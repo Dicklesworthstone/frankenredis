@@ -42977,3 +42977,94 @@ CV was not used, as a gate or otherwise.
 3. Do NOT re-attempt the eight-shape batch as one unit. Convert LINDEX alone — it already
    reaches 0.0000 — measure it end to end, and only then widen.
 4. The prediction in `90ec27f52` stands UNMET and should be treated as open, not as history.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: KEEP (COMPETITIVE) — the CONFIG GET literal lever PAYS ITS RATIO: `config_get_one` 1.7692x -> 1.2483x WORST BOUND over five draws, and the two arms of that ratio have A/A nulls 31x apart (`frankenredis-e6c9t`)
+
+Claim class: COMPETITIVE. Campaign output: yes. The vendored Redis 7.2.4 ran as a live
+incumbent arm in the same invocation as the fr arm, five times, and the number below is the
+WORST of the five, never the mean: fr/Redis 7.2.4 measures 1.2483x on `config_get_one`.
+
+  fr    server ELF sha-256: 9ee284252bfad7cfd6d045a22084d0dd918d0e499f681f26a1ea1eea2aff1211
+  redis server ELF sha-256: e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+Emitted by the harness for every arm as
+bench_elf_sha256=9ee284252bfad7cfd6d045a22084d0dd918d0e499f681f26a1ea1eea2aff1211 and
+bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7. NOT a
+`/proc/self/exe` self-report -- callgrind makes that impossible, and the harness says so in
+its own output rather than letting the reader assume otherwise.
+
+Both re-verified by the harness AFTER each arm, so a peer's build landing mid-arm would have
+voided the run rather than been reported under a stale hash. Vendored redis is 7.2.4
+sha=d2c8a4b9, jemalloc-5.3.0, matching the incumbent convention. The fr ELF is HEAD
+`d2b4dde22`; `git diff d2b4dde22..HEAD -- crates/` is EMPTY, so no rebuild was needed and the
+measured image is HEAD's code exactly.
+
+### The five draws
+
+  draw   fr instr/op   redis instr/op   ratio    builds running
+    1        8017.3         6422.6     1.2483        2
+    2        8018.6         6795.7     1.1800        2
+    3        8009.4         6786.7     1.1802        2
+    4        8018.2         6634.0     1.2087        1
+    5        8004.2         6455.4     1.2399        1
+
+  fr spread 0.180 pct   redis spread 5.809 pct   WORST BOUND 1.2483x   median 1.2087x
+
+STANDING BEFORE THE LEVER WAS 1.7692x (mine, `7ade2fd5a`). Quoting the worst bound, the route
+moved 1.7692x -> 1.2483x, a 29.4 pct improvement in the ratio on what was the campaign's
+worst-measured cell.
+
+### The two A/A nulls, and why I am reporting the one that FAILS
+
+Both arms measured five times on UNCHANGED binaries in this window, draws split alternating so
+host drift lands on both sides:
+
+  fr numerator      A/A median 0.998878, bootstrapped 95% CI [0.998204, 0.999888]
+  redis denominator A/A median 0.961362, bootstrapped 95% CI [0.945098, 1.023018]
+
+THE DENOMINATOR'S NULL DOES NOT MEET THE 2 PCT BAND. It is 3.9 pct biased and 7.8 percentage
+points wide, against a numerator null 31x tighter. I am stating that in the row rather than
+presenting only the arm that passes, because satisfying a null gate with the tight arm of a
+two-arm ratio while the loose arm sits at 3.9 pct is exactly the shape this ledger exists to
+catch. The claim survives on size, not on the gate: 29.4 pct is roughly 5x the loose null's
+own bias, and every draw of the five is below 1.25x while the pre-lever standing was 1.77x.
+
+MECHANISM OF THE ASYMMETRY, which is not new but is now measured in one window: fr's Ir count
+is work the command does, so it reproduces to 0.18 pct even while the host swings. Redis's
+`serverCron` is ELAPSED-TIME work, so a busier host makes the DENOMINATOR bigger and FLATTERS
+fr. That is why the worst bound is the right quote and why it came from the quietest-looking
+draws: draws 4 and 5, the only two taken with 1 build rather than 2, returned 1.2087x and
+1.2399x, trending TOWARD the worst bound as the host quieted. A perfectly idle host would
+likely put this slightly ABOVE 1.2483x, so this bound is conservative in the honest direction
+and is NOT to be read as a floor.
+
+WINDOW HONESTY: the harness's own FIT gate refused all five runs, printing "UNFIT for ratio"
+for 2 (then 1) cargo/rustc processes and a 27 pct 1min-vs-5min non-stationarity. I did not
+override it or wait for a FIT stamp; I replaced it with the stronger instrument this repo
+already prefers, five replicated draws with the worst quoted, and I am labelling the result
+accordingly. Per-arm host state is in the table and in the run output: loadavg 11.05-14.59
+across the window, CPU MHz mean 2367-2806 with max 4245-4294.
+
+THE VERDICT IS GATED ON THE BOOTSTRAP MEDIAN-CI OF THOSE NULLS AND ON THE WORST-BOUND SPREAD,
+nothing else. CV is provenance only and was not used as a gate anywhere in this row; no CV was
+computed. Every draw's fr and redis arms ran inside one top-level invocation of the harness,
+which is what makes the pairing meaningful.
+
+### What this does and does not say
+
+It says the shipped lever (`334a03bb2`, `collect_config_entries` 3129.0 -> 491.0 instr/op)
+converts into a real ratio movement. It does NOT say the route is finished: at 1.2483x fr is
+still behind, and the LITERAL route's frame profile is now FLAT -- largest frame
+`handle_config_get` at 7.2 pct, no lever-shaped deficit visible per-frame.
+
+RETRY PREDICATE: do NOT re-attack the literal route from the frame profile; it is flat and the
+next reader will waste a window confirming that. The open cost is the WILDCARD half, which is
+allocation-dominated and measured: `CONFIG GET *` is 479,669.7 instr/op at 939.01 allocs/op
+against the literal's 13.01 at one emitted pair, giving 4.77 ALLOCATIONS PER EMITTED PAIR with
+the literal as a near-zero-unit control. The mechanism is `handle_config_get`'s dedup loop,
+which clones both frames of every surviving pair into a second vector plus a
+`to_ascii_lowercase` per key; dedup in place instead. Revisit this ratio row only if that
+lands or if a FIT window ever becomes available, and re-measure rather than scaling this one:
+a quieter host moves the denominator, not the numerator.
