@@ -61,10 +61,11 @@ DECLARED_LITERALS = {
             "16k initial value"),
     "rbp": ("client->buf_peak",
             "a reply larger than the static buffer raises the peak, which then decays"),
-    "oll": ("listLength(client->reply) + used_blocks_of_repl_buf",
-            "a reply too large to write inline queues an output list"),
-    "omem": ("obufmem from getClientMemoryUsage",
-             "same as oll -- a queued output list has memory attributed to it"),
+    # (frankenredis-edwnn) `oll` and `omem` were hardcoded to 0 and are now COMPUTED from
+    # session.output_buffer_bytes as the spill past the 16384-byte static buffer, so they are
+    # deliberately NOT declared here any more. Re-adding either would re-allow the constant
+    # this gate exists to catch -- and 98e67ec2f MEASURED that constant against a client with
+    # 1.4 MB of undrained output.
     # (frankenredis-edwnn) `events` was hardcoded to "r" and is now COMPUTED from
     # session.output_buffer_bytes, so it is deliberately NOT declared here any more.
     # Re-adding it would re-allow the constant this gate exists to catch.
