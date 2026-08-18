@@ -49895,3 +49895,72 @@ an effect inside that interval is not claimed.
 4. Any future paired-build harness in this repo MUST abort on non-zero build status before
    copying `target/release/<bin>`. The failure mode is silent and produces a pair of identical
    ELFs that no downstream check flags.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: KEEP (COMPETITIVE) — TWO NEW DEFICITS, replicated: `pttl` at 0.8891x worst bound and `publish` at 0.9043x, found by screening `cascade` at rounds=36 where the default config had been returning nothing
+
+Claim class: COMPETITIVE. Campaign output: yes. Vendored Redis 7.2.4 ran as a live incumbent arm
+in the same invocation as the fr arm on both draws: fr/Redis 7.2.4 measures 0.8891x
+control-normalised on `pttl` and 0.9043x on `publish`, each the WORST bound of two admissible
+draws, i.e. fr 11.1 pct and 9.6 pct BEHIND.
+
+  fr    server ELF sha-256: e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  redis server ELF sha-256: e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+Emitted per arm and re-verified by the harness as
+bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399 and
+bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7, with the fr
+ELF pinned by `--expect-elf`. `balanced_square_ab.py --shapes cascade`, ABBAABBA, rounds=36,
+ops=50,000, -P16, null bound +/-0.02.
+
+  DRAW  loadavg before -> after   MHz   pttl norm / worst    publish norm / worst
+    1   7.25 8.30 9.09 -> 10.89   1429   0.9312 / 0.8891      0.9558 / 0.9116
+    2   23.01 13.95 11.00 -> 8.50 2395   0.9244 / 0.9009      0.9317 / 0.9043
+
+  pttl    points agree to 0.74 pct   WORST BOUND 0.8891
+  publish points agree to 2.59 pct   WORST BOUND 0.9043
+
+A/A NULLS from the harness's own same-binary arms across both draws, true value exactly 1.0000:
+`pttl` median 1.003550 with a bootstrapped 95% median CI of [0.993400, 1.018900]; `publish`
+median 1.002350 with a bootstrapped 95% median CI of [0.997000, 1.007100]; `get_control` median
+1.010400, CI [0.995100, 1.011300]. Worst per-shape null bias 1.89 pct and 0.71 pct against
+effects of 11.1 pct and 9.6 pct -- margins of 5.9x and 13.5x. Every arm and null ran within one
+top-level invocation of the harness per draw. THE VERDICT IS GATED ON THAT BOOTSTRAP MEDIAN-CI
+and on those margins. CV is provenance only and was not used as a gate anywhere in this row; no
+CV was computed.
+
+### What the screen found, in full
+
+Draw 1 certified 10 of 10 rows with 0 null-failures. Four rows read BEHIND: `pttl` 0.9312,
+`expiretime` 0.9291, `getbit` 0.9419, `publish` 0.9558. Five straddled (`sintercard`,
+`zrandmember`, `srandmember`, `copy`, `geohash`). Draw 2, restricted to the four candidates plus
+the control, replicated `pttl` and `publish`; `expiretime` and `getbit` NULL-FAILED and are
+therefore NOT claimed -- they remain candidates, not standings.
+
+### Why this took so long to find, which is the reusable half
+
+I screened four complex shapes on INSTRUCTIONS earlier today and found fr ahead on all of them
+(0.1433x to 0.8758x), and `zsetreads` and `frontclass` on throughput and found nothing. The
+instruction screen cannot locate these deficits: `pttl` and `publish` are cheap commands where fr
+almost certainly retires fewer instructions, exactly as it does on `geosearch_2` while losing on
+throughput. And the `frontclass` screen returned NOTHING not because that group is clean but
+because it ran at the harness DEFAULT rounds=9, where `8983321cd` measures the control admissible
+1 time in 3. This screen at rounds=36 certified 10 of 10 on the first attempt.
+
+So two of the three reasons this campaign has been unable to find new deficits were instrument
+settings, not the absence of deficits. That is worth more than the two shapes.
+
+### The shapes themselves
+
+`pttl` and `publish` are SIMPLE commands -- a TTL read and a fire-and-forget publish with no
+subscribers -- with short, concentrated code paths. That is the opposite of `geosearch_2`, whose
+cost `2e919c005` and `896df17a6` showed to be diffuse across three levels of attribution. A
+concentrated deficit is the kind a lever can move, and neither has been profiled.
+
+RETRY PREDICATE: profile `pttl` first -- it is the worse of the two at 0.8891x and its points
+agree to 0.74 pct, the tightest replication in this row. Take the frame profile and the
+instruction ratio TOGETHER before proposing anything: if fr retires fewer instructions here as it
+does on `geosearch_2`, the lever is IPC and not work, and `e96a9b03b`'s reasoning applies
+directly. `expiretime` and `getbit` need one more admissible draw each at rounds=36 before they
+may be quoted at all -- they are candidates on one draw. Do NOT screen any group at the default
+rounds=9 and conclude it is clean; `frontclass` is unscreened, not clean.
