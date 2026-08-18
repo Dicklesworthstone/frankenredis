@@ -45907,3 +45907,72 @@ and an effect inside that interval is not claimed.
 4. When the discriminator is understood, re-derive the 37-predicate list by ARITY before
    estimating the vein's value. The per-route 175.0 instr/op still holds as a cost; what is now
    in doubt is how much of it this technique can recover.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — the per-command pub/sub drain built a `Vec` for an empty queue after EVERY command: **60.0 -> 18.0 instr/op, a flat -42.0 on every shape** (`frankenredis-iqicb`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: an emptiness predicate so `drain_pending_pubsub_to_connection` returns before calling
+into the runtime at all. Shipped in `dd335769b`. It runs after EVERY command for EVERY client
+and built and moved a `Vec<PubSubMessage>` even when there was nothing to drain — which is
+every workload without subscribers. `Runtime::drain_pending_pubsub` already guarded the
+per-client outbox probe (`frankenredis-pubsubdrain`); this removes the CALL.
+
+It spans three crates because `Store::pubsub_pending` is private and its drain is a bare
+`mem::take`: `#[inline] has_pending_pubsub` in `fr-store`, one in `fr-runtime` that ORs the
+store queue AND the global outbox, and the early return in the `fr-server` helper so all six
+call sites are covered in one place.
+
+MEASURED, callgrind two-point (N=20,000 and 2N=40,000), both arms from a worktree pinned at
+HEAD `62fc98b7a` differing only in this change.
+`bench_elf_sha256=f6a23d985ebc6ac830cb98682ff5afd3500d5effe0f1e5abbcba54f702006b2c` (before),
+`bench_elf_sha256=d814892cadd1cef2328962945796ae9880309b9608b76203477c12658d0d59ee` (after). Per-arm host state: load 40.88/37.71/28.15 then
+13.65/22.39/24.38, **CPU idle 71.6 pct then 78.1 pct measured by me from `/proc/stat` against a
+brief reporting 40 pct**, iowait 1.2 then 0.1 pct, mean 2695-3487 MHz across 64 cores, /data
+130G. A peer's `redis-benchmark` was running at 300 pct CPU throughout; **no ratio is claimed
+here** and instruction counts are software-counted and immune to load.
+
+| shape | pub/sub frames before | after | delta |
+|---|---|---|---|
+| get | 60.0 | 18.0 | **-42.0** |
+| ping | 60.0 | 18.0 | **-42.0** |
+| ttl | 77.0 | 35.0 | **-42.0** |
+| sadd | 77.0 | 35.0 | **-42.0** |
+
+**The constant is the evidence** — an identical -42.0 across shapes whose whole-op costs span
+978 to 1690 instr/op is what an eliminated unconditional call looks like, and what per-command
+work does not. `Runtime::drain_pending_pubsub` disappears entirely (calls/op 2.000 -> 1.000,
+counting the helper and its callee). `.text` is unchanged at 6,518,882 bytes. Whole-op totals
+corroborate at -29.3 on GET and -19.2 on TTL, inside their own ~40 instr/op spread, which is
+why the claim rests on the frames.
+
+**CORRECTNESS, AND ITS LIMIT, WHICH IS THE HONEST HALF OF THIS ROW.** Five pub/sub paths answer
+identically on both arms: plain SUBSCRIBE/PUBLISH, PSUBSCRIBE patterns, SSUBSCRIBE/SPUBLISH
+shard traffic, keyspace notifications, and a plain GET afterwards. Those are the paths a wrong
+guard would break, and the failure mode is a MISSING message rather than an error, so the probe
+asserts on what ARRIVES.
+
+**But the probe does not have teeth for half the predicate.** A mutation that dropped the store
+source from the OR — checking only the outbox, exactly the error I had warned a peer about —
+**passed all five cases identically**. So the store half is NOT demonstrated necessary by this
+evidence. It is retained as the conservative side of a question the probe cannot settle, at a
+cost of one `is_empty()` on a path that already returns early. The restored build hashed
+byte-identical to the pre-mutation ELF (`d814892cadd1cef232896294`), so the tree held still
+across the mutation cycle.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run
+interleaving both arms across two rounds, so drift falls on both alike. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this row;
+no CV was computed. Host state is likewise provenance, not a gate. There is no zero-effect null
+available and that absence is structural, not an omission: the drain was UNCONDITIONAL, so no
+command existed that did not pay it. The constant across four shapes does the work a null would.
+
+RETRY PREDICATE: revisit only if a profile shows `drain_pending_pubsub_to_connection` back above
+~30 instr/op, which would mean the early return stopped firing — the reference values are 18.0
+on `get`/`ping` and 35.0 on `ttl`/`sadd`. **If anyone needs to prove the store half of the OR is
+load-bearing, do NOT reuse this probe**: build a case that leaves something queued in
+`Store::pubsub_pending` at the moment the helper runs, which the five paths above evidently do
+not, or accept the OR as insurance as this row does.
