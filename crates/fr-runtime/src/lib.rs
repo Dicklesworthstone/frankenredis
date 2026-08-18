@@ -16391,14 +16391,21 @@ impl Runtime {
     /// cache; the borrowed path just skips argv materialization + generic dispatch.
     /// Reply is the RDB payload bulk string, or nil on a missing key (DUMP never
     /// type-checks). Byte-identical to the generic handler (same dump_key call).
-    pub fn execute_plain_dump_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_dump_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"DUMP".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
 
@@ -16486,12 +16493,18 @@ impl Runtime {
     /// exactly like the generic randomkey (store.randomkey_in_db + decode_db_key for the
     /// logical name); reply is the chosen key bulk string, or nil on an empty db. Same
     /// store primitive + RNG advancement as the generic handler.
-    pub fn execute_plain_randomkey_borrowed(&mut self, now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_randomkey_borrowed(
+        &mut self,
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 1 || self.policy.gate.max_bulk_len < b"RANDOMKEY".len()
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
 
@@ -18504,24 +18517,36 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_object_encoding_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_object_encoding_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"ENCODING".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
-    fn can_execute_plain_object_refcount_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_object_refcount_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"REFCOUNT".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     fn can_execute_plain_memory_usage_borrowed(
@@ -18650,8 +18675,9 @@ impl Runtime {
         &mut self,
         key: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_object_encoding_borrowed(key, now_ms) {
+        if !self.can_execute_plain_object_encoding_borrowed(key, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -18702,8 +18728,9 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_object_encoding_borrowed(key, now_ms) {
+        if !self.can_execute_plain_object_encoding_borrowed(key, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -18797,8 +18824,9 @@ impl Runtime {
         &mut self,
         key: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_object_refcount_borrowed(key, now_ms) {
+        if !self.can_execute_plain_object_refcount_borrowed(key, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -19391,11 +19419,16 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_command_count_borrowed(&mut self, now_ms: u64) -> bool {
+    fn can_execute_plain_command_count_borrowed(
+        &mut self,
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 2 || self.policy.gate.max_bulk_len < b"COMMAND".len() {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for keyless `COMMAND COUNT`. Pure
@@ -19404,8 +19437,12 @@ impl Runtime {
     /// the SAME value the generic command|count handler computes. COMMAND is a
     /// container command -> cmdstat / CLIENT INFO name is `command|count`.
     /// Never errors. (cold-cmd audit)
-    pub fn execute_plain_command_count_borrowed(&mut self, now_ms: u64) -> Option<RespFrame> {
-        if !self.can_execute_plain_command_count_borrowed(now_ms) {
+    pub fn execute_plain_command_count_borrowed(
+        &mut self,
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_command_count_borrowed(now_ms, default_read_allowed) {
             return None;
         }
 
@@ -19772,14 +19809,21 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_bitpos_borrowed(&mut self, key: &[u8], argc: usize, now_ms: u64) -> bool {
+    fn can_execute_plain_bitpos_borrowed(
+        &mut self,
+        key: &[u8],
+        argc: usize,
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < argc
             || self.policy.gate.max_bulk_len < b"BITPOS".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for `BITPOS key bit [start [end [BYTE|BIT]]]`
@@ -19796,6 +19840,7 @@ impl Runtime {
         bit_arg: &[u8],
         range: Option<PlainBitposRange<'_>>,
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         // Only fast-path a well-formed 0/1 bit; defer the bit-arg error to generic.
         let bit = match parse_i64_arg(bit_arg) {
@@ -19830,7 +19875,7 @@ impl Runtime {
             }
         };
 
-        if !self.can_execute_plain_bitpos_borrowed(key, argc, now_ms) {
+        if !self.can_execute_plain_bitpos_borrowed(key, argc, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -19959,6 +20004,7 @@ impl Runtime {
         key: &[u8],
         argc: usize,
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < argc
             || self.policy.gate.max_bulk_len < b"BITCOUNT".len()
@@ -19966,7 +20012,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for `BITCOUNT key [start end [BYTE|BIT]]`
@@ -19986,6 +20033,7 @@ impl Runtime {
         key: &[u8],
         range: PlainBitcountRange<'_>,
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         // Parse the range BEFORE any side effect so a parse error / bad unit
         // declines cleanly (the generic path owns those error replies).
@@ -20020,7 +20068,7 @@ impl Runtime {
             }
         };
 
-        if !self.can_execute_plain_bitcount_borrowed(key, argc, now_ms) {
+        if !self.can_execute_plain_bitcount_borrowed(key, argc, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -28607,6 +28655,7 @@ impl Runtime {
         &mut self,
         keys: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < keys.len() + 1
             || self.policy.gate.max_bulk_len < b"TOUCH".len()
@@ -28614,7 +28663,9 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
         let argv_len_sum = b"TOUCH".len() + keys.iter().map(|k| k.len()).sum::<usize>();
@@ -31249,11 +31300,14 @@ impl Runtime {
         &mut self,
         sub: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if !sub.eq_ignore_ascii_case(b"NUMPAT") {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
         let argv_len_sum = b"PUBSUB".len() + sub.len();
@@ -31290,13 +31344,16 @@ impl Runtime {
         sub: &[u8],
         channels: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         let is_numsub = sub.eq_ignore_ascii_case(b"NUMSUB");
         let is_shardnumsub = sub.eq_ignore_ascii_case(b"SHARDNUMSUB");
         if !is_numsub && !is_shardnumsub {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
         let name: &'static str = if is_numsub {
@@ -50886,7 +50943,7 @@ mod tests {
                 _ => unreachable!(),
             };
             let f = direct
-                .execute_plain_bitcount_borrowed(key, range, ts)
+                .execute_plain_bitcount_borrowed(key, range, ts, None)
                 .expect("ranged bitcount fast path should engage");
             let mut argv = vec![b"BITCOUNT".to_vec(), key.to_vec()];
             argv.extend(tail.iter().map(|a| a.to_vec()));
@@ -50912,7 +50969,7 @@ mod tests {
             };
             assert!(
                 direct
-                    .execute_plain_bitcount_borrowed(key, range, ts)
+                    .execute_plain_bitcount_borrowed(key, range, ts, None)
                     .is_none(),
                 "ranged bitcount fast path must defer key={key:?} tail={tail:?}"
             );
@@ -51501,7 +51558,7 @@ mod tests {
             b"missing",
         ]) {
             let f = direct
-                .execute_plain_object_refcount_borrowed(key, ts)
+                .execute_plain_object_refcount_borrowed(key, ts, None)
                 .expect("object refcount fast path should engage");
             let g = generic.execute_frame(command(&[b"OBJECT", b"REFCOUNT", key]), ts);
             assert_eq!(f, g, "key={key:?}");

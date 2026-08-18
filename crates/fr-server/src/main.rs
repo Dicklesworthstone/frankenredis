@@ -7952,7 +7952,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_bitcount_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_bitcount_borrowed(packet.key, None, ts)
+                        runtime.execute_plain_bitcount_borrowed(packet.key, None, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -7975,6 +7975,7 @@ fn process_buffered_frames(
                         packet.key,
                         Some((packet.start, packet.end, None)),
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -7997,6 +7998,7 @@ fn process_buffered_frames(
                         packet.key,
                         Some((packet.start, packet.end, Some(packet.unit))),
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8016,7 +8018,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_bitpos_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_bitpos_borrowed(packet.key, packet.bit, None, ts)
+                        runtime.execute_plain_bitpos_borrowed(packet.key, packet.bit, None, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8040,6 +8042,7 @@ fn process_buffered_frames(
                         packet.bit,
                         Some((packet.start, None, None)),
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8063,6 +8066,7 @@ fn process_buffered_frames(
                         packet.bit,
                         Some((packet.start, Some(packet.end), None)),
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8086,6 +8090,7 @@ fn process_buffered_frames(
                         packet.bit,
                         Some((packet.start, Some(packet.end), Some(packet.unit))),
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8701,7 +8706,7 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_dump_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_dump_borrowed(packet.key, ts) {
+                    if let Some(response) = runtime.execute_plain_dump_borrowed(packet.key, ts, None) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -8772,7 +8777,7 @@ fn process_buffered_frames(
                     b"*2\r\n$5\r\n",
                     b"TOUCH",
                 ) {
-                    if let Some(response) = runtime.execute_plain_touch_borrowed(&[packet.key], ts)
+                    if let Some(response) = runtime.execute_plain_touch_borrowed(&[packet.key], ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8791,7 +8796,7 @@ fn process_buffered_frames(
                 } else if let Some(consumed) =
                     parse_borrowed_plain_randomkey_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_randomkey_borrowed(ts) {
+                    if let Some(response) = runtime.execute_plain_randomkey_borrowed(ts, None) {
                         Ok(BorrowedMultibulkAction::FastReply { consumed, response })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -9372,6 +9377,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -9392,7 +9398,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_object_refcount_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_object_refcount_borrowed(packet.key, ts)
+                        runtime.execute_plain_object_refcount_borrowed(packet.key, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10979,7 +10985,7 @@ fn process_buffered_frames(
                 {
                     // PUBSUB NUMPAT (*2) — execute claims only NUMPAT, defers else.
                     if let Some(response) =
-                        runtime.execute_plain_pubsub_numpat_borrowed(packet.sub, ts)
+                        runtime.execute_plain_pubsub_numpat_borrowed(packet.sub, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -11003,6 +11009,7 @@ fn process_buffered_frames(
                         packet.sub,
                         &packet.channels,
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12210,6 +12217,7 @@ fn process_buffered_frames(
                     if let Some(response) = runtime.execute_plain_touch_borrowed(
                         &[packet.key, packet.a, packet.b, packet.c],
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12281,7 +12289,7 @@ fn process_buffered_frames(
                 ) {
                     // 2-key TOUCH: key + arg are the two keys.
                     if let Some(response) =
-                        runtime.execute_plain_touch_borrowed(&[packet.key, packet.arg], ts)
+                        runtime.execute_plain_touch_borrowed(&[packet.key, packet.arg], ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12305,7 +12313,7 @@ fn process_buffered_frames(
                 ) {
                     // 3-key TOUCH: key + a + b are the three keys.
                     if let Some(response) =
-                        runtime.execute_plain_touch_borrowed(&[packet.key, packet.a, packet.b], ts)
+                        runtime.execute_plain_touch_borrowed(&[packet.key, packet.a, packet.b], ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13806,7 +13814,7 @@ fn parse_borrowed_multibulk_action(
                     b'B' => {
                         if let Some((key, range)) = borrowed_plain_bitcount_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_bitcount_borrowed(key, range, ts)
+                                runtime.execute_plain_bitcount_borrowed(key, range, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -13816,7 +13824,7 @@ fn parse_borrowed_multibulk_action(
                         if let Some((key, bit_arg, range)) =
                             borrowed_plain_bitpos_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_bitpos_borrowed(key, bit_arg, range, ts)
+                                runtime.execute_plain_bitpos_borrowed(key, bit_arg, range, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -13826,7 +13834,7 @@ fn parse_borrowed_multibulk_action(
                     }
                     b'C' => {
                         if borrowed_plain_command_count_args(&borrowed_args)
-                            && let Some(response) = runtime.execute_plain_command_count_borrowed(ts)
+                            && let Some(response) = runtime.execute_plain_command_count_borrowed(ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14235,7 +14243,7 @@ fn parse_borrowed_multibulk_action(
                     b'O' => {
                         if let Some(key) = borrowed_plain_object_encoding_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_object_encoding_borrowed(key, ts)
+                                runtime.execute_plain_object_encoding_borrowed(key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14244,7 +14252,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some(key) = borrowed_plain_object_refcount_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_object_refcount_borrowed(key, ts)
+                                runtime.execute_plain_object_refcount_borrowed(key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -17598,10 +17606,11 @@ fn dispatch_floor_fast_object_encoding_into(
     runtime: &mut Runtime,
     ts: u64,
     out: &mut Vec<u8>,
+    default_read_allowed: Option<bool>,
 ) -> Option<usize> {
     let packet = parse_borrowed_plain_object_encoding_packet(unparsed, parser_config)?;
     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-    runtime.execute_plain_object_encoding_borrowed_into(packet.key, ts, client_resp3, out)?;
+    runtime.execute_plain_object_encoding_borrowed_into(packet.key, ts, client_resp3, out, default_read_allowed)?;
     Some(packet.consumed)
 }
 
@@ -17612,9 +17621,10 @@ fn dispatch_floor_fast_object_refcount(
     parser_config: &ParserConfig,
     runtime: &mut Runtime,
     ts: u64,
+    default_read_allowed: Option<bool>,
 ) -> Option<(usize, RespFrame)> {
     let packet = parse_borrowed_plain_object_refcount_packet(unparsed, parser_config)?;
-    let response = runtime.execute_plain_object_refcount_borrowed(packet.key, ts)?;
+    let response = runtime.execute_plain_object_refcount_borrowed(packet.key, ts, default_read_allowed)?;
     Some((packet.consumed, response))
 }
 
@@ -18525,8 +18535,13 @@ fn try_dispatch_floor_classified_action(
         // (frankenredis-p98mw) Mirrors the cascade arm at ~8655 exactly. DUMP returns a
         // bulk payload, so this is FastReply with a response rather than an encoded reply.
         BorrowedDispatchFloorClass::Dump => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_dump_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_dump_borrowed(packet.key, ts)
+                && let Some(response) = runtime.execute_plain_dump_borrowed(packet.key, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -18548,8 +18563,13 @@ fn try_dispatch_floor_classified_action(
         // removed. Note the parser returns the CONSUMED length directly rather than a
         // packet struct, because RANDOMKEY carries no arguments to borrow.
         BorrowedDispatchFloorClass::Randomkey => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(consumed) = parse_borrowed_plain_randomkey_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_randomkey_borrowed(ts)
+                && let Some(response) = runtime.execute_plain_randomkey_borrowed(ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
@@ -19840,12 +19860,17 @@ fn try_dispatch_floor_classified_action(
         // Depth past the floor call was 1763 lines; depth RANKS a route, it does not
         // SIZE one, so no saving is claimed from it.
         BorrowedDispatchFloorClass::Touch => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_key_only_packet(
                 unparsed,
                 &parser_config,
                 b"*2\r\n$5\r\n",
                 b"TOUCH",
-            ) && let Some(response) = runtime.execute_plain_touch_borrowed(&[packet.key], ts)
+            ) && let Some(response) = runtime.execute_plain_touch_borrowed(&[packet.key], ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20801,13 +20826,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Touch2 => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
                 unparsed,
                 &parser_config,
                 b"*3\r\n$5\r\n",
                 b"TOUCH",
             ) && let Some(response) =
-                runtime.execute_plain_touch_borrowed(&[packet.key, packet.arg], ts)
+                runtime.execute_plain_touch_borrowed(&[packet.key, packet.arg], ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20827,13 +20857,18 @@ fn try_dispatch_floor_classified_action(
         // (frankenredis-p98mw) Mirrors the cascade arm exactly -- same parser, same
         // executor, same generic fallthrough.
         BorrowedDispatchFloorClass::Touch3 => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
                 b"*4\r\n$5\r\n",
                 b"TOUCH",
             ) && let Some(response) =
-                runtime.execute_plain_touch_borrowed(&[packet.key, packet.a, packet.b], ts)
+                runtime.execute_plain_touch_borrowed(&[packet.key, packet.a, packet.b], ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20853,13 +20888,18 @@ fn try_dispatch_floor_classified_action(
         // (frankenredis-p98mw) Mirrors the cascade arm exactly -- same parser, same
         // executor, same generic fallthrough.
         BorrowedDispatchFloorClass::Touch4 => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
                 unparsed,
                 &parser_config,
                 b"*5\r\n$5\r\n",
                 b"TOUCH",
             ) && let Some(response) = runtime
-                .execute_plain_touch_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts)
+                .execute_plain_touch_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -21472,8 +21512,20 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::ObjectEncoding => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(consumed) =
-                dispatch_floor_fast_object_encoding_into(unparsed, &parser_config, runtime, ts, out)
+                dispatch_floor_fast_object_encoding_into(
+                    unparsed,
+                    &parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    default_read_allowed,
+                )
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
@@ -21488,8 +21540,19 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::ObjectRefcount => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some((consumed, response)) =
-                dispatch_floor_fast_object_refcount(unparsed, &parser_config, runtime, ts)
+                dispatch_floor_fast_object_refcount(
+                    unparsed,
+                    &parser_config,
+                    runtime,
+                    ts,
+                    default_read_allowed,
+                )
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
@@ -21917,13 +21980,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::PubsubNumpat => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // (frankenredis-ozrro) Same parser and executor the cascade arm at ~10923 uses.
             // The parser accepts ANY arity-2 PUBSUB and the executor refuses anything but
             // NUMPAT, so a sibling subcommand declines to the generic path — which is where
             // it was going anyway, now without the cascade walk.
             if let Some(packet) = parse_borrowed_plain_pubsub_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_pubsub_numpat_borrowed(packet.sub, ts)
+                    runtime.execute_plain_pubsub_numpat_borrowed(packet.sub, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -21941,6 +22009,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::PubsubNumsub => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // (frankenredis-ozrro) Same variadic parser and executor the arm at ~10944 uses.
             // Only arity 3 is claimed; arity 4+ keeps the cascade route.
             if let Some(packet) =
@@ -21949,6 +22022,7 @@ fn try_dispatch_floor_classified_action(
                     packet.sub,
                     &packet.channels,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -22521,12 +22595,18 @@ fn try_dispatch_floor_classified_action(
         // (frankenredis-f2zrr) Mirrors the cascade arm at ~7885 exactly -- same parser,
         // same executor, same generic fallthrough. Only the walk to reach it goes.
         BorrowedDispatchFloorClass::BitcountUnit => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) =
                 parse_borrowed_plain_bitcount_unit_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_bitcount_borrowed(
                     packet.key,
                     Some((packet.start, packet.end, Some(packet.unit))),
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -22545,12 +22625,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::BitcountRange => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) =
                 parse_borrowed_plain_bitcount_range_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_bitcount_borrowed(
                     packet.key,
                     Some((packet.start, packet.end, None)),
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -22569,13 +22655,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::BitcountKey => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // BITCOUNT key (no range) mirrors ZCOUNT: the borrowed executor
             // returns an integer RespFrame (FastReply). Parser+executor already
             // shipped; only the dispatch-floor routing is new (frankenredis-au36f).
             // Range/unit forms are a distinct arity and fall through.
             if let Some(packet) = parse_borrowed_plain_bitcount_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_bitcount_borrowed(packet.key, None, ts)
+                    runtime.execute_plain_bitcount_borrowed(packet.key, None, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22697,6 +22788,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::BitposKeyBit => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // BITPOS key bit (no range) mirrors ZCOUNT: the borrowed executor
             // returns an integer RespFrame (FastReply). Parser+executor already
             // shipped; only the dispatch-floor routing is new. The executor defers
@@ -22705,7 +22801,7 @@ fn try_dispatch_floor_classified_action(
             // through.
             if let Some(packet) = parse_borrowed_plain_bitpos_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_bitpos_borrowed(packet.key, packet.bit, None, ts)
+                    runtime.execute_plain_bitpos_borrowed(packet.key, packet.bit, None, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22723,6 +22819,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::BitposRange => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // This is a pure route shortening: the exact parser and borrowed
             // executor are the same functions used by the later cascade arm.
             // Any malformed range, gate refusal, or semantic edge therefore
@@ -22733,6 +22834,7 @@ fn try_dispatch_floor_classified_action(
                     packet.bit,
                     Some((packet.start, Some(packet.end), None)),
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -22751,6 +22853,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::BitposStart => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // Route shortening only, exactly as BitposRange above: same parser, same
             // executor, same generic fallback on any refusal.
             if let Some(packet) = parse_borrowed_plain_bitpos_start_packet(unparsed, &parser_config)
@@ -22759,6 +22866,7 @@ fn try_dispatch_floor_classified_action(
                     packet.bit,
                     Some((packet.start, None, None)),
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -22777,6 +22885,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::BitposUnit => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // The unit token is validated by the EXECUTOR, not here: a `BITPOS k b s e
             // SIDEWAYS` reaches this arm, is declined below, and falls to generic with
             // redis's error text, which is what the differ rows pin.
@@ -22786,6 +22899,7 @@ fn try_dispatch_floor_classified_action(
                     packet.bit,
                     Some((packet.start, Some(packet.end), Some(packet.unit))),
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -23344,9 +23458,14 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::CommandCount => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(consumed) =
                 parse_borrowed_plain_command_count_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_command_count_borrowed(ts)
+                && let Some(response) = runtime.execute_plain_command_count_borrowed(ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
