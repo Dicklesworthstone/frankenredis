@@ -13980,7 +13980,11 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     let previous_read_only = store.script_read_only;
     let previous_allow_oom = store.script_allow_oom;
     store.script_read_only = is_ro || has_no_writes;
-    store.script_allow_oom = has_allow_oom;
+    // (frankenredis-oo3aw) `|| has_no_writes` for the same reason the line above carries it:
+    // upstream's no-writes implies allow-oom (script.c:191). See the ordering note at
+    // `script_shebang_is_oom_exempt` -- without this term the OOM gate answers a no-writes
+    // function before the read-only refusal does, and the client reads the wrong error.
+    store.script_allow_oom = has_allow_oom || has_no_writes;
     store.script_nesting_level += 1;
     // (frankenredis-9hori) `target_func_line` is Some exactly when the SCAN above produced a
     // `local function <func_name>(` line for the function being called. Both transform forms --
@@ -26641,7 +26645,7 @@ fn eval_cmd(
     let previous_read_only = store.script_read_only;
     let previous_allow_oom = store.script_allow_oom;
     store.script_read_only = read_only_script || script_shebang_has_no_writes_flag(script);
-    store.script_allow_oom = script_shebang_has_allow_oom_flag(script);
+    store.script_allow_oom = script_shebang_is_oom_exempt(script);
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
     {
@@ -26734,7 +26738,7 @@ fn evalsha_cmd(
     store.script_read_only = read_only_script || no_writes;
     // (frankenredis-oo3aw) Derived the same way `no_writes` above is: this arm compiles the
     // script itself, so there is no pre-computed flag to carry in.
-    store.script_allow_oom = script_shebang_has_allow_oom_flag(&script);
+    store.script_allow_oom = script_shebang_is_oom_exempt(&script);
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
     {
@@ -26852,17 +26856,21 @@ fn script_shebang_line_has_flag(line: &[u8], wanted: &str) -> bool {
 /// flag load-bearing, and adding it WITHOUT this accessor would turn a false acceptance into a
 /// false rejection for every `#!lua flags=allow-oom` script.
 ///
-/// `no-writes` implies it (script.c:191): a script that cannot write can never hit the gate. That
-/// is folded in here rather than at the call site so the implication cannot be forgotten by a
-/// future caller.
+/// `no-writes` implies it (script.c:191), and that implication is NOT cosmetic in fr even though
+/// a no-writes script's writes are refused anyway. Upstream runs its checks in a fixed order --
+/// `scriptVerifyWriteCommandAllow` at script.c:542, THEN `scriptVerifyOOM` at :546 -- so a
+/// no-writes script that writes over maxmemory reads "Write commands are not allowed from
+/// read-only scripts.". fr's order is the opposite: the OOM gate sits at the top of
+/// `dispatch_script_argv`, while the read-only refusal is inside `dispatch_argv` which that gate
+/// runs BEFORE. So without this term the same script reads "OOM command not allowed ..." instead
+/// -- a divergence in the error a client actually parses, produced by two checks that are each
+/// individually correct.
+///
+/// Folded in here rather than at the call sites so the implication cannot be dropped by one of
+/// them: it was, at all three, when the flag was first wired to an allow-oom-only accessor.
 #[must_use]
 pub fn script_shebang_is_oom_exempt(script: &[u8]) -> bool {
-    let line = match script.iter().position(|&b| b == b'\n') {
-        Some(end) => &script[..end],
-        None => script,
-    };
-    script_shebang_line_has_flag(line, "allow-oom")
-        || script_shebang_line_has_flag(line, "no-writes")
+    script_shebang_has_allow_oom_flag(script) || script_shebang_has_no_writes_flag(script)
 }
 
 /// Does the shebang declare `allow-oom`?
@@ -56560,6 +56568,71 @@ mod tests {
             .expect("eval");
             assert_eq!(out, RespFrame::Error((*expected).to_string()), "{script}");
         }
+    }
+
+    #[test]
+    fn no_writes_script_over_maxmemory_reads_the_read_only_error_not_the_oom_one_oo3aw() {
+        // (frankenredis-oo3aw) Upstream checks in a FIXED ORDER: scriptVerifyWriteCommandAllow
+        // (script.c:542) then scriptVerifyOOM (:546). fr's order is the opposite -- the OOM gate
+        // is at the top of dispatch_script_argv, the read-only refusal is inside dispatch_argv
+        // which that gate runs BEFORE -- so the two engines answer a no-writes script that writes
+        // over maxmemory with DIFFERENT errors unless no-writes implies allow-oom.
+        //
+        // Both checks are individually correct, which is why this needs its own row: nothing about
+        // either one looks wrong, and the reply is a well-formed error either way. Only the string
+        // moves, and it is the string a client parses.
+        let mut store = Store::new();
+        // What the runtime publishes when it is over the limit: maxmemory set, and the
+        // pre-command sample saying we were already over when the script started.
+        store.maxmemory_bytes_live = 1;
+        store.over_maxmemory_live = true;
+
+        let err_of = |store: &mut Store, script: &[u8]| -> String {
+            let body = [
+                b"local t = redis.pcall('SET','oom_k','v') if t['err'] then return t['err'] else return 'NO ERROR' end".to_vec(),
+            ]
+            .concat();
+            let mut full = script.to_vec();
+            full.extend_from_slice(&body);
+            match dispatch_argv(
+                &[b"EVAL".to_vec(), full, b"0".to_vec()],
+                store,
+                0,
+            )
+            .expect("EVAL itself must not be refused -- the gate is per inner call")
+            {
+                RespFrame::BulkString(Some(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+                other => panic!("expected a bulk reply carrying the error, got {other:?}"),
+            }
+        };
+
+        assert_eq!(
+            err_of(&mut store, b"#!lua flags=no-writes\n"),
+            "ERR Write commands are not allowed from read-only scripts.",
+            "a no-writes script must read the read-only refusal, exactly as 7.2.4 answers it -- \
+             the OOM gate must not get there first"
+        );
+
+        // allow-oom bypasses the gate outright, so the write proceeds and there is no error at
+        // all. This is the regression the naive fix causes, and it is what makes the row above
+        // an ORDERING assertion rather than an accidental pass.
+        assert_eq!(
+            err_of(&mut store, b"#!lua flags=allow-oom\n"),
+            "NO ERROR",
+            "allow-oom must write successfully over maxmemory"
+        );
+
+        // And the plain script -- neither flag -- is still refused by the gate, so this test
+        // cannot pass by the gate having been disabled.
+        // Containment, not equality: this is the one string here not copied verbatim from an
+        // already-passing test, and fr wraps some in-script errors with context before they reach
+        // `t['err']`. The distinction under test is WHICH gate answered, which the code word
+        // carries; pinning the exact wrapping is a separate concern from the ordering.
+        let plain = err_of(&mut store, b"");
+        assert!(
+            plain.contains("OOM command not allowed"),
+            "a plain script's write must still be OOM-refused, got {plain:?}"
+        );
     }
 
     #[test]
