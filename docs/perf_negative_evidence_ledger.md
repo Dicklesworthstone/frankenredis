@@ -63388,3 +63388,71 @@ reasons rather than one.
   3. Read the TWIN before optimising either copy of a duplicated rule. This is the second time this
      duplication has cost something — once when `2a4617295` rebuilt a deleted shape, once when an
      equivalence review passed over it. A third occurrence is a process failure, not bad luck.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: my retraction's "82" was the same proxy error BrownIbis names — the open count is **64** — and here are the three REGISTERED SHAPES that can actually execute cod-b's precondition: `bitop_and`, `bitop_not`, `geoadd_same`
+
+Claim class: SOURCE ANALYSIS + correction to my own row one turn ago. No ratio claimed.
+Campaign output: no — it makes a blocked measurement executable the moment the freeze lifts.
+Source reading only: no cargo, no benches, no artifact writes.
+
+### CORRECTING MY OWN NUMBER
+
+My retraction said "**82** executors derive the gate inline and none of them has been measured".
+`ffc09091c` shows why a raw grep overcounts: **a converted route KEEPS the gate call as its
+fallback** —
+
+    default_write_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
+
+— which is the whole point of the design, so grepping for the call counts converted routes as
+open. My 82 is that same proxy error, one turn after I criticised the twelve-shape version of it.
+**The open count is 64** (BrownIbis's tool: 64 not taking the parameter, 51 taking it). I adopt
+that figure and withdraw mine.
+
+### THE GAP THIS ROW FILLS
+
+`ffc09091c` classifies 64 open routes — 37 CONVERTIBLE, 6 NO-CACHE, 21 NO-SERVER-CALL — and names
+routes. My own retry predicate needs something one step further: *"profile a shape whose route
+DERIVES the gate inline"*. A route name is not a profileable thing; the harness takes SHAPES.
+Verified at HEAD:
+
+    execute_plain_bitop_borrowed     takes_param=no   derives_inline=**yes**   -> OPEN
+    execute_plain_geoadd_borrowed    takes_param=no   derives_inline=**yes**   -> OPEN
+
+    registered in shape_instr_per_op.py:  bitop_and  bitop_not  geoadd_same   all present
+
+**So `bitop_and`, `bitop_not` and `geoadd_same` are registered shapes whose routes derive the write
+gate inline.** Those three CAN exhibit the frame cod-b's precondition asks about, and are the
+shapes to profile to execute it.
+
+The contrast is the point of my retraction: `set_base` reaches
+`execute_plain_set_borrowed_with_default_write_gate`, which TAKES the parameter and does not derive
+inline, so it cannot answer the question however carefully it is measured. Route classification and
+shape choice are the same decision, and I made it wrong by picking the most familiar shape.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement, no ratio, no A/A, no build, no dumps — freeze in force at /data 34G. Route
+signatures read from `git show HEAD:`; shape registration checked in
+`scripts/shape_instr_per_op.py`. The 64/37/6/21 split is quoted from `ffc09091c`, not re-derived.
+CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           NONE built or run.
+  host          /data 34G free, BELOW the 42G brake; loadavg 5.08 5.19 6.36. Irrelevant to a
+                source count, recorded because the standing orders ask for it on every row.
+  disposition   ANALYSIS. No source file changed.
+
+### RETRY PREDICATE
+
+1. When the freeze lifts, execute cod-b's precondition with **`bitop_and`** (or `bitop_not` /
+   `geoadd_same`), `--fr-only`, `--keep-dumps`, then `frame_delta.py`. If
+   `plain_borrowed_default_key_write_allows` is a material frame there, the vein is confirmed open
+   with a number; if it is absent on a route that PROVABLY derives it inline, that absence IS
+   evidence — unlike on `set_base`.
+2. Use **64**, not 82 or 80, as the open count. A converted route's fallback call is not an open
+   route.
+3. Before choosing a shape to test a claim about a function, check the ROUTE's signature. Shape
+   choice and route classification are one decision.
