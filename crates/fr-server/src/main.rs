@@ -752,8 +752,38 @@ impl ClientConnection {
         Self::new_with_writer(stream, None, session, now_ms)
     }
 
+    /// TCP connection. Keeps the historical signature so every existing caller -- two production
+    /// sites and the test suite -- is unchanged.
     fn new_with_writer(
         stream: TcpStream,
+        writer_stream: Option<StdTcpStream>,
+        session: ClientSession,
+        now_ms: u64,
+    ) -> Self {
+        Self::from_client_stream(ClientStream::Tcp(stream), writer_stream, session, now_ms)
+    }
+
+    /// (frankenredis-w1djx) Unix domain socket connection.
+    ///
+    /// `writer_stream` is `None` and that is a DECISION, not an omission: the writer-handoff path
+    /// hands a `StdTcpStream` to a background writer thread, so it is TCP-only by type. A unix
+    /// client therefore serves its writes on the reactor, which is the same path a TCP client
+    /// takes whenever handoff is disabled -- an already-exercised configuration rather than a new
+    /// one.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    fn new_unix(stream: mio::net::UnixStream, session: ClientSession, now_ms: u64) -> Self {
+        Self::from_client_stream(ClientStream::Unix(stream), None, session, now_ms)
+    }
+
+    /// (frankenredis-w1djx) Build a connection over an ALREADY-CHOSEN stream kind.
+    ///
+    /// This is the body every constructor shares. `new_with_writer` and `new_unix` are thin
+    /// wrappers that pick the `ClientStream` variant, so the struct literal below exists once and
+    /// the two socket families cannot drift in what they initialise -- the failure mode that cost
+    /// `2a4617295` a 1.4x unported win when a rule was implemented twice.
+    fn from_client_stream(
+        stream: ClientStream,
         writer_stream: Option<StdTcpStream>,
         mut session: ClientSession,
         now_ms: u64,
@@ -761,12 +791,7 @@ impl ClientConnection {
         session.connected_at_ms = now_ms;
         session.last_interaction_ms = now_ms;
         Self {
-            // The TCP constructors keep taking a `TcpStream` and wrap here, so no existing
-            // caller -- production or test -- had to change. The Unix constructor is NOT
-            // written yet: it needs this body factored out behind a `ClientStream`-taking
-            // helper, and relocating a struct literal this size belongs with the accept
-            // wiring rather than inside a type swap.
-            stream: ClientStream::Tcp(stream),
+            stream,
             writer_stream,
             writer_in_flight_bytes: 0,
             uring_in_flight_bytes: 0,
