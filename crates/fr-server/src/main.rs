@@ -354,6 +354,115 @@ type ClientMap = HashMap<Token, ClientConnection, foldhash::fast::RandomState>;
 type TokenSet = HashSet<Token, foldhash::fast::RandomState>;
 
 /// Per-client connection state.
+/// The socket a client is attached to: TCP today, Unix domain socket once accept is wired.
+///
+/// (frankenredis-w1djx) `8cff0e126` landed `bind_unix_listener` but could not wire the accept path
+/// because `ClientConnection` names `mio::net::TcpStream` directly. This is that abstraction.
+///
+/// AN ENUM RATHER THAN A TRAIT OBJECT OR A GENERIC, because the surface is tiny and was MEASURED
+/// rather than assumed. Across the whole server the stream field is asked for exactly five things
+/// -- `read` (7 sites), `shutdown` (3), `as_raw_fd` (2), `write` (1), and mio registration (4) --
+/// and for nothing else: there is not one `set_nodelay`, `peer_addr`, `local_addr` or `set_linger`
+/// call on it. `mio::net::UnixStream` provides all five with the same signatures as
+/// `mio::net::TcpStream`, so dispatch is a two-arm match with no behavioural branch anywhere.
+///
+/// A trait object would add a vtable hop to the hottest read path in the server for a choice that
+/// is fixed at accept time; a generic parameter would infect `ClientConnection`, `ClientMap` and
+/// every function that touches either. The enum keeps the cost to one predictable branch.
+///
+/// NOTHING USES THIS YET. `ClientConnection.stream` still has its concrete type, so adoption is a
+/// separate, mechanical commit the compiler can check exhaustively.
+#[cfg(unix)]
+#[allow(dead_code)]
+enum ClientStream {
+    Tcp(TcpStream),
+    Unix(mio::net::UnixStream),
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+impl ClientStream {
+    /// `Shutdown` means the same thing on both socket families, so the three shutdown sites need
+    /// no branching of their own.
+    fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(s) => s.shutdown(how),
+            Self::Unix(s) => s.shutdown(how),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::io::Read for ClientStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(s) => s.read(buf),
+            Self::Unix(s) => s.read(buf),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::io::Write for ClientStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(s) => s.write(buf),
+            Self::Unix(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(s) => s.flush(),
+            Self::Unix(s) => s.flush(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for ClientStream {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        match self {
+            Self::Tcp(s) => s.as_raw_fd(),
+            Self::Unix(s) => s.as_raw_fd(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl mio::event::Source for ClientStream {
+    fn register(
+        &mut self,
+        registry: &mio::Registry,
+        token: Token,
+        interests: Interest,
+    ) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(s) => registry.register(s, token, interests),
+            Self::Unix(s) => registry.register(s, token, interests),
+        }
+    }
+
+    fn reregister(
+        &mut self,
+        registry: &mio::Registry,
+        token: Token,
+        interests: Interest,
+    ) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(s) => registry.reregister(s, token, interests),
+            Self::Unix(s) => registry.reregister(s, token, interests),
+        }
+    }
+
+    fn deregister(&mut self, registry: &mio::Registry) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(s) => registry.deregister(s),
+            Self::Unix(s) => registry.deregister(s),
+        }
+    }
+}
+
 struct ClientConnection {
     stream: TcpStream,
     writer_stream: Option<StdTcpStream>,
