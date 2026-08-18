@@ -33635,6 +33635,16 @@ impl Store {
         self.script_cache.get(&hex).map(Vec::as_slice)
     }
 
+    /// (frankenredis-sf510) Existence check against an ALREADY-normalised hex SHA.
+    ///
+    /// `script_get` lowercases on every call. EVALSHA needs the normalised form anyway to probe
+    /// the compiled-chunk index, so calling `script_get` as well allocated and lowercased the
+    /// SHA twice per invocation — which showed up as a +1.7 pct regression on an 8-byte script,
+    /// where that overhead is larger than the body hash the change removes.
+    pub fn script_contains_hex(&self, sha_hex: &str) -> bool {
+        self.script_cache.contains_key(sha_hex)
+    }
+
     // ── Function library management ─────────────────────────────────
 
     /// Load a function library. Parses the library code to extract metadata.

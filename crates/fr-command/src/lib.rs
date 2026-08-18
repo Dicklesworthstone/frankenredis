@@ -26358,35 +26358,69 @@ fn evalsha_cmd(
     let sha1 = &argv[1];
     let (_numkeys, keys, args) = parse_eval_args(argv)?;
 
-    // Look up script by SHA1
-    let script = match store.script_get(sha1) {
-        Some(s) => s.to_vec(),
+    // (frankenredis-sf510) EXISTENCE FIRST, ALWAYS — this check is NOT an optimisation and
+    // must not be folded into the cache hit below. The compiled-chunk index is keyed by SHA and
+    // is content-addressed, so it legitimately outlives SCRIPT FLUSH; the script_cache is what
+    // records whether this server currently KNOWS the script. Serving a cached chunk without
+    // this check would run a flushed script where Redis 7.2.4 returns NOSCRIPT.
+    //
+    // It is cheap for the same reason the old code was not: it hashes the 40-char SHA, not the
+    // script body.
+    // Normalise ONCE and use it for both the existence check and the index probe. Calling
+    // `script_get` here as well would lowercase and allocate the SHA a second time.
+    let sha_hex = String::from_utf8_lossy(sha1).to_ascii_lowercase();
+    if !store.script_contains_hex(&sha_hex) {
+        return Ok(RespFrame::Error(
+            "NOSCRIPT No matching script. Please use EVAL.".to_string(),
+        ));
+    }
+
+    // FAST PATH. On a hit neither the body nor its hash is touched: the old code paid a full
+    // `to_vec()` copy of the script and then hashed the whole body to probe a cache keyed on
+    // source bytes, despite already holding this SHA. MEASURED before the change: a `return 1`
+    // padded with 4000 bytes of Lua COMMENT — no extra interpreter work whatsoever — cost
+    // 4.5408x Redis 7.2.4 against 1.2345x unpadded (ledger b748dbc98).
+    let (compiled, no_writes) = match lua_eval::compiled_chunk_by_sha(&sha_hex) {
+        Some(hit) => hit,
         None => {
-            return Ok(RespFrame::Error(
-                "NOSCRIPT No matching script. Please use EVAL.".to_string(),
-            ));
-        }
-    };
-    let compiled = match lua_eval::compile_lua_chunk_cached(&script) {
-        Ok(compiled) => compiled,
-        Err(_) => {
-            // (frankenredis-5qhz7) Surface the true error line, not a hardcoded 1.
-            return Ok(RespFrame::Error(format!(
-                "ERR Error compiling script (new function): user_script:{}",
-                lua_eval::compile_error_line(&script)
-            )));
+            // MISS: materialise the body exactly once, then index it under the SHA so the next
+            // call takes the branch above.
+            let script = match store.script_get(sha1) {
+                Some(s) => s.to_vec(),
+                None => {
+                    return Ok(RespFrame::Error(
+                        "NOSCRIPT No matching script. Please use EVAL.".to_string(),
+                    ));
+                }
+            };
+            let no_writes = script_shebang_has_no_writes_flag(&script);
+            match lua_eval::compile_lua_chunk_cached_indexed_by_sha(&sha_hex, &script, no_writes) {
+                Ok(compiled) => (compiled, no_writes),
+                Err(_) => {
+                    // (frankenredis-5qhz7) Surface the true error line, not a hardcoded 1.
+                    return Ok(RespFrame::Error(format!(
+                        "ERR Error compiling script (new function): user_script:{}",
+                        lua_eval::compile_error_line(&script)
+                    )));
+                }
+            }
         }
     };
 
     let keys_vec: Vec<Vec<u8>> = keys.to_vec();
     let args_vec: Vec<Vec<u8>> = args.to_vec();
     let previous_read_only = store.script_read_only;
-    store.script_read_only = read_only_script || script_shebang_has_no_writes_flag(&script);
+    store.script_read_only = read_only_script || no_writes;
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
     {
         Ok(frame) => Ok(frame),
-        Err(e) => Ok(eval_script_error_reply(&script, e, store.lua_error_line)),
+        // The body is fetched HERE rather than held across the call: it is needed only to
+        // render an error, so the hot path never materialises it.
+        Err(e) => {
+            let body = store.script_get(sha1).map(<[u8]>::to_vec).unwrap_or_default();
+            Ok(eval_script_error_reply(&body, e, store.lua_error_line))
+        }
     };
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
@@ -55467,6 +55501,55 @@ mod tests {
                 &result, expected,
                 "seed {name} eval result drifted (got {result:?}, expected {expected:?})"
             );
+        }
+    }
+
+    #[test]
+    fn evalsha_after_script_flush_returns_noscript_even_though_the_chunk_is_still_compiled_sf510()
+    {
+        // (frankenredis-sf510) THE GUARD ON THE FAST PATH. evalsha_cmd now looks a compiled
+        // chunk up by SHA, and that index is CONTENT-ADDRESSED, so it deliberately outlives
+        // SCRIPT FLUSH -- a SHA always denotes the same bytes, so the entry can never be stale.
+        //
+        // What the index does NOT know is whether this server still KNOWS the script. Only
+        // `script_cache` records that, which is why evalsha_cmd checks existence BEFORE
+        // consulting the index. Delete that check and this test fails: the flushed script runs
+        // and returns 1 where Redis 7.2.4 returns NOSCRIPT.
+        //
+        // The first EVALSHA is what makes the test load-bearing -- it POPULATES the SHA index,
+        // so the post-flush call is served from a warm cache rather than a cold one. Without
+        // it the test would pass even with the guard removed.
+        let mut store = Store::new();
+        let body = b"return 1";
+        let sha = store.script_load(body);
+
+        let warm = dispatch_argv(
+            &[b"EVALSHA".to_vec(), sha.clone().into_bytes(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("evalsha before flush");
+        assert!(
+            matches!(warm, RespFrame::Integer(1)),
+            "the script must run before the flush, and must populate the SHA index; got {warm:?}"
+        );
+
+        store.script_flush();
+
+        let after = dispatch_argv(
+            &[b"EVALSHA".to_vec(), sha.into_bytes(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("evalsha after flush");
+        match after {
+            RespFrame::Error(ref msg) => assert!(
+                msg.starts_with("NOSCRIPT"),
+                "must be NOSCRIPT after SCRIPT FLUSH, got {msg}"
+            ),
+            other => panic!(
+                "a flushed script must NOT execute from the compiled-chunk index; got {other:?}"
+            ),
         }
     }
 
