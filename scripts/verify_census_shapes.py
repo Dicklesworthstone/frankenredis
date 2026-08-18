@@ -15,10 +15,9 @@ import tempfile
 import time
 
 S = "/data/tmp/claude-1000/-data-projects-frankenredis/f82d025c-b982-4760-a679-f7e31fe91efe/scratchpad"
-NEW = ["zcount_base", "zscore_base", "hgetall_base", "smembers_base", "lrange_base",
-       "getrange_base", "zmscore_2", "smismember_2", "hmget_2", "getbit_base",
-       "hstrlen_base", "xrange_base", "dbsize_base", "geodist_base", "geopos_base",
-       "geohash_base"]
+NEW = ["bitfield_get", "bitfield_ro_2get", "hscan_zero", "sscan_zero", "zscan_zero",
+       "pexpiretime_base", "unwatch_base", "xread_one", "xrevrange_base", "zdiff_2",
+       "zinter_2src"]
 
 src = open("/data/projects/frankenredis/scripts/shape_instr_per_op.py").read()
 body = re.search(r"^SHAPES = \{(.*?)^\}", src, re.S | re.M).group(1)
@@ -49,7 +48,7 @@ def enc(parts):
 
 
 d = tempfile.mkdtemp(prefix="shapeverify_", dir="/data/tmp")
-p = subprocess.Popen([f"{S}/bins/b4_after1.elf", "--port", "7471", "--dir", d, "--save", ""],
+p = subprocess.Popen([f"{S}/bins/b6b_after1.elf", "--port", "7471", "--dir", d, "--save", ""],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:
     for _ in range(200):

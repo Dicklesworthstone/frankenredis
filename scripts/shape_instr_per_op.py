@@ -758,6 +758,29 @@ SHAPES = {
     ),
     "geopos_base": (["GEOADD gpb 13.361389 38.115556 P1"], ["GEOPOS", "gpb", "P1"]),
     "geohash_base": (["GEOADD ghb 13.361389 38.115556 P1"], ["GEOHASH", "ghb", "P1"]),
+    # (frankenredis-getexgate) SECOND WAVE of census shapes. a1600b784 added 16 for read
+    # families that had none; a fresh source scan across all THREE gate-derivation forms found
+    # eleven more commands still deriving the read gate with no shape at all, so the census
+    # could not see them either. Same fix, same reason: a route without a shape is invisible to
+    # calls/op by construction, which is how this vein got mis-sized three times.
+    #
+    # WATCH is deliberately absent: it accumulates watched keys per connection, so a 20,000-op
+    # loop would measure a growing structure rather than a steady-state command. UNWATCH is
+    # safe and covers the same executor pair.
+    "bitfield_get": (["SET bfk abcdefgh"], ["BITFIELD", "bfk", "GET", "u8", "0"]),
+    "bitfield_ro_2get": (
+        ["SET bfr abcdefgh"],
+        ["BITFIELD_RO", "bfr", "GET", "u8", "0", "GET", "u8", "8"],
+    ),
+    "hscan_zero": (["HSET hsc f1 v1 f2 v2"], ["HSCAN", "hsc", "0"]),
+    "sscan_zero": (["SADD ssc a b c"], ["SSCAN", "ssc", "0"]),
+    "zscan_zero": (["ZADD zsc 1 a 2 b"], ["ZSCAN", "zsc", "0"]),
+    "pexpiretime_base": (["SET pxk v"], ["PEXPIRETIME", "pxk"]),
+    "unwatch_base": ([], ["UNWATCH"]),
+    "xread_one": (["XADD xrd 1-1 f v"], ["XREAD", "COUNT", "1", "STREAMS", "xrd", "0"]),
+    "xrevrange_base": (["XADD xrv 1-1 f v"], ["XREVRANGE", "xrv", "+", "-"]),
+    "zdiff_2": (["ZADD zd1 1 a 2 b", "ZADD zd2 1 b"], ["ZDIFF", "2", "zd1", "zd2"]),
+    "zinter_2src": (["ZADD zia 1 a 2 b", "ZADD zib 1 a"], ["ZINTER", "2", "zia", "zib"]),
     "georadius_ro_1": (
         ["GEOADD grk 13.361389 38.115556 P1"],
         ["GEORADIUS_RO", "grk", "13.361389", "38.115556", "200", "km"],
