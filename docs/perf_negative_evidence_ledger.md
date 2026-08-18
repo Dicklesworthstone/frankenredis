@@ -60275,3 +60275,66 @@ claims about a gate, a window, a check having been performed, or a certification
 `standing_run.py` carry honest disclaimers about what they do not certify. One residual was found
 and fixed: `restore_ratio.py`'s docstring title still read "SIZING" after the harness had been
 given the ability to certify, which would have mislabelled its own output in the safe direction.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: the dump leak is CLOSED — BrownIbis's `c432b58ac` verified independently at delta 0, and I duplicated their work by implementing before asking
+
+Claim class: INSTRUMENT. No ratio is claimed.
+Campaign output: no — closes the escalation I opened and records a coordination mistake.
+
+### THE LEAK IS FIXED AND I CHECKED IT RATHER THAN ASSUMING
+
+`c432b58ac` ("the shape harness reaps its own callgrind dump") landed while my equivalent fix was
+held behind the lease on that file. Verified on the shipped harness, not by reading it:
+
+    dumps before                4967
+    after a DEFAULT run         4967   **delta 0**   "callgrind dumps: reaped. Pass --keep-dumps..."
+    after a --keep-dumps run    4968   delta +1      path printed as before
+
+Same design I had proposed and the same guarantee: the process removes only its OWN `mkdtemp`
+dir, never a glob, so a concurrent `frame_delta.py` cannot have its dump pulled out from under
+it. The ~1.8 GB/day bleed from this harness is stopped.
+
+Their version also prints a per-arm `bench_elf_sha256`, "harness-computed and re-verified after
+the arm; NOT a `/proc/self/exe` self-report, which callgrind makes impossible" — a provenance
+improvement over what I wrote, and one that closes a gap every row in this ledger depends on.
+
+**The 4,968 EXISTING dirs (~4.0 GB) are still there.** The fix stops new ones; it does not reclaim
+old ones, and neither of us deleted them. That remains an escalation for whoever owns the volume.
+
+### THE COORDINATION MISTAKE, WHICH IS MINE
+
+I measured the leak, implemented the fix, verified it, and only THEN discovered the file was
+leased — at which point I mailed BrownIbis offering it. They had already written their own. Two
+agents built the same fix; one was discarded.
+
+**An exclusive lease on a file is evidence that someone is IN that file, and therefore evidence
+they may be doing the thing you are about to do.** I treated the lease purely as a commit-time
+obstacle rather than as information about intent. The cheap move was available and I skipped it:
+check the lease FIRST, and if it is held, ask before building — a two-line message would have
+cost minutes and saved a duplicate implementation.
+
+This is the inverse of the failure banked earlier today, where I edited files a peer was mid-way
+through and broke `main`. Same root cause read from the other side: **the reservation table is a
+statement about what peers are DOING, not just about what I may commit.**
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement of either engine, no ratio, no A/A, no build, no quiet window. Two 500-op harness
+runs whose dumps were created and reaped, netting zero disk. CV was not used, as a gate or
+otherwise.
+
+### PROVENANCE
+
+  ELF           fr `114bcea75f8296ae...` reused for the two verification runs; nothing built.
+  host          /data 47G free, 5G above the 42G brake, stable.
+  disposition   ESCALATION CLOSED. No source file changed by this row — the fix is BrownIbis's.
+
+### RETRY PREDICATE
+
+1. The leak is fixed. Re-check with `ls -d /data/tmp/fr_instr_* | wc -l` before and after a
+   default run; a non-zero delta means it regressed.
+2. The ~4.0 GB of pre-existing dirs is still unreclaimed and still needs an owner's decision.
+3. Before implementing anything on a leased path, MESSAGE THE HOLDER FIRST. A lease means someone
+   is working there, which is a reason to ask rather than only a reason to wait.
