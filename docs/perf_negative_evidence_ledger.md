@@ -61180,3 +61180,116 @@ otherwise.
    though it exists in `balanced_square_ab.py`. It is the campaign's clearest
    throughput-shortfall-without-a-CPU-story shape, so registering it on the instruction axis is
    the single most useful addition to this survey.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 BrownIbis: the GEOSEARCH per-element allocation is REAL but the fix I specified is BLOCKED — the scan callback is `impl FnMut(&[u8], f64)` over `&mut self`, so the slice cannot escape. Only reserve-and-inline remain, and the pattern is confined to THREE sites (`frankenredis-ozrro`)
+
+Claim class: SOURCE ANALYSIS closing out a retry predicate. No measurement, no ratio, no build.
+Campaign output: no — it makes the previous row's lever landable and kills half of it.
+
+### WHAT THIS ANSWERS
+
+`e2481acc4` measured `geosearch_64`'s deficit as per-element locality (fr ~3 L1 misses per added
+member against redis's ~1) and named a candidate: an owned `member.to_vec()` per hit into an
+unreserved `Vec`. Its retry predicate left one question blocking the larger half of the fix:
+
+> If fix (2) is attempted, the blocker to establish FIRST is whether the member slice can outlive
+> `zset_for_each_in_score_ranges`'s callback.
+
+**It cannot.** Two independent reasons, either sufficient:
+
+    pub fn zset_for_each_in_score_ranges(
+        &mut self, key: &[u8], ranges: &[(f64, f64)], now_ms: u64,
+        mut f: impl FnMut(&[u8], f64),
+    ) -> Result<bool, StoreError>
+
+  1. `impl FnMut(&[u8], f64)` is a HIGHER-RANKED bound. The slice's lifetime is fresh per
+     invocation and tied to it, so a borrow cannot be stored past the call. Allowing it would
+     mean naming a lifetime tied to the entry — a signature change on a method used well beyond
+     GEOSEARCH.
+  2. The method takes `&mut self` and USES it: it reaps expired keys, bumps LFU frequency and
+     calls `entry.touch(now_ms)`. Borrowed member slices would alias a mutably borrowed store,
+     so even with (1) fixed the caller could not hold them.
+
+And materialisation is genuinely required regardless: `geosearch` calls `results.sort_by` (three
+sites, ASC/DESC by distance or score) before encoding, so the hits must exist as a collection.
+**"Borrow instead of collect" is dead for this command.** Anyone reaching for the
+`hscan0_borrow_scan` shape here will lose the time I just spent.
+
+### WHAT REMAINS, AND IT IS SMALLER THAN IT LOOKED
+
+  1. **Reserve the accumulator.** `Vec::new()` grows by doubling; 64 hits is about seven
+     reallocate-and-copy cycles of a 56-byte tuple. The bound is the zset cardinality, known
+     before the scan. Pure win, no semantics touched, and the cheapest thing on the list.
+  2. **Stop heap-allocating the member NAME per hit.** The tuple owns a `Vec<u8>` purely so it
+     can outlive the callback, per the blocker above — but "owned" does not have to mean
+     "heap". An inline-or-heap small buffer keeps ownership and removes the allocation for every
+     member that fits. `fr_store::StringBytes` establishes the TECHNIQUE in this codebase with
+     `Inline([u8; 21], u8)`, though it is NOT a drop-in: its variants are Borrowed-or-Inline and
+     this needs Owned-inline-or-heap.
+  3. Sorting indices and re-reading members afterwards would avoid the copy entirely, and is
+     probably WORSE: it trades one allocation per hit for one store lookup per hit, on a store
+     that was mutably borrowed during the scan. Recorded so the next person does not re-derive
+     it as new.
+
+### HOW WIDESPREAD IS THIS? THREE SITES, ALL GEO.
+
+I looked for the same shape elsewhere, expecting a vein. There isn't one. Searching for functions
+that take a `&[u8]` parameter and push an owned copy of THAT parameter, across fr-command,
+fr-store and fr-runtime, excluding test code:
+
+    crates/fr-command/src/lib.rs:6528  geo_collect_candidate                  push((member.to_vec(), ..))
+    crates/fr-command/src/lib.rs:6558  geo_collect_box_candidate              push((member.to_vec(), ..))
+    crates/fr-command/src/lib.rs:6592  geo_collect_searchstore_box_candidate  push((member.to_vec(), ..))
+
+Every other hit — and there are about twenty-five — copies a KEY or an option token ONCE PER
+COMMAND while building argv for propagation (`plain_hmget_owned_argv`, `execute_plain_bitop_
+borrowed`, `notify_keyspace_event` and so on). Those are per-command costs, not per-element, and
+converting them would be work for nothing.
+
+So the per-element copy is confined to the geo family, and `geo_collect_candidate` (line 6528) is
+the BYRADIUS path that `geosearch_64` actually exercises.
+
+### TWO DETECTORS I WROTE AND DISCARDED, BECAUSE THE FAILURE IS INSTRUCTIVE
+
+The first keyed on the ACCUMULATOR's declaration and scanned a window after it. It missed
+`geosearch` — the case it was written for — because the pushes live in a helper that receives
+`results: &mut Vec<..>`, outside any window after the declaration. **An instrument that cannot
+see its own motivating case should not be trusted about anything else**, and this one would have
+reported "no per-element copies in fr-command".
+
+The second keyed on the push and ranked by count per function. Its top hits were
+`collect_config_entries` (66) and `function_load` (23), which push string LITERALS
+(`b"COUNT".to_vec()`). Ranking by frequency finds the most REPEATED code, not the most COSTLY;
+the signal only appeared once the query required the copied value to come from a borrowed
+parameter.
+
+Neither is committed. A misleading instrument in `scripts/` is worse than none, and this ledger
+has several rows about numbers taken from tools that were measuring the wrong thing.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement of either engine: this row is source analysis and a type-system argument. Nothing
+was built, no shape was run, no dump was written. CV was not used, as a gate or otherwise. The
+measurement this closes out is `e2481acc4`'s, whose contract stands.
+
+### PROVENANCE
+
+  source        `main` at `a41ab2697`; the three geo sites and
+                `zset_for_each_in_score_ranges` read at that commit.
+  host          /data 47G, 5G above the brake. No local builds — none needed or attempted.
+                `rch check` reports a worker unreachable, and rch does not retrieve a linked
+                binary in any case, so remote build was not a route to a measurable ELF either.
+  disposition   ANALYSIS. No source file changed; no instrument shipped.
+
+### RETRY PREDICATE
+
+1. Fix (1) is unblocked and cheap. It needs a build, so it is queued rather than done. Measure
+   `geosearch_64` AND a small-cardinality geo shape — over-reserving is the only way it could
+   regress, and the small shape is where that would show.
+2. Do NOT attempt "borrow instead of collect" on GEOSEARCH. The reasons are in this row; if
+   someone believes it is possible, they must first change `zset_for_each_in_score_ranges`'s
+   signature AND its `&mut self`, which is a much larger change than the prize.
+3. If fix (2) is built, size the inline capacity from real member names, not from the census
+   shape: `geosearch_64` uses 3-byte names (`M00`), which would flatter any inline threshold.
