@@ -34549,7 +34549,28 @@ fn process_argv_frame(
     // an in-pause UNPAUSE and releases at the original deadline). Under PAUSE
     // WRITE, non-write commands like UNPAUSE are not paused by is_command_paused
     // in the first place, so they still pass through. Mirror that exactly.
-    if runtime.is_client_paused(ts) && runtime.is_command_paused(argv, ts) {
+    //
+    // (frankenredis-pausereplica-sitf1) The `!is_replica` conjunct is upstream's
+    // `!(c->flags & CLIENT_SLAVE)` at server.c:4138, whose comment is simply "Replicas are
+    // never paused." The rule was already stated in the comment above -- "defers EVERY
+    // non-replica command" -- and not written as a condition.
+    //
+    // It matters because a replica's periodic REPLCONF ACK is processed through THIS function:
+    // the reply-suppression branch and the replication follow-up below are downstream of this
+    // gate, and the latter already asks `runtime.is_replica(runtime.client_id())`. Parking that
+    // ack is exactly backwards for what CLIENT PAUSE is for -- quiescing writes before a
+    // failover so replicas can catch up, with the operator confirming catch-up through WAIT or
+    // INFO replication. During PAUSE ALL the ack would be deferred to the deadline, WAIT could
+    // not be satisfied, and the replica's reported offset would freeze, making a caught-up
+    // replica look like a lagging one.
+    //
+    // On the CONNECTION rather than on the command deliberately: REPLCONF is neither a write
+    // nor may-replicate, so PAUSE WRITE does not park it today -- but that is a property of the
+    // command classification, not a guarantee, and upstream puts the exemption on the client.
+    if runtime.is_client_paused(ts)
+        && !runtime.is_replica(runtime.client_id())
+        && runtime.is_command_paused(argv, ts)
+    {
         // Don't process the command — leave it in the read buffer.
         // Track paused token so we can re-process when pause expires.
         paused_tokens.insert(token);
