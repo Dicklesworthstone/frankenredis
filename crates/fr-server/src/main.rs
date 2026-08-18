@@ -13039,11 +13039,14 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_lrem_packet(unparsed, &parser_config)
                 {
+                    let default_write_allowed =
+                        Some(cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts));
                     if let Some(response) = runtime.execute_plain_lrem_borrowed(
                         packet.key,
                         packet.count,
                         packet.element,
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -19071,12 +19074,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Lrem => {
+            // (frankenredis-ozrro) Hoisted ABOVE the let-chain: `cached_plain_write_gate` needs
+            // `&mut Runtime` and so does the executor, and a `let` cannot sit inside an
+            // `if let ... && let ...` chain anyway.
+            let default_write_allowed =
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
             if let Some(packet) = parse_borrowed_plain_lrem_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_lrem_borrowed(
                     packet.key,
                     packet.count,
                     packet.element,
                     ts,
+                    default_write_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {

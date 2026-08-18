@@ -23263,6 +23263,7 @@ impl Runtime {
         count_arg: &[u8],
         value: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"LREM".len()
@@ -23272,7 +23273,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-lremfast) Conservative borrowed WRITE fast path for `LREM key
@@ -23289,8 +23291,15 @@ impl Runtime {
         count_arg: &[u8],
         value: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_lrem_borrowed(key, count_arg, value, now_ms) {
+        if !self.can_execute_plain_lrem_borrowed(
+            key,
+            count_arg,
+            value,
+            now_ms,
+            default_write_allowed,
+        ) {
             return None;
         }
         // Only fast-path well-formed integer counts; defer the not-an-integer
