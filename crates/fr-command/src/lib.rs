@@ -73531,6 +73531,124 @@ mod tests {
     }
 
     #[test]
+    /// A library whose function NAME is computed at runtime must load AND be callable.
+    ///
+    /// (frankenredis-9hori) This is the bead's `local n = 'a'..'b'` case, and it pins BOTH halves
+    /// of the fix at once, which is the point: they were fixed in separate commits and either one
+    /// alone is worse than the bug.
+    ///
+    ///   * Registration used to TEXT-SCAN the source for `register_function(...)` and demand a
+    ///     string LITERAL, so this library was FALSELY REJECTED — a library redis 7.2.4 loads.
+    ///   * Invocation used to REWRITE the source, turning the call into a named global, which
+    ///     needs the same literal. So with registration alone fixed, this library would load and
+    ///     then be UNCALLABLE — the state the bead calls strictly worse than a clean rejection.
+    ///
+    /// `scripts/function_load_differ.py` cannot see the second half: its cases stop at FUNCTION
+    /// LOAD's accept/reject, so a library that loads and cannot be called passes it. That is why
+    /// this test exists here rather than as another differ row.
+    #[test]
+    fn fcall_invokes_a_function_whose_name_was_computed_at_runtime_9hori() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=dynnamelib\nlocal n = 'dyn' .. 'echo'\nredis.register_function(n, function(keys, args) return args[1] end)"
+                    .to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::BulkString(Some(b"dynnamelib".to_vec())),
+            "a runtime-computed function name must not be rejected at load"
+        );
+
+        let out = dispatch_argv(
+            &[
+                b"FCALL".to_vec(),
+                b"dynecho".to_vec(),
+                b"0".to_vec(),
+                b"hello".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::BulkString(Some(b"hello".to_vec())),
+            "the registered name must be CALLABLE -- loading it and stranding it is the \
+             register-but-uncallable state this bead exists to prevent"
+        );
+    }
+
+    /// The same, for a CALLBACK held in a local rather than written inline.
+    ///
+    /// (frankenredis-9hori) The bead's third measured divergence. It is a separate row because the
+    /// scan failed on it for a different reason: the name IS a literal here, so a name-only fix
+    /// would pass the previous test and still reject this library on the callback argument.
+    #[test]
+    fn fcall_invokes_a_function_whose_callback_was_held_in_a_local_9hori() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=dyncblib\nlocal cb = function(keys, args) return args[1] end\nredis.register_function('cbecho', cb)"
+                    .to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::BulkString(Some(b"dyncblib".to_vec())),
+            "a callback held in a local must not be rejected at load"
+        );
+
+        let out = dispatch_argv(
+            &[
+                b"FCALL".to_vec(),
+                b"cbecho".to_vec(),
+                b"0".to_vec(),
+                b"hello".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::BulkString(Some(b"hello".to_vec())),
+            "a local-held callback must be CALLABLE once registered"
+        );
+    }
+
+    /// A literal library must keep taking the REWRITING path, not the executing fallback.
+    ///
+    /// (frankenredis-9hori) The fallback is gated on `target_func_line.is_none()`, which is true
+    /// exactly when the scan could not express the function. This row is the other side of that
+    /// gate: an ordinary literal library must still resolve through the scan, so the fallback
+    /// cannot quietly become the path everything takes. If it ever does, the `on @user_function:<N>`
+    /// wording matched to vendored 7.0+ under `frankenredis-tos1j` changes with it.
+    #[test]
+    fn fcall_literal_library_still_resolves_through_the_scan_9hori() {
+        let (_wrapper, line) = super::fcall_wrapper_script(
+            "litecho",
+            b"#!lua name=litlib\nredis.register_function('litecho', function(keys, args) return args[1] end)",
+        );
+        assert!(
+            line.is_some(),
+            "a literal register_function must still yield a scanned definition line; None here \
+             would send every literal library down the executing fallback"
+        );
+    }
+
+    #[test]
     fn fcall_ro_succeeds_for_table_form_function_with_no_writes_flag() {
         // The positional form has no way to declare flags, so
         // FCALL_RO always rejects it. The table form's
