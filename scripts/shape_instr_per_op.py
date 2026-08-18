@@ -508,6 +508,32 @@ SHAPES = {
     # an executor, and the subcommand discriminant means the same both-variants trap the
     # arity-6 work paid for: FUNCTION at arity 4 is not only LOAD.
     "function_load": ([], ["FUNCTION", "LOAD", "REPLACE", "#!lua name=fnperf\nredis.register_function('fnperf_f', function(keys, args) return 1 end)\n"]),
+    # (frankenredis-kbyhy) FCALL dose-response over LIBRARY SIZE with the SAME invoked
+    # function. This bead's acceptance gate is the slope, not a level: FCALL used to rebuild
+    # and re-hash the whole library per call, so cost scaled with the library while the useful
+    # work stayed one function. If instr/op is flat across 1/8/32 the per-call cost no longer
+    # scales; if it still rises, the memo is not being reached.
+    #
+    # THREE POINTS, NOT TWO, for the reason gvm6z's keys_star_16 note gives: two points cannot
+    # tell a line from a curve, and this repo has already banked one refuted crossover from a
+    # two-point fit. n=8 sits between the ends so the linear model can be falsified rather than
+    # merely fitted.
+    #
+    # Function names are suffixed per library because FUNCTION LOAD rejects a name already
+    # registered by another library, and all three libraries are resident at once.
+    **{
+        "fcall_lib%d" % n: (
+            [["FUNCTION", "LOAD", "REPLACE",
+              "#!lua name=fclib%d\n" % n
+              + "\n".join(
+                  ["redis.register_function('fc_t%d', function(keys, args) return 1 end)" % n]
+                  + ["redis.register_function('fc_p%d_%d', function(keys, args) return 1 end)"
+                     % (n, i) for i in range(1, n)])
+              + "\n"]],
+            ["FCALL", "fc_t%d" % n, "0"],
+        )
+        for n in (1, 8, 32)
+    },
 
     # (frankenredis-kbyhy / frankenredis-sf510) THE SCRIPTING CACHE-KEY SHAPES.
     #
