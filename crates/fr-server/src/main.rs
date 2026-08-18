@@ -464,7 +464,11 @@ impl mio::event::Source for ClientStream {
 }
 
 struct ClientConnection {
-    stream: TcpStream,
+    /// (frankenredis-w1djx) Was `TcpStream`. Widened to `ClientStream` so a client can be
+    /// attached to a Unix domain socket as well as a TCP one. Every use of this field goes
+    /// through `read`, `write`, `shutdown`, `as_raw_fd` or mio registration, all of which
+    /// `ClientStream` forwards, so no call site changed.
+    stream: ClientStream,
     writer_stream: Option<StdTcpStream>,
     writer_in_flight_bytes: usize,
     uring_in_flight_bytes: usize,
@@ -757,7 +761,12 @@ impl ClientConnection {
         session.connected_at_ms = now_ms;
         session.last_interaction_ms = now_ms;
         Self {
-            stream,
+            // The TCP constructors keep taking a `TcpStream` and wrap here, so no existing
+            // caller -- production or test -- had to change. The Unix constructor is NOT
+            // written yet: it needs this body factored out behind a `ClientStream`-taking
+            // helper, and relocating a struct literal this size belongs with the accept
+            // wiring rather than inside a type swap.
+            stream: ClientStream::Tcp(stream),
             writer_stream,
             writer_in_flight_bytes: 0,
             uring_in_flight_bytes: 0,
