@@ -43671,3 +43671,77 @@ RETRY PREDICATE:
      survive in a fresh attribution; this bead has now had a stale attribution twice.
   2. Do NOT re-derive the n=1000 figure from the n=200 one. The saving is bounded by the head,
      so the percentage is size-dependent by construction.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — hoist `ParserConfig` out of the per-frame path into a plain local: **-6.0 to -8.5 instr/op on five shapes**, after the `#[inline]` and `Option`-cache forms of the same idea were both REJECTED (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: `process_buffered_frames` called `runtime.parser_config()` once per frame — 1.000
+calls/op on EVERY command, and a real cross-crate call because `lto = "thin"` is set only on
+`release-perf`, not on `release`. It is now computed ONCE per read batch into a plain local
+and recomputed at the six points the read-gate, output-limit and write-gate caches are
+dropped, i.e. wherever a generic or owned command could have moved the config.
+
+THIS IS THE THIRD FORM OF THE SAME IDEA AND THE ONLY ONE THAT PAYS. All three remove the
+call; only this one is cheaper for it:
+
+| form | calls/op | dispatch | `.text` |
+|---|---|---|---|
+| `#[inline]` on the accessor | 1.000 -> 0.000 | -6 to -8 | +6,208, of which **+5,786 into `process_buffered_frames`** — REJECTED (`2895d607c`) |
+| `Option<ParserConfig>` per-batch cache | 1.000 -> 0.000 | **+5.9 to +7.0 WORSE** | +256 — REJECTED (`5509645aa`) |
+| **plain local (this row)** | 1.000 -> 0.000 | **-6.0 to -8.5** | +2,432, on the COLD arms |
+
+`Option<T>` costs a discriminant test and a 32-byte copy on every frame, which is more than
+the three field loads and a `min` it was meant to save. The plain local costs neither. **A
+per-batch cache pays on a SCALAR — `cached_plain_write_gate` caches one `bool` — and loses on
+a struct.**
+
+MEASURED, callgrind two-point (N=20,000 and 2N=40,000, whole-process differenced so startup
+cancels), re-measured against TODAY's HEAD `ed8a6c3ca` rather than the base the lever was
+developed on, with both arms built from a worktree pinned there and differing only in this
+change. `bench_elf_sha256=6057e36f2562db4ce2b8c52494040d3a00aa76e5c39291f097a5819045161988` (before),
+`bench_elf_sha256=e13722a686f4e7e6a9b6ee6c2c46ff6ad64e6634a5f4d8527d24416e9c292617` (after).
+Per-arm host state: load 10.85/28.12/31.06 at the first arm and 26.35/30.02/31.41 at the
+second, CPU idle 88.5 pct then 77.8 pct measured directly from `/proc/stat`, iowait 1.7 then
+0.1 pct, mean 2050-2508 MHz across 64 cores, /data 86G falling to 82G. Instruction counts are
+software-counted and immune to load and MHz.
+
+| shape | dispatch before | after | delta | `parser_config` calls/op |
+|---|---|---|---|---|
+| get | 437.0 | 431.0 | **-6.0** | 1.000 -> 0.000 |
+| sadd | 603.6 | 597.0 | **-6.6** | 1.000 -> 0.000 |
+| ping | 311.0 | 304.0 | **-7.0** | 1.000 -> 0.000 |
+| ttl | 489.0 | 481.0 | **-8.0** | 1.000 -> 0.000 |
+| zadd | 643.9 | 635.4 | **-8.5** | 1.000 -> 0.000 |
+
+CORRECTNESS. The config can only move under a generic or owned command, and those are exactly
+the six sites where the sibling caches are dropped, so the local is recomputed there. A
+same-batch probe — `[CONFIG SET proto-max-bulk-len 1048576][SET k <2 MiB>]` in one write —
+answers identically on both arms (`+OK` then `-ERR Protocol error: invalid bulk length`).
+**That probe does NOT prove the guard is load-bearing and this row does not claim it does**:
+deleting all six invalidation sites and rebuilding passed it identically too (`5509645aa`),
+because that knob has a 1 MiB floor and a frame that large can never share a read batch with
+the `CONFIG SET` before it. The recompute is retained as the conservative side of an
+unmeasurable question, at a cost of 11 instr/op on paths that already run a whole command.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run
+interleaving both arms across two rounds, so drift falls on both alike. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this
+row; no CV was computed. Host state is likewise provenance, not a gate. Quoting the WORST
+bound, the claim is **-6.0 instr/op on GET**, the shallowest of the five, shipped in `4462ea8b6`.
+
+WHY THE CLAIM IS ON THE FRAME AND NOT THE PROCESS TOTAL: the whole-process two-point number
+carries up to ~40 instr/op of same-ELF spread on these shapes (`6e15c87c8`), which cannot
+adjudicate a 6-9 instr/op effect. The dispatch frames are exact integers and reproduce across
+independently built ELFs — the BEFORE column here was measured on a different day, at a
+different base, on a differently-loaded host, and lands within 1.0 of the earlier figures.
+
+RETRY PREDICATE: `parser_config` is now CLOSED in all three forms and should not be revisited.
+The reusable rule is the one at the top of this row — before caching a value per batch in this
+loop, check its SIZE, and prefer a plain local recomputed at the invalidation points over
+`Option<T>` plus a clear. The remaining per-op calls on a GET, by out-of-line body size, are
+`execute_plain_get_borrowed_into_with_default_read_gate` 83 B, `drain_pending_pubsub` 261 B and
+`parse_borrowed_plain_set_bulk` 363 B; each is at 1.000 calls/op and none has been tried.
