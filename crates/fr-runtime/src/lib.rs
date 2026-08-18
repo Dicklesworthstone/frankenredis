@@ -4389,6 +4389,18 @@ pub struct ServerState {
     stop_writes_on_bgsave_error: bool,
     /// Replica promotion priority reported in INFO replication / CONFIG.
     pub replica_priority: usize,
+    /// (frankenredis-w1djx) Longest single event-loop cycle observed, in microseconds.
+    ///
+    /// Upstream keeps `server.duration_stats[EL_DURATION_TYPE_EL].max` and reports it as
+    /// `eventloop_duration_max` in INFO's `# Debug` section (server.c:6240). fr already
+    /// receives every cycle's duration in `Runtime::record_eventloop_cycle` but only ever
+    /// accumulated a SUM (`Store::stat_eventloop_duration_sum_usec`), from which a maximum
+    /// cannot be recovered.
+    ///
+    /// Kept on `ServerState` rather than `Runtime` because a max over cycles is SERVER-wide;
+    /// `Runtime` is per-connection, so a max stored there would silently report only the
+    /// cycles that happened to run under one client's runtime.
+    pub eventloop_duration_max_usec: u64,
     /// Upstream Redis 7.2's `enable-debug-command` knob (no | local |
     /// yes). Default `"no"` denies DEBUG with the canonical lockout
     /// error. Settable at startup via `--enable-debug-command` or the
@@ -4606,6 +4618,7 @@ impl Default for ServerState {
             replica_read_only: true,
             applying_master_stream: false,
             replica_priority: 100,
+            eventloop_duration_max_usec: 0,
             enable_debug_command: "no".to_string(),
             repl_diskless_sync: true,
             repl_diskless_sync_delay_sec: 5,
@@ -7890,6 +7903,25 @@ impl Runtime {
     /// Track one completed server event loop cycle for INFO stats.
     pub fn record_eventloop_cycle(&mut self, duration_usec: u64) {
         self.server.store.record_eventloop_cycle(duration_usec);
+        // (frankenredis-w1djx) The store keeps a SUM, which cannot yield upstream's
+        // `eventloop_duration_max`. Track the maximum here, where the per-cycle duration is
+        // already in hand, so no new call site or instrumentation point is needed.
+        if duration_usec > self.server.eventloop_duration_max_usec {
+            self.server.eventloop_duration_max_usec = duration_usec;
+        }
+    }
+
+    /// Longest single event-loop cycle observed, in microseconds.
+    ///
+    /// (frankenredis-w1djx) Upstream's `eventloop_duration_max`. Exposed now so INFO's
+    /// `# Debug` section can be emitted from REAL data once its three siblings
+    /// (`eventloop_duration_aof_sum`, `eventloop_duration_cron_sum`,
+    /// `eventloop_cmd_per_cycle_max`) are instrumented too. Emitting the section before then
+    /// would mean publishing zeros for counters fr genuinely moves -- fr does run cron and
+    /// does process commands -- which is exactly the "hardcoded to upstream's default so every
+    /// cheap differential agrees" defect filed as `frankenredis-edwnn`.
+    pub fn eventloop_duration_max_usec(&self) -> u64 {
+        self.server.eventloop_duration_max_usec
     }
 
     /// Track a rejected connection (maxclients exceeded).
