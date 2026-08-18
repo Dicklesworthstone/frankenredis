@@ -9112,6 +9112,44 @@ mod tests {
     }
 
     #[test]
+    /// (frankenredis-qj6jn) PINS LEVER 1's GUARD, which nothing pinned before.
+    ///
+    /// `2904626f5` claimed the c92f6 fixture above was a ready-made mutation test for the
+    /// canonical-i64 guard. It is not, and the reason is worth keeping: that fixture mixes
+    /// canonical ints (`123`) with non-canonical ones (`00`, the 23-digit overflow). Whichever way
+    /// the guard's condition is written, SOME entry trips it, `derivable` goes false, the chunk
+    /// total is computed BY the per-entry walk -- and the `debug_assert_eq!` then compares the walk
+    /// against itself. Tautological, in both directions. Flipping `is_some` to `is_none` there
+    /// leaves the suite green, which was measured, not assumed.
+    ///
+    /// The assert only has teeth when `derivable` stays TRUE, so the fixture has to be entries that
+    /// the CORRECT guard fires on and the WRONG one does not: all canonical, string-encoded
+    /// integers. Under the correct `is_some` the guard fires, the walk is used, and lp_bytes is the
+    /// re-encoded total. Under `is_none` the guard never fires, the blob-length derivation is used
+    /// instead, and it disagrees -- a string-encoded `123` occupies 5 source bytes and re-encodes
+    /// to 2.
+    #[test]
+    fn restored_guard_fires_on_canonical_ints_stored_as_strings_qj6jn() {
+        // Every entry: canonical decimal, stored with the 6-bit STRING encoding. No `00`, no
+        // overflow, no letters -- nothing that would trip the guard under the inverted condition.
+        let canonical_ints: Vec<&[u8]> = vec![b"123", b"4096", b"-1", b"0", b"32767"];
+        let lp = string_encoded_listpack(&canonical_ints);
+        let expected: u64 = {
+            let entries = fr_persist::listpack::decode_value_spans(&lp).expect("fixture decodes");
+            super::LIST_LP_OVERHEAD
+                + entries
+                    .iter()
+                    .map(|span| super::list_lp_entry_bytes(span.as_bytes(&lp)))
+                    .sum::<u64>()
+        };
+        let value = ListValue::from_restored_quicklist2_nodes(vec![listpack_node(lp)]);
+        assert_eq!(
+            value.lp_bytes, expected,
+            "the guard must surrender the derivation for canonical ints stored as strings, so \
+             lp_bytes is the RE-ENCODED walk total, not the source blob length"
+        );
+    }
+
     fn restored_quicklist2_fused_growth_totals_match_rebuild_walk_c92f6() {
         // canonical: mixed strings + integer-encoded entries
         let canonical: Vec<&[u8]> = vec![b"member:0001", b"42", b"-9999", b"x"];
