@@ -8809,20 +8809,32 @@ fn parse_partial_auto_id(arg: &[u8]) -> Option<u64> {
 /// `<ms>-<seq>` id); this manual path is byte-identical and avoids the formatter
 /// plus its intermediate `String` allocation.
 #[inline]
-fn push_u64_ascii(out: &mut Vec<u8>, mut n: u64) {
-    if n == 0 {
-        out.push(b'0');
+fn push_u64_ascii(out: &mut Vec<u8>, n: u64) {
+    // (frankenredis-getexgate) TWO defects, both measured at 2.000 calls/op and 86.0 instr/op
+    // self on BOTH `xrevrange_base` and `xread_one`, which reach this through
+    // `format_stream_id` -- once for the ms timestamp and once for the sequence.
+    //
+    // 1. The digit loop divided by 10 PER DIGIT. `fr_protocol::write_u64_digits` renders two
+    //    digits at a time from `DIGIT_PAIRS` and is already the renderer every other emitter in
+    //    the workspace uses; a stream ID's ms half is ~13 digits, so this is the half that pays.
+    // 2. It ended in `extend_from_slice(&buf[i..])`, a RUNTIME-VARIABLE length, which rustc
+    //    lowers to a `memcpy` CALL. A stream sequence is almost always a single digit, and
+    //    `push` needs no slice at all.
+    //
+    // The single-digit arm subsumes the old `n == 0` special case: zero takes it and emits the
+    // same byte.
+    //
+    // Deliberately NOT adding an `n < 100` arm here, unlike the `fr-protocol` emitters. Nothing
+    // measured reaches this with a two-digit value: the sequence half is single-digit and the ms
+    // half is ~13 digits, so such an arm would sit on the fall-through path of both call sites
+    // and pay for itself nowhere. That is the mistake the `push_usize` rejection records.
+    if n < 10 {
+        out.push(b'0' + n as u8);
         return;
     }
-    // u64::MAX is 20 digits.
     let mut buf = [0u8; 20];
-    let mut i = buf.len();
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    out.extend_from_slice(&buf[i..]);
+    let pos = fr_protocol::write_u64_digits(&mut buf, 20, n);
+    out.extend_from_slice(&buf[pos..]);
 }
 
 #[inline]
