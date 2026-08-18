@@ -4427,39 +4427,51 @@ const fn list_node_exceeds_limit(fill: i64, new_sz: u64, new_count: u64) -> bool
 /// list 2.4 pct (measured; `bd84d97d2`). With the fold open-coded there is no call and no frame,
 /// so BOTH halves inline and neither shape pays for the other's needs.
 ///
-/// The accepted language is unchanged. Canonicity is still decided by
-/// `list_lp_int_bytes_are_canonical` before a digit is folded, so the leading-zero, `+`, `-0` and
-/// empty cases are refused exactly where they were, and the range check still rejects everything
-/// the `str` parse rejected — INCLUDING `-9223372036854775808`, which is why the magnitude is
-/// accumulated in `u64` and negated afterwards rather than built as an `i64`.
+/// The accepted language is unchanged: leading-zero, `+`, `-0`, empty and out-of-range inputs are
+/// all still refused, INCLUDING `-9223372036854775808`.
+///
+/// (frankenredis-qj6jn) SINGLE-PASS, ported from the twin. This rule is implemented TWICE in the
+/// workspace — here and as `fr_persist::parse_listpack_integer` — and `ac77762d8` (cc_fr,
+/// 2026-07-10) fused the fr-persist copy from two passes to one and measured **1.399x** on 2048
+/// canonical decimals, A/B null-gated and byte-identical in acceptance. This copy kept the
+/// two-pass shape: `list_lp_int_bytes_are_canonical` ran `all(is_ascii_digit)` over every byte and
+/// THEN a second loop re-scanned to fold. `2a4617295` open-coded that second loop by hand without
+/// reading the twin, reconstructing the very shape cc_fr had just deleted.
+///
+/// The fused form does both in one walk: the leading-zero and `-0` rejections need only the FIRST
+/// digit, and the per-digit `is_ascii_digit` gate inside the fold replaces the separate `all(...)`
+/// scan. Non-integers still reject on the first non-digit byte, so a `20260818T...`-shaped string
+/// exits at the `T` exactly as before.
+///
+/// The accumulator runs NEGATIVE so `i64::MIN` fits: building the magnitude positively cannot
+/// represent 2^63, which is why the previous form needed a `u64` and a post-hoc negate.
+/// `list_lp_int_bytes_are_canonical` is retained — a test still pins it directly — but is no
+/// longer on this path.
 #[inline]
 fn list_lp_int(entry: &[u8]) -> Option<i64> {
     if entry.is_empty() || entry.len() >= 21 {
         return None;
     }
-    if !list_lp_int_bytes_are_canonical(entry) {
+    let (neg, digits): (bool, &[u8]) = match entry.first() {
+        Some(b'-') => (true, &entry[1..]),
+        _ => (false, entry),
+    };
+    if digits.is_empty() {
         return None;
     }
-    let negative = entry[0] == b'-';
-    let digits = if negative { &entry[1..] } else { entry };
-    let mut magnitude: u64 = 0;
-    for &d in digits {
-        magnitude = magnitude
-            .checked_mul(10)?
-            .checked_add(u64::from(d - b'0'))?;
+    // Redundant leading zero ("007", "00") and "-0" are both decided by the FIRST digit: only
+    // "0" itself may begin with '0', and never with a sign in front of it.
+    if digits[0] == b'0' && (digits.len() > 1 || neg) {
+        return None;
     }
-    if negative {
-        // `i64::MIN` has magnitude 2^63 — one MORE than `i64::MAX`.
-        if magnitude > (i64::MAX as u64) + 1 {
+    let mut acc: i64 = 0;
+    for &b in digits {
+        if !b.is_ascii_digit() {
             return None;
         }
-        Some((magnitude as i64).wrapping_neg())
-    } else {
-        if magnitude > i64::MAX as u64 {
-            return None;
-        }
-        Some(magnitude as i64)
+        acc = acc.checked_mul(10)?.checked_sub((b - b'0') as i64)?;
     }
+    if neg { Some(acc) } else { acc.checked_neg() }
 }
 
 /// True iff `entry` is the canonical base-10 text of an integer: optional '-',
