@@ -46533,3 +46533,72 @@ whole-server profile**: the effect is ~15 instructions and that instrument's spr
 which is what produced the earlier UNRESOLVED verdict. The same reasoning applies to any other
 encode or parse kernel in `fr-protocol`: measure it in `crates/fr-protocol/benches/`, where the
 signal is not buried under ~980 instr/op of server work.
+
+## 2026-08-18 BrownIbis: KEEP (COMPETITIVE) — GET certified against live Redis 7.2.4 at **0.3182x worst bound** (fr 1004.6 vs redis 3156.9 instr/op), after a day of dispatch levers took fr's own GET from ~1274 to ~985 (`frankenredis-iqicb`)
+
+Claim class: COMPETITIVE
+Campaign output: yes
+
+RATIO CONVENTION: every figure is **fr instructions per op DIVIDED BY Redis 7.2.4 instructions
+per op**, so BELOW 1.0 means fr retires FEWER instructions and is AHEAD. Lower is better.
+
+WINDOW: `scripts/certification_window.py --for ratio` returned **FIT** immediately before the
+run — loadavg 9.28/9.54/12.25, 0 builds, stationarity within 3 pct. It had returned **UNFIT**
+twenty minutes earlier at a QUIETER-looking 88.4 pct idle, because the 1-minute and 5-minute
+loadavgs were 23 pct apart while the host was still settling from saturation; the brief called
+that a clean window and the gate disagreed. Per-arm state is recorded below.
+
+MEASURED, `scripts/shape_instr_per_op.py` on shape `get_control`, N=20,000 and 2N=40,000,
+two independent draws:
+
+| draw | fr instr/op | redis instr/op | fr/redis |
+|---|---|---|---|
+| 1 | 1004.6 | 3156.9 | **0.3182x** |
+| 2 | 969.0 | 3157.1 | 0.3069x |
+
+Stated for the record in one line: **fr against vendored Redis 7.2.4 = 0.3182x** on the worst
+of the two draws, from a live Redis arm run in the SAME invocation as the fr arm by
+`scripts/shape_instr_per_op.py`.
+
+**Quoting the WORST bound: 0.3182x** — fr retires **3.14x fewer instructions** than the
+incumbent on this shape. Per-arm host state: loadavg 8.89-9.01 / 9.40-9.47 / 12.10-12.20, CPU
+idle 86-88 pct measured from `/proc/stat`, iowait 0 pct, mean 2123-2468 MHz across 64 cores
+(max 4296), /data 127G. `bench_elf_sha256=d33ae06faf708b1e173e36f56c047eac11040b2d01780bb2b818fb53625b9d2a`
+(fr, harness-computed and re-verified after each arm) and
+`bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7` (redis).
+
+**THE DENOMINATOR IS STABLE AND THE NUMERATOR IS NOT, which is worth stating because it is the
+opposite of the usual worry.** Redis read 3156.9 then 3157.1 — 0.006 pct apart — while fr read
+1004.6 then 969.0, 3.6 pct apart. So the ratio's spread is fr's own, not the incumbent's, and
+the worst bound above is therefore fr's worst draw against a denominator that did not move.
+
+WHAT CHANGED TODAY, and it reconciles: this shape measured **1274.1 instr/op** on fr at base
+`5b323fa6a` this morning. Four levers landed on its path since — the single-digit fast path in
+the floor decimal parser (`6dc4a27d6`, -6.0), GET hoisted above the floor classifier
+(`91f652459`, -204.0 of dispatch), the pub/sub drain guard (`dd335769b`, -42.0), and the
+small-payload const-length store (`214fcd1b1`, -14 to -19 per encode). Those sum to roughly
+-266 to -271, against an observed 1274.1 -> 969.0-1004.6, i.e. -270 to -305. **That is
+consistent, not proof**: peers shipped to other crates today and this row does not attempt to
+partition credit between us.
+
+DISPATCH SHARE is now **18.9-19.6 pct** (~190.0 instr/op), against the harness's own reference
+point that "a front-classified route (EXISTS on a missing key) is 21.5 pct". GET is no longer
+front-classified at all — it is served ahead of the classifier — and it now sits BELOW the
+classified reference.
+
+GATE AND ITS OWN NULL. Both draws come from the same certified window with the arms run back to
+back inside one invocation, so drift falls on both alike. A/A null on the whole-process
+instrument, same ELF, four draws of GET, resampled ratio-of-medians: median 1.00000, bootstrap
+95% median CI [0.99730, 1.00244]. The verdict gate for this row is that bootstrap median-CI, and
+CV is provenance only and was not used as a gate anywhere in this row; no CV was computed. Host
+state is likewise provenance, not a gate — but for a RATIO it is more than that, because Redis's
+denominator includes elapsed-time work (`serverCron`) and is not load-immune the way fr's
+numerator is, which is exactly why the stationarity gate had to pass first.
+
+RETRY PREDICATE: re-certify only if the fr numerator moves more than 5 pct from 969-1005
+instr/op, or if `certification_window.py --for ratio` returns UNFIT for the run that produced
+the number — either invalidates the standing figure. **Do not quote 0.3069x**: the replicated
+standing convention takes the worst of the two draws, which is 0.3182x. And do not read this
+shape as GET in general — it is `get_control`, a single-key hit with a short value, seeded
+without a TTL; a volatile key changes the expire-cycle work on every command and would need its
+own row.
