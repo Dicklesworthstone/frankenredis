@@ -157,6 +157,32 @@ pub fn write_u64_digits(buf: &mut [u8; 20], end: usize, mut val: u64) -> usize {
 /// Fast integer-to-bytes without format machinery. Writes decimal representation
 /// of `n` directly into `out`. Avoids the allocation overhead of write!().
 fn push_i64(out: &mut Vec<u8>, n: i64) {
+    // (frankenredis-getexgate) CONST-LENGTH ARMS FIRST. The general path below ends in
+    // `extend_from_slice(&buf[pos..])`, a RUNTIME-VARIABLE length, which rustc lowers to a
+    // `memcpy` CALL whose size-dispatch preamble dwarfs one to three digits.
+    //
+    // This is the bare-digit sibling of the `:<n>\r\n` encoder fixed in a8fab1da6 and the
+    // `<prefix><n>\r\n` header fixed in 6c76dfe52, and it is reached from
+    // `push_redis_double_ascii`, which routes every WHOLE-NUMBER score through it -- the common
+    // case for ZSET scores, measured at 2.000 calls/op on `zscan_zero`.
+    //
+    // Arm order is the shape measured across three variants in a8fab1da6: the hottest case
+    // FIRST and alone, then ONE further range test covering the rest, so a large value falls
+    // through exactly two comparisons rather than three. A single digit uses `push`, which
+    // needs no slice at all.
+    if (0..10).contains(&n) {
+        out.push(b'0' + n as u8);
+        return;
+    }
+    if (-9..100).contains(&n) {
+        if n < 0 {
+            out.extend_from_slice(&[b'-', b'0' + (-n) as u8]);
+        } else {
+            let pair = (n as usize) * 2;
+            out.extend_from_slice(&[DIGIT_PAIRS[pair], DIGIT_PAIRS[pair + 1]]);
+        }
+        return;
+    }
     let (neg, val) = if n < 0 {
         (true, (n as i128).unsigned_abs() as u64)
     } else {
