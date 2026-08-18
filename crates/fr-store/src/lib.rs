@@ -5316,6 +5316,17 @@ pub struct CommandHistogramTracker {
     hset: Option<CommandHistogram>,
     zadd: Option<CommandHistogram>,
     incr: Option<CommandHistogram>,
+    // (frankenredis-getexgate) Direct fields for the hot borrowed READ commands; the fields
+    // above are all WRITES, so every borrowed read still paid the `HashMap<String>` hash+probe.
+    // See `record_canonical_with_kind` for the measurement and for why this is a `match` rather
+    // than a longer `if` chain.
+    hget: Option<CommandHistogram>,
+    llen: Option<CommandHistogram>,
+    strlen: Option<CommandHistogram>,
+    scard: Option<CommandHistogram>,
+    sismember: Option<CommandHistogram>,
+    hexists: Option<CommandHistogram>,
+    lindex: Option<CommandHistogram>,
     histograms: HashMap<String, CommandHistogram, foldhash::quality::RandomState>,
 }
 
@@ -5389,53 +5400,52 @@ impl CommandHistogramTracker {
         // and other GENERICALLY-dispatched commands see <1% — record is a tiny fraction of the full
         // argv-parse + dispatch + reply-build — so a direct field for them is measurable-noise, not
         // worth the line. Extend only for a command whose record is a real fraction of its hot path.
-        if command == "get" {
-            self.get
-                .get_or_insert_with(CommandHistogram::default)
-                .record_with_kind(latency_us, kind);
-            return;
+        // (frankenredis-getexgate) A `match` ON THE NAME, NOT A LINEAR `if` CHAIN.
+        //
+        // The chain this replaces tested 8 commands with sequential `command == "..."`. Adding
+        // the borrowed READ commands to it MEASURED a real cost on everything that falls
+        // through: `substr`, which is not in the set, went 2014.4 -> 2030.1 instr/op, a +15.9
+        // tax paid by every generically-dispatched command to speed up seven others. That is a
+        // trade this codebase should not silently make.
+        //
+        // A `match` on `&str` does not have that shape: rustc switches on LENGTH first and only
+        // then compares bytes, so a fall-through command tests its length against a handful of
+        // buckets rather than walking N string comparisons. The set can therefore grow without
+        // taxing the commands outside it.
+        //
+        // Why these commands: the record step is a real fraction of their hot path. MEASURED on
+        // `llen` by two-point differencing, where the read path is now ~1315 instr/op:
+        //     HashMap<String, CommandHistogram>::get_mut::<str>   87.0 instr/op
+        //     record_canonical_with_kind (self)                   57.0 instr/op
+        // -- commandstats was ~11 pct of the whole command. The gate and cache work that landed
+        // on these routes is what made the record step that large a share; the original bar
+        // ("extend only for a command whose record is a real fraction of its hot path") is met
+        // now where it was not before.
+        macro_rules! record_direct {
+            ($field:ident) => {{
+                self.$field
+                    .get_or_insert_with(CommandHistogram::default)
+                    .record_with_kind(latency_us, kind);
+                return;
+            }};
         }
-        if command == "set" {
-            self.set
-                .get_or_insert_with(CommandHistogram::default)
-                .record_with_kind(latency_us, kind);
-            return;
-        }
-        if command == "lpush" {
-            self.lpush
-                .get_or_insert_with(CommandHistogram::default)
-                .record_with_kind(latency_us, kind);
-            return;
-        }
-        if command == "rpush" {
-            self.rpush
-                .get_or_insert_with(CommandHistogram::default)
-                .record_with_kind(latency_us, kind);
-            return;
-        }
-        if command == "sadd" {
-            self.sadd
-                .get_or_insert_with(CommandHistogram::default)
-                .record_with_kind(latency_us, kind);
-            return;
-        }
-        if command == "hset" {
-            self.hset
-                .get_or_insert_with(CommandHistogram::default)
-                .record_with_kind(latency_us, kind);
-            return;
-        }
-        if command == "zadd" {
-            self.zadd
-                .get_or_insert_with(CommandHistogram::default)
-                .record_with_kind(latency_us, kind);
-            return;
-        }
-        if command == "incr" {
-            self.incr
-                .get_or_insert_with(CommandHistogram::default)
-                .record_with_kind(latency_us, kind);
-            return;
+        match command {
+            "get" => record_direct!(get),
+            "set" => record_direct!(set),
+            "lpush" => record_direct!(lpush),
+            "rpush" => record_direct!(rpush),
+            "sadd" => record_direct!(sadd),
+            "hset" => record_direct!(hset),
+            "zadd" => record_direct!(zadd),
+            "incr" => record_direct!(incr),
+            "hget" => record_direct!(hget),
+            "llen" => record_direct!(llen),
+            "strlen" => record_direct!(strlen),
+            "scard" => record_direct!(scard),
+            "sismember" => record_direct!(sismember),
+            "hexists" => record_direct!(hexists),
+            "lindex" => record_direct!(lindex),
+            _ => {}
         }
         // (frankenredis-igx7w follow-up) This runs on EVERY non-get/set command,
         // so avoid the per-command `command.to_string()` heap allocation that the
@@ -35809,40 +35819,57 @@ fn encode_dump_quicklist2(
     // count. Admission still mirrors Redis quicklist's conservative
     // raw-value-len + 8 estimate rather than using the exact next entry length.
     // (frankenredis-list-dump-quicklist-reencode-q5ody, frankenredis-s36di)
-    encode_length(
-        buf,
-        quicklist_fallback_node_count(list, list_max_listpack_size),
-    );
-    // Pre-size the first node's listpack buffer to the per-node byte budget (SIZE_SAFETY_LIMIT,
-    // 8 KiB) so the common 1-2 node quicklist DUMP is built without realloc churn from empty.
-    // Under-reserve is harmless (Vec grows); capacity never affects content => byte-identical.
-    // (frankenredis perf: presize quicklist node buffer, code-first batch-test pending)
+    // (frankenredis-qj6jn) ONE PASS. This used to call `quicklist_fallback_node_count`, which
+    // walks the WHOLE list to learn the node count the RDB header needs, and then walk it again
+    // to emit. Counted on a 300-element list: `ListValueIter::next` ran 2.007 times per element
+    // and `parse_listpack_integer` 3.00, to produce ONE encode.
+    //
+    // The count is only needed BEFORE the nodes because `encode_length` is variable-width, so it
+    // cannot be back-patched. Emitting into a scratch buffer and prefixing the count afterwards
+    // costs one payload-sized copy and removes a whole traversal — and a traversal is ~45
+    // instructions of classification per element before anything else.
+    //
+    // Two classifications per element also went: `listpack_entry_encoded_len(item)` used to
+    // recompute what `encode_listpack_entry` is about to work out anyway, so the entry's encoded
+    // size is now taken from how far the scratch buffer grew. The accept test never needed it —
+    // it takes `item.len()`, the RAW length, which is free.
+    let mut nodes_buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut node_count = 0usize;
     let mut packed_entries = Vec::with_capacity(8192);
     let mut packed_len = 0usize;
     let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
-    let flush_packed =
-        |packed_entries: &mut Vec<u8>, packed_len: &mut usize, buf: &mut Vec<u8>| -> Option<()> {
-            if *packed_len == 0 {
-                return Some(());
-            }
-            let listpack = finish_listpack_entries(std::mem::take(packed_entries), *packed_len)?;
-            encode_length(buf, 2);
-            encode_rdb_string(buf, &listpack);
-            *packed_len = 0;
-            Some(())
-        };
+    let flush_packed = |packed_entries: &mut Vec<u8>,
+                        packed_len: &mut usize,
+                        out: &mut Vec<u8>,
+                        node_count: &mut usize|
+     -> Option<()> {
+        if *packed_len == 0 {
+            return Some(());
+        }
+        let listpack = finish_listpack_entries(std::mem::take(packed_entries), *packed_len)?;
+        encode_length(out, 2);
+        encode_rdb_string(out, &listpack);
+        *packed_len = 0;
+        *node_count += 1;
+        Some(())
+    };
     for item in list.iter() {
         if quicklist_plain_node_required(item, list_max_listpack_size) {
             if packed_len != 0 {
-                flush_packed(&mut packed_entries, &mut packed_len, buf)?;
+                flush_packed(
+                    &mut packed_entries,
+                    &mut packed_len,
+                    &mut nodes_buf,
+                    &mut node_count,
+                )?;
                 packed_bytes = LISTPACK_FRAME_OVERHEAD;
             }
-            encode_length(buf, 1);
-            encode_rdb_string(buf, item);
+            encode_length(&mut nodes_buf, 1);
+            encode_rdb_string(&mut nodes_buf, item);
+            node_count += 1;
             continue;
         }
 
-        let entry_bytes = listpack_entry_encoded_len(item);
         if packed_len != 0
             && !quicklist_packed_node_accepts(
                 packed_len,
@@ -35851,17 +35878,45 @@ fn encode_dump_quicklist2(
                 list_max_listpack_size,
             )
         {
-            flush_packed(&mut packed_entries, &mut packed_len, buf)?;
+            flush_packed(
+                &mut packed_entries,
+                &mut packed_len,
+                &mut nodes_buf,
+                &mut node_count,
+            )?;
             packed_bytes = LISTPACK_FRAME_OVERHEAD;
         }
+        let before = packed_entries.len();
         encode_listpack_entry(&mut packed_entries, item);
+        let entry_bytes = packed_entries.len() - before;
+        debug_assert_eq!(
+            entry_bytes,
+            listpack_entry_encoded_len(item),
+            "buffer growth must equal the entry's encoded length; the accounting depends on it"
+        );
         packed_len += 1;
         packed_bytes += entry_bytes;
     }
-    flush_packed(&mut packed_entries, &mut packed_len, buf)?;
+    flush_packed(
+        &mut packed_entries,
+        &mut packed_len,
+        &mut nodes_buf,
+        &mut node_count,
+    )?;
+    encode_length(buf, node_count);
+    buf.extend_from_slice(&nodes_buf);
     Some(())
 }
 
+/// (frankenredis-qj6jn) FROZEN REFERENCE, not production. The fused single-pass encoder counts
+/// nodes as it emits them, which deleted this function's only caller. It is retained under
+/// `cfg(test)` as the INDEPENDENT oracle for that fusion: it is the two-pass code's own counting
+/// logic, so a fused count that matches it matches what the DUMP used to emit.
+///
+/// Do NOT re-point production at it, and do NOT "simplify" it to call the fused path — that
+/// would make `fused_node_count_matches_the_two_pass_reference_qj6jn` tautological, which
+/// `feedback_test_oracle_derived_from_source_is_tautological` is on record about.
+#[cfg(test)]
 fn quicklist_fallback_node_count(list: &ListValue, list_max_listpack_size: i64) -> usize {
     let mut nodes = 0usize;
     let mut packed_len = 0usize;
@@ -74751,6 +74806,68 @@ mod tests {
             store2.lrange(b"l", 0, -1, 100).unwrap(),
             vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
         );
+    }
+
+    /// (frankenredis-qj6jn) The fused single-pass DUMP must emit the SAME node count the
+    /// two-pass encoder did.
+    ///
+    /// `encode_dump_quicklist2` used to call `quicklist_fallback_node_count` — a full extra walk
+    /// of the list — because the RDB header needs the count before the nodes and `encode_length`
+    /// is variable-width, so it cannot be back-patched. The fused form emits nodes into a scratch
+    /// buffer, counts as it goes, and prefixes the count. Measured on a 300-element list, that
+    /// took `ListValueIter::next` from 2.007 to 1.00 calls per element and
+    /// `parse_listpack_integer` from 3.00 to 1.00.
+    ///
+    /// The old counting logic is retained as the reference and compared against the count
+    /// actually written into the payload, across shapes that straddle the node boundary and
+    /// include an over-long element (which takes the PLAIN-node branch, counted separately).
+    #[test]
+    fn fused_node_count_matches_the_two_pass_reference_qj6jn() {
+        fn dumped_node_count(store: &mut Store, key: &[u8]) -> usize {
+            let payload = store.dump_key(key, 100).unwrap();
+            assert_eq!(payload[0], RDB_TYPE_LIST_QUICKLIST_2);
+            decode_length(&payload, 1).unwrap().0
+        }
+
+        let short = |i: usize| format!("vvvvvvvvvv{i:05}").into_bytes();
+        let over_long = vec![b'z'; 200];
+
+        for fill in [-2i64, -1, 128, 32] {
+            for n in [1usize, 127, 128, 129, 300, 500] {
+                for long_at in [None, Some(0usize), Some(64)] {
+                    let mut items: Vec<Vec<u8>> = (0..n).map(short).collect();
+                    if let Some(at) = long_at {
+                        if at < items.len() {
+                            items[at] = over_long.clone();
+                        }
+                    }
+
+                    // The reference count, from the retained two-pass logic.
+                    let mut reference = packed_set::ListValue::default();
+                    reference.adopt_fill(fill);
+                    for it in &items {
+                        reference.push_back(it.clone());
+                    }
+                    let want = quicklist_fallback_node_count(&reference, fill);
+
+                    // What the fused encoder actually wrote.
+                    let mut store = Store::new();
+                    store.list_max_listpack_size = fill;
+                    store.rpush(b"l", &items, 100).unwrap();
+                    let payload = store.dump_key(b"l", 100).unwrap();
+                    if payload[0] != RDB_TYPE_LIST_QUICKLIST_2 {
+                        continue; // small lists emit a different container; not this test's job
+                    }
+                    let got = dumped_node_count(&mut store, b"l");
+
+                    assert_eq!(
+                        got, want,
+                        "fill {fill}, n {n}, long_at {long_at:?}: fused count diverged from the \
+                         two-pass reference"
+                    );
+                }
+            }
+        }
     }
 
     /// (frankenredis-qj6jn) A MULTI-VALUE LPUSH must chunk against the CURRENT fill, not the one
