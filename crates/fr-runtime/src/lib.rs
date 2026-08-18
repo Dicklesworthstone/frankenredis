@@ -38283,7 +38283,21 @@ impl Runtime {
                 | Some(RuntimeSpecialCommand::Publish)
                 | Some(RuntimeSpecialCommand::Spublish)
                 | Some(RuntimeSpecialCommand::Pubsub)
-                | Some(RuntimeSpecialCommand::Wait)
+                // (frankenredis-stalelist-hto86) WAIT is NOT stale-flagged upstream, so 7.2.4
+                // answers it with MASTERDOWN here. It was the one entry in this list that
+                // upstream refuses, and it is the entry that makes least sense to serve: WAIT
+                // asks how many REPLICAS acknowledged a write, and this branch runs only on a
+                // replica whose own master link is down -- so the number it returns describes a
+                // replication topology the caller cannot be asking about.
+                //
+                // The rest of this list is wrong in the other direction and is NOT fixed here:
+                // upstream gates on the command's own CMD_STALE flag, and 19 commands it serves
+                // -- MULTI/EXEC/DISCARD/WATCH/UNWATCH, the EVAL/FCALL family, ECHO, TIME, QUIT,
+                // RESET, MONITOR, DEBUG, LASTSAVE, FAILOVER -- are refused by this allowlist.
+                // Fixing that means reading the flag instead of restating it, which needs a
+                // `command_is_stale` accessor beside `command_is_denyoom` in fr-command; that
+                // file was leased when this landed. Removing WAIT is the part of the bead that
+                // does not depend on the accessor and stays correct once it exists.
                 | Some(RuntimeSpecialCommand::Select)
         ) || eq_ascii_token(command, b"INFO")
             || eq_ascii_token(command, b"COMMAND")
