@@ -63925,3 +63925,71 @@ down to roughly 1.06x between the two shapes.
      of six draws here were void and both were only visible from the incumbent's own numbers.
   3. Until then, `0bb42f113`'s 1.5998x remains the certified digit-leading figure of record, with
      this row attached as the reason to expect it to move.
+
+## 2026-08-18 CrimsonHawk: REVIEW — under a no-cargo throttle the only check available is reading, so I read: oo3aw's unbuilt OOM gate is FAITHFUL on all four subtleties, and both of my own security patches are OBSOLETE because peers replaced them with stronger versions
+
+EVIDENCE CLASS: source reading only. No measurement and no build — the disk throttle forbids cargo
+entirely, and `certification_window.py --for ratio` refuses independently (15min loadavg 32.93,
+above its 30 limit, so a low 1min reading is a dip rather than calm). CV was NOT used and no timing
+verdict is claimed.
+
+Claim class: not applicable. Campaign output: no.
+
+### MY TWO SECURITY PATCHES ARE OBSOLETE, AND THE PEER VERSIONS ARE BETTER
+
+Both fixes I wrote while `fr-runtime` and `fr-command` were leased have landed in other agents'
+commits, and in both cases the landed version is stronger than mine:
+
+  `2ubu0` pre-auth length caps    -> `cea43ce6c`. I lowered the EXISTING `ParserConfig` limits and
+    recorded the compromise: upstream's distinct wording ("unauthenticated multibulk length")
+    needs a new field, and that struct had 184 literal constructions of which one used
+    `..default()`. The peer did the harder thing -- added `pre_auth: Option<AuthedLimits>`, the
+    `Unauthenticated*Length` variants, and CLOSED the last exhaustive literal. No double-capping:
+    `authed.min(UNAUTH_MAX_BULK_LEN)` is one cap.
+  `yx1wa` SORT BY/GET ACL bypass  -> `8c85866f8`.
+
+My recovery patches are renamed `OBSOLETE_*` so a later turn cannot re-apply them onto code that
+has moved past them. Recorded because a stale patch that still applies cleanly is worse than one
+that conflicts.
+
+### `oo3aw`'s UNBUILT OOM GATE, READ AGAINST UPSTREAM
+
+That bead is actively owned -- its last commit landed 62 seconds before I looked -- so this is a
+review, not a contribution, and I did not touch the file. The author's own note says a previous
+commit "referenced an undefined `allow_oom` at the third script entrypoint -- my own break, caught
+by reading", which is exactly the failure class no one can compile-check right now. So I checked the
+same class:
+
+    all three entrypoints save / set / restore `store.script_allow_oom` symmetrically
+      FCALL (lib.rs:13981-14040) from the registered function's flags
+      the two shebang paths (26646-26657, 26737-26755)
+    `script_shebang_is_oom_exempt` = allow-oom OR no-writes, which is upstream's subtlety 3
+    the gate itself (lua_eval.rs:11707) conjoins, in upstream's order: not allow-oom, not yet
+      written, maxmemory set, `over_maxmemory_live`, and `command_is_denyoom`
+    `script_wrote` is SET, not merely read -- `dirty_after > dirty_before` at lua_eval.rs:11755
+
+All four of the bead's named subtleties are honoured, including the one most likely to be dropped:
+the write-dirty flag is driven by an actual dirty-counter delta rather than declared and forgotten.
+I found no defect.
+
+### MY OWN UNBUILT CHANGE, SAME SCRUTINY
+
+`f595e6b9d` split `list_lp_int` into two schedules over one body. Read back:
+
+    list_lp_int_impl::<false>  <- list_lp_int          (fused; DUMP/encode path, 4630)
+    list_lp_int_impl::<true>   <- list_lp_int_scan_first (scan-first; restore guard, 4170)
+    the twin test still calls `super::list_lp_int`, so it pins the fused schedule's acceptance
+
+No orphaned symbol, no caller left on the wrong schedule, no reference outside the file. A first
+grep suggested `list_lp_int_impl` had ZERO uses; that was the grep, not the code -- both call sites
+use turbofish, which `name(` does not match. Worth stating because that artifact would read as
+exactly the defect being looked for.
+
+### WHAT IS OWED
+
+  1. A build. `f595e6b9d` and the oo3aw chain are both unbuilt.
+  2. A FIT-window run of all THREE shapes -- letter, `%015d`, `20260818T%06d` -- against the
+     incumbent in ONE invocation. Standing figures: control 0.9115x certified; `%015d` 0.9756x
+     sizing (`86276eec0`); `20260818T` **1.4981x sizing, fr BEHIND** (`f595e6b9d`), which is the
+     regression my own levers introduced and which is not yet certified at the standard the win
+     was.
