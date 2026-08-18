@@ -16948,6 +16948,7 @@ impl Runtime {
         start: &[u8],
         end: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"GETRANGE".len()
@@ -16957,7 +16958,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `GETRANGE key start end`:
@@ -16975,8 +16977,9 @@ impl Runtime {
         start_arg: &[u8],
         end_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_getrange_borrowed(key, start_arg, end_arg, now_ms) {
+        if !self.can_execute_plain_getrange_borrowed(key, start_arg, end_arg, now_ms, default_read_allowed) {
             return None;
         }
         // Only fast-path well-formed integer ranges; defer the
@@ -17048,8 +17051,9 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_getrange_borrowed(key, start_arg, end_arg, now_ms) {
+        if !self.can_execute_plain_getrange_borrowed(key, start_arg, end_arg, now_ms, default_read_allowed) {
             return None;
         }
         // Only fast-path well-formed integer ranges; defer the
@@ -17186,8 +17190,9 @@ impl Runtime {
         start_arg: &[u8],
         end_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_getrange_borrowed(key, start_arg, end_arg, now_ms) {
+        if !self.can_execute_plain_getrange_borrowed(key, start_arg, end_arg, now_ms, default_read_allowed) {
             return None;
         }
         let start = parse_i64_arg(start_arg).ok()?;
@@ -17761,6 +17766,7 @@ impl Runtime {
         key: &[u8],
         members: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if members.is_empty()
             || members.len().saturating_add(2) > MAX_COMMAND_ARITY
@@ -17773,7 +17779,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed fast path for `ZMSCORE key member [member ...]`: mirrors the
@@ -17787,8 +17794,9 @@ impl Runtime {
         key: &[u8],
         members: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zmscore_borrowed(key, members, now_ms) {
+        if !self.can_execute_plain_zmscore_borrowed(key, members, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -17870,8 +17878,9 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zmscore_borrowed(key, members, now_ms) {
+        if !self.can_execute_plain_zmscore_borrowed(key, members, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -18012,6 +18021,7 @@ impl Runtime {
         key: &[u8],
         members: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if members.is_empty()
             || members.len().saturating_add(2) > MAX_COMMAND_ARITY
@@ -18024,7 +18034,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed fast path for `SMISMEMBER key member [member ...]`: members are
@@ -18036,8 +18047,9 @@ impl Runtime {
         key: &[u8],
         members: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_smismember_borrowed(key, members, now_ms) {
+        if !self.can_execute_plain_smismember_borrowed(key, members, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -18110,8 +18122,9 @@ impl Runtime {
         members: &[&[u8]],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_smismember_borrowed(key, members, now_ms) {
+        if !self.can_execute_plain_smismember_borrowed(key, members, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -18246,6 +18259,7 @@ impl Runtime {
         key: &[u8],
         fields: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         // argv is [HMGET, key, field, ...]; the gate bounds the whole multibulk.
         if fields.is_empty()
@@ -18259,7 +18273,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `HMGET key field [field ...]`:
@@ -18273,8 +18288,9 @@ impl Runtime {
         key: &[u8],
         fields: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_hmget_borrowed(key, fields, now_ms) {
+        if !self.can_execute_plain_hmget_borrowed(key, fields, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -18348,8 +18364,9 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_hmget_borrowed(key, fields, now_ms) {
+        if !self.can_execute_plain_hmget_borrowed(key, fields, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -18630,14 +18647,15 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_getbit_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_getbit_borrowed(&mut self, key: &[u8], now_ms: u64, default_read_allowed: Option<bool>) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"GETBIT".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for `GETBIT key offset`. Mirrors the
@@ -18651,8 +18669,9 @@ impl Runtime {
         key: &[u8],
         offset_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_getbit_borrowed(key, now_ms) {
+        if !self.can_execute_plain_getbit_borrowed(key, now_ms, default_read_allowed) {
             return None;
         }
         // Mirror bitops.c::getBitOffsetFromArgument: non-negative i64 with
@@ -19167,6 +19186,7 @@ impl Runtime {
         cmd: PlainObjectStatCmd,
         key: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"OBJECT".len()
@@ -19175,7 +19195,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for `OBJECT IDLETIME key` / `OBJECT FREQ
@@ -19191,8 +19212,9 @@ impl Runtime {
         cmd: PlainObjectStatCmd,
         key: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_object_stat_borrowed(cmd, key, now_ms) {
+        if !self.can_execute_plain_object_stat_borrowed(cmd, key, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -19779,13 +19801,14 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_dbsize_borrowed(&mut self, now_ms: u64) -> bool {
+    fn can_execute_plain_dbsize_borrowed(&mut self, now_ms: u64, default_read_allowed: Option<bool>) -> bool {
         if self.policy.gate.max_array_len < 1 || self.policy.gate.max_bulk_len < b"DBSIZE".len() {
             return false;
         }
         // The read gate requires selected_db == 0, so the fast path only serves
         // db-0 DBSIZE; a non-zero SELECT defers to generic (correct per-db count).
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for keyless `DBSIZE`. The read gate pins
@@ -19793,8 +19816,8 @@ impl Runtime {
     /// generic db-scoped path in that gated state. Runs the same fast active-
     /// expire cycle as the other read fast paths so the count reflects the same
     /// reaped state. Never errors. (cold-cmd audit)
-    pub fn execute_plain_dbsize_borrowed(&mut self, now_ms: u64) -> Option<RespFrame> {
-        if !self.can_execute_plain_dbsize_borrowed(now_ms) {
+    pub fn execute_plain_dbsize_borrowed(&mut self, now_ms: u64, default_read_allowed: Option<bool>) -> Option<RespFrame> {
+        if !self.can_execute_plain_dbsize_borrowed(now_ms, default_read_allowed) {
             return None;
         }
 
@@ -19984,10 +20007,15 @@ impl Runtime {
         &mut self,
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 1
             || self.policy.gate.max_bulk_len < b"UNWATCH".len()
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -30119,6 +30147,7 @@ impl Runtime {
         key: &[u8],
         field: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"HSTRLEN".len()
@@ -30127,7 +30156,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed fast path for `HSTRLEN key field`: calls the SAME store.hstrlen
@@ -30138,8 +30168,9 @@ impl Runtime {
         key: &[u8],
         field: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_hstrlen_borrowed(key, field, now_ms) {
+        if !self.can_execute_plain_hstrlen_borrowed(key, field, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -51117,7 +51148,7 @@ mod tests {
         let mut ts = 2;
         for (key, off) in cases {
             let f = direct
-                .execute_plain_getbit_borrowed(key, off, ts)
+                .execute_plain_getbit_borrowed(key, off, ts, None)
                 .expect("getbit fast path should engage");
             let g = generic.execute_frame(command(&[b"GETBIT", key, off]), ts);
             assert_eq!(f, g, "key={key:?} off={off:?}");
@@ -51126,17 +51157,17 @@ mod tests {
         // malformed / out-of-range offsets -> defer (None)
         assert!(
             direct
-                .execute_plain_getbit_borrowed(b"b", b"notnum", ts)
+                .execute_plain_getbit_borrowed(b"b", b"notnum", ts, None)
                 .is_none()
         );
         assert!(
             direct
-                .execute_plain_getbit_borrowed(b"b", b"-1", ts)
+                .execute_plain_getbit_borrowed(b"b", b"-1", ts, None)
                 .is_none()
         );
         assert!(
             direct
-                .execute_plain_getbit_borrowed(b"b", b"4294967296", ts)
+                .execute_plain_getbit_borrowed(b"b", b"4294967296", ts, None)
                 .is_none()
         );
         assert_eq!(
@@ -52026,7 +52057,7 @@ mod tests {
         for (i, (cmd, sub, key)) in cases.iter().enumerate() {
             let ts = 2000 + i as u64;
             let f = direct
-                .execute_plain_object_stat_borrowed(*cmd, key, ts)
+                .execute_plain_object_stat_borrowed(*cmd, key, ts, None)
                 .expect("object stat fast path should engage");
             let g = generic.execute_frame(command(&[b"OBJECT", sub, key]), ts);
             assert_eq!(f, g, "OBJECT {sub:?} {key:?}");
@@ -52130,7 +52161,7 @@ mod tests {
         let mut generic = Runtime::default_strict();
         // empty
         assert_eq!(
-            direct.execute_plain_dbsize_borrowed(2),
+            direct.execute_plain_dbsize_borrowed(2, None),
             Some(generic.execute_frame(command(&[b"DBSIZE"]), 2))
         );
         // populated
@@ -52139,7 +52170,7 @@ mod tests {
             rt.execute_frame(command(&[b"SET", b"b", b"2"]), 3);
             rt.execute_frame(command(&[b"RPUSH", b"l", b"x"]), 3);
         }
-        let f = direct.execute_plain_dbsize_borrowed(4).expect("fast path");
+        let f = direct.execute_plain_dbsize_borrowed(4, None).expect("fast path");
         let g = generic.execute_frame(command(&[b"DBSIZE"]), 4);
         assert_eq!(f, g);
         assert_eq!(f, RespFrame::Integer(3));
@@ -52147,7 +52178,7 @@ mod tests {
         // SELECT 1 -> defer (gate pins db 0)
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SELECT", b"1"]), 5);
-        assert!(rt.execute_plain_dbsize_borrowed(6).is_none());
+        assert!(rt.execute_plain_dbsize_borrowed(6, None).is_none());
     }
 
     #[test]
@@ -55744,7 +55775,7 @@ mod tests {
             (b"100", b"200"),
         ] {
             let f = fast
-                .execute_plain_getrange_borrowed(b"s", start, end, 2)
+                .execute_plain_getrange_borrowed(b"s", start, end, 2, None)
                 .expect("well-formed GETRANGE should take fast path");
             let g = generic.execute_frame(command(&[b"GETRANGE", b"s", start, end]), 2);
             assert_eq!(f, g, "start={start:?} end={end:?}");
@@ -55752,7 +55783,7 @@ mod tests {
 
         // wrong-type key -> WRONGTYPE (served on the fast path)
         let wt = fast
-            .execute_plain_getrange_borrowed(b"l", b"0", b"-1", 3)
+            .execute_plain_getrange_borrowed(b"l", b"0", b"-1", 3, None)
             .expect("wrong-type GETRANGE should take fast path");
         assert_eq!(
             wt,
@@ -55762,7 +55793,7 @@ mod tests {
 
         // non-integer arg -> fast path defers (None), generic emits the error
         assert!(
-            fast.execute_plain_getrange_borrowed(b"s", b"x", b"4", 4)
+            fast.execute_plain_getrange_borrowed(b"s", b"x", b"4", 4, None)
                 .is_none()
         );
 
@@ -55789,12 +55820,12 @@ mod tests {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"s", b"hi"]), 1);
         assert!(
-            rt.execute_plain_getrange_borrowed(b"s", b"0", b"-1", 2)
+            rt.execute_plain_getrange_borrowed(b"s", b"0", b"-1", 2, None)
                 .is_some()
         );
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
         assert!(
-            rt.execute_plain_getrange_borrowed(b"s", b"0", b"-1", 4)
+            rt.execute_plain_getrange_borrowed(b"s", b"0", b"-1", 4, None)
                 .is_none()
         );
     }
@@ -55827,7 +55858,7 @@ mod tests {
             for resp3 in [false, true] {
                 let mut out = Vec::new();
                 assert_eq!(
-                    fast.execute_plain_getrange_borrowed_into(b"s", start, end, 2, resp3, &mut out),
+                    fast.execute_plain_getrange_borrowed_into(b"s", start, end, 2, resp3, &mut out, None),
                     Some(()),
                     "well-formed GETRANGE should take _into fast path (start={start:?} end={end:?})"
                 );
@@ -55844,7 +55875,7 @@ mod tests {
         // missing key -> empty bulk string (NOT nil)
         let mut miss = Vec::new();
         assert_eq!(
-            fast.execute_plain_getrange_borrowed_into(b"nope", b"0", b"-1", 2, false, &mut miss),
+            fast.execute_plain_getrange_borrowed_into(b"nope", b"0", b"-1", 2, false, &mut miss, None),
             Some(())
         );
         assert_eq!(
@@ -55858,7 +55889,7 @@ mod tests {
         // wrong-type key -> WRONGTYPE error written into out
         let mut wt = Vec::new();
         assert_eq!(
-            fast.execute_plain_getrange_borrowed_into(b"l", b"0", b"-1", 3, false, &mut wt),
+            fast.execute_plain_getrange_borrowed_into(b"l", b"0", b"-1", 3, false, &mut wt, None),
             Some(())
         );
         assert_eq!(
@@ -55871,7 +55902,7 @@ mod tests {
         // non-integer arg -> defers to generic (None)
         let mut bad = Vec::new();
         assert!(
-            fast.execute_plain_getrange_borrowed_into(b"s", b"x", b"4", 4, false, &mut bad)
+            fast.execute_plain_getrange_borrowed_into(b"s", b"x", b"4", 4, false, &mut bad, None)
                 .is_none()
         );
         assert!(bad.is_empty());
@@ -55903,7 +55934,7 @@ mod tests {
         }
 
         let f = fast
-            .execute_plain_hmget_borrowed(b"h", &[b"f1", b"nope", b"f2"], 2)
+            .execute_plain_hmget_borrowed(b"h", &[b"f1", b"nope", b"f2"], 2, None)
             .expect("default HMGET should take borrowed fast path");
         let g = generic.execute_frame(command(&[b"HMGET", b"h", b"f1", b"nope", b"f2"]), 2);
         assert_eq!(f, g);
@@ -55917,7 +55948,7 @@ mod tests {
         );
 
         let miss_key = fast
-            .execute_plain_hmget_borrowed(b"nokey", &[b"f1", b"f2"], 3)
+            .execute_plain_hmget_borrowed(b"nokey", &[b"f1", b"f2"], 3, None)
             .expect("missing-key HMGET should take borrowed fast path");
         assert_eq!(
             miss_key,
@@ -55932,7 +55963,7 @@ mod tests {
         );
 
         let wt = fast
-            .execute_plain_hmget_borrowed(b"s", &[b"f1"], 4)
+            .execute_plain_hmget_borrowed(b"s", &[b"f1"], 4, None)
             .expect("wrong-type HMGET should take borrowed fast path");
         assert_eq!(
             wt,
@@ -55982,16 +56013,16 @@ mod tests {
     fn plain_hmget_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"HSET", b"h", b"f", b"v"]), 1);
-        assert!(rt.execute_plain_hmget_borrowed(b"h", &[b"f"], 2).is_some());
+        assert!(rt.execute_plain_hmget_borrowed(b"h", &[b"f"], 2, None).is_some());
         rt.execute_frame(command(&[b"MULTI"]), 3);
-        assert!(rt.execute_plain_hmget_borrowed(b"h", &[b"f"], 4).is_none());
+        assert!(rt.execute_plain_hmget_borrowed(b"h", &[b"f"], 4, None).is_none());
     }
 
     #[test]
     fn plain_hmget_borrowed_fast_path_defers_over_max_command_arity() {
         let mut rt = Runtime::default_strict();
         let fields = vec![b"f".as_slice(); super::MAX_COMMAND_ARITY - 1];
-        assert!(rt.execute_plain_hmget_borrowed(b"h", &fields, 1).is_none());
+        assert!(rt.execute_plain_hmget_borrowed(b"h", &fields, 1, None).is_none());
     }
 
     #[test]
@@ -56176,7 +56207,7 @@ mod tests {
             ];
             for (ts, (key, members)) in (2..).zip(cases) {
                 let f = direct
-                    .execute_plain_zmscore_borrowed(key, members, ts)
+                    .execute_plain_zmscore_borrowed(key, members, ts, None)
                     .expect("zmscore fast path");
                 let g_argv: Vec<&[u8]> = std::iter::once(b"ZMSCORE".as_slice())
                     .chain(std::iter::once(key))
@@ -56218,7 +56249,7 @@ mod tests {
             for (ts, (key, members)) in (2..).zip(cases) {
                 let mut out = Vec::new();
                 direct
-                    .execute_plain_zmscore_borrowed_into(key, members, ts, resp3, &mut out)
+                    .execute_plain_zmscore_borrowed_into(key, members, ts, resp3, &mut out, None)
                     .expect("zmscore direct encoder should take borrowed fast path");
                 let g_argv: Vec<&[u8]> = std::iter::once(b"ZMSCORE".as_slice())
                     .chain(std::iter::once(key))
@@ -56317,7 +56348,7 @@ mod tests {
         ];
         for (ts, (key, members)) in (2..).zip(cases) {
             let f = direct
-                .execute_plain_smismember_borrowed(key, members, ts)
+                .execute_plain_smismember_borrowed(key, members, ts, None)
                 .expect("smismember fast path");
             let g_argv: Vec<&[u8]> = std::iter::once(b"SMISMEMBER".as_slice())
                 .chain(std::iter::once(key))
@@ -56448,7 +56479,7 @@ mod tests {
             (b"s", b"f"),
         ] {
             let f = direct
-                .execute_plain_hstrlen_borrowed(key, field, ts)
+                .execute_plain_hstrlen_borrowed(key, field, ts, None)
                 .expect("hstrlen fast path");
             let g = generic.execute_frame(command(&[b"HSTRLEN", key, field]), ts);
             assert_eq!(f, g, "HSTRLEN key={key:?} field={field:?}");
@@ -67034,7 +67065,7 @@ mod tests {
         rt.execute_frame(command(&[b"SET", b"k", b"changed"]), 2);
         out.clear();
         assert_eq!(
-            rt.execute_plain_unwatch_borrowed_into(3, &mut out),
+            rt.execute_plain_unwatch_borrowed_into(3, &mut out, None),
             Some(())
         );
         assert_eq!(out, b"+OK\r\n");
@@ -67054,7 +67085,7 @@ mod tests {
             None
         );
         assert_eq!(
-            in_multi.execute_plain_unwatch_borrowed_into(1, &mut out),
+            in_multi.execute_plain_unwatch_borrowed_into(1, &mut out, None),
             None
         );
     }
