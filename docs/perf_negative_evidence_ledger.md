@@ -50064,3 +50064,59 @@ reset point or a new caller reintroduced it. Both are measurable with
 references are hlen and zcard at 0.000 and `exists_1` at 1.000. **`exists_1` at 1.000 is also the
 next lever on this vein** — it is one of the twelve read routes still paying the gate, and the
 list is in `d7c67e802`.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: PATTERN — on EVERY shape where fr is behind, fr retires 25-46 pct FEWER instructions and redis executes them 1.32-1.79x faster per cycle. The campaign's remaining deficit is IPC, not work
+
+NO NEW RATIO IS CERTIFIED. This joins three separately-measured shapes and states what they have
+in common, because the common part decides what kind of lever can work on any of them.
+
+fr ELF bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399,
+incumbent e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7.
+
+  shape          raw throughput   instructions   implied IPC gap   normalised worst
+  pttl               1.0468x         0.6362x          1.502x            0.8891
+  expiretime         1.0444x         0.5356x          1.788x         (one draw)
+  geosearch_2        1.0089x         0.7532x          1.316x            0.8578
+
+Instruction ratios are callgrind two-point (load-immune); raw throughput is from admissible
+`balanced_square_ab` draws; the IPC column is (1/raw throughput) / instruction ratio, both
+quantities RAW so nothing normalised is mixed with anything raw. `pttl` and `expiretime` were
+measured this turn at loadavg 11.93 with CPU MHz 2000-2309 per arm.
+
+THE INFERENCE METHOD IS VALIDATED, NOT ASSUMED. `e96a9b03b` derived an IPC gap for `geosearch_2`
+the same way and flagged it as a cross-harness combination worth distrusting; `2ff051637` then
+measured it directly with `perf stat` and got 1.2984-1.3229 against the inferred 1.3159-1.3374.
+The method reproduces. For `pttl` and `expiretime` the figure remains INFERRED and is labelled so.
+
+### What it rules out, which is the actionable content
+
+fr already retires between a quarter and nearly half fewer instructions than the incumbent on
+every shape where it loses. AN INSTRUCTION-REDUCTION LEVER ON ANY OF THESE ATTACKS A DIMENSION fr
+WINS BY 25-46 PCT. Removing 10 pct of fr's instructions on `pttl` moves 0.6362 to 0.5726 and, at
+an unchanged IPC gap, moves throughput by about 5 pct against a deficit of 11.1 pct -- and that
+is the optimistic reading, since it assumes the removed instructions were not the ones executing
+efficiently.
+
+This also explains why an INSTRUCTION screen found nothing today. Four complex shapes came back
+0.1433x to 0.8758x, all fr ahead, and I reported that as "no deficit found". The screen was
+working; it simply cannot see a deficit that lives entirely in the instruction RATE. Any future
+sweep for deficits must run on the throughput harness.
+
+### What it does not say
+
+It does not say fr's code is uniformly slower per instruction. Three shapes is three shapes, all
+of them small-to-medium commands, and `geosearch_2`'s attribution came out DIFFUSE across frames,
+data addresses and seven structural hypotheses (`896df17a6`). The shared IPC gap is a
+description of where the cost is, not yet a mechanism, and nothing here identifies a common cause.
+
+RETRY PREDICATE: do NOT open a work-reduction lever on `pttl`, `expiretime` or `geosearch_2`; the
+instruction ratios above are the reason and each is a two-point callgrind figure. The next
+measurement is a `perf stat` cycles/instructions/cache-misses pair on `pttl` specifically, using
+the invocation in `2ff051637` -- it is the shape with the tightest replication (points agree to
+0.74 pct) and a SIMPLE code path, so if the IPC gap has a nameable cause anywhere it is most
+likely findable there rather than on `geosearch_2`, whose attribution is closed. Reopen the
+work-reduction family only IF some deficit shape is measured with an instruction ratio ABOVE 1.0,
+which none of the three is close to. Note also that `publish` and `getbit` exist in
+`balanced_square_ab`'s `cascade` group but NOT in `shape_instr_per_op`'s table, so neither can be
+read on both metrics until someone registers them.
