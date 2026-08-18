@@ -49735,6 +49735,41 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 );
             }
         }
+
+        // SMISMEMBER is claimed across an ARITY RANGE, `(4..=5) -> SmismemberFew`, which is the
+        // same shape of promise one step further out: a range claims TWO pairs, and each needs its
+        // own parser. Checked and HONOURED today -- the arm chains `smismember2` then
+        // `smismember3` -- so these rows are here to keep it that way rather than to report a
+        // defect.
+        //
+        // This is the row set that would have caught `882ace426` had I written it against
+        // SMISMEMBER instead of LPOS: narrowing a range claim to its first parser is the same
+        // mistake, and a passing `dispatch_route_differ.py` would not have noticed either.
+        let smismember_rows: [(&[u8], usize); 2] = [
+            (b"*4\r\n$10\r\nSMISMEMBER\r\n$1\r\ns\r\n$1\r\na\r\n$1\r\nb\r\n", 2),
+            (
+                b"*5\r\n$10\r\nSMISMEMBER\r\n$1\r\ns\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n",
+                3,
+            ),
+        ];
+
+        for (packet, members) in smismember_rows {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(packet, &cfg),
+                Some(super::BorrowedDispatchFloorClass::SmismemberFew),
+                "SMISMEMBER with {members} members must classify"
+            );
+            let honoured = match members {
+                2 => super::parse_borrowed_plain_smismember2_packet(packet, &cfg).is_some(),
+                3 => super::parse_borrowed_plain_smismember3_packet(packet, &cfg).is_some(),
+                other => panic!("no oracle row for {other} members"),
+            };
+            assert!(
+                honoured,
+                "SmismemberFew claims {members} members, so the arm's parser for that count must \
+                 accept the packet -- a range claim is one promise per arity, not one for the range"
+            );
+        }
     }
 
     #[test]
