@@ -38739,7 +38739,21 @@ impl Runtime {
                 // The verdict is computed FRESH rather than read from `over_maxmemory_live`:
                 // that field is published by the dispatch gate, which a queued command never
                 // reaches, so it would be one command stale exactly here.
+                // (frankenredis-w1djx) The REPLICA carve-out has to be repeated here, and it must
+                // come BEFORE the refresh in this `&&` chain so short-circuiting stops the
+                // eviction loop from ever running. `enforce_maxmemory_before_dispatch` bails for a
+                // replica that ignores maxmemory, but `refresh_over_maxmemory` is the raw eviction
+                // pass and carries no such guard, so calling it here would (a) evict on a replica
+                // -- dropping keys the primary still holds and never told it to drop, which is the
+                // silent divergence w1djx exists to prevent -- and (b) refuse queued commands that
+                // upstream accepts, since its `performEvictions` answers EVICT_OK on exactly this
+                // configuration.
+                let replica_ignores_maxmemory = matches!(
+                    self.server.replication_runtime_state.role,
+                    ReplicationRoleState::Replica { .. }
+                ) && self.server.replica_ignore_maxmemory_enabled();
                 if self.server.maxmemory_bytes != 0
+                    && !replica_ignores_maxmemory
                     && !is_multi_oom_exempt(cmd_bytes)
                     && self.refresh_over_maxmemory(now_ms).status != EvictionLoopStatus::Ok
                 {
