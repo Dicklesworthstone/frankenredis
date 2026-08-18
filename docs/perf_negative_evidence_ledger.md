@@ -63044,3 +63044,96 @@ WIDETAG toggle. That is a build plus artifact writes, and both are frozen. Until
   4. Standing: before calling two numbers inconsistent, check that they are the same measurement.
      Both errors in this arc — the phantom mechanism gap and the over-correction — were one metric
      mismatch wearing two different hats.
+
+## 2026-08-18 CrimsonHawk: VERIFIED — lever 1's mutation test already exists and covers BOTH sides of its condition; my own fixture census said otherwise and was wrong, because a grep on builder names cannot see a test-local helper (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: source reading only. **No measurement of any kind was taken this turn** — /data
+stood at 34G against a 42G brake under a hard build freeze; no cargo, no callgrind, no artifact
+write, and the source tree was not modified. CV was NOT used and no timing verdict is claimed.
+
+Claim class: not applicable. Campaign output: no.
+
+### WHAT I SET OUT TO CHECK, AND THE WRONG ANSWER I GOT FIRST
+
+`f8dd88cdb` asserted that `cargo test -p fr-store` is a REQUIRED gate for lever 1 because the
+`debug_assert_eq!` in the restore fold is its oracle. That argument only holds if some fixture
+actually builds the case the guard governs: a listpack entry that is STRING-encoded while its bytes
+parse as a canonical `i64`.
+
+I censused the workspace's string-entry fixtures by grepping the encoding builders:
+
+    "", "-2.5", "0123", "1.375", "1.5", "a", "alpha", "beta", "hello", "inf",
+    "m0", "m000", "m001".."m005", "m1", "not_a_number", "omega", "vvvvvvvvvv", "x"
+
+Twenty-one payloads, **not one a canonical decimal integer** — `0123` has a redundant leading zero
+and the rest are non-numeric or floats. I was about to record that lever 1 ships with its central
+case untested and that a sign error in the new term would pass the whole suite.
+
+**That conclusion was wrong.** The census pattern only matched `entry_<width>_str(b"...")`, and the
+test that covers this case does not use those builders. It has its own local helper,
+`string_encoded_listpack`, which emits `0x80 | len` headers over raw `&[u8]` slices — invisible to
+every grep I ran.
+
+### THE COVERAGE EXISTS AND IT IS BETTER THAN THE LEVER NEEDS
+
+`packed_set.rs:9077`, `restored_quicklist2_fused_growth_totals_match_rebuild_walk_c92f6`, calls
+`from_restored_quicklist2_nodes` directly with:
+
+    canonical      b"member:0001", b"42", b"-9999", b"x"        (via encode_listpack_strings)
+    NON-CANONICAL  b"123", b"4096", b"-1", b"0", b"00", b"9223372036854775807"
+                   (via string_encoded_listpack — STRING-encoded although the bytes parse as ints)
+
+and its comment names the hazard exactly: *"a listpack whose entries are STRING-encoded even though
+their bytes parse as integers. Deriving `enc_total` from the listpack header's `total_bytes` would
+report the on-wire size and silently change OBJECT ENCODING."*
+
+That vector covers **both sides** of lever 1's condition:
+
+    b"123" / b"4096" / b"-1" / b"0"      list_lp_int -> Some   guard MUST fire, walk required
+    b"00"                                list_lp_int -> None   guard must NOT fire, derivation valid
+    b"9223372036854775807"               i64::MAX — the RANGE boundary
+
+So a sign error in the added term — `.is_none()` where `.is_some()` belongs — makes the four
+canonical entries take the derivation, the walk sum disagrees, and the unconditional
+`debug_assert_eq!` fails the suite. `b"00"` guards the opposite direction. **Lever 1 arrives with a
+working mutation test**, which is what `feedback_mutation_test_every_defensive_guard` asks for and
+is more than I had any right to expect.
+
+It also independently vindicates choosing `list_lp_int` over `list_lp_int_bytes_are_canonical`:
+`b"9223372036854775807"` is at the range boundary, and only the parse enforces range.
+
+### ONE GENUINE GAP, ONE LINE TO CLOSE IT
+
+No payload is a canonical decimal that **overflows** `i64`. That is precisely the case that
+distinguishes the two candidate conditions: a 25-digit canonical decimal passes the form test,
+overflows the parse, is re-encoded by fr as a string, and therefore MUST NOT fire the guard. Under
+`list_lp_int` it correctly does not; under the form-only test it wrongly would.
+
+    add to the noncanon vector:   b"99999999999999999999999"
+
+One entry, and it pins the design choice `f8dd88cdb` argued for instead of leaving it as prose. It
+is worth adding WITH lever 1 rather than before it — on its own it changes nothing, since today's
+first-byte guard fires on any digit regardless of range.
+
+### THE METHOD LESSON, WHICH IS THE REUSABLE PART
+
+**A fixture census by grepping builder names is not a census.** Test-local helpers that construct
+the same wire format by hand are invisible to it, and the more load-bearing the case, the more
+likely someone wrote a bespoke helper for it — precisely because the shared builders could not
+express it. Here the helper existed *because* the shared `entry_*_str` builders cannot easily emit a
+string-encoded canonical integer, which is the whole point of the fixture.
+
+Search for the CASE, not the constructor: grep the raw payload shapes (`b"123"`, `b"42"`), the
+concept words in comments ("non-canonical", "string-encoded"), and the call sites of the function
+under test. The last of those found it in one step — there are only four references to
+`from_restored_quicklist2_nodes` in the workspace and one is a test.
+
+### RETRY PREDICATES
+
+  1. When lever 1 is built, run `cargo test -p fr-store` and confirm
+     `restored_quicklist2_fused_growth_totals_match_rebuild_walk_c92f6` PASSES. Then deliberately
+     flip the new term to `.is_none()` and confirm it FAILS. A guard whose mutation is not observed
+     to fail is not known to be tested.
+  2. Add `b"99999999999999999999999"` in the same commit as lever 1, not separately.
+  3. Do not re-derive this coverage question. It is answered: the oracle is unconditional, the
+     fixture reaches it, and both directions of the condition are covered.
