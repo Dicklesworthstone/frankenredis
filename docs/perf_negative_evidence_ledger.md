@@ -45376,3 +45376,67 @@ risk is confined to the FLUSH interaction, which the guard test covers directly.
 3. The remaining EVALSHA gap is 1.1631x, i.e. fr still retires ~16 pct more instructions than
    Redis on a trivial script. That residue is the general Lua-interpreter gap
    (ledger:13594), not this lever, and should be attacked there rather than here.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: MEASURED — `geosearch_2`'s CI is SAMPLING-limited and 4x ops fixes it exactly as predicted (half-width 0.0323 -> 0.0164, CI now EXCLUDES 1); what remains is a window that holds still, not more ops (`frankenredis-eh2ct`)
+
+NO RATIO IS CERTIFIED. The row null-failed. This records that the retry predicate banked in
+`71c524eea` was RIGHT about the mechanism and that the remaining blocker has changed identity.
+
+  fr ELF  bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  incumbent e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7 (7.2.4, jemalloc)
+
+`balanced_square_ab.py --shapes sizepairs`, ABBAABBA, rounds=9, -P16, null bound +/-0.02.
+Per-arm host state: loadavg 10.01 12.14 10.79 BEFORE (16 pct of 1-min capacity, 6 builds) and
+56.91 43.41 24.95 AFTER; CPU MHz mean 2776 before, 3878 after.
+
+### The prediction and the result
+
+`71c524eea` predicted the blocker was measurement RESOLUTION on a two-member shape and said to
+"raise ops/slot until `geosearch_2`'s CI half-width falls below its distance from 1". Taking 4x
+the ops:
+
+  ops/slot    ratio      95% CI              half-width   distance from 1   verdict
+    50,000    1.0321   [0.9976, 1.0622]        0.0323          0.0321       STRADDLES-1
+   200,000    1.0153   [1.0071, 1.0398]        0.0164          0.0153       NULL-FAILED
+
+0.0323 / 0.0164 = 1.976, against sqrt(4) = 2. The interval is sampling-limited to within 1.2 pct
+of the textbook rate, which is about as cleanly as that prediction could have come out. AND THE
+CI NOW EXCLUDES 1 -- [1.0071, 1.0398] is entirely above it, where the 50k interval bracketed it.
+
+So the shape is NOT inherently uncertifiable, and the "accept that a 2-element GEOSEARCH is an
+intercept row" half of that retry predicate is now the less likely branch. Note the point
+estimate also MOVED, 1.0321 -> 1.0153, by more than the tighter interval's half-width; a
+sampling-limited interval says nothing about where the point sits, and these two runs sat in
+very different windows.
+
+### WHY IT STILL DID NOT CERTIFY, and it is not the ops count
+
+Both nulls failed at 0.9737 and 0.9740 -- a 2.6 pct same-binary bias whose true value is exactly
+1.0000. THE TWO NULLS ARE WITHIN 0.0003 OF EACH OTHER. That is not noise; noise would scatter
+them. It is a systematic, monotonic drift, and the host state says where it came from: loadavg
+went 10.01 -> 56.91 DURING the run, so arms measured later ran slower than arms measured
+earlier, in a fixed order.
+
+This matches a failure mode the campaign has already recorded independently: a four-arm run
+whose "residual is measurement ORDER, not core identity (first-measured arms in each round read
+slow)". The ABBAABBA square exists to cancel exactly this, and at rounds=9 with 200,000 ops per
+slot each round is long enough that drift WITHIN a round is no longer small against the effect.
+
+### The change that follows, and it costs nothing extra
+
+Total ops determine the CI; ROUNDS determine how finely the drift is interleaved. Those are
+separable and this run held rounds fixed while raising ops, which improved resolution and made
+drift cancellation WORSE at the same time. The same total sample at rounds=36 / 50,000 ops
+carries the identical CI by construction and interleaves the square four times more finely.
+
+RETRY PREDICATE: do NOT raise ops again -- resolution is solved, and a third attempt at 200k in
+a moving window will null-fail the same way. Re-run at rounds=36 with ops=50,000 (same total
+sample, four times the interleaving) in a window whose loadavg is stationary END TO END, and
+verify stationarity by comparing the harness's own before/after loadavg rather than the value at
+launch: this run looked clean at launch (16 pct of capacity) and was not clean by the finish.
+The certification bar is unchanged -- both nulls inside +/-0.02 -- and the row to beat is the
+standing 0.9162 control-normalised figure, quoting the WORST bound. If rounds=36 also
+null-fails with the two nulls again agreeing to 3 decimal places, the drift is faster than one
+round and the shape needs a different harness, not a different parameter.
