@@ -3874,7 +3874,13 @@ impl ChunkedList {
         let Some(chunk) = self.chunks.get_mut(chunk_idx) else {
             return false;
         };
-        self.rpush_conversion_prefix_len = 0;
+        // (frankenredis-qj6jn) An in-place replacement does NOT move the node boundary: upstream
+        // edits the listpack inside the existing quicklist node and the node COUNT is unchanged.
+        // Measured at `list-max-listpack-size -1`, seed 250 (one retained node of 4,257 bytes):
+        // LSET at index 0, at 249, and with a 200-byte value all left redis holding ONE node
+        // (4,249 / 4,251 / 4,444), while fr cleared the claim and re-split into two. So the
+        // prefix survives, and only its LENGTH could ever need adjusting -- which a replacement
+        // never changes.
         chunk.make_mut()[local_idx] = elem;
         true
     }
@@ -3911,9 +3917,17 @@ impl ChunkedList {
 
     fn remove(&mut self, idx: usize) -> Option<Vec<u8>> {
         let (chunk_idx, local_idx) = self.locate(idx)?;
-        self.rpush_conversion_prefix_len = 0;
+        // (frankenredis-qj6jn) A removal SHRINKS the retained node rather than destroying the
+        // claim -- upstream deletes from the listpack inside the node and the node count is
+        // unchanged. Measured: LREM of one middle element left redis with ONE node of 4,240
+        // bytes where fr cleared and re-split. Decrement only when the removed index falls
+        // INSIDE the prefix, exactly as `pop_front` already does for the head case.
+        if idx < self.rpush_conversion_prefix_len {
+            self.rpush_conversion_prefix_len -= 1;
+        }
         let out = self.chunks[chunk_idx].make_mut().remove(local_idx);
         self.len -= 1;
+        self.rpush_conversion_prefix_len = self.rpush_conversion_prefix_len.min(self.len);
         if self.chunks[chunk_idx].is_empty() {
             self.chunks.remove(chunk_idx);
         }

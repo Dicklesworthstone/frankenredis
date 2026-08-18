@@ -48990,3 +48990,94 @@ CV was not used, as a gate or otherwise; the gate is the bootstrap 95 pct median
    experiment this row rejects, and the next attempt will reproduce +3.2 and +7.9.
 4. The same two-halves argument applies to every remaining route in the `d7c67e802` sweep, since
    none of them has a twin yet. Budget each as a single atomic change across both files.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: PARITY FIX — LSET and LREM destroyed the conversion-node claim they only shrink; the mutation sweep 7e0d847d0 asked for cuts 7 divergences to 3, and NAMES the two that need a richer model (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: differential behaviour against a live vendored redis 7.2.4 in the same probe
+invocation, compared at NODE-TABLE level. No timing verdict is claimed, no instruction counts are
+quoted, and CV was NOT used, as a gate or otherwise. This row banks no vs-incumbent ratio.
+Campaign output: no.
+
+`7e0d847d0` closed the append path and named what had never been probed: LPUSH-side inserts,
+LSET, and REMOVALS against a retained conversion prefix. Fourteen mutations, all against the
+shape that HAS one (fill -1, one bulk RPUSH of 250 fifteen-byte elements, which upstream leaves
+as a single 4,257-byte node).
+
+### WHAT THE SWEEP FOUND — INCLUDING THAT MY OWN WORRY WAS WRONG
+
+    mutation              redis nodes        fr BEFORE            verdict
+    RPOP x1 / x50         [4240] / [3407]    same                 already correct
+    LPOP x1 / x50         [4240] / [3407]    same                 already correct
+    LTRIM 10..-1 / 0..-11 [4087]             same                 already correct
+    LSET idx 0            [4249]             [4079 177]           FIXED HERE
+    LSET idx 249          [4251]             [4087 171]           FIXED HERE
+    LSET 200-byte value   [4444]             [4087 364]           FIXED HERE
+    LREM one middle       [4240]             [4087 160]           FIXED HERE
+    LPUSH head            [15 4257]          [4078 194]           OPEN
+    LPUSH head x5         [47 4257]          [4076 228]           OPEN
+    LINSERT BEFORE mid    [2139 2132]        [4077 194]           OPEN
+
+  I had flagged `pop_back`, `retain` and `lrem` as the untested removal risk. THE REMOVALS WERE
+  FINE — `pop_front`'s decrement was already the right model and the pop/trim paths reach it.
+  The defect was in the INDEX-ADDRESSED paths I had not suspected: `ChunkedList::set` and
+  `ChunkedList::remove` both opened by zeroing the claim. Upstream mutates the listpack INSIDE
+  the node; the node count never changes. A replacement cannot change the prefix LENGTH at all,
+  and a removal decrements it only when the removed index falls inside — exactly what
+  `pop_front` already did for the head case.
+
+    7 of 14 diverging -> 3 of 14.
+
+### THE THREE THAT REMAIN NEED A RICHER MODEL, AND THIS IS THE SHAPE OF IT
+
+fr's model is a single `rpush_conversion_prefix_len`: "the first N elements are one node,
+everything after is re-derived by budget". Two upstream behaviours do not fit it:
+
+  LPUSH        redis puts the prepended elements in a NEW node BEFORE the retained one and keeps
+               it intact: [15 4257], [47 4257]. Expressing that needs a prefix START OFFSET as
+               well as a length — head region re-derived, then the retained node, then the tail.
+               `push_front_with_fill`'s comment currently justifies CLEARING the claim on the
+               grounds that a head insert "can create or extend nodes before the conversion
+               prefix". The measurement says upstream does create a node before it and leaves the
+               prefix ALONE, so that comment states the observation correctly and draws the wrong
+               conclusion from it.
+
+  LINSERT BEFORE  redis SPLITS the node at the insertion point into two near-equal halves,
+               [2139 2132]. That is not expressible as a prefix at all; it needs the node
+               boundary list itself. Neither clearing nor preserving reproduces it — fr's
+               [4077 194] is what clearing gives, and preserving would give one node.
+
+  I am recording both rather than reaching for the offset field tonight: LPUSH is tractable and
+  LINSERT-BEFORE is not, and shipping half a model into the DUMP path that three commits already
+  touched today is how the next agent inherits a subtly wrong boundary instead of a clearly
+  missing one.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = 32ad6582720b5bc1c452ac9e8cd06d40337c4c9d69c05e2a7a2fdc13f538ef7c
+                — the FIXED build the probes ran against. `release-perf`,
+                built locally with RCH_CARGO_WRAPPER_BYPASS=1, build log checked for BOTH
+                `^error` and rch refusals: 0 of each. `df` run immediately before the build.
+  probe         scratchpad `prefix_mutation_probe.py` — fourteen mutations, each applied to a
+                freshly seeded list on BOTH engines, compared on the decoded NODE TABLE. It also
+                asserts the ELEMENT sequences match on every case and they did throughout: every
+                divergence in this row is a boundary, never a content error.
+  incumbent     vendored redis 7.2.4, `legacy_redis_code/redis/src/redis-server`, booted per
+                probe on a free port with its own temp dir; fr and redis in the SAME invocation.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 18:34,
+                loadavg 6.37/8.86/10.55 at the start of the sweep, /data 103G. Recorded for
+                completeness: this row's evidence is byte equality, immune to load.
+  gates         `cargo test -p fr-store -p fr-persist --lib`, clippy `--all-targets`,
+                `cargo fmt --check`.
+
+RETRY PREDICATE:
+  1. LPUSH first, and ONLY with a prefix START offset — do not try to fake it by adjusting the
+     length. The oracle already exists: `prefix_mutation_probe.py` rows "LPUSH head" and
+     "LPUSH head x5" must read [15 4257] and [47 4257].
+  2. LINSERT BEFORE needs the node boundary LIST, not a prefix. Treat it as a separate design
+     question and measure where upstream splits before writing anything: [2139 2132] out of a
+     4,257-byte node is suspiciously close to halving, and that guess must be checked across
+     several insertion positions before it becomes code.
+  3. The sweep covers ONE shape (fill -1, seed 250). Re-run it at fill -2 and at a positive fill
+     before believing the three-of-fourteen figure generalises; the bulk-RPUSH window that makes
+     a retained prefix exist at all is fill-dependent.

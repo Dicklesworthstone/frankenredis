@@ -74731,6 +74731,84 @@ mod tests {
         );
     }
 
+    /// (frankenredis-qj6jn) An in-place EDIT or a REMOVAL must not destroy the conversion-node
+    /// claim: upstream mutates the listpack inside the existing node and the node COUNT is
+    /// unchanged.
+    ///
+    /// Measured against vendored redis 7.2.4 at `list-max-listpack-size -1`, seed 250 (one
+    /// retained node of 4,257 bytes). Before this fix fr split into two nodes on every one of
+    /// these; redis stayed at one:
+    ///
+    ///     LSET idx 0          redis [4,249]   fr [4,079 177]
+    ///     LSET idx 249        redis [4,251]   fr [4,087 171]
+    ///     LSET 200-byte value redis [4,444]   fr [4,087 364]
+    ///     LREM one middle     redis [4,240]   fr [4,087 160]
+    ///
+    /// The same sweep confirmed RPOP/LPOP/LTRIM were ALREADY correct, which is why only the
+    /// index-addressed paths are changed here.
+    #[test]
+    fn inplace_edit_and_removal_keep_the_conversion_node_qj6jn() {
+        fn nodes(store: &mut Store, key: &[u8]) -> usize {
+            let payload = store.dump_key(key, 100).unwrap();
+            assert_eq!(payload[0], RDB_TYPE_LIST_QUICKLIST_2);
+            decode_length(&payload, 1).unwrap().0
+        }
+        fn seeded() -> (Store, Vec<Vec<u8>>) {
+            let mut store = Store::new();
+            store.list_max_listpack_size = -1;
+            let items: Vec<Vec<u8>> = (0..250)
+                .map(|i| format!("vvvvvvvvvv{i:05}").into_bytes())
+                .collect();
+            store.rpush(b"l", &items, 100).unwrap();
+            (store, items)
+        }
+
+        let (mut store, _) = seeded();
+        assert_eq!(
+            nodes(&mut store, b"l"),
+            1,
+            "precondition -- one retained node"
+        );
+
+        // LSET at both ends and with a value that grows the node.
+        for (idx, value) in [
+            (0i64, b"reset-0".to_vec()),
+            (249, b"reset-249".to_vec()),
+            (0, vec![b'z'; 200]),
+        ] {
+            let (mut store, _) = seeded();
+            store.lset(b"l", idx, value, 100).unwrap();
+            assert_eq!(
+                nodes(&mut store, b"l"),
+                1,
+                "LSET at {idx} must edit in place, not re-split"
+            );
+        }
+
+        // LREM of a middle element shrinks the node; it does not destroy it.
+        let (mut store, items) = seeded();
+        store.lrem(b"l", 1, &items[125], 100).unwrap();
+        assert_eq!(
+            nodes(&mut store, b"l"),
+            1,
+            "LREM must shrink the retained node, not re-split"
+        );
+        assert_eq!(store.llen(b"l", 100).unwrap(), 249);
+
+        // The paths that were already correct stay correct.
+        for pops in [1usize, 50] {
+            let (mut store, _) = seeded();
+            for _ in 0..pops {
+                store.rpop(b"l", 100).unwrap();
+            }
+            assert_eq!(
+                nodes(&mut store, b"l"),
+                1,
+                "RPOP x{pops} must stay one node"
+            );
+        }
+    }
+
     /// (frankenredis-qj6jn) An APPENDING LINSERT must not move the node boundary the listpack
     /// conversion produced.
     ///
