@@ -55396,3 +55396,111 @@ into the caller, and `#[inline]` does not make that decision. Check the frame, n
   3. `decode_value_spans` remains the largest term at 70.68 instructions per element and this row
      did not move it. `write_u64_digits`, called from inside it, is 57.09 of that and has now
      resisted two attempts (four-digits-per-step, REJECTED; this).
+
+## 2026-08-18 CrimsonHawk: SELF-SPEEDUP CENSUS — `RespFrame::encode_into` is the dominant remaining memcpy source across six shapes, XREVRANGE pays 21 memcpys and 10 allocations per op, and OBJECT ENCODING allocates twice for two static strings (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — no code changed, no build was run (a build held the project's single slot),
+and no fr/Redis ratio is claimed. This maps the remaining sites of a defect class that has already
+produced five shipped levers, so the next ones start from counts.
+
+### THE CENSUS
+
+`call_count_delta.py <dump> <ops> --callers memcpy` plus `__rust_alloc`, one ELF
+(`736a21212e1e8e8d`), 15 shapes including the eleven added in `9f2f10bd8`:
+
+  shape              instr/op   memcpy/op  alloc/op  top memcpy caller
+  xrevrange_base       8318.1     21.0005    10.0    RespFrame::encode_into'2      (8.000)
+  hscan_zero           3637.9      5.0020     6.0    iter::Map<Filter<..>>         (4.000)
+  hmset_2              2856.4      7.0025     2.0    PackedStrMap::insert_borrowed (4.000)
+  zdiff_2              3824.9      3.9955     3.0    RespFrame::encode_into'2      (2.000)
+  zinter_2src          3916.0      3.9975     3.0    RespFrame::encode_into'2      (2.000)
+  zscan_zero           3578.6      3.0015     4.0    push_redis_double_ascii       (2.000)
+  xread_one            9500.7      3.0010     2.0    fr_command::push_u64_ascii    (2.000)
+  substr               1879.7      3.0000     1.0    RespFrame::encode_into        (2.000)
+  bitfield_ro_2get     3465.9      1.0060     2.0    RespFrame::encode_into        (1.000)
+  bitfield_get         2368.6      1.0010     1.0    RespFrame::encode_into        (1.000)
+  object_encoding      1873.4      1.0015     1.0    Store::object_encoding        (1.000)
+  sscan_zero           3053.7      1.0015     2.0    execute_plain_hscan0_borrowed_into
+  pexpiretime_base     1398.2      0.0005     0.0    — clean
+  unwatch_base          887.2      0.0010     0.0    — clean
+  zrank_base           1383.2      0.0010     0.0    — clean
+
+Three shapes are already clean, which is what makes the others readable as sites rather than as a
+property of the harness.
+
+### WHAT THE MAP SAYS
+
+**`RespFrame::encode_into` is the single dominant source**, top caller on six of the fifteen and
+reaching 8.000 calls/op on XREVRANGE. Every shipped lever in this vein so far has been a
+SPECIFIC encoder — the integer reply, the array header, the TYPE arm, the integer-encoded read.
+`encode_into` is the GENERIC path they all bypass, and it is where the remaining volume is.
+
+**XREVRANGE is the worst shape found anywhere in this campaign**: 21 memcpys and 10 allocations
+per op. It is a stream range reply, so per-entry framing multiplies whatever the per-element cost
+is.
+
+### ONE TARGET IS SMALL, EXACT, AND READY
+
+`OBJECT ENCODING` carries TWO independent instances of the pattern, both on a closed set of
+`&'static str`:
+
+  1. `RespFrame::BulkString(Some(enc.as_bytes().to_vec()))` — allocates a `Vec` and copies a
+     STATIC string, purely to hand it to a frame encoder that copies it again into the output.
+     `Store::object_encoding` returns `Option<&'static str>`, exactly like `key_type`, whose
+     equivalent was fixed in `1c995a48f` for +23.3 instr/op.
+  2. Inside `object_encoding` itself, `.range((key.to_vec(), Vec::new())..)` allocates and copies
+     the KEY on every call just to build a range bound for the per-field-TTL probe.
+
+The census attributes the memcpy to `Store::object_encoding`, i.e. to (2); (1) is visible as the
+1.0 allocation. Both are avoidable and neither needs new machinery.
+
+### WHAT IS AND IS NOT CLAIMED
+
+CLAIMED: the call counts above, on that ELF, for those shapes.
+
+NOT CLAIMED: that every memcpy here is removable. Several are genuine PAYLOAD copies — a bulk
+string's bytes have to reach the output buffer once, and `hmset_2`'s four copies into
+`PackedStrMap` are the values being stored. The removable ones are those whose length is known at
+compile time or whose source is a `&'static str`.
+
+NOT MEASURED: any instruction saving. This row counts calls; the instruction cost of
+`RespFrame::encode_into` per shape has not been differenced and should be before anyone sizes a
+fix.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timed quantity and no ratio are claimed. The counts are exact integers from two-point
+differencing at N=2000 and 2N=4000 on a single ELF, and `pexpiretime_base`, `unwatch_base` and
+`zrank_base` act as negative controls at ~0.0 on the same binary.
+
+For the instrument generally, measured in a single invocation of the same harness on one ELF and
+one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios, banked in `0bf781d57`.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           `736a21212e1e8e8db75ad2df180e88e0dddb616822aa659ca5d6336d88230f15`, the AFTER arm
+                of the TYPE pair, reused. NO build was run for this row.
+  bench_elf_sha256=736a21212e1e8e8db75ad2df180e88e0dddb616822aa659ca5d6336d88230f15
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` (239 shapes after `9f2f10bd8`),
+                `scripts/call_count_delta.py --callers`.
+  host          /data 59G free. loadavg 9.11 12.57 12.64, CPU idle 93 pct, iowait 0. A build held
+                the project's slot, so none was started.
+  disposition   NO CODE CHANGED.
+
+### RETRY PREDICATE
+
+1. Take OBJECT ENCODING first: it is two small fixes on a closed set, and the `key_type` precedent
+   (`1c995a48f`) measured +23.3. Accept only if `memcpy` and `__rust_alloc` both fall from 1.0 to
+   ~0 on `object_encoding`, with a shape that does NOT touch it unmoved.
+2. Before attacking `RespFrame::encode_into`, DIFFERENCE ITS INSTRUCTION COST per shape. This row
+   deliberately does not size it, and a call count is not a saving.
+3. Count allocations with `__rust_alloc`, never a `malloc` substring — that glob matches
+   mimalloc's nested frames and inflates by 3x (`556350ff6`).
+4. Do NOT treat `hmset_2`'s four `PackedStrMap::insert_borrowed` copies or a bulk payload copy as
+   this defect. They move bytes that genuinely have to move.
