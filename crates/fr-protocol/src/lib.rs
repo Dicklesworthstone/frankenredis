@@ -4277,6 +4277,136 @@ mod tests {
         assert!(parse_command_frame(b"*-9\r\n", &cfg).unwrap().frame == RespFrame::Array(None));
     }
 
+    /// The pre-auth caps must report upstream's wording, and must yield to the
+    /// ordinary limit exactly where upstream does.
+    ///
+    /// (frankenredis-2ubu0) Upstream networking.c::processMultibulkBuffer runs
+    /// two checks per length, in this order:
+    ///
+    ///   1. `!ok || ll > INT_MAX`            -> "invalid multibulk length"
+    ///   2. `ll > 10 && authRequired(c)`     -> "unauthenticated multibulk length"
+    ///
+    /// The ORDER is the whole subtlety, and it is why `pre_auth` carries the
+    /// authenticated limits rather than a bare "this client is unauthenticated"
+    /// flag. A count over INT_MAX is "invalid" even before AUTH; only a
+    /// well-formed but oversized one gets the unauthenticated wording. A flag
+    /// alone cannot tell those apart, and the failure would be silent -- both
+    /// inputs are refused and the connection closed either way, so only the text
+    /// on the wire differs, and only for a client that reads it.
+    ///
+    /// The last case is the one that guards the design rather than the wording:
+    /// with `pre_auth: None` -- every authenticated connection, and every one of
+    /// the 185 construction sites that spread `..default()` -- the new variants
+    /// must be unreachable, so this cannot change what an ordinary client sees.
+    #[test]
+    fn pre_auth_caps_report_upstream_wording_and_yield_to_the_ordinary_limit_2ubu0() {
+        let mut args = Vec::new();
+        // A connection that has not authenticated: `max_*` ARE the pre-auth caps
+        // already, and `pre_auth` carries what would apply once it authenticates.
+        let unauth = ParserConfig {
+            max_bulk_len: UNAUTH_MAX_BULK_LEN,
+            max_array_len: UNAUTH_MAX_MULTIBULK_LEN,
+            pre_auth: Some(AuthedLimits {
+                max_bulk_len: 512 * 1024 * 1024,
+                max_array_len: i32::MAX as usize,
+            }),
+            ..ParserConfig::default()
+        };
+
+        // Well-formed, over the pre-auth cap, under the authenticated limit.
+        assert_eq!(
+            parse_command_args_borrowed_into(b"*11\r\n", &unauth, &mut args).unwrap_err(),
+            RespParseError::UnauthenticatedMultibulkLength
+        );
+        assert_eq!(
+            parse_command_args_borrowed_into(b"*1\r\n$16385\r\n", &unauth, &mut args).unwrap_err(),
+            RespParseError::UnauthenticatedBulkLength
+        );
+
+        // Over the AUTHENTICATED limit too: upstream's first check wins and the
+        // wording stays "invalid ...", unauthenticated or not.
+        assert_eq!(
+            parse_command_args_borrowed_into(b"*2147483648\r\n", &unauth, &mut args).unwrap_err(),
+            RespParseError::MultibulkLengthTooLarge
+        );
+        assert_eq!(
+            parse_command_args_borrowed_into(b"*1\r\n$536870913\r\n", &unauth, &mut args)
+                .unwrap_err(),
+            RespParseError::BulkLengthTooLarge
+        );
+
+        // AT the cap is not OVER it: 10 elements and a 16384-byte bulk are what
+        // upstream still admits, and they must not be refused by these rules.
+        // (Both run out of input rather than parsing, which is the point -- the
+        // length itself was accepted.)
+        assert_eq!(
+            parse_command_args_borrowed_into(b"*10\r\n", &unauth, &mut args).unwrap_err(),
+            RespParseError::Incomplete
+        );
+        assert_eq!(
+            parse_command_args_borrowed_into(b"*1\r\n$16384\r\n", &unauth, &mut args).unwrap_err(),
+            RespParseError::Incomplete
+        );
+
+        // A malformed length is neither: it fails the parse before any cap is
+        // consulted, so it keeps the wording it always had.
+        assert_eq!(
+            parse_command_args_borrowed_into(b"*notanumber\r\n", &unauth, &mut args).unwrap_err(),
+            RespParseError::InvalidMultibulkLength
+        );
+
+        // An AUTHENTICATED connection carries `pre_auth: None`, and then the two
+        // new variants must be unreachable however small the limits are.
+        let authed = ParserConfig {
+            max_bulk_len: 16,
+            max_array_len: 2,
+            ..ParserConfig::default()
+        };
+        assert_eq!(
+            parse_command_args_borrowed_into(b"*3\r\n", &authed, &mut args).unwrap_err(),
+            RespParseError::MultibulkLengthTooLarge
+        );
+        assert_eq!(
+            parse_command_args_borrowed_into(b"*1\r\n$17\r\n", &authed, &mut args).unwrap_err(),
+            RespParseError::BulkLengthTooLarge
+        );
+    }
+
+    /// A stricter configured limit must survive the pre-auth cap.
+    ///
+    /// (frankenredis-2ubu0) The cap is imposed by LOWERING `max_bulk_len`, and
+    /// the first version of that wrote an assignment rather than a `min`, which
+    /// discarded the configured limit: on the hardened gate (1024) an
+    /// UNAUTHENTICATED client would have been handed the looser 16384. This pins
+    /// the invariant that a cap may only ever tighten -- expressed here as the
+    /// parser's behaviour, since that is what a client can observe.
+    #[test]
+    fn a_stricter_limit_survives_the_pre_auth_cap_2ubu0() {
+        let mut args = Vec::new();
+        // What `parser_config()` builds for an unauthenticated client on a server
+        // whose policy is already stricter than upstream's cap.
+        let hardened = ParserConfig {
+            max_bulk_len: 1024_usize.min(UNAUTH_MAX_BULK_LEN),
+            max_array_len: 1024_usize.min(UNAUTH_MAX_MULTIBULK_LEN),
+            pre_auth: Some(AuthedLimits {
+                max_bulk_len: 1024,
+                max_array_len: 1024,
+            }),
+            ..ParserConfig::default()
+        };
+        assert_eq!(hardened.max_bulk_len, 1024, "the cap must not RAISE 1024 to 16384");
+        assert_eq!(hardened.max_array_len, 10, "the cap must still lower 1024 to 10");
+
+        // 2000 bytes is inside upstream's 16384 but outside this server's own
+        // limit, so it is refused, and refused as an ordinary over-limit rather
+        // than as a pre-auth one -- the configured limit is what rejected it.
+        assert_eq!(
+            parse_command_args_borrowed_into(b"*1\r\n$2000\r\n", &hardened, &mut args)
+                .unwrap_err(),
+            RespParseError::BulkLengthTooLarge
+        );
+    }
+
     #[test]
     fn parse_command_args_borrowed_into_preserves_config_limits() {
         let mut args = Vec::new();
