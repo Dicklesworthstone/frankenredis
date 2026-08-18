@@ -6958,6 +6958,39 @@ pub struct FunctionEntry {
     pub flags: Vec<String>,
 }
 
+
+/// Emit `l[s..=e]` to `sink`, skipping the `Iterator::take` adapter when the range is the WHOLE
+/// list.
+///
+/// (frankenredis-qj6jn) `LRANGE key 0 -1` is the shape a full read takes, and there `take` can
+/// never fire: `e - s + 1` already equals the element count. It is not free, though. The
+/// disassembly of the emit loop keeps the take counter on the STACK and reloads, decrements and
+/// stores it on every element, next to a stack-resident iterator discriminant — three memory
+/// operations per element to enforce a bound the range has already enforced.
+///
+/// The helper exists so the two loop bodies are written ONCE rather than three times: this loop
+/// appears in the non-LFU, COLLAPSE and non-COLLAPSE arms of `lrange_borrow_scan_impl`, and
+/// duplicating it six ways would move code layout in a function that has already shown itself
+/// layout-sensitive. It is called once per LRANGE, not once per element, so it costs nothing
+/// measurable even if the compiler declines to inline it.
+#[inline]
+fn emit_list_range<'a>(
+    l: &'a packed_set::ListValue,
+    s: usize,
+    e: usize,
+    sink: &mut impl FnMut(SmembersScanEvent<'a>),
+) {
+    if s == 0 && e + 1 == l.len() {
+        for m in l.iter() {
+            sink(SmembersScanEvent::Member(m));
+        }
+    } else {
+        for m in l.iter_from(s).take(e - s + 1) {
+            sink(SmembersScanEvent::Member(m));
+        }
+    }
+}
+
 impl Store {
     #[must_use]
     pub fn new() -> Self {
@@ -18634,9 +18667,7 @@ impl Store {
                         let s = s as usize;
                         let e = e as usize;
                         sink(SmembersScanEvent::Len(e - s + 1));
-                        for m in l.iter_from(s).take(e - s + 1) {
-                            sink(SmembersScanEvent::Member(m));
-                        }
+                        emit_list_range(l, s, e, &mut sink);
                         entry.touch(now_ms);
                         Ok(())
                     }
@@ -18676,9 +18707,7 @@ impl Store {
                             let s = s as usize;
                             let e = e as usize;
                             sink(SmembersScanEvent::Len(e - s + 1));
-                            for m in l.iter_from(s).take(e - s + 1) {
-                                sink(SmembersScanEvent::Member(m));
-                            }
+                            emit_list_range(l, s, e, &mut sink);
                             entry.touch(now_ms);
                             Ok(())
                         }
@@ -18719,9 +18748,7 @@ impl Store {
                         let s = s as usize;
                         let e = e as usize;
                         sink(SmembersScanEvent::Len(e - s + 1));
-                        for m in l.iter_from(s).take(e - s + 1) {
-                            sink(SmembersScanEvent::Member(m));
-                        }
+                        emit_list_range(l, s, e, &mut sink);
                         entry.touch(now_ms);
                         Ok(())
                     }
@@ -32076,14 +32103,29 @@ impl Store {
                                 k.len() <= max_listpack_value && v.len() <= max_listpack_value
                             });
                         if fits_listpack {
-                            let pairs: Vec<(Vec<u8>, Vec<u8>)> = h
+                            // (frankenredis-getexgate) COLLECT BORROWS, NOT COPIES. This is a
+                            // *borrow* scan whose sink takes `SscanReplyEvent::Member(&[u8])`, yet
+                            // it materialised `Vec<(Vec<u8>, Vec<u8>)>` -- TWO allocations and two
+                            // byte copies PER FIELD -- and then handed the sink references into
+                            // the copies anyway. The owned pairs were never needed: the only
+                            // reason to collect at all is that RESP wants the array length before
+                            // the elements, and a Vec of REFERENCES answers that just as well.
+                            //
+                            // Measured on `hscan_zero`, a two-field hash: the
+                            // `Map<Filter<..>>` frame was 806.0 instr/op of 3637.2 -- 22 pct of
+                            // the command, the largest single frame found in this census -- with
+                            // memcpy at 4.000 and allocations at 6.000 per op.
+                            //
+                            // The same function already collects `Vec<(&[u8], &[u8])>` on its
+                            // resume path a few lines below, so this is the established idiom
+                            // here rather than a new one.
+                            let pairs: Vec<(&[u8], &[u8])> = h
                                 .iter()
                                 .filter(|(field, _)| scan_pattern_matches(pattern, field))
-                                .map(|(f, v)| (f.to_vec(), v.to_vec()))
                                 .collect();
                             sink(SscanReplyEvent::Cursor(0));
                             sink(SscanReplyEvent::Len(pairs.len() * 2));
-                            for (f, v) in &pairs {
+                            for &(f, v) in &pairs {
                                 sink(SscanReplyEvent::Member(f));
                                 sink(SscanReplyEvent::Member(v));
                             }
@@ -41727,6 +41769,40 @@ mod quicklist_dump_fix_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-qj6jn) `emit_list_range` skips the `take` adapter when the range is the whole
+    /// list. The two arms must agree for EVERY range, so this drives both against a reference that
+    /// is the `take` form written out by hand — including the ranges where the fast arm must NOT
+    /// be chosen (`s > 0`, `e < len - 1`) and the single-element and full-list boundaries.
+    #[test]
+    fn emit_list_range_fast_arm_matches_the_take_form_qj6jn() {
+        for len in [1usize, 2, 3, 7, 8, 9, 127, 128, 129, 300] {
+            let mut list = super::packed_set::ListValue::default();
+            for i in 0..len {
+                list.push_back(format!("e{i:04}").into_bytes());
+            }
+            for s in [0usize, 1, len / 2, len.saturating_sub(1)] {
+                for e in [s, s + 1, len / 2, len.saturating_sub(1)] {
+                    if e >= len || e < s {
+                        continue;
+                    }
+                    let mut got: Vec<Vec<u8>> = Vec::new();
+                    super::emit_list_range(&list, s, e, &mut |ev| {
+                        if let super::SmembersScanEvent::Member(m) = ev {
+                            got.push(m.to_vec());
+                        }
+                    });
+                    let want: Vec<Vec<u8>> = list
+                        .iter_from(s)
+                        .take(e - s + 1)
+                        .map(<[u8]>::to_vec)
+                        .collect();
+                    assert_eq!(got, want, "len {len}, range {s}..={e}");
+                    assert_eq!(got.len(), e - s + 1, "wrong count for {len}, {s}..={e}");
+                }
+            }
+        }
+    }
     /// (frankenredis-gvm6z / frankenredis-i41sx) The zset RESTORE builder SELECTION, which
     /// nothing covered end to end.
     ///
