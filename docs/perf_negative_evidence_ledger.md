@@ -63456,3 +63456,85 @@ CV was not used, as a gate or otherwise.
    route.
 3. Before choosing a shape to test a claim about a function, check the ROUTE's signature. Shape
    choice and route classification are one decision.
+
+## 2026-08-18 CrimsonHawk: GROOMING — `frankenredis-getexgate` resolves to NO bead but is cited 118 times; the XREAD arc belongs to `iqicb` and was never linked; and I am RETRACTING my own "tyujv is already fixed" note
+
+Claim class: SELF-SPEEDUP. Campaign output: no. Nothing measured, nothing built, no bead state
+changed. The freeze holds (/data 32G, 99 pct used) and standing orders ban standalone
+`chore(beads)` commits, so every action below is recorded here for whoever holds an unfrozen window
+to apply alongside their next code commit.
+
+### 1. A CITED IDENTIFIER THAT RESOLVES TO NOTHING
+
+`frankenredis-getexgate` appears in **118 commit messages** and in source comments in at least four
+crates (`fr-runtime`, `fr-store`, `fr-protocol`, `fr-command`), always in the syntactic position
+where this codebase cites a bead. **`br show frankenredis-getexgate` returns nothing.** Sampling
+other tags cited the same way — `eh2ct`, `ozrro`, `fpqns`, `b1o02` — every one resolves.
+
+Its only appearances in the bead store are INSIDE THE BODIES of `frankenredis-iqicb` and
+`frankenredis-qj6jn`, so it is functioning as a session or workstream label. That is fine in prose
+and misleading in a comment, because `(frankenredis-getexgate)` is indistinguishable from
+`(frankenredis-qj6jn)` and only one of them can be looked up. Anyone tracing a lever back to its
+justification gets an empty result and no hint that the identifier was never a bead.
+
+I contributed to this: my XREAD floor-class comments in `crates/fr-server/src/main.rs` cite
+`getexgate`, while my LZF comments in `fr-persist` correctly cite `qj6jn`. Same session, same author,
+two conventions, one of them dead.
+
+### 2. WHICH MEANS THE XREAD ARC IS UNLINKED FROM THE BEAD THAT TRACKS IT
+
+`frankenredis-iqicb` is titled "Front-classify commands stranded in the borrowed-parse cascade:
+9 routes, ALL NINE crossed from BEHIND to AHEAD of Redis 7.2.4". That is exactly what the XREAD work
+was, and none of it is attached to the bead:
+
+  * `978e002d3` front-classified XREAD: **-5310.2 instr/op (-56.3 pct)**, a tenth route.
+  * `1af2d590d` certified it at **0.2533x** vs Redis 7.2.4, worst of six draws.
+  * `3f81b87ce` pinned it in `scripts/dispatch_route_differ.py`, including the two array_len-6 forms
+    the classifier claims and the parser must decline.
+
+So the bead says nine routes and HEAD has ten, and the one with a certified ratio is the one the bead
+does not know about. **Action for an unfrozen window: comment `iqicb` with those three commits and
+correct "9 routes" to 10.** It is not closeable on that basis — the bead's scope is the vein, not one
+route.
+
+### 3. RETRACTION OF MY OWN GROOMING NOTE ON `tyujv`
+
+My memory carried, from 2026-08-16, that `frankenredis-tyujv` ("GEOADD is the last stranded route:
+57.9 pct dispatch share") was **already fixed** and merely left open. Checked against HEAD today:
+
+    crates/fr-server/src/main.rs:15739   [b'G',b'E',b'O',b'A',b'D',b'D'] => Geoadd
+    crates/fr-server/src/main.rs:16799   (5, Geoadd) => Some(GeoaddOne)
+
+GEOADD at arity 5 — which is the arity of the bead's own `geoadd_same` shape — **is** floor-classified,
+so the headline number is stale as a description of HEAD. **But the bead is not stale work and must
+not be closed.** Two things I had missed:
+
+  * It was **updated today** (2026-08-18), and its body now attributes 16.6 pct to
+    `process_buffered_frames` rather than the headline's 57.9 pct. Someone is working it.
+  * Its own body says, in capitals, "GEOADD IS ALREADY 23 PCT AHEAD OF REDIS. This is NOT a
+    below-parity fix. It is the largest remaining RECOVERABLE OVERHEAD." The bead tracks reclaimable
+    SHARE on a route that already leads, which a "is it fixed yet" reading of the title cannot see.
+
+**A stale headline is not a stale bead.** My note read the title, found the route classified, and
+concluded the work was done — on a bead whose entire point is that ratio and share answer different
+questions. The memory entry is corrected.
+
+### 4. WHY NOTHING WAS CLOSED
+
+Standing orders ban standalone bead-bookkeeping commits: 54 pct of one 90-minute window was
+`chore(beads)` with no code, and my own rate was 62 pct in a single session. Bead state rides with
+code. Under a freeze there is no code commit to ride with, so the correct output of a grooming pass is
+this row, not a commit stream.
+
+### RETRY PREDICATE
+
+  1. Decide whether `getexgate` should become a real bead or be dropped from citations. If it stays a
+     workstream label, stop writing it in the `(frankenredis-XXXXX)` slot that everything else uses
+     for beads — that slot is a promise the reader can look it up.
+  2. Comment `iqicb` with `978e002d3`, `1af2d590d`, `3f81b87ce` and correct its route count. Do it
+     alongside a code commit.
+  3. Before flagging any bead as "already fixed", check `updated_at` and read the body for a
+     share-versus-ratio framing. Two of the four beads my 2026-08-16 note called done were judged from
+     their titles.
+  4. The remaining 26 ready beads were NOT audited. This pass examined three. Do not read it as a
+     clean queue.
