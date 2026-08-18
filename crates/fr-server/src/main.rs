@@ -2845,7 +2845,7 @@ fn execute_shared_nothing_fast_command(
         }
         SharedNothingFastCommand::Lrange(packet) => {
             if partition
-                .execute_plain_lrange_borrowed_into(packet.key, packet.start, packet.end, ts, out)
+                .execute_plain_lrange_borrowed_into(packet.key, packet.start, packet.end, ts, out, None)
                 .is_none()
             {
                 if let Some(command_wire) = wire.get(..packet.consumed) {
@@ -7859,6 +7859,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -7887,6 +7888,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -7915,6 +7917,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -9105,6 +9108,7 @@ fn process_buffered_frames(
                             packet.end,
                             ts,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -13025,6 +13029,7 @@ fn process_buffered_frames(
                             ts,
                             false,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -13050,6 +13055,7 @@ fn process_buffered_frames(
                             ts,
                             true,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -13078,6 +13084,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -13106,6 +13113,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -14028,7 +14036,7 @@ fn parse_borrowed_multibulk_action(
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
                             if runtime
-                                .execute_plain_hgetall_borrowed_into(key, ts, client_resp3, out)
+                                .execute_plain_hgetall_borrowed_into(key, ts, client_resp3, out, None)
                                 .is_some()
                             {
                                 return Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -14044,7 +14052,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((key, values)) = borrowed_plain_hcoll_args(&borrowed_args) {
                             if runtime
-                                .execute_plain_hcoll_borrowed_into(key, ts, values, out)
+                                .execute_plain_hcoll_borrowed_into(key, ts, values, out, None)
                                 .is_some()
                             {
                                 return Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -14173,7 +14181,7 @@ fn parse_borrowed_multibulk_action(
                         if let Some((key, start, stop)) = borrowed_plain_lrange_args(&borrowed_args)
                         {
                             if runtime
-                                .execute_plain_lrange_borrowed_into(key, start, stop, ts, out)
+                                .execute_plain_lrange_borrowed_into(key, start, stop, ts, out, None)
                                 .is_some()
                             {
                                 return Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -14367,7 +14375,7 @@ fn parse_borrowed_multibulk_action(
                             let client_resp3 =
                                 runtime.client_session().resp_protocol_version() == 3;
                             if runtime
-                                .execute_plain_smembers_borrowed_into(key, ts, client_resp3, out)
+                                .execute_plain_smembers_borrowed_into(key, ts, client_resp3, out, None)
                                 .is_some()
                             {
                                 return Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -17819,9 +17827,17 @@ fn dispatch_floor_fast_lrange_into(
     runtime: &mut Runtime,
     ts: u64,
     out: &mut Vec<u8>,
+    default_read_allowed: Option<bool>,
 ) -> Option<usize> {
     let packet = parse_borrowed_plain_lrange_packet(unparsed, parser_config)?;
-    runtime.execute_plain_lrange_borrowed_into(packet.key, packet.start, packet.end, ts, out)?;
+    runtime.execute_plain_lrange_borrowed_into(
+        packet.key,
+        packet.start,
+        packet.end,
+        ts,
+        out,
+        default_read_allowed,
+    )?;
     Some(packet.consumed)
 }
 
@@ -19490,6 +19506,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Sunion => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) =
                 parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"SUNION")
@@ -19499,6 +19520,7 @@ fn try_dispatch_floor_classified_action(
                         ts,
                         client_resp3,
                         out,
+                        default_read_allowed,
                     )
                     .is_some()
             {
@@ -19517,6 +19539,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Sdiff => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) =
                 parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"SDIFF")
@@ -19526,6 +19553,7 @@ fn try_dispatch_floor_classified_action(
                         ts,
                         client_resp3,
                         out,
+                        default_read_allowed,
                     )
                     .is_some()
             {
@@ -19544,6 +19572,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Sinter => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) =
                 parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"SINTER")
@@ -19553,6 +19586,7 @@ fn try_dispatch_floor_classified_action(
                         ts,
                         client_resp3,
                         out,
+                        default_read_allowed,
                     )
                     .is_some()
             {
@@ -19750,10 +19784,15 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Hgetall => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) = parse_borrowed_plain_hgetall_packet(unparsed, &parser_config)
                 && runtime
-                    .execute_plain_hgetall_borrowed_into(packet.key, ts, client_resp3, out)
+                    .execute_plain_hgetall_borrowed_into(packet.key, ts, client_resp3, out, default_read_allowed)
                     .is_some()
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -19771,6 +19810,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Hcoll { values } => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let parsed = if values {
                 parse_borrowed_plain_hvals_packet(unparsed, &parser_config)
             } else {
@@ -19778,7 +19822,7 @@ fn try_dispatch_floor_classified_action(
             };
             if let Some(packet) = parsed
                 && runtime
-                    .execute_plain_hcoll_borrowed_into(packet.key, ts, values, out)
+                    .execute_plain_hcoll_borrowed_into(packet.key, ts, values, out, default_read_allowed)
                     .is_some()
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -20243,10 +20287,15 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Smembers => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) = parse_borrowed_plain_smembers_packet(unparsed, &parser_config)
                 && runtime
-                    .execute_plain_smembers_borrowed_into(packet.key, ts, client_resp3, out)
+                    .execute_plain_smembers_borrowed_into(packet.key, ts, client_resp3, out, default_read_allowed)
                     .is_some()
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -21811,8 +21860,20 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Lrange => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(consumed) =
-                dispatch_floor_fast_lrange_into(unparsed, &parser_config, runtime, ts, out)
+                dispatch_floor_fast_lrange_into(
+                    unparsed,
+                    &parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    default_read_allowed,
+                )
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
@@ -26806,7 +26867,7 @@ fn parse_borrowed_plain_decrby_packet<'a>(
     })
 }
 
-// (frankenredis-p0qbd) single-key HKEYS; reuses execute_plain_hcoll_borrowed_into(false).
+// (frankenredis-p0qbd) single-key HKEYS; reuses execute_plain_hcoll_borrowed_into(false, None).
 fn parse_borrowed_plain_hkeys_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -26827,7 +26888,7 @@ fn parse_borrowed_plain_hkeys_packet<'a>(
     Some(BorrowedPlainGetPacket { consumed, key })
 }
 
-// (frankenredis-p0qbd) single-key HVALS; reuses execute_plain_hcoll_borrowed_into(true).
+// (frankenredis-p0qbd) single-key HVALS; reuses execute_plain_hcoll_borrowed_into(true, None).
 fn parse_borrowed_plain_hvals_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,

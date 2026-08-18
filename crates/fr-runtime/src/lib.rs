@@ -14896,11 +14896,16 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"SMEMBERS".len()
             || key.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -14983,11 +14988,16 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"SUNION".len()
             || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -15197,11 +15207,16 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"SDIFF".len()
             || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -15281,11 +15296,16 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"SINTER".len()
             || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -15370,11 +15390,16 @@ impl Runtime {
         now_ms: u64,
         values: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"HKEYS".len()
             || key.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -15459,11 +15484,16 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"HGETALL".len()
             || key.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -15545,11 +15575,16 @@ impl Runtime {
         stop_bytes: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"LRANGE".len()
             || key.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
