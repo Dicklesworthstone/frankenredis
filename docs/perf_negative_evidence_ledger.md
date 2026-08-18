@@ -57189,3 +57189,103 @@ it is worth widening, cost per element must rise sharply the moment the fallback
   3. `frankenredis-iqicb` introduced arms 1..8 together and measured the family, not the arms. This
      row does not overturn its result for the arms that pay — 5, 6 and 7 sit ~17 instructions per
      element below the plateau, which is the fusion working. It overturns the top of its range.
+
+--------------------------------------------------------------------------------
+
+## KEEP (SELF-SPEEDUP) — 29 literal sites address their histogram field directly: `exists` **-3.41 pct**, `hstrlen` **-2.23 pct**, `strlen` **-1.98 pct**, `hget` **-1.71 pct** worst bound — and MY REGISTERED ACCEPTANCE TEST FAILED
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — instruction-level self-speedup, no vs-incumbent ratio is claimed.
+
+### THE REGISTERED TEST, AND ITS RESULT
+
+`2a6972e6a` registered this before any measurement: *"ACCEPTANCE TEST, binary: `get_control`
+must gain at least 20.0 instr/op... REJECT the lever if `get_control` moves less than 20.0
+instr/op."*
+
+**It failed.** Three draws on `get_control`:
+
+    +34.7   -25.3   -12.8   instr/op
+
+The sign flips and the worst draw is a REGRESSION of +34.7. That is not a gain of 20.0 by any
+reading, and it is recorded as a FAILURE rather than reworded. The broad prediction that
+accompanied it — *"every shape whose command is in the 17 gains 25-50 instr/op"* — is likewise
+**FALSIFIED**: `get` does not, and `getrange` gains only 12.2.
+
+### WHY THE TEST WAS BADLY CHOSEN, WHICH IS MY ERROR AND NOT THE LEVER'S
+
+I wrote the reason down in advance, in the same row, and then picked the shape anyway:
+
+> *"the match is LENGTH-BUCKETED, and `"get"` is three characters sharing that bucket with
+> `"set"` and `"ttl"`, so a GET may already resolve in one length test plus at most three short
+> compares — near-free ALREADY."*
+
+That is exactly what happened. `get_control` is also the noisiest shape on this instrument: it
+has set the A/A envelope twice in this session and once read **-13.3 instr/op against itself**.
+So I chose, as a binary gate, the shape where the mechanism was LEAST likely to be present and
+the noise was LARGEST. **An acceptance shape should be where the mechanism should show most
+clearly, not where the command matters most.**
+
+### WHAT SURVIVES, MEASURED
+
+Both ELFs from the SAME HEAD, differing only in the 29 call sites. Three draws each on the four
+strongest, worst bound quoted:
+
+  shape          draws (instr/op)         worst bound
+  exists_1       -44.1, -42.7, -46.0      **-3.41 pct**
+  hstrlen_base   -32.8, -35.5, -32.6      **-2.23 pct**
+  strlen         -25.3, -26.2, -23.8      **-1.98 pct**
+  hget           -27.1, -26.1, -27.5      **-1.71 pct**
+
+Single draw, reported for completeness and NOT replicated: `lindex` -27.9 (-1.75 pct),
+`sismember` -21.9 (-1.41 pct), `getrange_base` -12.2 (-0.75 pct).
+
+Same-invocation A/A over six shapes on the BEFORE binary: **A/A null median 1.000064; bootstrap
+95% median CI [0.997759, 1.003316]**, 20,000 resamples, widest single deviation 0.531 pct. CV was
+not used, as a gate or otherwise; that bootstrap median-CI is the gate for this verdict and an
+effect inside it is not claimed. The four replicated effects are 3.2x-6.4x the envelope.
+
+**A caution on that envelope**: `get_control`'s A/A drew 943.5 -> 943.5, ratio EXACTLY 1.000000,
+while its A/B swung 60 instr/op across three draws. A single A/A pair can understate a shape's
+variance to zero. That is the second reason `get_control` was the wrong gate, and it is why the
+four claims above rest on three A/B draws each rather than on the A/A.
+
+### THE NARROWER CLAIM THAT REPLACES THE PREDICTION
+
+Not "the match is loss for every command through these sites", but: **the match is loss in
+proportion to how contested the command's LENGTH BUCKET is.** `exists` (6) shares its bucket with
+`strlen`, `getbit`, `zscore` and `substr`; it gains most. `get` (3) shares with `set` and `ttl`
+and resolves almost immediately; it gains nothing. This is the same mechanism that made the enum
+seam's fall-through half read zero, now confirmed from the other direction, and it is the third
+time in this vein that a length-bucket argument has explained a result I predicted wrongly.
+
+### PROVENANCE
+
+  ELF           before `2f0b074318c3f4852fd6402eee224cf440f210e053d60ec6285d354adbf0b9b6`,
+                after  `3ff3378393f72d097a0080ecf3977faf52ad1d49618edb4b692354a2bdaf7687`
+  bench_elf_sha256=3ff3378393f72d097a0080ecf3977faf52ad1d49618edb4b692354a2bdaf7687
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`.
+  host          /data 60G free, checked immediately before each build, above the 42G floor. NO
+                frankenredis build was in flight: the only `cargo` present was
+                `-p fsci-conformance`, a DIFFERENT project, sleeping at 0 pct CPU since 08:31.
+                Per-arm loadavg 9.02 10.22 10.76 at 3349 MHz through 11.12 18.60 14.94 at
+                1429 MHz, peaking at 43.35 mid-run. Instructions by two-point subtraction with
+                `--fr-only`, so there is no incumbent arm and no `serverCron` elapsed-time
+                confound; load and MHz do not enter.
+  pair          Both ELFs from the SAME HEAD, built back to back, one at a time, exit-checked,
+                DISTINCT SHA-256. The BEFORE tree was verified to contain 0 converted sites.
+  tests         `cargo test -p fr-runtime --lib` 634 passed, `-p fr-store --lib` 943 passed,
+                0 failed.
+  disposition   SHIPPED, with its registered acceptance test recorded as FAILED.
+
+### RETRY PREDICATE
+
+1. RE-OPEN IF: `exists_1` on the shipped ELF measures above **1240.0 instr/op** at 2000 ops.
+   That is the AFTER draws (1207.0-1208.3) plus the envelope; above it the conversion regressed.
+2. Do NOT use `get_control` as an acceptance gate on this instrument again. It is the noisiest
+   shape measured here AND the one where a length-bucket mechanism is least likely to appear.
+   Choose the shape where the mechanism should be LARGEST — for a length-bucket argument, the
+   longest contested name in the set.
+3. The 9 remaining RUNTIME-name sites are the last of this vein. Expect them to behave like the
+   enum seam: gains only where the name is long enough to have been contested.

@@ -9227,8 +9227,8 @@ impl Runtime {
             let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
-                    "get",
+                .record_command_histogram_slot_with_kind(
+                    HistSlot::get,
                     elapsed_us,
                     if failed {
                         CommandRecordKind::Failed
@@ -9896,7 +9896,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("set", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::set, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -10043,8 +10043,8 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
-                    "set",
+                .record_command_histogram_slot_with_kind(
+                    HistSlot::set,
                     elapsed_us,
                     CommandRecordKind::Success,
                 );
@@ -10161,8 +10161,8 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
-                    "set",
+                .record_command_histogram_slot_with_kind(
+                    HistSlot::set,
                     elapsed_us,
                     CommandRecordKind::Success,
                 );
@@ -10320,8 +10320,8 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
-                    "set",
+                .record_command_histogram_slot_with_kind(
+                    HistSlot::set,
                     elapsed_us,
                     CommandRecordKind::Success,
                 );
@@ -10563,8 +10563,8 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
-                    "set",
+                .record_command_histogram_slot_with_kind(
+                    HistSlot::set,
                     elapsed_us,
                     CommandRecordKind::Success,
                 );
@@ -10725,7 +10725,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("set", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::set, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -11142,7 +11142,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("incr", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::incr, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -12309,7 +12309,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("hset", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::hset, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -12637,7 +12637,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zadd", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::zadd, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -13850,7 +13850,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zadd", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::zadd, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -14029,7 +14029,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zadd", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::zadd, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -14220,7 +14220,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zadd", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::zadd, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -14410,7 +14410,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zadd", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::zadd, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -15913,7 +15913,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("hget", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::hget, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -16322,8 +16322,8 @@ impl Runtime {
             // EXISTS never returns an error reply.
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
-                    "exists",
+                .record_command_histogram_slot_with_kind(
+                    HistSlot::exists,
                     elapsed_us,
                     CommandRecordKind::Success,
                 );
@@ -16608,7 +16608,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("strlen", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::strlen, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -17161,7 +17161,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("getrange", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::getrange, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -18627,7 +18627,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("sismember", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::sismember, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -18767,7 +18767,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("getbit", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::getbit, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -30277,7 +30277,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("hstrlen", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::hstrlen, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -30418,7 +30418,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("hexists", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::hexists, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -30554,7 +30554,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("llen", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::llen, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -35043,7 +35043,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("scard", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::scard, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -35299,7 +35299,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("lindex", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::lindex, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -36632,7 +36632,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zscore", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::zscore, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -36870,8 +36870,8 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
-                    "set",
+                .record_command_histogram_slot_with_kind(
+                    HistSlot::set,
                     elapsed_us,
                     if failed {
                         CommandRecordKind::Failed
@@ -36927,8 +36927,8 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
-                    "set",
+                .record_command_histogram_slot_with_kind(
+                    HistSlot::set,
                     elapsed_us,
                     CommandRecordKind::Success,
                 );
@@ -36967,7 +36967,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("get", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(HistSlot::get, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
