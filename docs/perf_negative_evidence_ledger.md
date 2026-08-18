@@ -48274,3 +48274,137 @@ RETRY PREDICATE:
   3. When a test named for the incumbent fails after a parity fix, ASK THE INCUMBENT before
      assuming the fix is wrong. Here the fixture was wrong and the fix was right; the cost of
      checking was one probe.
+
+## 2026-08-18 CrimsonHawk: REJECT — converting the 18 keyed-values-write CASCADE sites to the cached write gate is a NULL, because front-classification means the bench never reaches them and the floor twin was already converted (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — the change is backed out, nothing ships, and no ratio against the
+incumbent is claimed. This row exists so the next person does not re-derive the same enumeration
+and repeat the build.
+
+### WHAT WAS TRIED
+
+A source enumeration found every `fr-runtime` executor with a `_with_default_write_gate` /
+`_with_default_read_gate` twin, then every `crates/fr-server/src/main.rs` call site still using
+the UNTHREADED wrapper. It reported **18 sites** calling
+`execute_plain_keyed_values_write_borrowed` inside `process_buffered_frames` — the cascade, which
+has `plain_write_gate_cache` in scope. All 18 are the identical call shape (SADD / SREM / LPUSH /
+RPUSH / PFADD / HDEL / ZREM, arity variants 1 through 18), so they were converted in one
+mechanical patch and built.
+
+That enumeration was correct about the call sites and WRONG about what it implied. The write gate
+is a flat ~187 instr/op and the same conversion had paid on other routes, so the expected result
+was a large per-arm constant.
+
+### THE MEASURED RESULT IS A FLAT NULL
+
+Paired build one change apart, two replicates each, `--fr-only`, instructions per op:
+
+  shape             before             after              delta
+  sadd_existing     1700.7 1700.4      1702.0 1703.5      +2.2
+  srem_missing      1846.3 1828.9      1844.2 1848.4      +8.7  (before spread 17.4)
+  pfadd_same        2062.8 2063.5      2062.3 2061.8      -1.1
+  zadd_base (null)  2658.4 2658.3      2660.3 2659.4      +1.5
+  zcard     (null)  1668.0 1667.9      1668.0 1668.9      +0.5
+
+Nothing moved. The converted shapes sit inside the same band as the two untouched nulls, and
+`srem_missing`'s apparent +8.7 is smaller than its own before-arm spread of 17.4.
+
+### COUNTED MECHANISM — THE BENCH NEVER REACHES THE CHANGED CODE
+
+The instruction totals say "no effect"; the call counts say WHY, and they are unambiguous:
+
+  shape           arm      execute_plain_keyed_values_write_borrowed   (unthreaded name)
+  sadd_existing   before   1.0000 calls/op
+  sadd_existing   AFTER    1.0000 calls/op     <- unchanged
+  srem_missing    before   1.0000 -> AFTER 1.0000
+  pfadd_same      before   1.0000 -> AFTER 1.0000
+
+**If these shapes went through any of the 18 converted sites, the unthreaded name would read
+0.0000 in the AFTER arm.** It does not. The exercised call sites are elsewhere, so the patch is
+inert for this workload by construction, not by a small margin.
+
+`plain_borrowed_default_key_write_allows` reads **0.0000 calls/op in the BEFORE arm** on all
+three shapes — there was no per-op gate call to remove in the first place.
+
+### WHY: FRONT-CLASSIFICATION MADE THE CASCADE ARMS DEAD FOR THESE COMMANDS
+
+There are TWO sets of keyed-values-write arms in `main.rs`:
+
+  1. `process_buffered_frames`, the ~166-arm CASCADE — the 18 sites this patch converted.
+  2. `dispatch_floor_keyed_values_write`, reached from the floor class table — arities 1..18.
+
+SADD, SREM and PFADD all have floor-table entries (`BorrowedDispatchFloorCommand::Sadd`, `Srem`,
+`Pfadd`), so they are front-classified and take path 2. **Path 2 was ALREADY converted**: every
+arm there already calls
+`execute_plain_keyed_values_write_borrowed_with_default_write_gate(..., default_write_allowed)`.
+
+So the cascade arms are the pre-classification FALLBACK, duplicated by the floor dispatcher and
+not taken by any front-classified command. The 18 "unthreaded call sites" were real, and dead.
+
+**The reusable lesson is about the DETECTOR, not this patch.** An enumeration of unthreaded call
+sites is a list of CANDIDATES, not of opportunities: it cannot see that a command was
+front-classified out of the arm it lives in. Before converting a cascade arm, check whether the
+command has a floor-table entry, and whether the corresponding
+`dispatch_floor_*` arm already carries the gate. That check is free and would have saved a
+paired build plus five measured shapes here.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The instrument carries its own null: A/A null median 1.000002, bootstrapped over 20,000
+resamples, 95% median CI [0.996069, 1.003947], six draws and 30 pairwise ratios, banked in
+`0bf781d57`. Every delta above is inside that interval, which is the basis for calling this a
+null rather than a small win.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and no effect inside that interval is claimed.
+
+### PAIRED BUILD, AND A FAILED STABILITY CHECK THAT IS RECORDED RATHER THAN HIDDEN
+
+The FIRST attempt at the pair FAILED its own stability check: built AFTER, BEFORE, AFTER again,
+and the two AFTER ELFs were DIFFERENT (`b28162339d82f181` vs `763713f6fa3fc94e`). Cause: peers
+committed into this shared checkout mid-cycle and HEAD moved from `9177b99f1` to `03b4afefd`.
+Those ELFs were discarded, not used.
+
+The pair quoted above is the SECOND attempt, and it passes at the ELF level: the two AFTER builds
+are BIT-IDENTICAL (`ccc853910ea07d80`) with BEFORE distinct (`22a13f450e611473`). HEAD moved again
+during that window too, but bit-identical AFTER arms prove whatever moved did not reach this
+binary — which is the property the check exists to establish, and it is stronger than a HEAD
+comparison.
+
+A peer was concurrently editing `scripts/shape_instr_per_op.py`, the harness itself, so its
+sha256 was recorded before and after the measurement: `1beb5dc8dd7eb8d1` both times, unchanged
+across all 20 arms.
+
+### PROVENANCE
+
+  ELF           AFTER `ccc853910ea07d803ba408a06eefe5cfa08cf9222a4f64b9a864deeb6efd07b9`,
+                BEFORE `22a13f450e6114739b7062ade3ab09a367a1f3c0dae21ba32b6603d060ec58d6`,
+                plain `--release`, no feature flags, built locally, copied to a private path and
+                sha256'd there.
+  bench_elf_sha256=ccc853910ea07d803ba408a06eefe5cfa08cf9222a4f64b9a864deeb6efd07b9
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` (sha `1beb5dc8dd7eb8d1`, verified unchanged
+                across the run), `scripts/call_count_delta.py`.
+  host          /data 115G free, checked immediately before each build. loadavg 8.79 10.53 10.55
+                at build; CPU MHz mean 2401-2475 across arms; the fr-only Ir numerator is
+                load-immune and the harness reported WINDOW: FIT for fr-only on every arm.
+  disposition   BACKED OUT. `crates/fr-server/src/main.rs` is byte-identical to HEAD; nothing
+                from this experiment is in the tree.
+
+### RETRY PREDICATE
+
+1. Re-open ONLY if the cascade keyed-values arms become reachable again — that is, if SADD, SREM,
+   LPUSH, RPUSH, PFADD, HDEL or ZREM LOSE their floor-table entries, or if a new keyed-values
+   command is added WITHOUT one. The cheap check is a call count: if
+   `execute_plain_keyed_values_write_borrowed` reads 1.0000 calls/op while
+   `dispatch_floor_keyed_values_write` reads 0.0000 on the same shape, the cascade is live again
+   and the conversion is worth redoing.
+2. Do NOT re-run this from a fresh enumeration of unthreaded call sites. That enumeration will
+   keep reporting these 18 sites forever, because they really are unthreaded; they are simply not
+   executed. Check the floor table first.
+3. There is a SEPARATE and untested question this row does not answer: these cascade arms appear
+   to be dead code for every front-classified command, so DELETING them may shrink `.text` and
+   shorten the cascade walk. That is not claimed here and must not be attempted without checking
+   `--features perf-ab-cascade-bypass`, which deliberately routes through them and would lose its
+   reference path.
