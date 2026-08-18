@@ -5586,6 +5586,65 @@ fn rebind_listeners(
     }
 }
 
+/// Bind a Unix domain socket listener the way upstream `anetUnixServer` does.
+///
+/// (frankenredis-w1djx) fr accepts `unixsocket` and `unixsocketperm` as CONFIG parameters but has
+/// never listened on one -- there is no `UnixListener` anywhere in production code, which is why
+/// `INFO`'s `unixsocket` field is CORRECTLY absent rather than merely unimplemented: emitting it
+/// would advertise a listener that does not exist.
+///
+/// This is the BIND half. It encodes the three parts of upstream's algorithm that are easy to get
+/// wrong, each verified against `anet.c` / `unix.c`:
+///
+///   * `sun_path` is 108 bytes on Linux, so the path must fit in 107 plus a NUL. Upstream checks
+///     the length FIRST (`anetUnixServer`) and reports it as its own error, rather than letting
+///     `bind` fail opaquely much later.
+///   * The stale socket file is unlinked before binding and the failure is deliberately ignored --
+///     `unix.c` says "don't care if this fails". A leftover file from an unclean shutdown must not
+///     stop the server starting.
+///   * `chmod` runs ONLY when `perm` is non-zero (`anetListen`: `if (sa->sa_family == AF_LOCAL &&
+///     perm)`), so `unixsocketperm 0` leaves the mode to the umask. Upstream ignores the chmod
+///     result, so this does too.
+///
+/// ORDERING DIFFERENCE, recorded because it is observable rather than cosmetic: upstream chmods
+/// BETWEEN `bind` and `listen`, so the socket is never listenable with the wrong mode.
+/// `UnixListener::bind` performs both, so the chmod lands immediately after. The window is one
+/// syscall wide, and a connection arriving inside it is governed by the umask-derived mode instead
+/// of `unixsocketperm`.
+///
+/// NOT YET WIRED TO ACCEPT. `ClientConnection` is concretely typed on `TcpStream`, so accepting a
+/// `UnixStream` needs the connection type to become generic or enum-dispatched over stream kind --
+/// every read, flush, writev and uring site. Landing the listener separately keeps that refactor
+/// honest: this function is inert until something calls it.
+#[cfg(unix)]
+#[allow(dead_code)]
+fn bind_unix_listener(path: &str, perm: u32) -> Result<mio::net::UnixListener, String> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // `sizeof(sa.sun_path)` is 108 on Linux; upstream's guard is `> sizeof(sun_path) - 1`.
+    const SUN_PATH_MAX: usize = 107;
+    if path.len() > SUN_PATH_MAX {
+        return Err(format!(
+            "unix socket path too long ({}), must be under {}",
+            path.len(),
+            SUN_PATH_MAX + 1
+        ));
+    }
+
+    // Upstream unlinks unconditionally and ignores the result.
+    let _ = std::fs::remove_file(path);
+
+    let listener = mio::net::UnixListener::bind(path)
+        .map_err(|e| format!("failed to bind unix socket '{path}': {e}"))?;
+
+    if perm != 0 {
+        // Upstream ignores chmod's return value here too.
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(perm));
+    }
+
+    Ok(listener)
+}
+
 fn accept_connections(
     listener: &TcpListener,
     poll: &mut Poll,
