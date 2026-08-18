@@ -13589,7 +13589,18 @@ fn process_buffered_frames(
                     // MEASURED: with the clear in place, `llen` re-derived the gate 1.0000
                     // times/op while `lindex` — identical in every way except that it returns
                     // FastEncodedReply, whose arm never cleared the cache — held it at 0.0000.
-                    output_hard_limit_cache = None;
+                    //
+                    // (frankenredis-getexgate) THE OUTPUT-LIMIT CACHE IS NOW KEPT HERE TOO, for
+                    // exactly the same reason. `effective_output_hard_limit` is a function of
+                    // `is_replica`, `is_pubsub_client` and `client_output_buffer_limits` — moved
+                    // only by REPLICAOF, SUBSCRIBE and CONFIG SET, every one of which goes down
+                    // the GENERIC argv path, which still clears this cache at the `Parsed` arm
+                    // and again before `process_argv_frame`. Serving a borrowed FastReply cannot
+                    // move any of the three.
+                    //
+                    // `pending_output_bytes()` is NOT cached and is still recomputed every
+                    // iteration, so the disconnect check still sees the buffer growing; only the
+                    // LIMIT it is compared against is held for the pass.
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if !runtime.suppress_current_network_reply() {
                         encode_client_reply(&response, client_resp3, &mut conn.write_buf);
@@ -13613,7 +13624,10 @@ fn process_buffered_frames(
                     // RESP3), written directly rather than through an allocated frame.
                     processed_frames = processed_frames.saturating_add(1);
                     plain_get_read_gate_cache = None;
-                    output_hard_limit_cache = None;
+                    // (frankenredis-getexgate) Output-limit cache kept, same argument as the
+                    // FastReply arm above. The READ gate clear on the line above is deliberately
+                    // LEFT IN PLACE here: removing it is a separate change with a separate
+                    // measurement, and this arm serves writes whose routes take the write gate.
                     if !runtime.suppress_current_network_reply() {
                         conn.write_buf.extend_from_slice(b"+OK\r\n");
                     }
