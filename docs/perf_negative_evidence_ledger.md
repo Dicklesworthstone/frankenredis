@@ -48408,3 +48408,66 @@ across all 20 arms.
    shorten the cascade walk. That is not claimed here and must not be attempted without checking
    `--features perf-ab-cascade-bypass`, which deliberately routes through them and would lose its
    reference path.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: INSTRUMENT + ATTRIBUTION EXHAUSTED — `perf mem record` is BROKEN on this host (use `perf record -e ibs_op// -d -p PID`), and the data-address attribution it enables ALSO fails to concentrate `geosearch_2`'s misses: top data symbol 3.10 pct (`frankenredis-eh2ct`)
+
+`2e919c005` closed the frame-level attribution and banked one specific next step: change the
+INSTRUMENT, to `perf mem` / `perf c2c`, and reopen a targeted lever only IF that attribution
+names a structure holding more than about 20 pct of the miss excess. I made the instrument
+change. THE PREDICATE RESOLVES NEGATIVE: nothing is nameable at that level either.
+
+fr ELF bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399.
+Sampling only, no ratio and no competing arm, so this is admissible on a busy host: it asks
+where fr's OWN memory traffic lands, which is a within-process share. loadavg 8.71 -> 8.10
+across the run, CPU MHz 2584.
+
+### The tooling finding, which is reusable and cost me four attempts
+
+`perf mem record` FAILS on this host, with or without `-p`:
+
+    Failed to collect 'ibs_op//' for the '<pid>' workload: No such file or directory
+
+THE INSTRUMENT IS FINE AND THE FRONT-END IS WHAT IS BROKEN. Verified three ways before
+concluding anything: `perf record -e ibs_op//` alone captures 18 samples; `perf c2c record`
+captures 22 and `perf evlist` shows it used `ibs_op//`; and `perf record -e ibs_op// -p <live
+server>` captures 34. The working invocation is
+
+    perf record -e ibs_op// -d -p <pid> -- sleep <n>
+
+and the `-d` is load-bearing: without it the samples carry no ADDR/DATA_SRC and every
+data-address sort returns EMPTY, which is what my first successful 28,757-sample capture did.
+I nearly banked "perf mem is unusable here", which would have been wrong in the direction that
+costs someone else a window; the `c2c` cross-check is what caught it.
+
+### The attribution, and why it settles the question rather than opening one
+
+13,239 samples with `-d`, driven by `redis-benchmark -n 2000000 -P 16`:
+
+  memory level of classified loads      data DSO of all samples
+    36.67 pct  L1 hit                     72.04 pct  [unknown]
+     1.18 pct  L2 hit                     20.55 pct  [stack]
+     0.41 pct  LFB/MAB hit                 4.25 pct  [anon:mimalloc]
+     0.02 pct  cross-node cache hit        1.60 pct  fr_mimalloc
+    61.72 pct  N/A                         0.82 pct  libm.so.6
+
+TOP SINGLE DATA SYMBOL: 3.10 pct. Heap objects carry no symbol so they render as
+`0000000000000000` and cannot be told apart by name, but the SHARES are the answer regardless:
+the largest single data address accounts for 3.10 pct of samples, against a 20 pct bar. There
+is no structure to name.
+
+Two secondary readings, offered as observations and not as leads. Almost nothing escapes L2 --
+0.02 pct cross-node against 1.18 pct L2 hits -- so `geosearch_2`'s misses are L1 misses served
+by L2, which is consistent with a small working set and puts a low ceiling on what any locality
+fix could buy. And 20.55 pct of samples land on the STACK, which is high enough to be worth
+someone's curiosity but is not a 20 pct share of the MISS EXCESS and is not being claimed as one.
+
+RETRY PREDICATE: the attribution question for `geosearch_2` is CLOSED at three levels -- per
+frame (flat, largest 5.64 pct), per hypothesis (seven eliminated in `2e919c005`), and now per
+data address (top 3.10 pct). Do NOT open a fourth attribution attempt on this shape; the next
+person to touch it should take the certified throughput deficit (0.8578, `f8067cba3`) as a
+standing fact about a diffuse cost and spend the window on a shape whose deficit CONCENTRATES.
+Reopen only IF a future profile shows any single data address or frame above 20 pct on this
+shape, which three independent instruments now say does not exist. The reusable output of this
+row is the invocation above, not the geo result.
