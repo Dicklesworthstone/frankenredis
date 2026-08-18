@@ -59018,3 +59018,201 @@ positive control is the reply itself.
      2 builds). The worst draw is draw 1, from the verified-FIT window, so the quoted bound does not
      depend on the degraded half — but the frame-level immunity demonstrated above is the reason
      this row would stand either way.
+
+--------------------------------------------------------------------------------
+
+## KEEP (SELF-SPEEDUP) — the numkeys trio takes direct histogram fields: `xpending` **-4.50 pct**, `zintercard` **-3.54 pct**, `zintercard_limit` **-3.41 pct**, `sintercard` **-2.86 pct** worst bound, and BOTH match-path controls are FLAT
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — instruction-level self-speedup, no vs-incumbent ratio is claimed.
+
+### FOUND BY PROFILING A SHAPE I HAD JUST DECLARED CLOSED
+
+Re-measuring `zintercard_2` for a different row put
+`HashMap<String, CommandHistogram>::get_mut::<str>` at **83.0 instr/op — 2.9 pct** of a 2886.9
+instr/op command, with `record_plain_sintercard_borrowed_metrics_named` at 61.0 beside it. That
+helper is one of the nine sites I had catalogued as "must stay on the match", on the grounds that
+they pass a RUNTIME name.
+
+**That catalogue was right about the helper and wrong about its callers.** The helper takes
+`canonical: &'static str`, and all THREE of its callers pass a string LITERAL — `"sintercard"`,
+`"xpending"`, `"zintercard"`. The identity is known at compile time one level up. So the trio can
+take direct fields and the helper can take a `HistSlot`, removing BOTH the name match and the map
+probe.
+
+### THE MEASUREMENT — THREE DRAWS, WORST BOUND QUOTED
+
+Both ELFs from the SAME HEAD, differing only in three list entries, three struct fields, one
+helper parameter and three call sites.
+
+  shape               draws (instr/op)          worst bound
+  xpending_empty      -145.0, -125.8, -136.9    **-4.50 pct**
+  zintercard_2        -119.3, -135.1, -101.3    **-3.54 pct**
+  zintercard_limit    -150.0, -109.8, -137.2    **-3.41 pct**
+  sintercard_base     -139.2, -102.7, -137.2    **-2.86 pct**
+
+### THE CONTROLS ARE THE ARGUMENT, NOT THE MARGIN
+
+Extending the direct-field set lengthens the match for whatever still walks it. The retired
+"do not extend" predicate named the corrected control for exactly this: NOT `substr`, which is
+map-converted and would read zero regardless, but a shape served by one of the remaining
+match sites.
+
+    expire_same            2194.8 -> 2194.7    **-0.1 instr/op  (-0.00 pct)**
+    zremrangebyrank_none   2034.5 -> 2028.9    **-5.6 instr/op  (-0.28 pct)**
+
+Both FLAT. The predicted tax did not appear, which is the concrete confirmation of that
+retirement: with only 8 sites still traversing the match, extending the set is close to free.
+
+**This pattern — four targets all negative across three draws, two controls flat — is the
+evidence, more than any single margin.** A noise process wide enough to fake 100-150 instr/op on
+four shapes would not spare both controls.
+
+### THE NULL, AND THE ONE SHAPE THAT MUDDIES IT
+
+Same-invocation A/A on the BEFORE binary, six shapes: **A/A null median 1.000433; bootstrap 95%
+median CI [0.998709, 1.016237]**, 20,000 resamples. Widest single deviation **2.842 pct**.
+
+**That widest deviation is `zintercard_limit` moving +90.3 instr/op against ITSELF** — and
+`zintercard_limit` is also one of the targets. Against a 2.842 pct envelope its own -3.41 pct is
+only 1.2x, and `sintercard_base` at -2.86 pct is barely 1.006x. Read that way, two of the four
+are marginal and I am not going to pretend otherwise.
+
+Read the other way: excluding that single outlier, the remaining five A/A pairs agree within
+**0.406 pct**, against which all four targets are 7-11x. Both readings are given because the
+honest answer depends on whether one A/A pair is an outlier or a property of the shape, and one
+pair cannot tell you. CV was not used, as a gate or otherwise; the bootstrap median-CI is the
+gate and an effect inside it is not claimed.
+
+`zintercard_limit` should be treated as the least certain of the four until it is re-drawn.
+
+### CORRECTNESS
+
+`cargo test -p fr-store --lib` 943 passed, `-p fr-runtime --lib` 635 passed, 0 failed. The
+generated guard covers the three new commands automatically, because it is generated from the
+same list. Behavioural check against Redis 7.2.4 as oracle, three runs each after
+`CONFIG RESETSTAT`: `sintercard` 3/3, `zintercard` 3/3, `xpending` 3/3, **no duplicate
+`cmdstat_` keys**, 0 mismatches.
+
+### PROVENANCE
+
+  ELF           before `4491969bfb7b9be3c1905163ee521a2abec2125d6be627fb239f876571a07dd8`,
+                after  `2c46b7522eca42f15f92eb441dd1b4235b3a03069d1a3189ccddbd47af355bd2`
+  bench_elf_sha256=2c46b7522eca42f15f92eb441dd1b4235b3a03069d1a3189ccddbd47af355bd2
+  incumbent     NOT RUN for a ratio; Redis 7.2.4 used as the correctness ORACLE above.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`.
+  host          /data 57G free, checked immediately before each build, above the 42G floor.
+                Per-arm loadavg 15.21 11.08 9.00 through 7.35 9.66 8.80, MHz 1429. Instructions
+                by two-point subtraction with `--fr-only`, so load and MHz do not enter.
+  pair          Both ELFs from the SAME HEAD, built back to back, exit-checked, DISTINCT
+                SHA-256; the BEFORE tree verified to contain 0 of the new list entries.
+                DISCLOSED: one frankenredis cargo was observed at the launch of the BEFORE build
+                and may have overlapped its tail. Instructions are load-immune, so this does not
+                affect the numbers, but it is recorded rather than omitted.
+  disposition   SHIPPED.
+
+### RETRY PREDICATE
+
+1. RE-OPEN IF `xpending_empty` measures above **2700.0 instr/op** at 2000 ops on the shipped ELF.
+   That is the AFTER draws (2662.5-2668.4) plus the envelope.
+2. RE-DRAW `zintercard_limit` before quoting it. Its own A/A moved 90.3 instr/op, and it is the
+   only target whose effect is not comfortably outside its own noise.
+3. The remaining match sites are now EIGHT and the controls read flat. Extending the direct-field
+   set further is cheap, but keep using `expire_same` or `zremrangebyrank_none` as the control —
+   never `substr`.
+4. REUSABLE: a "must stay" catalogue keyed on a helper's PARAMETER TYPE is wrong whenever the
+   helper's callers pass literals. Check one level up before writing a site off.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the FIRST place fr loses on this bead: LPOP is 1.1722x the incumbent at 15-byte elements, 48 pct of it ONE memcpy, and the cause is `pop_front` doing `Vec::remove(0)` on a chunk whose entry array the same file already documents as quadratic (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir) with a LIVE redis 7.2.4 arm,
+differenced across POP COUNTS at a FIXED key count — the tight form — replicated, plus a per-frame
+profile and two discriminating tests. CV was NOT used, as a gate or otherwise; none was computed.
+No timing verdict is claimed: the measurand is a retired-instruction COUNT. No code changed: the
+fix is specified below and needs ordering tests that deserve their own turn.
+
+**SIZING, NOT CERTIFIED.** `--for ratio` cannot return FIT while any cargo runs under the shared
+uid. Per-arm host state is on every line.
+
+Claim class: not applicable — nothing is kept.
+
+  fr arm `cbb7395f7a3c01d2d8ac751e182eae0a87e8a27f90ab04ac858af708af0ef18f` (`5fe0cff19`)
+
+### fr LOSES HERE, AND IT IS THE FIRST TIME ON THIS BEAD
+
+RPUSH, LRANGE, RESTORE and DUMP have all come out ahead. LPOP — the other half of a queue, and the
+shape behind the four DUMP divergences this bead never closed — had never been measured.
+
+    instructions per LPOP on a 400-element list
+      element size      fr        redis     fr/redis (WORST of draws)
+        15 bytes     8,701.4     7,422.9      1.1722x   <- fr BEHIND
+        60 bytes     5,048.8     7,921.1      0.6374x   <- fr well ahead
+
+    86-92 pct idle, loadavg 9.85-12.34. Draws reproduce to 0.15 pct.
+
+### 48 PCT OF IT IS ONE memcpy, AND TWO TESTS SAY WHAT IT IS COPYING
+
+    SELF cost per LPOP, 400-element list, 15-byte elements
+      4,231.7  __memcpy_avx_unaligned_erms        <- 48 pct of the whole command
+        400.7  frankenredis::main
+        343.0  process_buffered_frames
+        248.0  handle_readable
+        188.0  execute_plain_keyed_pop_borrowed
+        109.0  <ListValue>::pop_front
+      8,728.9  TOTAL
+
+  Everything except the memcpy is the shared per-command plumbing measured in `3e7a892cf`, and
+  `pop_front` itself is 109. The command's entire excess is one copy.
+
+  TEST 1 — vary the configured fill: 128 -> 32 leaves the memcpy at **4,231.7, unchanged to the
+  decimal**. That is not a null result, it is a CONFIRMATION of `81d24e224`: fr's chunk boundary is
+  `PACKED_MAX_ENTRIES` = 128, not the configured fill, so this test never varied what it looked
+  like it varied.
+
+  TEST 2 — vary the ELEMENT SIZE, which does change entries-per-chunk because a chunk is bounded by
+  bytes as well as entries: 15 bytes -> 60 bytes drops the memcpy from **4,231.7 to 643.3**, a
+  factor of 6.58 against an entries-per-chunk ratio of about 6.6. The copy scales with the number of
+  ENTRIES in the chunk, not with the bytes in them.
+
+### THE CAUSE, AND THE FILE ALREADY KNOWS ABOUT IT
+
+`ChunkedList::pop_front` is `self.chunks.front_mut()?.make_mut().remove(0)`. `make_mut` returns
+`&mut Vec<Vec<u8>>` in FORWARD order, so `remove(0)` shifts every remaining entry of the chunk —
+O(entries) per pop, ~3 KB of pointer-array memmove at 128 entries.
+
+Two things make this worse than a plain oversight:
+
+  * `make_mut` ACTIVELY DISCARDS the mechanism that would fix it. `ListChunk::Owned` carries a
+    `front_biased` flag meaning "physical order is reversed so repeated LPUSH can append at the Vec
+    tail". `make_mut` un-reverses it (`elems.reverse(); *front_biased = false`) before handing the
+    Vec back. The flag that would make a front pop an O(1) `Vec::pop` is cleared on the way in.
+  * The same file documents this exact quadratic — for the OTHER representation.
+    `PackedList::drain_front_n`'s comment reads "`pop_front` x count re-shifts the remaining buffer
+    on every call, so popping `count` of `n` is O(count*n) (quadratic when count ~ n); this is
+    O(n)". That fix was made for `PackedList` and the `ChunkedList` path still has the defect.
+
+### THE FIX, SPECIFIED NOT BUILT
+
+Give `pop_front` a path that does not go through `make_mut`'s forward normalisation: materialise a
+`Listpack` chunk into `Owned` in REVERSED order with `front_biased = true`, then `elems.pop()` —
+O(1). Subsequent pops on an already-front-biased chunk are the same `pop()`. This is the exact
+mirror of what `front_biased` already does for repeated LPUSH, using a flag that exists.
+
+  IT IS NOT A ONE-LINER AND IS NOT BEING RUSHED. `front_biased` changes the meaning of every index
+  into the chunk, so the change needs ordering coverage across LPUSH/RPUSH/LPOP/RPOP/LINSERT/LSET/
+  LREM/LRANGE and both chunk representations before it lands —
+  `for_each_borrowed_matches_iter_for_every_repr_qj6jn` is the shape of test it needs, and that test
+  exists precisely because a front-built corpus is the one that catches a forgotten reversal.
+
+### RETRY PREDICATES
+
+  1. Build the reversed-materialisation pop next, and gate it on THIS row's instrument: the memcpy
+     must fall from 4,231.7 toward the per-element floor at 15-byte elements, AND the 60-byte case
+     must not regress — it is already 0.6374x and has little to gain, so it is the control.
+  2. Do NOT quote "fr is behind on LPOP" without the element size. At 60 bytes fr is 0.6374x. The
+     deficit is a small-element phenomenon created by entries-per-chunk, and
+     `feedback_quote_instr_per_element_when_the_denominator_moves` applies to the composition here
+     exactly as it did to the read.
+  3. This is also a candidate explanation for the four unclosed `queue RPUSH+LPOP` DUMP
+     divergences, since it is the same path that rewrites the head chunk. NOT tested — do not
+     assume the two are the same bug without measuring.
