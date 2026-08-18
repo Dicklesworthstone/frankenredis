@@ -4145,9 +4145,29 @@ impl ChunkedList {
                     let mut derivable = true;
                     for span in &entries {
                         raw_total += span.byte_len() as u64;
+                        // (frankenredis-qj6jn) The first-byte test is a cheap PRE-FILTER, not the
+                        // condition. What actually invalidates the derivation is the string BEING a
+                        // canonical i64: only then does `list_lp_entry_bytes` pick the integer width
+                        // while the source stored a string width. A string that merely STARTS like a
+                        // number -- `000000000000042`, `20260818T000042`, `7f3a...` -- re-encodes as a
+                        // string, so the derivation was correct for it and surrendering the chunk was
+                        // pure loss. Measured on a 300-element list, that surrender cost 2.74x to
+                        // 6.40x on this frame and turned a certified 0.9115x string RESTORE into
+                        // 1.5998x on digit-leading data.
+                        //
+                        // `list_lp_int` is the exact test, and NOT `list_lp_int_bytes_are_canonical`:
+                        // that one checks FORM only and defers range to the parse, so a 25-digit
+                        // canonical decimal would pass it, overflow `i64`, re-encode as a string, and
+                        // wrongly surrender the chunk.
+                        //
+                        // Ordering is load-bearing. `as_bytes` materialises a bounds-checked
+                        // subslice, which is precisely what `byte_len`/`first_byte` exist to avoid in
+                        // this fold, so the new term sits LAST and `&&` short-circuits: a
+                        // letter-leading list never reaches it and pays nothing.
                         if derivable
                             && span.is_string_encoded()
                             && matches!(span.first_byte(&bytes), Some(b) if b.is_ascii_digit() || b == b'-')
+                            && list_lp_int(span.as_bytes(&bytes)).is_some()
                         {
                             derivable = false;
                         }
@@ -9097,8 +9117,20 @@ mod tests {
         );
 
         // NON-CANONICAL: int-looking values stored as listpack STRINGS.
-        let noncanon: Vec<&[u8]> =
-            vec![b"123", b"4096", b"-1", b"0", b"00", b"9223372036854775807"];
+        // (frankenredis-qj6jn) `99999999999999999999999` is the case that distinguishes the two
+        // candidate guard conditions: it is a CANONICAL decimal that OVERFLOWS i64, so
+        // `list_lp_int` rejects it, fr re-encodes it as a string, and the derivation is CORRECT --
+        // the guard must NOT fire. A form-only canonicality test would have fired and surrendered
+        // the chunk for nothing.
+        let noncanon: Vec<&[u8]> = vec![
+            b"123",
+            b"4096",
+            b"-1",
+            b"0",
+            b"00",
+            b"9223372036854775807",
+            b"99999999999999999999999",
+        ];
         let noncanon_lp = string_encoded_listpack(&noncanon);
         assert_fused_totals_match_rewalk(
             "non-canonical string-encoded ints",
