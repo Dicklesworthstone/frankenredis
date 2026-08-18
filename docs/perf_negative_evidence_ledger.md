@@ -56041,3 +56041,92 @@ window banner** — that is the whole failure here. Two FIT draws of `geosearch_
 inside 0.74-0.77x would make the worst bound certifiable; a draw outside 0.60-0.80x on either
 shape means something moved and this sizing is stale. **Do not carry "GEOSEARCH just crossed
 1.0x" forward** without a measurement attached: three draws contradict it.
+
+## 2026-08-18 CrimsonHawk: MEASURED — fr is AHEAD of redis 7.2.4 on string list RESTORE at a WORST bound of 0.9074x over three draws, and the window gate held at the OPEN but not at the CLOSE (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) with a LIVE redis
+7.2.4 arm, both sides in ONE INVOCATION and INTERLEAVED fr / redis / fr / redis per draw so each
+side is bracketed by the other. CV was NOT used, as a gate or otherwise — no coefficient of
+variation appears in this row's decision path and none was computed. No timing verdict is claimed:
+the measurand is a retired-instruction COUNT. No code changed and NO BUILD was run — a build would
+have disqualified the window, and the fr arm is an artifact already on disk.
+
+Claim class: not applicable — this row banks NOTHING as campaign output, for the reason below.
+
+### THE GATE HELD AT THE OPEN AND NOT AT THE CLOSE, SO THIS IS NOT CERTIFIED
+
+`scripts/certification_window.py --for ratio` was polled until it returned FIT and the run was
+started immediately:
+
+    OPEN   builds 0, VERDICT for ratio: FIT
+    CLOSE  non-stationary: 1min 9.00 vs 5min 11.89 = 24 pct apart (limit 15 pct)
+           VERDICT for ratio: UNFIT
+
+The window went non-stationary because loadavg FELL during the run — 15.72 at the poll that
+preceded FIT, 9.00 at the close. That is the benign direction, and callgrind Ir is immune to load
+except through the slope-duration exposure recorded on `308db786f`. It is still a gate that did
+not hold at both ends, and `feedback_a_flaky_gate_is_not_a_passed_gate` is on record that a gate
+which moves is not a gate that passed. So: REPLICATED STANDING, worst bound quoted, NOT CERTIFIED,
+and not campaign output. A certified row needs one run with FIT at both ends.
+
+  fr arm        `6c6f38416be08e7a9c77a1754ba45f09a87d5d6a16120bde972f06affb9dc7b2`
+                (release artifact at `9cf845b22`, the code now on main for fr-persist/fr-store)
+  incumbent     `legacy_redis_code/redis/src/redis-server`, vendored 7.2.4,
+                sha256 `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+
+### WHAT IT READS
+
+    RESTORE+DUMP, 300 elements, fill 128, slope 10 vs 30 keys, distinct keys, fr/redis interleaved
+
+    ALL-STRING   0.9045 / 0.9074 / 0.9027    WORST 0.9074x   <- fr AHEAD
+      per-draw fr A/A +0.089 / −0.493 / +0.181 pct; redis A/A −0.375 / −0.139 / −0.149 pct
+      91.2-92.4 pct idle, loadavg 11.35-12.61, MHz mean 1822-2074 against a 1429-4292 spread
+    50/50 MIXED  1.3032 / 1.3079              WORST 1.3079x
+    ALL-INTEGER  2.1117 / 2.1438              WORST 2.1438x
+
+  Every draw's own A/A is under 0.5 pct on both arms, which is what makes a 9 pct margin readable
+  at all. The three string draws span 0.47 pct — the spread is smaller than the margin by a factor
+  of twenty.
+
+### IT MOVED BY WHAT THE LAST LEVER SAID IT WOULD
+
+`a30758265` measured the same three shapes on the previous binary. `9cf845b22` landed between them
+and claimed −2.88 / −2.97 / −3.59 pct on the fr side by a deterministic instrument. The ratios
+moved by:
+
+    shape          before      now       ratio delta     9cf845b22 claimed
+    all-string     0.9277x    0.9074x     −2.2 pct        −2.88 pct
+    50/50 mixed    1.3531x    1.3079x     −3.3 pct        −2.97 pct
+    all-integer    2.1998x    2.1438x     −2.5 pct        −3.59 pct
+
+  Two independent instruments — a self-A/B on one binary, and a vs-incumbent ratio taken a turn
+  later against a live arm — agree to within about a point on all three shapes. That is worth more
+  than either number alone, and it is the first cross-check this vein has had.
+
+### THE RESTORE-ISOLATION LAW, ENGAGED
+
+`b1o02`'s standing law says RESTORE-in-isolation flatters redis, because fr decodes eagerly while
+redis attaches the listpack shallowly and walks it on EVERY read, with a break-even well under one
+read per RESTORE — so an isolation ratio is not a deficit. It applies to this row and sharpens it
+in both directions:
+
+  * the shape runs RESTORE **+ DUMP**, one read per restore, nominally at the ~1.034 reads/RESTORE
+    break-even — but DUMP on a restored list goes through `quicklist_packed_nodes` and copies
+    retained blobs without touching the decoded spans, so fr's eager decode is NOT amortised here;
+  * therefore 2.1438x is an UPPER BOUND on the integer deficit, and 0.9074x is a LOWER bound on
+    the string lead — fr's advantage there would GROW with reads per restore, not shrink.
+
+  Nobody should quote either figure as a workload result without running
+  `scripts/hash_restore_read_premise_run.sh` and stating the break-even.
+
+### RETRY PREDICATES
+
+  1. The certified string row is STILL OWED. Reopen when `--for ratio` returns FIT at BOTH the open
+     and the close of one run; three draws at that condition converts 0.9074x from replicated
+     standing to campaign output. The gate has now blocked this on three consecutive turns —
+     twice on other projects' builds under the shared uid, once on load drifting DOWN mid-run.
+  2. Do NOT quote `project_list_restore_gap_architectural`'s 3.29x. It is superseded on every
+     composition measured here, and on the string shape the sign has changed.
+  3. The integer deficit is still the eager decimal render, priced at 57.09 instr/elem by
+     `a30758265` and constrained by `frankenredis-33832`. Nothing in this row changes that; it only
+     narrows the number the render has to beat, from 2.1998x to 2.1438x.
