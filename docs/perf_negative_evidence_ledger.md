@@ -63299,6 +63299,13 @@ verdict is claimed. The 1.399x quoted below is `ac77762d8`'s OWN measurement, ci
 Claim class: not applicable — nothing new is banked. Campaign output: no. What this row changes is
 lever 2's status: from "specified, magnitude unknown" to "port of a measured win".
 
+PROVENANCE NOTE: this row's text reached `origin/main` inside a PEER's commit `a201aa1c9` ("the
+memset omission MEASURED at 1012.4 instr/key"), which swept it from the index before I could commit
+it under my own message. The content is mine and unaltered; searching the git log for a commit
+describing this finding will not find one. Recorded here because a row whose commit message
+describes something else is undiscoverable by the archaeology that found `ac77762d8` in the first
+place. History was NOT rewritten to fix it — `--amend`/rebase in a shared checkout is forbidden.
+
 ### THE SIZE RULE IS IMPLEMENTED TWICE, AND ONLY ONE COPY WAS FUSED
 
     fr_persist::parse_listpack_integer   (fr-persist/src/lib.rs:2888)   SINGLE-PASS, fused
