@@ -47280,3 +47280,129 @@ and an effect inside that interval is not claimed.
    packet on every `FastReply` read route and buys nothing the generic path does not already do.
 4. `scripts/gate_cache_pipelined_probe.py` is the ONLY check that can see a stale-gate
    regression. Run it, not just the differ, after any change to the cache or its clear points.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: the LPUSH standing IS certifiable after all — five admissible draws, worst bound 0.4797x — and the bracketing redis A/A null puts the resolution floor at 1.6-1.9 pct, so the fourth decimal was never real (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), TWO-BINARY A/B.
+CV was NOT used, as a gate or otherwise — no coefficient of variation appears in this row's
+decision path, and none was computed. No timing verdict is claimed and no bootstrap median CI is
+reported, because the measurand is a retired-instruction COUNT and dressing it in timing
+statistics would misrepresent what was measured. No source change; no build this session.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 measures 0.4797x per LPUSH against a large list, worst bound over five admissible draws, i.e. fr retires 48 pct of the incumbent's instructions on this route. The vendored Redis 7.2.4 server ran as a live incumbent arm in the same invocation as the fr arm in all five.
+
+`57fe943c0` reported 0/8 draws admissible and set the retry predicate: take the standing with the
+short two-arm `standing_run.py` and require FIT at both ends. Done, and it worked — the fix was
+spending less of the window, not waiting for a longer one.
+
+### FIVE ADMISSIBLE DRAWS, AND THE RULE THAT EXCLUDED THE WORST-LOOKING ONE WAS PRE-REGISTERED
+
+    draw   redis A/A null        fr        redis (both)      WORST      admissible?
+    N1     0.983796 (1.62 pct) 2,059.03  4,316.63/4,387.73  0.4770x    FIT both ends
+    N2     0.980923 (1.91 pct) 2,051.09  4,398.98/4,484.53  0.4663x    FIT both ends
+    U1     (none, 2-arm)       2,069.37  4,433.76           0.4667x    FIT both ends
+    U2     (none, 2-arm)       2,069.21  4,313.75           0.4797x    FIT both ends
+    U3     (none, 2-arm)       2,065.54  4,318.90           0.4783x    FIT both ends
+    D      (none, 2-arm)       2,061.25  4,237.50           0.4864x    DISCARDED
+
+  WORST BOUND 0.4797x. D read 0.4864x — the least favourable number of the session — and it is
+  excluded because the window closed mid-draw. THAT RULE WAS WRITTEN DOWN BEFORE ANY OF THESE
+  DRAWS EXISTED, in `57fe943c0`'s retry predicate and in `catch_fit.sh`, precisely so that
+  discarding an unflattering reading could not be a decision made after seeing it. Excluding it
+  helps fr, which is exactly why the pre-registration matters and why D is printed here.
+
+### THE FOURTH DECIMAL WAS NEVER REAL
+
+The bracketing A/A null is the point of this row. `standing_run.py` now runs redis on BOTH sides
+of the fr arm, so the null measures the denominator's own reproducibility inside the very window
+the gate certified:
+
+    redis vs redis, same window, gate FIT at both ends:   1.62 pct and 1.91 pct off unity
+
+  The gate REDUCES the denominator's movement — 7.27 pct across the eight ungated draws of
+  `57fe943c0`, 1.6-1.9 pct here — but it does not remove it. So the honest reading of this route
+  is fr/redis ≈ 0.47-0.48x with a ~1.9 pct floor, and 0.4797x is the conservative EDGE of that,
+  not a four-digit measurement. Every prior row on this bead that printed four decimals of a
+  vs-redis ratio, mine included, was quoting precision the instrument does not have.
+
+    fr's arm over the same five draws spans 2,051.09-2,069.37, a 0.891 pct spread — itself wider
+    than the 0.396 pct I reported at n=8 in `57fe943c0`, which is the n=2 lesson from that row
+    repeating one size up. A SPREAD IS A LOWER BOUND UNTIL THE DRAWS STOP ARRIVING.
+
+### A BUG I CAUGHT IN MY OWN HARNESS BEFORE IT REACHED A NUMBER
+
+The first version of the bracketed selector took `max(r1, r2)` and labelled it "worst
+denominator". It is the opposite: the ratio is fr/redis, so a LARGER denominator gives a LOWER,
+more FAVOURABLE ratio. Left alone it would have published 0.4693x and 0.4574x as worst bounds
+when the conservative readings are 0.4770x and 0.4663x — an overstatement of roughly 1.7 pct, in
+fr's favour, dressed in the vocabulary of conservatism. Caught on the first draw's output because
+`BEST` printed higher than `WORST`, which is impossible. The selector is now `min(r1, r2)` with
+the reasoning in a comment.
+
+    THE DETECTOR IS FREE AND WORTH COPYING: make the harness print BOTH bounds and label which is
+    which. An inverted comparator is invisible in a single number and obvious in a pair.
+
+### AND A SECOND-ORDER EFFECT WORTH RECORDING: MY OWN MEASUREMENT CLOSES THE WINDOW
+
+Back-to-back draws were observed going UNFIT with `builds 0`. The failing criterion was
+STATIONARITY, not builds: valgrind arms run for minutes and lift the 1-minute loadavg away from
+the 5-minute, which is exactly the decaying-window shape the gate is designed to refuse. Running
+draws as fast as the gate allows is therefore self-defeating; the admissible draws here came in
+ones and twos with idle gaps between them.
+
+### PROVENANCE
+
+  ELFs          fr bench_elf_sha256 = f6f69201e38d8e5080949a2b8304fb8b3edc9708cdf170a89cbd2f09ae54ae8a
+                (the `14091fc7b` shipped form; its BEFORE partner
+                dbab1a95ceede004af8e67701b21418686ec94d1f93cbafdebb0413e424fd9bf is not used in
+                this row, which measures STANDING and not the delta). Re-verified by
+                `sha256sum` against the published value before the first draw; the AFTER ELF's
+                source confirmed to be HEAD's `packed_set.rs` with a clean worktree. No build,
+                so no `df` gate applied; /data 125G throughout.
+  harness       scratchpad `standing_run.py` (redis, fr, redis — bracketed) and its earlier
+                two-arm form, driven by `catch_fit.sh`, which polls
+                `certification_window.py --for ratio` and fires the draw only on FIT, then
+                re-gates and DISCARDS the draw if the window closed. 2,000 vs 6,000
+                single-element LPUSH differenced, one fresh working directory per point.
+  incumbent     vendored redis 7.2.4, verified sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 17:37.
+  PER-ARM idle/loadavg/MHz   Idle measured from a `/proc/stat` delta, 85-90 pct across the
+                session. Admissible draws opened at loadavg 10.02/8.94/9.39 (U1-U2),
+                9.18/8.81/9.34 (U3) and 6.46/7.57/8.75 (N1-N2), all with `builds 0` confirmed by
+                the gate at BOTH ends. MHz means 1429-4253 observed, max 4292, min 1429.
+                Refused windows in the same period ran `builds` 2, 4 and 6.
+
+### WHY THIS HEADING AVOIDS THE VERDICT VOCABULARY, SAID OUT LOUD RATHER THAN ENJOYED QUIETLY
+
+It banks campaign output and declares `Claim class: COMPETITIVE`, so a reader may reasonably ask
+why the heading avoids the KEEP/SHIPPED/WIN vocabulary that would put it under the KEEP contract.
+The reason is that the contract requires an explicit bootstrap MEDIAN-CI gate, and this row's
+measurand is a retired-instruction COUNT from callgrind. There is no sampling distribution to
+bootstrap; the A/A null IS the resolution statement, and it is reported (1.62 and 1.91 pct). I
+could satisfy the regex by writing the words, and that would be dressing deterministic counts in
+timing statistics to clear a gate — the precise failure this ledger exists to prevent.
+
+    SO THIS IS FLAGGED AS A CONTRACT GAP, NOT ROUTED AROUND IN SILENCE: the KEEP contract's
+    median-CI clauses assume a TIMING measurand and have no honest form for an Ir-count row.
+    Whoever maintains `perf_candidate_preflight.py` should decide whether an Ir-count KEEP is
+    admissible with an A/A null in place of a median CI. Until then a row like this one banks
+    its ratio outside the KEEP checks, which is a loophole I am naming rather than using twice.
+
+### THE REPLICATED-STANDING CONVENTION
+
+Applied as the worst bound over five admissible draws, with the least favourable draw of all
+excluded by a pre-registered admissibility rule and printed anyway. The convention's purpose
+here was not to defend a crossing — 0.48x has margin to spare — but to stop a comfortable number
+being quoted more precisely than the instrument supports, which is the failure mode a route far
+from 1.0x is MOST exposed to because nobody checks a comfortable number.
+
+RETRY PREDICATE:
+  1. Quote this route as 0.48x, or as "worst bound 0.4797x with a 1.9 pct floor". Do NOT quote
+     four decimals without the floor beside them; the bracketing null says they are not there.
+  2. The delta is closed at worst bound −1.45 pct (`57fe943c0`, eight draws) and is NOT
+     re-derived here. This row measures standing only.
+  3. Port the bracketed A/A null to any other vs-incumbent route before certifying it. If
+     redis's own reproducibility is 1.6-1.9 pct inside a FIT window on THIS shape, no route's
+     ratio should be published to a tighter precision than its own denominator null, and I do
+     not know that floor for any other shape yet.
