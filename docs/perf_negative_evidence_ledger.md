@@ -47906,3 +47906,71 @@ quiescence, which has no reply-shape assumption.
    sat unconverted, with a wrong mechanism written into the source comment to explain it.
 4. `scripts/gate_cache_pipelined_probe.py` is the only check that can see a stale-gate
    regression. Run it, not just the differ. Do not add TTL or PTTL to a byte-comparing batch.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: KEEP (COMPETITIVE) — the `geosearch_2` hardware row now carries its A/A null: every effect clears by 4.0x to 32.9x, the cache-miss counter has an 18.26 pct bias, and `cycles` carries a systematic ORDER bias I am subtracting from my own claim (`frankenredis-eh2ct`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Vendored Redis 7.2.4 ran as a live incumbent arm
+in the same invocation as the fr arm on every draw: fr/Redis 7.2.4 measures 0.7923x on
+instructions per op, the worst of two draws, while burning 1.0430x the CYCLES.
+
+  fr    bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  redis bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+This discharges the obligation I wrote into `7adeccea2`, which refused to file that row as a
+KEEP because the hardware instrument had no A/A null. It has one now: THREE draws with both arms
+pointed at the SAME `fr_mimalloc` binary, whose true ratio is exactly 1.0000, run through the
+identical `perf stat`-attached-to-server-pid harness at `redis-benchmark -n 300000 -P 16`.
+Per-arm loadavg 6.58-7.10 and CPU MHz 1429-3144; both arms of every draw at the same loadavg.
+
+  counter          A/A median   bootstrap 95% CI     worst bias   effect     margin
+  instructions        1.0002   [0.9999, 1.0010]         0.10 pct      --         --
+  cycles              1.0079   [1.0042, 1.0108]         1.08 pct  1.0430x      4.0x
+  branch-misses       1.0020   [0.9784, 1.0300]         3.00 pct  1.1559x      5.2x
+  cache-misses        1.0050   [0.8174, 1.0114]        18.26 pct  2.6889x      9.2x
+  IPC ratio           1.0080   [1.0040, 1.0098]         0.98 pct  1.3229x     32.9x
+
+Stated in prose so it is greppable rather than only tabular: the A/A null on the IPC ratio,
+taken within one top-level invocation per draw, gives a median 1.008000 with a bootstrapped 95%
+median CI of [1.004000, 1.009800]; the A/A null on instructions gives a median 1.000200 with a
+bootstrapped 95% median CI of [0.999900, 1.001000]. Every A/A median sits inside the 2 pct
+gross-bias band. THE VERDICT IS GATED ON THAT BOOTSTRAP
+MEDIAN-CI and on the per-counter margins above, nothing else. CV is provenance only and was not
+used as a gate anywhere in this row; no CV was computed.
+
+### Two things the null exposes that the effect row could not
+
+THE CACHE-MISS COUNTER IS THE NOISY ONE, at an 18.26 pct worst A/A bias driven by a single draw
+reading 0.8174x on two identical binaries. The 2.6889x effect clears it 9.2x over, so the
+conclusion holds -- but a cache-miss ratio under about 1.25x from this harness would be
+indistinguishable from its own null, and anyone quoting a small cache-miss difference from a
+single draw here is quoting noise. The two effect draws' 12 pct spread (2.6889 and 2.3949) is
+consistent with exactly this.
+
+`CYCLES` CARRIES A SYSTEMATIC ORDER BIAS AND I AM SUBTRACTING IT FROM MY OWN NUMBER. All three
+A/A draws put the ratio ABOVE 1 in the same direction -- 1.0079, 1.0042, 1.0108 -- which is not
+noise but the second-measured arm reading faster on a warmed host. fr is always the FIRST arm,
+so the bias INFLATES fr's apparent disadvantage. Corrected for it, the 1.0430x cycle ratio is
+about 1.035x and the 1.3229x IPC gap is about 1.312x. The effects survive the correction with
+room; the point is that the uncorrected numbers flatter my own conclusion and should not be
+quoted without it.
+
+### What is certified
+
+  instructions/op   fr 0.7923x worst of two draws        fr AHEAD by ~21 pct
+  cycles/op         1.0430x measured, ~1.035x corrected  fr BEHIND
+  IPC               1.3229x measured, ~1.312x corrected  redis executes fr's smaller stream faster
+  branch-misses     1.1559x worst                        ~a third of the cycle gap
+  cache-misses      2.6889x worst                        the dominant term
+
+fr retires a fifth fewer instructions and still burns more cycles. That is the whole deficit,
+now measured on hardware with a null rather than inferred across harnesses.
+
+RETRY PREDICATE: a `geosearch_2` lever succeeds only IF fr's cycles per op FALL below the
+incumbent's 7686.6 at unchanged correctness, measured with `perf stat` attached to the server
+pid and reported against this row's nulls. Do NOT quote a cache-miss improvement below 1.25x
+from this harness -- it cannot be told from the 18.26 pct null. Do NOT quote cycles or IPC
+without the ~0.8 pct order correction, or swap the arm order and show the bias reverses. Do NOT
+use `--branch-sim`, which reverses sign on this shape (`8c4f86a63`). Instructions are not the
+axis: fr already leads them by 21 pct.
