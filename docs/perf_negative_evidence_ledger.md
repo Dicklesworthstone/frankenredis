@@ -51748,6 +51748,7 @@ RETRY PREDICATE:
      This row exists because I did that; the callee list answered it in one probe.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the FAST expire-cycle rate limit is LANDED: plain `GET` -26.08 pct, volatile-keyspace `GET` -37.10 pct, conservative bounds (`frankenredis-eh2ct`)
 
 Claim class: SELF-SPEEDUP. Campaign output: no. fr-against-fr instruction counts with NO live
@@ -51880,6 +51881,7 @@ added without a shape, it is invisible to this census by construction, so add th
 route.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: CAVEAT CLOSED — the expire-cycle rate limit now passes `cargo test -p fr-runtime` AT its own commit: 633 passed, 0 failed
 
 `da47c18ca` landed the FAST-cycle rate limit with an explicit and uncomfortable caveat: the unit
@@ -51910,3 +51912,115 @@ had simply claimed "builds fine" would have had nothing to come back and check.
 
 No retry predicate: this closes a bookkeeping obligation rather than opening a surface. The
 lever's own reopen conditions are unchanged and live in `da47c18ca`.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the list DUMP walked the list TWICE and classified each element THREE times to produce ONE encode; fusing to a single pass is −12.84 pct worst bound (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) and callgrind CALL
+COUNTS, TWO-BINARY A/B with the A/A and the A/B in ONE INVOCATION and the candidate arm BRACKETED
+by control arms. CV was NOT used, as a gate or otherwise — no coefficient of variation appears in
+this row's decision path and none was computed. No timing verdict is claimed: the measurand is a
+retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 0.999432, bootstrap 95% CI [0.998323, 1.004658] over six
+draws, taken in the same invocation as the A/B it gates; the per-draw table is below. The
+bootstrap median-CI is the verdict gate and it excludes zero.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### THE COUNTS SAID EXACTLY WHAT THE CODE WAS DOING
+
+`8221af8aa` counted, per element on a 300-element list: 2.007 iterator steps, 3.00
+classifications, 1.00 encode. The source explains every one of them. `encode_dump_quicklist2`
+called `quicklist_fallback_node_count` — a FULL extra traversal — because the RDB header needs
+the node count BEFORE the nodes and `encode_length` is variable-width, so it cannot be
+back-patched. Then the emit loop traversed again, calling `listpack_entry_encoded_len` (which
+classifies) before calling `encode_listpack_entry` (which classifies again).
+
+    walk 1: count the nodes                     1 iterator step, 1 classification
+    walk 2: length for the byte accounting      1 iterator step, 1 classification
+            encode                                               1 classification
+
+### THE FUSION, AND WHY BOTH HALVES ARE SAFE
+
+  COUNT WHILE EMITTING. Nodes are written to a scratch buffer, counted as they are flushed, and
+  the count is prefixed at the end. Cost: one payload-sized copy. Saving: a whole traversal,
+  which is ~45 instructions of classification per element before anything else.
+
+  TAKE THE ENTRY SIZE FROM THE BUFFER. `listpack_entry_encoded_len(item)` recomputed what
+  `encode_listpack_entry` works out anyway, so the size is now the scratch buffer's growth. The
+  accept test never needed it — it takes `item.len()`, the RAW length, which is free. A
+  `debug_assert_eq!` pins growth == `listpack_entry_encoded_len` and runs in every test build.
+
+    AFTER, counted on the same shape: 1.00 iterator step, 1.00 classification, 1.00 encode.
+    Exactly the target `8221af8aa` set.
+
+### THE MEASUREMENT
+
+    draw   BEFORE_a     BEFORE_b     AFTER        cand-pct    null-pct
+      1    262,772.40   262,674.55   226,272.10   −13.8744    +0.0373
+      2    261,573.35   261,858.15   226,392.35   −13.4969    −0.1088
+      3    262,024.70   262,517.20   225,846.10   −13.8883    −0.1876
+      4    262,681.85   262,694.55   226,666.55   −13.7127    −0.0048
+      5    262,428.80   262,817.45   228,892.20   −12.8439    −0.1479
+      6    261,972.85   259,650.65   226,858.60   −13.0183    +0.8944
+
+    A/B median −13.6048 pct, bootstrap 95% CI [−13.8813, −12.9311], n=6 draws
+    WORST SINGLE DRAW −12.8439 pct  <- the figure this row claims
+    null  median 0.999432 as a ratio BEFORE_a/BEFORE_b (within 2 pct of unity); the same six
+          draws as absolute percentages have median 0.128 pct, CI [0.021, 0.541]
+
+  ~34,000 instructions per key on a 300-element list, ~100x the null. Quoted as the WORST draw
+  per the replicated-standing convention. Draw 5 ran at 1.4 pct idle with loadavg 15.76 and draw
+  6 at 66.0 pct with loadavg rising to 18.58; they are the two least favourable and are reported
+  rather than discarded, which is what `feedback_callgrind_ir_is_immune_to_load_and_mhz` predicts
+  and what keeping them can only cost the claim.
+
+  COMPOUNDING with `5d6f53a43` (−11.11 pct): build+DUMP per key has gone 295,547 -> 262,434 ->
+  226,272 across the two levers on the same shape.
+
+### PARITY AND THE ORACLE THE DEAD CODE BECAME
+
+    workload sweep 4 of 42 diverging, UNCHANGED
+    fr-store 936 / fr-persist 227, 0 failures; clippy clean.
+
+  The fusion deleted `quicklist_fallback_node_count`'s only caller. Rather than delete the
+  function, it is retained under `cfg(test)` as the INDEPENDENT oracle for the change that killed
+  it: `fused_node_count_matches_the_two_pass_reference_qj6jn` compares the count actually written
+  into the payload against the old two-pass logic across four fills, six sizes and an over-long
+  element that takes the PLAIN-node branch.
+
+    THAT TEST FAILED FIRST, AND THE FAILURE WAS THE TEST'S. At fill −2, n=500 the reference
+    disagreed — because the reference models the FALLBACK accumulator only, and that shape is
+    served by `quicklist_packed_nodes` instead. The test now skips cases where
+    `quicklist_packed_node_blobs` returns Some. A reference that does not model the path under
+    test is not evidence, and the guard says so in the source.
+
+### PROVENANCE
+
+  ELFs          BEFORE bench_elf_sha256 = da7140d9a1309d7905281ce2231a7d3c6d9c3025f64e7077ff8763b1f8f3242b
+                AFTER  bench_elf_sha256 = 5088491d407864e10bc9f0fade29285e2621db4452d8a6538e8b2b483768c5ff
+                `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1, build log checked
+                for BOTH `^error` and rch refusals: 0 of each. `df` run immediately before the
+                build; /data 89-90G, the lowest of this campaign and still above the 42G floor.
+                Build slot verified free by name before starting (0 cargo/rustc).
+  harness       scratchpad `dump_paired.py` (bracketed, one invocation, percentile bootstrap over
+                the DRAWS, 20,000 resamples, seeded); `callees.py` for the call counts —
+                COUNTS ONLY, its self-cost parser is broken and says so.
+  incumbent     vendored redis 7.2.4 as the parity oracle only, via `workload_shapes_probe.py`.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 20:25.
+                PER-DRAW idle/loadavg/MHz inline above: idle 1.4-90.8 pct, loadavg 10.12-18.58 /
+                11.31-13.07 / 10.36-10.96, MHz mean 1983-3715, max 4294, min 1429. Every idle
+                figure measured from a `/proc/stat` delta, not quoted.
+
+RETRY PREDICATE:
+  1. The remaining classification is ONE per element and is genuine work — upstream decides
+     int-vs-string per entry too. Do NOT try to remove it; make it cheaper only if a first-byte
+     reject measures, and measure it with `dump_paired.py`.
+  2. This lever pays on the FALLBACK path. On a RESTORE-loaded list `retained_listpack_chunks`
+     serves the DUMP and the expected effect is ZERO — still untested, as `5d6f53a43` also noted.
+  3. The scratch buffer adds one payload-sized copy. At 300 elements it is dwarfed by the
+     traversal it removes, but the trade REVERSES as elements get smaller and the payload/
+     traversal ratio grows. Re-measure at a much larger element count before claiming this
+     generalises.

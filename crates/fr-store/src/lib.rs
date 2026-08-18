@@ -74836,19 +74836,27 @@ mod tests {
             for n in [1usize, 127, 128, 129, 300, 500] {
                 for long_at in [None, Some(0usize), Some(64)] {
                     let mut items: Vec<Vec<u8>> = (0..n).map(short).collect();
-                    if let Some(at) = long_at {
-                        if at < items.len() {
-                            items[at] = over_long.clone();
-                        }
+                    if let Some(at) = long_at
+                        && at < items.len()
+                    {
+                        items[at] = over_long.clone();
                     }
 
                     // The reference count, from the retained two-pass logic.
-                    let mut reference = packed_set::ListValue::default();
+                    let mut reference = super::packed_set::ListValue::default();
                     reference.adopt_fill(fill);
                     for it in &items {
                         reference.push_back(it.clone());
                     }
-                    let want = quicklist_fallback_node_count(&reference, fill);
+                    // The reference models the FALLBACK accumulator ONLY. When
+                    // `quicklist_packed_nodes` serves the DUMP instead (retained chunks, or a
+                    // conversion prefix), the node table comes from a different rule entirely
+                    // and comparing against this reference is meaningless — it failed at
+                    // fill -2, n 500 for exactly that reason before this guard existed.
+                    if reference.quicklist_packed_node_blobs(fill).is_some() {
+                        continue;
+                    }
+                    let want = super::quicklist_fallback_node_count(&reference, fill);
 
                     // What the fused encoder actually wrote.
                     let mut store = Store::new();
