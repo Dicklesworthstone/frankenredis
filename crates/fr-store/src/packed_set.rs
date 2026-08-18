@@ -3351,6 +3351,10 @@ impl ListChunk {
         }
     }
 
+    /// (frankenredis-qj6jn) Reached only from the frozen `push_front_with_fill` reference;
+    /// production builds the head chunk directly in `push_front_with_fill_sized`, which
+    /// already holds the byte total this would recompute via `owned_listpack_bytes`.
+    #[cfg(test)]
     fn from_front_vec(elems: Vec<Vec<u8>>) -> Self {
         let lp_bytes = owned_listpack_bytes(&elems);
         Self::Owned {
@@ -3524,8 +3528,23 @@ impl ListChunk {
         }
     }
 
+    /// (frankenredis-qj6jn) Sized twin of [`Self::push_front_owned`], mirroring
+    /// [`Self::push_back_owned_sized`]. `EntryBytes`'s only constructor calls
+    /// `list_lp_entry_bytes`, so the caller cannot hand this a raw length by mistake.
+    fn push_front_owned_sized(&mut self, elem: Vec<u8>, added: EntryBytes) {
+        debug_assert_eq!(added, EntryBytes::of(&elem));
+        self.push_front_owned_impl(elem, added.get());
+    }
+
+    /// (frankenredis-qj6jn) Reached only from the frozen `push_front_with_fill` reference;
+    /// production goes through `push_front_owned_sized`.
+    #[cfg(test)]
     fn push_front_owned(&mut self, elem: Vec<u8>) {
         let added = list_lp_entry_bytes(&elem);
+        self.push_front_owned_impl(elem, added);
+    }
+
+    fn push_front_owned_impl(&mut self, elem: Vec<u8>, added: u64) {
         if let Self::Listpack { bytes, entries } = self {
             let elems = entries
                 .iter()
@@ -3763,6 +3782,48 @@ impl ChunkedList {
         self.len += 1;
     }
 
+    /// (frankenredis-qj6jn) Sized twin of [`Self::push_front_with_fill`], mirroring
+    /// [`Self::push_back_with_fill_sized`]. `ListValue::push_front` has already computed this
+    /// element's listpack length to fold into `lp_bytes`; without this twin the chunk computes
+    /// it a SECOND time inside `push_front_owned`.
+    ///
+    /// THE ONE THING THAT IS NOT MECHANICAL ABOUT THE FRONT PAIR: the head insert invalidates
+    /// `rpush_conversion_prefix_len`, which `quicklist_packed_nodes` reads to reproduce a
+    /// historical node boundary, and that boundary IS the DUMP payload. The zeroing below is
+    /// unconditional and independent of `added`, exactly as in the unsized form, so sizing
+    /// cannot move it -- and `list_front_sized_matches_unsized_qj6jn` pins the node blobs
+    /// across an RPUSH conversion rather than trusting that reading.
+    fn push_front_with_fill_sized(&mut self, elem: Vec<u8>, fill: i64, added: EntryBytes) {
+        debug_assert_eq!(added, EntryBytes::of(&elem));
+        self.rpush_conversion_prefix_len = 0;
+        if let Some(front) = self.chunks.front_mut()
+            && front.accepts_append(&elem, fill)
+        {
+            front.push_front_owned_sized(elem, added);
+            self.len += 1;
+            return;
+        }
+        if let Some(front) = self.chunks.front_mut() {
+            front.seal_if_owned(fill);
+        }
+        // `ListChunk::from_front_vec` would call `owned_listpack_bytes` over this one-element
+        // Vec to recover a total we already hold; build the chunk directly instead, as
+        // `push_back_with_fill_sized` does.
+        self.chunks.push_front(ListChunk::Owned {
+            elems: Arc::new(Vec::from([elem])),
+            lp_bytes: LIST_LP_OVERHEAD + added.get(),
+            front_biased: true,
+        });
+        self.len += 1;
+    }
+
+    /// (frankenredis-qj6jn) FROZEN REFERENCE, not production. Production routes through
+    /// `push_front_with_fill_sized`; this is the pre-lever form kept so
+    /// `list_front_sized_matches_unsized_qj6jn` has something independent to compare node
+    /// blobs against. Do not "simplify" it to delegate to the sized twin -- that would make
+    /// the test tautological, which `feedback_test_oracle_derived_from_source_is_tautological`
+    /// is on record about. Delete it when the sized twin is deleted.
+    #[cfg(test)]
     fn push_front_with_fill(&mut self, elem: Vec<u8>, fill: i64) {
         // A later head insertion can create or extend nodes before the
         // conversion prefix. Fall back to ordinary boundary synthesis rather
@@ -4761,11 +4822,19 @@ impl ListValue {
     }
 
     pub fn push_front(&mut self, elem: Vec<u8>) {
-        self.add_entry_bytes(&elem);
+        // (frankenredis-qj6jn) The accumulate sits AFTER `maybe_promote`, not before it as on
+        // the back path. Neither `maybe_promote` nor `promote` reads `lp_bytes` -- they read
+        // `repr` and the element LENGTH -- so the order is semantically free, and keeping the
+        // value dead across the promote check is what stops the Packed arm, which never uses
+        // it, from paying to carry it.
         self.maybe_promote(elem.len());
+        let entry_bytes = EntryBytes::of(&elem);
+        self.lp_bytes += entry_bytes.get();
         match &mut self.repr {
             ListRepr::Packed(p) => p.push_front(&elem),
-            ListRepr::Deque(d) => Arc::make_mut(d).push_front_with_fill(elem, self.fill),
+            ListRepr::Deque(d) => {
+                Arc::make_mut(d).push_front_with_fill_sized(elem, self.fill, entry_bytes);
+            }
         }
     }
 
@@ -4788,12 +4857,15 @@ impl ListValue {
     }
 
     fn push_front_borrowed_impl<const DIRECT: bool>(&mut self, elem: &[u8]) {
-        self.add_entry_bytes(elem);
         self.maybe_promote(elem.len());
+        let entry_bytes = EntryBytes::of(elem);
+        self.lp_bytes += entry_bytes.get();
         match &mut self.repr {
             ListRepr::Packed(p) if DIRECT => p.push_front(elem),
             ListRepr::Packed(p) => p.push_front_splice_bench(elem),
-            ListRepr::Deque(d) => Arc::make_mut(d).push_front_with_fill(elem.to_vec(), self.fill),
+            ListRepr::Deque(d) => {
+                Arc::make_mut(d).push_front_with_fill_sized(elem.to_vec(), self.fill, entry_bytes);
+            }
         }
     }
 
@@ -4805,6 +4877,18 @@ impl ListValue {
     #[doc(hidden)]
     pub fn push_front_borrowed_splice_bench(&mut self, elem: &[u8]) {
         self.push_front_borrowed_impl::<false>(elem);
+    }
+
+    /// (frankenredis-qj6jn) FROZEN REFERENCE for `list_front_sized_matches_unsized_qj6jn`:
+    /// the exact pre-lever `push_front`, recomputing the entry length inside the chunk.
+    #[cfg(test)]
+    fn push_front_reference_qj6jn(&mut self, elem: Vec<u8>) {
+        self.add_entry_bytes(&elem);
+        self.maybe_promote(elem.len());
+        match &mut self.repr {
+            ListRepr::Packed(p) => p.push_front(&elem),
+            ListRepr::Deque(d) => Arc::make_mut(d).push_front_with_fill(elem, self.fill),
+        }
     }
 
     pub fn pop_front(&mut self) -> Option<Vec<u8>> {
@@ -7553,6 +7637,149 @@ mod tests {
     /// `PACKED_MAX_VALUE` (64), including the case where an over-long element forces an
     /// EARLY promote before the count threshold is reached — which is exactly where a
     /// `min(count_threshold)` slip would show up.
+    /// (frankenredis-qj6jn) Routing `ListValue::push_front` through the sized chunk twin must
+    /// be OBSERVATIONALLY INERT. The back lever's own row promised this test before the front
+    /// pair was taken, because the front is NOT the mechanical mirror of the back: the head
+    /// insert clears `rpush_conversion_prefix_len`, which `quicklist_packed_nodes` reads to
+    /// reproduce the historical first node after an RPUSH-time listpack conversion — and that
+    /// node boundary IS the DUMP payload against the incumbent. A front push that forgot to
+    /// clear it, or cleared it at the wrong moment, would still return the right ELEMENTS and
+    /// change bytes on the wire.
+    ///
+    /// So the comparison is against `push_front_reference_qj6jn`, a frozen copy of the
+    /// pre-lever code, and it compares NODE BLOBS rather than contents. Every case first
+    /// drives a real RPUSH-shaped conversion so `rpush_conversion_prefix_len` is genuinely
+    /// non-zero going in — asserted, not assumed, because a case that failed to convert would
+    /// make this test pass while exercising nothing.
+    #[test]
+    fn list_front_sized_matches_unsized_qj6jn() {
+        let short = |i: usize| format!("item-{i:05}").into_bytes();
+        let long = |i: usize| vec![b'a' + (i % 26) as u8; PACKED_MAX_VALUE + 1];
+
+        // Mirrors the RPUSH command path in `Store`: push the batch, then account for it at
+        // command granularity, which is what can flip `forced_quicklist` and stamp the prefix.
+        fn rpush_command(l: &mut ListValue, values: &[Vec<u8>], fill: i64) {
+            let lp_pre = l.listpack_byte_len();
+            let mut raw_add = 0u64;
+            for v in values {
+                raw_add += v.len() as u64;
+                l.push_back(v.clone());
+            }
+            l.note_rpush_command_grow(lp_pre, raw_add, values.len(), fill);
+        }
+
+        fn prefix_len(l: &ListValue) -> usize {
+            match &l.repr {
+                ListRepr::Deque(d) => d.rpush_conversion_prefix_len,
+                ListRepr::Packed(_) => 0,
+            }
+        }
+
+        // The grow batch must actually TRIP the conversion at the fill under test, and the
+        // limit differs per fill (`list_neg_fill_size`: 4K/8K/16K/32K/64K for -1..-5, a COUNT
+        // budget for non-negative fill). A fixed batch silently under-shoots the larger
+        // budgets, which is what the vacuity assertion below caught on the first run — the
+        // -2 case was proving nothing. Size it from the fill instead.
+        fn converting_batch(fill: i64, seed_n: usize) -> Vec<Vec<u8>> {
+            const WIDE: usize = 100; // > PACKED_MAX_VALUE, so the repr is Deque by element 1
+            let by_bytes = if fill < 0 {
+                super::list_neg_fill_size(fill) as usize / WIDE + 2
+            } else {
+                0
+            };
+            // Also push the total past PACKED_MAX_ENTRIES so the repr is a Deque and past the
+            // count budget for non-negative fill; otherwise no prefix is ever stamped.
+            let by_count = (PACKED_MAX_ENTRIES + 2)
+                .max(fill.max(0) as usize + 2)
+                .saturating_sub(seed_n);
+            (0..by_bytes.max(by_count).max(1))
+                .map(|i| vec![b'a' + (i % 26) as u8; WIDE])
+                .collect()
+        }
+
+        const SEED_N: usize = 16;
+        let seed: Vec<Vec<u8>> = (0..SEED_N).map(short).collect();
+        let fronts: Vec<(String, Vec<Vec<u8>>)> = vec![
+            ("1 short head".into(), vec![short(900)]),
+            ("2 short heads".into(), (900..902).map(short).collect()),
+            // More heads than PACKED_MAX_ENTRIES, so head chunks are created AND filled.
+            ("129 short heads".into(), (900..1029).map(short).collect()),
+            // Each head alone exceeds PACKED_MAX_VALUE, so the head chunk refuses the append
+            // and the direct `ListChunk::Owned` construction is the path taken.
+            ("8 long heads".into(), (0..8).map(long).collect()),
+        ];
+
+        for (label, front) in &fronts {
+            for fill in [-2i64, -1, -3, -5, 128, 32] {
+                let grow = converting_batch(fill, SEED_N);
+                let (seed, grow) = (&seed, &grow);
+                let build = |reference: bool| {
+                    let mut l = ListValue::default();
+                    rpush_command(&mut l, seed, fill);
+                    rpush_command(&mut l, grow, fill);
+                    let converted = prefix_len(&l);
+                    for v in front {
+                        if reference {
+                            l.push_front_reference_qj6jn(v.clone());
+                        } else {
+                            l.push_front(v.clone());
+                        }
+                    }
+                    (l, converted)
+                };
+                let (want, want_pre) = build(true);
+                let (got, got_pre) = build(false);
+
+                // The case must actually exercise the hazard, or it proves nothing.
+                assert_ne!(
+                    want_pre, 0,
+                    "{label} fill {fill}: case never forced an RPUSH conversion"
+                );
+                assert_eq!(
+                    want_pre, got_pre,
+                    "{label} fill {fill}: prefix diverged pre-front"
+                );
+                assert_eq!(
+                    prefix_len(&want),
+                    prefix_len(&got),
+                    "{label} fill {fill}: rpush_conversion_prefix_len diverged after push_front"
+                );
+                // ABSOLUTE, not just arm-vs-arm: a head insert MUST retire the conversion
+                // prefix claim outright. Comparing the two arms to each other would pass if
+                // both stopped clearing it; this pins the value the incumbent's node layout
+                // depends on, so dropping the `rpush_conversion_prefix_len = 0` line from the
+                // sized twin fails here even though every element still round-trips.
+                assert_eq!(
+                    prefix_len(&got),
+                    0,
+                    "{label} fill {fill}: head insert left a stale conversion prefix"
+                );
+                assert_eq!(
+                    want.len(),
+                    got.len(),
+                    "{label} fill {fill}: length diverged"
+                );
+                assert_eq!(
+                    want.listpack_byte_len(),
+                    got.listpack_byte_len(),
+                    "{label} fill {fill}: lp_bytes diverged"
+                );
+                assert_eq!(
+                    want.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+                    got.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+                    "{label} fill {fill}: element sequence diverged"
+                );
+                // THE ONE THAT MATTERS: identical quicklist node boundaries, hence identical
+                // DUMP payload against the incumbent.
+                assert_eq!(
+                    want.quicklist_packed_node_blobs(fill),
+                    got.quicklist_packed_node_blobs(fill),
+                    "{label} fill {fill}: quicklist NODE BLOBS diverged"
+                );
+            }
+        }
+    }
+
     #[test]
     fn list_bulk_back_matches_incremental_push_qj6jn() {
         fn incremental(values: &[Vec<u8>]) -> (ListValue, u64) {

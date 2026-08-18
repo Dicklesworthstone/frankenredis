@@ -46250,3 +46250,217 @@ and an effect inside that interval is not claimed.
    shared 2.5 pct arrives once for everybody.
 4. Do NOT restore the clear to "be safe" without reading this row: it costs 175.0 instr/op per
    packet on every FastReply read route and buys nothing the generic path does not already do.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: the LIVE LPUSH path double-computed too, and the front pair is NOT the back pair's mirror — the naive mirror FAILED the Packed half, and moving the accumulate past `maybe_promote` fixed it (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), TWO-BINARY A/B
+with tree stability proven on BOTH pairs. CV was NOT used, as a gate or otherwise. No timing
+verdict is claimed.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 measures 0.4786x per LPUSH against a large list after this change, from 0.4868x before, i.e. fr retires under half the incumbent's instructions on this route. The vendored Redis 7.2.4 server process ran as a live incumbent arm in the same invocation as both fr arms, at 4,323.61 instr/push.
+
+`4c2ed3ecf`'s retry predicate asked for the FRONT paths and attached a condition: take them only
+with a node-blob equivalence test covering `rpush_conversion_prefix_len`, "because the front
+pair is NOT the mechanical mirror of the back". That warning was aimed at CORRECTNESS. It was
+right about the asymmetry and wrong about where it lives — the correctness half turned out to be
+mechanical, and the asymmetry showed up in PERFORMANCE, in the control regime.
+
+### THE NAIVE MIRROR LOSES THE COMMON REGIME
+
+The first candidate is `push_back`'s shape transcribed onto `push_front`: compute `EntryBytes`,
+fold it into `lp_bytes`, call `maybe_promote`, then hand the value to the sized chunk twin.
+
+    ELF c0400f50, LPUSH        A/A null      BEFORE      AFTER      delta
+    Deque  (seed 200)          1.005279    2,103.67   2,069.72   −1.61 pct
+                               1.000488    2,094.70   2,069.62   −1.20 pct
+                               0.996482    2,104.29   2,070.16   −1.62 pct
+    Packed (3,000 keys)        0.996889    2,195.17   2,202.92   +0.35 pct
+                               1.000328    2,197.18   2,197.09   −0.00 pct
+                               1.000503    2,196.29   2,199.35   +0.14 pct
+
+  Two of the three Packed draws COST, and the frame says why rather than leaving it to the
+  spread: `push_front` reads 75.00 instructions BEFORE and 78.00 AFTER, identically in all
+  three draws. That is not noise — frames here are exact per-push integers. The function grew
+  by 3 instructions on the regime that can never use what those instructions produce, because
+  a Packed list dispatches to `PackedList::push_front` and never reaches the chunk.
+
+    THIS IS THE TRADE `df9a4da1d` REFUSED — buying the Deque regime at the Packed one's
+    expense — and redis's default `list-max-listpack-size` of 128 makes Packed the common case.
+    At −25 against +3 it is a far better trade than the −8.30/+4.38 that row rejected, but
+    "better ratio, same shape" is not a reason to ship a shape I retired.
+
+### THE FIX IS AN ORDERING THE BACK PATH CANNOT USE
+
+    self.maybe_promote(elem.len());          // was second
+    let entry_bytes = EntryBytes::of(&elem); // was first
+    self.lp_bytes += entry_bytes.get();
+
+  Legal because NEITHER `maybe_promote` NOR `promote` reads `lp_bytes` — `maybe_promote` tests
+  `self.repr` and the element's LENGTH, and `promote` rebuilds `repr` from the elements. The
+  accumulator is untouched by both, so the two statements commute, and the equivalence test
+  below re-passed unchanged, which is what turns "they commute" from an argument into a check.
+
+    ELF f6f69201, LPUSH        A/A null      BEFORE      AFTER      delta      vs redis 7.2.4
+    Deque  (seed 200)          0.999825    2,104.89   2,069.17   −1.70 pct   0.4868x -> 0.4786x
+                               0.999470    2,104.18   2,069.33   −1.66 pct   0.4577x -> 0.4501x
+    Packed (3,000 keys)        1.001641    2,198.73   2,201.55   +0.13 pct
+                               0.999749    2,197.58   2,195.14   −0.11 pct
+
+  The Packed arm now STRADDLES ZERO, and its worst draw (+0.13 pct) is inside that same draw's
+  own null (0.16 pct). The frame confirms the mechanism moved rather than the luck: `push_front`
+  goes 75.00 -> 76.00 instead of 75.00 -> 78.00. Two of the three added instructions were the
+  cost of keeping a value live across the promote check that the Packed arm then discards.
+
+  THE ROW CLAIMS THE WORST BOUND: −1.66 pct on Deque, +0.13 pct on Packed.
+
+### THE FRAME IS CATEGORICAL, AND THE CONTROL IS REQUIRED TO STILL SHOW ONE
+
+    list_lp_entry_bytes, Deque      BEFORE 54.00   AFTER 27.00
+    maybe_promote,       Deque      BEFORE 18.00   AFTER 18.00
+    maybe_promote,       Packed     BEFORE 26.00   AFTER 26.00
+
+  54.00 -> 27.00 is two calls per element becoming one, at the 27.00 per call this bead measured
+  exactly on the loader tail in `4c2ed3ecf` and again on RPUSH. `maybe_promote` is carried as the
+  frame the CONTROL must still show, which is the detector `fdb578bac` earned when a toggle
+  inside a hot function drove its own control's `maybe_promote` to 0.00. It holds at 18.00 and
+  26.00 in every arm of every draw here, so no arm has quietly absorbed the other's win.
+
+### CORRECTNESS: THE HAZARD THE PREDICATE NAMED, PINNED
+
+`list_front_sized_matches_unsized_qj6jn` compares the routed `push_front` against
+`push_front_reference_qj6jn`, a frozen copy of the pre-lever code, on `quicklist_packed_node_blobs`
+— the DUMP payload — at six `fill` values. Every case first drives a real RPUSH-shaped conversion
+through `note_rpush_command_grow` so `rpush_conversion_prefix_len` is genuinely non-zero going in.
+
+  THE FIRST RUN FAILED, AND THAT IS THE EVIDENCE THE TEST IS LIVE. It failed on its own vacuity
+  assertion — "case never forced an RPUSH conversion" — because a fixed grow batch under-shoots
+  the larger `list_neg_fill_size` budgets (4K/8K/16K/32K/64K for fill −1..−5). Every case now
+  sizes its batch FROM the fill under test. Without that assertion the test would have passed
+  while exercising nothing, which is the exact shape
+  `feedback_test_oracle_derived_from_source_is_tautological` warns about.
+
+  The prefix check is ABSOLUTE, not arm-vs-arm: a head insert must retire the conversion claim
+  outright, so the test pins `rpush_conversion_prefix_len == 0` rather than merely equal between
+  arms — comparing the arms to each other would pass if BOTH stopped clearing it.
+
+### PROVENANCE
+
+  ELFs          BEFORE bench_elf_sha256 = dbab1a95ceede004af8e67701b21418686ec94d1f93cbafdebb0413e424fd9bf
+                SHIPPED bench_elf_sha256 = f6f69201e38d8e5080949a2b8304fb8b3edc9708cdf170a89cbd2f09ae54ae8a
+                REJECTED MIRROR bench_elf_sha256 = c0400f50570d2ccd1067839b73f545d4d5c590cd53b818503681cca68fab1965
+                `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1. Every build log
+                checked for BOTH `^error` and rch refusals: 0 of each, five builds. `df` run
+                immediately before each; /data held 127-130G throughout.
+  stability     BOTH pairs proven, not just the first. The mirror pair: AFTER, BEFORE, AFTER
+                again, c0400f50 == c0400f50 bit-identical. The shipped pair: BEFORE rebuilt
+                after all measurement, dbab1a95 == dbab1a95 across builds ninety minutes apart
+                with my edits going in and out of the tree between them. A shared checkout is
+                exactly where an unproven pair goes wrong.
+  harness       scratchpad `push_slope.py`, parameterised this session by `PUSH_CMD` so the same
+                instrument drives LPUSH, plus `pair_slope.py`, a new two-binary driver that runs
+                null/BEFORE/AFTER/redis back to back IN ONE PROCESS. That is required, not
+                stylistic: `93b78f8be` withdrew this harness's O(1) claim after disjoint windows
+                disagreed by 2-3 pct, so only WITHIN-window differences are comparable and a
+                two-binary A/B may not split its arms across invocations.
+  incumbent     vendored redis 7.2.4, verified sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor.
+  PER-ARM idle/loadavg/MHz   Idle measured from a `/proc/stat` delta at every arm boundary, not
+                quoted: 87.8-90.5 pct across all twelve arms. Deque draws loadavg 6.90->6.76,
+                7.16, 7.08->6.91, 7.42, 7.36->7.30; Packed draws 6.58->6.73, 7.44->7.40,
+                10.20->10.10, 8.04->8.02, 8.06. MHz means 1904-2474, max 4304, min 1429. A
+                QUIET window, and the nulls show it: five of the nine came in under 0.06 pct.
+  gates         `cargo test -p fr-store -p fr-persist --lib`, clippy `--all-targets`, and
+                `cargo fmt --check` on the two crates I touched. The four remaining fmt diffs in
+                `fr-store/src/lib.rs` and `packed_set.rs` are PRE-EXISTING in HEAD, in other
+                agents' test code, and are NOT mine to reformat in a shared checkout.
+
+### THE REPLICATED-STANDING CONVENTION
+
+Applied as a worst bound over replicate draws in BOTH regimes, and the Packed regime is the
+reason the convention earned its keep here: a single Packed draw would have read −0.00 pct on
+the mirror candidate and shipped a form that costs the common case 3 instructions per LPUSH.
+NOT used to claim a crossing — there is none at stake. fr retires under half the incumbent's
+instructions per LPUSH in both regimes (0.4786x large, 0.4486x small), so nothing here is thin.
+
+RETRY PREDICATE:
+  1. `ChunkedList::push_back` (hardcoded fill −2) is now the LAST unsized caller in the file.
+     It is internal and its call rate is unmeasured; ATTRIBUTE IT before touching it, and note
+     the two remaining unsized `push_back_with_fill` callers are A/B CONTROL ARMS, not
+     production — do not "clean them up".
+  2. Re-examine the BACK path's ordering with this row's finding. `push_back` still accumulates
+     BEFORE `maybe_promote`, and its Packed control straddled zero (−0.47/+0.06) so nothing is
+     owed, but the same reorder may be free there too. Reopen ONLY with both regimes measured;
+     a Deque-only reading does not qualify.
+  3. Do NOT reuse the mirror candidate's Deque figures (−1.61/−1.20/−1.62 pct) as this lever's.
+     They belong to c0400f50, which is not what shipped.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: NOT CERTIFIED (jemalloc) + METHOD — one admissible jemalloc draw puts `geosearch_2` at 0.9351 against mimalloc's replicated ~0.896, but it did NOT replicate; and load DIRECTION has now predicted admissibility 8 times out of 8 (`frankenredis-eh2ct`)
+
+NO ALLOCATOR STANDING IS CLAIMED. jemalloc has ONE admissible draw and one null-failure at
+identical config, which is the same flaky-gate situation that stopped me certifying mimalloc
+from a single draw. The mimalloc standing (`f8067cba3`, 0.8578 worst bound, two agreeing draws)
+is unaffected by anything here.
+
+  mimalloc ELF bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  jemalloc ELF bench_elf_sha256=1fd257d3bc1ee0723f38373db2a58202f1886a1a20c5d1c4945b06bc96402ce9
+  incumbent    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+`balanced_square_ab.py --shapes sizepairs`, ABBAABBA, rounds=36, ops=50,000, -P16, null +/-0.02,
+`--expect-elf` pinned on every run.
+
+  ARM        load before -> after    geosearch_2 raw          normalised  worst   verdict
+  mimalloc   25.93 -> 12.07          1.0089 [1.0004,1.0219]     0.8969   0.8796   ADMISSIBLE
+  mimalloc   25.56 ->  9.45          1.0210 [1.0060,1.0342]     0.8956   0.8578   ADMISSIBLE
+  jemalloc   13.17 ->  9.85          1.0434 [1.0249,1.0585]     0.9351   0.8899   ADMISSIBLE
+  jemalloc    9.59 -> 21.89          1.0297 [1.0077,1.0402]        --      --     NULL-FAILED
+
+The single admissible jemalloc draw is BETTER than both mimalloc draws on raw (1.0434 against
+1.0089 and 1.0210) and on normalised (0.9351 against 0.8969 and 0.8956), which is the direction
+`c4a2f6e91`'s 31.68 pct D1-miss reduction predicts. It is still one draw and is NOT a standing.
+
+### A CONFOUND IN THE NORMALISATION THAT I DID NOT ANTICIPATE
+
+`get_control` is measured with the SAME fr binary as the row it normalises, so an ALLOCATOR
+change moves the normaliser too:
+
+  get_control   mimalloc 1.1248 / 1.1401      jemalloc 1.1158 / 1.1322
+
+jemalloc's control is LOWER, i.e. jemalloc is slightly WORSE on the control shape while being
+better on geosearch_2 -- which is exactly the per-shape split the "63.6 pct vs 36.5 pct geomean"
+default predicts. But it means the normalised improvement (0.896 -> 0.9351, +4.4 pct) is LARGER
+than the raw improvement (~1.015 -> 1.0434, +2.8 pct), and the difference is the control getting
+worse rather than geosearch_2 getting better.
+
+CONTROL-NORMALISATION IS NOT A CLEAN ADJUSTMENT WHEN THE TREATMENT MOVES THE CONTROL. For an
+allocator comparison the RAW ratio is the less confounded quantity, and any future allocator row
+on this group should say which it is quoting and why. This does not affect `f8067cba3`, where
+both arms are the same binary and the control is doing the job it was designed for.
+
+### THE LOAD-DIRECTION PREDICTOR IS 8 FOR 8, and it is worth more than the geo number
+
+Across every run I have taken on this shape family, admissibility was predicted by whether
+loadavg ROSE or FELL during the run -- not by its level at launch, and not by the harness's FIT
+gate:
+
+  FELL, certified          25.93->12.07 | 25.56->9.45 | 13.17->9.85          3 of 3 ADMISSIBLE
+  ROSE, did not certify     6.91->13.44 | 16.00->27.03 | 10.01->56.91 |
+                           17.38->33.77 |  9.59->21.89                       5 of 5 FAILED
+
+Launch non-stationarity of 42-45 pct did NOT prevent certification in the falling cases. A
+window that looks clean at launch and rises is worse than one that looks dirty at launch and
+decays, which is the opposite of how "prefer a quiet window" is usually applied. The mechanism
+is the one already recorded for a four-arm run here: "the residual is measurement ORDER --
+first-measured arms in each round read slow". A rising host makes later arms slower in a fixed
+order; a falling host makes them faster; the square cancels the direction only if the drift is
+small within one round.
+
+RETRY PREDICATE: to certify an allocator effect on `geosearch_2`, take TWO admissible jemalloc
+draws whose worst bounds agree and compare RAW ratios against mimalloc's 1.0089/1.0210, not
+normalised ones, for the confound reason above. Start a run ONLY when loadavg is falling --
+1-min below 5-min -- and abandon the result if the harness's after-loadavg exceeds its
+before-loadavg, regardless of what the nulls say; on this evidence that condition alone would
+have saved five of the eight runs. Do NOT re-run mimalloc: it is replicated at 0.8578 worst
+bound and re-measuring a settled standing is not work.
