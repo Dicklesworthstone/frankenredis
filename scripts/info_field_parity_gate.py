@@ -114,19 +114,54 @@ DECLARED_ABSENT = {
     "loading_loaded_perc": "loading",
     "loading_eta_seconds": "loading",
     # `# Debug` -- an opt-in section (INFO debug / everything) fr does not emit at all.
-    # `# Server`, only when a unix socket is configured.
-    "unixsocket": "unixsocket configured",
+    # (frankenredis-w1djx) `unixsocket` was declared here and is GONE: upstream's INFO does not
+    # emit it at all. It appeared only because the extraction window overran into the startup
+    # log-banner expander -- see `_function_body_len`. Do not re-add it.
     # `# Server`, only during a graceful shutdown pause.
     "shutdown_in_milliseconds": "shutdown in progress",
 }
+
+
+def _function_body_len(src: str, start: int) -> int:
+    """Length of the function beginning at `start`, by brace matching.
+
+    (frankenredis-w1djx) THE WINDOW USED TO END AT THE NEXT `\nsds <name>(`, which is not the end
+    of the function -- it is the start of the next function that happens to return `sds`. In
+    redis 7.2.4 that overran `genRedisInfoString` by roughly 1,100 lines and swept in
+    `"unixsocket:%s"` from the startup LOG-BANNER expander, so the gate reported 221 upstream INFO
+    fields where there are 220 and asked fr for a field upstream's INFO never emits.
+
+    Braces inside string and character literals and inside comments are skipped; counting them
+    raw would end the function early on any `"{"` in a format string.
+    """
+    p = src.index("{", start)
+    depth = 0
+    while p < len(src):
+        c = src[p]
+        if c == '"' or c == "'":
+            quote = c
+            p += 1
+            while p < len(src) and src[p] != quote:
+                p += 2 if src[p] == "\\" else 1
+        elif src.startswith("/*", p):
+            p = src.index("*/", p) + 1
+        elif src.startswith("//", p):
+            p = src.index("\n", p)
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return p - start + 1
+        p += 1
+    raise SystemExit("FAIL — unterminated function body while parsing the incumbent")
 
 
 def upstream_info_fields():
     """Field names rendered by genRedisInfoString, in source order."""
     src = open(UPSTREAM, encoding="utf-8", errors="replace").read()
     i = src.index("sds genRedisInfoString(")
-    m = re.search(r"\nsds \w+\(", src[i + 10:])
-    seg = src[i: i + 10 + m.start()] if m else src[i:]
+    seg = src[i: i + _function_body_len(src, i)]
     seen, ordered = set(), []
     for name in re.findall(r'"([a-z][a-z0-9_]{2,})\s*:%', seg):
         if name not in seen:
