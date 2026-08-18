@@ -60415,3 +60415,102 @@ CV was not used, as a gate or otherwise.
 3. `encode_bulk_string_slice` at 27,136 instr/op (16.0 pct) on this shape is the only frame here
    NOT owned by the set-algebra rows. It is reply encoding for a large result and is untouched by
    this row.
+## 2026-08-18 BrownIbis: `geosearch_64` on the INSTRUCTION axis — **worst bound 0.6887x over three FIT draws**, spread 0.09 pct. The shape whose THROUGHPUT ratio has straddled 1.0 for six replicates retires **31 pct FEWER instructions**, so the straddle was never a work-volume story (`frankenredis-ozrro`)
+
+Claim class: MEASUREMENT, plus the shape registration that made it possible.
+Campaign output: yes — it re-points the longest-running open question on the board.
+
+### WHY THIS SHAPE HAD NEVER BEEN MEASURED THIS WAY
+
+`geosearch_64` was banked once at **1.0094 normalised** and described as "an inversion, fr
+AHEAD". `2365`'s replicated-standing convention then re-measured it to worst bound **0.9445**,
+and a later pair to **0.9549**, leaving it **STRADDLES-1** across six replicates — intervals that
+admit both directions, so no crossing may be claimed either way.
+
+**Every one of those six is a THROUGHPUT ratio.** redis-benchmark, load sensitive, CI width about
+2 pct, and normalised by a control that has been measured WIDER than the row it normalises. The
+shape has never had an instruction count. That asymmetry is why the question stayed open: more
+replicates of a noisy metric cannot settle a margin this thin.
+
+So I registered the shape in `shape_instr_per_op.py`, mirroring `balanced_square_ab.py`'s
+definition **byte for byte** — same 64 members on the same 8x8 quarter-degree lattice, same
+`FROMLONLAT 15 37 BYRADIUS 500 km ASC`. Verified equal by reconstructing the throughput tool's
+seed string and comparing: `seed identical: True`, `cmd identical: True`. `geosearch_2` already
+carries the warning this avoids — comparing an instruction ratio from one shape against a
+throughput ratio from a NEARBY shape is the cross-shape error the size pairs exist to remove.
+
+### THE NUMBERS
+
+    draw  WINDOW  fr instr/op   redis instr/op   fr/redis   loadavg at arm       MHz mean
+    d1    FIT      93977.4       136569.1        0.6881     6.39 / 6.46 / 6.70   2066
+    d2    FIT      93999.1       136489.0        0.6887     6.72 / 6.53 / 6.72   2847
+    d3    FIT      93997.4       136562.7        0.6883     6.78 / 6.55 / 6.72   2230
+
+    WORST BOUND (least favourable to fr, i.e. the highest ratio)   **0.6887x**
+    spread across three draws                                       0.09 pct
+
+All three windows FIT for ratio, zero builds running in each. fr's own Ir differs by 43k parts in
+191.7M across the three draws — the determinism the instruction axis is chosen for, against the
+~2 pct CI the throughput axis gives on the SAME shape.
+
+The 1- and 2-member siblings, measured the same way in the same session:
+
+    geosearch_1   0.6634 / 0.6578 (two FIT draws)   worst bound 0.6634x
+    geosearch_2   0.6958 (FIT, single draw) — SIZING, not certified
+
+### WHAT THIS MEANS, AND WHAT IT DOES NOT
+
+fr retires **31 pct fewer instructions** than Redis 7.2.4 for the identical 64-member GEOSEARCH,
+and ties it on throughput. Those two facts together say the throughput straddle **is not a
+work-volume deficit**, so any further attempt to close it by removing fr instructions from this
+path is aimed at the wrong thing. It is the `zrangebyscore` pattern again — fewer instructions
+retired, no throughput advantage — which points at stalls, memory behaviour or per-op wakeup
+cost rather than at the amount of work done.
+
+It does NOT overturn the throughput straddle. Different metric, different question. The six
+throughput replicates stand exactly as banked; this row adds the axis they lacked.
+
+### THE INSTRUMENT LESSON: A RATIO RUN DEFEATS ITS OWN GATE
+
+The first nine draws I took were **UNFIT, every one**, with reasons like "non-stationary: 1min
+9.80 vs 5min 7.00 = 40 pct apart". The window was FIT when I checked it BEFORE starting. A
+callgrind ratio run is four valgrind invocations and lifts the 1-minute loadavg roughly three
+points for about a minute afterwards, so **back-to-back draws are permanently UNFIT — the
+measurement creates the non-stationarity that its own gate refuses.**
+
+The fix is trivial once seen: wait for `|1min - 5min| / 5min <= 12 pct` before each draw. A
+**20-second** cooldown was enough every time (spreads of 1, 2 and 3 pct), which is why nine
+consecutive UNFIT results is a scheduling artefact rather than a busy host.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No A/B and no null: this is a vs-incumbent ratio on one binary, not a lever. The control against
+mis-specification is the reply check — both engines answer `:64` to the seed and return 64
+members to the query, so neither arm is measuring an error path. Per-arm loadavg and CPU MHz are
+recorded per draw above. CV was not used, as a gate or otherwise; the three-draw spread is quoted
+instead.
+
+### PROVENANCE
+
+  ELF           fr `4b2dd580cfaa158c...`, built at `643df0862`, NOT current main. Main has since
+                advanced by two `fr-persist` commits (LZF literal handling, an RDB/DUMP path).
+                GEOSEARCH does not call into `fr-persist`, so the code path is untouched, but a
+                different crate does change whole-binary LAYOUT, and this campaign has measured
+                layout effects at plus or minus 40-90 instr/op. Against 93,977 instr/op that is
+                under 0.1 pct and cannot move a 0.6887x reading materially — but the row is
+                labelled at `643df0862` rather than at main, because that is the ELF measured.
+  incumbent     redis-server sha256 `e837dbb2556cff6b...`, harness-verified after each arm.
+  host          /data 47G, 5G above the brake. No local builds — the shape registration is
+                Python only. Dumps auto-reaped by `c432b58ac`, so this row cost no disk.
+  disposition   MEASUREMENT. New shape registered; no engine source changed.
+
+### RETRY PREDICATE
+
+1. Re-running this needs a **cooldown loop**, not a bigger machine. Gate each draw on
+   `|1min - 5min| / 5min <= 12 pct` or every draw after the first will read UNFIT.
+2. If a future reading disagrees, check the SHAPE first: the value of this row depends on the
+   instruction shape and the throughput shape being byte-identical. Rebuild the throughput
+   tool's seed string and compare it to `SHAPES["geosearch_64"]` before trusting a divergence.
+3. Do NOT read this as closing the throughput straddle. Anyone tempted to shave instructions off
+   the geo path to "fix" the 1.0x crossing should first establish that instructions are the
+   binding constraint — this row is evidence that they are not.

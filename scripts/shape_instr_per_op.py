@@ -806,6 +806,17 @@ SHAPES = {
         ["GEOADD gsk 13.361389 38.115556 P1"],
         ["GEOSEARCH", "gsk", "FROMLONLAT", "13.361389", "38.115556", "BYRADIUS", "200", "km"],
     ),
+    # (frankenredis-ozrro) THE 64-MEMBER SIBLING, mirroring `balanced_square_ab.py`'s
+    # `geosearch_64` byte for byte -- same lattice, same radius, same ASC -- so the two metrics
+    # describe ONE shape rather than two adjacent ones. That shape is the longest-running open
+    # question on the board: banked at 1.0094 normalised as "an inversion, fr AHEAD", then
+    # re-measured to worst bound 0.9445 and 0.9549 and left STRADDLING 1.0 over six replicates.
+    # All six are throughput numbers with ~2 pct CI width; none is an instruction count, and a
+    # deterministic count is what a margin that thin actually needs.
+    "geosearch_64": (
+        ["GEOADD g64 13.0 37.0 M00 13.25 37.0 M01 13.5 37.0 M02 13.75 37.0 M03 14.0 37.0 M04 14.25 37.0 M05 14.5 37.0 M06 14.75 37.0 M07 13.0 37.25 M08 13.25 37.25 M09 13.5 37.25 M10 13.75 37.25 M11 14.0 37.25 M12 14.25 37.25 M13 14.5 37.25 M14 14.75 37.25 M15 13.0 37.5 M16 13.25 37.5 M17 13.5 37.5 M18 13.75 37.5 M19 14.0 37.5 M20 14.25 37.5 M21 14.5 37.5 M22 14.75 37.5 M23 13.0 37.75 M24 13.25 37.75 M25 13.5 37.75 M26 13.75 37.75 M27 14.0 37.75 M28 14.25 37.75 M29 14.5 37.75 M30 14.75 37.75 M31 13.0 38.0 M32 13.25 38.0 M33 13.5 38.0 M34 13.75 38.0 M35 14.0 38.0 M36 14.25 38.0 M37 14.5 38.0 M38 14.75 38.0 M39 13.0 38.25 M40 13.25 38.25 M41 13.5 38.25 M42 13.75 38.25 M43 14.0 38.25 M44 14.25 38.25 M45 14.5 38.25 M46 14.75 38.25 M47 13.0 38.5 M48 13.25 38.5 M49 13.5 38.5 M50 13.75 38.5 M51 14.0 38.5 M52 14.25 38.5 M53 14.5 38.5 M54 14.75 38.5 M55 13.0 38.75 M56 13.25 38.75 M57 13.5 38.75 M58 13.75 38.75 M59 14.0 38.75 M60 14.25 38.75 M61 14.5 38.75 M62 14.75 38.75 M63"],
+        ["GEOSEARCH", "g64", "FROMLONLAT", "15", "37", "BYRADIUS", "500", "km", "ASC"],
+    ),
     # Summary form against a group with an EMPTY pending list: still exercises the whole
     # lookup/group-resolve path, and reads nothing that changes.
     # (frankenredis-gvm6z) THE POPULATED SIBLING, required by my own retry predicate before
