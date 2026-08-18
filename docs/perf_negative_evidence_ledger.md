@@ -49364,7 +49364,112 @@ contradicts it and the rounds recommendation should be revisited. The obvious fo
 have NOT done, is whether some rounds between 9 and 36 suffices -- 18 would halve the cost again
 if it holds, and nothing here rules it in or out.
 
+## 2026-08-18 CrimsonHawk: KEEP (COMPETITIVE) — the keymeta conversion re-certified with 12 of 12 arms WINDOW-FIT, which CORRECTS my own EXPIRETIME bound from 0.5180x to a worse figure and leaves TTL at 0.4975x (`frankenredis-getexgate`)
+
+Claim class: COMPETITIVE
+Campaign output: yes
+
+This supersedes the standing figures in my earlier row for `7395a4edf`. No code changed; the
+SAME ELF was re-measured in a window the harness certifies, because that row had to disclose
+that only 2 of its 12 ratio arms were WINDOW-FIT.
+
+### THE RE-CERTIFIED STANDING
+
+fr against Redis 7.2.4, instructions per op, two-point, each arm a SINGLE INVOCATION running
+both engines side by side. FOUR replicates per shape, and **every one of the 12 arms reported
+WINDOW: FIT for ratio** — no build running under the shared uid, loadavg stationary within the
+harness's 15 pct limit. WORST of each quadruple quoted:
+
+  shape             r5        r6        r7        r8        WORST     previously claimed
+  ttl_nonvolatile   0.4960x   0.4962x   0.4975x   0.4971x   0.4975x   0.4972x
+  expiretime        0.4871x   0.4864x   0.5165x   0.5180x   0.5180x   0.5062x   <- CORRECTED
+  pttl              0.5473x   0.5666x   0.5633x   0.5519x   0.5666x   0.5646x
+
+Stated inline: PTTL is fr/Redis 7.2.4 0.5666x at its worst FIT-window bound, the weakest of the
+three, so fr still retires a little over half the incumbent's instructions on every converted
+route.
+
+### WHAT THE RE-CERTIFICATION CHANGED, AND WHAT IT DID NOT
+
+TTL moves 0.4972x -> 0.4975x and PTTL 0.5646x -> 0.5666x: both inside measurement scatter, and
+neither changes anything.
+
+**EXPIRETIME moves 0.5062x -> 0.5180x, and that one was my error to make.** The earlier figure
+came from a quadruple in which three of four arms were WINDOW-UNFIT, and it was optimistic by
+0.0118. The conclusion of the earlier row is unchanged — fr is still roughly half the incumbent
+on all three routes — but anyone quoting 0.5062x for EXPIRETIME should quote 0.5180x instead.
+
+### WHY EXPIRETIME MOVED AND THE OTHER TWO DID NOT
+
+fr's numerator is stable to a fraction of a percent across all four replicates:
+`ttl_nonvolatile` reads 1436.2, 1438.9, 1438.8, 1439.7 — a 0.24 pct spread. The whole of the
+movement is in the DENOMINATOR, which is the load-sensitive half because `serverCron` does
+elapsed-time work.
+
+And on EXPIRETIME the denominator is not merely noisy, it is **BIMODAL**: 3735.9 and 3735.5 on
+the first two replicates, then 3512.5 and 3514.3 on the last two — a 6.4 pct step, with each
+cluster internally tight to 0.05 pct. That is a redis-side regime change part-way through a
+window the harness certified as FIT, not a gradual drift.
+
+Two consequences worth carrying forward:
+
+1. A FIT window is necessary and NOT sufficient. All four arms passed the stationarity gate and
+   the denominator still moved 6.4 pct between them. Replication across arms is what caught it;
+   a single FIT arm would have reported 0.4864x and looked clean.
+2. The replicated-standing convention earns its keep exactly here. Quoting the WORST of the four
+   gives 0.5180x, which is the high-denominator... no — it is the LOW-denominator cluster, and
+   therefore the reading taken against the least-flattered incumbent. Quoting a mean would have
+   split two genuinely different regimes and described neither.
+
+### COUNTED MECHANISM
+
+Unchanged from the row this supersedes and re-stated so this row stands alone:
+`plain_borrowed_default_key_read_allows` reads 0.0000 calls/op on the converted routes and
+1.0000 on `zcard`, the unconverted null, on this same ELF. That is a binary acceptance test
+registered before the edit; noise cannot produce it.
+
+The instrument carries its own null, measured in a single invocation of the same harness on one
+ELF and one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios, banked in `0bf781d57`. The
+EXPIRETIME correction of 0.0118 is about three times that interval's half-width, which is why it
+is reported as a correction rather than absorbed as scatter.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           `c9841153123128a025050b60a317c38555d81752def6f2260801df15be6c35cc` — byte for
+                byte the ELF named in the row this supersedes, re-verified by sha256 before use.
+                NO build was run for this row and no source changed.
+  bench_elf_sha256=c9841153123128a025050b60a317c38555d81752def6f2260801df15be6c35cc
+  incumbent     vendored redis 7.2.4, sha `d2c8a4b9` == vendored source HEAD, clean; started,
+                seeded and counted in the SAME INVOCATION as the fr arm on every one of the 12
+                arms.
+  harness       `scripts/shape_instr_per_op.py`, sha `1beb5dc8dd7eb8d1` recorded at the head of
+                the run because a peer had been editing that file.
+  host          /data 102G free. Per-arm loadavg spans 8.08-9.08 (1min) with 5min 8.92-9.09, and
+                per-arm CPU MHz mean spans 2152-2835; every arm's figures are in the per-arm
+                outputs. Zero cargo/rustc processes for this project, verified by process args
+                before the run.
+  window        12 of 12 arms WINDOW: FIT for ratio. This is the property the superseded row
+                could not claim.
+
+### RETRY PREDICATE
+
+1. Re-open if `ttl_nonvolatile`'s fr numerator leaves the 1436-1440 band on this ELF, which
+   would mean the measurement, not the engine, has changed.
+2. Re-certify these three routes after any dispatch change, and require 4 FIT arms per shape,
+   not 1. The EXPIRETIME bimodality above is the reason: one FIT arm would have reported
+   0.4864x.
+3. If a future EXPIRETIME quadruple lands entirely in the ~3735 denominator cluster, its ratio
+   will look ~0.487x and BETTER than this row. Do not publish that as an improvement without
+   showing the denominator; it is the same fr binary.
+4. The superseded figures (TTL 0.4972x, EXPIRETIME 0.5062x, PTTL 0.5646x) should not be quoted
+   again. This row's numbers replace them.
+
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: INSTRUMENT — rounds=18 does NOT halve the cost: it is 1 of 3 admissible, indistinguishable from rounds=9, because admissibility tracks the NULLS and the nulls do not narrow with rounds the way the CI does
 
 CLOSES THE GAP `8983321cd` FLAGGED and closes it NEGATIVELY. That row recommended rounds=36 over
@@ -49414,3 +49519,99 @@ interleaving, and check the NULLS rather than the CI when judging whether it wor
 rounds question only IF a setting below 36 is measured admissible in at least 5 consecutive
 isolated draws, which is the smallest count that would distinguish it from the 1-in-3 behaviour
 seen at 9 and 18.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: COSTED — the multi-node DUMP gap is NOT rare, it is 23 of 42 on ORDINARY build patterns including `redis-benchmark -t lpush`; and 13 of the 23 are EXACT REVERSALS, which localises the fix (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: differential behaviour against a live vendored redis 7.2.4 in the same probe
+invocation, compared at NODE-TABLE level across seven build patterns x six shapes. No timing
+verdict is claimed, no instruction counts are quoted, and CV was NOT used, as a gate or
+otherwise. No source change, no build. This row banks no vs-incumbent ratio. Campaign output: no.
+
+`9af5168f0` said the gap needed COSTING before any representation change, and offered the exit:
+"if that combination is rare in the workloads this campaign benchmarks, the correct decision may
+be to record the limit and stop." Costed. IT IS NOT RARE, and that exit is closed.
+
+### THE PRIOR SWEEP MUTATED AN RPUSH-BUILT LIST. THAT IS NOT HOW A BENCHMARK BUILDS ONE.
+
+`redis-benchmark -t lpush` is head insertion all the way down. Driving the patterns that actually
+occur, at three fills and two sizes:
+
+    pattern                 diverging shapes
+    RPUSH one-at-a-time     0 of 6
+    RPUSH bulk              0 of 6
+    LPUSH one-at-a-time     5 of 6      <- the default list benchmark
+    LPUSH bulk              5 of 6
+    stack  LPUSH+LPOP       3 of 6
+    alternating L/R         5 of 6
+    queue  RPUSH+LPOP       5 of 6
+                            ----------
+                            23 of 42
+
+  Every RPUSH-built shape agrees. Every LPUSH-built shape above one node diverges. The single-node
+  cases (fill -2 at n=300) agree throughout, which is why none of this was visible until the
+  probe went past the conversion threshold on the head-growth side.
+
+### 13 OF THE 23 ARE EXACT REVERSALS, AND THAT IS THE USEFUL HALF
+
+    fill -1  n 600  LPUSH        fr [4087 4087 2047]            redis [2047 4087 4087]
+    fill 128 n 600  LPUSH        fr [2183 2183 2183 2183 1503]  redis [1503 2183 2183 2183 2183]
+    fill 128 n 300  stack        fr [2183 1656]                 redis [1656 2183]
+
+  Same node sizes, same multiset, order MIRRORED. fr accumulates boundaries FRONT-TO-BACK, so its
+  partial node lands at the TAIL; redis, growing at the head, leaves its partial node at the HEAD.
+  All 13 reversals are LPUSH-built or stack-shaped.
+
+  The other 10 (alternating, queue) are not reversals — `[8184 2030]` against `[5634 4580]`, or
+  `[2183 2183 755]` against `[908 2183 2030]`. Those genuinely encode WHERE each element was
+  added and need real node state, exactly as `9af5168f0` argued.
+
+    SO THE PROBLEM SPLITS: 13 need a DERIVATION DIRECTION, 10 need a REPRESENTATION.
+
+### WHERE THE DIRECTION FIX GOES, AND WHY IT IS NOT IN THIS COMMIT
+
+`encode_dump_quicklist2` has three paths. The first two (`quicklist_packed_nodes`, then
+`retained_listpack_chunks`) decline for these lists; the THIRD, the incremental forward
+accumulator, is what emits `[4087 4087 2047]`. A direction flag would make that accumulator walk
+back-to-front for head-grown lists.
+
+  WHAT IT NEEDS THAT DOES NOT EXIST: a trustworthy "this list only ever grew at the front" signal
+  on `ListValue`, maintained across push_front/push_back/pop/insert AND across RESTORE-loaded and
+  RDB-loaded lists, which have no growth history at all. Inventing that field at speed, in the
+  fourth commit to touch this DUMP path tonight, is precisely the "subtly wrong boundary instead
+  of a clearly missing one" this bead already warned about once. It is specified here and left
+  for a turn that can start from the signal rather than the symptom.
+
+### WHAT IS AT STAKE, STATED THE SAME WAY EACH TIME
+
+Element sequences matched on all 42 cases, as on all 84 of the previous sweep. Nothing here is a
+data-correctness bug; RESTORE round-trips both ways with identical elements. What diverges is the
+BYTE LAYOUT of DUMP output — which matters for byte-comparing DUMP against the incumbent, and for
+anything checksumming it.
+
+    THE HONEST HEADLINE IS THAT THIS IS THE DEFAULT LPUSH SHAPE. Not a corner case, not a
+    configured fill, not an exotic mutation: build a list with LPUSH until it exceeds
+    `list-max-listpack-size` and DUMP it, and the bytes differ from redis.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = 32ad6582720b5bc1c452ac9e8cd06d40337c4c9d69c05e2a7a2fdc13f538ef7c
+                — the `a1332ccc2` build, unchanged; NO BUILD was run for this row.
+  probe         scratchpad `workload_shapes_probe.py`: seven build patterns x {fill -2, -1, 128}
+                x {n 300, 600}, each built from scratch on BOTH engines, compared on the decoded
+                node table, with the reversal classification computed rather than eyeballed.
+  incumbent     vendored redis 7.2.4, `legacy_redis_code/redis/src/redis-server`, booted per
+                probe on a free port with its own temp dir; fr and redis in the SAME invocation.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 18:42,
+                loadavg 7.38/8.39/9.40, /data 102G. Recorded for completeness: this row's
+                evidence is byte equality, immune to load.
+
+RETRY PREDICATE:
+  1. Take the DIRECTION fix first and scope it honestly to the 13. The oracle exists: every row
+     `workload_shapes_probe.py` marks EXACT REVERSAL must go green, and the 10 history-dependent
+     rows must NOT be claimed. Start by deciding what the head-grown signal is for a
+     RESTORE-loaded list — if the answer is "unknowable", the flag must default to the current
+     forward behaviour and the fix covers only lists built in-process.
+  2. Do NOT attempt the 10 without the node-boundary representation `9af5168f0` describes.
+  3. `9af5168f0`'s exit clause ("record the limit and stop") is WITHDRAWN by this row's numbers.
+     Anyone citing it should cite this row instead.
