@@ -57369,3 +57369,283 @@ away. Quote 3.64x for "one more read of a 300-element list" and this table for "
      and one fill. Element COUNT is the obvious second axis and is unmeasured — redis's fixed
      per-entry work should make its cost scale linearly in count, but that is an expectation, not
      a measurement.
+
+## 2026-08-18 CrimsonHawk: MEASURED — fr's read lead is almost ENTIRELY in the per-element term: 0.194x marginal but only 0.909x on the fixed per-read cost, so a ONE-element LRANGE is 0.75x, not 0.22x — which scopes every read figure this bead has published (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir) with a LIVE redis 7.2.4 arm, both
+arms in ONE invocation alternating per element count, read counts differenced at a FIXED key count.
+CV was NOT used, as a gate or otherwise; none was computed. No timing verdict is claimed: the
+measurand is a retired-instruction COUNT. No code changed and NO BUILD was run — another agent has
+held this project's build slot for a FOURTH consecutive window.
+
+**SIZING, NOT CERTIFIED.** `--for ratio` cannot return FIT while any cargo runs under the shared
+uid. Per-arm host state is on every line; the replicate's weak points are called out and not used.
+
+Claim class: not applicable — nothing is kept and nothing is banked as campaign output.
+
+  fr arm    `4eceae6c624c670fb4111eceae3068632e8b9223b0ef822440b5015f9c89fce5` (`68e1d4990`)
+  incumbent `legacy_redis_code/redis/src/redis-server`, vendored 7.2.4
+
+### THE AXIS I HAD NEVER VARIED
+
+`8dbe53d98`'s retry predicate named element COUNT as the unmeasured second axis. Every read figure
+on this bead — the −14.52 pct lever, the 3.64x marginal read, the 0.19x-0.27x per-element table —
+used 300-element lists. Most lists in a real keyspace are short, and a per-read FIXED cost that
+neither engine can amortise there would not show up at 300 at all.
+
+    cost of ONE LRANGE(0,-1), 15-byte elements, by ELEMENT COUNT
+       n     fr/read    redis/read    fr/redis    host
+       1      5,241.4      6,993.3     0.7495x    idle 82.3 pct
+       4      5,803.5      8,185.0     0.7090x    idle 87.4 pct
+      16      6,406.4     13,216.0     0.4847x    idle 87.2 pct
+      64     11,116.7     34,581.3     0.3215x    idle 86.6 pct
+     300     33,025.1    149,219.2     0.2213x    idle 86.4 pct
+
+      fr    cost/read =  5,171.9 +  92.81 * n
+      redis cost/read =  5,688.8 + 477.28 * n
+      fixed-cost ratio  0.9091x        marginal-per-element ratio  0.1945x
+
+  INTERNAL CHECK: `8dbe53d98` measured 112.67 instructions per element at n = 300 and 15 bytes.
+  This fit says 92.81 marginal plus 5,171.9/300 = 17.2 of amortised fixed cost, i.e. 110.0. The two
+  instruments agree to 2.4 pct on a quantity neither was built to produce.
+
+### WHAT IT MEANS, INCLUDING FOR WHAT I HAVE ALREADY PUBLISHED
+
+  THE LEAD IS THE PER-ELEMENT TERM AND ALMOST NOTHING ELSE. fr's marginal cost per element is
+  0.1945x redis's — a 5.1x lead. fr's FIXED cost of answering an LRANGE at all is 0.9091x redis's,
+  a 9 pct lead. Every read-side lever this bead landed moved the per-element term; none touched the
+  fixed one.
+
+  SO A SHORT LIST IS NOT WHERE fr IS 4x AHEAD. At n = 1 the ratio is 0.7495x, replicated at 0.7476x
+  with fr's own value agreeing to 0.8 pct. That is 33 pct ahead, not 350 pct. Anyone quoting this
+  bead's read numbers for a queue of a handful of items would be overstating fr by a factor of
+  three, and the numbers as published do not carry the caveat — this row is where it goes.
+
+  REDIS'S CURVE EXPLAINS ITS OWN SHAPE. `8dbe53d98` found redis flat in element LENGTH at 486-489
+  instructions per element; here its marginal term is 477.28 per element, the same quantity from a
+  different fit. Redis pays a large fixed cost PER ENTRY — walking the listpack, re-deriving each
+  entry, rendering integers — and almost nothing for the bytes.
+
+### THE REPLICATE, AND WHY ONLY PART OF IT IS USED
+
+    n = 1   fr 5,200.4  redis 6,956.2  0.7476x   idle 39.4 pct
+    n = 4   fr 5,312.1  redis 8,144.1  0.6523x   idle  2.0 pct   <- NOT used
+    n = 16  fr 6,178.2  redis 10,410.3 0.5935x   idle 46.7 pct   <- NOT used
+
+  The n = 4 point ran at 2.0 pct idle and the n = 16 redis arm moved 21 pct between sweeps
+  (13,216 -> 10,410), which is far outside anything Ir should do for a fixed workload. The likely
+  cause is the wall-clock-driven server work recorded on `308db786f`: at 2 pct idle a run takes
+  much longer and does more of it. The replicate's FIT is therefore not quoted; only its n = 1
+  point, which is the load-bearing new claim and which agrees.
+
+### RETRY PREDICATES
+
+  1. THE FIXED PER-READ COST IS THE UNWORKED TERM: 5,171.9 instructions to answer an LRANGE that
+     returns ONE 15-byte element, against redis's 5,688.8. Nothing on this bead has looked at it,
+     and it is what decides every short-list read. Profile it before assuming it is protocol
+     plumbing that cannot move.
+  2. Re-take the n = 4 and n = 16 points in a window above 80 pct idle before anyone builds on the
+     middle of this curve. The endpoints (1 and 300) are solid; the shape between them rests on one
+     clean sweep.
+  3. Any future read-side row on this bead must state its element COUNT in the heading or the first
+     table. The count changes the answer by a factor of three and the previous rows do not say so.
+
+## SHIPPED (SELF-SPEEDUP) 978e002d3 — XREAD WAS A STRANDED ROUTE: -5311.9 instr/op (-56.3 pct), AND THE LONG TAIL OF FAILING PARSERS IS THE LARGER HALF
+
+Claim class: SELF-SPEEDUP. Campaign output: no. This row measures fr against fr's own prior build.
+It is NOT a ratio against the incumbent: `certification_window.py --for ratio` returned UNFIT at
+the time of measurement (1 cargo/rustc process under the shared uid, which cannot be attributed
+away), so no vs-Redis number was taken and none is claimed. bench_elf_sha256=6cf1a8f42994a6444b93f2a7a0b080aebe812ed750e6527b2809039ae3389c8c
+
+XREAD already had a byte-prefix parser, a zero-copy executor, and a cascade arm wiring them
+together. What it did not have was a row in the floor class table — so every XREAD walked the
+~166-arm cascade to reach a fast path that had been written months earlier. Adding the class,
+the command token, the 5-byte table row, the classifier arm and a dispatch arm that delegates
+VERBATIM to the existing parser and executor is the whole change: 54 lines, no new logic.
+
+    xread_one   before 9431.8 9431.5 9431.4   after 4116.2 4105.5 4121.2   worst bound -5310.2
+
+### WHAT THE FRAME DELTA SAYS, AND WHY I UNDER-PREDICTED IT BY HALF
+
+The target row predicted only the four frames a top-N profile shows, and would have claimed about
+2730. The actual mechanism is larger and only visible in a full frame delta:
+
+    process_buffered_frames SELF            1469.0 ->  124.0    -1345.0
+    __memcmp_avx2_movbe (name comparisons)   552.1 ->   96.0     -456.1
+    parse_borrowed_plain_key_arg2_packet     429.0 ->    0.0     -429.0
+    parse_borrowed_plain_keys_multi_packet   281.0 ->    0.0     -281.0
+    seventeen further speculative parsers    all   ->    0.0    -1225.0 combined
+    classifier + floor dispatcher (RISERS)                        +82.0
+                                                                --------
+                                                              -5311.9
+
+TWENTY speculative parsers RUN AND FAIL on the XREAD input on the way to its cascade arm, and all
+twenty go to exactly 0.0. Each is individually small (36 to 429) so none is individually worth
+chasing; together they are 1935, more than the cascade's own self time. REUSABLE: a cascade walk's
+cost is NOT its self time plus its memcmp. It is that plus every parser that speculatively runs and
+fails before the right arm. Size a stranded route with a frame delta, never a top-N profile.
+
+The sum of all frame deltas reconciles to the shape total, so no part of the win is unattributed.
+
+### CORRECTION TO MY OWN COMMIT MESSAGE: THE +3.3 ON GET IS NOT RESOLVABLE
+
+The commit for this change disclosed a +3.3 instr/op rise on `get_control` and called it real,
+reasoning that the two 3-draw distributions did not overlap and that fr-server layout noise is
+about 1. That was asserted against a null I had not measured, and it is wrong.
+
+The A/A null on get_control, measured in a single invocation of the same harness on one ELF and one shape, has ratio median 0.9959 with a bootstrapped 95% median CI of [0.9850, 1.0131].
+
+Eight draws of the SAME binary ran 902.4 to 923.0 instr/op — spread 20.6, and a null interval of about plus or minus 1.4 pct, which is plus or minus 13 instr/op at this shape's scale.
+
+A +3.3 effect sits well inside that. The correct statement is that `get_control` is
+unresolved by this experiment, not that it regressed.
+
+The headline is unaffected.
+
+The A/A null on xread_one, taken in the same single invocation of the same harness on one ELF and one shape, has ratio median 0.9996 with a bootstrapped 95% median CI of [0.9978, 1.0007].
+
+Eight draws held to 4115.8 to 4126.3 instr/op — spread 10.5, 0.25 pct. The measured A/B ratio is 0.4364, which is not close to that null interval.
+
+That is three orders of magnitude of headroom. The bootstrap median-CI gate determined this verdict. CV is provenance only and never influenced it.
+
+### A CHEAP SHAPE'S CALLGRIND COUNT IS NOT LOAD-IMMUNE
+
+Worth recording because it contradicts a standing campaign belief. The `get_control` A/A above
+wandered 902.4 to 923.0 — 2.3 pct — on ONE binary, while a build ran on the host. `xread_one`, on
+the same host in the same interval, held to 0.25 pct. The campaign's rule that the fr numerator is
+immune to load and MHz was established on expensive shapes; on a ~915 instr/op shape the fixed
+elapsed-time background work is a large enough share to move the count. Prefer an expensive shape,
+or an explicitly measured A/A, when adjudicating a sub-20 instr/op effect under load.
+
+### CORRECTNESS: THE RISK IS ENTIRELY THE CLASSIFIER PREDICATE
+
+No new logic exists, so behaviour can only change if the classifier claims a shape the old route
+handled differently. The predicate fires on array_len 4 or 6, and TWO other XREAD forms are also
+array_len 6: multi-key (`XREAD STREAMS k1 k2 0 0`) and blocking (`XREAD BLOCK 0 STREAMS k id`).
+The parser distinguishes the COUNT form by requiring COUNT at token 1 and declines both others,
+falling through to the unchanged path. Verified by a byte-for-byte differential of the two ELFs
+over 24 shapes x RESP2/RESP3 — both len-6 forms, the `$` ID, wrong key type, bad count, negative
+count, bad ID, short arity, absent STREAMS keyword, lowercase, mixed case, empty stream,
+multi-entry, multi-field: 0 divergences.
+
+Paired build guards: A1 == A2 bit-identical, HEAD held af38b999b, no peer file changed, no
+concurrent frankenredis builder. Per-arm host state: loadavg 5.94/10.46/12.54 rising to
+9.91/10.25/11.69, CPU idle 89-90 pct, CPU MHz 2688/1429/3433/3432/3433/3432/3433/4292.
+
+### RETRY PREDICATE
+
+  1. The vs-incumbent ratio for XREAD is UNMEASURED. Take it only when
+     `certification_window.py --for ratio` returns FIT; a 56 pct self-improvement says nothing
+     about where XREAD now stands against Redis.
+  2. Re-run the `get_control` question only if a lever claims an effect under about 20 instr/op on
+     a cheap shape, and then only against a fresh A/A on the same ELF in the same window. Do not
+     cite the +3.3 in this row's commit message as evidence of anything.
+  3. The other stranded-route candidates found by the same detector remain open. Before sizing any
+     of them, run the frame delta rather than the top-N profile — this row under-predicted by half
+     because seventeen sub-500 parsers do not appear in a top-N view.
+  4. Multi-key and blocking XREAD are still unclassified by design and still walk the cascade. If a
+     shape shows them hot, they are separate work with a separate predicate, not this finding.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: COMPETITIVE — fr is AHEAD of Redis 7.2.4 on all NINE admissible shapes of the commandstats vein, worst bound **1.0777x** on `hlen`, measured live in ONE invocation (`frankenredis-getexgate`)
+
+Claim class: COMPETITIVE
+Campaign output: **yes** — a vs-incumbent ratio measured LIVE, both engines in the SAME
+invocation, on the shapes this session's levers moved. Every prior row of this vein was
+instruction-level self-speedup and said "Campaign output: no".
+
+### THE STANDING — RAW fr/redis THROUGHPUT, WORST BOUND QUOTED
+
+`>1` means FrankenRedis is faster. `--shapes unswept --rounds 36`, ten shapes, both engines
+interleaved in one invocation with the control re-measured alongside every row.
+
+| shape | ratio | 95% CI | **worst bound** | null redis | null fr | verdict |
+|---|---|---|---|---|---|---|
+| hget | 1.1466 | [1.1234, 1.1620] | **1.1234** | 1.0103 | 1.0088 | ADMISSIBLE |
+| get_control | 1.1437 | [1.1285, 1.1620] | **1.1285** | 0.9977 | 0.9887 | ADMISSIBLE |
+| type | 1.1146 | [1.1030, 1.1333] | **1.1030** | 0.9950 | 0.9828 | ADMISSIBLE |
+| ttl_nonvolatile | 1.1135 | [1.0939, 1.1361] | **1.0939** | 1.0025 | 0.9982 | ADMISSIBLE |
+| strlen | 1.1097 | [1.0893, 1.1324] | **1.0893** | 0.9978 | 0.9929 | ADMISSIBLE |
+| scard | 1.1037 | [1.0853, 1.1397] | **1.0853** | 0.9845 | 0.9911 | ADMISSIBLE |
+| llen | 1.0988 | [1.0862, 1.1181] | **1.0862** | 1.0173 | 0.9963 | ADMISSIBLE |
+| hlen | 1.0946 | [1.0777, 1.1204] | **1.0777** | 0.9892 | 0.9973 | ADMISSIBLE |
+| zcard | 1.0886 | [1.0827, 1.1155] | **1.0827** | 0.9850 | 1.0077 | ADMISSIBLE |
+| getrange | 1.1144 | [1.0939, 1.1362] | — | **1.0211** | 0.9902 | **NULL-FAILED** |
+
+**Nine of ten admissible. fr is ahead on every one of the nine, and the WEAKEST worst bound in
+the set is `hlen` at 1.0777x** — i.e. on its worst shape at the low end of its interval, fr still
+does 7.77 pct more ops/s than the incumbent.
+
+`getrange` is **EXCLUDED, not quoted**: its redis-side null read 1.0211, outside the null bound,
+so the instrument refused the row. Its 1.1144 is not a result and does not enter the set.
+
+### THE NORMALISED COLUMN SAYS "BEHIND" AND THAT DOES NOT MEAN BEHIND THE INCUMBENT
+
+The harness also prints figures normalised against `get_control`, where `llen`, `hlen` and
+`zcard` read BEHIND. **That means their advantage over Redis is SMALLER than `get_control`'s
+advantage — not that they are slower than Redis.** All three are comfortably ahead in raw terms
+(1.0862, 1.0777, 1.0827 worst bound). This distinction has already caused one retraction in this
+campaign and is restated here so the table above is not misread.
+
+The normaliser is also wider than two of the rows it divides, which the harness flags inline.
+**The standing quoted here is the RAW ratio, and no normalised figure is claimed.**
+
+### THIS IS ONE DRAW AND IS NOT YET A REPLICATED STANDING
+
+One invocation. The campaign's replicated-standing convention wants the worst of TWO draws before
+a figure is treated as settled. These margins are not thin — the narrowest is 7.77 pct at the
+worst bound, against per-row nulls spanning 0.9845-1.0173 — but **a second draw is OWED before
+any of these is quoted as a certified standing**, and it is not taken here because the host
+saturated to 2 pct CPU idle immediately after this run finished.
+
+### PROVENANCE — SELF-REPORTED FROM INSIDE THE RUNNING PROCESSES
+
+  host                  thinkstation1, kernel 6.17.0-41-generic, 64 cores, governor powersave,
+                        ISA avx2
+  loadavg               7.20 9.83 12.15 at launch — the harness computes this as **11 pct of
+                        1-min capacity on 64 cpus** and prints "quote this with every row"
+  cpu_mhz               before mean 2109 (min 1429, max 4293, spread 3.00x);
+                        after mean 2910 (min 1429, max 4192, spread 2.93x)
+  fr_elf_sha256         114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+  bench_elf_sha256=114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+  redis_elf_sha256      e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  incumbent             Redis 7.2.4, `v=7.2.4 sha=d2c8a4b9:0 malloc=jemalloc-5.3.0 bits=64`,
+                        vendored, measured in the SAME INVOCATION as fr
+  threads               fr 3 observed, redis 5 observed
+  allocator             fr mimalloc vs redis jemalloc-5.3.0 — a deliberate asymmetry; both are
+                        the engines' SHIPPING configurations, which is what a standing compares
+  levers present        the ELF carries all three batches of this vein: 68 map-converted sites,
+                        the 29 literal->slot conversions, and the 6 enum-seam sites
+  disposition           MEASUREMENT. No source file changed by this row.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The instrument carries its own A/A null on BOTH engines for EVERY row, taken in the SAME
+INVOCATION as the A/B, and all twenty are printed in the table above. Pooled over those twenty:
+
+    **A/A null median 0.996800; bootstrap 95% median CI [0.990650, 1.000350]**, 20,000 resamples.
+    Widest single null deviation 2.110 pct.
+
+The widest deviation IS `getrange`'s redis-side null, the one the instrument refused — so the
+number that sets this envelope is the row that was thrown out. **The narrowest admissible worst
+bound, `hlen` at 1.0777, is 3.7x that widest null deviation**, and every other admissible row is
+further out still.
+
+The null median sits 0.32 pct BELOW 1.0, a small bias toward the redis arm, which makes the fr
+lead quoted here conservative rather than flattered.
+
+CV was not used, as a gate or otherwise; the bootstrap median-CI above is the gate for this
+verdict, admissibility is the harness's own per-row null test, and an effect inside that interval
+is not claimed. A quiet window WAS required for this row and was checked: 11 pct of 1-min
+capacity at launch, zero frankenredis builds in flight, verified by process name AND by project.
+
+### RETRY PREDICATE
+
+1. TAKE THE SECOND DRAW before calling any of these certified. Same command, same ELF, a window
+   at or below the 11 pct of capacity recorded here. Quote the worst of the two.
+2. Re-run `getrange` specifically. Its redis-side null failed at 1.0211 and the shape is
+   otherwise the weakest gainer in the instruction measurements, so it is the one most likely to
+   move.
+3. Do NOT quote the normalised column from this run in either direction. The normaliser is wider
+   than two of the rows it divides and BEHIND there means "less far ahead", not "behind".
