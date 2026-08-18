@@ -46464,3 +46464,72 @@ normalised ones, for the confound reason above. Start a run ONLY when loadavg is
 before-loadavg, regardless of what the nulls say; on this evidence that condition alone would
 have saved five of the eight runs. Do NOT re-run mimalloc: it is replicated at 0.8578 worst
 bound and re-measuring a settled standing is not work.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — the small-payload const-length store, RESOLVED on a same-binary instruction-counted A/B after the server profile could not see it: **-19 / -15 / -14 instructions per encode** at 1/3/8 bytes, worst bound -14 (`frankenredis-iqicb`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: `fr_protocol::encode_bulk_string_slice` emits payload+CRLF for `len <= 8` as one
+CONST-length array instead of `extend_from_slice` on a runtime-length slice, which lowers to a
+`__memcpy_avx_unaligned_erms` CALL. Shipped in `214fcd1b1`. Same trick the `$<len>` header path
+already uses (`vlis9`).
+
+**THIS ROW SUPERSEDES `7c6e0add0`, WHICH REJECTED THE SAME CHANGE AS UNRESOLVED.** The code is
+the same; the INSTRUMENT is different, and that is the finding. That row measured on a whole-
+server profile, where a ~15 instruction effect sits inside a 15-37 instr/op spread: its
+constructed nulls drifted +3 and +11 and the 8-byte size moved the WRONG WAY. It also chased a
+prize derived from the `memcpy` frame's 83.5 instr/op, which was never one call site's cost —
+that frame is shared libc and read 55.3 then 69.8 on the same arm across two rounds.
+
+MEASURED, same-binary A/B behind a `SMALL_PAYLOAD` const generic (both arms in ONE binary, so
+build and layout cannot differ), `perf stat -e instructions:u` (instructions, not time, so host
+load cannot contribute), 400,000 encodes per sample, 9 INTERLEAVED rounds per size, median
+reported. Both arms are the SAME binary, so one hash covers the pair: `bench_elf_sha256=194346995db17047b942dde3528437b009530653b4fd723040ae6af1b1b54002`. Host: load 7.91/8.53/13.25, CPU idle 84.7 pct measured from `/proc/stat`, mean 2288
+MHz across 64 cores, /data 128G. A redis build was in flight and did not matter, because nothing
+here is timed.
+
+| size | reference | candidate | raw delta | role |
+|---|---|---|---|---|
+| 1 B | 65.76 | 42.76 | -23.00 | candidate path |
+| 3 B | 67.76 | 48.76 | -19.00 | candidate path |
+| 8 B | 62.76 | 44.76 | -18.00 | candidate path |
+| 16 B | 64.76 | 60.76 | **-4.00** | NULL |
+| 64 B | 65.76 | 61.76 | **-4.00** | NULL |
+
+**THE NULLS MOVED -4.00 AND I SUBTRACT THEM.** Sizes above 8 do not take the candidate path, so
+a -4.00 there cannot be the lever: the two arms are separate MONOMORPHISATIONS and differ
+slightly even on code they share. Net effect is therefore **-19, -15 and -14** instructions per
+encode. **Quoting the WORST bound: -14 per encode, at 8 bytes.**
+
+**WHAT THE NULL DOES NOT MEAN, because it would be easy to misread as a bonus:** it is NOT a
+saving for large values. In the shipped build there is no reference arm to compare against — the
+generic is instantiated `true` — so a value above 8 bytes pays one extra length compare, not
+-4.00.
+
+WHERE IT LANDS IN A REAL COMMAND: one encode per GET reply, so roughly -14 to -19 instr/op on a
+GET whose value is 8 bytes or fewer, against ~980 instr/op — about 1.5 to 2 pct, and nothing at
+all for larger values. It is a small lever measured properly, not a large one measured loosely.
+
+CORRECTNESS: wire output is BYTE-IDENTICAL to the pre-change server across value sizes 0, 1, 2,
+3, 4, 5, 6, 7, 8, 9, 10, 16, 64 and 300 with binary (non-ASCII) content, plus a four-element
+MGET. Size 0 is the interesting one: the match's `_` arm instantiates N=8, so an empty value
+takes the `try_from` Err fallback rather than panicking.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run that
+interleaves the arms across nine rounds per size, so drift lands on both alike. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this row;
+no CV was computed. Host state is likewise provenance, not a gate. The verdict rests on the
+microbench's interleaved medians, whose per-size null (-4.00) is explicitly subtracted rather
+than ignored.
+
+RETRY PREDICATE: revisit only if the null in `encode_bulk_payload_small` exceeds the effect at
+any dosed size — that is, if `16 B` or `64 B` moves by more than the 1/3/8 deltas, the
+monomorphisation difference has grown past what it is measuring and the numbers must be
+rebuilt. The bench ships with the change so this is one command. **Do NOT re-measure this on a
+whole-server profile**: the effect is ~15 instructions and that instrument's spread is 15-37,
+which is what produced the earlier UNRESOLVED verdict. The same reasoning applies to any other
+encode or parse kernel in `fr-protocol`: measure it in `crates/fr-protocol/benches/`, where the
+signal is not buried under ~980 instr/op of server work.
