@@ -12509,11 +12509,21 @@ impl Store {
         // Redis 7.4: any hash carrying a per-field TTL flips its encoding
         // from listpack/hashtable to the listpack_ex / hashtable_ex variant.
         // (br-frankenredis-omff)
-        let hash_has_field_ttl = self
-            .hash_field_expires
-            .range((key.to_vec(), Vec::new())..)
-            .next()
-            .is_some_and(|((k, _), _)| k.as_slice() == key);
+        // (frankenredis-getexgate) ASK BEFORE ALLOCATING. The range bound below needs an OWNED
+        // key, so `key.to_vec()` allocates and memcpys the key on EVERY call -- measured at
+        // 1.000 allocations and 1.000 memcpy calls/op on the `object_encoding` shape, with
+        // `Store::object_encoding` named as the memcpy's caller.
+        //
+        // Per-field hash TTLs are a Redis 7.4 feature that most keyspaces never use, and the map
+        // is empty unless some hash somewhere has one. `is_empty()` is O(1) on a BTreeMap, and
+        // when it holds the range yields nothing, so `is_some_and` was already going to be
+        // false: byte-identical, and the allocation disappears with it.
+        let hash_has_field_ttl = !self.hash_field_expires.is_empty()
+            && self
+                .hash_field_expires
+                .range((key.to_vec(), Vec::new())..)
+                .next()
+                .is_some_and(|((k, _), _)| k.as_slice() == key);
         let entry = self.entries.get(key)?;
         Some(match &entry.value {
             Value::String(v) => {
@@ -43888,6 +43898,55 @@ mod tests {
         assert!(!store.expire_seconds(b"missing", 5, 0));
         assert!(!store.expire_milliseconds(b"missing", 5, 0));
         assert!(!store.expire_at_milliseconds(b"missing", 5_000, 0));
+    }
+
+    #[test]
+    fn object_encoding_reports_ex_when_a_hash_field_carries_a_ttl_getexgate() {
+        // (frankenredis-getexgate) THE ARM GUARDED BY THE hash_field_expires EMPTINESS CHECK.
+        //
+        // `object_encoding` builds a range bound with `key.to_vec()`, which allocated and copied
+        // the key on EVERY call -- 1.000 allocations and 1.000 memcpy calls/op measured. That
+        // probe is now skipped when `hash_field_expires` is empty, which is byte-identical
+        // because an empty map's range yields nothing.
+        //
+        // But the arm it guards had NO test: nothing anywhere asserted the `_ex` encodings, so a
+        // future change to the probe could drop them and the suite would stay green. That is the
+        // same shape as the commandstats regression I shipped earlier in this campaign, where a
+        // field was added to the writer and the readers were left behind with 2433 tests passing.
+        //
+        // ASSERTION ORDER IS THE POINT. The no-TTL case is asserted FIRST so the test proves the
+        // encoding can be plain `listpack` -- without it, an implementation that answered
+        // `listpack_ex` unconditionally would pass.
+        let mut store = Store::new();
+        store
+            .hset(b"h", b"f".to_vec(), b"v".to_vec(), 1_000)
+            .expect("hset");
+        assert_eq!(
+            store.object_encoding(b"h", 1_000),
+            Some("listpack"),
+            "a hash with no field TTL must report the plain encoding; without this the _ex \
+             assertion below proves nothing"
+        );
+
+        // The empty map is the fast path the guard takes; setting a field TTL populates it and
+        // forces the probe to actually run.
+        let set = store.hash_field_set_abs_expiry(
+            b"h",
+            b"f",
+            4_102_444_800_000,
+            HashFieldTtlCondition::None,
+            1_000,
+        );
+        assert!(
+            matches!(set, HashFieldTtlSet::Applied),
+            "field TTL must apply, or the _ex assertion below is vacuous: {set:?}"
+        );
+        assert_eq!(
+            store.object_encoding(b"h", 1_000),
+            Some("listpack_ex"),
+            "a hash carrying a per-field TTL must report the _ex encoding -- this is the arm the \
+             hash_field_expires emptiness guard skips when the map is empty"
+        );
     }
 
     #[test]
