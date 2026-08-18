@@ -1030,18 +1030,32 @@ impl RespFrame {
             }
             Self::Integer(n) => encode_integer_reply::<true>(*n, out),
             Self::BulkString(None) => out.extend_from_slice(b"$-1\r\n"),
+            // (frankenredis-getexgate) HEADERS GO THROUGH `push_len_header`, which exists for
+            // exactly this and which this function never adopted. Its own documentation says it
+            // "replaces the prior three-call header shape (`extend(prefix)` + `push_usize` +
+            // `extend("\r\n")`)" -- the shape still written out below it until now.
+            //
+            // `push_usize` ends in `extend_from_slice(&buf[pos..])`, a RUNTIME-VARIABLE length,
+            // which rustc lowers to a `memcpy` CALL; `push_len_header` emits the whole header in
+            // one go and has const-length arms for n < 100, so a small header becomes stores.
+            //
+            // MEASURED cost of this function before the change, two-point differenced, SELF plus
+            // the memcpy it drives:
+            //     xrevrange_base  480 + 483 instr/op of 8317.5   (11.6 pct)
+            //     substr           83 + 142           of 1875.5   (12.0 pct)
+            //     zdiff_2         156 + 160           of 3806.9   ( 8.3 pct)
+            //     bitfield_get     96 + 112           of 2372.0   ( 8.8 pct)
+            // It is the GENERIC reply path that every specific encoder fixed in this campaign
+            // bypasses, so a nested Array pays it once per element -- 8.000 calls/op on
+            // XREVRANGE.
             Self::BulkString(Some(bytes)) => {
-                out.extend_from_slice(b"$");
-                push_usize(out, bytes.len());
-                out.extend_from_slice(b"\r\n");
+                push_len_header::<true>(out, b'$', bytes.len() as u64);
                 out.extend_from_slice(bytes);
                 out.extend_from_slice(b"\r\n");
             }
             Self::Array(None) => out.extend_from_slice(b"*-1\r\n"),
             Self::Array(Some(frames)) => {
-                out.extend_from_slice(b"*");
-                push_usize(out, frames.len());
-                out.extend_from_slice(b"\r\n");
+                push_len_header::<true>(out, b'*', frames.len() as u64);
                 for frame in frames {
                     frame.encode_into(out);
                 }
