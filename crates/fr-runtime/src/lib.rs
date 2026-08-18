@@ -30720,9 +30720,38 @@ impl Runtime {
             PlainKeyMetaCmd::Type => {
                 let type_str = self.server.store.key_type(key, now_ms).unwrap_or("none");
                 if !suppress_reply {
-                    out.push(b'+');
-                    out.extend_from_slice(type_str.as_bytes());
-                    out.extend_from_slice(b"\r\n");
+                    // (frankenredis-getexgate) Emit each reply as ONE compile-time-constant
+                    // slice. The previous form was three appends -- `push(b'+')`, the type name,
+                    // then `"\r\n"` -- and the middle one is a `&str` of RUNTIME-VARIABLE
+                    // length, which rustc lowers to a `memcpy` CALL. Measured at 1.000 calls/op
+                    // on the `type` shape, for a reply of at most nine bytes.
+                    //
+                    // The names come from `ValueType::as_str`, a closed set of six `&'static
+                    // str`s plus the absent case, so every possible reply is known at compile
+                    // time. A `match` that binds one slice and extends once would NOT fix this:
+                    // the bound slice still has a runtime length. Each arm has to do its own
+                    // `extend_from_slice` on an array literal for the length to be constant.
+                    //
+                    // rustc buckets a `match` on `&str` by LENGTH before comparing bytes, so the
+                    // dispatch below is not a linear scan of seven string compares -- the same
+                    // property measured on the floor command table, where arm position showed no
+                    // gradient across 30 positions.
+                    match type_str {
+                        "string" => out.extend_from_slice(b"+string\r\n"),
+                        "list" => out.extend_from_slice(b"+list\r\n"),
+                        "set" => out.extend_from_slice(b"+set\r\n"),
+                        "zset" => out.extend_from_slice(b"+zset\r\n"),
+                        "hash" => out.extend_from_slice(b"+hash\r\n"),
+                        "stream" => out.extend_from_slice(b"+stream\r\n"),
+                        "none" => out.extend_from_slice(b"+none\r\n"),
+                        // Unreachable for the closed set above; kept so a new ValueType variant
+                        // is still emitted correctly rather than silently dropped.
+                        other => {
+                            out.push(b'+');
+                            out.extend_from_slice(other.as_bytes());
+                            out.extend_from_slice(b"\r\n");
+                        }
+                    }
                 }
                 None
             }
