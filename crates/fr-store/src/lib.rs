@@ -11228,7 +11228,13 @@ impl Store {
         }
         // (frankenredis-uwhyl) Mirror redis setbitCommand: reject when the byte
         // index reaches proto-max-bulk-len (config knob, not a hardcoded 512 MiB).
-        if offset >> 3 >= self.proto_max_bulk_len {
+        // (frankenredis-obeyclient-strlen-qxdyn) An OBEYED client is exempt from the CAP only.
+        // Upstream puts both halves in one helper: getBitOffsetFromArgument is
+        // `if (loffset < 0 || (!mustObeyClient(c) && (loffset >> 3) >= server.proto_max_bulk_len))`
+        // (bitops.c:433), shared by setbitCommand (:540), getbitCommand (:586) and bitfieldGeneric
+        // (:1080, once per op). The negative-offset half stays unconditional; a write that has
+        // ALREADY HAPPENED on the master, or in the AOF, must not be refused as it is replayed.
+        if !self.must_obey_client && offset >> 3 >= self.proto_max_bulk_len {
             return Err(StoreError::GenericError(
                 "ERR bit offset is not an integer or out of range".to_string(),
             ));
@@ -11602,7 +11608,13 @@ impl Store {
         // enforces bit_offset < 2^32 (== this guard for the default 512 MiB), so
         // the prior `needed_bytes > 512MiB` length check wrongly rejected the top
         // few offsets that redis accepts.
-        if (bit_offset >> 3) as usize >= self.proto_max_bulk_len {
+        // (frankenredis-obeyclient-strlen-qxdyn) An OBEYED client is exempt from the CAP only.
+        // Upstream puts both halves in one helper: getBitOffsetFromArgument is
+        // `if (loffset < 0 || (!mustObeyClient(c) && (loffset >> 3) >= server.proto_max_bulk_len))`
+        // (bitops.c:433), shared by setbitCommand (:540), getbitCommand (:586) and bitfieldGeneric
+        // (:1080, once per op). The negative-offset half stays unconditional; a write that has
+        // ALREADY HAPPENED on the master, or in the AOF, must not be refused as it is replayed.
+        if !self.must_obey_client && (bit_offset >> 3) as usize >= self.proto_max_bulk_len {
             return Err(StoreError::GenericError(
                 "ERR bit offset is not an integer or out of range".to_string(),
             ));
@@ -11658,7 +11670,13 @@ impl Store {
         // the default 512 MiB), so the prior length check wrongly rejected the top
         // few offsets redis accepts. Supersedes the ga4j1 checkStringLength wording
         // here (that wording is correct for SET/APPEND/SETRANGE, not BITFIELD).
-        if (bit_offset >> 3) as usize >= self.proto_max_bulk_len {
+        // (frankenredis-obeyclient-strlen-qxdyn) An OBEYED client is exempt from the CAP only.
+        // Upstream puts both halves in one helper: getBitOffsetFromArgument is
+        // `if (loffset < 0 || (!mustObeyClient(c) && (loffset >> 3) >= server.proto_max_bulk_len))`
+        // (bitops.c:433), shared by setbitCommand (:540), getbitCommand (:586) and bitfieldGeneric
+        // (:1080, once per op). The negative-offset half stays unconditional; a write that has
+        // ALREADY HAPPENED on the master, or in the AOF, must not be refused as it is replayed.
+        if !self.must_obey_client && (bit_offset >> 3) as usize >= self.proto_max_bulk_len {
             return Err(StoreError::GenericError(
                 "ERR bit offset is not an integer or out of range".to_string(),
             ));
@@ -11742,7 +11760,13 @@ impl Store {
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
         }
-        if (bit_offset >> 3) as usize >= self.proto_max_bulk_len {
+        // (frankenredis-obeyclient-strlen-qxdyn) An OBEYED client is exempt from the CAP only.
+        // Upstream puts both halves in one helper: getBitOffsetFromArgument is
+        // `if (loffset < 0 || (!mustObeyClient(c) && (loffset >> 3) >= server.proto_max_bulk_len))`
+        // (bitops.c:433), shared by setbitCommand (:540), getbitCommand (:586) and bitfieldGeneric
+        // (:1080, once per op). The negative-offset half stays unconditional; a write that has
+        // ALREADY HAPPENED on the master, or in the AOF, must not be refused as it is replayed.
+        if !self.must_obey_client && (bit_offset >> 3) as usize >= self.proto_max_bulk_len {
             return Err(StoreError::GenericError(
                 "ERR bit offset is not an integer or out of range".to_string(),
             ));
@@ -11878,7 +11902,16 @@ impl Store {
         // Offset guard per WRITE op (mirrors bitfield_set/bitfield_incrby; the command layer already
         // validated offsets, but the store guard is load-bearing for the top few addressable ones).
         for op in ops {
-            if op.is_write() && (op.offset() >> 3) as usize >= self.proto_max_bulk_len {
+            // (frankenredis-obeyclient-strlen-qxdyn) An OBEYED client is exempt from the CAP only.
+            // Upstream puts both halves in one helper: getBitOffsetFromArgument is
+            // `if (loffset < 0 || (!mustObeyClient(c) && (loffset >> 3) >= server.proto_max_bulk_len))`
+            // (bitops.c:433), shared by setbitCommand (:540), getbitCommand (:586) and bitfieldGeneric
+            // (:1080, once per op). The negative-offset half stays unconditional; a write that has
+            // ALREADY HAPPENED on the master, or in the AOF, must not be refused as it is replayed.
+            if op.is_write()
+                && !self.must_obey_client
+                && (op.offset() >> 3) as usize >= self.proto_max_bulk_len
+            {
                 return Err(StoreError::GenericError(
                     "ERR bit offset is not an integer or out of range".to_string(),
                 ));
@@ -46517,6 +46550,85 @@ mod tests {
             store.append(b"k2", &vec![b'y'; 64], 0).is_err(),
             "the cap must come back when the obeyed source ends"
         );
+    }
+
+    #[test]
+    fn obeyed_sources_are_exempt_from_the_bit_offset_cap_qxdyn() {
+        // Upstream's proto-max-bulk-len cap for bit offsets lives in ONE helper,
+        // `getBitOffsetFromArgument`, whose guard reads
+        // `if (loffset < 0 || (!mustObeyClient(c) && (loffset >> 3) >= server.proto_max_bulk_len))`
+        // (bitops.c:433). Because the exemption is inside the shared helper it reaches all three
+        // callers -- setbitCommand (:540), getbitCommand (:586) and bitfieldGeneric (:1080, called
+        // once per op) -- which is why the APPEND fix alone left SETBIT and BITFIELD diverging in
+        // exactly the two silent ways `append` did: a replica refuses a write its master applied
+        // and keeps the SHORT value, and an AOF written under a larger limit stops replaying once
+        // the limit is lowered.
+        //
+        // Each of the five store-side guards is entered through its OWN public entry point rather
+        // than through one wrapper, because `bitfield_set` and friends re-check the offset
+        // themselves: a test that only reached one of them would report the family fixed while
+        // four guards still refused an obeyed write.
+        //
+        // The cap is 8 bytes here, so bit offset 64 is the first one past it; nothing in this test
+        // allocates more than a handful of bytes.
+        //
+        // `BitfieldOp` is imported locally rather than added to the module's explicit list, which
+        // is how `bitfield_apply_ops_matches_per_op_reference_across_matrix` already reaches it.
+        use super::BitfieldOp;
+
+        let mut store = Store::new();
+        store.proto_max_bulk_len = 8;
+
+        // Not obeyed: every entry point refuses.
+        assert!(store.setbit(b"k", 64, true, 0).is_err(), "SETBIT is capped");
+        assert!(
+            store.bitfield_reserve_for_write(b"k", 64, 8, 0).is_err(),
+            "the BITFIELD reserve path is capped"
+        );
+        assert!(store.bitfield_set(b"k", 64, 8, 1, 0).is_err(), "BITFIELD SET is capped");
+        assert!(
+            store.bitfield_incrby(b"k", 64, 8, true, 0, |v| Some(v + 1)).is_err(),
+            "BITFIELD INCRBY is capped"
+        );
+        assert!(
+            store
+                .bitfield_apply_ops(
+                    b"k",
+                    &[BitfieldOp::Set { offset: 64, bits: 8, signed: false }],
+                    0,
+                    |_, v| Some(v),
+                )
+                .is_err(),
+            "the batched BITFIELD path is capped"
+        );
+
+        // Obeyed: the same five writes are applied, because they already happened elsewhere.
+        store.must_obey_client = true;
+        assert!(
+            !store.setbit(b"k", 64, true, 0).expect("an obeyed SETBIT must not be refused"),
+            "the bit was previously unset"
+        );
+        store
+            .bitfield_reserve_for_write(b"k", 64, 8, 0)
+            .expect("an obeyed reserve must not be refused");
+        store.bitfield_set(b"k", 64, 8, 1, 0).expect("an obeyed BITFIELD SET must not be refused");
+        store
+            .bitfield_incrby(b"k", 64, 8, true, 0, |v| Some(v + 1))
+            .expect("an obeyed BITFIELD INCRBY must not be refused");
+        store
+            .bitfield_apply_ops(
+                b"k",
+                &[BitfieldOp::Set { offset: 64, bits: 8, signed: false }],
+                0,
+                |_, v| Some(v),
+            )
+            .expect("an obeyed batched BITFIELD must not be refused");
+
+        // And the cap comes back when the obeyed source ends -- an exemption that failed to clear
+        // would lift the limit for ordinary clients, turning a parity fix into unbounded growth.
+        store.must_obey_client = false;
+        assert!(store.setbit(b"k", 64, false, 0).is_err(), "the cap must return");
+        assert!(store.bitfield_set(b"k", 64, 8, 1, 0).is_err(), "the cap must return for BITFIELD");
     }
 
     #[test]

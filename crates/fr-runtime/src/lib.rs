@@ -38068,8 +38068,11 @@ impl Runtime {
     ) -> T {
         let previous = std::mem::replace(&mut self.execution_source, source);
         // (frankenredis-obeyclient-strlen-qxdyn) Publish it where the limits are enforced. Store cannot
-        // see `execution_source`, and the checks that need it (the proto-max-bulk-len cap on
-        // APPEND) live there. Saved and restored with the source itself so a nested replay -- or
+        // see `execution_source`, and the checks that need it live there: the proto-max-bulk-len
+        // cap on APPEND, and the bit-offset cap on SETBIT/BITFIELD, which upstream exempts in the
+        // SAME two places (`checkStringLength` t_string.c:41, `getBitOffsetFromArgument`
+        // bitops.c:433) -- so a reader must not conclude from this comment that APPEND is the only
+        // consumer. Saved and restored with the source itself so a nested replay -- or
         // an early return out of `f` -- cannot leave the exemption stuck on, which would silently
         // lift the cap for ordinary clients.
         let previous_obey = std::mem::replace(
