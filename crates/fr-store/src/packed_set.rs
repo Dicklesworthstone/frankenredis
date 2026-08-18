@@ -4081,13 +4081,20 @@ impl ChunkedList {
                     //
                     // `raw_total` is unaffected — it needs each element's own length either way,
                     // so this shrinks the fold rather than removing it.
+                    // (frankenredis-qj6jn) This loop needs each element's LENGTH and, for the
+                    // guard, its FIRST BYTE. It used to get both from `span.as_bytes(&bytes)`,
+                    // which materializes a bounds-checked subslice per entry to produce a slice
+                    // whose only uses are `.len()` and `.first()`. A span already knows its own
+                    // length, so `byte_len` and `first_byte` answer directly — and asking
+                    // `is_string_encoded` rather than matching the variant here keeps the
+                    // "nothing outside that module matches one" invariant its own comment relies
+                    // on, which the previous form had quietly broken.
                     let mut derivable = true;
                     for span in &entries {
-                        let elem = span.as_bytes(&bytes);
-                        raw_total += elem.len() as u64;
+                        raw_total += span.byte_len() as u64;
                         if derivable
-                            && matches!(span, ListpackValueSpan::String(_))
-                            && matches!(elem.first(), Some(b) if b.is_ascii_digit() || *b == b'-')
+                            && span.is_string_encoded()
+                            && matches!(span.first_byte(&bytes), Some(b) if b.is_ascii_digit() || b == b'-')
                         {
                             derivable = false;
                         }

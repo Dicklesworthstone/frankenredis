@@ -176,6 +176,55 @@ impl ListpackValueSpan {
         }
     }
 
+    /// The element's LENGTH, without materializing the element.
+    ///
+    /// (frankenredis-qj6jn) The list restore fold sums every element's length and never looks at
+    /// the bytes; asking `as_bytes` for them costs a bounds-checked subslice — two comparisons and
+    /// a pointer/len pair — per entry, to produce a slice whose only use is `.len()`. A string
+    /// span already KNOWS its length as `end - start`, and an integer span's is `20 - start`.
+    /// Callgrind charged the fold 33.07 instructions per element on an all-string RESTORE, where
+    /// the work it must do is an add and a compare.
+    #[must_use]
+    #[inline]
+    pub fn byte_len(&self) -> usize {
+        match self {
+            Self::String(range) => (range.end - range.start) as usize,
+            Self::Integer(bytes) => bytes.as_slice().len(),
+        }
+    }
+
+    /// The element's FIRST byte, or `None` when the element is empty.
+    ///
+    /// (frankenredis-qj6jn) Same reason as [`Self::byte_len`]: the restore fold's canonical-decimal
+    /// guard needs one byte, not a slice. A listpack a decoder produced always has its string
+    /// ranges inside the blob, so the index is in bounds — but this uses `get`, because the span
+    /// and the blob are separate arguments and nothing in the type system ties them together.
+    #[must_use]
+    #[inline]
+    pub fn first_byte(&self, listpack: &[u8]) -> Option<u8> {
+        match self {
+            Self::String(range) => {
+                if range.start < range.end {
+                    listpack.get(range.start as usize).copied()
+                } else {
+                    None
+                }
+            }
+            Self::Integer(bytes) => bytes.as_slice().first().copied(),
+        }
+    }
+
+    /// True when this entry was STRING-encoded in the source listpack.
+    ///
+    /// (frankenredis-qj6jn) The restore fold's guard needs the encoding, and matching the variant
+    /// from another crate would defeat the "nothing outside this module matches one" invariant the
+    /// type's own comment relies on to keep its layout free to change.
+    #[must_use]
+    #[inline]
+    pub fn is_string_encoded(&self) -> bool {
+        matches!(self, Self::String(_))
+    }
+
     /// The entry's integer value when it was integer-encoded in the listpack.
     /// Returns `None` for string-encoded entries.
     ///
@@ -1709,6 +1758,59 @@ mod tests {
                 "decimal rendering of {v}"
             );
         }
+    }
+
+    /// (frankenredis-qj6jn) `byte_len` and `first_byte` answer from the span alone, where the list
+    /// restore fold used to materialize a subslice through `as_bytes` and then ask it. They must
+    /// agree with `as_bytes` for every span a decoder can produce — the EMPTY string entry
+    /// included, which is the one case where `first_byte` must say `None` rather than index.
+    ///
+    /// The fixture is assembled from the encoding builders and read back through the real decoder,
+    /// so the spans under test are the ones production would see rather than hand-built ones.
+    #[test]
+    fn span_byte_len_and_first_byte_match_as_bytes_qj6jn() {
+        let parts: Vec<Vec<u8>> = vec![
+            entry_6bit_str(b""),
+            entry_6bit_str(b"a"),
+            entry_6bit_str(b"0123"),
+            entry_6bit_str(b"vvvvvvvvvv"),
+            entry_6bit_str(&[b'z'; 60]),
+            entry_7bit_uint(0),
+            entry_7bit_uint(9),
+            entry_7bit_uint(127),
+            entry_13bit_int(-4096),
+            entry_13bit_int(4095),
+            entry_32bit_int(i32::MIN),
+            entry_32bit_int(2_147_483_647),
+        ];
+        let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+        let lp = assemble(&refs);
+        let spans = decode_value_spans(&lp).expect("the fixture must decode");
+        assert_eq!(spans.len(), parts.len(), "fixture lost an entry");
+        for span in &spans {
+            let via_slice = span.as_bytes(&lp);
+            assert_eq!(span.byte_len(), via_slice.len(), "byte_len disagreed");
+            assert_eq!(
+                span.first_byte(&lp),
+                via_slice.first().copied(),
+                "first_byte disagreed for {:?}",
+                String::from_utf8_lossy(&via_slice[..via_slice.len().min(12)])
+            );
+        }
+        // Both encodings must actually be present, or this proves half of what it claims.
+        assert!(
+            spans.iter().any(ListpackValueSpan::is_string_encoded),
+            "fixture produced no string span"
+        );
+        assert!(
+            !spans.iter().all(ListpackValueSpan::is_string_encoded),
+            "fixture produced no integer span"
+        );
+        // And the empty entry must be the one that exercises the None arm.
+        assert!(
+            spans.iter().any(|s| s.first_byte(&lp).is_none()),
+            "fixture never exercised the empty-element arm"
+        );
     }
 
     /// Builds a minimal listpack byte sequence from a set of pre-encoded

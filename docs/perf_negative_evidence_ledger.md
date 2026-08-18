@@ -55762,6 +55762,130 @@ ones passed while the `Other` ones did not would indict the `Other` arm specific
 3. Diff the FULL `cmdstat_*` key set, not only the commands under test. A mis-map inflates a
    bucket that may not be in your list.
 
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the restore fold materialized a bounds-checked subslice per entry to ask its LENGTH; asking the span directly wins on ALL THREE compositions, −1.59 pct worst on strings and −2.20 pct on integers (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), deterministic
+per-frame and whole-shape SELF-cost totals, TWO-BINARY A/B with the A/A and the A/B in ONE
+INVOCATION and the candidate arm BRACKETED by control arms, on THREE compositions. CV was NOT used,
+as a gate or otherwise — no coefficient of variation appears in this row's decision path and none
+was computed. No timing verdict is claimed: the measurand is a retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 0.999843, bootstrap 95% CI [0.989334, 1.003436] on the
+string shape and 0.999176, CI [0.990322, 1.035605] on the integer shape, each taken in the same
+invocation as the A/B it gates. The bootstrap median-CI is the verdict gate and it excludes zero
+on both.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### PROVENANCE
+
+  ELF           AFTER `6c6f38416be08e7a9c77a1754ba45f09a87d5d6a16120bde972f06affb9dc7b2`,
+                BEFORE `3bd9f49905922276caff69deac3467c1cc7914e7c5b3d541ffaba628f69d95ca`.
+  bench_elf_sha256=6c6f38416be08e7a9c77a1754ba45f09a87d5d6a16120bde972f06affb9dc7b2
+
+  Booted and hashed from `/proc/<pid>/exe`. Not a self-report and not claimed as one. Since the
+  arms were built, the only source changes are inside `#[cfg(test)]` and one blank line — no
+  production code moved.
+
+### THE LEVER
+
+`from_restored_nodes` needs two things per entry: the element's LENGTH, for `raw_total`, and — for
+the derivation guard `7c45e08ad` added — its FIRST BYTE. It got both from
+`span.as_bytes(&bytes)`, which materializes a bounds-checked subslice: two comparisons and a
+pointer/len pair, per entry, to build a slice whose only uses are `.len()` and `.first()`.
+
+A span already knows its own length. A `String` span's is `end - start`; an `Integer` span's is
+`20 - start`. So `ListpackValueSpan` gained `byte_len()`, `first_byte(listpack)` and
+`is_string_encoded()`, and the fold asks those.
+
+    <ListValue>::from_restored_quicklist2_nodes
+      all-string shape   33.07 -> 27.06 instr/elem   (9,921.0 -> 8,118.0 per key)
+      all-integer shape  21.07 -> 12.06 instr/elem   (6,321.0 -> 3,618.0 per key)
+
+  AND IT REPAIRS AN ENCAPSULATION BREAK I INTRODUCED. `ListpackValueSpan`'s own comment says
+  "nothing outside this module builds or matches one (verified repo-wide), every consumer goes
+  through `as_bytes`, so the layout is free to change" — and `7c45e08ad`'s guard quietly matched
+  `ListpackValueSpan::String(_)` from `fr-store`, making that false. `is_string_encoded()` puts
+  the match back inside the module, so the claim in that comment is true again.
+
+  ORACLE: `span_byte_len_and_first_byte_match_as_bytes_qj6jn` assembles a listpack from the
+  encoding builders, reads it back through the REAL decoder — so the spans under test are the ones
+  production sees — and asserts `byte_len()` and `first_byte()` agree with `as_bytes()` on every
+  one. It also asserts the fixture actually contains both encodings and at least one EMPTY element,
+  because `first_byte` returning `None` rather than indexing is the only arm that could have been
+  written wrong and still passed on ordinary data.
+
+### THE MEASUREMENT — EVERY COMPOSITION MOVES THE SAME WAY
+
+Worth saying plainly after the last two attempts on this path: `36a66d696` was a trade (integers
+−9.48 pct, strings +0.71 pct) and `69f8a0f72` lost on everything. This one wins on all three, and
+the deterministic totals — which have no draw-to-draw exposure — are the clearest statement of it:
+
+    shape          BEFORE      AFTER       delta       pct
+    all-string     59,956.2    58,230.2    −1,726.0    −2.88
+    50/50 mixed    66,811.5    64,827.5    −1,984.0    −2.97
+    all-integer    75,488.7    72,777.3    −2,711.4    −3.59
+
+    ALL-STRING whole-op A/B, RESTORE+DUMP, 300 elements, slope 10 vs 30 keys, six draws
+      −3.3167 / −3.8972 / −1.5936 / −2.9531 / −2.7717 / −3.6040 pct
+      median −3.1349 pct, CI [−3.7506, −2.1826]; null ratio 0.999843, absolute median 0.2625 pct
+      WORST SINGLE DRAW −1.5936 pct  <- the figure this row claims for strings
+
+    ALL-INTEGER whole-op A/B, four draws
+      median −3.3712 pct, CI [−3.9017, −2.1969]; null ratio 0.999176, absolute median 0.7729 pct
+      WORST SINGLE DRAW −2.1969 pct  <- the figure this row claims for integers
+
+  The worst draws sit well below the deterministic figures because they are the draws whose own
+  A/A was worst — the string worst draw (−1.59 pct) sits in a run whose first draw showed a −1.74
+  pct A/A, and the integer worst draw's set has an A/A CI reaching 3.56 pct. They are quoted anyway
+  per the replicated-standing convention. The deterministic totals are what the mechanism predicts
+  and they agree with the medians, not with the worst draws.
+
+  Host: 87-90 pct idle, loadavg 10.8-14.6, MHz mean 2000-2500 against a 1429-4292 spread.
+
+### THE RESTORE-ISOLATION LAW, ENGAGED
+
+`b1o02`'s standing law says RESTORE-in-isolation flatters redis — fr decodes eagerly, redis
+attaches the listpack shallowly and walks it on EVERY read, and the break-even is well under one
+read per RESTORE — so an isolation ratio is not a deficit. It fires on this row because the row
+cites `a30758265`'s 2.1998x. Engaging it, in two parts:
+
+  * THIS ROW'S OWN CLAIM DOES NOT DEPEND ON IT. Every figure quoted above is a SELF-speedup, fr
+    against fr, on identical workloads. The law constrains how a vs-incumbent ratio may be read; it
+    does not touch a before/after comparison of one implementation.
+  * THE SHAPE IS NOT ISOLATION, BUT IT IS NOT THE BREAK-EVEN WORKLOAD EITHER, and this row should
+    not pretend otherwise. It runs RESTORE **+ DUMP** per key — one read per restore, which is
+    already at the ~1.034 reads/RESTORE break-even the law names. But DUMP is not the per-element
+    read that break-even was computed from: on a restored list it goes through
+    `quicklist_packed_nodes` and copies retained blobs, so it never touches the decoded spans. The
+    eager decode is therefore still unamortised in these numbers, and `a30758265`'s 2.1998x should
+    be read as an upper bound on the integer deficit, not as the deficit. Anyone quoting it against
+    the incumbent owes `scripts/hash_restore_read_premise_run.sh` and a break-even first.
+
+### PARITY
+
+    digit-leading / mixed / canonical pools, BEFORE vs AFTER:            0 of 75 diverging
+      the same 75 vs redis 7.2.4 on ENCODING + LLEN + LRANGE:            0 of 75 diverging
+    INTEGER round-trip (LRANGE after RESTORE + DUMP bytes) before/after: 0 of 30 diverging
+      and vs redis 7.2.4:                                                0 of 30 diverging
+    BEFORE-vs-AFTER DUMP BYTES, string shapes:                           0 of 84 diverging
+    workload sweep vs redis 7.2.4:                                       4 of 42, UNCHANGED
+    fr-persist 231 / fr-store 940, 0 failures; clippy clean; fmt clean.
+
+### RETRY PREDICATES
+
+  1. `as_bytes` is still the right accessor for every consumer that wants the BYTES. This row only
+     claims that asking it for a LENGTH was wasteful. Do not sweep other `as_bytes` call sites into
+     `byte_len` without checking they do not then need the slice anyway — two calls would be worse
+     than one.
+  2. The fold is now 27.06 instr/elem on strings and 12.06 on integers, against `raw_total` needing
+     one add and the guard one compare. What remains is loop and iterator overhead over
+     `&entries`. Reopen ONLY IF a profile shows that overhead above ~10 instr/elem after this.
+  3. This does NOT touch the eager decimal render, which `a30758265` priced at 57.09 instr/elem and
+     identified as the whole of fr's 2.1998x integer gap against the incumbent. That remains the
+     one large item on this path, and it is constrained by `frankenredis-33832`.
+
 ## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — the collection `_into` family takes the cached gate: **86.0 -> ABSENT on all four measured shapes**, and the structural verdict **REPRODUCED ACROSS TWO BASES** with a peer's 127-instr/op lever landing in between (`frankenredis-getexgate`)
 
 Claim class: SELF-SPEEDUP
