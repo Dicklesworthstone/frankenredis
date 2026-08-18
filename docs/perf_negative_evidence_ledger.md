@@ -64285,3 +64285,47 @@ accepted.
   3. The paren-cycle figure (~2.8 KB/level) is a SUM over the ladder and some of those frames are
      inlined into each other, so it is an estimate with the sign known but not the exact value. The
      `parse_unary` and `parse_concat` figures are exact — each has a confirmed direct self-call.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the reply ceiling of 2000 is safe for the walks BELOW it too, so the fix does not just move the crash downstream (`frankenredis-5h2lu`)
+
+EVIDENCE CLASS: static read of the shipping release ELF's prologues. No build, no server — the
+disk throttle forbids cargo and none was needed. CV was NOT used and no timing verdict is claimed.
+
+Claim class: MEASUREMENT, supporting the limit chosen in `4a438ed13`. Campaign output: no.
+
+### WHY THIS CHECK EXISTS
+
+Bounding `lua_to_resp` at 2000 levels means fr now BUILDS a 2001-level `RespFrame` on purpose. A
+ceiling is only a fix if everything that consumes the bounded structure also survives it — otherwise
+the abort simply moves one frame downstream, which is the failure mode a depth limit is most likely
+to hide.
+
+    walker                            B/level  self-calls  at 2001 levels   pct of 2 MiB
+    lua_to_resp_at_depth (bounded)      416         1         832 KB           39.7 pct
+    downconvert_lua_reply_to_resp2      256         4         512 KB           24.4 pct
+    RespFrame::encode_into_resp3_impl    96         8         192 KB            9.2 pct
+
+All three carry confirmed direct self-calls, so each figure is a cycle cost rather than a floor.
+They also do NOT overlap in time — `lua_to_resp` has unwound before the downconvert runs, and the
+downconvert before the encode — so the peak is the MAXIMUM of the three, 39.7 pct, not their sum.
+2000 clears every priced consumer with room for the frames beneath.
+
+### THE ONE THING I COULD NOT PRICE, STATED RATHER THAN ASSUMED
+
+`RespFrame`'s recursive DROP has no distinct symbol in the binary — there is `drop_glue<[RespFrame;
+2]>` and several wrapper glues, but no `drop_glue<RespFrame>`, so it is inlined into its callers and
+the prologue instrument cannot reach it. Dropping a 2001-deep reply therefore recurses by an amount
+I have NOT measured. Drop glue is usually tens of bytes per level, which would put it far inside
+budget, but that is an expectation and not a measurement, and this ledger's own rule is that a
+symbol which cannot be found is not thereby fine.
+
+### RETRY PREDICATES
+
+  1. After the next build, add `lua_to_resp_at_depth` to
+     `scripts/recursion_stack_budget_gate.py`'s walker table at limit 2000. It is deliberately NOT
+     added yet: the gate reads whatever release ELF exists, the current one predates the fix, and a
+     gate that goes red because the binary is stale teaches people to ignore it.
+  2. Price the `RespFrame` drop path by a means the prologue read cannot reach — the honest options
+     are a `#[inline(never)]` shim in a scratch build, or accepting it as unpriced and saying so.
+  3. If the reply ceiling is ever raised, re-read all three rows above. The 39.7 pct figure is what
+     makes 2000 defensible, and it scales linearly.
