@@ -3061,7 +3061,23 @@ pub fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
             5
         }
     }
-    let data_len = if let Some(value) = parse_listpack_integer(entry) {
+    // (frankenredis-qj6jn) FIRST-BYTE PRE-FILTER, ported from the fr-store twin
+    // (`list_lp_entry_bytes`), which has always had it while this copy called the parser for every
+    // entry including obviously non-numeric ones.
+    //
+    // It cannot change the result: `parse_listpack_integer` returns `Some` only for a canonical
+    // decimal, and a canonical decimal necessarily begins with an ASCII digit or `-`. So the
+    // pre-filter only skips calls that were going to return `None`.
+    //
+    // This is the SYMMETRIC half of `15b146e10`, which ported the single-pass fold the other way
+    // after `ac77762d8` fused it here and fr-store kept the two-pass shape. Auditing a duplicated
+    // rule in one direction only leaves the other copy behind; both copies now carry both
+    // improvements.
+    let looks_numeric = matches!(entry.first(), Some(&b) if b.is_ascii_digit() || b == b'-');
+    let data_len = if let Some(value) = looks_numeric
+        .then(|| parse_listpack_integer(entry))
+        .flatten()
+    {
         if (0..=127).contains(&value) {
             1
         } else if (-4096..=4095).contains(&value) {
