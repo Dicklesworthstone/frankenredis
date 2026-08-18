@@ -743,6 +743,15 @@ struct ReplicaSyncState {
     /// Carried here rather than read from the runtime because the value must reach
     /// `sync_replica_with_primary`, and this state is already threaded to it.
     announce_ip: Option<String>,
+    /// (frankenredis-w1djx) `replica-announce-port` / `slave-announce-port`, when set.
+    ///
+    /// The other half of the NAT story: upstream's `REPLCONF listening-port` carries the announce
+    /// port when one is configured, falling back to the real port. fr always sent the real port,
+    /// so a forwarded deployment told its primary a port nothing could connect back on.
+    ///
+    /// `0` is NOT a port here, it is "unset": upstream's guard is a plain truthiness test
+    /// (`if (server.slave_announce_port)`), so a configured 0 falls through to the real port.
+    announce_port: Option<u16>,
 }
 
 impl Drop for ReplicaPrimaryConnection {
@@ -757,6 +766,7 @@ impl ReplicaSyncState {
             connection: None,
             retry_after_ms: 0,
             announce_ip: None,
+            announce_port: None,
         }
     }
 
@@ -5096,6 +5106,18 @@ fn main() -> ExitCode {
         })
         .map(|(_, value)| value.clone())
         .filter(|ip| !ip.is_empty());
+    // (frankenredis-w1djx) Its port sibling. A value of 0 is discarded rather than sent, matching
+    // upstream's truthiness guard, and an unparseable value is discarded rather than guessed.
+    let announce_port: Option<u16> = file_passthrough
+        .iter()
+        .chain(cli_passthrough.iter())
+        .rev()
+        .find(|(name, _)| {
+            name.eq_ignore_ascii_case("replica-announce-port")
+                || name.eq_ignore_ascii_case("slave-announce-port")
+        })
+        .and_then(|(_, value)| value.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0);
 
     if let Some(path) = pidfile_path.as_deref() {
         // Best-effort exactly as upstream: a pid file that cannot be written warns and does not
@@ -5199,6 +5221,7 @@ fn main() -> ExitCode {
     );
     let mut replica_sync = ReplicaSyncState::new();
     replica_sync.announce_ip.clone_from(&announce_ip);
+    replica_sync.announce_port = announce_port;
     // (frankenredis-jd75g) Client handles start above the reserved listener
     // token range (0..MAX_LISTENERS).
     let mut next_handle: usize = MAX_LISTENERS;
@@ -35116,6 +35139,7 @@ fn sync_replica_with_primary(
     requested_offset: i64,
     now_ms: u64,
     announce_ip: Option<&str>,
+    announce_port: Option<u16>,
 ) -> io::Result<ReplicaPrimaryConnection> {
     let mut stream = StdTcpStream::connect((host, port))?;
     let _ = stream.set_nodelay(true);
@@ -35154,7 +35178,14 @@ fn sync_replica_with_primary(
         "PONG",
     )?;
 
-    let listening_port = runtime.server_port().to_string();
+    // (frankenredis-w1djx) Upstream sends the ANNOUNCE port here when one is configured,
+    // falling back to the real port -- `if (server.slave_announce_port) port = ...` in
+    // replication.c. fr always sent the real port, so a port-forwarded replica advertised an
+    // address the primary could not reach. (Upstream's middle branch picks tls_port when TLS
+    // replication is on; fr has no TLS, so that arm has nothing to select.)
+    let listening_port = announce_port
+        .unwrap_or_else(|| runtime.server_port())
+        .to_string();
     stream.write_all(
         &replica_handshake_frame(&[b"REPLCONF", b"listening-port", listening_port.as_bytes()])
             .to_bytes(),
@@ -35483,6 +35514,7 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
         requested_offset,
         now_ms,
         replica_sync.announce_ip.as_deref(),
+        replica_sync.announce_port,
     ) {
         Ok(connection) => {
             replica_sync.connection = Some(connection);
@@ -48080,7 +48112,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         replica.set_masteruser(Some(b"replica".to_vec()));
         replica.set_masterauth(Some(b"secret".to_vec()));
         let host = addr.ip().to_string();
-        let connection = sync_replica_with_primary(&mut replica, &host, addr.port(), "?", -1, 1, None)
+        let connection = sync_replica_with_primary(&mut replica, &host, addr.port(), "?", -1, 1, None, None)
             .expect("sync with auth");
         drop(connection);
 
@@ -48288,7 +48320,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         let mut replica = Runtime::default_strict();
         replica.set_server_port(6381);
         let host = addr.ip().to_string();
-        let result = sync_replica_with_primary(&mut replica, &host, addr.port(), "?", -1, 1, None);
+        let result = sync_replica_with_primary(&mut replica, &host, addr.port(), "?", -1, 1, None, None);
         assert!(
             result.is_err(),
             "expected sync to fail after primary disconnects"
