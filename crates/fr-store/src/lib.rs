@@ -74731,6 +74731,69 @@ mod tests {
         );
     }
 
+    /// (frankenredis-qj6jn) An APPENDING LINSERT must not move the node boundary the listpack
+    /// conversion produced.
+    ///
+    /// `ChunkedList::insert` cleared `rpush_conversion_prefix_len` unconditionally, including on
+    /// the `idx >= len` append branch. Upstream keeps the converted node and puts the appended
+    /// element in a NEW node. Measured at `list-max-listpack-size -1`, seed 250 then
+    /// `LINSERT AFTER <last>`: redis held node 0 at 4,257 bytes and grew node 1 (51/62/73 for
+    /// 4/5/6 appends), while fr cleared the claim and re-split at 4,087. Elements matched; only
+    /// the boundary moved — and the boundary is the wire bytes.
+    ///
+    /// The invariant pinned here is the one that survives a change of element size: an append
+    /// leaves node 0 EXACTLY as the preceding bulk RPUSH left it.
+    #[test]
+    fn appending_linsert_preserves_the_conversion_node_qj6jn() {
+        // Node 0's string may be LZF-encoded (compression defaults ON), so it must be read
+        // with `decode_rdb_string`, not `decode_length`. Comparing the DECODED node is the
+        // stronger invariant anyway: it holds whether or not the compressor ran.
+        fn first_node(store: &mut Store, key: &[u8]) -> (usize, Vec<u8>) {
+            let payload = store.dump_key(key, 100).unwrap();
+            assert_eq!(payload[0], RDB_TYPE_LIST_QUICKLIST_2);
+            let data_end = payload.len() - DUMP_TRAILER_LEN;
+            let (node_count, consumed) = decode_length(&payload, 1).unwrap();
+            let mut cursor = 1 + consumed;
+            let (_container, consumed) = decode_length(&payload, cursor).unwrap();
+            cursor += consumed;
+            let (listpack, _) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+            (node_count, listpack)
+        }
+
+        let mut store = Store::new();
+        store.list_max_listpack_size = -1;
+        let items: Vec<Vec<u8>> = (0..250)
+            .map(|i| format!("vvvvvvvvvv{i:05}").into_bytes())
+            .collect();
+        store.rpush(b"l", &items, 100).unwrap();
+
+        // The bulk RPUSH left one whole node; record what upstream would retain.
+        let (nodes_before, node0_before) = first_node(&mut store, b"l");
+        assert_eq!(
+            nodes_before, 1,
+            "precondition -- bulk push under the raw budget is ONE node"
+        );
+
+        let mut pivot = items.last().unwrap().clone();
+        for i in 0..6 {
+            let fresh = format!("ins-{i:05}").into_bytes();
+            store
+                .linsert_after(b"l", &pivot, fresh.clone(), 100)
+                .unwrap();
+            pivot = fresh;
+
+            let (nodes, node0) = first_node(&mut store, b"l");
+            assert_eq!(
+                node0, node0_before,
+                "append {i}: node 0 must be byte-identical to what the conversion produced"
+            );
+            assert_eq!(
+                nodes, 2,
+                "append {i}: the appended element belongs in a NEW node"
+            );
+        }
+    }
+
     /// (frankenredis-qj6jn) A BULK RPUSH whose RAW argv bytes fit the budget leaves ONE
     /// quicklist node, even when the ENCODED listpack exceeds it.
     ///

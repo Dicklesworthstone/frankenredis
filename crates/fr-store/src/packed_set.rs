@@ -3880,11 +3880,20 @@ impl ChunkedList {
     }
 
     fn insert(&mut self, idx: usize, elem: Vec<u8>) {
-        self.rpush_conversion_prefix_len = 0;
+        // (frankenredis-qj6jn) An APPEND lands AFTER the retained conversion prefix and cannot
+        // disturb it, so it must NOT clear the claim. Upstream keeps the node the listpack
+        // conversion produced and puts the appended element in a NEW node: measured at
+        // `list-max-listpack-size -1`, seed 250 then LINSERT AFTER <last>, redis holds node 0 at
+        // 4,257 bytes and grows node 1, while fr cleared the prefix and re-split at 4,087.
+        // Elements matched; only the boundary moved -- and the boundary is the wire bytes.
+        //
+        // A non-append insert still invalidates: it can create or extend nodes INSIDE the
+        // prefix, which is the same reason `push_front_with_fill` clears it.
         if idx >= self.len {
             self.push_back(elem);
             return;
         }
+        self.rpush_conversion_prefix_len = 0;
         let Some((chunk_idx, local_idx)) = self.locate(idx) else {
             self.push_back(elem);
             return;

@@ -48541,3 +48541,101 @@ both are measurable on the dispatch FRAME (`ping` 108.0, `sadd_existing` 602.0 a
 references). **There is no third command to do this to.** After GET and PING the floor table names
 every hot command measured, so the pair that had "unclassifiable AND cheap guard" is exhausted;
 a third hoist would charge every command below it for a beneficiary that does not exist.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: PARITY FIX — an APPENDING LINSERT cleared the conversion-node claim it cannot disturb; with this the whole three-layer DUMP divergence closes at 0 of 10 (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: differential behaviour against a live vendored redis 7.2.4 in the same probe
+invocation, compared at NODE-STRUCTURE level. No timing verdict is claimed, no instruction counts
+are quoted, and CV was NOT used, as a gate or otherwise. This row banks no vs-incumbent ratio.
+Campaign output: no.
+
+`92c750886`'s retry predicate said: drive the LINSERT layer with `rdbcompression no` and compare
+NODE COUNTS, because payload LENGTH had misled this bead twice. Both halves of that advice paid.
+
+### THE LENGTH WAS THE WRONG INSTRUMENT, AGAIN
+
+With compression OFF the seed-400 cases that had been "diverging by 11 bytes" AGREE at 0, 1 and 5
+appends. The whole 11-byte gap was the compressor seeing a different input, not a different
+compressor — which retires the "fr's LZF output differs from redis's" hypothesis I floated in
+`37e7b724b`. It was never an LZF difference; it was this bug, viewed through LZF.
+
+One case survived: fill -1, seed 250, appends 4/5/6 — ONE byte, same node count, same elements.
+Walking the node table named it immediately:
+
+    appends   fr nodes                    redis nodes
+    4         [4,087] [221]               [4,257] [51]
+    5         [4,087] [232]               [4,257] [62]
+    6         [4,087] [243]               [4,257] [73]
+
+  Same two nodes, same elements, and the SPLIT POINT 170 bytes apart. Node 0 in redis is 4,257 —
+  the node the listpack conversion produced, retained intact — and the appended elements go into
+  a NEW node. fr had thrown that boundary away and re-derived one at 4,087.
+
+### THE CAUSE IS ONE UNCONDITIONAL LINE
+
+`ChunkedList::insert` opened with `self.rpush_conversion_prefix_len = 0;` — before the
+`idx >= len` append branch. So every appending LINSERT discarded the conversion claim that
+`92c750886` had just taught fr to record.
+
+  AN APPEND LANDS AFTER THE PREFIX AND CANNOT DISTURB IT. The clear now happens only on the
+  non-append path, where an insert really can create or extend nodes INSIDE the prefix — which
+  is the same reason `push_front_with_fill` clears it, and that function's comment already said
+  so. The invariant was written down; the append branch just sat on the wrong side of the line.
+
+### AFTER: EVERY PROBE IN THIS INVESTIGATION IS CLEAN
+
+    LINSERT matrix (3 fills x 5 shapes, compression off)      15 of 15 agree
+    bulk RPUSH node map, fill -1, bulk AND one-at-a-time      20 of 20 agree
+    original fill sweep WITH compression on                    0 of 10 diverging
+
+  The last line is the one worth reading twice: that sweep is the probe that opened this
+  investigation three turns ago at 1 of 10 diverging, and it was the compressed view that made
+  the residue look like an LZF problem. Three layers — `rdbcompression` ignored, the bulk-RPUSH
+  conversion node, and this — were one structural defect seen through three different veils.
+
+### THE TEST, AND THE ONE I HAD TO FIX FIRST
+
+`appending_linsert_preserves_the_conversion_node_qj6jn` pins the invariant rather than the
+numbers: node 0 must be BYTE-IDENTICAL before and after each append, and the appended element
+must land in a new node. That survives a change of element size, where asserting 4,257 would not.
+
+  It failed on its first run inside `decode_length`, because in-process the compression global
+  defaults ON and node 0 carries the `0xC3` LZF marker, which only `decode_rdb_string` can read.
+  Comparing the DECODED node is both the fix and the better oracle: it holds whether or not the
+  compressor ran.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = d7aba8b4a902ed15b1daff40c927a270dd80538336effe62c09ea23400f93411
+                is the FIXED build the probes ran against; `release-perf`, built locally with
+                RCH_CARGO_WRAPPER_BYPASS=1, build log checked for BOTH `^error` and rch refusals:
+                0 of each. `df` run immediately before the build.
+  probes        scratchpad `linsert_node_probe.py` (node counts across fills and shapes),
+                `onebyte_probe.py` (the node-table walk that named it), plus `nodecount_probe.py`
+                and `linsert_fill_probe.py` re-run as regressions.
+  incumbent     vendored redis 7.2.4, `legacy_redis_code/redis/src/redis-server`, booted per probe
+                on a free port with its own temp dir; every comparison is fr and redis in the SAME
+                probe invocation.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 18:21,
+                loadavg 6.85/11.32/11.51 at the start of the probes. /data 104G, 95 pct used —
+                well clear of the 42G floor but DOWN 20G in the preceding hour, which is why the
+                single build in this row was taken immediately after a `df` rather than deferred.
+                Load is recorded for completeness: this row's evidence is byte equality, which is
+                immune to it.
+  gates         `cargo test -p fr-store -p fr-persist --lib`, clippy `--all-targets`, `cargo fmt
+                --check`.
+
+RETRY PREDICATE:
+  1. The three DUMP layers on this bead are closed for the shapes probed. What is NOT probed:
+     LPUSH-side inserts, LSET, and removals against a retained conversion prefix. `pop_front`
+     already decrements the prefix; `pop_back`, `retain` and `lrem` were not checked and each one
+     can move the boundary. Drive them with `linsert_node_probe.py`'s shape and compare NODE
+     TABLES, not lengths.
+  2. Do NOT reopen "fr's LZF output differs from redis's". It was measured, it was wrong, and the
+     evidence is in this row: with the structure fixed the compressed forms match byte for byte.
+  3. `ChunkedList::push_back`'s hardcoded `fill = -2` is STILL unattributed after three rows that
+     each suspected it. It is reached from the append branch above, and every append shape probed
+     now agrees, so if it is wrong it is wrong somewhere these probes do not reach — or it is
+     harmless because DUMP re-derives boundaries from the prefix and the passed fill. Decide that
+     deliberately rather than leaving it as a standing suspicion.
