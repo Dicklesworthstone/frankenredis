@@ -551,7 +551,7 @@ impl PlainKeyedValuesCmd {
             PlainKeyedValuesCmd::Hdel => HistSlot::Other("hdel"),
             PlainKeyedValuesCmd::Srem => HistSlot::Other("srem"),
             PlainKeyedValuesCmd::Zrem => HistSlot::Other("zrem"),
-            PlainKeyedValuesCmd::Lpushx => HistSlot::Other("lpushx"),
+            PlainKeyedValuesCmd::Lpushx => HistSlot::lpushx,
             PlainKeyedValuesCmd::Rpushx => HistSlot::Other("rpushx"),
         }
     }
@@ -21010,8 +21010,8 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_map_with_kind(
-                    "setnx",
+                .record_command_histogram_slot_with_kind(
+                    HistSlot::setnx,
                     elapsed_us,
                     CommandRecordKind::Success,
                 );
@@ -22912,7 +22912,8 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_map_with_kind("getset", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(
+                    HistSlot::getset, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -29652,7 +29653,8 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_map_with_kind("setbit", elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(
+                    HistSlot::setbit, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {

@@ -5391,6 +5391,21 @@ macro_rules! with_direct_histogram_fields {
             "hstrlen" => hstrlen,
             "zrank" => zrank,
             "getrange" => getrange,
+            // (frankenredis-ozrro) Seven WRITE/keyspace commands. The list above is all reads;
+            // these were still taking the `HashMap<String, CommandHistogram>` probe, MEASURED at
+            // 87.0 instr/op on five of them and 93.0 on `del` (which also carries a 19.0
+            // `__memcmp_avx2_movbe` frame the probe calls). As a fraction of their own hot path
+            // that is del 11.6 pct, expiretime 9.1 pct, setnx 6.7 pct, setex 5.6 pct,
+            // setbit/lpushx 5.3 pct, getset 3.6 pct -- every one of them clears the "record is a
+            // real fraction of the command" bar this list is supposed to be selected on. They all
+            // have borrowed floor fast paths, which is why the record step is visible at all.
+            "del" => del,
+            "setnx" => setnx,
+            "getset" => getset,
+            "setbit" => setbit,
+            "lpushx" => lpushx,
+            "setex" => setex,
+            "expiretime" => expiretime,
         }
     };
 }
@@ -5486,6 +5501,17 @@ pub struct CommandHistogramTracker {
     hstrlen: Option<CommandHistogram>,
     zrank: Option<CommandHistogram>,
     getrange: Option<CommandHistogram>,
+    // (frankenredis-ozrro) The WRITE/keyspace commands that were still paying the
+    // `HashMap<String, CommandHistogram>` probe. Same rationale as the fields above, selected the
+    // same way -- by what fraction of their own hot path the record step actually is, MEASURED
+    // per command rather than assumed. See `with_direct_histogram_fields!` for the numbers.
+    del: Option<CommandHistogram>,
+    setnx: Option<CommandHistogram>,
+    getset: Option<CommandHistogram>,
+    setbit: Option<CommandHistogram>,
+    lpushx: Option<CommandHistogram>,
+    setex: Option<CommandHistogram>,
+    expiretime: Option<CommandHistogram>,
     histograms: HashMap<String, CommandHistogram, foldhash::quality::RandomState>,
 }
 
@@ -53101,6 +53127,7 @@ mod tests {
         }
         with_direct_histogram_fields!(assert_reported);
     }
+
 
     #[test]
     fn command_histogram_new_direct_fields_report_consistently_with_hashmap_reference() {
