@@ -21873,38 +21873,59 @@ end
     /// kills the process, and any client that can run EVAL can construct it in three tokens.
     #[test]
     fn cjson_encode_bounds_nesting_at_upstreams_limit_zo5ac() {
-        fn nest(depth: usize) -> LuaValue {
-            let mut v = LuaValue::Number(1.0);
-            for _ in 0..depth {
-                let t = LuaTable::new();
-                t.inner.borrow_mut().array.push(v);
-                v = LuaValue::Table(t);
+        // (frankenredis-cjson-encode-depth-zo5ac) EXPLICIT STACK, and the size is the finding.
+        // The 1000-deep arm is inside upstream's limit and must encode, but this test aborted the
+        // process -- "has overflowed its stack" -- on libtest's default thread stack, while the
+        // decode and cmsgpack arms passed on the same run. So fr's JSON ENCODE frame is the fat
+        // one, and 1000 of them do not fit where 1000 decode frames do.
+        //
+        // Sizing the stack here keeps the boundary pinned at 1000-ok / 1001-refused. Lowering the
+        // depth instead would make the test pass on any host while pinning nothing, which is the
+        // trade this bead's own notes refused in advance.
+        //
+        // THE FRAME COST IS A SEPARATE, LARGER PROBLEM, tracked on the bead: `stack_size` appears
+        // NOWHERE in this workspace, so every thread fr spawns gets Rust's 2 MiB default. A depth
+        // this side of upstream's limit can therefore still exhaust a real fr thread, which means
+        // matching upstream's limit is necessary but not sufficient here.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+            fn nest(depth: usize) -> LuaValue {
+                let mut v = LuaValue::Number(1.0);
+                for _ in 0..depth {
+                    let t = LuaTable::new();
+                    t.inner.borrow_mut().array.push(v);
+                    v = LuaValue::Table(t);
+                }
+                v
             }
-            v
-        }
 
-        // 1000 tables deep is exactly upstream's DEFAULT_ENCODE_MAX_DEPTH and must still encode.
-        assert!(
-            lua_value_to_json(&nest(1000)).is_ok(),
-            "1000 deep is within upstream's limit and must not be refused"
-        );
-        assert_eq!(
-            lua_value_to_json(&nest(1001)).unwrap_err(),
-            "Cannot serialise, excessive nesting (1001)",
-            "the reported depth is the FAILING one, as upstream reports it"
-        );
+            // 1000 tables deep is exactly upstream's DEFAULT_ENCODE_MAX_DEPTH and must still encode.
+            assert!(
+                lua_value_to_json(&nest(1000)).is_ok(),
+                "1000 deep is within upstream's limit and must not be refused"
+            );
+            assert_eq!(
+                lua_value_to_json(&nest(1001)).unwrap_err(),
+                "Cannot serialise, excessive nesting (1001)",
+                "the reported depth is the FAILING one, as upstream reports it"
+            );
 
-        let cyclic = LuaTable::new();
-        cyclic
-            .inner
-            .borrow_mut()
-            .array
-            .push(LuaValue::Table(cyclic.clone()));
-        assert_eq!(
-            lua_value_to_json(&LuaValue::Table(cyclic)).unwrap_err(),
-            "Cannot serialise, excessive nesting (1001)",
-            "a self-referential table must terminate at the depth limit, not at the stack floor"
-        );
+            let cyclic = LuaTable::new();
+            cyclic
+                .inner
+                .borrow_mut()
+                .array
+                .push(LuaValue::Table(cyclic.clone()));
+            assert_eq!(
+                lua_value_to_json(&LuaValue::Table(cyclic)).unwrap_err(),
+                "Cannot serialise, excessive nesting (1001)",
+                "a self-referential table must terminate at the depth limit, not at the stack floor"
+            );
+            })
+            .expect("spawn the deep-encode thread")
+            .join()
+            .expect("the deep-encode thread must not panic or abort");
     }
 
     /// cjson.decode must STOP at upstream's nesting limit, and must not count siblings as depth.
