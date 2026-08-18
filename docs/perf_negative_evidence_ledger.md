@@ -52683,3 +52683,99 @@ comparison is made by this row, so no quiet window was required and none is clai
    the vein survives step 1, confirm it by counting on an `inline(never)` build before acting.
 5. The 157.0 instr/op command-histogram lookup on `zcard` is counted and open. Count it per route
    first — it is 43.0 on `llen` and does not surface the same way.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — the read gate stopped looking up the ACL user `"default"` twice per command: **175.0 -> 86.0 instr/op, memcmp 2.000 -> 0.000 calls/op**, identical on all eight gate-paying shapes, and it pays on all 29 the census found (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: acts on the target measured in `8521fdc9a`. `plain_borrowed_default_key_read_allows`
+called `memcmp` twice per command, both of them `BTreeMap` lookups of the same 7-byte key
+`b"default"` in the same map — once via `auth_required()`, once via
+`current_acl_allows_default_key_command()`. Both answers change only when an ACL or CONFIG
+command runs, so `AuthState` now carries them precomputed. Shipped in `2bdc560df`.
+
+**The cache is EAGER, which is what makes it a cache rather than a sidecar.** It is refreshed
+inside `bump_dispatch_permissions_generation` — the choke point every `AuthState` mutator
+already ends with — plus at construction and after the ACL-file load replaces `*self`. There is
+no staleness window to reason about and no interior mutability. Each read carries a
+`debug_assert` comparing the cached value against a fresh computation, so a mutation path that
+ever skips the bump fails loudly instead of silently granting a fast path. **633 `fr-runtime`
+lib tests pass with that assert live** (test builds enable `debug_assertions`).
+
+**MEASURED — the frame and the call count are exact integers and are IDENTICAL on all eight
+gate-paying shapes:**
+
+| | before | after | delta |
+|---|---|---|---|
+| **gate frame** (`plain_borrowed_default_key_read_allows`) | **175.0** | **86.0** | **-89.0**, a 50.9 pct cut in the gate itself |
+| **gate `memcmp` calls/op** | **2.000** | **0.000** | both lookups gone |
+| `__memcmp_avx2_movbe` frame | 57.0 | 19.0 | -38.0 (measured on `dbsize_base`) |
+
+**Quoting the WORST bound: -89.0 instr/op on the gate frame**, which reproduced as the same
+integer on all eight shapes and both rounds. Counting the `memcmp` frame the removal is ~127
+instr/op, and `a1600b784`'s census puts **29 measured shapes** still paying the gate once per
+command.
+
+| shape | whole-op before | after | worst bound | pct |
+|---|---|---|---|---|
+| dbsize_base | 1357.6/1356.9 | 1230.0/1239.6 | +117.3 | 8.6 |
+| keys_star | 2574.7/2577.8 | 2413.6/2404.1 | +161.1 | 6.3 |
+| smembers_base | 1966.3/1965.7 | 1844.7/1827.7 | +121.0 | 6.2 |
+| zscore_base | 1802.5/1803.1 | 1684.9/1674.4 | +117.6 | 6.5 |
+| hstrlen_base | 1774.2/1789.9 | 1652.8/1658.2 | +116.0 | 6.5 |
+| getbit_base | 1714.7/1684.6 | 1575.8/1554.8 | +108.8 | 6.5 |
+| sinter_2 | 4077.7/4058.5 | 3995.6/3954.5 | +62.9 | 1.5 |
+| zcount_base | 2499.9/2583.3 | 2360.4/2451.5 | +48.4 | 1.9 |
+| get_control | 947.8/914.3 | 913.9/967.5 | -53.2 | control |
+| llen | 1233.3/1217.0 | 1221.7/1210.5 | -4.7 | control |
+
+`get_control` and `llen` are routes converted in earlier batches: their gate frame reads
+**ABSENT on both arms**, so they should not move, and their whole-op wander (-53.2, -4.7) is the
+layout noise this ledger has documented at ±40-70. That is exactly why the verdict is the frame.
+
+**THE PREDICATE IS "THE NAME IS `default`", NOT "THE SESSION IS UNAUTHENTICATED", AND I GOT
+THAT WRONG FIRST.** My first build used `!session.is_authenticated()`, on the reasoning that
+`current_user_name()` returns `b"default"` exactly then. It compiled, it was correct, and it
+removed only ONE of the two lookups — gate 175.0 -> 130.0, memcmp 2.000 -> 1.000. **The
+disassembly is what caught it**: the surviving `memcmp` had a *dynamic* needle rather than the
+`.rodata` `"default"` constant, which meant `get_user(current_user_name())` was still running.
+`refresh_authentication_for_server` sets `authenticated_user = Some(DEFAULT_AUTH_USER)` whenever
+`!auth_required()`, so **`is_authenticated()` is true on essentially every connection** and the
+early return never fired. Comparing the name instead is a 7-byte slice compare in place of a
+tree walk plus a libc call, and it covers the case my first attempt missed — a session that
+authenticated AS `"default"`. A session authenticated as any other user still takes the real
+lookup.
+
+CORRECTNESS: **86 commands byte-identical**, built around the failure this lever could actually
+cause — not a wrong reply to a query, but **a fast path taken when permission should have been
+denied**. The battery mutates permissions and immediately reads, in the same connection and the
+same pass: `-get`, `resetkeys`, `-@read`, `off`/`on`, `resetchannels`, a second user reached by
+`AUTH`, restricting that user *while authenticated as it*, `CONFIG SET requirepass` both ways,
+and `ACL DELUSER`. **7 of the replies are NOPERM/-ERR**, which is what proves the denials took
+effect rather than the battery matching vacuously — a battery where every ACL command silently
+failed would also have compared equal.
+
+BUILD PROVENANCE: paired build in a worktree pinned at `cb5942a6f`, built AFTER, BEFORE, AFTER
+again. The two AFTERs are bit-identical
+(`bench_elf_sha256=d2fc12463e28fd24d564ba823458b659762aacaaa712718b3aee1008230dfb9d`) and BEFORE
+distinct
+(`bench_elf_sha256=d0574ba628901e60f6ca8899e3656b3de2e0d4a6ba1946ba0e9b8e023f946e4c`).
+`cargo check --all-targets` clean before committing. Host: /data 85G, loadavg 7.77/9.52/9.76,
+mean 2383 MHz across 64 cores, CPU idle 89 pct.
+
+GATE AND ITS OWN NULL. Both arms were measured in one same-invocation interleaved run, two
+rounds, so drift falls on both alike. The A/A null and the A/B pairing are same-invocation. A/A
+null on the whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians:
+median 1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is
+that bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this
+row; no CV was computed. Host state is provenance, not a gate.
+
+RETRY PREDICATE: revisit if the gate frame departs from **86.0**, or if
+`call_count_delta.py <dump> 20000 --callers memcmp` attributes ANY calls to
+`plain_borrowed_default_key_read_allows` again — either would mean a lookup came back. **The
+gate is still 86.0, so it is still worth converting the remaining routes**; this lever reduces
+the per-command cost, it does not remove it, and the 29 shapes in `a1600b784` still pay 86.0
+each where a converted route pays it once per pass. The next structural question is what the
+remaining 86.0 consists of — the same disassembly method applies, and the ~20 remaining
+conditions are field loads with no libc calls left in them.
