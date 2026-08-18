@@ -9135,6 +9135,35 @@ impl Runtime {
     }
 
     #[must_use]
+    /// Parser limits for a SERVER-TO-SERVER link, which is never subject to the pre-AUTH caps.
+    ///
+    /// (frankenredis-2ubu0) `parser_config()` applies the pre-AUTH caps whenever this runtime's
+    /// session has not authenticated. That is correct for a client socket and wrong for every
+    /// internal link: the replica's master stream, the initial sync, and sentinel's monitoring
+    /// connections all parse bytes produced by ANOTHER SERVER over a link that never authenticates
+    /// as a client, so they would be capped at 10 elements and 16 KiB on any instance with
+    /// `requirepass` set. A replicated wide HSET, a value over 16 KiB, or an INFO reply -- which
+    /// routinely exceeds 16 KiB -- would be refused, and none of it surfaces as a client-visible
+    /// error: it is silent replica divergence and a blinded sentinel.
+    ///
+    /// Upstream exempts the same traffic twice over: `authRequired(c)` is false for an
+    /// authenticated master link, and the bulk check is additionally guarded
+    /// `!(c->flags & CLIENT_MASTER)` (networking.c:2332). fr already recognises the exemption for
+    /// the read-only gate under frankenredis-replro.
+    ///
+    /// The limits come from the `pre_auth` carrier the caps landed with, which already holds the
+    /// values that would apply after AUTH -- so nothing is recomputed here and the two cannot
+    /// drift apart.
+    #[must_use]
+    pub fn internal_link_parser_config(&self) -> fr_protocol::ParserConfig {
+        let mut config = self.parser_config();
+        if let Some(authed) = config.pre_auth.take() {
+            config.max_bulk_len = authed.max_bulk_len;
+            config.max_array_len = authed.max_array_len;
+        }
+        config
+    }
+
     pub fn parser_config(&self) -> fr_protocol::ParserConfig {
         // (frankenredis-2ubu0) PRE-AUTH LENGTH CAPS. Upstream refuses a multibulk count over 10
         // or a bulk length over 16384 from a client that has not authenticated

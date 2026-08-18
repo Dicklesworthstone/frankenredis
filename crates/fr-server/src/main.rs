@@ -34911,7 +34911,7 @@ fn run_sentinel_monitoring_tick(
     // matching redis's mstime()-based deltas.
     runtime.sentinel_begin_tick(now_ms);
 
-    let parser_config = runtime.parser_config();
+    let parser_config = runtime.internal_link_parser_config();
     // Snapshot (name, ip, port) so the blocking probes hold no borrow of the
     // sentinel state across the network IO.
     let targets = runtime.sentinel_monitor_targets();
@@ -35213,7 +35213,7 @@ fn sync_replica_with_primary(
     stream.set_read_timeout(Some(replica_handshake_read_timeout(runtime)))?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
 
-    let parser_config = runtime.parser_config();
+    let parser_config = runtime.internal_link_parser_config();
     let mut read_buf = Vec::new();
 
     if let Some((masteruser, masterauth)) = runtime.replica_primary_auth() {
@@ -35463,7 +35463,7 @@ fn drain_replica_stream(
         }
 
         let unparsed = &connection.read_buf[consumed_total..];
-        match fr_protocol::parse_frame_with_config(unparsed, &runtime.parser_config()) {
+        match fr_protocol::parse_frame_with_config(unparsed, &runtime.internal_link_parser_config()) {
             Ok(parsed) => {
                 let frame = parsed.frame;
                 consumed_total += parsed.consumed;
