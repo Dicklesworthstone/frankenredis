@@ -2726,6 +2726,15 @@ struct AuthState {
     acl_pubsub_default: AclPubsubDefault,
     acl_users: BTreeMap<Vec<u8>, AclUser>,
     dispatch_permissions_generation: u64,
+    /// (frankenredis-getexgate) `auth_required()` precomputed. The borrowed read gate asked
+    /// this per command and each ask was a BTreeMap lookup of the 7-byte key `b"default"`.
+    /// Recomputed eagerly in `bump_dispatch_permissions_generation`, which every mutator of
+    /// `requirepass`/`acl_users` already ends with.
+    default_auth_required: bool,
+    /// (frankenredis-getexgate) The `current_acl_allows_default_key_command` conjunction,
+    /// evaluated for the DEFAULT user only. Usable exclusively for an unauthenticated session,
+    /// because that is exactly when `current_user_name()` returns `b"default"`.
+    default_allows_all_key_commands: bool,
 }
 
 impl Default for AuthState {
@@ -2738,12 +2747,16 @@ impl AuthState {
     fn with_acl_pubsub_default(acl_pubsub_default: AclPubsubDefault) -> Self {
         let mut acl_users = BTreeMap::new();
         acl_users.insert(DEFAULT_AUTH_USER.to_vec(), AclUser::new_default());
-        Self {
+        let mut state = Self {
             requirepass: None,
             acl_pubsub_default,
             acl_users,
             dispatch_permissions_generation: 0,
-        }
+            default_auth_required: false,
+            default_allows_all_key_commands: false,
+        };
+        state.refresh_default_user_cache();
+        state
     }
 
     fn set_acl_pubsub_default(&mut self, acl_pubsub_default: AclPubsubDefault) {
@@ -2789,13 +2802,7 @@ impl AuthState {
         // so calling `ACL SETUSER alice on >secret` would lock out all
         // subsequent fresh connections even though the default user
         // remained nopass. (frankenredis-aclnopass)
-        if self.requirepass.is_some() {
-            return true;
-        }
-        match self.acl_users.get(DEFAULT_AUTH_USER) {
-            Some(default) => !default.nopass,
-            None => true, // defensive — default user shouldn't be missing
-        }
+        self.default_auth_required()
     }
 
     fn requirepass(&self) -> Option<&[u8]> {
@@ -2839,6 +2846,8 @@ impl AuthState {
         loaded.dispatch_permissions_generation =
             self.dispatch_permissions_generation.wrapping_add(1);
         *self = loaded;
+        // The assignment does not go through a mutator, so refresh explicitly.
+        self.refresh_default_user_cache();
         Ok(())
     }
 
@@ -3290,6 +3299,65 @@ impl AuthState {
 
     fn bump_dispatch_permissions_generation(&mut self) {
         self.dispatch_permissions_generation = self.dispatch_permissions_generation.wrapping_add(1);
+        self.refresh_default_user_cache();
+    }
+
+    /// (frankenredis-getexgate) Recompute the two default-user facts the borrowed read gate
+    /// needs. Every mutator of `requirepass` or `acl_users` ends with the bump above, so this
+    /// runs on an ACL/CONFIG command and never on a request.
+    fn refresh_default_user_cache(&mut self) {
+        self.default_auth_required = Self::compute_auth_required(&self.requirepass, &self.acl_users);
+        self.default_allows_all_key_commands =
+            Self::compute_default_allows_all_key_commands(&self.acl_users);
+    }
+
+    fn compute_auth_required(
+        requirepass: &Option<Vec<u8>>,
+        acl_users: &BTreeMap<Vec<u8>, AclUser>,
+    ) -> bool {
+        if requirepass.is_some() {
+            return true;
+        }
+        match acl_users.get(DEFAULT_AUTH_USER) {
+            Some(default) => !default.nopass,
+            None => true, // defensive -- default user shouldn't be missing
+        }
+    }
+
+    fn compute_default_allows_all_key_commands(acl_users: &BTreeMap<Vec<u8>, AclUser>) -> bool {
+        match acl_users.get(DEFAULT_AUTH_USER) {
+            Some(user) => Self::user_allows_all_key_commands(user),
+            None => false,
+        }
+    }
+
+    fn user_allows_all_key_commands(user: &AclUser) -> bool {
+        user.enabled
+            && user.all_commands
+            && user.denied_commands.is_empty()
+            && user.denied_categories.is_empty()
+            && user.all_keys
+            && user.all_channels
+    }
+
+    fn default_auth_required(&self) -> bool {
+        debug_assert_eq!(
+            self.default_auth_required,
+            Self::compute_auth_required(&self.requirepass, &self.acl_users),
+            "default_auth_required cache is stale -- a mutator skipped \
+             bump_dispatch_permissions_generation"
+        );
+        self.default_auth_required
+    }
+
+    fn default_allows_all_key_commands(&self) -> bool {
+        debug_assert_eq!(
+            self.default_allows_all_key_commands,
+            Self::compute_default_allows_all_key_commands(&self.acl_users),
+            "default_allows_all_key_commands cache is stale -- a mutator skipped \
+             bump_dispatch_permissions_generation"
+        );
+        self.default_allows_all_key_commands
     }
 }
 
@@ -36455,6 +36523,20 @@ impl Runtime {
     }
 
     fn current_acl_allows_default_key_command(&self) -> bool {
+        // (frankenredis-getexgate) When the current user IS the default one -- which is the
+        // ordinary case, since a server that does not require auth assigns every connection
+        // `authenticated_user = Some("default")` -- the answer is precomputed, and the
+        // BTreeMap descent is pure waste. It was one of the two `memcmp` calls this gate made
+        // per command. A 7-byte slice compare replaces a tree walk plus a libc call.
+        //
+        // NOTE the predicate is "the name is default", NOT "the session is unauthenticated".
+        // I wrote the latter first and it never fired: `refresh_authentication_for_server`
+        // sets `authenticated_user = Some(DEFAULT_AUTH_USER)` whenever `!auth_required()`, so
+        // `is_authenticated()` is true on essentially every connection. The disassembly caught
+        // it -- the lookup was still there with a dynamic needle.
+        if self.session.current_user_name() == DEFAULT_AUTH_USER {
+            return self.server.auth_state.default_allows_all_key_commands();
+        }
         let Some(user) = self
             .server
             .auth_state
