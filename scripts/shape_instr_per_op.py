@@ -1277,6 +1277,14 @@ SHAPES = {
     "zrange_rev": (["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "REV"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    # (frankenredis-getexgate) The INTEGER-encoded counterpart of get_control, which seeds a
+    # STRING. Redis stores a small decimal as Value::Integer, and reading one back goes down a
+    # different path: Value::string_bytes returns Cow::Owned(integer_decimal_bytes(..)), which
+    # allocates a Vec and does a variable-length extend_from_slice (a memcpy CALL) PER VALUE.
+    # get_control cannot see any of that -- its Cow is Borrowed -- so the single-key integer
+    # read, which is what every counter/ID workload actually does, had no shape at all.
+    # Same key length and command as get_control so the two differ ONLY in value encoding.
+    "get_integer": (["SET kk 12345"], ["GET", "kk"]),
 }
 
 
