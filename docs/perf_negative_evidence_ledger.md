@@ -44206,3 +44206,125 @@ saving materially under **140 instr/op** per route, since the gate is a fixed 17
 3. Enumerate coverage, never infer it from a name: `getrange` serves SUBSTR, `rand_member`
    serves three families, `PlainCardinalityCmd` excluded SCARD. Three for three so far.
 4. The 54 direct read-gate callers are NOT costed and must not be folded into a predicate batch.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: the loader computed every TAIL element's listpack length twice — handing it over is worth 27 instructions per tail element exactly, and scales the OPPOSITE way to the previous lever: n=1000 list DEBUG RELOAD 3.4125x -> 3.2337x, worst bound −5.24 pct (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method). CV was NOT used,
+as a gate or otherwise. No timing verdict is claimed.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 measures 3.2337x after this
+change, from 3.4125x before, on the 1000-entry list DEBUG RELOAD workload. The vendored Redis
+7.2.4 server process ran as a live incumbent arm in the same invocation as both fr arms, at
+291,237.9 instr/key.
+
+### RE-ATTRIBUTED FIRST, AS THE PREVIOUS ROW'S PREDICATE REQUIRED
+
+`9820fe75a` closed with "the tail path could carry its chunk total the same way — reopen ONLY
+IF the tail's recomputation is shown to survive in a fresh attribution; this bead has now had a
+stale attribution twice." Re-attributed on the SHIPPED post-lever binary before writing a line:
+
+    caller of list_lp_entry_bytes         calls/key    Ir/key
+    ListValue::bulk_from_back                200.00     6,600.0   necessary
+    ChunkedList::push_back_with_fill          78.00     2,574.0   SURVIVES — the tail
+    ListValue::push_back_borrowed             16.67       550.0
+    ListChunk::from_vec                       10.67       352.0   residual after 9820fe75a
+                                             ------
+                                             305.33   (was 433.33 before that lever)
+
+It survives. `bulk_from_back`'s tail loop calls `add_entry_bytes(&v)`, which computes
+`list_lp_entry_bytes(v)` for the ListValue's running total; `push_back_with_fill` then reaches
+`ListChunk::push_back_owned`, whose first line is `let added = list_lp_entry_bytes(&elem);` —
+the identical value, for the CHUNK's total.
+
+### THE LEVER
+
+Sized twins: `push_back_with_fill_sized(elem, fill, added)` and `push_back_owned_sized(elem,
+added)`, with the tail loop passing the length it already computed. A brand-new one-element
+chunk is built directly as `lp_bytes: LIST_LP_OVERHEAD + added` rather than through
+`ListChunk::from_vec`, whose `owned_listpack_bytes` would walk that single element to derive a
+number already in hand.
+
+    frame                    n=200               n=1000
+    list_lp_entry_bytes   7,344 -> 5,400     50,544 -> 27,000
+    saving                    −1,944            −23,544
+    tail elements                 72                872
+    PER TAIL ELEMENT           27.00              27.00
+
+    EXACTLY 27.00 BOTH TIMES. 72 x 27 = 1,944 and 872 x 27 = 23,544, to the instruction. That
+    is the mechanism identifying itself, not a fit.
+
+### THE BOARD — TWO DRAWS, WORST BOUND QUOTED
+
+    n      draw   A/A null        ORIG          CAND       delta      vs redis 7.2.4
+    200      1   0.999834     175,936.1     171,746.7   −2.38 pct   2.6904x -> 2.6263x
+    200      2   0.999752     175,989.0     171,640.3   −2.47 pct   2.6965x -> 2.6299x
+    1000     1   0.999943     993,848.4     941,764.0   −5.24 pct   3.4125x -> 3.2337x
+    1000     2   1.000222     994,021.5     941,682.4   −5.27 pct   3.4119x -> 3.2322x
+
+    WORST BOUND: −2.38 pct at n=200 and −5.24 pct at n=1000. Draws agree to 0.09 and 0.03
+    percentage points; all four nulls are inside 0.03 pct.
+
+  IT SCALES THE OPPOSITE WAY TO `9820fe75a`, AND THAT IS THE CHECK THAT IT IS A DIFFERENT
+  LEVER RATHER THAN A RE-MEASUREMENT OF THE SAME ONE. That row's saving was bounded by the
+  HEAD — at most `PACKED_MAX_ENTRIES` elements — so its percentage DECAYED with n (−3.71 at
+  200, −0.86 at 1000). This one is bounded by the TAIL, `N − PACKED_MAX_ENTRIES`, so its
+  percentage GROWS with n (−2.38 at 200, −5.24 at 1000). Two levers on the same function with
+  opposite size dependence is what you would predict from where each one sits, and it is why
+  neither figure may be quoted for the other size.
+
+  The WHOLE delta exceeds the named frame — 4,189 against 1,944 at n=200, and 52,084 against
+  23,544 at n=1000 — because the eliminated `from_vec` and the call overhead around it go too.
+  Per tail element the whole saving is 58.2 and 59.7 at the two sizes. I am NOT fitting a law
+  to that: two sizes is exactly the trap this bead already fell into once, and only the 27.00
+  frame figure is claimed as exact.
+
+### EQUIVALENCE
+
+`debug_assert_eq!(added, list_lp_entry_bytes(&elem))` in BOTH sized twins, so a caller that
+passes the wrong length fails loudly in tests and costs nothing in release. On top of that the
+existing `list_bulk_back_matches_incremental_push_qj6jn` compares `bulk_from_back` against the
+incremental `push_back` path on elements, `lp_bytes` and `quicklist_packed_node_blobs` at six
+`fill` values across 16 shapes including multi-chunk 200- and 400-element batches — and a wrong
+chunk `lp_bytes` changes `accepts_append`, hence node boundaries, hence those blobs. 926
+fr-store tests pass with both assertions live.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = 6e8d42d9fe55ffe56f21da5b32adf94de1564e0a404fd93cef1df04923d6372d
+                `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1; build log checked
+                for BOTH `^error` and rch refusals, 0 of each. Both arms from this ONE ELF via
+                `FR_PERF_AB_TAIL_ENTRY_BYTES_ORIG=1`, and the selector picks between TWO WHOLE
+                LOOPS read once per key rather than branching per element — `fdb578bac`
+                measured a per-element toggle moving its own control arm.
+  harness       scratchpad `reload_slope.py` + `zset_board.py`, K=4 -> K=12 DEBUG RELOAD slope,
+                one fresh working directory per point. DEBUG RELOAD is idempotent, so this
+                harness is not subject to the window-dependence found in `push_slope.py`.
+  incumbent     vendored redis 7.2.4, verified sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor. /data 70G before the
+                build and 69G after — the build cost ~1G. Disk is at 97 pct and has fallen
+                190G -> 69G across today; `target/` is 22G and my session scratchpad is 805M,
+                so the bulk is elsewhere under /data/tmp (199G).
+  window        GENUINELY CLEAN, and my own reading agreed with the handed one for once: CPU
+                idle 89.2 pct from a `/proc/stat` delta immediately before the board.
+  PER-ARM loadavg/MHz   draw 1 n=200 36.93/31.39/29.67 -> 30.98, MHz mean 2436 then 2323;
+                draw 1 n=1000 30.98 -> 16.96, MHz mean 2357 then 2398; draw 2 n=200
+                15.82/26.03/27.93 -> 14.52, MHz mean 2574 then 2403; draw 2 n=1000 14.00 ->
+                10.57, MHz mean 2465 then 2503. Max 4091-4292, min 1429 throughout.
+  gates         926 fr-store tests pass; clippy -p fr-store --all-targets -D warnings clean;
+                fmt clean over my edits, with four pre-existing hunks in peer-written regions
+                left alone.
+
+### THE REPLICATED-STANDING CONVENTION
+
+Applied as the two-draw worst bound above. Not used to claim STANDING against the incumbent:
+the route is 3.23x BEHIND after the change, so there is none to claim.
+
+RETRY PREDICATE:
+  1. `list_lp_entry_bytes` is now 5,400 instr/key at n=200 and 27,000 at n=1000 — 200 and 1000
+     calls respectively, i.e. exactly ONE per element, which is the floor. This particular
+     redundancy is spent; do not look for a third pass at it.
+  2. `push_back_borrowed` still shows 16.67 calls/key and it is a DIFFERENT entry point
+     (LPUSH-side / borrowed). Reopen ONLY IF a fresh attribution shows it recomputing rather
+     than receiving, and only with a workload that actually drives it — this bead has twice
+     measured a lever against a path that no longer reached it.

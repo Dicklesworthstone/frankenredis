@@ -3483,8 +3483,21 @@ impl ListChunk {
         }
     }
 
+    /// (frankenredis-qj6jn) Sized twin of [`Self::push_back_owned`] for a caller that has
+    /// already computed this element's listpack length. `bulk_from_back`'s tail loop computes
+    /// it for the ListValue's own `lp_bytes` and then this function recomputed the identical
+    /// value for the CHUNK's -- measured at 78 calls per key per reload, 2,574.0 instr/key.
+    fn push_back_owned_sized(&mut self, elem: Vec<u8>, added: u64) {
+        debug_assert_eq!(added, list_lp_entry_bytes(&elem));
+        self.push_back_owned_impl(elem, added);
+    }
+
     fn push_back_owned(&mut self, elem: Vec<u8>) {
         let added = list_lp_entry_bytes(&elem);
+        self.push_back_owned_impl(elem, added);
+    }
+
+    fn push_back_owned_impl(&mut self, elem: Vec<u8>, added: u64) {
         if let Self::Listpack { bytes, entries } = self {
             let elems = entries
                 .iter()
@@ -3704,6 +3717,31 @@ impl ChunkedList {
 
     fn push_back(&mut self, elem: Vec<u8>) {
         self.push_back_with_fill(elem, -2);
+    }
+
+    /// (frankenredis-qj6jn) Sized twin of [`Self::push_back_with_fill`]: same control flow,
+    /// but the element's listpack length is supplied instead of recomputed. A brand-new
+    /// one-element chunk is built directly rather than through `ListChunk::from_vec`, whose
+    /// `owned_listpack_bytes` would walk that single element to derive the number we already
+    /// hold -- `LIST_LP_OVERHEAD + added` is that number by definition.
+    fn push_back_with_fill_sized(&mut self, elem: Vec<u8>, fill: i64, added: u64) {
+        debug_assert_eq!(added, list_lp_entry_bytes(&elem));
+        if let Some(back) = self.chunks.back_mut()
+            && back.accepts_append(&elem, fill)
+        {
+            back.push_back_owned_sized(elem, added);
+            self.len += 1;
+            return;
+        }
+        if let Some(back) = self.chunks.back_mut() {
+            back.seal_if_owned(fill);
+        }
+        self.chunks.push_back(ListChunk::Owned {
+            elems: Arc::new(Vec::from([elem])),
+            lp_bytes: LIST_LP_OVERHEAD + added,
+            front_biased: false,
+        });
+        self.len += 1;
     }
 
     fn push_back_with_fill(&mut self, elem: Vec<u8>, fill: i64) {
@@ -4072,6 +4110,22 @@ impl<'a> Iterator for ListChunkRevIter<'a> {
 // `forced_quicklist` is consulted — other budgets fall back to the stateless
 // estimate in `Store::object_encoding`).
 const LIST_LP_OVERHEAD: u64 = 7; // 4-byte total-bytes + 2-byte count header + 0xFF EOF
+
+#[cfg(feature = "perf-ab-tail-entry-bytes")]
+#[inline]
+fn tail_entry_bytes_carry_enabled_impl() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(|| match std::env::var("FR_PERF_AB_TAIL_ENTRY_BYTES_ORIG") {
+        Ok(value) => value == "1",
+        Err(_) => false,
+    })
+}
+
+#[cfg(not(feature = "perf-ab-tail-entry-bytes"))]
+#[inline(always)]
+const fn tail_entry_bytes_carry_enabled_impl() -> bool {
+    true
+}
 
 /// (frankenredis-qj6jn) Does the bulk head builder carry each chunk's byte total, or let
 /// `ListChunk::from_vec` recompute it? Production: carries, compiled to a constant. Under
@@ -4620,15 +4674,39 @@ impl ListValue {
         }
         list.repr = ListRepr::Deque(Arc::new(chunked));
         let fill = list.fill;
-        for v in tail {
-            raw_add += v.len() as u64;
-            list.add_entry_bytes(&v);
-            match &mut list.repr {
-                ListRepr::Packed(p) => p.push_back(&v),
-                ListRepr::Deque(d) => Arc::make_mut(d).push_back_with_fill(v, fill),
+        // (frankenredis-qj6jn) Two loops rather than a per-element branch: the selector is read
+        // ONCE PER KEY. A toggle inside a per-element loop was measured moving its own control
+        // arm (`fdb578bac`), so the arms are kept whole instead.
+        if Self::tail_entry_bytes_carry_enabled() {
+            for v in tail {
+                raw_add += v.len() as u64;
+                let entry_bytes = list_lp_entry_bytes(&v);
+                list.lp_bytes += entry_bytes;
+                match &mut list.repr {
+                    ListRepr::Packed(p) => p.push_back(&v),
+                    ListRepr::Deque(d) => {
+                        Arc::make_mut(d).push_back_with_fill_sized(v, fill, entry_bytes);
+                    }
+                }
+            }
+        } else {
+            for v in tail {
+                raw_add += v.len() as u64;
+                list.add_entry_bytes(&v);
+                match &mut list.repr {
+                    ListRepr::Packed(p) => p.push_back(&v),
+                    ListRepr::Deque(d) => Arc::make_mut(d).push_back_with_fill(v, fill),
+                }
             }
         }
         (list, raw_add)
+    }
+
+    /// (frankenredis-qj6jn) Does the tail loop hand the chunk the element length it just
+    /// computed? Production: yes, compiled to a constant. Read once per key.
+    #[inline]
+    fn tail_entry_bytes_carry_enabled() -> bool {
+        tail_entry_bytes_carry_enabled_impl()
     }
 
     fn maybe_promote(&mut self, added_len: usize) {

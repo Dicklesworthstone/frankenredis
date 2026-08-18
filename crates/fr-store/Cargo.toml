@@ -22,6 +22,7 @@ perf-ab-xtrim-minid-noop = []
 # encoding refresh (re-walk the object that was just built) so BOTH arms of that
 # lever live in ONE ELF. Production builds compile the control away entirely.
 perf-ab-restore-encoding-rescan = []
+perf-ab-tail-entry-bytes = []
 perf-ab-chunk-bytes-carry = []
 # (frankenredis-qj6jn) Measurement-only selector restoring the element-by-element
 # fresh-key bulk RPUSH, so both arms of the direct-build lever live in ONE ELF.
