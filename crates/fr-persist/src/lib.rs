@@ -1443,13 +1443,48 @@ fn rdb_length_size(len: usize) -> usize {
 /// (rdbcompression on) so dump.rdb files emitted by fr-persist
 /// round-trip through `redis-server --loadrdb` even when long strings
 /// are present. (br-frankenredis-1uin)
+/// (frankenredis-qj6jn) Upstream reads `server.rdb_compression` inside the RDB string writer,
+/// so the switch is a process-global there too — this mirrors that rather than threading a flag
+/// through the 99 `rdb_encode_string` call sites.
+///
+/// Found by differential probe: `CONFIG SET rdbcompression no` was ACCEPTED and IGNORED. At
+/// `list-max-listpack-size -1` with 256 elements, redis emitted 4,374 bytes with compression
+/// off and fr emitted 1,338 — the same bytes it emits with compression on. The payloads still
+/// cross-RESTOREd and the elements matched, so this was a config-honouring gap, not corruption.
+static RDB_COMPRESSION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Set by the runtime when `rdbcompression` is applied, at startup and on CONFIG SET.
+pub fn set_rdb_compression(enabled: bool) {
+    RDB_COMPRESSION.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn rdb_compression_enabled() -> bool {
+    RDB_COMPRESSION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn rdb_encode_string(buf: &mut Vec<u8>, data: &[u8]) {
+    rdb_encode_string_with(buf, data, rdb_compression_enabled());
+}
+
+/// The flag is a parameter here so tests can exercise BOTH arms without mutating the process
+/// global — `feedback_shared_oracle_config_pollution` is on record about a test that flips a
+/// shared setting racing every other test in the binary.
+fn rdb_encode_string_with(buf: &mut Vec<u8>, data: &[u8], compress: bool) {
     // Upstream skips LZF below this threshold because even a run of
     // repeated bytes cannot compress enough to beat the wire overhead.
     if let Ok(len) = u8::try_from(data.len())
         && len <= 20
     {
         buf.push(len);
+        buf.extend_from_slice(data);
+        return;
+    }
+
+    // Upstream gates the whole LZF attempt on `server.rdb_compression`; with it off the raw
+    // form is emitted even when the string would have compressed well.
+    if !compress {
+        rdb_encode_length(buf, data.len());
         buf.extend_from_slice(data);
         return;
     }
@@ -7432,6 +7467,68 @@ mod tests {
             out,
             vec![0x01, b'x', b'x', 0xe0, 0x11, 0x00, 0x01, b'x', b'x'],
             "fr LZF wire form must match vendored byte-for-byte for 'x' * 30",
+        );
+    }
+
+    /// (frankenredis-qj6jn) `rdbcompression no` must actually suppress LZF.
+    ///
+    /// Found differentially against vendored redis 7.2.4: the config was ACCEPTED and IGNORED
+    /// on BOTH the CONFIG SET and the startup path, so `DUMP` stayed compressed. A 4,000-byte
+    /// run of 'a' came back as 69 bytes from fr and 4,013 from redis with the switch off.
+    ///
+    /// Exercises the seam rather than the process global on purpose: flipping a shared setting
+    /// inside a parallel test binary races every other test that encodes.
+    #[test]
+    fn rdb_compression_switch_suppresses_lzf_qj6jn() {
+        let compressible = vec![b'a'; 4000];
+
+        let mut on = Vec::new();
+        super::rdb_encode_string_with(&mut on, &compressible, true);
+        assert_eq!(
+            on[0], 0xC3,
+            "compression ON must emit the LZF special encoding"
+        );
+        assert!(
+            on.len() < 200,
+            "LZF of 4000 identical bytes should be tiny, got {}",
+            on.len()
+        );
+
+        let mut off = Vec::new();
+        super::rdb_encode_string_with(&mut off, &compressible, false);
+        assert_ne!(
+            off[0], 0xC3,
+            "compression OFF must NOT emit the LZF special encoding"
+        );
+        assert!(
+            off.len() >= compressible.len(),
+            "compression OFF must carry the raw bytes, got {} for {}",
+            off.len(),
+            compressible.len()
+        );
+        assert!(
+            off.ends_with(&compressible),
+            "raw form must contain the payload verbatim"
+        );
+
+        // Short strings take the <=20 byte path and are unaffected by the switch either way.
+        let short = b"short".to_vec();
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        super::rdb_encode_string_with(&mut a, &short, true);
+        super::rdb_encode_string_with(&mut b, &short, false);
+        assert_eq!(
+            a, b,
+            "the <=20-byte path must not depend on the compression switch"
+        );
+    }
+
+    /// The process global backing the switch: default ON, matching upstream's `rdbcompression yes`.
+    #[test]
+    fn rdb_compression_defaults_on_qj6jn() {
+        assert!(
+            super::rdb_compression_enabled(),
+            "default must be ON; a false default would silently change every DUMP payload"
         );
     }
 

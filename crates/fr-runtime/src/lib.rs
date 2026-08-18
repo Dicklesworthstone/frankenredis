@@ -43436,7 +43436,16 @@ impl Runtime {
                         | "use-exit-on-panic"
                 ) {
                     match std::str::from_utf8(value_bytes) {
-                        Ok(s) if s.eq_ignore_ascii_case("yes") || s.eq_ignore_ascii_case("no") => {}
+                        Ok(s) if s.eq_ignore_ascii_case("yes") || s.eq_ignore_ascii_case("no") => {
+                            // (frankenredis-qj6jn) Propagate `rdbcompression` to the RDB string
+                            // writer, in the same spirit as `lfu-log-factor` below: it was
+                            // ACCEPTED and IGNORED, so DUMP stayed LZF-compressed with the
+                            // switch off. Differentially confirmed against redis 7.2.4, which
+                            // emitted 4,374 bytes where fr emitted 1,338.
+                            if canonical == "rdbcompression" {
+                                fr_persist::set_rdb_compression(s.eq_ignore_ascii_case("yes"));
+                            }
+                        }
                         _ => {
                             return config_set_failed(canonical, "argument must be 'yes' or 'no'");
                         }

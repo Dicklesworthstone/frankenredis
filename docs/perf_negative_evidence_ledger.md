@@ -47632,3 +47632,110 @@ server pid -- not on instructions, where fr already leads by 21 pct, and not on 
 which reverses sign on this shape. This row has no A/A null; before any figure here is promoted
 to a competitive claim, run the same invocation with both arms pointed at the SAME binary and
 show the null inside the usual bound.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: PARITY FIX — `rdbcompression no` was ACCEPTED AND IGNORED on both the CONFIG SET and the startup path, because there are TWO independent RDB string encoders and neither read the switch (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: differential behaviour against a live vendored redis 7.2.4 in the same probe
+invocation. No timing verdict is claimed, no instruction counts are quoted, and CV was NOT used,
+as a gate or otherwise. This row banks no vs-incumbent ratio.
+
+Claim class: SELF-SPEEDUP is not the label either — this is a CORRECTNESS/parity fix and it is
+deliberately not written as a perf verdict. Campaign output: no.
+
+### HOW IT WAS FOUND, INCLUDING THE HYPOTHESIS THAT WAS WRONG
+
+`14091fc7b`'s retry predicate said `ChunkedList::push_back` is the last unsized caller and to
+ATTRIBUTE its call rate before touching it. Attributing it surfaced something else: that function
+hardcodes `fill = -2`, and it is reached from `ChunkedList::insert` when the index appends — so
+an LINSERT that appends would pick chunk boundaries with a budget the list is not configured
+with, and chunk boundaries are quicklist node boundaries are DUMP bytes.
+
+    THE HYPOTHESIS WAS WRONG AND THE CONTROL IS WHAT SAID SO. The probe ran each fill with
+    appends=5 AND appends=0. At `list-max-listpack-size -1` the DUMP diverged from redis with
+    FIVE appends (2,089 vs 2,078 bytes) and diverged just the same with ZERO (2,058 vs 2,035).
+    LINSERT was not the culprit; the RPUSH path already diverged. Without the zero-append arm I
+    would have "confirmed" a bug in the function I set out to suspect.
+
+### WHAT THE DIVERGENCE ACTUALLY WAS
+
+Narrowing by size showed it appear at n=256 and vanish by n=300, with BOTH engines reporting
+`listpack` encoding and BOTH emitting RDB type 18. A same-type payload differing by 23 bytes
+with identical elements pointed at the wrapper, not the container — so the probe re-ran with
+`rdbcompression no`, which should remove LZF from both engines:
+
+    n     comp   fr bytes   redis bytes
+    250   yes      1,307       1,285
+    250   no       1,307       4,272
+    256   no       1,338       4,374
+    280   no       1,458       4,792
+
+  fr's output is IDENTICAL with the switch on and off. `CONFIG SET rdbcompression no` returned
+  OK, `CONFIG GET` read back `no`, and nothing changed. The same held for `--rdbcompression no`
+  on the command line. A plain 4,000-byte string made it unmissable: 69 bytes from fr, 4,013
+  from redis.
+
+### THE FIX NEEDED TWO EDITS BECAUSE THERE ARE TWO ENCODERS
+
+The first attempt gated `fr_persist::rdb_encode_string` and changed NOTHING — the probe was
+byte-for-byte identical afterwards. That null result is what exposed the real shape:
+
+    crates/fr-persist  `rdb_encode_string`   -> RDB FILE writes
+    crates/fr-store    `encode_rdb_string`   -> DUMP, via `Store::dump_key`
+
+  Two independent implementations of upstream's `rdbSaveLzfStringObject`, neither reading the
+  switch. Both now consult one shared flag (`fr_persist::rdb_compression_enabled`) so they
+  cannot drift apart, mirroring upstream where `server.rdb_compression` is a process global
+  read inside the string writer.
+
+  A THIRD EDIT WAS REQUIRED AND IS EASY TO MISS: `DumpPayloadCache` is keyed on every collection
+  config that can change the bytes, but not on this one, so a payload cached under one setting
+  would be served under the other. The flag is now part of the cache validity check.
+
+    RESULT, same probe: `no` now yields 4,384 / 6,832 bytes where fr previously emitted
+    1,338 / 2,067, on BOTH the CONFIG SET and the startup path. At n=400 fr and redis now agree
+    EXACTLY with compression off (6,832 == 6,832) as well as on (2,067 == 2,067). Payloads still
+    cross-RESTORE into redis with the elements intact.
+
+### A SECOND DIVERGENCE THIS UNCOVERED, RECORDED AND NOT FIXED
+
+With compression OFF and `list-max-listpack-size -1`, fr and redis still differ by TEN bytes at
+n = 250, 256 and 257 (4,384 vs 4,374), while agreeing exactly at n = 400. That is a genuine
+listpack/container difference in a narrow band, and compression was MASKING it — the compressed
+forms differed by 22-23 bytes, which I initially and wrongly read as an LZF difference. It is a
+separate defect from the one fixed here and is left open deliberately rather than bundled.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = c2f61cccf581eddd746f9609297b9ed3643e656afe5f9f69a58e12fdf8efef9e
+                (the FIXED build the verification probe ran against; no measurement claim in
+                this row depends on it, but it is recorded so the probe can be re-run against
+                the same binary). `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1,
+                build log checked
+                for BOTH `^error` and rch refusals: 0 of each, two builds. `df` run immediately
+                before each; /data 124-125G throughout.
+  probes        `/tmp/linsert_fill_probe.py` (fill sweep with the zero-append CONTROL),
+                `fill_m1_probe.py` (size localisation), `dump_type_probe.py` (RDB type byte),
+                `lzf_band_probe.py` (compression on/off plus cross-RESTORE) and
+                `rdbcomp_verify.py` (both config paths). Copied to the session scratchpad.
+  incumbent     vendored redis 7.2.4, `legacy_redis_code/redis/src/redis-server`, booted per
+                probe on a free port with its own temp dir; every comparison is fr and redis in
+                the SAME probe invocation.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 17:49.
+                loadavg 7.27/9.11/9.24 at the start of the investigation, 90.3 pct idle measured
+                from a `/proc/stat` delta. Load is recorded for completeness only: this row's
+                evidence is byte comparisons, which are immune to it.
+  gates         `cargo test -p fr-persist -p fr-store --lib`, clippy `--all-targets` over
+                fr-persist/fr-store/fr-runtime, and `cargo fmt --check`.
+
+RETRY PREDICATE:
+  1. The TEN-BYTE band at `list-max-listpack-size -1`, n = 250-257, is open. Start from
+     `lzf_band_probe.py` with `rdbcompression no` so the container is not hidden behind LZF, and
+     diff the raw listpack bytes rather than the payload length.
+  2. `ChunkedList::push_back`'s hardcoded `fill = -2` is STILL unattributed — this row refuted a
+     guess about it, it did not clear it. An LINSERT-append under a NON-default fill on an
+     already-Deque list is the shape to drive; the probe here seeded 400 elements, which may not
+     have reached the boundary the hardcoded budget would move.
+  3. Any future config that changes DUMP bytes must be added to `DumpPayloadCache` in the same
+     commit. That struct is the third place a config has to be wired and the only one with no
+     compiler error to remind you.

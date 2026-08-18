@@ -5986,6 +5986,10 @@ struct DumpPayloadCache {
     hash_max_listpack_value: usize,
     set_max_intset_entries: usize,
     set_max_listpack_entries: usize,
+    // (frankenredis-qj6jn) The payload also depends on whether LZF ran, and `rdbcompression` is
+    // a live CONFIG SET. Without this a payload cached under one setting is served under the
+    // other -- the same over-invalidate-rarely trade the config fields above already make.
+    rdb_compression: bool,
     payload: Vec<u8>,
 }
 
@@ -34551,6 +34555,7 @@ impl Store {
                 && cache.hash_max_listpack_value == self.hash_max_listpack_value
                 && cache.set_max_intset_entries == self.set_max_intset_entries
                 && cache.set_max_listpack_entries == self.set_max_listpack_entries
+                && cache.rdb_compression == fr_persist::rdb_compression_enabled()
         }) {
             return Some(cache.payload.clone());
         }
@@ -34750,6 +34755,7 @@ impl Store {
                     zset_max_listpack_entries: self.zset_max_listpack_entries,
                     zset_max_listpack_value: self.zset_max_listpack_value,
                     list_max_listpack_size: self.list_max_listpack_size,
+                    rdb_compression: fr_persist::rdb_compression_enabled(),
                     hash_max_listpack_entries: self.hash_max_listpack_entries,
                     hash_max_listpack_value: self.hash_max_listpack_value,
                     set_max_intset_entries: self.set_max_intset_entries,
@@ -35732,7 +35738,12 @@ fn encode_rdb_string(buf: &mut Vec<u8>, data: &[u8]) {
     // Without this, DUMP/DEBUG OBJECT serializedlength for long
     // repetitive strings was ~8x larger than vendored 7.2.4 (e.g.
     // 'x' * 100 emitted 102 bytes vs vendored's 13).
-    if data.len() > 20 {
+    // (frankenredis-qj6jn) ...and mirror the SWITCH too. Upstream gates the whole LZF attempt
+    // on `server.rdb_compression`; fr accepted `CONFIG SET rdbcompression no` and ignored it,
+    // so DUMP stayed compressed. NOTE there are TWO independent RDB string encoders in this
+    // workspace -- this one serves DUMP via `Store::dump_key`, and `fr_persist`'s serves RDB
+    // FILE writes; both consult the same flag so they cannot drift apart.
+    if data.len() > 20 && fr_persist::rdb_compression_enabled() {
         let budget = data.len() - 4;
         if let Some(compressed) = fr_persist::lzf_compress(data, budget) {
             let raw_size = encoded_length_size(data.len()) + data.len();
