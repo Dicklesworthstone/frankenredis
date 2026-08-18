@@ -53441,3 +53441,77 @@ cache-fill floor established in `a1600b784`). **The vein remains open**: `keys_s
 collection `_into` family (`smembers_base`, `hgetall_base`, `lrange_base`, `sinter_2`) and SCAN
 (four shapes). Re-run the census after each batch rather than reasoning from source — and check
 the census entry, not the command name, before assuming a route is unconverted.
+
+## 2026-08-18 BrownIbis: CENSUS REFRESH — the read-gate vein goes **29 -> 23 shapes still paying**, the six that moved are exactly batch 5's beneficiaries, and a ratio certification was REFUSED by the gate at 92 pct idle (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+`d6f97f48e`'s retry predicate says to re-run the census after each batch rather than reason from
+source. This is that re-run, on `b5_after1.elf` (HEAD `9a937431c` plus batch 5, i.e. the shipped
+state of `e766788a8`), one draw per shape, calls/op to `plain_borrowed_default_key_read_allows`.
+
+**23 still paying, 23 converted.** The previous census (`a1600b784`, on `b4_after1.elf`) read 29
+and 13. **29 - 6 = 23, and the six that moved are exactly batch 5's six measured beneficiaries** —
+`zrangebyscore_plain`, `zrangebyscore_l`, `zrange_rev`, `zrange_withscores`, `zcount_base`,
+`zscore_base` — all of which now appear in the converted list at 0.000. The arithmetic closes with
+no unexplained movement in either direction, which is the cheapest available check that a batch
+did what its row claimed and nothing else.
+
+**STILL PAYING — 23 shapes**, ordered by what 86.0 costs them (the gate is 86.0 since
+`2bdc560df`, not 175.0):
+
+| shape | instr/op | 86.0 as pct | shape | instr/op | 86.0 as pct |
+|---|---|---|---|---|---|
+| dbsize_base | 1194.4 | **7.2** | zmscore_2 | 2472.5 | 3.5 |
+| getbit_base | 1514.7 | 5.7 | keys_star | 2552.4 | 3.4 |
+| hstrlen_base | 1612.6 | 5.3 | xpending_empty | 2721.9 | 3.2 |
+| getrange_base | 1733.6 | 5.0 | scan_zero | 3688.5 | 2.3 |
+| smembers_base | 1851.4 | 4.6 | sinter_2 | 3961.0 | 2.2 |
+| substr | 1854.8 | 4.6 | scan_count | 3993.8 | 2.2 |
+| geohash_base | 2066.7 | 4.2 | geopos_base | 4179.9 | 2.1 |
+| hgetall_base | 2108.4 | 4.1 | scan_type | 4412.6 | 1.9 |
+| hmget_2 | 2145.6 | 4.0 | scan_match | 4459.5 | 1.9 |
+| smismember_2 | 2165.3 | 4.0 | xpending_populated | 4552.5 | 1.9 |
+| lrange_base | 2166.8 | 4.0 | pubsub_channels | 4953.1 | 1.7 |
+| | | | geodist_base | 6680.9 | **1.3** |
+
+**THE PERCENTAGES ARE HALF WHAT THEY WERE, AND THAT IS THIS VEIN EATING ITSELF.** `a1600b784`
+quoted 13.0 pct down to 2.6 pct against a 175.0 gate; the same shapes now read 7.2 down to 1.3
+against 86.0. Every further conversion is worth half what it was before `2bdc560df` halved the
+gate. That is not an argument against finishing — 7.2 pct of a DBSIZE is still the largest
+per-command win on the board — but it does mean the remaining 23 are worth roughly what 11 were
+worth this morning, and a lever that halves the gate again would be worth more than all of them.
+
+NEXT, in the order the census argues for: the **collection `_into` family** (`smembers_base`
+4.6 pct, `hgetall_base` 4.1, `lrange_base` 4.0, `sinter_2` 2.2) is the largest coherent cluster;
+the **SCAN family** is four shapes at 1.9-2.3 pct; the **geo family** (`geohash_base`,
+`geopos_base`, `geodist_base`) is three at 1.3-4.2 pct. The cheap singletons — `dbsize_base`,
+`getbit_base`, `hstrlen_base`, `getrange_base` — carry the best percentages and have no cluster
+to wait for.
+
+**NO CERTIFICATION THIS TURN, AND THE REASON IS WORTH RECORDING.** The operator's no-certify hold
+was explicitly lifted and CPU idle was **92 pct**, so the brief said go. `certification_window.py
+--for ratio` returned **UNFIT** anyway: six cargo/rustc processes were live and, under a shared
+uid, none can be attributed away — three of them were another session's `-p fr-server` build.
+This is the same lesson as `d22cf2d10`: **a lifted hold is permission, not a measurement, and the
+gate's verdict beats apparent quiet.** I also note that my own build-slot check (`pgrep -c
+rustc`) returned **0** while those three `-p fr-server` builds were running; the reliable form
+greps `ps -eo args=` for `-p <package>`.
+
+GATE AND ITS OWN NULL. This row makes no A/B claim — single-draw call counts, which are exact
+integers — so there is no lever to gate. A/A null on the whole-process instrument, same ELF, four
+draws of GET, resampled ratio-of-medians: median 1.00000, bootstrap 95% median CI [0.99730,
+1.00244]. The verdict gate for any lever built on this must be that bootstrap median-CI, and CV
+is provenance only and was not used as a gate anywhere in this row; no CV was computed. Host:
+/data 88G, loadavg 12.94/14.29/11.93 falling, CPU idle 92 pct, mean 1999 MHz across 64 cores;
+three peer `-p fr-server` builds in flight throughout, which is why this turn measured an existing
+ELF, built nothing and certified nothing.
+`bench_elf_sha256=81630963a263180b4b6293e215070716dcc45d69bdf2873583b46205464a20d9`.
+
+RETRY PREDICATE: re-run this census after the next batch and check the same arithmetic — the
+count must fall by exactly the number of measured beneficiaries that batch claimed, and the
+shapes that moved must be exactly the ones named. A count that falls by more means something
+converted that the row did not claim; by less means a beneficiary did not take, which is what
+caught `zrange_withscores` in `d6f97f48e`. **Do not size this vein from source**, and check the
+census entry rather than the command name before assuming a route is unconverted.
