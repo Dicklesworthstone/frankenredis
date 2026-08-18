@@ -21977,17 +21977,23 @@ fn try_dispatch_floor_classified_action(
             )
         }
         BorrowedDispatchFloorClass::Ttl => {
-            // (frankenredis-ozrro) REVERTED to the uncached gate. This arm is a let-chain, so a
-            // cached gate had to be HOISTED above the parser check -- and measured, that made TTL
-            // 21 instr/op WORSE (control-corrected) while TYPE, whose gate sits inside the `if let`
-            // body, improved 189. Same executor, same predicate; only the placement differs, and
-            // the hoisted placement lost. Not shipping a regression to keep a pattern tidy.
+            // (frankenredis-getexgate) RE-CONVERTED, and the earlier revert is now EXPLAINED.
+            // The recorded "hoisted placement lost, 21 instr/op WORSE" was not about placement.
+            // This arm returns FastReply and TYPE returns FastEncodedReply, and until bffba0601
+            // the FastReply arm of the buffered loop CLEARED plain_get_read_gate_cache after
+            // every packet. So the hoist here populated a cache that was thrown away before the
+            // next packet could read it: every op paid the full gate PLUS the get_or_insert_with,
+            // which is the +21. TYPE kept its entry and gained 189 with an identical hoist.
+            // With that clear gone the cache survives the packet, so the hoist is a hit.
+            let default_read_allowed = *read_gate_cache
+                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
             if let Some(packet) = parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
-                && let Some(response) =
-                    runtime.execute_plain_keymeta_borrowed(
+                && let Some(response) = runtime
+                    .execute_plain_keymeta_borrowed_with_default_read_gate(
                         PlainKeyMetaCmd::Ttl,
                         packet.key,
                         ts,
+                        default_read_allowed,
                     )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -23186,12 +23192,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Pexpiretime => {
+            // (frankenredis-getexgate) Cached read gate. Same hoist as TYPE; safe for a
+            // FastReply arm now that bffba0601 stopped clearing the cache after every packet.
+            let default_read_allowed = *read_gate_cache
+                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
             if let Some(packet) = parse_borrowed_plain_pexpiretime_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_keymeta_borrowed(
-                    PlainKeyMetaCmd::Pexpiretime,
-                    packet.key,
-                    ts,
-                )
+                && let Some(response) = runtime
+                    .execute_plain_keymeta_borrowed_with_default_read_gate(
+                        PlainKeyMetaCmd::Pexpiretime,
+                        packet.key,
+                        ts,
+                        default_read_allowed,
+                    )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -23380,17 +23392,23 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Pttl => {
-            // (frankenredis-ozrro) REVERTED to the uncached gate. This arm is a let-chain, so a
-            // cached gate had to be HOISTED above the parser check -- and measured, that made TTL
-            // 21 instr/op WORSE (control-corrected) while TYPE, whose gate sits inside the `if let`
-            // body, improved 189. Same executor, same predicate; only the placement differs, and
-            // the hoisted placement lost. Not shipping a regression to keep a pattern tidy.
+            // (frankenredis-getexgate) RE-CONVERTED, and the earlier revert is now EXPLAINED.
+            // The recorded "hoisted placement lost, 21 instr/op WORSE" was not about placement.
+            // This arm returns FastReply and TYPE returns FastEncodedReply, and until bffba0601
+            // the FastReply arm of the buffered loop CLEARED plain_get_read_gate_cache after
+            // every packet. So the hoist here populated a cache that was thrown away before the
+            // next packet could read it: every op paid the full gate PLUS the get_or_insert_with,
+            // which is the +21. TYPE kept its entry and gained 189 with an identical hoist.
+            // With that clear gone the cache survives the packet, so the hoist is a hit.
+            let default_read_allowed = *read_gate_cache
+                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
             if let Some(packet) = parse_borrowed_plain_pttl_packet(unparsed, &parser_config)
-                && let Some(response) =
-                    runtime.execute_plain_keymeta_borrowed(
+                && let Some(response) = runtime
+                    .execute_plain_keymeta_borrowed_with_default_read_gate(
                         PlainKeyMetaCmd::Pttl,
                         packet.key,
                         ts,
+                        default_read_allowed,
                     )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -23409,12 +23427,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Expiretime => {
+            // (frankenredis-getexgate) Cached read gate. Same hoist as TYPE; safe for a
+            // FastReply arm now that bffba0601 stopped clearing the cache after every packet.
+            let default_read_allowed = *read_gate_cache
+                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
             if let Some(packet) = parse_borrowed_plain_expiretime_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_keymeta_borrowed(
-                    PlainKeyMetaCmd::Expiretime,
-                    packet.key,
-                    ts,
-                )
+                && let Some(response) = runtime
+                    .execute_plain_keymeta_borrowed_with_default_read_gate(
+                        PlainKeyMetaCmd::Expiretime,
+                        packet.key,
+                        ts,
+                        default_read_allowed,
+                    )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
