@@ -44,8 +44,7 @@ use fr_store::{
     AclKeyPattern, ClientReplyState, ClientTrackingState, CommandRecordKind, DispatchAclLogContext,
     DispatchAclPermissionReason, DispatchAclPermissions, EvictionLoopFailure, EvictionLoopResult,
     EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPolicy, PendingAclLogEvent,
-    SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, StringBytes, decode_db_key, encode_db_key,
-    glob_match,
+    SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, decode_db_key, encode_db_key, glob_match,
 };
 
 /// Re-exported so a cross-partition INFO aggregate can hold and merge per-command
@@ -9128,7 +9127,7 @@ impl Runtime {
         let result = self.server.store.get_string_bytes(key, now_ms);
         let failed = result.is_err();
         match result {
-            Ok(value) => encode_bulk_string_slice(value.as_ref().map(StringBytes::as_slice), false, out),
+            Ok(value) => encode_bulk_string_slice(value.as_deref(), false, out),
             Err(err) => CommandError::Store(err).to_resp().encode_into(out),
         }
         if let Some(started) = started {
@@ -14546,7 +14545,7 @@ impl Runtime {
         match result {
             Ok(value) => {
                 if !suppress_reply {
-                    encode_bulk_string_slice(value.as_ref().map(StringBytes::as_slice), resp3, out);
+                    encode_bulk_string_slice(value.as_deref(), resp3, out);
                 }
             }
             Err(err) => {
@@ -15986,7 +15985,7 @@ impl Runtime {
             let value = self.server.store.get_string_bytes(key, now_ms);
             if !suppress_reply {
                 match value {
-                    Ok(v) => encode_bulk_string_slice(v.as_ref().map(StringBytes::as_slice), resp3, out),
+                    Ok(v) => encode_bulk_string_slice(v.as_deref(), resp3, out),
                     // MGET yields nil for a non-string (wrong-type) key, not an error.
                     Err(_) => encode_bulk_string_slice(None, resp3, out),
                 }
