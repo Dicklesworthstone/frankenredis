@@ -21550,6 +21550,34 @@ end
         )
         .expect("a script that has ALREADY written must not be stopped mid-way");
 
+        // ROW 5: a NO-WRITES script over maxmemory reads the READ-ONLY refusal, not the OOM one.
+        //
+        // Upstream checks in a fixed order -- scriptVerifyWriteCommandAllow (script.c:542) THEN
+        // scriptVerifyOOM (:546) -- so a no-writes script that writes over maxmemory reads "Write
+        // commands are not allowed from read-only scripts.". fr's order is the opposite: this OOM
+        // gate sits at the top of `dispatch_script_argv` and the read-only refusal is inside
+        // `dispatch_argv`, which the gate runs BEFORE. `no-writes` therefore has to exempt from
+        // OOM as well (upstream's script.c:191 implication), or the same script reads a different
+        // error in each engine -- from two checks that are each individually correct.
+        //
+        // The flags below are what the command layer sets for `#!lua flags=no-writes`, via
+        // `script_shebang_is_oom_exempt`. The NEGATIVE assertion is the point: without that fold
+        // this reads the OOM refusal.
+        let mut store = Store::new();
+        store.maxmemory_bytes_live = 1;
+        store.over_maxmemory_live = true;
+        store.script_read_only = true;
+        store.script_allow_oom = true;
+        let err = eval_script(b"return redis.call('set','k','v')", &[], &[], &mut store, 0)
+            .expect_err("a no-writes script must still be refused");
+        assert!(
+            !err.contains("OOM command not allowed"),
+            "a no-writes script must NOT read the OOM refusal: {err}"
+        );
+        assert!(
+            err.contains("Write commands are not allowed from read-only scripts"),
+            "expected the read-only refusal, got {err}"
+        );
     }
 
     #[test]
