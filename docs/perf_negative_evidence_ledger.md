@@ -57289,3 +57289,83 @@ time in this vein that a length-bucket argument has explained a result I predict
    longest contested name in the set.
 3. The 9 remaining RUNTIME-name sites are the last of this vein. Expect them to behave like the
    enum seam: gains only where the name is long enough to have been contested.
+
+## 2026-08-18 CrimsonHawk: MEASURED — fr's read is 3.7x to 6.0x cheaper than redis 7.2.4's at EVERY element length, redis is FLAT in that length and fr is not, and fr's ONE weak point is exactly the 8-byte const-fusion cliff (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir) with a LIVE redis 7.2.4 arm, both
+arms in ONE invocation alternating per length, differenced across READ COUNTS at a FIXED key count.
+CV was NOT used, as a gate or otherwise; none was computed. No timing verdict is claimed: the
+measurand is a retired-instruction COUNT. No code changed and NO BUILD was run — two other agents
+held this project's build slot for a third consecutive window.
+
+**SIZING, NOT CERTIFIED.** `--for ratio` cannot return FIT while any cargo runs under the shared
+uid, and several did throughout. Per-arm host state is on every line, and two lines are called out
+below as untrustworthy on their own.
+
+Claim class: not applicable — nothing is kept and nothing is banked as campaign output.
+
+  fr arm    `4eceae6c624c670fb4111eceae3068632e8b9223b0ef822440b5015f9c89fce5` (`68e1d4990`)
+  incumbent `legacy_redis_code/redis/src/redis-server`, vendored 7.2.4
+
+### WHY LENGTH AT ALL
+
+Every read-side figure this bead has quoted used 15-byte elements. And the const-payload sweep in
+the previous row found fr has a CLIFF at exactly 8 bytes — 130 instructions per element against a
+~110 plateau. Whether that matters depends on something nobody had measured: does redis have a
+matching cliff, or is that the one length where fr's lead is worst?
+
+### WHAT IT READS
+
+    per-element cost of ONE LRANGE(0,-1), 300 elements, by ELEMENT LENGTH
+      len        fr      redis    fr/redis    host
+        4     91.01     488.94     0.1861x    idle 85.9 pct
+        7     93.11     489.31     0.1903x    idle 89.3 pct
+        8    130.45     485.78     0.2685x    idle 87.0 pct   <- fr's worst point
+        9    112.25     487.86     0.2301x    idle  1.7 pct   <- see caveat
+       15    112.67     464.27     0.2427x    idle  4.6 pct   <- see caveat
+       32    114.62     523.13     0.2191x    idle 71.5 pct
+       64    106.30     635.43     0.1673x    idle 84.0 pct
+
+    replicated at the cliff, all three at 87.6-88.9 pct idle:
+        7     93.02     488.69     0.1904x
+        8    130.32     486.84     0.2677x
+        9    112.09     486.45     0.2304x
+
+  The len 9 and len 15 rows of the first sweep were taken at 1.7 and 4.6 pct idle. Ir is immune to
+  load for a fixed workload, but those two are not quoted on their own — the replicate covers len 9
+  at 88.9 pct idle and agrees to 0.2 pct, which is the check that matters.
+
+### THE TWO THINGS WORTH KNOWING
+
+  REDIS IS FLAT IN ELEMENT LENGTH AND FR IS NOT. Redis reads 486-489 instructions per element for
+  every length from 4 to 9, and only climbs past 32 bytes. Its per-element read cost is dominated
+  by fixed per-entry work — walking the listpack, re-deriving each entry, rendering integers — not
+  by payload size. fr's varies 91 to 130 over the same range, because fr's cost IS mostly the
+  payload handling.
+
+  FR'S ONE WEAK POINT IS ITS OWN CONST-FUSION CLIFF. The ratio degrades from 0.1904x at len 7 to
+  0.2677x at len 8 and recovers to 0.2304x at len 9 — a 40 pct worsening at exactly the length the
+  previous row showed `encode_small_payload::<8, 10>` misfiring on. That is the same defect seen
+  from the other side, and it says the one-character fix (narrow `len <= 8` to `len <= 7`) is worth
+  about 30 pct of the vs-incumbent ratio at that length, not just 18 instructions per element.
+
+### AND A NUMBER OF MINE THAT NEEDS ITS SCOPE STATED
+
+`d8a1861d9` put redis's marginal read at 3.64x fr's on strings. This sweep reads 4.1x at the same
+15-byte length, and 5.4x to 6.0x at 4-7 and 64 bytes. Those are not in conflict and neither
+supersedes the other: `d8a1861d9` fitted the MARGINAL COST OF A WHOLE READ, which carries the
+per-read fixed cost of both engines, while this is PER ELEMENT with that fixed cost differenced
+away. Quote 3.64x for "one more read of a 300-element list" and this table for "one more element".
+
+### RETRY PREDICATES
+
+  1. Narrowing `len <= 8` to `len <= 7` now has TWO independent motivations — 18 instructions per
+     element self-relative, and ~30 pct of the incumbent ratio at that length. It is still one
+     character and still unbuilt: three consecutive windows have had another agent in this
+     project's build slot.
+  2. Do NOT generalise "redis is flat in element length" past 64 bytes. At 64 redis is already
+     climbing (635.43) and the trend beyond is unmeasured; the flat region measured here is 4..32.
+  3. The whole sweep is one binary against one incumbent build at one list length (300 elements)
+     and one fill. Element COUNT is the obvious second axis and is unmeasured — redis's fixed
+     per-entry work should make its cost scale linearly in count, but that is an expectation, not
+     a measurement.
