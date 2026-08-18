@@ -14873,6 +14873,7 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         // (CrimsonHawk) `reverse` selects ZREVRANK (true) vs ZRANK (false): identical reply shape and the
         // same fused store method (`zrank_withscore` takes `reverse`), only the rank orientation + the
@@ -14883,7 +14884,11 @@ impl Runtime {
             || self.policy.gate.max_bulk_len < cmd_upper.len()
             || key.len() > self.policy.gate.max_bulk_len
             || member.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -15807,7 +15812,7 @@ impl Runtime {
         Some(())
     }
 
-    fn can_execute_plain_mget_borrowed(&mut self, keys: &[&[u8]], now_ms: u64) -> bool {
+    fn can_execute_plain_mget_borrowed(&mut self, keys: &[&[u8]], now_ms: u64, default_read_allowed: Option<bool>) -> bool {
         // argv is [MGET, key, key, ...]; the gate bounds the whole multibulk.
         if keys.is_empty()
             || self.policy.gate.max_array_len < keys.len().saturating_add(1)
@@ -15816,7 +15821,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `MGET key [key ...]`: mirrors
@@ -15841,8 +15847,9 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_mget_borrowed(keys, now_ms) {
+        if !self.can_execute_plain_mget_borrowed(keys, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -17071,6 +17078,7 @@ impl Runtime {
         &mut self,
         tail: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         // tail = [numkeys, key...]
         let numkeys = parse_i64_arg(tail.first()?).ok()?;
@@ -17110,7 +17118,9 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
 
@@ -17304,6 +17314,7 @@ impl Runtime {
         &mut self,
         tail: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         // tail = [numkeys, key..., ("LIMIT", n)?]
         let numkeys = parse_i64_arg(tail.first()?).ok()?;
@@ -17347,7 +17358,9 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
         // The zintercardwt ordering, preserved by DECLINING rather than by reproducing it: a
@@ -19181,6 +19194,7 @@ impl Runtime {
         element: &[u8],
         rank_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         // parse_i64_arg_long_range + the rank==0 guard, but as a decline: any of
         // bad-int / i64::MIN / zero falls to generic for the exact error reply.
@@ -19193,7 +19207,11 @@ impl Runtime {
             || key.len() > self.policy.gate.max_bulk_len
             || element.len() > self.policy.gate.max_bulk_len
             || rank_arg.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -19282,6 +19300,7 @@ impl Runtime {
         element: &[u8],
         count_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         let count = parse_i64_arg(count_arg).ok()?;
         if count < 0 {
@@ -19293,7 +19312,11 @@ impl Runtime {
             || key.len() > self.policy.gate.max_bulk_len
             || element.len() > self.policy.gate.max_bulk_len
             || count_arg.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -23120,6 +23143,7 @@ impl Runtime {
         min: &[u8],
         max: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"ZRANGEBYLEX".len()
@@ -23129,7 +23153,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// (frankenredis-zbylexfast) Conservative borrowed READ fast path for the
@@ -23147,8 +23172,9 @@ impl Runtime {
         min: &[u8],
         max: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms) {
+        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms, default_read_allowed) {
             return None;
         }
         // Defer malformed-bound errors to the generic path for byte-exact wording
@@ -23224,8 +23250,9 @@ impl Runtime {
         max: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms) {
+        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms, default_read_allowed) {
             return None;
         }
         if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
@@ -23296,8 +23323,9 @@ impl Runtime {
         min: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zrevrangebylex_borrowed(key, max, min, now_ms) {
+        if !self.can_execute_plain_zrevrangebylex_borrowed(key, max, min, now_ms, default_read_allowed) {
             return None;
         }
         if !plain_lex_bound_well_formed(max) || !plain_lex_bound_well_formed(min) {
@@ -23426,6 +23454,7 @@ impl Runtime {
         max: &[u8],
         min: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"ZREVRANGEBYLEX".len()
@@ -23435,7 +23464,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// (BlackThrush) Borrowed READ fast path for `ZRANGEBYLEX key min max LIMIT
@@ -23453,8 +23483,9 @@ impl Runtime {
         offset_arg: &[u8],
         count_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms) {
+        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms, default_read_allowed) {
             return None;
         }
         if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
@@ -23543,8 +23574,9 @@ impl Runtime {
         count_arg: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms) {
+        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms, default_read_allowed) {
             return None;
         }
         if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
@@ -23679,8 +23711,9 @@ impl Runtime {
         max: &[u8],
         min: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zrevrangebylex_borrowed(key, max, min, now_ms) {
+        if !self.can_execute_plain_zrevrangebylex_borrowed(key, max, min, now_ms, default_read_allowed) {
             return None;
         }
         if !plain_lex_bound_well_formed(max) || !plain_lex_bound_well_formed(min) {
@@ -33870,6 +33903,7 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         let count = parse_i64_arg(count_arg).ok()?;
         if count == i64::MIN {
@@ -33879,7 +33913,11 @@ impl Runtime {
             || self.policy.gate.max_bulk_len < b"HRANDFIELD".len()
             || key.len() > self.policy.gate.max_bulk_len
             || count_arg.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
