@@ -53802,3 +53802,95 @@ required; per-arm loadavg and MHz are recorded in PROVENANCE regardless.
    flipped twice after.
 5. If `git archive | tar -x` feeds a build, `touch` the changed file first and CHECK THE SHA-256
    differs from the other arm. A 0.11s "build" is a skipped build.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the list-size arc costed on a MIXED list (−8.49 pct worst) and the "obvious next candidate" I named twice is ABSENT from every shape I have (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) and deterministic
+per-frame SELF costs, with the A/A and the A/B in ONE INVOCATION and the candidate arm BRACKETED
+by control arms. CV was NOT used, as a gate or otherwise — no coefficient of variation appears in
+this row's decision path and none was computed. No timing verdict is claimed: the measurand is a
+retired-instruction COUNT. No code changed in this row; it closes two predicates and refutes a
+third that I wrote myself.
+
+No new ELF was produced — a build slot was held by other projects for the whole window, so this is
+measurement on the already-recorded arms
+`33ee6ed052a76d4f1e8b00d83090c8292ea1f2de929a0d7b7a45b3ae0094c1a2` (pre-`308db786f`) and
+`ef158d668074e8c980694b9e47c2617b0a2cb4969982052aa9909aeab967f890` (post-`2a4617295`), booted and
+hashed from `/proc/<pid>/exe` in the rows that landed them.
+
+### THE PREDICATE THAT SAID "MEASURE THE MIX BEFORE QUOTING A BLENDED NUMBER"
+
+`2a4617295` refused to quote a list figure because −11.96 pct was an ALL-INTEGER number and −0.19
+pct was the string one. Measured now, over the whole arc (`308db786f` + `bd84d97d2` +
+`2a4617295`), same harness, four draws each, RPUSH+DUMP at nelem 300 fill 128:
+
+    shape          BEFORE      AFTER       saved    per elem   worst draw   median    null (ratio)
+    all-string     221,229     215,595      5,634     18.78     −2.3997    −2.5697    0.999375
+    50/50 mixed    302,581     276,510     26,071     86.90     −8.4858    −8.6027    1.000394
+    all-integer    381,988     335,783     46,205    154.02    −11.9580   −12.1110    0.999920
+
+    all-string  CI [−2.6359, −2.3997]   |  mixed CI [−8.7742, −8.4858]  |  int CI [−12.1408, −12.0134]
+    every median-CI excludes zero; nulls 0.0537-0.0694 pct absolute, all within 2 pct of unity.
+
+  THE PERCENTAGES ARE NOT INTERPOLABLE BUT THE INSTRUCTIONS ARE. A half-and-half list read −8.62
+  pct where a naive average of −2.55 and −12.10 predicts −7.33. In ABSOLUTE instructions there is
+  no such puzzle: half of each pure shape's saving is 25,920 per key and the mixed list measured
+  26,071, which is 0.58 pct apart. The saving is per ELEMENT and additive; the percentage moves
+  only because an integer list costs 1.73x more to build in the first place.
+
+  REUSABLE: when a lever's effect is per-element, quote instructions per element and let the
+  reader divide. A percentage on a shape whose DENOMINATOR moves with composition is not a
+  quantity that blends, and publishing only percentages invites exactly the wrong interpolation.
+
+### THE CANDIDATE I NAMED TWICE, REFUTED
+
+`308db786f` and `2a4617295` both named `listpack_entry_encoded_len` — the `fr-store/src/lib.rs`
+twin of `list_lp_entry_bytes`, which still ends in a `str` parse — as the obvious next target.
+It is not a target. Counted by name rather than by eye, so a cold frame cannot hide below a top-N
+cut:
+
+    shape             listpack_entry_encoded_len   retained_quicklist2_chunks_match_dump_rules
+    RPUSH+DUMP        ABSENT from the profile      ABSENT from the profile
+    RESTORE+DUMP      ABSENT from the profile      ABSENT from the profile
+
+  The source says why. In a release build the function has exactly two live callers:
+  `quicklist_node_stats`, reachable only from `Store::list_quicklist_debug_stats` — that is
+  `DEBUG OBJECT` — and `retained_quicklist2_chunks_match_dump_rules`, which `9bf8ee80d`'s
+  correction already showed runs about once per RPUSH-built source key and never for RESTOREd
+  ones, because `quicklist_packed_nodes` matches first. Its other two call sites are `cfg(test)`
+  and a `debug_assert!`.
+
+  I asserted "identical fused shape, identical frame, obvious next candidate" twice without
+  checking whether anything CALLS it. Symbol similarity is not a profile.
+  `feedback_bench_must_reach_the_function_you_changed` is the standing form of this and I walked
+  into it from the other direction: not a bench that misses the code, but a code reading that
+  never asked for a bench.
+
+### A SIZING NOTE FOR WHOEVER TAKES THIS NEXT
+
+`list_lp_entry_bytes` behaves differently on the two shapes now, and the difference is worth
+knowing before anyone re-attributes this route:
+
+    RPUSH+DUMP     7,800.0 instr/key, 26.00/elem, still its OWN frame  (was 14,124.0, 47.08/elem)
+    RESTORE+DUMP       0.0 instr/key,  0.00/elem, fully inlined        (was  9,900.0, 33.00/elem)
+
+  So the open-coded fold left the function large enough that LLVM re-outlined it at the RPUSH call
+  sites while keeping it inline at the RESTORE one. The remaining RPUSH cost is real work plus one
+  call; a forced inline could recover at most the call overhead, on the order of 5-8 instructions
+  per element, so the ceiling there is roughly 1 pct of the shape — worth one measured attempt,
+  not worth a campaign.
+
+### RETRY PREDICATES
+
+  1. Do NOT re-file `listpack_entry_encoded_len` as a lever on the strength of its source shape.
+     Reopen ONLY IF a profile shows it present on a shape a real workload drives — which today
+     means finding a workload that reaches `retained_quicklist2_chunks_match_dump_rules`, since
+     `DEBUG OBJECT` is not one.
+  2. The `list_lp_entry_bytes` re-outlining above is one build away from being settled: force the
+     inline at the RPUSH sites and measure the string shape. Take it only when a build slot is
+     free, and expect at most ~1 pct; if it reads more than that, something else moved and the
+     A/B is not clean.
+  3. `decode_value_spans` remains the largest RESTORE-path term at 12,804.0 instr/key, 42.68 per
+     element, untouched by this whole arc. `NEGATIVE_EVIDENCE.md:5684` rejected making the decode
+     LAZY; nothing has yet measured the cost of the eager walk itself, and that is where the next
+     real headroom on the RESTORE shape is.
