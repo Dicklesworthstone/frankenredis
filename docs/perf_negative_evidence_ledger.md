@@ -57978,3 +57978,98 @@ why the per-row null test, not the pooled median, is what admits a row.
 4. Do NOT chase quieter windows to shrink this instrument's null. Measured: 9 pct of capacity
    produced a WIDER widest-null than 11 pct. Reduce it with more rounds or more shapes, or accept
    it and quote worst bounds.
+
+## SHIPPED (SELF-SPEEDUP) 8340ea25c — LZF SLICE 3: THE PER-LITERAL-BYTE BUDGET GUARD DUPLICATED `Vec::push`'S OWN CAPACITY CHECK, -549 instr/op (-3.14 pct)
+
+Claim class: SELF-SPEEDUP. Campaign output: no. This is fr against fr on a kernel A/B, not a ratio
+against the incumbent. The vein it serves IS competitive — fr's LZF compressor retires 1.66x
+redis's instructions on byte-identical input — but this row does not re-measure that ratio and does
+not claim to have closed it. bench_elf_sha256=639a56967e05a411090b08c15b68e9460c39a0c6e11610941d5388ba47e4af21
+
+The compressor tested `out.len() >= out_budget` before EVERY literal byte. `out` is
+`Vec::with_capacity(out_budget)`, so that compare duplicated the capacity test `Vec::push` performs
+on the next line: two compares per literal byte where one already sufficed.
+
+Both arms live in one binary behind a const generic (the pattern slices 1 and 2 established in this
+file), so there is no paired build and no contamination surface at all. Callgrind slope at
+2000/4000 reps, three draws per arm:
+
+    payload                                    guard    noguard     delta      pct
+    listpack (the shape DUMP/RESTORE feeds it) 17510      16961      -549    -3.14
+    random   (incompressible, FAILS to fit)   123307     118209     -5098    -4.13
+    runs     (match-heavy control)             11587      11297      -290    -2.50
+
+### THE STANDING RESTORE-ISOLATION LAW, AND WHY IT DOES NOT REACH THIS ROW
+
+Naming it explicitly because this row says "DUMP/RESTORE" and the schema is right to stop me. The
+law is that a RESTORE-in-isolation ratio flatters redis — fr decodes eagerly, redis attaches the
+listpack shallowly and walks it on every read, so the break-even is well under one read per restore
+and an isolation ratio is not a deficit.
+
+It does not reach this row, for a reason that is structural rather than a plea. This is not an
+isolation ratio and not a ratio at all: it is a self-speedup inside a COMPRESSION KERNEL that BOTH
+engines run, on byte-identical input, producing byte-identical output, called exactly the same
+number of times by each. There is no eager-vs-lazy asymmetry to flatter anyone, and no read-side
+cost being prepaid — the deleted instructions are not buying a decoded structure, they are a
+duplicated capacity compare. "DUMP/RESTORE" appears here only to name the payload SHAPE that feeds
+this kernel. Nothing in this row is a claim about restore-in-isolation, and the break-even question
+the law asks is not a question this measurement can or does answer.
+
+### THE INCOMPRESSIBLE PAYLOAD GOT FASTER, WHICH IS THE OPPOSITE OF MY PREDICTION
+
+I predicted this arm would LOSE on incompressible input. Removing an early bail should cost work on
+the path that bails: the guarded arm stops the moment output reaches budget, the unguarded arm
+compresses to the end and fails at the terminal check. It measured -4.13 pct instead.
+
+The reason is the budget convention, and it retires the concern rather than explaining it away. The
+ONE production call site (`rdb_encode_string`) passes upstream's `budget = in_len - 4`. Output
+reaches that budget only when roughly four input bytes remain, so the guard could never fire early
+enough to skip meaningful work — on ANY payload, compressible or not. It was never an early exit.
+It was a per-byte tax that happened to be spelled like an early exit.
+
+REUSABLE: an early-exit guard is only worth its per-iteration cost if some caller can actually make
+it fire early. Check the callers' arguments before pricing a bail as a saving. Here a single call
+site with a fixed `in_len - 4` convention made the guard structurally dead as an optimisation while
+leaving it fully alive as a cost.
+
+### THE NULL IS DEGENERATE, AND I AM NOT GOING TO DRESS THAT UP
+
+The A/A null, measured in a single invocation of the same harness on one ELF and one shape, has ratio median 1.0000 with a bootstrapped 95% median CI of [1.0000, 1.0000].
+
+That interval is DEGENERATE: all three draws of every arm returned bit-identical instruction counts,
+so the bootstrap has no variation to resample and the CI collapses to a point. It should be read as
+"this instrument has no observed noise on this kernel", NOT as unlimited precision. It is credible
+here for a reason that does not generalise: a pure compute kernel in a short-lived process has no
+cron, no epoll and no clock-dependent work, which is exactly the elapsed-time residual that makes a
+~915 instr/op server shape wander 20.6 counts. The bootstrap median-CI gate determined this verdict.
+CV is provenance only and never influenced it.
+
+The consequence for this row: a -549 effect against a zero-width null is not marginal, and the usual
+worst-bound convention is vacuous when the spread is zero — worst equals median equals best.
+
+### CORRECTNESS, AND WHY THE TEST SWEEPS THE BUDGET RATHER THAN SAMPLING IT
+
+Removing the guard cannot change the return value. The virtual length is monotonic, so any input
+that tripped the early test also fails the terminal `out.len() > out_budget` check: the bail moves
+later, never away. What could break is the BAIL POINT, and a bail is observable — `None` is what
+makes DUMP fall back to the raw encoding, so an off-by-one changes bytes on the wire.
+
+`lzf_budget_guard_removal_matches_guarded_arm_byte_for_byte` therefore sweeps the budget DENSELY
+over `0..=len+8` for every equivalence payload rather than sampling a few, asserts the two arms are
+byte-identical, asserts the output round-trips through `lzf_decompress`, and asserts it never
+overruns the budget it was given. 259 fr-persist tests pass, including the `lzf_compress_respects_budget`
+fuzz test. Host: loadavg 6.15/6.85/8.28, CPU MHz 3438, built remotely via rch.
+
+### RETRY PREDICATE
+
+  1. The remaining sized slice is the rolling `hval` update (1,152/key from the line profile). Size
+     it with a FRAME delta before building — the line profile that produced these estimates is days
+     old and predates two shipped slices.
+  2. Do NOT re-run the literal-run batching (slice 2). It is CLOSED structurally, not merely
+     rejected: `MAX_LIT` is 32, so a literal run can never be long enough for a bulk copy to pay.
+  3. If a caller is ever added that passes a budget far below the input length, revisit this row —
+     that caller loses an early exit and will compress to the end before returning None. There is
+     exactly one call site today and it passes `in_len - 4`.
+  4. The 1.66x-vs-redis compressor ratio is UNMEASURED since slice 1. Re-measure it only when
+     `certification_window.py --for ratio` returns FIT; three slices have shipped against it and
+     nobody has re-priced the gap.
