@@ -48366,6 +48366,23 @@ replica_announced:1\r\n",
                 "NOMASTERLINK Can't SYNC while not connected with my master".to_string(),
             );
         }
+        // Upstream replication.c::syncCommand:978-984, the check immediately after the one
+        // above: SYNC/PSYNC is refused while the client still has replies buffered from
+        // commands it already issued. Upstream's reason is structural rather than defensive --
+        // it needs a FRESH reply buffer to register the differences between the BGSAVE and the
+        // current dataset, so that the same bytes can be copied to other replicas. Starting a
+        // sync on a buffer that already holds a previous command's reply would interleave that
+        // reply into the replication stream.
+        //
+        // `output_buffer_bytes` is fr's `clientHasPendingReplies`: the connection's pending
+        // UNDRAINED bytes, refreshed onto the session before the command reaches the runtime
+        // (fr-server main.rs) and already used to render obl/oll/omem for CLIENT INFO.
+        // (frankenredis-syncpending-6lzih)
+        if self.session.output_buffer_bytes > 0 {
+            return RespFrame::Error(
+                "ERR SYNC and PSYNC are invalid with pending output".to_string(),
+            );
+        }
         let (requested_replid, requested_offset) = if is_sync {
             ("?", -1)
         } else {
@@ -66743,6 +66760,60 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"SLAVEOF"]), 0),
             RespFrame::Error("ERR wrong number of arguments for 'slaveof' command".to_string())
+        );
+    }
+
+    #[test]
+    fn sync_rejects_while_the_client_still_has_pending_output_6lzih() {
+        // (frankenredis-syncpending-6lzih) Upstream replication.c:978-984 refuses SYNC/PSYNC
+        // while the client has replies buffered from commands it already issued, because the
+        // replication stream needs a fresh reply buffer -- otherwise the previous command's
+        // reply is interleaved into the bytes copied to replicas.
+        //
+        // The order matters and is asserted below: upstream runs this check AFTER the master-
+        // link one (971-976), so a disconnected replica that also has pending output reads
+        // NOMASTERLINK, not this. Getting the two the wrong way round would be invisible in
+        // isolation -- each guard fires correctly on its own input.
+        let mut rt = Runtime::default_strict();
+        rt.session.output_buffer_bytes = 1;
+
+        for (ts, argv) in [
+            (1u64, vec![b"SYNC".to_vec()]),
+            (2, vec![b"PSYNC".to_vec(), b"?".to_vec(), b"-1".to_vec()]),
+        ] {
+            let out = rt.execute_frame(
+                command(&argv.iter().map(Vec::as_slice).collect::<Vec<_>>()),
+                ts,
+            );
+            assert_eq!(
+                out,
+                RespFrame::Error(
+                    "ERR SYNC and PSYNC are invalid with pending output".to_string()
+                ),
+                "argv={argv:?}"
+            );
+        }
+
+        // Drained: the sync proceeds past this guard. Asserting only that it is no longer THIS
+        // error keeps the row about the guard rather than about what a full sync replies.
+        rt.session.output_buffer_bytes = 0;
+        let out = rt.execute_frame(command(&[b"SYNC"]), 3);
+        assert_ne!(
+            out,
+            RespFrame::Error("ERR SYNC and PSYNC are invalid with pending output".to_string()),
+            "a drained client must get past the pending-output guard"
+        );
+
+        // Master-link check still wins when both apply, matching upstream's order.
+        let mut replica = Runtime::default_strict();
+        replica.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0);
+        replica.session.output_buffer_bytes = 1;
+        assert_eq!(
+            replica.execute_frame(command(&[b"SYNC"]), 1),
+            RespFrame::Error(
+                "NOMASTERLINK Can't SYNC while not connected with my master".to_string()
+            ),
+            "upstream checks the master link FIRST (971-976), then pending output (978-984)"
         );
     }
 
