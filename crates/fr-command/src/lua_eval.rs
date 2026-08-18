@@ -4407,6 +4407,71 @@ pub fn function_load_execute(
     }
 }
 
+/// Build a Lua array table from a list of byte strings.
+///
+/// (frankenredis-9hori) Same construction `set_keys_argv` uses for KEYS and ARGV: a fresh table
+/// whose `array` half is the values. FCALL passes these as ARGUMENTS rather than globals, which
+/// is what upstream does -- a registered function is declared `function(keys, args)`.
+fn lua_array_table(values: Vec<Vec<u8>>) -> LuaValue {
+    let table = LuaTable::new();
+    table.inner.borrow_mut().array = values.into_iter().map(LuaValue::Str).collect();
+    LuaValue::Table(table)
+}
+
+/// Execute a library body and invoke one of its registered functions BY NAME.
+///
+/// (frankenredis-9hori) This is the FCALL path that does not read the library source. Today
+/// `fcall_cmd` rewrites the source -- `transform_register_function` turns
+/// `redis.register_function('n', function() ... end)` into a named global `function n(...)` and
+/// then calls that global -- which requires the name and the `function` keyword to be visible as
+/// LITERALS in the text. A library that names either through a local is unloadable AND, if it
+/// were loaded, uncallable. Both surfaces have the same cause.
+///
+/// Upstream has no such coupling: `function_lua.c` refs the callback into the Lua registry
+/// (`luaL_ref(lua, LUA_REGISTRYINDEX)`) and stores the ref in `functionInfo.function`, so FCALL
+/// looks the name up and calls the stored ref. This function is fr's equivalent: run the body so
+/// the real `redis.register_function` builtin collects the callbacks, then call the one asked for.
+///
+/// The body is re-executed per call, which is what fr already does today (it re-transforms the
+/// whole library on every FCALL) and is NOT a regression -- but it is also not upstream's
+/// behaviour, which compiles once at load. That cost is tracked separately as
+/// `frankenredis-kbyhy`; this change removes the text scan, not the re-execution.
+pub fn function_call_execute(
+    store: &mut Store,
+    now_ms: u64,
+    code: &[u8],
+    function_name: &[u8],
+    keys: Vec<Vec<u8>>,
+    args: Vec<Vec<u8>>,
+) -> Result<Vec<LuaValue>, (u32, String)> {
+    let source = lua_execution_source(code);
+    let mut state = LuaState::new_for_function_load(store, now_ms);
+    if let Err(err) = state.execute(source.as_ref()) {
+        return Err((state.current_line, err));
+    }
+
+    // Cloned out of the state before the call, so the immutable borrow of `state` ends before
+    // `call_registered_function` takes it mutably. Cloning a `LuaValue::Function` preserves
+    // `identity`, so this calls the same function the library registered.
+    let found = state
+        .registered_function_callbacks()
+        .iter()
+        .find(|(name, _)| name.as_slice() == function_name)
+        .map(|(_, callback)| callback.clone());
+
+    let Some(callback) = found else {
+        // Upstream functions.c:630 replies "Function not found"; fr's FCALL surface already
+        // spells it with the ERR prefix (fr-command/src/lib.rs:13872).
+        return Err((0, "ERR Function not found".to_string()));
+    };
+
+    let mut call_args = [lua_array_table(keys), lua_array_table(args)];
+    match state.call_registered_function(&callback, &mut call_args) {
+        Ok(values) => Ok(values),
+        Err(err) => Err((state.current_line, err)),
+    }
+}
+
 fn lua_function_load_globals() -> LuaGlobals {
     let mut map = lua_base_globals_template().as_ref().clone();
     let redis_table = lua_redis_table_template();
@@ -4514,6 +4579,28 @@ impl<'a> LuaState<'a> {
         &self.registered_functions
     }
 
+    /// Call a registered callback directly, with no call site in the source to derive from.
+    ///
+    /// (frankenredis-9hori) `call_function_with_callee` is the ordinary path and it needs an
+    /// `&Expr`, but only to derive a call-site NAME for error wording
+    /// (`ast_call_name`/`callee_label`); it then delegates to `call_function`, which needs
+    /// neither. A registered function is invoked BY NAME from FCALL, not from a syntactic call
+    /// site, so there is no expression to hand it and none is required.
+    ///
+    /// `Env::new()` is the right environment: `global_env: None` keeps the interpreter's default
+    /// protected globals, and a registered callback is a closure that already carries its own
+    /// upvalues from the library body that defined it. `varargs` is unused by `call_function`
+    /// (its parameter is `_varargs`) and is passed only to satisfy the signature.
+    fn call_registered_function(
+        &mut self,
+        callback: &LuaValue,
+        args: &mut [LuaValue],
+    ) -> Result<Vec<LuaValue>, String> {
+        let mut env = Env::new();
+        let mut varargs = Vec::new();
+        self.call_function(callback, args, &mut env, &mut varargs)
+    }
+
     /// The callbacks those registrations named, paired with the name, in call order.
     ///
     /// (frankenredis-9hori) Same order and same length as `registered_function_specs`: both are
@@ -4521,11 +4608,6 @@ impl<'a> LuaState<'a> {
     /// index i of the other. Kept as two vectors rather than one so `RegisterFunctionSpec` stays
     /// comparable with `PartialEq` -- a callback is not meaningfully equatable, and the spec type
     /// is asserted on directly by roughly ten tests.
-    // (frankenredis-9hori) Unused until the FCALL path stops rewriting source and starts
-    // invoking by name. Explicitly allowed rather than left to warn, because a `-D warnings`
-    // build would otherwise fail on an accessor whose only defect is that its caller has not
-    // landed yet. REMOVE THIS ALLOW when the invocation half wires it up.
-    #[allow(dead_code)]
     pub(crate) fn registered_function_callbacks(&self) -> &[(Vec<u8>, LuaValue)] {
         &self.registered_callbacks
     }
