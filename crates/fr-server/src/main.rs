@@ -399,6 +399,18 @@ enum ClientStream {
 impl ClientStream {
     /// `Shutdown` means the same thing on both socket families, so the three shutdown sites need
     /// no branching of their own.
+    /// (frankenredis-w1djx) Nagle control, needed by `repl-disable-tcp-nodelay`.
+    ///
+    /// A no-op on a Unix domain socket, which is CORRECT rather than a stub: Nagle is a TCP
+    /// algorithm and AF_UNIX has no equivalent, so there is nothing to disable and upstream's
+    /// reason for disabling it -- coalescing small writes on a wide link -- does not apply.
+    fn set_nodelay(&self, nodelay: bool) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(s) => s.set_nodelay(nodelay),
+            Self::Unix(_) => Ok(()),
+        }
+    }
+
     fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
         match self {
             Self::Tcp(s) => s.shutdown(how),
@@ -34620,6 +34632,16 @@ fn process_argv_frame(
         conn.write_buf.extend_from_slice(&follow_up);
         if runtime.is_replica(runtime.client_id()) {
             conn.replication_sent_offset = Some(runtime.replication_primary_offset());
+            // (frankenredis-w1djx) Upstream disables TCP_NODELAY on a replica link when
+            // `repl-disable-tcp-nodelay` is set (replication.c, at the point the client becomes a
+            // replica), trading up to 40ms of latency for fewer, fuller packets on a slow or
+            // metered link. fr accepted the directive and never applied it, so the trade was
+            // unavailable however it was configured.
+            //
+            // Failure is deliberately ignored, matching upstream's "Non critical if it fails".
+            if runtime.server.repl_disable_tcp_nodelay_enabled() {
+                let _ = conn.stream.set_nodelay(false);
+            }
         }
     }
 

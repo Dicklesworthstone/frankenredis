@@ -5143,6 +5143,17 @@ impl ServerState {
             .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
     }
 
+    /// (frankenredis-w1djx) `repl-disable-tcp-nodelay`; upstream's default is `no`.
+    ///
+    /// Read live like the other replication knobs -- upstream marks it MODIFIABLE_CONFIG, so an
+    /// operator can turn it on for a replica that attaches later without restarting.
+    #[must_use]
+    pub fn repl_disable_tcp_nodelay_enabled(&self) -> bool {
+        self.config_overrides
+            .get("repl-disable-tcp-nodelay")
+            .is_some_and(|value| value.eq_ignore_ascii_case("yes"))
+    }
+
     /// (frankenredis-w1djx) Is protected mode in force? Upstream's default is `yes`.
     ///
     /// Read LIVE from the config rather than captured at startup, and that is load-bearing: the
