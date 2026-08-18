@@ -12,6 +12,7 @@ perf-ab-xtrim-minid-noop = [
 # (frankenredis-aqkvk) Forwards the fr-persist A/B arm so the allocation census
 # can select the pre-lever decode from one source tree.
 perf-ab-rdb-hash-owned = ["fr-persist/perf-ab-rdb-hash-owned"]
+perf-ab-chunk-bytes-carry = ["fr-store/perf-ab-chunk-bytes-carry"]
 # (frankenredis-qj6jn) Forwards the fresh-key bulk list build control arm.
 perf-ab-list-bulk-build = ["fr-store/perf-ab-list-bulk-build"]
 # (frankenredis-qj6jn) Forwards the promoted-list node capacity control arm.

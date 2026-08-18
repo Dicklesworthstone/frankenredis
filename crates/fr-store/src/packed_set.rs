@@ -4073,6 +4073,29 @@ impl<'a> Iterator for ListChunkRevIter<'a> {
 // estimate in `Store::object_encoding`).
 const LIST_LP_OVERHEAD: u64 = 7; // 4-byte total-bytes + 2-byte count header + 0xFF EOF
 
+/// (frankenredis-qj6jn) Does the bulk head builder carry each chunk's byte total, or let
+/// `ListChunk::from_vec` recompute it? Production: carries, compiled to a constant. Under
+/// `perf-ab-chunk-bytes-carry` a control process sets `FR_PERF_AB_CHUNK_BYTES_CARRY_ORIG=1`.
+/// The toggle is read ONCE PER KEY, not per element -- deliberately, because a toggle inside
+/// a per-element hot path was measured to move its own control arm (`fdb578bac`).
+#[cfg(feature = "perf-ab-chunk-bytes-carry")]
+#[inline]
+fn chunk_bytes_carry_enabled_impl() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_CHUNK_BYTES_CARRY_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+#[cfg(not(feature = "perf-ab-chunk-bytes-carry"))]
+#[inline(always)]
+const fn chunk_bytes_carry_enabled_impl() -> bool {
+    true
+}
+
 /// (frankenredis-qj6jn) Is the promoted-list node encoder allowed to use the length the
 /// packing loop already computed? Production: always, compiled to a constant. Under
 /// `perf-ab-list-node-capacity` a control process sets
@@ -4491,6 +4514,11 @@ impl ListValue {
     /// `list_bulk_back_matches_incremental_push_qj6jn` pins this against the incremental path.
     ///
     /// Returns the built value and the raw byte total the caller needs for growth accounting.
+    #[inline]
+    fn chunk_bytes_carry_enabled() -> bool {
+        chunk_bytes_carry_enabled_impl()
+    }
+
     pub fn bulk_from_back(values: Vec<Vec<u8>>) -> (Self, u64) {
         let mut list = ListValue::default();
         let mut raw_add = 0u64;
@@ -4527,12 +4555,70 @@ impl ListValue {
 
         let mut values = values;
         let tail = values.split_off(split);
-        let head: VecDeque<Vec<u8>> = values
-            .into_iter()
-            .inspect(|v| raw_add += v.len() as u64)
-            .inspect(|v| list.lp_bytes += list_lp_entry_bytes(v))
-            .collect();
-        list.repr = ListRepr::Deque(Arc::new(ChunkedList::from(head)));
+        // (frankenredis-qj6jn) Chunk the head HERE, carrying each chunk's listpack byte total
+        // as it is built, instead of handing a `VecDeque` to `ChunkedList::from` and letting
+        // `ListChunk::from_vec` re-walk every element to recompute it.
+        //
+        // This loop already computes `list_lp_entry_bytes(v)` per element for `lp_bytes`, and
+        // a chunk's `lp_bytes` is just `LIST_LP_OVERHEAD` plus those same per-element values.
+        // Measured on the n=200 list reload, `from_vec` re-walked 138.67 elements per key per
+        // reload for 4,576.0 instr/key -- entirely to recompute numbers this loop had in hand.
+        // Same chunk boundaries (`LIST_CHUNK_TARGET`), same `lp_bytes`, same order, so the
+        // built `ChunkedList` is identical; the debug assertion below pins that rather than
+        // asserting it in prose.
+        if !Self::chunk_bytes_carry_enabled() {
+            // Control arm: hand the head to `ChunkedList::from`, which rebuilds every chunk's
+            // byte total from scratch via `ListChunk::from_vec`.
+            let head: VecDeque<Vec<u8>> = values
+                .into_iter()
+                .inspect(|v| raw_add += v.len() as u64)
+                .inspect(|v| list.lp_bytes += list_lp_entry_bytes(v))
+                .collect();
+            list.repr = ListRepr::Deque(Arc::new(ChunkedList::from(head)));
+            let fill = list.fill;
+            for v in tail {
+                raw_add += v.len() as u64;
+                list.add_entry_bytes(&v);
+                match &mut list.repr {
+                    ListRepr::Packed(p) => p.push_back(&v),
+                    ListRepr::Deque(d) => Arc::make_mut(d).push_back_with_fill(v, fill),
+                }
+            }
+            return (list, raw_add);
+        }
+        let mut chunked = ChunkedList::default();
+        let mut chunk: Vec<Vec<u8>> = Vec::with_capacity(LIST_CHUNK_TARGET);
+        let mut chunk_bytes = LIST_LP_OVERHEAD;
+        for v in values {
+            raw_add += v.len() as u64;
+            let entry_bytes = list_lp_entry_bytes(&v);
+            list.lp_bytes += entry_bytes;
+            chunk_bytes += entry_bytes;
+            chunk.push(v);
+            if chunk.len() == LIST_CHUNK_TARGET {
+                debug_assert_eq!(chunk_bytes, owned_listpack_bytes(&chunk));
+                chunked.len += chunk.len();
+                chunked.chunks.push_back(ListChunk::Owned {
+                    elems: Arc::new(std::mem::replace(
+                        &mut chunk,
+                        Vec::with_capacity(LIST_CHUNK_TARGET),
+                    )),
+                    lp_bytes: chunk_bytes,
+                    front_biased: false,
+                });
+                chunk_bytes = LIST_LP_OVERHEAD;
+            }
+        }
+        if !chunk.is_empty() {
+            debug_assert_eq!(chunk_bytes, owned_listpack_bytes(&chunk));
+            chunked.len += chunk.len();
+            chunked.chunks.push_back(ListChunk::Owned {
+                elems: Arc::new(chunk),
+                lp_bytes: chunk_bytes,
+                front_biased: false,
+            });
+        }
+        list.repr = ListRepr::Deque(Arc::new(chunked));
         let fill = list.fill;
         for v in tail {
             raw_add += v.len() as u64;

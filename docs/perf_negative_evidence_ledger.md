@@ -43556,3 +43556,118 @@ CV was not used, as a gate or otherwise. No A/A null applies because no measurem
 3. Do NOT fold the 50 direct callers into a predicate batch. They are a separate design
    question and are uncosted.
 4. The read-side attempt remains open at seven predicates (`9a82da1a4`), LINDEX first.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: the bulk head builder recomputed every chunk's byte total it had just calculated — carrying it removes `ListChunk::from_vec` entirely; n=200 list DEBUG RELOAD 2.7782x -> 2.6751x, worst bound −3.71 pct (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method). Ir is exact and
+load-immune, which matters for this row because one of the two draws was taken on a saturated
+host — see the window note. CV was NOT used, as a gate or otherwise.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 measures 2.6751x after this
+change, from 2.7782x before, on the 200-entry list DEBUG RELOAD workload. The vendored Redis
+7.2.4 server process ran as a live incumbent arm in the same invocation as both fr arms, at
+65,300.0 instr/key.
+
+### THE ATTRIBUTION WAS STALE AND I RE-MEASURED IT FIRST
+
+`qj6jn`'s open item said `list_lp_entry_bytes` is computed 2.17x per element. That figure was
+taken BEFORE `a7668ed11` rewrote the loader's head construction, so it was owed a re-check
+before anything was built on it. Re-measured on current code — it survives unchanged at
+**433.33 calls per key for 200 elements, 2.17x per element** — but the caller list moved:
+
+    caller                              calls/key    Ir/key
+    ListValue::bulk_from_back              200.00     6,600.0   necessary: one per element
+    ListChunk::from_vec                    138.67     4,576.0   REDUNDANT re-walk
+    ChunkedList::push_back_with_fill        78.00     2,574.0
+    ListValue::push_back_borrowed           16.67       550.0
+
+`bulk_from_back` computes `list_lp_entry_bytes(v)` for every head element to maintain
+`lp_bytes`, then hands the elements to `ChunkedList::from`, whose `ListChunk::from_vec` calls
+`owned_listpack_bytes` to re-derive each chunk's total from the same elements. A chunk's
+`lp_bytes` is `LIST_LP_OVERHEAD` plus exactly the per-element values that loop already had.
+
+### THE LEVER
+
+Chunk the head in `bulk_from_back` itself, carrying `chunk_bytes` as it goes, and emit
+`ListChunk::Owned { elems, lp_bytes: chunk_bytes, front_biased: false }` directly. Same
+boundaries (`LIST_CHUNK_TARGET`), same totals, same order — so the `ChunkedList` is identical
+and `from_vec` disappears from the path rather than getting cheaper.
+
+    frame                     ORIG        CAND
+    list_lp_entry_bytes    10,800.0     7,344.0    −3,456.0  = the 138.67 re-walked elements
+    ListChunk::from_vec       152.0         0.0    GONE from the profile
+
+### THE BOARD — TWO DRAWS, WORST BOUND QUOTED
+
+    n      draw   A/A null        ORIG          CAND       delta      vs redis 7.2.4
+    200      1   1.001525     181,856.3     174,655.2   −3.96 pct   2.7599x -> 2.6506x
+    200      2   1.000018     181,416.3     174,685.0   −3.71 pct   2.7782x -> 2.6751x
+    1000     1   0.995973     989,461.9     980,554.5   −0.90 pct   3.4031x -> 3.3725x
+    1000     2   0.999822     988,966.9     980,500.1   −0.86 pct   3.3979x -> 3.3688x
+
+    WORST BOUND: −3.71 pct at n=200 and −0.86 pct at n=1000, and those are the figures this
+    row claims. The draws agree to 0.25 percentage points at n=200 and 0.04 at n=1000, which
+    is what makes the pair a replication rather than two guesses; quoting the better draw
+    would have inflated the n=200 result by a quarter of a point for nothing.
+
+  The effect shrinks with n because the saving is bounded by the HEAD — only
+  `PACKED_MAX_ENTRIES` elements are ever chunked this way, and the tail is appended by
+  `push_back_with_fill` either way — so a longer list amortises a fixed saving. That is the
+  same shape `a7668ed11` showed and it is consistent with the mechanism rather than a
+  separate claim.
+
+### EQUIVALENCE
+
+`debug_assert_eq!(chunk_bytes, owned_listpack_bytes(&chunk))` on every sealed chunk, so the
+carried total is checked against the very function it replaces, on every shape the suite
+touches — free in release. On top of that the existing
+`list_bulk_back_matches_incremental_push_qj6jn` compares `bulk_from_back` against the
+incremental `push_back` path on elements, `lp_bytes` and `quicklist_packed_node_blobs` at six
+`fill` values across 16 shapes including 200- and 400-element batches that produce MULTIPLE
+chunks. A wrong per-chunk `lp_bytes` changes `accepts_append`, hence node boundaries, hence
+those blobs — so that test gates this directly. 926 fr-store tests pass with the assertion live.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = 515dbe2e8da76e26c46424b5e5a1bc043f2a6325ec8b81512af61730b8a4e4be
+                `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1; build log
+                checked for BOTH `^error` and rch refusals (0 of each) — a habit this bead
+                earned when a log grep that matched only rch refusals let a failed build hand
+                me a five-hour-old ELF.
+                BOTH ARMS FROM THIS ONE ELF via `FR_PERF_AB_CHUNK_BYTES_CARRY_ORIG=1`, and the
+                toggle is read ONCE PER KEY rather than per element — deliberately, because
+                `fdb578bac` measured a per-element toggle moving its own control arm.
+  harness       scratchpad `reload_slope.py` + `zset_board.py`, K=4 -> K=12 DEBUG RELOAD slope,
+                one fresh working directory per point. DEBUG RELOAD is idempotent, so this
+                harness is NOT subject to the window-dependence that the correction row found
+                in `push_slope.py`; the two draws above are a check on that, not an assumption.
+  incumbent     vendored redis 7.2.4, verified sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, /data 123G at build time,
+                86G after a LOCAL test run (the rch cluster had no admissible workers, twice,
+                so the correctness gate was run locally — 37G of that drop is mine).
+  PER-ARM loadavg/MHz   draw 1 n=200 75.05/51.25/30.16 -> 70.89, MHz mean 2960 then 3817;
+                draw 1 n=1000 71.46 -> 62.38, MHz mean 2804 then 3747; draw 2 n=200
+                52.53/53.09/34.22 -> 44.85, MHz mean 2739 then 2148; draw 2 n=1000 41.98 ->
+                29.47, MHz mean 2407 then 2367. Max 3761-3985, min 1429-3740.
+  window        DRAW 1 WAS TAKEN ON A SATURATED HOST AND I AM NOT HIDING IT: CPU idle 0.9 pct
+                measured from a `/proc/stat` delta immediately before it, loadavg 75. Draw 2
+                landed at loadavg 42-53 with much tighter nulls (1.000018 and 0.999822 against
+                draw 1's 1.001525 and 0.995973). The two agree anyway, which is the argument
+                for admitting them: Ir is a deterministic count, and the null tightening while
+                the DELTA held to 0.25 pp is the evidence that saturation moved the
+                instrument's reproducibility and not its answer. The worst bound comes from
+                draw 2 at n=200 and draw 2 at n=1000 regardless.
+
+### THE REPLICATED-STANDING CONVENTION
+
+Applied as the two-draw worst bound above. It is not being used to claim STANDING against the
+incumbent, because there is none to claim: the route is 2.68x BEHIND after the change.
+
+RETRY PREDICATE:
+  1. `list_lp_entry_bytes` is still 7,344 instr/key at n=200 — 200 necessary calls plus the 78
+     from `push_back_with_fill` on the tail. The tail path could carry its chunk total the same
+     way. Reopen ONLY IF the tail's own `from_vec`/`accepts_append` recomputation is shown to
+     survive in a fresh attribution; this bead has now had a stale attribution twice.
+  2. Do NOT re-derive the n=1000 figure from the n=200 one. The saving is bounded by the head,
+     so the percentage is size-dependent by construction.
