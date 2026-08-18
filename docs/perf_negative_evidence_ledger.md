@@ -64062,3 +64062,71 @@ is ahead at all.
   3. Re-run `--audit-sizes` before quoting the board after any new shape registration. It is
      server-free, needs no build, and it is the only thing standing between the board and a fresh
      degenerate row.
+
+---
+
+## ANALYSIS — the LIMIT behind a name, not the name: seven surfaces censused, six already bounded, one was a process-killer (frankenredis-cjson-encode-depth-zo5ac, frankenredis-2ubu0)
+
+A name-level census of fr's Lua sandbox against upstream's allow-lists comes back CLEAN — 27
+builtins, 7 libraries, none of the three denied names, and `os` correctly absent because
+`libraries_allow_list` omits it. That census is worth running and it is not enough: it asks whether
+a capability EXISTS, never what BOUND it carries. Every defect below lived behind a name that
+matched.
+
+      surface                       upstream                          fr
+      ----------------------------------------------------------------------------------------
+      cjson.encode nesting          DEFAULT_ENCODE_MAX_DEPTH 1000     WAS UNBOUNDED -> fixed
+      cjson.decode nesting          DEFAULT_DECODE_MAX_DEPTH 1000     bounded, same bead
+      cmsgpack pack nesting         LUACMSGPACK_MAX_NESTING 16        CMSGPACK_MAX_NESTING 16
+      Lua call recursion            LUAI_MAXCCALLS                    MAX_CALL_DEPTH 128
+      inline request size           PROTO_INLINE_MAX_SIZE 64 KiB      same, and INDEPENDENT of
+                                                                     the pre-AUTH caps
+      pre-AUTH multibulk / bulk     10 / 16384                        same (2ubu0)
+      RESTORE listpack decode       validated header + terminator     no panic path (below)
+
+The encode row killed the process: a self-referential table recursed until the stack died. Its
+twin on the decode side was bounded by the same fix, which is the reason to always ask for the
+PAIR -- an encoder and a decoder are one rule implemented twice.
+
+TWO PANIC CENSUSES, both clean, both worth recording because a panic on client input is a DoS and
+"looks careful" is not evidence:
+
+  * fr-protocol has exactly TWO `unwrap`/`expect` outside tests, both on data the encoder itself
+    produced (`String::from_utf8(out).expect("ascii")`, and a d2string round-trip). Neither is
+    reachable from client bytes.
+  * fr-persist/listpack.rs has 35, and ALL 35 are inside the test module -- the RESTORE decode
+    path, which parses attacker-supplied DUMP payloads, has none. Its apparent underflow
+    (`total_bytes as usize - 1`) cannot fire either: `parse_header` requires
+    `total_len == data.len()` and `data.len() >= 6` first.
+
+ALSO SETTLED, after being asserted twice without proof: fr's two remaining protocol wordings that
+differ from upstream -- `InvalidInteger` and `RecursionLimitExceeded` -- are NOT client-reachable.
+They are produced by `parse_resp3_big_number_body`, `parse_resp3_bool_impl` and
+`parse_frame_internal`, i.e. the reply and server-to-server parsers. The command path rejects any
+non-`$` element with `ExpectedBulk` ("expected '$', got 'X'"), which is upstream's own wording.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement, no ratio, no A/A, no build — disk throttle in force at /data 43G, one gigabyte
+above the 42G brake, with cargo forbidden. This is a reachability and bounds argument over exact
+greps and the incumbent's constants; it has no timing exposure. Its weak point, stated: each row
+was checked by locating the constant and its enforcement site, not by executing a hostile input
+against a running server. A bound that exists but is applied at the wrong place would read as
+present here.
+
+### PROVENANCE
+
+      source        `main` at `62e2d6655`.
+      host          /data 43G, 98 pct used; no cargo run. loadavg 11.20 / 22.88 / 32.44, recorded
+                    although exact source counts do not depend on it.
+      disposition   ANALYSIS. No engine source changed by this row.
+
+### RETRY PREDICATE
+
+1. When adding any recursive walk over client-supplied structure, quote the upstream constant AND
+   the line that enforces it. Six of the seven rows above were already right because someone did
+   exactly that in a comment.
+2. Ask for the PAIR. An encoder implies a decoder; a pack implies an unpack. The one unbounded
+   surface found here had a bounded twin one function away.
+3. Do NOT re-run the name-level census expecting it to find this class. It reported all seven
+   surfaces clean, four separate times.
