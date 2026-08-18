@@ -5297,6 +5297,43 @@ impl CommandHistogram {
     }
 }
 
+/// The single source of truth for which commands have a direct histogram field.
+///
+/// (frankenredis-getexgate) EVERY site that records, reads or clears the direct fields is
+/// generated from this ONE list. `f9c0d03f7` added seven READ fields to the recorder and left
+/// `get()`, `all()` and `reset()` covering only the original eight WRITE fields, so LLEN, HGET,
+/// STRLEN, SCARD, SISMEMBER, HEXISTS and LINDEX were recorded into fields that nothing ever read
+/// and disappeared from `INFO commandstats` entirely — verified missing against Redis 7.2.4,
+/// which reports all seven. Driving every consumer from the same list makes that class of defect
+/// unrepresentable: a field cannot be added to the recorder and forgotten in the readout.
+///
+/// Consumers keep their own shape. `record_canonical_with_kind` and `get` expand to a `match` on
+/// the name, NOT an `if` chain: rustc switches on LENGTH first and compares bytes only within a
+/// bucket, so commands outside the set test a few length buckets instead of walking N string
+/// comparisons. That distinction was measured — the `if`-chain form taxed a fall-through command
+/// (`substr`) by +15.9 instr/op and the `match` form by +12.0.
+macro_rules! with_direct_histogram_fields {
+    ($consumer:ident) => {
+        $consumer! {
+            "get" => get,
+            "set" => set,
+            "lpush" => lpush,
+            "rpush" => rpush,
+            "sadd" => sadd,
+            "hset" => hset,
+            "zadd" => zadd,
+            "incr" => incr,
+            "hget" => hget,
+            "llen" => llen,
+            "strlen" => strlen,
+            "scard" => scard,
+            "sismember" => sismember,
+            "hexists" => hexists,
+            "lindex" => lindex,
+        }
+    };
+}
+
 /// Tracks per-command latency histograms.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandHistogramTracker {
@@ -5429,24 +5466,15 @@ impl CommandHistogramTracker {
                 return;
             }};
         }
-        match command {
-            "get" => record_direct!(get),
-            "set" => record_direct!(set),
-            "lpush" => record_direct!(lpush),
-            "rpush" => record_direct!(rpush),
-            "sadd" => record_direct!(sadd),
-            "hset" => record_direct!(hset),
-            "zadd" => record_direct!(zadd),
-            "incr" => record_direct!(incr),
-            "hget" => record_direct!(hget),
-            "llen" => record_direct!(llen),
-            "strlen" => record_direct!(strlen),
-            "scard" => record_direct!(scard),
-            "sismember" => record_direct!(sismember),
-            "hexists" => record_direct!(hexists),
-            "lindex" => record_direct!(lindex),
-            _ => {}
+        macro_rules! record_match {
+            ($($name:literal => $field:ident),* $(,)?) => {
+                match command {
+                    $($name => record_direct!($field),)*
+                    _ => {}
+                }
+            };
         }
+        with_direct_histogram_fields!(record_match);
         // (frankenredis-igx7w follow-up) This runs on EVERY non-get/set command,
         // so avoid the per-command `command.to_string()` heap allocation that the
         // owned-key `entry` API forces. Probe with a borrowed key first (the
@@ -5501,30 +5529,15 @@ impl CommandHistogramTracker {
     #[must_use]
     pub fn get(&self, command: &str) -> Option<&CommandHistogram> {
         let key = command.to_ascii_lowercase();
-        if key == "get" {
-            return self.get.as_ref();
+        macro_rules! get_match {
+            ($($name:literal => $field:ident),* $(,)?) => {
+                match key.as_str() {
+                    $($name => return self.$field.as_ref(),)*
+                    _ => {}
+                }
+            };
         }
-        if key == "set" {
-            return self.set.as_ref();
-        }
-        if key == "lpush" {
-            return self.lpush.as_ref();
-        }
-        if key == "rpush" {
-            return self.rpush.as_ref();
-        }
-        if key == "sadd" {
-            return self.sadd.as_ref();
-        }
-        if key == "hset" {
-            return self.hset.as_ref();
-        }
-        if key == "zadd" {
-            return self.zadd.as_ref();
-        }
-        if key == "incr" {
-            return self.incr.as_ref();
-        }
+        with_direct_histogram_fields!(get_match);
         self.histograms.get(&key)
     }
 
@@ -5536,30 +5549,14 @@ impl CommandHistogramTracker {
             .iter()
             .map(|(k, v)| (k.as_str(), v))
             .collect();
-        if let Some(hist) = &self.get {
-            result.push(("get", hist));
+        macro_rules! all_push {
+            ($($name:literal => $field:ident),* $(,)?) => {
+                $(if let Some(hist) = &self.$field {
+                    result.push(($name, hist));
+                })*
+            };
         }
-        if let Some(hist) = &self.set {
-            result.push(("set", hist));
-        }
-        if let Some(hist) = &self.lpush {
-            result.push(("lpush", hist));
-        }
-        if let Some(hist) = &self.rpush {
-            result.push(("rpush", hist));
-        }
-        if let Some(hist) = &self.sadd {
-            result.push(("sadd", hist));
-        }
-        if let Some(hist) = &self.hset {
-            result.push(("hset", hist));
-        }
-        if let Some(hist) = &self.zadd {
-            result.push(("zadd", hist));
-        }
-        if let Some(hist) = &self.incr {
-            result.push(("incr", hist));
-        }
+        with_direct_histogram_fields!(all_push);
         result.sort_by(|a, b| a.0.cmp(b.0));
         result
     }
@@ -5567,23 +5564,15 @@ impl CommandHistogramTracker {
     /// Reset histograms for specified commands, or all if empty.
     pub fn reset(&mut self, commands: &[&str]) -> usize {
         if commands.is_empty() {
-            let count = self.histograms.len()
-                + usize::from(self.get.is_some())
-                + usize::from(self.set.is_some())
-                + usize::from(self.lpush.is_some())
-                + usize::from(self.rpush.is_some())
-                + usize::from(self.sadd.is_some())
-                + usize::from(self.hset.is_some())
-                + usize::from(self.zadd.is_some())
-                + usize::from(self.incr.is_some());
-            self.get = None;
-            self.set = None;
-            self.lpush = None;
-            self.rpush = None;
-            self.sadd = None;
-            self.hset = None;
-            self.zadd = None;
-            self.incr = None;
+            macro_rules! count_and_clear {
+                ($($name:literal => $field:ident),* $(,)?) => {{
+                    let count = self.histograms.len()
+                        $(+ usize::from(self.$field.is_some()))*;
+                    $(self.$field = None;)*
+                    count
+                }};
+            }
+            let count = with_direct_histogram_fields!(count_and_clear);
             self.histograms.clear();
             return count;
         }
@@ -5593,54 +5582,20 @@ impl CommandHistogramTracker {
                 // (frankenredis-6n2qm) Lookup key matches the
                 // canonical lowercase form used by record_with_kind.
                 let key = cmd.to_ascii_lowercase();
-                if key == "get" {
-                    return self.get.as_mut().map(|h| {
-                        h.reset();
-                        1
-                    });
+                macro_rules! reset_match {
+                    ($($name:literal => $field:ident),* $(,)?) => {
+                        match key.as_str() {
+                            $($name => {
+                                return self.$field.as_mut().map(|h| {
+                                    h.reset();
+                                    1
+                                });
+                            })*
+                            _ => {}
+                        }
+                    };
                 }
-                if key == "set" {
-                    return self.set.as_mut().map(|h| {
-                        h.reset();
-                        1
-                    });
-                }
-                if key == "lpush" {
-                    return self.lpush.as_mut().map(|h| {
-                        h.reset();
-                        1
-                    });
-                }
-                if key == "rpush" {
-                    return self.rpush.as_mut().map(|h| {
-                        h.reset();
-                        1
-                    });
-                }
-                if key == "sadd" {
-                    return self.sadd.as_mut().map(|h| {
-                        h.reset();
-                        1
-                    });
-                }
-                if key == "hset" {
-                    return self.hset.as_mut().map(|h| {
-                        h.reset();
-                        1
-                    });
-                }
-                if key == "zadd" {
-                    return self.zadd.as_mut().map(|h| {
-                        h.reset();
-                        1
-                    });
-                }
-                if key == "incr" {
-                    return self.incr.as_mut().map(|h| {
-                        h.reset();
-                        1
-                    });
-                }
+                with_direct_histogram_fields!(reset_match);
                 self.histograms.get_mut(&key).map(|h| {
                     h.reset();
                     1
@@ -36902,10 +36857,30 @@ fn encode_listpack_string_entry(buf: &mut Vec<u8>, entry: &[u8]) {
     encode_listpack_backlen(buf, data_len);
 }
 
+/// (frankenredis-qj6jn) The SAME split `308db786f` made in `list_lp_entry_bytes`, at a second
+/// site and for the same reason. Every listpack entry written on the DUMP path ends here, and
+/// the one-byte form is the only one a list element normally reaches: `len` is the entry's
+/// ENCODED size, so the multi-byte forms need an element of 127 bytes or more. Callgrind charged
+/// the fused form 6,900 instr/key, 23.00 per element, on the RPUSH+DUMP shape — for what is, in
+/// that one-byte case, a compare and a `Vec::push`.
+///
+/// The four cold arms are what makes it expensive: they are the bulk of the function's code and
+/// they are laid out in line with the hot one. Moving them behind a call the hot path never makes
+/// leaves the compare and the push.
+#[inline]
 fn encode_listpack_backlen(buf: &mut Vec<u8>, len: usize) {
     if len <= 127 {
         buf.push(len as u8);
-    } else if len < 16_383 {
+    } else {
+        encode_listpack_backlen_multibyte(buf, len);
+    }
+}
+
+/// The multi-byte arms of [`encode_listpack_backlen`], VERBATIM and out of line.
+#[cold]
+#[inline(never)]
+fn encode_listpack_backlen_multibyte(buf: &mut Vec<u8>, len: usize) {
+    if len < 16_383 {
         buf.push((len >> 7) as u8);
         buf.push(((len & 0x7F) as u8) | 0x80);
     } else if len < 2_097_151 {
@@ -41405,6 +41380,61 @@ mod quicklist_dump_fix_tests {
         encode_listpack_strings(&[entry]).unwrap().len() - 7
     }
 
+    /// (frankenredis-qj6jn) `encode_listpack_backlen` was split so the one-byte form — the only
+    /// one a normal list element reaches — stops carrying four cold arms in line with it. The
+    /// reference below is the FUSED chain written out by hand rather than called, so this is two
+    /// independent expressions of one rule and not a tautology
+    /// (`feedback_test_oracle_derived_from_source_is_tautological`).
+    ///
+    /// The boundaries matter more than usual here because the original chain does NOT use the
+    /// same comparator throughout — `len <= 127` then `len < 16_383` — so an "obvious tidy-up"
+    /// to a uniform `<=` would move the 16,382/16,383 boundary. Delete this test when
+    /// `encode_listpack_backlen` is deleted.
+    #[test]
+    fn encode_listpack_backlen_split_matches_the_fused_reference_qj6jn() {
+        fn fused_reference(buf: &mut Vec<u8>, len: usize) {
+            if len <= 127 {
+                buf.push(len as u8);
+            } else if len < 16_383 {
+                buf.push((len >> 7) as u8);
+                buf.push(((len & 0x7F) as u8) | 0x80);
+            } else if len < 2_097_151 {
+                buf.push((len >> 14) as u8);
+                buf.push((((len >> 7) & 0x7F) as u8) | 0x80);
+                buf.push(((len & 0x7F) as u8) | 0x80);
+            } else if len < 268_435_455 {
+                buf.push((len >> 21) as u8);
+                buf.push((((len >> 14) & 0x7F) as u8) | 0x80);
+                buf.push((((len >> 7) & 0x7F) as u8) | 0x80);
+                buf.push(((len & 0x7F) as u8) | 0x80);
+            } else {
+                buf.push((len >> 28) as u8);
+                buf.push((((len >> 21) & 0x7F) as u8) | 0x80);
+                buf.push((((len >> 14) & 0x7F) as u8) | 0x80);
+                buf.push((((len >> 7) & 0x7F) as u8) | 0x80);
+                buf.push(((len & 0x7F) as u8) | 0x80);
+            }
+        }
+
+        let mut lens: Vec<usize> = Vec::new();
+        let edges: [usize; 7] = [0, 127, 16_383, 2_097_151, 268_435_455, 1 << 30, 65_535];
+        for edge in edges {
+            for delta in [0i64, -2, -1, 1, 2] {
+                let candidate = edge as i64 + delta;
+                if candidate >= 0 {
+                    lens.push(candidate as usize);
+                }
+            }
+        }
+        lens.extend(0..300);
+        for len in lens {
+            let mut split = Vec::new();
+            let mut reference = Vec::new();
+            super::encode_listpack_backlen(&mut split, len);
+            fused_reference(&mut reference, len);
+            assert_eq!(split, reference, "backlen split diverged at len {len}");
+        }
+    }
     #[test]
     fn listpack_entry_encoded_len_matches_real_encoder() {
         let mut cases: Vec<Vec<u8>> = Vec::new();
@@ -52656,6 +52686,70 @@ mod tests {
     // HashMap-only reference (`bench_record_hashmap_only`), which physically cannot miss a field.
     // This guards INFO Commandstats / Latencystats + LATENCY HISTOGRAM reporting parity for the
     // three new fast-path commands.
+    #[test]
+    fn every_direct_histogram_field_is_reported_by_all_and_get_getexgate() {
+        // (frankenredis-getexgate) REGRESSION GUARD. `f9c0d03f7` added seven READ commands to
+        // `record_canonical_with_kind`'s direct-field set but extended neither `get()` nor
+        // `all()`, both of which still covered only the original eight WRITE fields. LLEN, HGET,
+        // STRLEN, SCARD, SISMEMBER, HEXISTS and LINDEX were therefore recorded into fields that
+        // nothing ever read: they disappeared from `INFO commandstats`, which Redis 7.2.4 reports
+        // for every one of them. `cargo test` stayed green throughout, because no test asserted
+        // that what the recorder writes is what the readout returns.
+        //
+        // Generated from `with_direct_histogram_fields!`, the same list the recorder and the
+        // readout are generated from, so a field added there is covered here automatically.
+        macro_rules! assert_reported {
+            ($($name:literal => $field:ident),* $(,)?) => {
+                $({
+                    let mut tracker = crate::CommandHistogramTracker::default();
+                    tracker.record_canonical_with_kind($name, 42, crate::CommandRecordKind::Success);
+
+                    let via_get = tracker.get($name);
+                    assert!(
+                        via_get.is_some(),
+                        "get({:?}) returned None after recording it: the direct field is written by the recorder and never read back",
+                        $name
+                    );
+                    assert_eq!(via_get.expect("just asserted").calls, 1, "calls for {:?}", $name);
+
+                    let names: Vec<&str> = tracker.all().into_iter().map(|(n, _)| n).collect();
+                    assert!(
+                        names.contains(&$name),
+                        "all() omitted {:?} after recording it; INFO commandstats is built from all(), so the command would be invisible. Reported: {:?}",
+                        $name,
+                        names
+                    );
+
+                    // CONFIG RESETSTAT must reach it too, or the counter is unclearable.
+                    let cleared = tracker.reset(&[$name]);
+                    assert_eq!(cleared, 1, "reset({:?}) did not find the direct field", $name);
+                    assert_eq!(
+                        tracker.get($name).map(|h| h.calls),
+                        Some(0),
+                        "reset({:?}) did not zero the direct field",
+                        $name
+                    );
+
+                    // And the reset-everything branch must count and clear it.
+                    let mut tracker = crate::CommandHistogramTracker::default();
+                    tracker.record_canonical_with_kind($name, 42, crate::CommandRecordKind::Success);
+                    assert_eq!(
+                        tracker.reset(&[]),
+                        1,
+                        "reset-all did not count the direct field for {:?}",
+                        $name
+                    );
+                    assert!(
+                        tracker.all().is_empty(),
+                        "reset-all left {:?} behind in all()",
+                        $name
+                    );
+                })*
+            };
+        }
+        with_direct_histogram_fields!(assert_reported);
+    }
+
     #[test]
     fn command_histogram_new_direct_fields_report_consistently_with_hashmap_reference() {
         use super::{CommandHistogramTracker, CommandRecordKind};
