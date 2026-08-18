@@ -4468,15 +4468,38 @@ pub fn function_call_execute(
     };
 
     let mut call_args = [lua_array_table(keys), lua_array_table(args)];
-    match state.call_registered_function(&callback, &mut call_args) {
+    let called = state.call_registered_function(&callback, &mut call_args);
+    match called {
         // A Lua function returns a LIST; upstream takes the first value and treats an empty
         // return as nil. Converted with the same call `eval_compiled_script` uses, so this path
         // and the rewriting path cannot disagree about how a reply is shaped.
         Ok(values) => {
             let result = values.into_iter().next().unwrap_or(LuaValue::Nil);
-            Ok(lua_to_resp(&result, state.resp_version == 3))
+            let frame = lua_to_resp(&result, state.resp_version == 3);
+            // Drop state explicitly to release the mutable borrow of store before reading
+            // store.dispatch_client_ctx below -- same ordering as `eval_script`.
+            drop(state);
+            // (frankenredis-luaresp2map) THE CONVERSION ABOVE IS NOT ENOUGH, and the reason is
+            // easy to miss: `lua_to_resp`'s RESP3 type-hint group is UNCONDITIONAL. `{map = t}`
+            // returns `RespFrame::Map` with no `resp3` test on that branch -- the flag gates
+            // `Bool` and friends, not the hint tables -- and fr-protocol's encoder writes
+            // `%N\r\n` for a Map whatever the client speaks. `eval_script` therefore walks the
+            // result tree and flattens Map -> flat 2N Array (and Set -> Array) whenever the
+            // CALLER is on RESP2; without the same step here, a registered function returning
+            // `{map={...}}` to a RESP2 client -- the DEFAULT protocol -- emits a RESP3 frame it
+            // cannot parse. No `redis.setresp` is needed to reach it.
+            Ok(
+                if store.dispatch_client_ctx.resp_protocol_version == 3 {
+                    frame
+                } else {
+                    downconvert_lua_reply_to_resp2(frame)
+                },
+            )
         }
-        Err(err) => Err((state.current_line, err)),
+        Err(err) => {
+            let line = state.current_line;
+            Err((line, err))
+        }
     }
 }
 
