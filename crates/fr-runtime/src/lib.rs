@@ -38727,6 +38727,28 @@ impl Runtime {
                         "ERR Command not allowed inside a transaction".to_string(),
                     );
                 }
+                // (frankenredis-multi-queue-oom-1153w) QUEUE-TIME OOM. Upstream checks in
+                // processCommand, BEFORE the command is queued, and its rule is WIDER than the
+                // dispatch gate's: `reject_cmd_on_oom = 1` for ANY command queued inside MULTI
+                // except EXEC/DISCARD/QUIT/RESET (server.c:3989-4006), because queuing itself
+                // consumes unbounded memory -- so a queued DEL is refused although DEL is not
+                // denyoom. The refusal also taints the transaction, so EXEC then answers
+                // EXECABORT and applies NOTHING; fr previously answered +QUEUED here and applied
+                // the transaction, reporting the OOM as one element of the EXEC array.
+                //
+                // The verdict is computed FRESH rather than read from `over_maxmemory_live`:
+                // that field is published by the dispatch gate, which a queued command never
+                // reaches, so it would be one command stale exactly here.
+                if self.server.maxmemory_bytes != 0
+                    && !is_multi_oom_exempt(cmd_bytes)
+                    && self.refresh_over_maxmemory(now_ms).status != EvictionLoopStatus::Ok
+                {
+                    self.session.transaction_state.exec_abort = true;
+                    self.apply_existing_client_reply_suppression_to_undispatched_reply();
+                    return RespFrame::Error(
+                        "OOM command not allowed when used memory > 'maxmemory'.".to_string(),
+                    );
+                }
                 self.session
                     .transaction_state
                     .command_queue
@@ -40188,6 +40210,31 @@ impl Runtime {
         }
     }
 
+    /// Run one bounded eviction pass and PUBLISH the verdict, returning the pass's result.
+    ///
+    /// (frankenredis-multi-queue-oom-1153w) Extracted so the dispatch gate and the MULTI
+    /// queue-time check share ONE implementation. They need the same thing at different moments,
+    /// and upstream runs `performEvictions()` from `processCommand` for every command -- including
+    /// one that is only being QUEUED -- so the queue path cannot reuse a verdict computed by the
+    /// previous command's dispatch.
+    ///
+    /// (frankenredis-oo3aw) The verdict is written on BOTH outcomes, never only on failure: a
+    /// stale `true` left from an earlier command would make the next script refuse writes on a
+    /// server that is no longer over its limit.
+    fn refresh_over_maxmemory(&mut self, now_ms: u64) -> EvictionLoopResult {
+        let loop_result = self.server.store.run_bounded_eviction_loop(
+            now_ms,
+            self.server.maxmemory_bytes,
+            self.server.maxmemory_not_counted_bytes,
+            self.server.maxmemory_eviction_sample_limit,
+            self.server.maxmemory_eviction_max_cycles,
+            self.server.eviction_safety_gate,
+        );
+        self.server.last_eviction_loop = Some(loop_result);
+        self.server.store.over_maxmemory_live = loop_result.status != EvictionLoopStatus::Ok;
+        loop_result
+    }
+
     fn enforce_maxmemory_before_dispatch(
         &mut self,
         argv: &[Vec<u8>],
@@ -40233,19 +40280,7 @@ impl Runtime {
             return None;
         }
 
-        let loop_result = self.server.store.run_bounded_eviction_loop(
-            now_ms,
-            self.server.maxmemory_bytes,
-            self.server.maxmemory_not_counted_bytes,
-            self.server.maxmemory_eviction_sample_limit,
-            self.server.maxmemory_eviction_max_cycles,
-            self.server.eviction_safety_gate,
-        );
-        self.server.last_eviction_loop = Some(loop_result);
-        // (frankenredis-oo3aw) Publish the verdict for the script gate. Written on BOTH outcomes,
-        // never only on failure: a stale `true` left over from an earlier command would make the
-        // next script refuse writes on a server that is no longer over its limit.
-        self.server.store.over_maxmemory_live = loop_result.status != EvictionLoopStatus::Ok;
+        let loop_result = self.refresh_over_maxmemory(now_ms);
 
         // A script entrypoint is sampled, never REJECTED here. Refusing EVAL itself would
         // over-reject every read-only-body script, which 7.2.4 runs happily over maxmemory --
@@ -49916,6 +49951,19 @@ fn apply_rdb_entries_to_store(
         counts.loaded = counts.loaded.saturating_add(1);
     }
     Ok(counts)
+}
+
+/// The four commands upstream never refuses on OOM while queuing a transaction.
+///
+/// (frankenredis-multi-queue-oom-1153w) server.c:3995-4000 -- EXEC, DISCARD, QUIT and RESET are
+/// excluded by name, because refusing them would strand a client inside a MULTI it cannot leave.
+/// EXEC is still refused when it contains a denyoom command, but by the per-command gate at EXEC
+/// time rather than by this one.
+fn is_multi_oom_exempt(cmd: &[u8]) -> bool {
+    cmd.eq_ignore_ascii_case(b"exec")
+        || cmd.eq_ignore_ascii_case(b"discard")
+        || cmd.eq_ignore_ascii_case(b"quit")
+        || cmd.eq_ignore_ascii_case(b"reset")
 }
 
 fn protocol_error_to_resp(error: RespParseError) -> RespFrame {
