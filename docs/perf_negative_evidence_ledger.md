@@ -51670,3 +51670,79 @@ the SCAN and XRANGE families) is untouched. Before claiming completion, run the 
 `call_count_delta.py <dump> 20000 --callers plain_borrowed_default_key_read_allows` over a broad
 shape set and quote its output — and note that a source scan will UNDERCOUNT unless it knows all
 three derivation forms.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: CORRECTION — `dump_key`'s 84 instr/element is the INLINED encode loop, not orchestration waste; and the loop WALKS THE LIST TWICE (2.01 iterator calls per element) while classifying each element three times (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: callgrind CALL COUNTS from explicit `calls=` records, plus `callgrind_annotate`
+self-Ir. No timing verdict is claimed and CV was NOT used, as a gate or otherwise. NO BUILD —
+the project's build slot was in flight and verified so (two `cargo`/`rustc` processes by name,
+against a brief that also said "no builds"; the brief was wrong and checking took one command).
+No source change. Campaign output: no; no vs-incumbent ratio is banked.
+
+### CORRECTION FIRST: `be2f1f08e` CALLED THIS "ORCHESTRATION THAT SHOULD DELEGATE". IT IS NOT.
+
+`Store::dump_key` carries 25,075 instr/key of SELF cost, 84 per element, and I flagged it as
+suspicious on the grounds that a function which delegates should not be the largest frame.
+Listing its callees settles it — the delegation target is INLINED INTO IT:
+
+    <fr_store::Store>::dump_key  ->  fr_store::parse_listpack_integer        3.00 / element
+                                 ->  ListValueIter::next                     2.01 / element
+                                 ->  fr_store::encode_listpack_string_entry  1.00 / element
+                                 ->  quicklist_packed_nodes                  1.00 / KEY
+                                 ->  encode_rdb_string, finish_listpack_entries, mi_*  ~0.01
+
+  `encode_dump_quicklist2` appears NOWHERE as a callee, and the per-element work calls hang
+  directly off `dump_key`. That is what an inlined callee looks like from the frame table, and it
+  means the 84 instr/element is the encode loop's own body — bounds checks, branches, byte
+  accounting — not waste. THE FLAG IS WITHDRAWN.
+
+### WHAT THE CALLEE COUNTS DO SHOW: THE LIST IS WALKED TWICE
+
+    ListValueIter::next     18,060 calls over 9,000 elements = 2.007 per element
+                            (the +60 is 2 per key across 30 keys)
+
+  One walk to compute node boundaries and the running byte total, a second to encode. That is
+  the same compute-then-encode duplication as `parse_listpack_integer` at 3.00/element, one
+  level up: the ELEMENTS are re-visited, not just re-classified.
+
+    SO THE DUMP LOOP'S REDUNDANCY IS TWO-LAYERED. Per element it takes 2 iterator steps and 3
+    classifications to produce 1 encode. A fused single pass that computes the boundary and
+    encodes as it goes would take 1 and 1.
+
+### WHAT I GOT WRONG IN THE INSTRUMENT, STATED SO NOBODY INHERITS IT
+
+`callees.py`'s hand-rolled SELF-cost parser read 480 instr for `dump_key` where
+`callgrind_annotate` reads 25,075 — a 52x under-report, because it ignores callgrind's
+subposition-compressed cost lines. I nearly published "dump_key's real self cost is 480, so the
+25,075 was inclusive" off the back of it.
+
+  THE ONLY REASON I DID NOT is that the two numbers disagreed by a factor no reading of the
+  format explains, and `reload_slope.per_function` shells out to `callgrind_annotate` rather than
+  parsing the file — a tool whose output is already validated. The script now prints a refusal in
+  place of that figure and is documented as CALL COUNTS ONLY. Its counts ARE sound: 3.00/element
+  reproduces the independent measurement in `be2f1f08e` from a different script.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = da7140d9a1309d7905281ce2231a7d3c6d9c3025f64e7077ff8763b1f8f3242b
+                — the `5d6f53a43` build, unchanged. NO BUILD was run for this row.
+  probes        scratchpad `callees.py` (NEW: callgrind `fn=`/`cfn=`/`calls=` edge extraction)
+                and `callcount.py` from `be2f1f08e`. 30 keys x 300 elements, fill 128,
+                `rdbcompression no`.
+  incumbent     not exercised; no ratio claimed.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 20:21,
+                loadavg 7.81/8.81/9.21, /data 90G — the lowest of this campaign, still above the
+                42G floor. Call counts are exactly reproducible and immune to load.
+
+RETRY PREDICATE:
+  1. The lever is now ONE fused pass, not two separate de-duplications. Target: 1.00 iterator
+     step and 1.00 classification per element, encoders unchanged at 1.00. Oracle is
+     `callees.py`'s counts; do NOT use its cost figure.
+  2. Size it before building. The classification redundancy is ~8.5 pct of the DUMP residue
+     (`be2f1f08e`); the second WALK is `ListValueIter::next` at 4,214 instr/key plus whatever
+     share of `dump_key`'s own 25,075 the duplicate traversal owns — which the frame table
+     CANNOT separate, because both passes are inlined into the same frame. That share is the
+     number to establish first, and it may need `#[inline(never)]` on one pass to become visible.
+  3. Do NOT flag a large frame as waste on the grounds that its name sounds like orchestration.
+     This row exists because I did that; the callee list answered it in one probe.
