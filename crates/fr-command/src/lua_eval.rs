@@ -13883,11 +13883,10 @@ fn lua_fmt_g(n: f64, prec: usize, upper: bool) -> String {
 
 // ── cmsgpack / cjson helpers ────────────────────────────────────────────
 
+/// Upstream's `LUACMSGPACK_MAX_NESTING` (deps/lua/src/lua_cmsgpack.c:18).
+const CMSGPACK_MAX_NESTING: usize = 16;
+
 fn cmsgpack_pack_value(value: &LuaValue, out: &mut Vec<u8>, depth: usize) -> Result<(), String> {
-    if depth >= 16 {
-        out.push(0xc0);
-        return Ok(());
-    }
     match value {
         LuaValue::Nil
         | LuaValue::Function(_)
@@ -13899,7 +13898,25 @@ fn cmsgpack_pack_value(value: &LuaValue, out: &mut Vec<u8>, depth: usize) -> Res
         LuaValue::Bool(true) => out.push(0xc3),
         LuaValue::Number(n) => cmsgpack_pack_number(*n, out),
         LuaValue::Str(bytes) => cmsgpack_pack_bytes(bytes, out),
-        LuaValue::Table(table) => cmsgpack_pack_table(table, out, depth + 1)?,
+        LuaValue::Table(table) => {
+            // (frankenredis-cjson-encode-depth-zo5ac) Upstream degrades on the TYPE, not on the
+            // level alone: `if (t == LUA_TTABLE && level == LUACMSGPACK_MAX_NESTING) t =
+            // LUA_TNIL` (lua_cmsgpack.c:490). Only a TABLE becomes nil at the limit; a string or
+            // number sitting at exactly that level still encodes its own value. fr checked the
+            // depth before looking at the type, so a scalar at nesting 16 packed as nil where
+            // Redis packs the scalar -- silent data loss inside a reply rather than an error.
+            //
+            // This guard is also the only thing between this packer and a circular table, which
+            // is what upstream's comment on that line says it is for, so the limit itself is
+            // unchanged -- it just applies where upstream applies it. `>=` rather than `==`
+            // because a depth past the limit is unreachable once the limit degrades, and a
+            // guard that only fires on equality would be one refactor away from being skipped.
+            if depth >= CMSGPACK_MAX_NESTING {
+                out.push(0xc0);
+            } else {
+                cmsgpack_pack_table(table, out, depth + 1)?;
+            }
+        }
     }
     Ok(())
 }
@@ -21936,6 +21953,56 @@ end
         assert!(
             json_to_lua_value(&wide).is_ok(),
             "sibling arrays must not accumulate depth -- this fails if the ascend is missing"
+        );
+    }
+
+    /// cmsgpack's nesting limit must degrade a TABLE at the limit, and nothing else.
+    ///
+    /// (frankenredis-cjson-encode-depth-zo5ac) Upstream decides on the TYPE and the level
+    /// together -- `if (t == LUA_TTABLE && level == LUACMSGPACK_MAX_NESTING) t = LUA_TNIL`
+    /// (lua_cmsgpack.c:490) -- so a table at level 16 becomes nil while a string at level 16
+    /// still packs its own bytes. fr checked the depth before looking at the type, which turned
+    /// a scalar at exactly that level into nil: silent data loss inside a reply, not an error.
+    ///
+    /// Both arms are needed. Asserting only that a deep table becomes nil passes against the old
+    /// code too, because the old code nilled everything -- it is the SCALAR arm that separates
+    /// "degrades tables at the limit" from "stops looking at the limit".
+    #[test]
+    fn cmsgpack_pack_nesting_limit_degrades_tables_only_zo5ac() {
+        fn nest(levels: usize, leaf: LuaValue) -> LuaValue {
+            let mut v = leaf;
+            for _ in 0..levels {
+                let t = LuaTable::new();
+                t.inner.borrow_mut().array.push(v);
+                v = LuaValue::Table(t);
+            }
+            v
+        }
+        fn pack(v: &LuaValue) -> Vec<u8> {
+            let mut out = Vec::new();
+            super::cmsgpack_pack_value(v, &mut out, 0).expect("pack");
+            out
+        }
+
+        // 16 wrapping tables put the leaf at exactly nesting level 16. Upstream packs the
+        // string there; fr used to emit nil.
+        let packed = pack(&nest(16, LuaValue::Str(b"deep".to_vec())));
+        assert!(
+            packed.ends_with(b"\xa4deep"),
+            "a scalar at the nesting limit must pack its own value, got {packed:?}"
+        );
+
+        // One level further and the innermost TABLE is the thing at the limit, so it degrades
+        // to nil (0xc0) and its contents never appear -- in fr and upstream alike.
+        let packed = pack(&nest(17, LuaValue::Str(b"deep".to_vec())));
+        assert_eq!(
+            packed.last().copied(),
+            Some(0xc0),
+            "a table at the nesting limit must degrade to nil"
+        );
+        assert!(
+            !packed.ends_with(b"deep"),
+            "the degraded table's contents must not be emitted"
         );
     }
 
