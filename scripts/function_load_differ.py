@@ -130,6 +130,20 @@ EXPECTED_DIVERGENCES: dict[str, str] = {
     # would have hidden it behind a stale excuse instead.
 }
 
+# (frankenredis-fnukn) Rows whose FULL reply was MEASURED against vendored 7.2.4, checked for
+# EQUALITY rather than by the first-colon-segment rule the other rows use. Values are the WIRE text
+# (what follows the `-` in the error frame); `classify` prepends its own "ERR " tag, and the
+# comparison below adds it rather than baking a doubled prefix into this table.
+#
+# ENTRIES MUST CARRY PROVENANCE. A literal nobody measured is a guess that the gate would then
+# enforce as fact, which is worse than the coarse rule it replaces.
+MEASURED_EXACT_REPLIES: dict[str, tuple[str, str]] = {
+    "unknown_named_arg": (
+        "ERR Error registering functions: ERR unknown argument given to redis.register_function",
+        "frankenredis-fnukn, differential probe vs vendored 7.2.4, 2026-05-07",
+    ),
+}
+
 CASES = [
     ("top_level_error",
      "error('boom')\nredis.register_function('f', function(k,a) return 1 end)",
@@ -360,6 +374,8 @@ def main():
     divergences = 0
     control_failures = 0
     envelope_mismatches = []
+    exact_failures = []
+    stale_measurements = []
     unexpected = []
     fixed_but_still_expected = []
     print(f"{'case':<22} {'fr':<44} {'redis 7.2.4'}")
@@ -390,6 +406,15 @@ def main():
         # bugs from tails that legitimately differ, and the freeze forbids that.
         if agree and r_reply.startswith("ERR") and f_reply != r_reply:
             envelope_mismatches.append((name, f_reply, r_reply))
+        # (frankenredis-fnukn) Rows with a MEASURED reply are held to equality, both sides.
+        if name in MEASURED_EXACT_REPLIES:
+            wire, provenance = MEASURED_EXACT_REPLIES[name]
+            expected = "ERR " + wire
+            if r_reply != expected:
+                stale_measurements.append((name, r_reply, expected, provenance))
+            elif f_reply != expected:
+                agree = False
+                exact_failures.append((name, f_reply, expected, provenance))
         mark = "" if agree else "   <-- DIVERGES"
         if not agree:
             divergences += 1
@@ -411,6 +436,22 @@ def main():
         print(f"HARNESS INVALID: {control_failures} CONTROL row(s) diverged — the probe "
               f"is not measuring what it claims. Fix the harness before trusting any row.")
         return 2
+    if stale_measurements:
+        print()
+        print("STALE MEASUREMENT — 7.2.4 no longer replies what was recorded. fr was NOT judged")
+        print("against these; fix the literal from a fresh probe, do not bend fr to match it.")
+        for name, got, expected, provenance in stale_measurements:
+            print(f"  {name}   ({provenance})")
+            print(f"    recorded  {expected}")
+            print(f"    redis now {got}")
+    if exact_failures:
+        print()
+        print(f"EXACT REPLY MISMATCH — {len(exact_failures)} row(s) where 7.2.4 still replies what")
+        print("was measured and fr does not. These count as divergences.")
+        for name, got, expected, provenance in exact_failures:
+            print(f"  {name}   ({provenance})")
+            print(f"    expected  {expected}")
+            print(f"    fr        {got}")
     if envelope_mismatches:
         print()
         print(f"ENVELOPE MISMATCH — {len(envelope_mismatches)} row(s) that the first-segment rule")
