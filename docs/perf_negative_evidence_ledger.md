@@ -43930,3 +43930,96 @@ above, and an effect inside that interval is not claimed.
    families; `PlainCardinalityCmd` excluded SCARD. Enumerate.
 3. This map is valid at `5b2f6382c`. Re-run the enumeration if peers land executors in between —
    it costs no build and takes seconds.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: KEEP (COMPETITIVE) — `config_get_star` measured for the FIRST time: fr LEADS at 0.6361x worst bound, and I RETRACT two things I said about this cell while never having measured it (`frankenredis-e6c9t`)
+
+Claim class: COMPETITIVE. Campaign output: yes. The vendored Redis 7.2.4 ran as a live
+incumbent arm in the same invocation as the fr arm on all five draws: fr/Redis 7.2.4 measures
+0.6361x on `config_get_star`, which is fr 1.572x FASTER at the worst bound.
+
+  fr    server ELF sha-256: 13b4f066cc9487d1288f86f0f5c30d9404de8fc774a738885706576f510e37fc
+  redis server ELF sha-256: e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+Emitted per arm by the harness and re-verified after each arm, as
+bench_elf_sha256=13b4f066cc9487d1288f86f0f5c30d9404de8fc774a738885706576f510e37fc and
+bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7.
+The fr ELF is `ed8a6c3ca`, THREE commits behind HEAD at measurement time. The intervening
+crates/ changes are `4462ea8b6` and siblings at -6.0 to -8.5 instr/op on dispatch, which is
+0.002 pct of this shape, plus an fr-store `packed_set` change no CONFIG path reaches. Stated
+because it is a real gap, not because it moves the number.
+
+### The five draws
+
+  draw   fr instr/op   redis instr/op   ratio    load / builds
+    1      407,631.1        660,644.8   0.6170     15.8 / 5
+    2      408,395.5        649,876.1   0.6284     12.9 / 4
+    3      405,722.6        653,015.8   0.6213     10.9 / 3
+    4      408,530.0        643,460.3   0.6349     38.7 / 8
+    5      407,851.6        641,142.6   0.6361     33.4 / 7
+
+  fr spread 0.692 pct   redis spread 3.042 pct   WORST BOUND 0.6361x   median 0.6284x
+  CPU MHz mean 1961-4008 across the arms, max 3857-4276.
+
+A/A NULLS, both arms measured five times on unchanged binaries with draws split alternating:
+the redis denominator gives median 1.009816, bootstrapped 95% median CI [0.986561, 1.026706];
+the fr numerator gives median 0.997964, bootstrapped 95% median CI [0.993128, 0.998668]. Every
+draw's fr and redis arms ran inside one top-level invocation of the harness. THE VERDICT IS
+GATED ON THAT BOOTSTRAP MEDIAN-CI: the lead (0.6361x, i.e. 57 pct) is more than an order of
+magnitude outside the denominator's 2.7 pct null width. CV is provenance only and was not used
+as a gate anywhere in this row; no CV was computed.
+
+### RETRACTION 1: I called this the expensive half of the bead. Against the incumbent it was never behind.
+
+For two turns I described `CONFIG GET *` as "the expensive half of this bead by a factor of
+61" and handed it on as the priority. That factor was real and is still real -- but it is
+fr-INTERNAL, 479,669.7 against 7,844.0 instr/op on the literal. I never asked what the
+incumbent pays. It pays MORE: ~650,000 instr/op. Even before my dedup lever landed
+(`ed8a6c3ca`), fr was at ~480,000 against that, i.e. roughly 0.74x -- already ahead. The lever
+took it to 0.6361x, which is a real improvement on a cell fr was already winning, not a rescue
+of a deficit.
+
+THE GENERAL ERROR, because it is the reusable part: I ranked a lever by the fr-side cost of a
+route and never checked whether the route was BEHIND. An expensive command is not the same as
+a losing command. `CONFIG GET *` is expensive in both engines because it genuinely emits ~195
+config pairs. Rank by ratio, or at minimum measure the ratio before calling something the
+priority.
+
+### RETRACTION 2: the mechanism I asserted in `797de86b6` does not hold
+
+That row said redis's `serverCron` is elapsed-time work, so "a busier host makes the
+DENOMINATOR bigger and FLATTERS fr", and used it to argue the worst bound came from the
+quietest draws and that a fully idle host "would likely land slightly ABOVE 1.2483x". This
+shape contradicts the direction outright:
+
+  draws 1-3 at loadavg 10.9-15.8 (3-5 builds):  redis 660,645 / 649,876 / 653,016
+  draws 4-5 at loadavg 33.4-38.7 (7-8 builds):  redis 643,460 / 641,143
+
+The BUSIER draws produced the CHEAPER denominator. So the denominator's contamination is not
+monotonic in loadavg -- the same thing the campaign already knows about CPU MHz, which is also
+not monotonic in load. What survives is the part that was measured rather than reasoned: the
+denominator moves (3.0 pct here, 5.8 pct on `config_get_one`) while the numerator does not
+(0.69 pct here, 0.18 pct there), which is why the WORST bound is the honest quote. The
+predicted DIRECTION was an inference I should not have attached to it, and the "would likely
+land above 1.2483x" sentence in `797de86b6` is withdrawn. 1.2483x remains the worst OBSERVED
+bound and is unaffected.
+
+### A denominator-size observation, offered as corroboration and not as a law
+
+BrownIbis reported that the FIT rule's real variable is denominator SIZE rather than build
+count, at 0.10 pct spread on a 198k denominator against 3.21 pct on an 8.4k one. Two
+independent points here run the same way: 5.81 pct spread on `config_get_one`'s ~6.5k redis
+denominator, 3.04 pct on `config_get_star`'s ~650k. Directionally consistent, but my 650k point
+is far looser than their 198k point, and my draws also spanned loadavg 10.9-38.7, so this
+corroborates the direction and settles nothing about the size of the effect.
+
+RETRY PREDICATE: do NOT open a lever on `config_get_star` on the theory that it is behind --
+it leads at 0.6361x worst bound and this row exists to stop that. The remaining fr-side cost
+(407,851.6 instr/op, 583.02 allocs/op) is still worth reducing as a SELF-SPEEDUP, and
+`489e21aac` counts three disjoint components for it, but any row claiming campaign output on
+this shape must beat 0.6361x rather than merely reduce fr's own number. Re-measure the ratio
+before sizing anything: a shape fr already wins can be made to look like a win twice.
+Concretely, reopen this surface only if `config_get_star` EXCEEDS 0.6361x on a replicated
+worst bound of at least five draws, or if fr's own cost on it FALLS below ~350,000 instr/op
+and someone wants the ratio restated. Until one of those happens, treat this cell as won.
