@@ -52779,3 +52779,116 @@ the per-command cost, it does not remove it, and the 29 shapes in `a1600b784` st
 each where a converted route pays it once per pass. The next structural question is what the
 remaining 86.0 consists of — the same disassembly method applies, and the ~20 remaining
 conditions are field loads with no libc calls left in them.
+
+--------------------------------------------------------------------------------
+
+## The read gate is NOT EXECUTED on any of the eight routes its conversion targeted — 0.0000 calls/op on an `inline(never)` build with a working positive control
+
+Claim class: MEASUREMENT — retires a vein. Campaign output: no code ships; this stops future
+turns spending on a gate that does not run.
+
+My own row one commit earlier said the read-gate premise did not reproduce and registered the
+test: *"Re-derive it on a build with `plain_borrowed_default_key_read_allows` marked
+`#[inline(never)]`... If that build shows the gate below ~60 instr/op, the vein is finished."*
+Built it. The gate is not below 60 instr/op. **It is not called.**
+
+### THE POSITIVE CONTROL, STATED FIRST
+
+A zero is worthless without proof the instrument can produce a non-zero, and the previous row
+failed exactly there — `call_count_delta.py` returned 0.0000 for `process_argv_frame`, which
+every command traverses. So `cached_plain_write_gate` was marked `#[inline(never)]` in the SAME
+BUILD as a control:
+
+  set_base   cached_plain_write_gate   2000 -> 4000   delta 2000   **1.0000 calls/op**   5.0 instr/op
+
+The instrument counts these functions correctly when they are called. A 0.0000 from this build is
+therefore evidence of absence, not an artifact of inlining.
+
+### THE RESULT — 10 SHAPES, ZERO CALLS
+
+`plain_borrowed_default_key_read_allows`, forced out of line, on the `inline(never)` ELF:
+
+  llen 0.0000   hlen 0.0000   strlen 0.0000   zcard 0.0000   hexists 0.0000
+  sismember 0.0000   scard 0.0000   lindex 0.0000   get_control 0.0000   type 0.0000
+
+The first eight are EXACTLY the batch `42862`'s failed conversion registered. `current_acl_allows_default_key_command`
+is likewise 0.0000 calls/op on every shape including `set_base`.
+
+**The conversion could never have paid, on any of those routes, because the gate it was hoisting
+is not on their hot path at all.** That is the retrospective explanation for 1-of-8, and it is a
+better one than the two defects that row named: those were real, but they were downstream of a
+premise that was already false.
+
+### THE PAIRED PERTURBATION, SO THE BUILD IS NOT ASSUMED HARMLESS
+
+Both ELFs built from the SAME HEAD `2bdc560df`, back to back, one build at a time:
+
+  shape       baseline   inline(never)   delta
+  llen         1213.6        1217.1      +3.5
+  zcard        1372.4        1378.2      +5.8
+  sismember    1588.2        1590.7      +2.5
+  set_base     1535.6        1543.1      +7.5
+
+`set_base`'s +7.5 is the write gate's own call overhead at 1.0000 calls/op — the control paying
+for itself, visible in the total. The read shapes move +2.5 to +5.8, i.e. the other two
+`inline(never)` marks cost almost nothing because their functions are not entered.
+
+Note the totals are NOT the discriminator here and are not offered as one: a predicate executing
+175 instr/op inline would show roughly the same total when forced out of line, plus call
+overhead. Only the call count separates "executing inline" from "not executing", which is why the
+control mattered.
+
+### WHAT IS AND IS NOT CLAIMED
+
+CLAIMED: on these ten shapes, at this HEAD, the read gate and the ACL helper are not entered, so
+no lever that removes, caches, threads or memoises them can pay on these routes.
+
+NOT CLAIMED that the gate is dead code. **100 source call sites remain** in `crates/`. They are
+simply not reached by the borrowed fast-path and floor routes these pipelined shapes take; the
+gate presumably still runs on generic dispatch, which no shape here exercises. A route not
+measured may still pay it.
+
+NOT CLAIMED as a fix for anything. Nothing shipped and nothing was removed — deleting 100 call
+sites on the strength of ten shapes would be exactly the over-generalisation that produced the
+stale 175.0 in the first place.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Call counts from two-point subtraction (N=2000, 2N=4000): startup and seeding appear identically
+in both dumps and cancel exactly, which is why the control reads 2000 -> 4000 delta 2000 rather
+than an approximate figure. A call count is an integer and carries no run-to-run spread, so no
+A/A null applies to the 0.0000 figures; the instruction totals beside them come from the
+instrument whose banked A/A is median 1.000002, 95 pct median CI [0.996069, 1.003947]. No
+throughput ratio and no incumbent comparison is made, so no quiet window is claimed.
+
+### PROVENANCE
+
+  ELF           inline(never) `07268b8b2662c56677597d80d2ae3699ea631e027dd35578efa2008dfd3947bb`,
+                baseline      `20eb7fb0849a7c45e0e71c8b53ac05d976a1ac3948522a0bb294dec127703540`
+  bench_elf_sha256=07268b8b2662c56677597d80d2ae3699ea631e027dd35578efa2008dfd3947bb
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`, then
+                `scripts/call_count_delta.py` and `scripts/frame_delta.py` on its own dumps.
+  host          /data 84G then 83G free, checked immediately before each build; zero cargo/rustc
+                at each launch, verified by process name. Per-arm loadavg 11.88 10.45 10.03 to
+                11.13 10.33 10.00, CPU 2165-2347 MHz mean. Instructions and call counts, so MHz
+                and load do not enter.
+  pair          Two ELFs from the SAME HEAD `2bdc560df`, built back to back, one at a time, both
+                exit-checked before copying, distinct SHA-256. The `inline(never)` marks were made
+                in a PRIVATE tree extracted by `git archive HEAD`; the shared checkout was never
+                modified and no such mark is committed.
+  disposition   MEASUREMENT ONLY. No source file changed; the private tree was restored from
+                `git archive HEAD` before the baseline build.
+
+### RETRY PREDICATE
+
+1. The read-gate conversion vein is retired for these ten routes. Do NOT thread, cache or hoist
+   the read gate on any of them. Re-open only for a route MEASURED to call it — and measure with
+   `inline(never)` plus a positive control, because an optimised build reports 0.0000 for
+   functions it certainly calls.
+2. Before retiring it for a route not in this list, count that route. Ten shapes is not 100 call
+   sites, and the failure mode of this vein has twice been generalising from a subset.
+3. If a future profile shows the gate costing anything, the FIRST question is which dispatch path
+   the shape took — generic dispatch plausibly still pays it and no shape here exercises that.
+4. The 157.0 instr/op command-histogram lookup on `zcard` from the previous row is still the
+   counted open target and is untouched by this row.
