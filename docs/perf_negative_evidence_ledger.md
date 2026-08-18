@@ -48639,3 +48639,193 @@ RETRY PREDICATE:
      now agrees, so if it is wrong it is wrong somewhere these probes do not reach — or it is
      harmless because DUMP re-derives boundaries from the prefix and the passed fill. Decide that
      deliberately rather than leaving it as a standing suspicion.
+
+## 2026-08-18 CrimsonHawk: SIZING — the main.rs-only gate vein is EXHAUSTED, and a counted sweep names the 12 live routes that still pay the gate, ranked by how many commands each executor would convert (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — no code ships in this row and no ratio against the incumbent is claimed.
+It is a measured target list, produced so the next conversion starts from counts rather than from
+a source enumeration, which is what misled the previous attempt.
+
+### THE MAIN.RS-ONLY VEIN IS FINISHED
+
+A source scan over the LIVE floor path — `try_dispatch_floor_classified_action` plus all 16
+`dispatch_floor_*` helpers — finds:
+
+  unthreaded executor calls on the live floor path:  0
+  gate derivations on the live floor path:          13, ALL already `get_or_insert_with` cached
+
+So every remaining conversion now requires an `fr-runtime` change (adding a
+`_with_default_read_gate` twin), not just a `main.rs` edit. That closes the cheap half of this
+vein and is worth knowing before anyone budgets another main.rs-only batch.
+
+### THE COUNTED SWEEP
+
+One ELF, 24 read shapes, `plain_borrowed_default_key_read_allows` calls per op measured by
+two-point call-count differencing. `1.0000` means the route still derives the gate on every
+packet; `0.0000` means it takes the cached one.
+
+STILL PAYING (the target list), ordered by fr instr/op:
+
+  shape             fr instr/op   gate calls/op
+  exists_1              1598.4       1.0000
+  hlen                  1635.1       1.0000
+  zcard                 1658.6       1.0000
+  zrank_base            1857.8       1.0000
+  memory_usage          1882.2       1.0000
+  hrandfield_base       1914.7       1.0000
+  srandmember_1         1955.3       1.0000
+  substr                2105.4       1.0000
+  object_encoding       2138.2       1.0000
+  lpos_base             2167.6       1.0000
+  zrandmember_1         2420.0       1.0000
+  zlexcount             2502.1       1.0000
+
+ALREADY CONVERTED, and included as the sweep's own control — these must read 0.0000 and do:
+
+  get_control 988.4 · get_missing 788.0 · hget 1684.1 · hexists 1671.0 · llen 1411.2 ·
+  strlen 1435.7 · scard 1458.2 · sismember 1762.7 · lindex 1758.2 · type 1326.2 ·
+  zrange_plain 2233.9 · ttl_nonvolatile 1439.8
+
+A sweep that returned 1.0000 everywhere would prove only that the counter was broken. Twelve
+routes at 0.0000 and twelve at 1.0000, on ONE ELF in ONE sweep, is the discrimination.
+
+### RANKED BY EXECUTOR, NOT BY SHAPE — WHICH IS THE POINT
+
+Several of these shapes share one executor, so one twin converts several commands. Ranked by
+commands-per-edit:
+
+  1. `execute_plain_cardinality_borrowed` — **4 commands from one twin**: `PlainCardinalityCmd`
+     is {Zcard, Hlen, Xlen, Pfcount}, one executor and one predicate
+     (`can_execute_plain_cardinality_borrowed`). Two of its four are measured above and BOTH read
+     1.0000: hlen 1635.1 and zcard 1658.6. This is the first edit to make.
+  2. `execute_plain_exists_borrowed` + `_borrowed_into` + `_multi_borrowed` — EXISTS across
+     arities; exists_1 is 1598.4 at 1.0000.
+  3. `execute_plain_lpos_borrowed` + `_count_` + `_rank_` — three entry points, one command.
+  4. Singles: `object_encoding`, `memory_usage`, `substr`, `zlexcount`,
+     `zrank_withscore_borrowed_into`.
+  5. The random family — `srandmember`, `zrandmember`, `hrandfield`, `_into` executors with
+     count/withvalues variants. Most entry points per command, so the worst ratio of edit to
+     benefit; do these last.
+
+### WHAT IS AND IS NOT CLAIMED
+
+CLAIMED: these twelve routes derive the read gate once per packet, counted exactly, and the
+converted twelve do not.
+
+NOT CLAIMED: that each will gain a specific figure. The measured saving on already-converted
+routes spans **175.0 to 215.3 instr/op** — 175 on the earlier six, 213.7 to 215.3 on the keymeta
+four — so the honest expectation for a route in this list is a per-arm constant somewhere in that
+band, i.e. roughly 8 to 13 pct of these shapes' totals. The exact figure has to be measured per
+executor, because the wrapper's own call overhead differs.
+
+NOT CLAIMED: that this list is complete. It is 24 shapes, not the whole command surface. A shape
+absent here is unmeasured, not converted.
+
+### METHOD NOTE — WHY THIS IS COUNTED RATHER THAN ENUMERATED
+
+The immediately preceding attempt converted 18 unthreaded call sites found by source enumeration
+and measured a flat null, because front-classification had routed every one of those commands out
+of the arm the sites lived in. A source enumeration cannot see that. A call count can, and does:
+every row above is a statement about what the binary EXECUTED, on a real shape, not about what
+the source contains.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timed quantity is claimed. Call counts are exact integers from two-point differencing
+(N=2000, 2N=4000) and carry no sampling error; the `0.0000` rows are the null control and were
+measured in the same sweep on the same ELF.
+
+The instrument's own null, for the instr/op figures quoted as context: A/A null median 1.000002,
+bootstrapped over 20,000 resamples, 95 pct median CI [0.996069, 1.003947], six draws and 30
+pairwise ratios, banked in `0bf781d57`.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95 pct median CI quoted above,
+and no effect inside that interval is claimed.
+
+### PROVENANCE
+
+  ELF           `22a13f450e6114739b7062ade3ab09a367a1f3c0dae21ba32b6603d060ec58d6`, plain
+                `--release`, no feature flags, containing the keymeta conversion `7395a4edf`.
+                No build was started for this row; an ELF already on disk was reused.
+  bench_elf_sha256=22a13f450e6114739b7062ade3ab09a367a1f3c0dae21ba32b6603d060ec58d6
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` sha `1beb5dc8dd7eb8d1`, recorded at the head of
+                the sweep because a peer was editing that file; `scripts/call_count_delta.py`.
+  host          /data 104G free. loadavg 13.24 11.10 11.32 at sweep start; the fr-only Ir
+                numerator is load-immune and call counts are immune to load entirely.
+  build slot    A build was in flight for this project, so NO cargo command was run this turn.
+
+### RETRY PREDICATE
+
+1. Start with `execute_plain_cardinality_borrowed`: add a `_with_default_read_gate` twin plus a
+   `can_execute_..._with_default_read_gate`, and have the floor arms pass the cached gate. Accept
+   ONLY if `hlen` AND `zcard` both move 1.0000 -> 0.0000 calls/op while an unconverted route from
+   this same list stays at 1.0000 as the null.
+2. Classify each arm's `BorrowedMultibulkAction` variant before editing. `FastReply` arms convert
+   only on top of `bffba0601`; `FastEncodedReply` arms always converted.
+3. Do NOT convert a cascade arm in `process_buffered_frames` for any command that has a
+   floor-table entry — it is unreachable and the conversion is inert.
+4. Re-run this sweep after any conversion batch. If a route that read 0.0000 returns to 1.0000, a
+   regression has been introduced; that check is cheaper than any ratio and needs no incumbent.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: INSTRUMENT — `get_control` is WIDER than every row it normalises in TWO independent shape groups, and its point is more stable ACROSS runs (2.18 pct) than its own within-run interval (3.94 pct): the single-run normaliser injects variance it does not remove
+
+NO SHAPE RATIO IS CLAIMED. This is about the normaliser every `balanced_square_ab` group divides
+by, so it bears on every control-normalised figure this campaign quotes, mine included.
+
+fr ELF bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399.
+
+### The harness has been saying it; two groups make it a property of the normaliser
+
+`balanced_square_ab` prints its own diagnosis whenever it happens. In `sizepairs` it printed
+"normaliser WIDER than the row (10.5 vs 5.3 pct): it injects more variance than it removes" on
+`geosearch_64`, and again at 3.0-vs-2.1 and 5.3-vs-2.8 and 5.9-vs-3.2 on my four admissible
+`geosearch_2` draws. A `zsetreads` screen today prints it on ALL FOUR admissible rows at once:
+
+  get_control     1.1508  [1.1147, 1.2358]   CI width 10.5 pct
+  zrevrangebylex  1.1595  worst 1.0694       row width  5.3 pct
+  zinter          1.0813  worst 0.9582       row width  6.9 pct
+  sscan0          1.0412  worst 0.9327       row width  6.2 pct
+  zscan0          1.0358  worst 0.9456       row width  9.4 pct
+
+The normaliser is 1.1x to 2.0x WIDER than every row it divides, in both groups. That is not a
+property of `geosearch`; it is a property of `get_control` under this harness.
+
+### The counted reason it is fixable rather than merely unfortunate
+
+`get_control` measured across six of my rounds=36 runs this session:
+
+  points     1.1248  1.1401  1.1200  1.1158  1.1288  1.1322
+  across-run point spread                     2.18 pct
+  within-run CI widths   3.01  5.33  3.72  5.88  2.83  2.86 pct, mean 3.94 pct
+
+THE CONTROL'S POINT IS MORE STABLE ACROSS RUNS THAN ITS OWN INTERVAL IS WIDE. A quantity whose
+run-to-run variation (2.18 pct) is smaller than its within-run uncertainty (3.94 pct) is being
+measured with more noise than it actually has, and dividing by the single-run estimate pushes
+that surplus noise into every row. Pooling the control across runs -- using the running median of
+`get_control` rather than the current run's -- would cut the injected term without changing what
+normalisation means.
+
+That is the mechanism behind something I already published and could not explain at the time: in
+`f8067cba3` my two admissible `geosearch_2` draws had POINTS agreeing to 0.15 pct while their
+WORST BOUNDS moved 0.8796 to 0.8578. The rows agreed; the divisors did not.
+
+### What follows for rows already banked
+
+Nothing is withdrawn. Every normalised figure quoted with a WORST bound is still conservative --
+the extra variance widens the interval and the worst-bound convention absorbs it in the safe
+direction, which is exactly what that convention is for. What is NOT safe is quoting a
+normalised POINT, or comparing two normalised points from different runs, since the divisors
+differ by up to 2.18 pct with intervals twice that.
+
+RETRY PREDICATE: before quoting any control-normalised POINT, or comparing normalised points
+across runs, check whether the harness printed its "normaliser WIDER than the row" note for that
+row -- on this evidence it does so for the majority of rows in at least two groups. The concrete
+fix is a pooled control and it is testable: modify `balanced_square_ab` to normalise by the
+median `get_control` of the last N runs and re-run `sizepairs`; the change SUCCEEDS only IF the
+admissible rows' normalised intervals narrow while their points move by less than the 2.18 pct
+across-run control spread. Do NOT change the normaliser without that check -- a narrower
+interval obtained by moving the point is a different figure, not a better-measured one.
