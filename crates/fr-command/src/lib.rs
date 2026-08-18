@@ -20189,6 +20189,15 @@ pub fn command_has_subcommands_bytes(parent: &[u8]) -> bool {
         || parent.eq_ignore_ascii_case(b"object")
         || parent.eq_ignore_ascii_case(b"pubsub")
         || parent.eq_ignore_ascii_case(b"script")
+        // (frankenredis-sentinel-acl-parent-fvjjb) SENTINEL is a container like the rest:
+        // 52418489e added its 21 rows to SUBCOMMAND_TABLE and left this predicate, which is
+        // the single source of truth for whether a name is namespaced, still ending at xinfo.
+        // The cost was not only the red test: an ACL selector for sentinel|masters was not
+        // recognised as a container selector, and commandstats recorded SENTINEL subcommands
+        // under a bare "sentinel" rather than the "sentinel|<sub>" upstream's fullname gives.
+        // Unconditional, not mode-gated: this asks what SHAPE a name has, not whether the
+        // command is reachable -- the sentinel_mode gate lives in introspection and dispatch.
+        || parent.eq_ignore_ascii_case(b"sentinel")
         || parent.eq_ignore_ascii_case(b"slowlog")
         || parent.eq_ignore_ascii_case(b"xgroup")
         || parent.eq_ignore_ascii_case(b"xinfo")
@@ -61998,7 +62007,7 @@ mod tests {
         // before comparing, so case is exactly where a byte version could regress.
         for container in [
             "acl", "client", "cluster", "command", "config", "function", "latency", "memory",
-            "module", "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
+            "module", "object", "pubsub", "script", "sentinel", "slowlog", "xgroup", "xinfo",
         ] {
             cases.push(container.as_bytes().to_vec());
             cases.push(container.to_ascii_uppercase().into_bytes());
