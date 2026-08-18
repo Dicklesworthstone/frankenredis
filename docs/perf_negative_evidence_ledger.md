@@ -50419,3 +50419,66 @@ open a `publish` lever against cycles -- 0.9980x against its own control says th
 there; measure syscalls first. `getbit` at 1.0196x is not yet distinguishable from its control
 and needs a second draw before it is called anything. And note none of these four may be
 described as behind the INCUMBENT: all four use fewer cycles than Redis.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: MEASURED — `pttl` and `expiretime` REPLICATE a server-CPU shortfall against fr's own baseline (1.0680x and 1.0535x conservative), while still using FEWER cycles than the incumbent
+
+DISCHARGES the obligation in `9cc18b19a`: "take a second draw on `expiretime` and `pttl` before
+treating their CPU shortfall as standing". Both now have two draws each with `get_control`
+measured in the SAME invocation.
+
+  fr    bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  redis bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  `perf stat` on the server pid for `redis-benchmark -n 1000000 -P 16`; shape and control
+  definitions verbatim from `balanced_square_ab.py:554`. loadavg 9.13-10.48 across the draws,
+  CPU MHz 2395-2994.
+
+  shape        cycles fr/redis      vs same-run control    spread   CONSERVATIVE BOUND
+  pttl         0.9359 / 0.9203      1.0680 / 1.0751        0.67 pct       1.0680
+  expiretime   0.9318 / 0.9178      1.0736 / 1.0535        1.91 pct       1.0535
+
+The conservative bound is the LOWEST of the two, i.e. the reading least favourable to the claim
+that a shortfall exists, which is the direction the worst-bound convention requires when the
+claim is that a number exceeds 1.
+
+### What is and is not being claimed, since I got this wrong once already
+
+NOT A DEFICIT AGAINST REDIS. `cycles fr/redis` is 0.9178-0.9359 on both shapes: fr uses 6-8 pct
+FEWER cycles than the incumbent on each. `80044f42c` withdrew my earlier "fr is BEHIND" language
+for exactly this reason and nothing here reinstates it.
+
+WHAT IS CLAIMED: both shapes earn measurably LESS of fr's usual margin than GET does, on server
+CPU, replicated. fr's cycle advantage over the incumbent is ~14 pct on `get_control` and ~7-8 pct
+on these two. That is a real and specific statement -- these command paths are relatively
+inefficient inside fr -- and it is the correctly-framed version of what the `cascade` throughput
+screen pointed at.
+
+### Where the four candidates ended up
+
+  pttl         1.0680x conservative, replicated      CPU shortfall, worth a lever
+  expiretime   1.0535x conservative, replicated      CPU shortfall, worth a lever
+  getbit       1.0196x, ONE draw                     not distinguishable from its control yet
+  publish      0.9980x, ONE draw                     NOT a CPU cost; measure syscalls
+
+A `cascade` screen that started as "four new deficits" is two shapes with a replicated
+relative-CPU shortfall, one undetermined, and one whose cost is provably somewhere other than
+where I first looked. Every narrowing step was a measurement that contradicted the previous
+framing rather than confirming it.
+
+### The caveat that still applies to both
+
+No A/A null exists for this `perf stat` instrument in this row. `2ff051637` measured one for the
+same invocation on a different shape and found the cycles counter carries a systematic
+order bias -- fr is always the FIRST arm there and here -- so a same-direction bias of order 1 pct
+cannot be excluded from these figures. The shortfalls are 5.4 and 6.8 pct, comfortably larger,
+but a lever claiming to have closed one must show its own null rather than inheriting this row's
+margin.
+
+RETRY PREDICATE: `pttl` and `expiretime` are the two shapes on this board worth opening a lever
+against, and the axis is INSTRUCTION RATE inside fr, not work: fr already retires 25-28 pct fewer
+instructions on both (0.7480-0.7543 and 0.7163-0.7265). Profile them for the per-op fixed costs a
+cheap command pays -- both take a key and both touch the expire machinery, and this campaign has
+already measured that ONE volatile key changes per-command costs engine-wide, which `pttl`'s
+seed creates by construction. A lever SUCCEEDS only IF the shape's cycles-vs-same-run-control
+falls at or below `get_control`'s own 1.0000 with the null shown. Do NOT chase `publish` on
+cycles, and do NOT quote `getbit` until it has a second draw.
