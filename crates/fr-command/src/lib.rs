@@ -13698,7 +13698,37 @@ fn function_cmd(
         } else {
             ""
         };
-        match store.function_restore(&argv[2], policy) {
+        // (frankenredis-9hori) EXECUTE each library in the payload and restore with what it
+        // actually registered. The store cannot do this itself -- it cannot depend on
+        // `fr-command` and so cannot run Lua -- so it hands back the codes and takes the answers.
+        //
+        // Without this, a DUMP containing a library whose function names are computed at runtime
+        // is not merely mis-registered: the scan finds nothing in it, `finish_function_load`
+        // answers `ERR No functions registered`, and the WHOLE PAYLOAD is refused. fr would
+        // decline to read data the incumbent wrote, which is the same false-rejection direction
+        // as the FUNCTION LOAD gap fixed in `8cae02235`.
+        //
+        // A library whose body fails to execute keeps `None` and falls back to the scan, which
+        // preserves today's behaviour for it rather than inventing a wire error -- the same
+        // conservative choice `f8bb35107` made for the five reload paths.
+        let registrations: Vec<Option<Vec<fr_store::FunctionEntry>>> =
+            match fr_store::Store::function_restore_payload_codes(&argv[2]) {
+                Ok(codes) => codes
+                    .iter()
+                    .map(|code| {
+                        lua_eval::function_load_execute(store, now_ms, code)
+                            .ok()
+                            .map(|specs| {
+                                specs.iter().map(|spec| spec.to_function_entry()).collect()
+                            })
+                    })
+                    .collect(),
+                // A payload whose envelope or body will not decode has no registrations to
+                // collect; `function_restore` re-reports the same error from the same helper,
+                // so the wire message and its ORDER relative to the policy check are unchanged.
+                Err(_) => Vec::new(),
+            };
+        match store.function_restore_with_registrations(&argv[2], policy, &registrations) {
             Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
             Err(e) => Err(CommandError::Store(e)),
         }

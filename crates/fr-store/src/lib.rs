@@ -34566,6 +34566,49 @@ impl Store {
         buf
     }
 
+    /// Verify the upstream envelope footer and return the body it wraps.
+    ///
+    /// (frankenredis-9hori) Moved VERBATIM out of `function_restore` so the public codes
+    /// accessor below shares it rather than restating it. Every error here is on the wire:
+    /// upstream `cluster.c::verifyDumpPayload` emits one message for a too-short envelope, a
+    /// version newer than the local RDB_VERSION, and a CRC64 mismatch alike.
+    fn function_restore_trimmed_body(data: &[u8]) -> Result<&[u8], StoreError> {
+        const FOOTER_LEN: usize = 10;
+        if data.len() < FOOTER_LEN {
+            return Err(StoreError::GenericError(
+                "ERR DUMP payload version or checksum are wrong".to_string(),
+            ));
+        }
+        let footer_offset = data.len() - FOOTER_LEN;
+        let stored_version = u16::from_le_bytes([data[footer_offset], data[footer_offset + 1]]);
+        if stored_version > Self::FUNCTION_DUMP_RDB_VERSION {
+            return Err(StoreError::GenericError(
+                "ERR DUMP payload version or checksum are wrong".to_string(),
+            ));
+        }
+        let stored_crc = u64::from_le_bytes(
+            data[footer_offset + 2..]
+                .try_into()
+                .map_err(|_| StoreError::GenericError("ERR Invalid dump data".to_string()))?,
+        );
+        let computed_crc = fr_persist::crc64_redis(&data[..footer_offset + 2]);
+        if stored_crc != computed_crc {
+            return Err(StoreError::GenericError(
+                "ERR DUMP payload version or checksum are wrong".to_string(),
+            ));
+        }
+        Ok(&data[..footer_offset])
+    }
+
+    /// The library codes inside a FUNCTION DUMP payload, envelope checked, nothing registered.
+    ///
+    /// (frankenredis-9hori) This is what the FUNCTION RESTORE command handler needs: the store
+    /// cannot run Lua, so it cannot know what a library registers, but the command layer can
+    /// execute each code and hand the answers back to `function_restore_with_registrations`.
+    pub fn function_restore_payload_codes(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
+        Self::function_restore_library_codes(Self::function_restore_trimmed_body(data)?)
+    }
+
     /// Decode a FUNCTION DUMP body into its library codes, registering nothing.
     ///
     /// (frankenredis-9hori) Split out of `function_restore` so that registration and DECODING
@@ -34610,6 +34653,30 @@ impl Store {
 
     /// Restore function libraries from a serialized blob.
     pub fn function_restore(&mut self, data: &[u8], policy: &str) -> Result<(), StoreError> {
+        self.function_restore_inner(data, policy, None)
+    }
+
+    /// FUNCTION RESTORE with the registrations the caller collected by EXECUTING each library.
+    ///
+    /// (frankenredis-9hori) `None` for a library means "fall back to the source-text scan",
+    /// which is what happens when its body failed to execute — the same conservative choice
+    /// `f8bb35107` made for the five reload paths, preserving today's behaviour instead of
+    /// inventing a new wire error for a case the differ does not yet cover.
+    pub fn function_restore_with_registrations(
+        &mut self,
+        data: &[u8],
+        policy: &str,
+        registrations: &[Option<Vec<FunctionEntry>>],
+    ) -> Result<(), StoreError> {
+        self.function_restore_inner(data, policy, Some(registrations))
+    }
+
+    fn function_restore_inner(
+        &mut self,
+        data: &[u8],
+        policy: &str,
+        registrations: Option<&[Option<Vec<FunctionEntry>>]>,
+    ) -> Result<(), StoreError> {
         let flush = policy.eq_ignore_ascii_case("FLUSH");
         let replace = policy.eq_ignore_ascii_case("REPLACE") || flush;
         let append = policy.eq_ignore_ascii_case("APPEND") || policy.is_empty();
@@ -34630,46 +34697,27 @@ impl Store {
         // "DUMP payload version or checksum are wrong" for any of:
         // too-short envelope, version-newer-than-RDB_VERSION, or
         // CRC64 mismatch. (br-frankenredis-ngn0)
-        const FOOTER_LEN: usize = 10;
-        if data.len() < FOOTER_LEN {
-            return Err(StoreError::GenericError(
-                "ERR DUMP payload version or checksum are wrong".to_string(),
-            ));
-        }
-        let footer_offset = data.len() - FOOTER_LEN;
-        // Upstream cluster.c::verifyDumpPayload rejects a payload
-        // whose version is newer than the local RDB_VERSION. We
-        // mirror that so a future-version FUNCTION DUMP can't
-        // sneak past the body parser. (br-frankenredis-r83v)
-        let stored_version = u16::from_le_bytes([data[footer_offset], data[footer_offset + 1]]);
-        if stored_version > Self::FUNCTION_DUMP_RDB_VERSION {
-            return Err(StoreError::GenericError(
-                "ERR DUMP payload version or checksum are wrong".to_string(),
-            ));
-        }
-        let stored_crc = u64::from_le_bytes(
-            data[footer_offset + 2..]
-                .try_into()
-                .map_err(|_| StoreError::GenericError("ERR Invalid dump data".to_string()))?,
-        );
-        let computed_crc = fr_persist::crc64_redis(&data[..footer_offset + 2]);
-        if stored_crc != computed_crc {
-            return Err(StoreError::GenericError(
-                "ERR DUMP payload version or checksum are wrong".to_string(),
-            ));
-        }
-        let data = &data[..footer_offset];
+        let data = Self::function_restore_trimmed_body(data)?;
         let mut incoming = Store::new();
-        for code in Self::function_restore_library_codes(data)? {
-            // (frankenredis-9hori) STILL THE TEXT SCAN, and still wrong for the same reason
-            // FUNCTION LOAD was: a library whose names are computed at runtime scans as
-            // registering nothing, so `finish_function_load` answers `ERR No functions
-            // registered` and the whole payload fails to restore. The registrations cannot be
-            // collected here because `fr-store` cannot depend on `fr-command` and so cannot run
-            // Lua; the decode above is split out precisely so the FUNCTION RESTORE command
-            // handler, which CAN, is able to execute each library and call
-            // `function_load_with_registrations` per code. Wiring that is the next commit.
-            incoming.function_load(&code, false)?;
+        for (index, code) in Self::function_restore_library_codes(data)?
+            .into_iter()
+            .enumerate()
+        {
+            // (frankenredis-9hori) A supplied registration set is what the library ACTUALLY
+            // registered when its body ran, so a name computed at runtime survives. `None`
+            // falls back to the source-text scan, which is both the old behaviour and the
+            // right answer when the caller could not execute the body.
+            match registrations
+                .and_then(|all| all.get(index))
+                .and_then(|one| one.as_ref())
+            {
+                Some(entries) => {
+                    incoming.function_load_with_registrations(&code, false, entries)?;
+                }
+                None => {
+                    incoming.function_load(&code, false)?;
+                }
+            }
         }
 
         let restored_libraries = incoming.function_libraries;
