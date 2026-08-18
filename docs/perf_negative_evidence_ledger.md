@@ -63993,3 +63993,72 @@ exactly the defect being looked for.
      sizing (`86276eec0`); `20260818T` **1.4981x sizing, fr BEHIND** (`f595e6b9d`), which is the
      regression my own levers introduced and which is not yet certified at the standard the win
      was.
+
+## 2026-08-18 CrimsonHawk: VERIFIED — the size audit now PASSES, every scaling shape has a larger-N twin, and that settles what "GEOSEARCH crossed 1.0x" can mean: at n=2 fr is BEHIND at 0.9162 normalised, and the raw ratios never cross at all
+
+EVIDENCE CLASS: the repository's own server-free audit (`scripts/balanced_square_ab.py
+--audit-sizes`), re-run this turn, plus the certified pair already recorded on `frankenredis-eh2ct`.
+No cargo and no new measurement — a disk throttle forbids builds and `/data` is at 49G, below the
+58G floor. CV was NOT used and no timing verdict is claimed.
+
+Claim class: not applicable — this row banks nothing new; it reads an existing certified pair
+against a premise.
+
+### THE AUDIT PASSES NOW
+
+`eh2ct` recorded 21 of 39 size-scaling shapes seeded with fewer than four elements, and exactly ONE
+carrying a larger-N sibling. Re-running it today:
+
+    PASS: every scaling shape carries a larger-N twin in its own group
+
+Twenty-two siblings now exist — `bitcount_big`, `geosearch_64`, `hgetall_64`, `hmget_64`,
+`hrandfield_c_64`, `mget_64`, `scan_prefix_64`, `sinter_64`, `sintercard*_64`, `smismember_64`,
+`sort_ro_alpha_64`, `xrange_64`, `zdiff_64`, `zinter_64`, `zintercard*_64`, `zrange*_64`,
+`zrangebylex_64`, `zrangebyscore_l_64`. The bead's remedy — "each owner should either register a
+larger-N sibling or relabel the row" — is complete. Its owner should decide whether to close it;
+the audit's own docstring says the check may be deleted once this condition holds, though keeping
+it as a tripwire against a NEW degenerate registration costs nothing and is what caught this.
+
+### WHAT THAT MEANS FOR THE GEOSEARCH PREMISE
+
+The certified pair on that bead, both members in ONE invocation, live incumbent, 3 of 3 admissible
+with every null within 1.5 pct:
+
+    shape          raw ratio   control-normalised
+    geosearch_2      1.0202        0.9162   <- fr BEHIND
+    geosearch_64     1.1240        1.0094   <- fr AHEAD
+    get_control      1.1135          —
+
+Two readings of "GEOSEARCH just crossed 1.0x" are possible and NEITHER supports treating it as a
+thin margin that fr has just won:
+
+  * RAW — both sizes are ABOVE 1.0 (1.0202 and 1.1240). There is no crossing to speak of; a raw
+    board would have recorded "fine at both sizes" and seen nothing.
+  * CONTROL-NORMALISED — the two sides of 1.0 are n=2 (0.9162) and n=64 (1.0094). That is a SIZE
+    effect, not a movement over time. The "crossing" is between two rows of the same board, not
+    between two dates.
+
+**The WORST bound across the pair is 0.9162x at n=2, with fr BEHIND** — and that is the row the
+audit flags as an INTERCEPT measurement, dominated by fixed per-command cost rather than by
+GEOSEARCH. So the conservative reading and the meaningful reading point in opposite directions:
+quote 0.9162 and you are quoting dispatch overhead; quote 1.0094 and you are quoting the command
+but discarding the worst bound.
+
+### WHY THIS IS WORTH A ROW RATHER THAN A SHRUG
+
+A row whose ratio is dominated by fixed cost moves when dispatch or allocation changes and does NOT
+move when the command's own kernel improves, so it misdirects lever selection in both directions.
+`eh2ct` records that SORT was picked as a target on exactly such a row. GEOSEARCH is the second
+command measured both ways and it inverts the same way. Any standing instruction to prioritise
+GEOSEARCH on thin margins should say WHICH row it means, because the two disagree about whether fr
+is ahead at all.
+
+### RETRY PREDICATES
+
+  1. When a GEOSEARCH ratio is next quoted, name the shape (`geosearch_2` or `geosearch_64`) and
+     whether it is raw or control-normalised. Those four combinations give two answers.
+  2. Do not read `geosearch_2` as the command's ratio. Read it against `geosearch_64`, which now
+     exists precisely so it can be.
+  3. Re-run `--audit-sizes` before quoting the board after any new shape registration. It is
+     server-free, needs no build, and it is the only thing standing between the board and a fresh
+     degenerate row.
