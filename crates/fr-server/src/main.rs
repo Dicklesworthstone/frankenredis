@@ -5863,6 +5863,26 @@ fn bind_unix_listener(path: &str, perm: u32) -> Result<mio::net::UnixListener, S
     Ok(listener)
 }
 
+/// Register a freshly-built connection with the reactor's bookkeeping.
+///
+/// (frankenredis-w1djx) The tail of accepting a client, shared so the Unix accept arm cannot drift
+/// from the TCP one. Everything ABOVE this seam is genuinely socket-family-specific -- `set_nodelay`
+/// and the writer-handoff clone are TCP-only -- but everything below is not, and duplicating it per
+/// family is how two paths silently stop agreeing about what a client is.
+fn admit_client(
+    conn: ClientConnection,
+    conn_handle: Token,
+    clients: &mut ClientMap,
+    client_id_to_token: &mut HashMap<u64, Token>,
+    runtime: &mut Runtime,
+) {
+    let client_id = conn.session.client_id;
+    runtime.record_client_session(&conn.session);
+    clients.insert(conn_handle, conn);
+    client_id_to_token.insert(client_id, conn_handle);
+    runtime.track_connection_opened();
+}
+
 fn accept_connections(
     listener: &TcpListener,
     poll: &mut Poll,
@@ -5954,13 +5974,9 @@ fn accept_connections(
                 {
                     session.socket_fd = Some(stream.as_raw_fd());
                 }
-                let client_id = session.client_id;
                 let conn =
                     ClientConnection::new_with_writer(stream, writer_stream, session, now_ms());
-                runtime.record_client_session(&conn.session);
-                clients.insert(conn_handle, conn);
-                client_id_to_token.insert(client_id, conn_handle);
-                runtime.track_connection_opened();
+                admit_client(conn, conn_handle, clients, client_id_to_token, runtime);
             }
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
             Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
