@@ -157,6 +157,35 @@ CASES = [
     ("dyn_callback_local",
      "local cb = function(k,a) return 1 end\nredis.register_function('f', cb)",
      "registration callback supplied by a local"),
+    # (frankenredis-o500d) THE OTHER DIRECTION. Every row above is a false REJECTION -- fr
+    # refusing a library 7.2.4 loads. These six are false ACCEPTANCES: until 4390bc9c5 fr
+    # LOADED all of them and 7.2.4 refuses every one, so a library authored against fr would
+    # have failed on real redis. Upstream's refusals are in
+    # function_lua.c::luaRegisterFunctionReadNamedArgs / ReadFlags, with the flag set in
+    # script.c:34 (no-writes, allow-oom, allow-stale, no-cluster, allow-cross-slot-keys).
+    ("unknown_flag",
+     "redis.register_function{function_name='f', callback=function(k,a) return 1 end,"
+     " flags={'no-write'}}",
+     "flag one character off a real one"),
+    ("flag_not_string",
+     "redis.register_function{function_name='f', callback=function(k,a) return 1 end,"
+     " flags={1}}",
+     "non-string entry inside the flags table"),
+    ("flags_not_table",
+     "redis.register_function{function_name='f', callback=function(k,a) return 1 end,"
+     " flags='no-writes'}",
+     "flags present but not a table"),
+    ("unknown_named_arg",
+     "redis.register_function{function_name='f', callback=function(k,a) return 1 end,"
+     " nosuch='x'}",
+     "named argument outside the four upstream knows"),
+    ("description_not_string",
+     "redis.register_function{function_name='f', callback=function(k,a) return 1 end,"
+     " description=1}",
+     "description present but not a string"),
+    ("single_non_table_arg",
+     "redis.register_function('f')",
+     "lone argument that is not a table"),
     # ---- controls: both arms MUST already agree on these ----
     ("CONTROL_no_register",
      "local x = 1",
@@ -164,6 +193,13 @@ CASES = [
     ("CONTROL_valid",
      "redis.register_function('f', function(k,a) return 1 end)",
      "CONTROL: valid library"),
+    # (frankenredis-o500d) The guard against over-correcting: a LEGAL flag, in the case
+    # upstream's strcasecmp accepts and a naive exact-match would refuse. If the validation
+    # added in 4390bc9c5 is too strict, this row goes red rather than the six above going green.
+    ("CONTROL_legal_flags",
+     "redis.register_function{function_name='f', callback=function(k,a) return 1 end,"
+     " flags={'no-writes', 'ALLOW-OOM'}}",
+     "CONTROL: real flags, mixed case"),
 ]
 
 
