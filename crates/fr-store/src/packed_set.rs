@@ -4167,7 +4167,7 @@ impl ChunkedList {
                         if derivable
                             && span.is_string_encoded()
                             && matches!(span.first_byte(&bytes), Some(b) if b.is_ascii_digit() || b == b'-')
-                            && list_lp_int(span.as_bytes(&bytes)).is_some()
+                            && list_lp_int_scan_first(span.as_bytes(&bytes)).is_some()
                         {
                             derivable = false;
                         }
@@ -4467,8 +4467,41 @@ const fn list_node_exceeds_limit(fill: i64, new_sz: u64, new_count: u64) -> bool
 /// represent 2^63, which is why the previous form needed a `u64` and a post-hoc negate.
 /// `list_lp_int_bytes_are_canonical` is now `#[cfg(test)]`: a test still pins its acceptance,
 /// but it is no longer on any production path.
+/// The SUCCESS-optimised schedule: one pass, digit test fused with the accumulate.
+///
+/// Right for a caller whose entries mostly ARE integers -- the DUMP/encode side, which is the
+/// population `ac77762d8` measured at 1.399x.
 #[inline]
 fn list_lp_int(entry: &[u8]) -> Option<i64> {
+    list_lp_int_impl::<false>(entry)
+}
+
+/// The FAILURE-optimised schedule: reject on the first non-digit BEFORE any arithmetic.
+///
+/// (frankenredis-qj6jn) Right for a caller whose entries mostly are NOT integers. The restore
+/// guard is exactly that -- it exists to find digit-leading strings that are not canonical
+/// decimals, so nearly every call it makes is destined to fail.
+///
+/// `e83407622` measured what using the wrong schedule there costs: on `20260818T%06d`, eight
+/// leading digits followed by a `T`, the fused form performs eight multiplies, eight subtracts and
+/// sixteen overflow checks before reaching the byte that rejects the entry, and the frame regressed
+/// 22.6 pct. A scan that bails at the `T` having done no arithmetic is what the two-pass form used
+/// to do for free.
+///
+/// ONE ACCEPTANCE DEFINITION, TWO SCHEDULES. The const generic exists so the two cannot drift:
+/// there is a single body, and a caller picks only the ORDER in which it does the same work.
+/// Keeping two hand-written copies is what this bead has already paid for twice --
+/// `2a4617295` rebuilt a shape `ac77762d8` had deleted, and `ec6eacac7` had to port a pre-filter
+/// back the other way.
+#[inline]
+fn list_lp_int_scan_first(entry: &[u8]) -> Option<i64> {
+    list_lp_int_impl::<true>(entry)
+}
+
+/// Shared body. `SCAN_FIRST` selects the schedule; the accepted language is identical either way,
+/// which is the property the twin test against `fr_persist::listpack_entry_encoded_len` pins.
+#[inline]
+fn list_lp_int_impl<const SCAN_FIRST: bool>(entry: &[u8]) -> Option<i64> {
     if entry.is_empty() || entry.len() >= 21 {
         return None;
     }
@@ -4480,13 +4513,18 @@ fn list_lp_int(entry: &[u8]) -> Option<i64> {
         return None;
     }
     // Redundant leading zero ("007", "00") and "-0" are both decided by the FIRST digit: only
-    // "0" itself may begin with '0', and never with a sign in front of it.
+    // "0" itself may begin with '0', and never with a sign in front of it. This runs before either
+    // schedule and is why `%015d` rejects at byte 2 under both.
     if digits[0] == b'0' && (digits.len() > 1 || neg) {
+        return None;
+    }
+    if SCAN_FIRST && !digits.iter().all(u8::is_ascii_digit) {
+        // No arithmetic has been performed. This is the whole point of the schedule.
         return None;
     }
     let mut acc: i64 = 0;
     for &b in digits {
-        if !b.is_ascii_digit() {
+        if !SCAN_FIRST && !b.is_ascii_digit() {
             return None;
         }
         acc = acc.checked_mul(10)?.checked_sub((b - b'0') as i64)?;
