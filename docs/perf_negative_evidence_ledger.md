@@ -52111,3 +52111,103 @@ to `plain_borrowed_default_key_read_allows`, the two lookups are no longer there
 stale. And if a workload authenticates (`AUTH`), `current_user_name()` stops returning
 `"default"` and the second lookup is a genuine map query — **the cache must not be applied to an
 authenticated session**, which is the one correctness trap in the fix above.
+
+## 2026-08-18 CrimsonHawk: REJECT — replacing `Duration::as_micros()`'s u128 division with 64-bit arithmetic is a REGRESSION of +6 to +11 instr/op, because division by the CONSTANT 1000 was never a division (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — backed out, nothing ships, no ratio against the incumbent is claimed.
+
+### THE HYPOTHESIS, AND WHY IT LOOKED SOUND
+
+Per-command latency timing costs **83.0 instr/op** on `llen`, which after this campaign's gate,
+cache and commandstats work is down to ~1214 instr/op — so 6.8 pct of the command. Measured by
+two-point differencing:
+
+  <Timespec>::sub_timespec        36.0 instr/op
+  <Instant>::duration_since       18.0
+  <Timespec>::now                 16.0
+  clock_gettime                   11.0
+  <Instant>::now                   2.0
+
+`finish_chained_command_at` ended with `end.saturating_duration_since(start).as_micros() as u64`.
+`as_micros()` returns **u128**, so the reading was: a 128-bit division runs on every command to
+produce a value that always fits in u64. The replacement is exact, not approximate — a Duration is
+`s` seconds plus `n` nanos with n < 1e9, and `as_micros()` is `s * 1_000_000 + n / 1000`, which is
+precisely `as_secs()` and `subsec_micros()`.
+
+### IT IS SLOWER, ON FOUR SHAPES OUT OF FIVE
+
+Paired build one change apart, three replicates each, `--fr-only`:
+
+  shape             before                     after                     delta
+  get_control        931.1  938.4  938.4        942.9  945.8  944.4      +6 to +11 WORSE
+  set_same          1535.2 1535.2 1528.6       1546.4 1541.0 1539.8      +6 to +11 WORSE
+  llen              1215.1 1212.9 1213.8       1216.9 1218.6 1215.4      +2 to  +5 WORSE
+  hget              1527.8 1527.0 1527.0       1518.7 1533.5 1525.6      no gain (spread 14.8)
+  config_get_star  407343.8 408335.9 406987.5   405846.2 407123.6 406602.7   no consistent sign
+
+### THE MECHANISM I HAD WRONG
+
+**Division by a CONSTANT is not a division.** `as_micros()` divides by the literal 1000, and LLVM
+lowers that to a multiply-high plus shift — there is no 128-bit divide instruction in the emitted
+code at all. The u128 width costs a second register and an extra multiply, and that is the whole
+of it.
+
+What I replaced it with is *more* work, not less: `saturating_mul` and `saturating_add` each carry
+an overflow check and a branch, and `subsec_micros()` performs its own divide-by-1000. So the
+"optimisation" swapped one constant-division sequence for another plus two saturating guards.
+
+The general lesson is the one worth keeping: **`u128` in a profile is not evidence of a soft-float
+or library division.** Check the emitted code, or measure, before treating a wide integer type as
+a cost. I did neither and the sign came out against me.
+
+### WHAT THIS DOES NOT REFUTE
+
+The 83.0 instr/op timing cost is real and still unclaimed. It is dominated by
+`sub_timespec` (36.0) and `duration_since` (18.0) — the `Timespec` arithmetic, not the
+micro conversion. Removing THOSE requires representing the timestamp as a raw monotonic `u64`
+rather than an `Instant`.
+
+**That is not attempted and should not be, at least not this way.** The only way to read a
+monotonic clock as raw nanoseconds is `libc::clock_gettime` behind `unsafe`, and this workspace
+keeps `#![forbid(unsafe_code)]` on `fr-expire`, `fr-sentinel`, `fr-server`, `fr-repl`,
+`fr-eventloop`, `fr-config` and `fr-protocol`, with `fr-simd` documenting that every other crate
+does so. Trading the memory-safety premise of the project for ~54 instr/op is not a trade this
+campaign should make, and a row that quietly made it would be worse than the regression above.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The instrument carries its own null: A/A null median 1.000002, bootstrapped over 20,000
+resamples, 95% median CI [0.996069, 1.003947], six draws and 30 pairwise ratios, banked in
+`0bf781d57`. On a ~930 instr/op shape that interval is about +/-3.7 instr/op, so `get_control`'s
++6 to +11 sits outside it, and the verdict rests on the sign agreeing across three shapes and
+three replicates rather than on any single delta.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           AFTER `21158a2583e5822c08fdc082ae5f79b07933e1f852f9fc2e552a545876cd884b`,
+                BEFORE `102daa8baa2f5d141e1bbf8253139f12296b6dc94b2a40b9e62cdaf8fb7d0be6`.
+  bench_elf_sha256=21158a2583e5822c08fdc082ae5f79b07933e1f852f9fc2e552a545876cd884b
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` sha `e8e743a90d08c490`, captured at BOTH ends of
+                the run and unchanged.
+  host          /data 88G free, checked immediately before the build. loadavg 8.04 11.78 11.15,
+                CPU idle 91 pct, iowait 0, zero peer frankenredis builds verified by process args.
+  pair          HEAD held (`9bf8ee80d` both ends), ZERO uncommitted peer files at both ends, both
+                AFTER ELFs BIT-IDENTICAL with BEFORE distinct, every build's exit status checked
+                before its binary was copied.
+  disposition   BACKED OUT. `crates/fr-runtime/src/lib.rs` is byte-identical to HEAD.
+
+### RETRY PREDICATE
+
+1. Do NOT re-attempt this substitution. It is measured slower on four shapes and the mechanism is
+   understood; a future profile showing `u128` here is not new evidence.
+2. The 83.0 instr/op timing cost REMAINS OPEN. Re-open only with an approach that removes
+   `sub_timespec` and `duration_since` — i.e. a `u64` monotonic representation — AND that does not
+   introduce `unsafe` into this workspace. If no such approach exists in safe Rust, the correct
+   outcome is to leave it and say so.
+3. Before optimising any arithmetic on the strength of a type width, disassemble or measure first.
+   Constant divisors are compiled to multiplies; `u128` alone is not a cost signal.
