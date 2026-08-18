@@ -9,11 +9,18 @@ NO BUILD and NO DISK WRITES: it is usable during a build freeze, which is when i
 The convention is upstream's and fr copies it: a POSITIVE arity is exact ("this many argv
 entries, including the command name"), a NEGATIVE arity is a minimum ("at least this many").
 
-Upstream's table is `redisCommandTable[]` at the end of `commands.def`. Only its TOP-LEVEL rows
-are compared: container subcommands (`CONFIG GET`, `SLOWLOG GET`) share bare names like "get"
-with real commands and live in separate per-container tables, so pulling every `MAKE_CMD` would
-compare `GET` against `CONFIG GET`. fr checks subcommand arity in a separate function
-(`check_command_arity_with_subcommand`) which this gate does not cover.
+BOTH LEVELS ARE COMPARED, and they must be read from different places. Top-level commands come
+from `redisCommandTable[]` at the end of `commands.def`; container subcommands live in separate
+`<PARENT>_Subcommands[]` blocks and are keyed `parent|sub`, because a bare `MAKE_CMD("get")`
+appears three times upstream -- as GET, CONFIG GET and SLOWLOG GET -- and flattening them would
+compare a command against a subcommand of the same name. fr keys its `SUBCOMMAND_TABLE` the same
+way, and `check_full_command_arity` enforces both levels at once, matching upstream's
+`processCommand`, which resolves the subcommand and checks its arity at the same point as the
+parent's.
+
+SENTINEL SUBCOMMANDS ARE EXCLUDED. fr is not a sentinel, so upstream's 21 `sentinel|*` rows are
+absent from fr by design, not by omission; counting them as gaps would put a permanent 21 in the
+output and train the reader to ignore it.
 
 Exit 0 = every command fr implements agrees with the incumbent, 1 = at least one disagrees.
 """
@@ -57,37 +64,75 @@ def fr_arities() -> dict[str, int]:
     return out
 
 
-def main() -> int:
-    inc = incumbent_arities()
-    fr = fr_arities()
-    if not inc or not fr:
-        print(f"HARNESS INVALID: parsed {len(inc)} incumbent and {len(fr)} fr entries; "
-              f"a table moved and this gate is measuring nothing.")
-        return 2
+def incumbent_subcommand_arities() -> dict[str, int]:
+    """`parent|sub` -> arity, from every `<PARENT>_Subcommands[]` block."""
+    text = INCUMBENT.read_text(errors="replace")
+    out: dict[str, int] = {}
+    for block in re.finditer(
+            r"struct COMMAND_STRUCT ([A-Z0-9_]+)_Subcommands\[\] = \{(.*?)\n\};",
+            text, re.S):
+        parent = block.group(1).lower()
+        for line in block.group(2).splitlines():
+            m = re.search(r'MAKE_CMD\("([a-z0-9_|-]+)"', line)
+            a = re.search(r",([A-Za-z_][A-Za-z0-9_]*Command|NULL),(-?\d+),", line)
+            if m and a:
+                out[f"{parent}|{m.group(1).lower()}"] = int(a.group(2))
+    return out
 
+
+def fr_subcommand_arities() -> dict[str, int]:
+    """`parent|sub` -> arity, from `SUBCOMMAND_TABLE`."""
+    text = FR.read_text(errors="replace")
+    start = text.index("const SUBCOMMAND_TABLE:")
+    end = text.index("\n];", start)
+    return {m.group(1).lower(): int(m.group(2))
+            for m in re.finditer(r'\(\s*"([a-z0-9_|-]+\|[a-z0-9_-]+)"\s*,\s*(-?\d+)\s*,',
+                                 text[start:end])}
+
+
+# fr is not a sentinel; these exist upstream only in sentinel mode.
+SENTINEL_PREFIX = "sentinel|"
+
+
+def compare(label: str, inc: dict[str, int], fr: dict[str, int]) -> int:
+    """Print a comparison and return the mismatch count."""
     shared = sorted(set(inc) & set(fr))
     mismatches = [(n, fr[n], inc[n]) for n in shared if fr[n] != inc[n]]
-
-    print(f"incumbent top-level commands : {len(inc)}")
-    print(f"fr COMMAND_TABLE entries     : {len(fr)}")
-    print(f"compared (in both)           : {len(shared)}")
-    print()
+    print(f"{label}: incumbent {len(inc)}, fr {len(fr)}, compared {len(shared)}")
     if mismatches:
-        print(f"{'command':<24} {'fr':>6} {'redis 7.2.4':>12}   meaning")
+        print(f"  {'command':<28} {'fr':>6} {'redis 7.2.4':>12}   meaning")
         for name, f, i in mismatches:
             def describe(a: int) -> str:
                 return f"exactly {a}" if a > 0 else f"at least {-a}"
-            print(f"{name:<24} {f:>6} {i:>12}   fr {describe(f)}, redis {describe(i)}")
-        print()
-        print(f"FAIL: {len(mismatches)} arity mismatch(es). Each is a wrong reply to a wrong "
-              f"argument count, decided before the command runs.")
-        return 1
+            print(f"  {name:<28} {f:>6} {i:>12}   fr {describe(f)}, redis {describe(i)}")
+    missing = sorted(n for n in set(inc) - set(fr) if not n.startswith(SENTINEL_PREFIX))
+    if missing:
+        print(f"  {len(missing)} in the incumbent and NOT in fr's table: "
+              f"{', '.join(missing[:10])}")
+    extra = sorted(set(fr) - set(inc))
+    if extra:
+        print(f"  {len(extra)} in fr and NOT upstream: {', '.join(extra[:10])}")
+    return len(mismatches)
 
-    only_fr = sorted(set(fr) - set(inc))
-    if only_fr:
-        print(f"note: {len(only_fr)} fr entries absent from the incumbent's top-level table "
-              f"(subcommands or fr-only): {', '.join(only_fr[:12])}")
-    print(f"PASS: all {len(shared)} shared commands agree on arity.")
+
+def main() -> int:
+    inc, fr = incumbent_arities(), fr_arities()
+    inc_sub, fr_sub = incumbent_subcommand_arities(), fr_subcommand_arities()
+    if not inc or not fr or not inc_sub or not fr_sub:
+        print(f"HARNESS INVALID: parsed {len(inc)}/{len(fr)} commands and "
+              f"{len(inc_sub)}/{len(fr_sub)} subcommands; a table moved and this gate is "
+              f"measuring nothing.")
+        return 2
+
+    bad = compare("top-level", inc, fr)
+    print()
+    bad += compare("subcommands", inc_sub, fr_sub)
+    print()
+    if bad:
+        print(f"FAIL: {bad} arity mismatch(es). Each is a wrong reply to a wrong argument "
+              f"count, decided before the command runs.")
+        return 1
+    print("PASS: every shared command and subcommand agrees on arity.")
     return 0
 
 
