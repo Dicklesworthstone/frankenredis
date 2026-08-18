@@ -20488,8 +20488,14 @@ fn try_dispatch_floor_classified_action(
                 // a third keyword (`rank_kw != "RANK"` -> decline -> generic). Parsing
                 // once moves that decision here, so an `else` meaning RANK would execute
                 // `LPOS k e MAXLEN n` AS RANK — a WRONG ANSWER, not a wrong route, and
-                // invisible to every perf test. MAXLEN is live: it is a real LPOS option
-                // deliberately left stranded on generic, so it WILL reach this branch.
+                // invisible to every perf test.
+                //
+                // (frankenredis-uu33c) This warning USED to point at MAXLEN, which was a real
+                // LPOS option deliberately left stranded on generic. MAXLEN is served here now,
+                // so the example is gone but the rule is not: LPOS accepts RANK, COUNT and
+                // MAXLEN, and upstream may add more. Whatever arrives next must get its own
+                // explicit arm or fall to the `None` below -- never to an `else` that means one
+                // of the three.
                 let served = if packet.b.eq_ignore_ascii_case(b"RANK") {
                     runtime.execute_plain_lpos_rank_borrowed(packet.key, packet.a, packet.c, ts, default_read_allowed)
                 } else if packet.b.eq_ignore_ascii_case(b"COUNT") {
@@ -49778,6 +49784,58 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 honoured,
                 "SmismemberFew claims {members} members, so the arm's parser for that count must \
                  accept the packet -- a range claim is one promise per arity, not one for the range"
+            );
+        }
+
+        // GETEX is the OTHER command in this codebase with several distinct option keywords at
+        // ONE arity, which is the only shape that produces this defect: `GETEX k EX n`, `PX n`,
+        // `EXAT n` and `PXAT n` are all arity 4, and `PERSIST` is arity 3 and so cannot collide.
+        // The arm serves all four (~22098), so these rows record a NEGATIVE and keep it.
+        //
+        // The screening rule they encode is the reusable part. Every other keyword-requiring arm
+        // checked -- ZRANK WITHSCORE at arity 4, ZREVRANK the same, XADD NOMKSTREAM, and
+        // ZRANGEBYSCORE LIMIT at arity 7 -- is safe for a structural reason rather than a careful
+        // one: at those arities the keyword is the ONLY well-formed possibility, so arity does
+        // imply it. LPOS and ZRANGE were the exceptions precisely because each has two or more
+        // option keywords landing on the same arity.
+        let getex_rows: [(&[u8], &[u8]); 4] = [
+            (b"*4\r\n$5\r\nGETEX\r\n$1\r\nk\r\n$2\r\nEX\r\n$2\r\n60\r\n", b"EX"),
+            (b"*4\r\n$5\r\nGETEX\r\n$1\r\nk\r\n$2\r\nPX\r\n$4\r\n6000\r\n", b"PX"),
+            (
+                b"*4\r\n$5\r\nGETEX\r\n$1\r\nk\r\n$4\r\nEXAT\r\n$10\r\n1900000000\r\n",
+                b"EXAT",
+            ),
+            (
+                b"*4\r\n$5\r\nGETEX\r\n$1\r\nk\r\n$4\r\nPXAT\r\n$13\r\n1900000000000\r\n",
+                b"PXAT",
+            ),
+        ];
+
+        for (packet, keyword) in getex_rows {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(packet, &cfg),
+                Some(super::BorrowedDispatchFloorClass::GetexExpire),
+                "arity-4 GETEX is claimed on arity alone, so {} must still classify",
+                String::from_utf8_lossy(keyword)
+            );
+            let parsed = super::parse_borrowed_plain_key_arg2_packet(
+                packet,
+                &cfg,
+                b"*4\r\n$5\r\n",
+                b"GETEX",
+            )
+            .expect("the GetexExpire arm parses every arity-4 GETEX with key_arg2");
+            assert_eq!(
+                parsed.a, keyword,
+                "key_arg2 must land GETEX's option keyword in field a"
+            );
+            assert!(
+                parsed.a.eq_ignore_ascii_case(b"EX")
+                    || parsed.a.eq_ignore_ascii_case(b"PX")
+                    || parsed.a.eq_ignore_ascii_case(b"EXAT")
+                    || parsed.a.eq_ignore_ascii_case(b"PXAT"),
+                "the arm serves exactly these four; a fifth arity-4 keyword would be claimed and \
+                 stranded on generic, which is the defect this test exists to catch"
             );
         }
     }
