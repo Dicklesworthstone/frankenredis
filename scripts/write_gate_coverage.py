@@ -20,7 +20,11 @@ So this bounds the convertible subset, from source only, with no build:
   CONVERTIBLE   an fr-server caller's enclosing function holds a write-gate cache
   VIA-WRAPPER   no fr-server caller, but an in-runtime caller takes the parameter or is itself
                 reachable, so the cache can arrive one hop further in
-  NO-CACHE      every fr-server caller is somewhere with no cache in scope
+  FLOOR-HELPER  the fr-server caller is a floor helper that does not hold a cache but is itself
+                called from one that does -- one helper signature away, the dispatch_floor_fast_del
+                fix
+  FALLBACK-PATH the only fr-server callers are the generic fallback (parse_borrowed_multibulk_
+                action) or the sharded worker, where passing None may well be correct
   UNREACHABLE   no fr-server caller and no in-runtime caller that could forward a value
 
 The read-gate sibling (`read_gate_coverage.py`) does more than this — three derivation forms,
@@ -149,7 +153,7 @@ def main() -> int:
     server_cache_reached = set()
     for _, _, n in rt_spans:
         for m in re.finditer(r"(?<![\w])" + re.escape(n) + r"\(", sv):
-            if enclosing(sv_spans, m.start()) in cache_reachable_sv:
+            if enclosing(sv_spans, m.start()) in cache_fns:
                 server_cache_reached.add(n)
                 break
 
@@ -178,12 +182,17 @@ def main() -> int:
         sv_callers = {enclosing(sv_spans, m.start())
                       for m in re.finditer(r"(?<![\w])" + re.escape(fn) + r"\(", sv)}
         sv_callers.discard(None)
-        if sv_callers & cache_reachable_sv:
-            verdicts[fn] = ("CONVERTIBLE", sv_callers & cache_reachable_sv)
+        if sv_callers & cache_fns:
+            verdicts[fn] = ("CONVERTIBLE", sv_callers & cache_fns)
         elif fn in reachable:
             verdicts[fn] = ("VIA-WRAPPER", rt_callers[fn] & reachable)
+        elif sv_callers and (sv_callers & cache_reachable_sv):
+            # Caller is a floor helper that does not hold a cache but IS called from one that
+            # does -- precisely where `dispatch_floor_fast_del` sat before `bc05733bf` threaded
+            # it. One helper signature, then the supply. Not blocked.
+            verdicts[fn] = ("FLOOR-HELPER", sv_callers)
         elif sv_callers:
-            verdicts[fn] = ("NO-CACHE", sv_callers)
+            verdicts[fn] = ("FALLBACK-PATH", sv_callers)
         else:
             verdicts[fn] = ("UNREACHABLE", rt_callers[fn])
 
@@ -198,7 +207,7 @@ def main() -> int:
     print(f"fr-server fns HOLDING a cache   : {len(cache_fns)}  {sorted(cache_fns)}")
     print(f"fr-server fns that can RECEIVE one: {len(cache_reachable_sv)}")
     print()
-    for v in ("CONVERTIBLE", "VIA-WRAPPER", "NO-CACHE", "UNREACHABLE"):
+    for v in ("CONVERTIBLE", "VIA-WRAPPER", "FLOOR-HELPER", "FALLBACK-PATH", "UNREACHABLE"):
         print(f"  {v:16s} {counts.get(v, 0):>4}")
     if args.list:
         print()
