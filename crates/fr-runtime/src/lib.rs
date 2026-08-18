@@ -5568,6 +5568,14 @@ pub struct ClientSession {
     /// handshake) that also report `fd=0`; CLIENT INFO falls back to the loopback rendering
     /// for those, which is what fr emitted for every client before this field existed.
     pub local_addr: Option<std::net::SocketAddr>,
+    /// (frankenredis-w1djx) Path of the Unix domain socket this client arrived on, when it did.
+    ///
+    /// A unix address is NOT a `std::net::SocketAddr` -- it carries a filesystem path and has no
+    /// port -- so `peer_addr` and `local_addr` cannot hold one and stay `None` for such a client.
+    /// Upstream has the same shape and solves it the same way: it does not store a sockaddr either,
+    /// it FORMATS the address, and `catClientInfoString` renders a unix client as `<path>:0`. Both
+    /// `addr` and `laddr` come from this field when it is set, which is why one field serves both.
+    pub unix_path: Option<std::sync::Arc<str>>,
     /// (frankenredis-lxccd) Per-client socket file descriptor, set by
     /// the TCP server immediately after accept() via AsRawFd. Used by
     /// CLIENT INFO / CLIENT LIST to emit the `fd=N` field matching
@@ -5616,6 +5624,7 @@ impl Clone for ClientSession {
             client_reply: self.client_reply.clone(),
             peer_addr: self.peer_addr,
             local_addr: self.local_addr,
+            unix_path: self.unix_path.clone(),
             socket_fd: self.socket_fd,
             qbuf_bytes: self.qbuf_bytes,
             qbuf_free_bytes: self.qbuf_free_bytes,
@@ -5724,6 +5733,7 @@ impl ClientSession {
         self.client_reply.suppress_current_response = source.client_reply.suppress_current_response;
         self.peer_addr = source.peer_addr;
         self.local_addr = source.local_addr;
+        self.unix_path.clone_from(&source.unix_path);
         self.socket_fd = source.socket_fd;
         self.connected_at_ms = source.connected_at_ms;
     }
@@ -5828,6 +5838,7 @@ impl ClientSession {
             && self.client_reply == source.client_reply
             && self.peer_addr == source.peer_addr
             && self.local_addr == source.local_addr
+            && self.unix_path == source.unix_path
             && self.socket_fd == source.socket_fd
             && self.connected_at_ms == source.connected_at_ms
     }
@@ -5928,6 +5939,7 @@ impl Default for ClientSession {
             client_reply: ClientReplyState::default(),
             peer_addr: None,
             local_addr: None,
+            unix_path: None,
             socket_fd: None,
             qbuf_bytes: 0,
             qbuf_free_bytes: 0,
@@ -6030,6 +6042,10 @@ pub struct Runtime {
     dispatch_acl_snapshot_generation: u64,
     dispatch_peer_addr_cache: String,
     dispatch_peer_addr_cache_source: Option<std::net::SocketAddr>,
+    /// (frankenredis-w1djx) Second memo key. Every unix client has `peer_addr == None`,
+    /// so the sockaddr alone cannot distinguish one socket path from another -- nor from a
+    /// genuinely address-less session, which renders the `127.0.0.1:0` default.
+    dispatch_peer_addr_cache_unix: Option<std::sync::Arc<str>>,
     /// (frankenredis-7grsy) Chained command-timing clock. Holds the monotonic
     /// `Instant` at which the previous timed fast-path command finished, paired
     /// with the `stat_total_commands_processed` value at that moment. A timed
@@ -6336,6 +6352,7 @@ impl Runtime {
             dispatch_acl_snapshot_generation: 0,
             dispatch_peer_addr_cache: "127.0.0.1:0".to_string(),
             dispatch_peer_addr_cache_source: None,
+            dispatch_peer_addr_cache_unix: None,
             last_command_end: None,
         }
     }
@@ -40225,10 +40242,14 @@ impl Runtime {
             .as_ref()
             .map(|n| String::from_utf8_lossy(n).to_string())
             .unwrap_or_default();
-        let peer = session
-            .peer_addr
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| "127.0.0.1:0".to_string());
+        // (frankenredis-w1djx) A unix client has no sockaddr, so `addr` comes from the socket
+        // path rendered as `<path>:0` -- upstream's own form in catClientInfoString, and the one
+        // CLIENT KILL's ADDR help text already documents.
+        let peer = match (&session.unix_path, session.peer_addr) {
+            (Some(path), _) => format!("{path}:0"),
+            (None, Some(a)) => a.to_string(),
+            (None, None) => "127.0.0.1:0".to_string(),
+        };
         let age_seconds = now_ms.saturating_sub(session.connected_at_ms) / 1000;
         let idle_seconds = now_ms.saturating_sub(session.last_interaction_ms) / 1000;
         let channel_subs = self
@@ -40347,9 +40368,12 @@ impl Runtime {
             // on a non-loopback address reported the wrong local address to every client.
             // The fallback is the exact string fr emitted before this field existed, so
             // non-TCP sessions (fd=0) are unchanged.
-            match session.local_addr {
-                Some(addr) => addr.to_string(),
-                None => format!("127.0.0.1:{}", self.server.store.server_port),
+            match (&session.unix_path, session.local_addr) {
+                // Upstream reports the same `<path>:0` for a unix client's LOCAL address: both
+                // ends of a unix connection are that socket.
+                (Some(path), _) => format!("{path}:0"),
+                (None, Some(addr)) => addr.to_string(),
+                (None, None) => format!("127.0.0.1:{}", self.server.store.server_port),
             },
             // (frankenredis-lxccd) Real socket fd when known; 0 for
             // non-TCP sessions (matches vendored behavior for the
@@ -40593,17 +40617,28 @@ impl Runtime {
     }
 
     fn refresh_dispatch_peer_addr_cache(&mut self, peer_addr: Option<std::net::SocketAddr>) {
-        if self.dispatch_peer_addr_cache_source == peer_addr {
+        // (frankenredis-w1djx) A unix client carries no sockaddr, so the path is part of the memo
+        // key: keying on `peer_addr` alone would treat every unix client as the same address-less
+        // session and hand a stale `127.0.0.1:0` to the next one.
+        let unix_path = self.session.unix_path.clone();
+        if self.dispatch_peer_addr_cache_source == peer_addr
+            && self.dispatch_peer_addr_cache_unix == unix_path
+        {
             return;
         }
         self.dispatch_peer_addr_cache.clear();
-        if let Some(addr) = peer_addr {
+        if let Some(path) = unix_path.as_deref() {
+            // Upstream's `<path>:0`, the same form CLIENT INFO's `addr` reports.
+            write!(&mut self.dispatch_peer_addr_cache, "{path}:0")
+                .expect("writing to String cannot fail");
+        } else if let Some(addr) = peer_addr {
             write!(&mut self.dispatch_peer_addr_cache, "{addr}")
                 .expect("writing to String cannot fail");
         } else {
             self.dispatch_peer_addr_cache.push_str("127.0.0.1:0");
         }
         self.dispatch_peer_addr_cache_source = peer_addr;
+        self.dispatch_peer_addr_cache_unix = unix_path;
     }
 
     fn handle_deferred_store_runtime_action(&mut self, now_ms: u64) -> Option<RespFrame> {
