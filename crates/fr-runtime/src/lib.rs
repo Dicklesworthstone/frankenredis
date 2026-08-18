@@ -52416,6 +52416,81 @@ mod tests {
     }
 
     #[test]
+    fn plain_lpos_maxlen_borrowed_matches_generic_and_defers() {
+        // (frankenredis-uu33c) LPOS key element MAXLEN n (argc 5) borrow == generic.
+        //
+        // MAXLEN was the last arity-5 LPOS form the floor arm CLAIMED and did not SERVE, so it
+        // was dropped on the generic dispatcher rather than handed back to the cascade. The
+        // executor added with it is the RANK twin with the arguments swapped, NOT the COUNT
+        // twin, and this test exists because those two differ in the way that produces a WRONG
+        // ANSWER rather than a wrong route:
+        //
+        //   * without COUNT the reply is a single position or NIL -- never the empty array the
+        //     COUNT form returns for no matches;
+        //   * `rank` stays at its default of 1 while `maxlen` carries the bound, so an
+        //     implementation that passed the argument to the rank slot would answer
+        //     `LPOS l b MAXLEN 2` as `LPOS l b RANK 2` -- a real position, just the wrong one.
+        //
+        // Both are silent: the reply is well-formed either way, and the pair-invariant test in
+        // fr-server only checks that the arm CLAIMS the shape, not that it answers correctly.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(
+                command(&[b"RPUSH", b"l", b"a", b"b", b"c", b"b", b"a", b"b"]),
+                1,
+            );
+            rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
+        }
+        // l = [a, b, c, b, a, b]; the first `b` is at index 1.
+        let cases: [(&[u8], &[u8], &[u8]); 8] = [
+            (b"l", b"b", b"1"),       // scans only index 0 ('a') -> NIL, not a match
+            (b"l", b"b", b"2"),       // reaches index 1 -> the first match
+            (b"l", b"b", b"6"),       // the whole list
+            (b"l", b"b", b"9"),       // past the end -> same as the whole list
+            (b"l", b"b", b"0"),       // 0 == UNLIMITED, the upstream special case
+            (b"l", b"zzz", b"3"),     // no matches -> NIL, not an empty array
+            (b"missing", b"a", b"2"), // missing key
+            (b"s", b"a", b"2"),       // wrong type -> WRONGTYPE
+        ];
+        for (ts, (key, el, maxlen)) in (2..).zip(cases) {
+            let f = direct
+                .execute_plain_lpos_maxlen_borrowed(key, el, maxlen, ts, None)
+                .expect("lpos MAXLEN fast path should engage");
+            let g = generic.execute_frame(command(&[b"LPOS", key, el, b"MAXLEN", maxlen]), ts);
+            assert_eq!(f, g, "key={key:?} el={el:?} maxlen={maxlen:?}");
+        }
+        // Deferral: upstream answers a negative MAXLEN with "ERR MAXLEN can't be negative", and
+        // an unparseable one with its own wording. Keeping BOTH on generic is what keeps those
+        // strings in one place. Drive the declined shapes through generic on both runtimes so the
+        // stats stay in lockstep.
+        let defer: [&[u8]; 4] = [b"-1", b"-9223372036854775808", b"notint", b""];
+        for (ts, maxlen) in (100u64..).zip(defer) {
+            assert!(
+                direct
+                    .execute_plain_lpos_maxlen_borrowed(b"l", b"b", maxlen, ts, None)
+                    .is_none(),
+                "lpos MAXLEN must defer maxlen={maxlen:?}"
+            );
+            let f = direct.execute_frame(command(&[b"LPOS", b"l", b"b", b"MAXLEN", maxlen]), ts);
+            let g = generic.execute_frame(command(&[b"LPOS", b"l", b"b", b"MAXLEN", maxlen]), ts);
+            assert_eq!(f, g, "defer maxlen={maxlen:?}");
+        }
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+    }
+
+    #[test]
     fn plain_lpos_owned_argv_reports_the_option_the_client_sent() {
         // (frankenredis-uu33c) This argv is what slowlog, latency sampling and the
         // threat digest reconstruct the command from. The keyword used to be a
