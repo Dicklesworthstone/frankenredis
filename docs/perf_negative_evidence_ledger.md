@@ -62874,3 +62874,90 @@ gate or otherwise.
 2. Do NOT cite `8456`'s "discarded UTF-8 validation" as open. The fast path returns before it.
 3. `sort_ro_alpha` n=3 remains undiagnosed. Start from a frame census on a current ELF, not from
    either pattern above.
+
+## 2026-08-18 CrimsonHawk: MEASURED — slice 7 is worth **-187 instr/key (-1.23 pct)** on the SERVER shape, not the -1588 the micro-driver showed; and my "6.9 pct of the gap" claim was an extrapolation I had already warned against
+
+Claim class: SELF-SPEEDUP. Campaign output: no. **No ratio was taken this turn.** A build freeze
+landed mid-measurement (/data at 34G, below the 42G brake, no cargo and no artifact writes), so the
+fr arm was drawn and the incumbent arm was not. Combining today's fr numbers with an earlier session's
+redis arm would break the same-invocation requirement, so no fr/redis figure appears here and the
+certified board figure remains **1.5139x** from `6177c6ac2`.
+
+    fr lzf_compress per key, 200 x 40-field listpack hashes, DEBUG RELOAD, two-point at 4 and 8
+
+    draw   before (slices 5-6)   after (slice 7)   delta    loadavg 1m   CPU MHz
+      1              15196.0            15009.0    -187.0        5.48       2509
+      2              15196.0            15009.0    -187.0        5.48       3103
+      3              15196.0            15009.0    -187.0        5.44       2508
+
+bench_elf_sha256=a4969a8f72d1e6209fc314452a3ad3a4dcfcfbfe0295cb062e19a588b4dd5219 (fr; the incumbent arm was not drawn).
+
+Bit-identical across three draws again, including across a 3103 -> 2508 MHz change.
+
+### I EXTRAPOLATED A MICRO-DRIVER NUMBER TO THE SERVER AFTER WRITING DOWN THAT THIS IS WRONG
+
+`a41ab2697` sized slice 7 from the example driver and then said: "Amortised: 1048 instructions per
+compression, against a total compressor cost of 15,196 per key on the server shape. That is **~6.9
+pct of fr's side of the certified 1.5139x gap**, spent on a clear."
+
+That sentence took a per-call cost measured in a micro-driver and divided it by a SERVER-measured
+denominator, which silently asserts that the micro-driver's call pattern is the server's. It is not.
+Measured directly, the whole of slice 7 is worth **1.23 pct** on the server shape, not 6.9 pct from
+the memset alone — an **8.5x over-statement**, and this time in the unfavourable direction.
+
+The galling part is that `970486bc4` had already recorded the rule, three rows earlier: "Quote
+micro-driver deltas as evidence that a lever works, never as the size it will have in the product."
+I wrote that after being wrong by a third in the favourable direction, and then wrote the 6.9 pct
+sentence anyway. **A rule recorded in the ledger is not a rule applied; the check has to happen at the
+point where the number is written down.**
+
+### WHAT THE GAP BETWEEN 1588 AND 187 MOST LIKELY MEANS, STATED AS A HYPOTHESIS
+
+The example's win decomposed (in `27ddbd824`) into 1048.7 from the memset and 6092 from a per-probe
+mask, on a 3000-byte incompressible payload. On the server shape the entire delta is 187.
+
+The memset component only exists when the 8-bit generation actually WRAPS, which needs more than 255
+compressions against a WARM thread-local scratch. The micro-driver does 2000-4000 compressions in one
+process on one thread, so it wraps constantly. Whether the server's save path presents hundreds of
+consecutive compressions to one warm `LZF_SCRATCH` is exactly the assumption I never checked, and if
+it does not — a fresh scratch per save, or per thread — then there is no wrap, no clear, and nothing
+for that 1048.7 to save.
+
+**This is a hypothesis, not a finding.** Confirming it needs a callgrind run against the server with
+the memset frame isolated, which is an artifact write and is frozen. It is written down so the next
+window starts from the right question instead of re-deriving it.
+
+What is NOT in doubt: slice 7 is a real 1.23 pct on the shape that matters, it is bit-identical across
+draws, and the 262-test suite including the representation-switch coverage passes. Nothing needs
+reverting.
+
+### TWO INSTRUMENT FINDINGS FROM VERIFYING THE BUILD
+
+Before publishing the -187 I had to rule out a stale binary, since the number was 8.5x smaller than
+predicted and rch has silently returned stale or incomplete artifacts twice this session.
+
+  1. **An inlined type leaves NO symbol, so symbol absence proves nothing.** `nm -C | grep Packed16`
+     returned 0 for the server ELF — and also 0 for the example ELF that demonstrably contains slice 7
+     and measured its win. `LzfPacked16Table::{get,set}` are `#[inline]` and fold entirely into the
+     dispatch monomorphisation. Reading that 0 as "the build is stale" would have been a false alarm,
+     and it is the same class of error as the standing law that a 0.000 call count is evidence only if
+     the callee is its own frame.
+  2. **Const-generic values in a monomorphised symbol name ARE a reliable build-provenance check.**
+     The server ELF contains exactly one `lzf_compress_dispatch::<true, true, false, false, true,
+     true, true>` — seven parameters, WIDETAG last and true. A pre-slice-7 binary would carry a
+     six-parameter name. That is a direct, cheap read of what the compiler actually instantiated, and
+     it is now the way to answer "did my change reach this ELF" without running anything.
+
+### RETRY PREDICATE
+
+  1. First job in the next unfrozen window: isolate the memset frame in a SERVER-shape callgrind run
+     and settle whether the wrap-clear happens there at all. If it does not, slice 7's server-shape
+     value is the per-probe mask alone, and the memset half of `27ddbd824`'s decomposition is a
+     micro-driver artefact — which would also mean the sized follow-up (the redundant `& 0xFF` in the
+     8-bit path) is the better-value remaining item, not the leftover.
+  2. Re-price the certified 1.5139x only with BOTH arms in one invocation and the gate FIT at both
+     brackets. The fr arm alone is 15009.0 and is recorded here so the next attempt can be a single
+     redis-arm draw plus arithmetic — but that arithmetic is NOT a certification and must not be
+     filed as one.
+  3. Stop dividing micro-driver deltas by server-measured denominators. If a row wants to state a
+     fraction of the gap, the numerator has to come from the same shape as the denominator.
