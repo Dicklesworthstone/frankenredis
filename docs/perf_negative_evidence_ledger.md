@@ -51259,3 +51259,32 @@ active reaping happens and proves nothing about what is published when it does. 
 shows a test depending on per-command expire cadence, that test is the evidence to weigh, not an
 obstacle to route around. Do NOT re-derive the 148 call sites or the upstream guard; both are
 cited above with line numbers.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: ADDENDUM — the blocker on the expire-cycle patch is CLEARED and the patch still applies; what remains owed is the suite run and the notification/replication check, not the build
+
+`26b7686b2` held a measured expire-cycle rate limit (plain `GET` -27.2 pct, volatile-keyspace
+`GET` -37.1 pct) because `cargo test -p fr-runtime` did not compile at pristine HEAD. That
+statement is now STALE and this corrects it rather than leaving a wrong "held because" on main.
+
+  `57b289ba1` (getexgate) -- "repair the test build at PRISTINE HEAD: 11 call sites left behind
+  by the read-gate threading batches, across mod tests and one integration test" -- landed
+  immediately after that row. The stale `execute_plain_bitcount_borrowed(key, None, ts)` call
+  sites I cited are gone from HEAD.
+
+REBASE CHECKED, not assumed: `scratchpad/expire_ratelimit.patch` still applies cleanly to
+HEAD's `crates/fr-runtime/src/lib.rs` under `patch --dry-run`, and the structure it targets is
+unchanged -- 148 `run_active_expire_cycle(now_ms, Fast)` call sites and
+`last_active_expire_cycle: Option<ActiveExpireCycleStats>` still at :4201.
+
+NOT RUN THIS TURN, and the reason is a rule rather than an obstacle: a peer's
+`cargo test -p fr-store -p fr-persist --lib` is in flight and this project allows ONE build at a
+time. Verified by `pgrep`, not taken from a brief -- the brief and the host have disagreed
+before in both directions.
+
+WHAT IS STILL OWED IS UNCHANGED and is not the build: `cargo test -p fr-runtime` green, plus a
+keyspace-notification and replica-propagation check on ACTIVELY expired keys.
+`propagate_expired_key_deletions` runs 2.00 times per op on the before arm, and the three-engine
+differential in `26b7686b2` deliberately never reads the expiring keys -- it proves reaping still
+happens and proves nothing about what is published when it does. A -37 pct number is exactly the
+kind that makes skipping that check attractive.
