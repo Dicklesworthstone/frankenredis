@@ -2992,7 +2992,13 @@ const LISTPACK_BLOB_OVERHEAD: usize = 7;
 /// `encode_listpack_entry` appends for `entry` (header/payload + backlen), so a
 /// running sum reproduces `encode_listpack_strings_blob(..).len()` without
 /// encoding. Used to pack quicklist nodes incrementally in O(n).
-fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
+/// (frankenredis-qj6jn) Exposed so `fr-store` can PIN its own copy of this rule against it.
+/// `fr_store::list_lp_entry_bytes` is an independent implementation of the same listpack entry
+/// layout, and two shipped levers add its result straight into a chunk's `lp_bytes`, which
+/// decides quicklist node boundaries and therefore DUMP bytes. Nothing kept the two in step
+/// but a comment; `list_lp_entry_bytes_matches_fr_persist_twin_qj6jn` does now.
+#[doc(hidden)]
+pub fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
     fn backlen_len(len: usize) -> usize {
         if len <= 127 {
             1

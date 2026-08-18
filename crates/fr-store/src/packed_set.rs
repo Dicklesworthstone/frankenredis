@@ -3487,9 +3487,9 @@ impl ListChunk {
     /// already computed this element's listpack length. `bulk_from_back`'s tail loop computes
     /// it for the ListValue's own `lp_bytes` and then this function recomputed the identical
     /// value for the CHUNK's -- measured at 78 calls per key per reload, 2,574.0 instr/key.
-    fn push_back_owned_sized(&mut self, elem: Vec<u8>, added: u64) {
-        debug_assert_eq!(added, list_lp_entry_bytes(&elem));
-        self.push_back_owned_impl(elem, added);
+    fn push_back_owned_sized(&mut self, elem: Vec<u8>, added: EntryBytes) {
+        debug_assert_eq!(added, EntryBytes::of(&elem));
+        self.push_back_owned_impl(elem, added.get());
     }
 
     fn push_back_owned(&mut self, elem: Vec<u8>) {
@@ -3724,8 +3724,8 @@ impl ChunkedList {
     /// one-element chunk is built directly rather than through `ListChunk::from_vec`, whose
     /// `owned_listpack_bytes` would walk that single element to derive the number we already
     /// hold -- `LIST_LP_OVERHEAD + added` is that number by definition.
-    fn push_back_with_fill_sized(&mut self, elem: Vec<u8>, fill: i64, added: u64) {
-        debug_assert_eq!(added, list_lp_entry_bytes(&elem));
+    fn push_back_with_fill_sized(&mut self, elem: Vec<u8>, fill: i64, added: EntryBytes) {
+        debug_assert_eq!(added, EntryBytes::of(&elem));
         if let Some(back) = self.chunks.back_mut()
             && back.accepts_append(&elem, fill)
         {
@@ -3738,7 +3738,7 @@ impl ChunkedList {
         }
         self.chunks.push_back(ListChunk::Owned {
             elems: Arc::new(Vec::from([elem])),
-            lp_bytes: LIST_LP_OVERHEAD + added,
+            lp_bytes: LIST_LP_OVERHEAD + added.get(),
             front_biased: false,
         });
         self.len += 1;
@@ -4257,6 +4257,32 @@ fn list_lp_backlen_bytes(data_len: u64) -> u64 {
 /// Exact number of listpack bytes one element occupies (encoding header/int
 /// width + payload + backlen) — mirrors `encode_listpack_entry` /
 /// `encode_listpack_integer_entry` in `lib.rs`.
+/// (frankenredis-qj6jn) A listpack entry length that PROVABLY came from
+/// [`list_lp_entry_bytes`], because that is its only constructor.
+///
+/// The sized push twins add this value straight into a chunk's `lp_bytes`, and `lp_bytes`
+/// feeds `accepts_append` -> chunk boundary -> one quicklist node per chunk -> DUMP payload.
+/// So a wrong length here is not a performance bug, it is a WRONG ANSWER against the
+/// incumbent, and in release the `debug_assert`s that used to be the only guard are compiled
+/// out. Wrapping it makes `elem.len()`, a stale local, or the value for a different element
+/// fail to COMPILE rather than fail silently on the wire. The value still travels as a bare
+/// `u64`, so the levers this protects keep their saving.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct EntryBytes(u64);
+
+impl EntryBytes {
+    /// The ONLY way to make one.
+    #[inline]
+    fn of(elem: &[u8]) -> Self {
+        Self(list_lp_entry_bytes(elem))
+    }
+
+    #[inline]
+    const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 fn list_lp_entry_bytes(elem: &[u8]) -> u64 {
     let data_len: u64 = if let Some(v) = list_lp_int(elem) {
         if (0..=127).contains(&v) {
@@ -4680,8 +4706,8 @@ impl ListValue {
         if Self::tail_entry_bytes_carry_enabled() {
             for v in tail {
                 raw_add += v.len() as u64;
-                let entry_bytes = list_lp_entry_bytes(&v);
-                list.lp_bytes += entry_bytes;
+                let entry_bytes = EntryBytes::of(&v);
+                list.lp_bytes += entry_bytes.get();
                 match &mut list.repr {
                     ListRepr::Packed(p) => p.push_back(&v),
                     ListRepr::Deque(d) => {
@@ -4717,12 +4743,20 @@ impl ListValue {
         }
     }
 
+    /// (frankenredis-qj6jn) Compute this element's listpack length ONCE. `add_entry_bytes`
+    /// computed it for the ListValue's total and `push_back_owned` then recomputed the
+    /// identical value for the CHUNK's -- measured at 27.00 instructions per element, exactly,
+    /// on two disjoint sizes of the loader's tail (`4c2ed3ecf`). This is the same redundancy on
+    /// the LIVE RPUSH path.
     pub fn push_back(&mut self, elem: Vec<u8>) {
-        self.add_entry_bytes(&elem);
+        let entry_bytes = EntryBytes::of(&elem);
+        self.lp_bytes += entry_bytes.get();
         self.maybe_promote(elem.len());
         match &mut self.repr {
             ListRepr::Packed(p) => p.push_back(&elem),
-            ListRepr::Deque(d) => Arc::make_mut(d).push_back_with_fill(elem, self.fill),
+            ListRepr::Deque(d) => {
+                Arc::make_mut(d).push_back_with_fill_sized(elem, self.fill, entry_bytes);
+            }
         }
     }
 
@@ -4742,11 +4776,14 @@ impl ListValue {
     /// lists) needs an owned element (uncommon), where this `to_vec()`s exactly as before. Same
     /// `add_entry_bytes`/`maybe_promote`/repr dispatch ⇒ byte-identical to `push_*(elem.to_vec())`.
     pub fn push_back_borrowed(&mut self, elem: &[u8]) {
-        self.add_entry_bytes(elem);
+        let entry_bytes = EntryBytes::of(elem);
+        self.lp_bytes += entry_bytes.get();
         self.maybe_promote(elem.len());
         match &mut self.repr {
             ListRepr::Packed(p) => p.push_back(elem),
-            ListRepr::Deque(d) => Arc::make_mut(d).push_back_with_fill(elem.to_vec(), self.fill),
+            ListRepr::Deque(d) => {
+                Arc::make_mut(d).push_back_with_fill_sized(elem.to_vec(), self.fill, entry_bytes);
+            }
         }
     }
 
@@ -7602,6 +7639,51 @@ mod tests {
              if this now matches, the node-blob assertions above have stopped discriminating \
              and this test needs a new adversary"
         );
+    }
+
+    /// (frankenredis-qj6jn) PIN the two independent implementations of the listpack entry
+    /// size rule together.
+    ///
+    /// `fr_store::list_lp_entry_bytes` and `fr_persist::listpack_entry_encoded_len` encode the
+    /// SAME upstream layout in two crates. Two shipped levers add the fr-store result straight
+    /// into a chunk's `lp_bytes`, which decides node boundaries and therefore DUMP bytes, and
+    /// in release nothing checks it. Until now the only thing keeping them in step was a
+    /// comment, so a parity fix applied to one copy would silently change bytes on the wire.
+    ///
+    /// The corpus is every boundary the two implementations branch on, written as literals
+    /// rather than generated, so it cannot inherit a bug from either side.
+    #[test]
+    fn list_lp_entry_bytes_matches_fr_persist_twin_qj6jn() {
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for n in [
+            "0", "1", "127", "128", "-1", "-4096", "-4097", "4095", "4096", "32767", "-32768",
+            "32768", "8388607", "-8388608", "8388608", "2147483647", "-2147483648",
+            "2147483648", "9223372036854775807", "-9223372036854775808",
+        ] {
+            cases.push(n.as_bytes().to_vec());
+        }
+        for t in ["007", "-0", "+1", "1.0", "", " 1", "1 ", "0x10", "9223372036854775808"] {
+            cases.push(t.as_bytes().to_vec());
+        }
+        for len in [0usize, 1, 63, 64, 65, 4095, 4096, 4097] {
+            cases.push(vec![b'q'; len]);
+        }
+        for len in [126usize, 127, 128, 16_380, 16_384] {
+            cases.push(vec![b'z'; len]);
+        }
+
+        for case in &cases {
+            let ours = super::list_lp_entry_bytes(case);
+            let theirs = fr_persist::listpack_entry_encoded_len(case) as u64;
+            assert_eq!(
+                ours, theirs,
+                "fr-store and fr-persist disagree on the listpack length of {:?} (len {}): \
+                 a divergence here moves quicklist node boundaries and so changes DUMP bytes \
+                 against the incumbent",
+                String::from_utf8_lossy(&case[..case.len().min(24)]),
+                case.len()
+            );
+        }
     }
 
     #[test]
