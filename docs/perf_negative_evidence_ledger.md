@@ -60338,3 +60338,80 @@ otherwise.
 2. The ~4.0 GB of pre-existing dirs is still unreclaimed and still needs an owner's decision.
 3. Before implementing anything on a leased path, MESSAGE THE HOLDER FIRST. A lease means someone
    is working there, which is a reason to ask rather than only a reason to wait.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: `sinter_big`'s 48.3 pct in `CompactFieldMap` is NOT two lookup paths to unify — `lookup_slot` is a HASH-ONLY WRAPPER over `lookup_slot_prehashed`, and the split is inherent
+
+Claim class: SELF-SPEEDUP sizing (fr-only; no incumbent ratio is claimed).
+Campaign output: no — a short negative row so the next profiler does not read a two-path
+optimisation into a one-path structure.
+
+Surveying unprofiled expensive shapes for a lever: `sinter_big` 168,662 instr/op (dispatch 0.5
+pct), `zrangestore_200` 117,375 (0.8 pct), `keys_star_64` 22,877 (2.1 pct), `scan_match` 4,385.9
+(14.7 pct). The first is dominated by one structure:
+
+     47,939  CompactFieldMap::lookup_slot_prehashed     28.3 pct
+     27,136  encode_bulk_string_slice                   16.0 pct
+     22,016  CompactFieldMap::lookup_slot               13.0 pct
+     21,217  Store::sinter_borrow_scan                  12.5 pct
+     11,783  CompactFieldMap::field_at                   7.0 pct
+     10,258  GenericSetIter::next                        6.1 pct
+     10,023  __memcmp_avx2_movbe                         5.9 pct
+      8,704  SetValue::contains                          5.1 pct
+
+**CompactFieldMap totals 81,738 instr/op = 48.3 pct of the shape.** Two lookup symbols appearing
+side by side at 47,939 and 22,016 reads like two implementations to unify, and that is the trap.
+
+### WHY IT IS NOT A LEVER
+
+`lookup_slot` is four lines:
+
+    fn lookup_slot(&self, field: &[u8]) -> Option<(usize, usize)> {
+        self.lookup_slot_prehashed(field, self.hash(field))
+    }
+
+It is the SAME path plus a hash. So the 22,016 is not a second algorithm competing with the
+first — **it is the hash computation** for callers that do not already hold one, and
+`lookup_slot_prehashed`'s 47,939 is the probe both forms share.
+
+That is only waste if something hashes the same field twice. It does not: each looked-up element
+is distinct, so each needs its own hash, and `SetValue::contains` routes Generic sets to a
+hashbrown `GenericSet` rather than back through the compact map. There is no double-hash to
+remove.
+
+### AND THE GROUND IS ALREADY WON
+
+`check-candidate` returns **74 prior rows** on `CompactFieldMap` and 14 on
+`lookup_slot_prehashed`. MossyBluff's competitive rows put fr at **3.2237x** (SINTERSTORE),
+**2.8835x** (SDIFFSTORE) and **15.5322x** (SUNIONSTORE) against live Redis at saturated P16. A
+48 pct concentration in the structure doing the intersection is that structure doing its job on a
+family where fr already dominates — not a deficit.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No A/B, no ratio, no A/A: this is a single-arm frame census plus source reading, so no null
+applies and none is claimed. Instructions by two-point subtraction with `--fr-only`, load-immune.
+CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           fr `114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f`
+  bench_elf_sha256=114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+  incumbent     NOT RUN — the 3.2x/2.9x/15.5x figures are quoted FROM MossyBluff's rows, not
+                re-derived here.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`, `frame_delta.py`.
+  host          /data 47G free, 5G above the brake, loadavg 5.79 6.42 6.70; no local build. Four
+                survey runs reaped their own dumps (delta 0); the one `--keep-dumps` dump for the
+                frame census is 468 KB.
+  disposition   NO LEVER OPENED. No source file changed.
+
+### RETRY PREDICATE
+
+1. Do NOT open a lever to "unify the two CompactFieldMap lookup paths". There is one path;
+   `lookup_slot` is `lookup_slot_prehashed` plus a hash.
+2. A prehashed/non-prehashed pair in a profile is worth ONE source read before it is worth a
+   hypothesis. The wrapper here is four lines and settles it.
+3. `encode_bulk_string_slice` at 27,136 instr/op (16.0 pct) on this shape is the only frame here
+   NOT owned by the set-algebra rows. It is reply encoding for a large result and is untouched by
+   this row.
