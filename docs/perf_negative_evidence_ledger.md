@@ -43840,3 +43840,93 @@ and an effect inside that interval is not claimed.
    function X") can be an artefact of inlining. Attribute it in the BINARY with `--callers`
    before filing it as separate work. This is the fifth static-structure claim of mine this
    campaign that measurement corrected.
+
+## 2026-08-18 CrimsonHawk: REJECT (SELF-SPEEDUP) — the next write-gate batch is 17 predicates, not 23, and FIVE of them are multi-executor. The map is pre-computed so the SCARD failure cannot repeat (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — no code ships. Source enumeration only; the host measured 1.5 pct CPU
+idle at the time, so no build, no `cargo check` and no measurement were performed.
+
+### A CORRECTION TO MY OWN COUNT
+
+`1aaa6ad9d` said "19 predicates already take a cached answer and 23 do not". The 23 was counted
+over EXECUTORS, not over distinct predicates — several executors share one predicate, so the
+figure double-counts. **Deduplicated, there are 17 unthreaded write predicates.** The 23 is not
+wrong about executors; it is wrong as a count of edits, which is how a reader would use it.
+
+### THE MAP, PRE-COMPUTED SO THE FAILURE MODE CANNOT REPEAT
+
+SCARD regressed because one predicate had an executor I did not thread. That is detectable
+before any edit, and here it is for all 17:
+
+  MULTI-EXECUTOR — thread ALL of them or none:
+
+    3  can_execute_plain_zremrange_borrowed      zremrangebylex, zremrangebyrank, zremrangebyscore
+    2  can_execute_plain_getset_borrowed         getset, getset_into
+    2  can_execute_plain_key_arg1_write_borrowed list_pop_count, spop_count
+    2  can_execute_plain_lmove_borrowed          lmove, lmove_into
+    2  can_execute_plain_rpoplpush_borrowed      rpoplpush, rpoplpush_into
+
+  SINGLE-EXECUTOR: the remaining 12.
+
+`can_execute_plain_zremrange_borrowed` is the highest-leverage single edit left on the write
+side — one predicate covering ZREMRANGEBYLEX, ZREMRANGEBYRANK and ZREMRANGEBYSCORE — and by the
+same token the highest-risk, because missing any one of its three executors reproduces SCARD
+exactly. `can_execute_plain_key_arg1_write_borrowed` is the one to watch for a different
+reason: its two executors are LPOP/RPOP-with-count and SPOP-with-count, which are different
+COMMAND FAMILIES sharing a predicate, so its command coverage cannot be read off the predicate
+name the way `PlainCardinalityCmd` could not be read off the discriminant.
+
+The `_into` pattern accounts for three of the five: an executor and its
+reply-written-in-place twin share one predicate. That is a naming regularity, so it can be
+checked mechanically rather than remembered.
+
+### COUNTED MECHANISM
+
+A source enumeration over `crates/fr-runtime/src/lib.rs` at HEAD `5b2f6382c`: resolve every
+`fn` body, select predicates that reach `plain_borrowed_default_key_write_allows` and do not yet
+accept `default_write_allowed`, then count executors calling each. Exact function counts, not
+estimates: 17 predicates, 5 multi-executor, 12 single, executor multiplicities 3/2/2/2/2.
+
+No NEW measurement was taken for this row. The mechanism it targets was counted earlier and is
+banked in `552062a92` and `1aaa6ad9d`: the write gate is a flat **187.0 instructions per op** on
+every unconverted route and 0.0 on every converted one, with an exact call count of 1.0000
+calls/op unconverted against 0.0000 calls/op converted, and no intermediate value on any shape
+measured. That is what each of the 17 edits recovers, and it is why the count of edits is the
+useful quantity here.
+
+The instrument those counts came from carries its own null, measured in a single invocation of
+the same harness on one ELF and one shape: A/A null median 1.000002, bootstrapped over 20,000
+resamples, 95% median CI [0.996069, 1.003947], from six draws and 30 pairwise ratios (banked in
+`0bf781d57`). Call counts are deterministic integers, so that null bounds the instruction arm
+rather than the counts.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted
+above, and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  source        `crates/fr-runtime/src/lib.rs` at HEAD `5b2f6382c`, read only.
+  ELF           NONE BUILT for this row. The 187.0 instr/op and the 1.0000/0.0000 call counts it
+                cites were measured earlier on `fr_head2`, re-verified by sha256sum:
+  bench_elf_sha256=c13d2f7f6a349a8212c4173b8d327af07e23ac55f9887a4fe8f49caff9caa42a
+  incumbent     NOT RUN.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 79G free (checked
+                immediately, and no build was started). loadavg 29.58 21.65 26.79; **CPU idle
+                measured at 1.5 pct** with 0.0 pct iowait in a 10 s /proc/stat delta — the host
+                was SATURATED, which is why this turn is source-only. The status line for this
+                window reported 88 pct idle; my own sample did not agree and the sample governs.
+  admissibility No ratio, instruction count or timed row is claimed, so host state does not bear
+                on this row's validity. It is recorded because a reader must be able to tell a
+                source row from a measured one.
+
+### RETRY PREDICATE
+
+1. Take `can_execute_plain_zremrange_borrowed` first among the write predicates: one edit, three
+   commands, and all three executors are named above so the SCARD mode is closed by
+   construction. Verify with `call_count_delta.py --callers
+   plain_borrowed_default_key_write_allows` — every one of the three must go 1.0000 -> 0.0000.
+2. Do NOT infer command coverage from a predicate's name. `key_arg1_write` serves two different
+   families; `PlainCardinalityCmd` excluded SCARD. Enumerate.
+3. This map is valid at `5b2f6382c`. Re-run the enumeration if peers land executors in between —
+   it costs no build and takes seconds.
