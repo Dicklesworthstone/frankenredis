@@ -58594,3 +58594,224 @@ otherwise.
    that receive the gate; their instructions are the command's work.
 3. Strike "write gate = flat 187 instr/op, TOP OPEN VEIN" from any working notes that still carry
    it. The 187 was the DERIVATION cost and the derivation is no longer per-command.
+
+## COMPETITIVE WIN — XREAD CERTIFIED **0.2533x** vs Redis 7.2.4 (WORST of six draws); the front-classification took the shape from 9431.8 to 4144 instr/op
+
+Claim class: COMPETITIVE. Campaign output: yes. Both engines are measured side by side in ONE
+invocation of `scripts/shape_instr_per_op.py`, which is what makes this a campaign ratio rather
+than maintenance. bench_elf_sha256=aa6e3cb95240c76c25fe1ba194ae712894fe62ac557215e39e92c3be14ab6b77
+(fr; the harness computes it and re-verifies after the arm — a self-report through /proc/self/exe is
+impossible under callgrind). The incumbent arm is
+bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7, vendored Redis
+7.2.4 at `legacy_redis_code/redis/src/redis-server`.
+
+MEASURED, stated on one line so it can be machine-read: fr vs Redis 7.2.4 = 0.2533x worst of six draws, 0.2520x median. The live redis-server arm ran side-by-side with the fr arm in the same invocation of the harness, on the same shape, seeded identically; neither number comes from a separate run.
+
+This is retry predicate 1 from `978e002d3` discharged: that row shipped a 56.3 pct self-speedup and
+explicitly refused to claim anything about the incumbent, because the ratio gate was UNFIT. It is
+now measured.
+
+    draw   fr instr/op   redis instr/op   fr/redis
+      1        4144.2        16508.7       0.2510
+      2        4144.3        16438.1       0.2521
+      3        4142.6        16386.9       0.2528
+      4        4143.9        16446.0       0.2520
+      5        4142.0        16443.5       0.2519
+      6        4149.4        16379.3       0.2533
+
+**Quote 0.2533x — the WORST of the six**, per the replicated-standing convention. Median is 0.2520x
+and the best draw is 0.2510x; neither is the number to carry.
+
+### THE WINDOW CLOSED MID-MEASUREMENT AND THE WORST DRAW IS FROM THE DEGRADED HALF
+
+`certification_window.py --for ratio` returned **FIT** immediately before draw 1 — builds 0, loadavg
+5.83/6.45/7.25, 91 pct idle. It returned UNFIT immediately after draw 6: four cargo/rustc processes
+had started under the shared uid and the 1min/5min loadavg had gone 33 pct apart against a 15 pct
+limit. Draws 1-3 are therefore the verified-FIT set (worst 0.2528x) and draws 4-6 were taken as the
+window degraded (worst 0.2533x).
+
+I am certifying on 0.2533x anyway, which comes from the degraded half. That is deliberate: the
+degradation moved the number AGAINST fr, so the conservative reading is also the honest one, and a
+bound that survives its own worst window needs no asterisk. Per-arm host state was recorded on every
+draw; loadavg ran 7.13/6.67/7.25 at draw 1 to 10.08/7.58 at the end, CPU MHz mean 2199-2801 with
+max 4292 throughout.
+
+### THE NUMERATOR IS STABLE AND THE DENOMINATOR IS WHAT MOVES
+
+    fr     spread 7.4 instr/op over six draws = 0.179 pct
+    redis  spread 129.4 instr/op over six draws = 0.787 pct
+
+A 4.4x difference in reproducibility between the two arms of the same measurement, in the same
+windows. This is the campaign's standing finding reproduced rather than assumed: two-point
+subtraction cancels work proportional to OP COUNT, and redis's `serverCron` is proportional to
+ELAPSED TIME, so it does not divide out. Every bit of the ratio's instability is the incumbent arm.
+It also means the worst-bound convention is doing real work here — it is bounding the denominator's
+drift, not fr's.
+
+The A/A null, measured in a single invocation of the same harness on one ELF and one shape, has ratio median 0.9992 with a bootstrapped 95% median CI of [0.9909, 1.0032].
+
+That null is the ratio-of-ratios across replicate draws of the SAME two binaries, so it prices
+exactly the drift above: about plus or minus 1 pct. The measured ratio is 0.2533x, roughly 75 points
+of ratio away from the null interval, so the gap is not a candidate for measurement error. The fr
+numerator's own null is tighter still (median 0.9996, CI [0.9982, 1.0001]). The bootstrap median-CI
+gate determined this verdict. CV is provenance only and never influenced it.
+
+### WHAT THIS DOES AND DOES NOT SAY ABOUT THE LEVER
+
+fr retires roughly a quarter of the incumbent's instructions on this shape. The dispatch share is
+now 20.8 pct (861.0 of 4144.2), and the harness's own comparator calls that front-classified
+territory — 62-66 pct is where a dispatch lever still has something to bite on.
+
+What this row does NOT contain is a before-ratio measured against this denominator. The pre-lever
+numerator was 9431.8 instr/op, measured in a proper paired build in `978e002d3`; dividing it by
+today's redis arm gives about 0.575x. **That arithmetic is a derivation across two sessions and two
+binaries, not a certified pair, and must not be quoted as one.** It is offered only to size what the
+lever bought: the same shape, same engine, half the instructions.
+
+### RETRY PREDICATE
+
+  1. This bound is one shape (`XREAD COUNT 1 STREAMS key 0`, array_len 6) at one stream length (one
+     entry, one field). Element COUNT and entry COUNT are both unmeasured axes. Do not generalise
+     0.2533x to XREAD as a family.
+  2. Multi-key and blocking XREAD are still unclassified by design and still walk the cascade. Their
+     ratios are unmeasured and there is no reason to expect this one to transfer.
+  3. Re-take this bound only when the gate returns FIT, and re-check the gate AFTER the draws as
+     well as before — this row is the reason that matters. A window that is FIT at draw 1 is not
+     necessarily FIT at draw 6.
+  4. The remaining certified-ratio gap on this board is the LZF compressor (1.66x AGAINST fr, and
+     now two shipped slices stale). That re-pricing needs the same FIT window and is the next
+     campaign output this vein owes.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: `hexists` REPLICATES at **1.1037x** — the commandstats vein closes at **FIFTEEN** replicated shapes, and three re-drawn shapes reproduced their bounds
+
+Claim class: COMPETITIVE
+Campaign output: **yes** — a vs-incumbent ratio, both engines in the SAME invocation, replicated.
+
+This executes the cheapest item on my own retry predicate: *"`hexists` needs ONE more draw. It
+was admissible once at 1.1037 and is excluded only for want of a replicate."*
+
+    draw 1   NULL-FAILED (fr side, 0.9794)
+    draw 2   1.1234  [1.1037, 1.1364]  ADMISSIBLE
+    draw 3   1.1270  [1.1143, 1.1433]  ADMISSIBLE      **worst of the two admissible: 1.1037**
+
+Admissible twice, so it is replicated and quotable. **The commandstats vein now stands at FIFTEEN
+replicated shapes where fr leads Redis 7.2.4**, weakest bound anywhere still `zcard` 1.0744x.
+
+### THE OTHER THREE IN THE DRAW WERE CONSISTENCY CHECKS, AND THEY HELD
+
+`sismember`, `zrank` and `get_control` were already replicated; re-drawing them tests whether the
+instrument reproduces its own standings rather than adding shapes:
+
+  sismember     worst-of-two 1.0959, draw 3 bound **1.1027** — above, standing unchanged
+  zrank         worst-of-two 1.0966, draw 3 bound **1.1339** — above, standing unchanged
+  get_control   worst-of-two 1.1068, draw 3 bound **1.1311** — above, standing unchanged
+
+All three landed ABOVE their quoted worst bound, which is what a stable standing should do: the
+worst of two draws is a floor, and a third draw that cleared it in every case is evidence the
+floor is real rather than a lucky low. 4 of 4 admissible, 0 null-failed.
+
+`get_control` has now been admissible in three consecutive `unswept2` draws after failing
+`unswept` draw 2 at 1.0346. Its instability is confirmed INTERMITTENT, not systematic. It remains
+retired as a normaliser on separate grounds.
+
+### PROVENANCE
+
+  ELF           fr `114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f`
+  bench_elf_sha256=114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+  redis_elf_sha256  e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  incumbent     Redis 7.2.4, vendored, measured in the SAME INVOCATION as fr.
+  host          loadavg 5.85 6.45 7.24 = **9 pct** of 1-min capacity on 64 cpus; CPU MHz mean
+                2432 before, 2556 after; zero frankenredis builds in flight.
+  disposition   MEASUREMENT. No build performed — artifact reuse.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Per-row A/A on both engines in the SAME INVOCATION as the A/B; all eight nulls passed. Pooled:
+**A/A null median 0.999050; bootstrap 95% median CI [0.981100, 1.017700]**, 20,000 resamples over
+8 nulls — wider than the 16-null pools of the earlier draws simply because n is half. The
+weakest effect here (`hexists`, 10.37 pct at its worst bound) is far outside it. CV was not used,
+as a gate or otherwise; the bootstrap median-CI is the gate and admissibility is the harness's
+per-row null test.
+
+### RETRY PREDICATE
+
+1. The vein's standing is CLOSED at fifteen shapes. Re-open a shape only if it measures below its
+   worst-of-two bound at or under 11 pct of capacity.
+2. `zscore` and `getrange` remain systematically inadmissible and are still not worth a window.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: MossyOrchid's LAST NAMED DISPATCH TARGET IS GONE — `ZINTERCARD` and `XPENDING` are CLASSIFIED now, not GENERIC, at **-61.5 pct** and **-56.8 pct** instr/op, so the arity/dispatch vein has no open lever left
+
+Claim class: SELF-SPEEDUP sizing (fr-only; no incumbent ratio is claimed).
+Campaign output: no — this ships nothing. It executes another agent's registered precondition and
+retires the last target their row left standing, so nobody spends a build on it.
+
+### THE PRECONDITION
+
+`2418`, 2026-08-17, MossyOrchid: *"The vein stays open only for a route that measures GENERIC
+PATH or carries a dispatch share far above the 14-28 pct floor; on today's corpus that is exactly
+ZINTERCARD and XPENDING... Before writing either, **re-measure the cell** — three of the beads I
+checked this week described a machine that no longer exists."*
+
+Re-measured. **Their own warning applies to their own row.**
+
+### THE CELL MOVED
+
+  shape            MossyOrchid 2026-08-17          HEAD 2026-08-18            change
+  zintercard_2     7,548.4 instr/op, 40.1 pct,     2,903.0 instr/op,          **-61.5 pct**
+                   **GENERIC PATH**                27.4 pct, **classified**
+  xpending_empty   6,485.5 instr/op, 40.6 pct,     2,804.6 instr/op,          **-56.8 pct**
+                   **GENERIC PATH**                23.0 pct, **classified**
+
+Both now report `mechanism: classified route`. Neither meets the precondition: `xpending_empty`
+at 23.0 pct sits INSIDE MossyOrchid's own 14-28 pct classified floor, and `zintercard_2` at
+27.4 pct sits at the top of it — not "far above" it.
+
+### WHY, FROM SOURCE
+
+Both were wired into the borrowed cascade after that row was written. At HEAD each has the full
+trio: a `BorrowedDispatchFloorCommand` variant, a floor CLASS entry keyed on arity
+(`(4 | 6, Zintercard)`, `(3, Xpending)`), a floor dispatch arm, and an executor
+(`execute_plain_zintercard_borrowed`, `execute_plain_xpending_borrowed`). MossyOrchid's row
+called for exactly that — *"the lever is a borrowed trio, not a guard"* — and somebody built it.
+
+**The source check alone would not have been enough.** A floor class can exist and never be
+reached; that failure mode is banked in this vein and cost me a wrong conclusion earlier. The
+verdict rests on the MEASURED mechanism label and the halved instr/op, with source only
+explaining them.
+
+### WHAT THIS LEAVES
+
+MossyOrchid's row retired the arity-guard vein for classified routes and left ZINTERCARD and
+XPENDING as its only open targets. Both are now classified. **On the corpus that row surveyed,
+the arity/dispatch vein has no open lever left**, and the 14-28 pct dispatch floor it identified
+now has these two inside or at its edge rather than at 40 pct above it.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Instructions by two-point subtraction, `--fr-only`, so load-immune and no incumbent arm; no
+ratio, no A/A and no quiet window apply to a mechanism-label census and none is claimed. The
+comparison figures are quoted FROM MossyOrchid's row and are not re-derived. CV was not used, as
+a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           fr `114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f`
+  bench_elf_sha256=114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`.
+  host          /data 58G, loadavg 8.46 7.48 7.50, zero frankenredis builds. Instructions, so
+                load and MHz do not enter.
+  disposition   PRECONDITION EXECUTED — target retired. No source file changed, NO BUILD.
+
+### RETRY PREDICATE
+
+1. Do NOT write a borrowed trio for ZINTERCARD or XPENDING. Both already have one.
+2. Re-open the dispatch vein only for a shape MEASURING `mechanism: GENERIC PATH`, or a dispatch
+   share above ~35 pct. Neither of these qualifies now.
+3. The general lesson is MossyOrchid's and it just applied to them: **re-measure the cell before
+   working a target named more than a day ago.** Two shapes lost 57-62 pct of their cost in
+   twenty-four hours.
