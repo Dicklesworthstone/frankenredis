@@ -49675,3 +49675,223 @@ RETRY PREDICATE: re-certify only if `get_control`'s dispatch frame departs from 
 would mean the routing changed, not merely the numerator), or if the fr numerator leaves the
 963-977 band across two FIT draws. A single draw outside that band is NOT grounds — that is the
 error this row corrects, and the shape's own spread reaches 28.6.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: PARITY FIX — DUMP→RESTORE→DUMP was NOT idempotent; fr validated LOADED node boundaries against its own maximal-packing rule and re-derived them, reversing redis's own payload (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: differential behaviour against a live vendored redis 7.2.4 in the same probe
+invocation, plus a frozen payload fixture captured FROM that server. No timing verdict is
+claimed, no instruction counts are quoted, and CV was NOT used, as a gate or otherwise. This row
+banks no vs-incumbent ratio. Campaign output: no.
+
+`36ab77cc4`'s predicate 1 said to start by deciding what the "head-grown" signal is for a
+RESTORE-loaded list, and offered "unknowable" as a possible answer. IT IS NOT UNKNOWABLE. Upstream
+rebuilds the quicklist FROM THE PAYLOAD's node table, so the boundaries are in the bytes — and fr
+was throwing them away.
+
+### THE INVARIANT, AND WHO HOLDS IT
+
+    built by   fill   redis original     redis after RESTORE   fr after RESTORE
+    LPUSH       -1    [2047 4087 4087]   IDEMPOTENT            [4087 4087 2047]  REVERSED
+    LPUSH      128    [1503 2183 ...]    IDEMPOTENT            [... 2183 1503]   REVERSED
+    RPUSH       -1    [4087 4087 2047]   IDEMPOTENT            IDEMPOTENT
+
+  Redis round-trips its own payload byte for byte in every case. fr round-trips only when the
+  loaded boundaries happen to coincide with what its forward re-derivation would produce.
+
+### THE CAUSE IS ONE ADMISSION CHECK THAT IS STRICTER THAN THE INCUMBENT
+
+`retained_quicklist2_chunks_match_dump_rules` refused any retained chunk set in which a previous
+node could still accept the next node's first element — i.e. it demanded MAXIMAL front-to-back
+packing. A head-grown list has its PARTIAL node first, so node 0 can obviously accept more, the
+rule refused, and `encode_dump_quicklist2` fell through to re-derivation.
+
+  UPSTREAM IMPOSES NO SUCH RULE, and its own output proves it: redis's DUMP of a head-grown list
+  is [17, 27, 27] at fill 4 and [535, 775, 775, 775, 675] at fill 128 — a partial node adjacent
+  to a full one, every time. The checks that REMAIN are the ones about validity under the CURRENT
+  fill (plain-node requirement, no node exceeding the budget, byte total matching the blob),
+  because the configured fill can have changed since the payload was loaded.
+
+### THE SECOND FIXTURE THIS ARC THAT ENCODED fr's MODEL
+
+The change failed `dump_retained_quicklist2_falls_back_for_mergeable_nodes`, which asserted that
+RESTOREing a two-node payload (["alpha"], ["bravo"]) must DUMP as ONE merged node. Per this
+bead's own rule — ASK THE INCUMBENT BEFORE ASSUMING THE FIX IS WRONG — redis was handed THOSE
+EXACT BYTES:
+
+    redis RESTORE of the 2-node payload   OK
+    OBJECT ENCODING                       quicklist
+    redis DUMP after                      byte-identical to the input, still TWO nodes
+
+  So the fixture asserted the opposite of the incumbent. Corrected to idempotence, with the
+  measurement in the doc comment. This is the second time in four commits (`92c750886` was the
+  first) that a test NAMED for redis had never been compared against it.
+
+    THE CRC64 MATTERS TO THAT CLAIM. Feeding redis a handcrafted payload needs a valid footer,
+    and minting it with fr's own crc64 would have made the experiment circular. The probe
+    implements CRC64/Jones independently and SELF-CHECKS it against a payload redis itself
+    produced; the first attempt FAILED that self-check (unreflected polynomial) and the run was
+    abandoned rather than trusted. Only the second, passing, implementation was used.
+
+### THE NEW TEST IS A FROZEN INCUMBENT PAYLOAD, AND IT WAS SENSITIVITY-CHECKED
+
+`dump_restore_dump_is_idempotent_for_head_grown_payload_qj6jn` embeds redis 7.2.4's own 89-byte
+DUMP of ten LPUSH'd elements at fill 4 — node table [17, 27, 27], partial node first — and
+asserts RESTORE-then-DUMP reproduces it exactly. Captured from a live server, not constructed
+from fr's source. Confirmed to FAIL on the pre-fix binary, which emits [27, 27, 17].
+
+### SCOPE, STATED PLAINLY
+
+This fixes RESTORE-loaded lists, whose chunks survive as `ListChunk::Listpack`. It does NOT fix
+lists built IN-PROCESS by LPUSH: those have `Owned` chunks, `retained_listpack_chunks` declines,
+and the forward accumulator still reverses them. `36ab77cc4`'s 13 exact reversals are therefore
+still open for the in-process case — but the signal question that blocked them is now answered
+for the loaded case, and answered in the affirmative.
+
+### PROVENANCE
+
+  ELF           NO SERVER BINARY WAS BUILT FOR THIS ROW, and the reason is worth recording: a
+                peer's uncommitted WIP in `crates/fr-server/src/main.rs` (an in-flight
+                `execute_plain_cardinality_borrowed` signature change with 11 un-updated call
+                sites) breaks the workspace binary build. Their file was NOT touched. The fix and
+                its test were verified at `Store` level instead, and the pre-fix comparison used
+                `/tmp/fr_pmfix` = 32ad6582720b5bc1c452ac9e8cd06d40337c4c9d69c05e2a7a2fdc13f538ef7c,
+                the `a1332ccc2` build.
+  probes        scratchpad `restore_roundtrip_probe.py` (idempotence across three build shapes),
+                `capture_payload.py` (the frozen fixture), `fixture_sensitivity.py` (fixture
+                fails pre-fix), `crc_probe.py` (independent self-checked CRC64 + the mergeable
+                question).
+  incumbent     vendored redis 7.2.4, booted per probe on a free port with its own temp dir.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 18:58,
+                loadavg 7.49/8.25/9.04, /data 100-101G. Recorded for completeness: this row's
+                evidence is byte equality, immune to load.
+  gates         `cargo test -p fr-store -p fr-persist --lib` 933 + 227 passed, 0 failed; clippy
+                `--all-targets` clean.
+
+RETRY PREDICATE:
+  1. The in-process LPUSH case still needs the derivation-direction work `36ab77cc4` specified.
+     Its blocking question is now ANSWERED for loaded lists — they carry their boundaries — so
+     the flag only has to describe lists fr built itself, which is a strictly smaller problem
+     than it looked.
+  2. Re-run `workload_shapes_probe.py` after any such fix; this row does NOT move its 23 of 42,
+     because every pattern there builds in-process.
+  3. If a third fixture named for redis fails a parity fix on this bead, ask redis FIRST. Two of
+     two so far have been wrong, and both were the only thing standing between fr and a measured
+     divergence.
+
+## 2026-08-18 CrimsonHawk: INSTRUMENT — a paired A/B cannot be taken in this shared checkout while a peer is mid-edit in files the binary links: three attempts, three distinct contaminations, and one of them produced a BOGUS pair that looked valid (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — no code ships and no ratio is claimed. This row records why a measurement
+was ABANDONED rather than published, and the two defects that made the first attempt look
+successful when it was not.
+
+### THE CANDIDATE, WHICH REMAINS UNMEASURED
+
+`is_pubsub_client` has the same shape as the outlining lever shipped in `1ed5c75ef`: a triple
+`is_empty()` short-circuit that returns `false` on any workload with no subscribers, counted at
+**1.0000 calls/op** on `ttl_nonvolatile` (reached via `effective_output_hard_limit`), sitting OUT
+OF LINE — so every command paid a call and a return to be told three maps are empty. Only 4 call
+sites, so inlining the guard costs almost nothing in code size.
+
+The change is written and compiles. It is NOT claimed to be a win, because no valid pair was ever
+obtained. It is banked outside the tree and backed out of the working copy.
+
+### ATTEMPT 1 — A BOGUS PAIR THAT LOOKED VALID. THIS IS THE IMPORTANT ONE.
+
+The "before" arm was produced the usual way: `git diff crates/fr-runtime/src/lib.rs > mine.patch`,
+then `git apply -R mine.patch`. **That diff is the FILE's uncommitted delta, not MINE.** A peer was
+concurrently mid-edit in the same file, so the patch captured their in-progress work as well, and
+reverse-applying it reverted THEIR code. The resulting build failed with eleven
+`E0061: this method takes 3 arguments but 4 arguments were supplied` — their `main.rs` calling a
+reverted `fr-runtime`.
+
+**And the script copied `target/release/frankenredis` anyway, because it never checked the build's
+exit status.** `target/release/<bin>` is a RENDEZVOUS, not an output: after a failed build it still
+holds the PREVIOUS binary. So the "before" ELF was byte-identical to the "after" ELF —
+`6be15abbfc22773c` for both — and the A/B was silently comparing a binary with ITSELF. A pair that
+returns a small, tidy delta in that state is pure noise wearing a lab coat.
+
+Two defects, both mine, both reusable:
+
+  1. **Never build a "before" arm by reverse-applying `git diff <path>` in a shared checkout.**
+     It is not your diff. Toggle YOUR OWN text by exact match instead, which leaves a peer's
+     concurrent work untouched in BOTH arms — where it belongs, since identical peer content in
+     both arms still isolates your delta.
+  2. **Check the build's exit code before copying the binary.** A failed build leaves a stale ELF
+     at the rendezvous path and every downstream check passes against it.
+
+The peer's work was restored immediately and verified hunk by hunk — their threading present,
+their test call site present, `cargo check` at 0 errors — but it should never have been touched.
+
+### ATTEMPT 2 — THE GUARD WORKING AS INTENDED
+
+The rewritten harness aborts on any non-zero build status and restores the toggle before exiting.
+It correctly refused: `BUILD FAILED rc=101`, patch restored, no ELF copied, no numbers produced.
+A harness that refuses is the instrument working.
+
+### ATTEMPT 3 — CLEAN METHOD, STILL CONTAMINATED, AND THE ELF CHECK CAUGHT IT
+
+With a surgical toggle matching only my own text, all three builds SUCCEEDED and the peer's work
+stayed untouched throughout. The pair is still invalid:
+
+  ps3_a1.elf  260e8422f27d71be...
+  ps3_a2.elf  764f58820f8c2592...   <- the two AFTER arms DIFFER
+  ps3_b.elf   a213596bf0984 8b7...
+
+and the peer-file guard fired: `md5` over `main.rs` + `fr-store/src/lib.rs` moved from
+`ccac692c1b` to `413b446363` during the pair. The peer was actively editing files this binary
+links, so the three builds are three different programs.
+
+**The A1 == A2 bit-identity check is what makes a pair trustworthy, and it is the only thing that
+caught this.** Comparing HEADs would not have: HEAD never moved. The contamination was entirely in
+uncommitted peer WIP.
+
+### THE STRUCTURAL CONCLUSION
+
+While one agent is mid-edit in files another agent's binary links, the second agent CANNOT take a
+trustworthy paired A/B in this checkout. This is not tunable by retrying; attempt 3 used a correct
+method and still failed. The options are to wait, or to agree a measurement window.
+
+Proposed and sent to the peer: whoever is about to measure announces it, and the other holds edits
+for that window. No process beyond one line of mail.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No effect is claimed, so no null is required to defend one — and that is the point of the row. For
+completeness, the instrument's null is A/A median 1.000002, bootstrapped over 20,000 resamples,
+95% median CI [0.996069, 1.003947], six draws and 30 pairwise ratios, banked in `0bf781d57`. The
+attempt-1 pair could not have been assessed against it in any case, because both arms were the
+same ELF.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above, and
+an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELFs          `260e8422f27d71be`, `764f58820f8c2592`, `a213596bf09848b7` from attempt 3, and
+                `6be15abbfc22773c` from attempt 1 where BEFORE and AFTER collided. All DISCARDED.
+  bench_elf_sha256=260e8422f27d71be062263b34acfc6aac704961322be48ffc974caf1333c144d
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py`, `scripts/call_count_delta.py`, plus a local
+                paired-build script now carrying build-status and peer-churn guards.
+  host          /data 101G free, checked before each build. loadavg 7.39 8.31 9.09, CPU idle 87
+                pct, iowait 0, zero peer frankenredis builds verified by process args. The host
+                was NOT the problem.
+  disposition   The candidate is backed out; `crates/fr-runtime/src/lib.rs` carries only the
+                peer's uncommitted work. My `fr-runtime` reservation was released so it cannot
+                obstruct them.
+
+### RETRY PREDICATE
+
+1. Re-attempt `is_pubsub_client` outlining when `crates/fr-runtime/src/lib.rs`,
+   `crates/fr-server/src/main.rs` and `crates/fr-store/src/lib.rs` are all clean in
+   `git status`, or during an agreed measurement window. Accept only if the two AFTER ELFs are
+   BIT-IDENTICAL and the peer-file hash is unchanged across the pair.
+2. Expected size, NOT claimed: the same shape shipped at −16.6 to −19.7 instr/op in `1ed5c75ef`,
+   so anything outside roughly −10 to −25 should be treated as suspicious rather than as a result.
+3. Use `config_get_star` (408k instr/op) as the null, as in `1ed5c75ef`. `fr-runtime` edits are
+   layout-sensitive and a shape 280x larger is what rules out a whole-binary shift.
+4. Any future paired-build harness in this repo MUST abort on non-zero build status before
+   copying `target/release/<bin>`. The failure mode is silent and produces a pair of identical
+   ELFs that no downstream check flags.

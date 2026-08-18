@@ -35956,7 +35956,6 @@ fn retained_quicklist2_chunks_match_dump_rules(
     chunks: &[RetainedListpackChunk<'_>],
     list_max_listpack_size: i64,
 ) -> bool {
-    let mut previous: Option<(usize, usize)> = None;
     for chunk in chunks {
         let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
         let mut first_entry_bytes = None;
@@ -35968,16 +35967,18 @@ fn retained_quicklist2_chunks_match_dump_rules(
             let entry_bytes = listpack_entry_encoded_len(item);
             if index == 0 {
                 first_entry_bytes = Some(entry_bytes);
-                if let Some((previous_count, previous_bytes)) = previous
-                    && quicklist_packed_node_accepts(
-                        previous_count,
-                        previous_bytes,
-                        item.len(),
-                        list_max_listpack_size,
-                    )
-                {
-                    return false;
-                }
+                // (frankenredis-qj6jn) The "previous node could still accept this one's first
+                // element" check USED TO REJECT HERE. It enforces maximal front-to-back packing,
+                // which upstream does NOT guarantee: a list grown at the head leaves its PARTIAL
+                // node first. Measured — redis's own DUMP of an LPUSH-built list is
+                // [2047 4087 4087], and redis RESTOREs then re-DUMPs it unchanged.
+                //
+                // These chunks came out of a payload redis wrote, so their boundaries are
+                // AUTHORITATIVE and re-deriving them is how fr turned [2047 4087 4087] into
+                // [4087 4087 2047] and broke DUMP->RESTORE->DUMP idempotence. The checks that
+                // remain are the ones about VALIDITY under the CURRENT fill — a plain-node
+                // requirement, and no node exceeding the budget (the `else` branch below) —
+                // because the configured fill can have changed since the payload was loaded.
             } else if !quicklist_packed_node_accepts(
                 index,
                 packed_bytes,
@@ -35988,10 +35989,12 @@ fn retained_quicklist2_chunks_match_dump_rules(
             }
             packed_bytes += entry_bytes;
         }
+        // `first_entry_bytes` still gates the empty chunk, and the byte total must match the
+        // blob exactly — an inconsistent retained chunk is still refused, only the
+        // maximal-packing requirement is gone.
         if first_entry_bytes.is_none() || packed_bytes != chunk.bytes.len() {
             return false;
         }
-        previous = Some((chunk.entries.len(), packed_bytes));
     }
     true
 }
@@ -74028,10 +74031,21 @@ mod tests {
         store
             .restore_key(b"ql", 0, &split_payload, false, 100)
             .map_err(|_| "quicklist2 split restore failed")?;
+        // (frankenredis-qj6jn) CORRECTED from `merged_payload`. This asserted fr's MODEL: that
+        // two adjacent mergeable retained nodes must be re-encoded into one. Vendored redis
+        // 7.2.4 was handed THESE EXACT BYTES (CRC64 minted independently in the probe and
+        // self-checked against a payload redis itself produced) and it RESTOREd them, kept
+        // `OBJECT ENCODING quicklist`, and DUMPed them back BYTE-IDENTICAL — two nodes, unmerged.
+        //
+        // It is not even unusual: redis's own DUMP of a head-grown list is [17, 27, 27] at
+        // fill 4 and [535, 775, 775, 775, 675] at fill 128, a PARTIAL node adjacent to a full
+        // one every time. A loaded payload's boundaries are authoritative and fr must not
+        // re-derive them; `merged_payload` is retained below only as the contrast.
+        let _ = &merged_payload;
         assert_eq!(
             store.dump_key(b"ql", 100).ok_or("dump missing")?,
-            merged_payload,
-            "mergeable retained nodes must use the canonical encoder"
+            split_payload,
+            "retained node boundaries are authoritative: DUMP must reproduce the loaded payload"
         );
         Ok(())
     }
@@ -74728,6 +74742,46 @@ mod tests {
         assert_eq!(
             store2.lrange(b"l", 0, -1, 100).unwrap(),
             vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+    }
+
+    /// (frankenredis-qj6jn) DUMP -> RESTORE -> DUMP must be IDEMPOTENT: a loaded payload's node
+    /// boundaries are AUTHORITATIVE and must not be re-derived.
+    ///
+    /// The fixture is vendored redis 7.2.4's OWN output, captured from a live server rather than
+    /// constructed from fr's source — `feedback_test_oracle_derived_from_source_is_tautological`
+    /// is on record about fixtures that validate the const they came from. Ten elements pushed
+    /// with LPUSH at `list-max-listpack-size 4`, which leaves redis with node table [17, 27, 27]:
+    /// the PARTIAL node FIRST, because the list grew at the head.
+    ///
+    /// fr used to reject that layout — `retained_quicklist2_chunks_match_dump_rules` required
+    /// maximal front-to-back packing, and node 0 (17 bytes) can obviously still accept more — so
+    /// it fell through to re-derivation and emitted the boundaries REVERSED. Upstream imposes no
+    /// such requirement: it wrote this payload, and it RESTOREs and re-DUMPs it unchanged.
+    #[test]
+    fn dump_restore_dump_is_idempotent_for_head_grown_payload_qj6jn() {
+        // redis 7.2.4: CONFIG SET list-max-listpack-size 4; LPUSH k e00..e09; DUMP k
+        const REDIS_PAYLOAD_HEX: &str = "1203021111000000020083653039048365303804ff021b1b00000004008365303704836530360483653035048365303404ff021b1b00000004008365303304836530320483653031048365303004ff0b00b69f12e48f655eef";
+        let payload: Vec<u8> = (0..REDIS_PAYLOAD_HEX.len() / 2)
+            .map(|i| u8::from_str_radix(&REDIS_PAYLOAD_HEX[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
+
+        let mut store = Store::new();
+        store.list_max_listpack_size = 4;
+        store.restore_key(b"k", 0, &payload, false, 100).unwrap();
+
+        // Elements first: a boundary bug must never be mistaken for a content bug.
+        let want: Vec<Vec<u8>> = (0..10)
+            .rev()
+            .map(|i| format!("e{i:02}").into_bytes())
+            .collect();
+        assert_eq!(store.lrange(b"k", 0, -1, 100).unwrap(), want);
+
+        let redumped = store.dump_key(b"k", 100).unwrap();
+        assert_eq!(
+            redumped, payload,
+            "DUMP after RESTORE must reproduce the payload byte for byte; \
+             re-deriving node boundaries reverses [17, 27, 27] into [27, 27, 17]"
         );
     }
 
