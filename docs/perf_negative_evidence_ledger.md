@@ -44549,3 +44549,68 @@ line spans at n=2. Reopen the tuple-size angle only if a LARGE-N geosearch row i
 BEHIND, which `geosearch_64` at 1.0094 currently is not. The measurement worth taking first is
 still the one the size pairs were built for and nobody has run: `geosearch_2` read on BOTH
 metrics, since it now carries a registered instruction shape and a certified throughput figure.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: SOURCE TRACE — the GEOSEARCH allocator hypothesis is ALREADY WIRED as a one-flag A/B, and the default's own comment says jemalloc wins ~36.5 pct of shapes (`frankenredis-eh2ct`)
+
+SOURCE-DERIVED, NOT MEASURED. Written under a build hold; no ratio, delta or verdict is
+claimed. This exists because the largest un-eliminated hypothesis on `geosearch_2` turns out to
+need NO code — only a cargo feature and one extra build — and nobody appears to have noticed.
+
+### The experiment is already built
+
+  crates/fr-server/Cargo.toml:57   jemalloc = ["dep:tikv-jemallocator"]
+  crates/fr-server/Cargo.toml:28   tikv-jemallocator = { workspace = true, optional = true }
+  crates/fr-server/src/main.rs:12  compile_error! if both features are on -- they are exclusive
+  crates/fr-server/src/main.rs:16  #[global_allocator] tikv_jemallocator::Jemalloc
+  crates/fr-server/src/main.rs:20  #[global_allocator] mimalloc::MiMalloc   (the default)
+
+So `--features jemalloc --no-default-features`-style A/B is a PAIRED BUILD of identical source
+differing in one global allocator, which is about as clean an A/B as this campaign can
+construct: no source edit, no gate, no codegen question of the kind that made my PING null move
+3.56 pct on an unrelated change. fr also ships mimalloc with ZERO tuning -- no `mi_option_*`
+call and no `MIMALLOC_*` environment anywhere in the tree.
+
+### Why this shape specifically, rather than allocators in general
+
+`crates/fr-server/Cargo.toml`'s own comment records the decision: **"mimalloc by default: 63.6
+pct vs 36.5 pct geomean parity, 70x better p99 tails"**. Read that as what it is -- mimalloc
+wins the GEOMEAN, and jemalloc still wins on roughly a THIRD of shapes. The default is
+correct on average and is not claimed to be correct everywhere.
+
+`geosearch_2` is an unusually good candidate to be one of that third: it is certified BEHIND at
+0.9162 normalised; its deficit is specifically a 1.4722x worse L1 MISS rate at 157.1 misses per
+op rather than a work-volume gap; the prior row at :38143 established the deficit is NOT
+allocation VOLUME (fr 9.0 allocations per op against redis's 25.8) and nominated "allocator
+behaviour under mimalloc versus redis's jemalloc" in as many words; and the incumbent it loses
+to is itself jemalloc-5.3.0. A global default chosen on a geomean is exactly the mechanism by
+which one shape can be handicapped while the average improves.
+
+### The counter-prior, stated because it is real and because misusing it would be easy
+
+`docs/NEGATIVE_EVIDENCE.md:26210` measures the user-heap allocator at **0.11 pct (SET) / 0.18
+pct (GET)** of time at -P16, an Amdahl elimination ceiling of ~1.0011x-1.0018x, and concludes
+any further P16 SET/GET lever is a syscall lever rather than an allocation one. That is a
+strong prior that allocator TIME share is small.
+
+IT IS NOT A REFUTATION OF THIS, and the distinction is the whole point: that figure is a TIME
+share, on SET/GET, at -P16, under a throughput profile. The geo hypothesis is about MISS
+LOCALITY on a callgrind/hardware profile of a different command -- where the same allocation
+count can cost different misses depending on which blocks the allocator hands back and how
+fresh they are. Transferring a time share from one workload and instrument to a miss ratio on
+another is the cross-context substitution this ledger keeps catching, including twice in my own
+rows this session. The 0.11 pct lowers the prior; it does not close the question.
+
+RETRY PREDICATE / EXIT CONDITION for whoever takes it when a build is sanctioned: build
+`fr-server` twice from IDENTICAL source, once default and once with the `jemalloc` feature, and
+read `geosearch_2` on both metrics -- it now carries a registered instruction shape
+(`shape_instr_per_op.py:654`) and a certified throughput figure (0.9162 normalised). The
+hypothesis is SUPPORTED only if the jemalloc arm moves the L1 MISS rate toward the incumbent's,
+compared against the standing 157.1 misses per op at IPC 1.387; an instruction-count difference
+alone does NOT support it, because the two allocators retire different instruction counts for
+identical work and that says nothing about locality. Verify the arms differ by allocator and
+nothing else -- the `compile_error!` at main.rs:12 makes a both-features build fail loudly
+rather than silently pick one. If the miss rate does not move, the allocator hypothesis is
+closed for this shape and the geo cell walk is the last surface standing from the prior row's
+three.
