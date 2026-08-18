@@ -38887,6 +38887,33 @@ impl Runtime {
             return reply;
         }
 
+        // (frankenredis-monitorexec-pfcz4) Upstream server.c:6278 -- the first thing
+        // monitorCommand does -- refuses a CLIENT_DENY_BLOCKING client. MONITOR is the only
+        // member of that five-guard family that actually reaches it here: the three subscribe
+        // variants carry an explicit `&& !(c->flags & CLIENT_MULTI)` backward-compat exemption
+        // (pubsub.c 536/568/707) and SHUTDOWN is NO_MULTI so it never survives queueing, but
+        // MONITOR is neither -- it can be queued in a transaction and must be refused when EXEC
+        // runs it.
+        //
+        // Pre-dispatch, not at the `enable_monitor()` site further down, even though that is
+        // where MONITOR is recognised: the commandstats success/failure classification runs
+        // BETWEEN the two, so rewriting the reply afterwards would record a failed call as a
+        // success. Returning here matches the maxmemory guard above, which is the established
+        // shape for a rejection that never reaches the command.
+        //
+        // `executing_exec` is the same condition the SSUBSCRIBE guard uses -- fr's model of
+        // CLIENT_DENY_BLOCKING -- so the two cannot disagree about what the flag means.
+        if self.session.transaction_state.executing_exec
+            && argv
+                .first()
+                .is_some_and(|cmd| cmd.eq_ignore_ascii_case(b"MONITOR"))
+        {
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
+            return RespFrame::Error(
+                "ERR MONITOR isn't allowed for DENY BLOCKING client".to_string(),
+            );
+        }
+
         // Command paths run a fast active-expire cycle to keep short-lived keys
         // from lingering between server ticks.
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
@@ -66827,6 +66854,47 @@ mod tests {
             ),
             "upstream checks the master link FIRST (971-976), then pending output (978-984)"
         );
+    }
+
+    #[test]
+    fn monitor_inside_exec_is_refused_and_does_not_enable_monitoring_pfcz4() {
+        // (frankenredis-monitorexec-pfcz4) Upstream server.c:6278 refuses MONITOR for a
+        // DENY BLOCKING client and, unlike the subscribe family, has no MULTI exemption --
+        // while unlike SHUTDOWN it is not NO_MULTI, so it survives queueing and must be
+        // refused at EXEC.
+        //
+        // The second assertion is the one that matters: the reply alone does not prove the
+        // guard ran EARLY enough. fr recognises MONITOR after dispatch and flags the client
+        // there, so a guard that only rewrote the reply would leave the client silently
+        // monitoring while telling it that it is not -- the worst of both.
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 2),
+            RespFrame::SimpleString("QUEUED".to_string()),
+            "MONITOR is not NO_MULTI upstream, so it must still QUEUE"
+        );
+        let exec = rt.execute_frame(command(&[b"EXEC"]), 3);
+        assert_eq!(
+            exec,
+            RespFrame::Array(Some(vec![RespFrame::Error(
+                "ERR MONITOR isn't allowed for DENY BLOCKING client".to_string()
+            )]))
+        );
+        assert!(
+            rt.server.monitor_clients.is_empty(),
+            "the refusal must happen BEFORE the client is flagged as a monitor"
+        );
+
+        // Outside a transaction it still works, so the guard cannot pass by disabling MONITOR.
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.server.monitor_clients.is_empty());
     }
 
     #[test]
