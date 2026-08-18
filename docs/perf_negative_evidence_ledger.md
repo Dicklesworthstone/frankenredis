@@ -62658,3 +62658,68 @@ by hand to lack the parameter and derive inline). CV was not used, as a gate or 
 3. The 21 NO-SERVER-CALL routes need the transitive step: follow in-crate callers to see whether
    a cache can reach them through a wrapper chain. Until someone does that, they are unclassified
    and must not be quoted as either open or closed.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: ADDENDUM correcting my own retraction — the collator figures I quoted are PRE-fast-path "MEASURED MOTIVATION" numbers, so calling collation "the largest identified block at both sizes" in the measured binary was WRONG
+
+Claim class: SELF-SPEEDUP (correction). Campaign output: no.
+Source reading only, under the build freeze: no cargo, no benches, no artifact writes.
+
+My retraction row quoted `fr-command/src/lib.rs:29790` — collator frames at **3,147 instr/op
+(25.3 pct) at n=3 and 81,297 (60 pct) at n=64** — and concluded that collation "is the largest
+identified block in the command at both sizes". **That last clause is wrong, and the doc comment
+says so if read carefully.**
+
+Those figures are labelled **"MEASURED MOTIVATION"**: they are the BEFORE numbers that justified
+building the ASCII collation fast path, not a description of the shipped binary.
+
+### THE FAST PATH IS LIVE, VERIFIED IN SOURCE
+
+    active_sort_alpha_collation()   OnceLock; resolves the collator ONCE per process and
+                                    decides `ascii_fast_path` with it
+    :29939                          gate — `ascii_alnum_fast_path_agrees_with(collator,
+                                    ascii_alnum_collate)`; the flag is only set if the fast
+                                    path AGREES with ICU
+    :29992                          `&& let Some(ordering) = ascii_alnum_collate(left, right)`
+                                    — used in the live comparison
+
+And both sort shapes are IN its domain: `sort_ro_alpha` sorts `c a b`, `sort_ro_alpha_64` sorts
+`w00A, w01b, ...` — all `[0-9A-Za-z]`. My ELF `114bcea75f8296ae` is HEAD-derived and carries the
+fast path, so **my own 0.9914x and 0.1937x were measured WITH collation already fast-pathed.**
+
+### WHAT THAT CHANGES, AND WHAT IT DOES NOT
+
+It does NOT rescue the retracted hypothesis. A fixed per-call cost still shows a FALLING share as
+n grows, the two-point fit across n=3 to n=64 is still a phantom, and the negative fixed term it
+produces for the incumbent still invalidates the model. **The retraction stands.**
+
+What it changes is the picture of where the n=3 cost sits. At n=3, with the ASCII fast path
+already applied, fr is at **0.9914x — parity — and collation is no longer the dominant block**. So
+the reason fr only matches the incumbent at n=3 is something I have NOT identified, and my row
+implied otherwise by leaving collation named as the largest block.
+
+**That is an unidentified cost, not a diagnosed one, and it should be recorded as such rather
+than left pointing at a frame the fast path already addressed.**
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement: source reading plus figures quoted from an in-source callgrind note (ELF
+`a9426571fcb48c07`, not mine, not pooled with mine). No ratio, A/A, interval or quiet window
+applies and none is claimed. CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           NONE built or run. My 0.9914x / 0.1937x are from `114bcea75f8296ae`; the
+                3,147 / 81,297 figures are from `a9426571fcb48c07` and are PRE-fast-path.
+  host          /data 34G free — BELOW the 42G brake, freeze in force, no writes but this row.
+  disposition   CORRECTION to my own row. No source file changed.
+
+### RETRY PREDICATE
+
+1. Do NOT cite 3,147 / 81,297 as current collator cost. They are pre-fast-path motivation
+   numbers; the fast path shipped and both sort shapes are in its domain.
+2. `sort_ro_alpha`'s n=3 parity is UNDIAGNOSED. A frame census at n=3 on a current ELF is the
+   next step, and it must be run with `--keep-dumps` to be useful — blocked by the freeze.
+3. When quoting a figure from a doc comment, check whether it is labelled as MOTIVATION for the
+   change it sits next to. I read the numbers and not the label.
