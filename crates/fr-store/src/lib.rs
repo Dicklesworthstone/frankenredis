@@ -6406,6 +6406,23 @@ pub struct Store {
     /// SETBIT/BITFIELD/BITOP. Synced from the server config on CONFIG SET; default
     /// 512 MiB. Previously hardcoded at every size-check site.
     pub proto_max_bulk_len: usize,
+    /// Whether the command being applied comes from a source that must be OBEYED rather than
+    /// validated -- upstream's `mustObeyClient` (server.c:3209), which is true for the AOF
+    /// client and for the master link.
+    ///
+    /// (frankenredis-obeyclient-strlen-qxdyn) Synced from the runtime, like `maxmemory_bytes_live` and
+    /// `over_maxmemory_live`. `checkStringLength` (t_string.c:40) returns C_OK immediately when
+    /// it is set, so a replica NEVER refuses a write its master accepted and an AOF ALWAYS
+    /// reloads what it recorded. fr enforced the cap unconditionally, which is a divergence in
+    /// both directions:
+    ///
+    ///   * a replica whose `proto-max-bulk-len` is smaller than its master's silently diverges
+    ///     -- the master grows the string, the replica refuses and keeps the short value, and
+    ///     nothing reports it because the refusal is a reply to a link nobody reads;
+    ///   * lowering `proto-max-bulk-len` and restarting makes an AOF that upstream reloads
+    ///     FAIL to replay, because the recorded APPEND that was legal when written is now over
+    ///     the new limit. That one costs data on a config change alone.
+    pub must_obey_client: bool,
     pub hll_sparse_max_bytes: usize,
 
     /// Seed for deterministic pseudo-random operations (HRANDFIELD, RANDOMKEY, etc.).
@@ -6885,6 +6902,7 @@ impl Default for Store {
             zset_max_listpack_entries: 128,
             zset_max_listpack_value: 64,
             proto_max_bulk_len: 512 * 1024 * 1024, // (frankenredis-uwhyl) redis 7.2 default
+            must_obey_client: false,
             hll_sparse_max_bytes: HLL_REDIS_SPARSE_MAX_BYTES,
             rng_seed: 0xDEADBEEF_C0FFEE11,
             dirty: 0,
@@ -10100,7 +10118,14 @@ impl Store {
         // (CrimsonHawk) Enforce the proto-max-bulk-len cap INSIDE append so callers no longer need a
         // separate `string_len_no_stats` probe. WRONGTYPE takes precedence (materialize_string first);
         // a rejected append never changes the key / bumps dirty / touches LRU (Err before mutation).
-        let max_len = self.proto_max_bulk_len;
+        // (frankenredis-obeyclient-strlen-qxdyn) Upstream's checkStringLength is a NO-OP for an
+        // obeyed client, so the cap lifts rather than widening: both the grow path and the
+        // create path below read `max_len`, and they must agree.
+        let max_len = if self.must_obey_client {
+            usize::MAX
+        } else {
+            self.proto_max_bulk_len
+        };
         // COLLAPSE draws the rand inside the get_mut borrow via the rng_seed field split; the baseline
         // draws it here behind the redundant `contains_key` probe.
         let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
@@ -46439,6 +46464,59 @@ mod tests {
             other => return Err(format!("SMEMBERS should bump LFU frequency, got {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn append_cap_lifts_for_an_obeyed_source_obeyclient() {
+        // (frankenredis-obeyclient-strlen-qxdyn) Upstream's checkStringLength (t_string.c:40) opens with
+        // `if (mustObeyClient(c)) return C_OK;` -- the AOF client and the master link are OBEYED,
+        // not validated. fr enforced the cap on every source, which diverges in two ways that are
+        // both silent:
+        //
+        //   * a replica whose proto-max-bulk-len is smaller than its master's refuses an APPEND
+        //     the master accepted and keeps the SHORT value -- the refusal is a reply to a link
+        //     nobody reads, so the divergence surfaces later as a wrong value;
+        //   * an AOF recorded under a larger limit stops replaying after the limit is lowered,
+        //     so a config change alone costs data that upstream reloads fine.
+        //
+        // Both directions are asserted, and the cap is re-checked afterwards: an exemption that
+        // failed to clear would lift the limit for ordinary clients, which is the failure mode
+        // that turns a parity fix into an unbounded allocation.
+        let mut store = Store::new();
+        store.proto_max_bulk_len = 8;
+        store.set(b"k".to_vec(), b"12345".to_vec(), None, 0);
+
+        let err = store
+            .append(b"k", b"6789", 0)
+            .expect_err("an ordinary client is held to proto-max-bulk-len");
+        match err {
+            StoreError::GenericError(msg) => assert!(
+                msg.contains("string exceeds maximum allowed size"),
+                "unexpected error: {msg}"
+            ),
+            other => panic!("expected the proto-max-bulk-len error, got {other:?}"),
+        }
+
+        store.must_obey_client = true;
+        assert_eq!(
+            store.append(b"k", b"6789", 0).expect("an obeyed source must not be refused"),
+            9,
+            "the grow path must apply the write the master already applied"
+        );
+        // The CREATE path reads the same `max_len`, and a master stream can carry a SET of a key
+        // this replica has never seen, so it needs the exemption just as much.
+        assert_eq!(
+            store
+                .append(b"fresh", &vec![b'x'; 64], 0)
+                .expect("the create path is obeyed too"),
+            64
+        );
+
+        store.must_obey_client = false;
+        assert!(
+            store.append(b"k2", &vec![b'y'; 64], 0).is_err(),
+            "the cap must come back when the obeyed source ends"
+        );
     }
 
     #[test]

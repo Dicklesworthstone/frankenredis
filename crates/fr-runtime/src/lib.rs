@@ -6260,6 +6260,18 @@ impl ExecutionSource {
     fn counts_as_unexpected_error_reply(self) -> bool {
         matches!(self, Self::AofLoad | Self::ReplicationReplay)
     }
+
+    /// Upstream's `mustObeyClient` (server.c:3209): `c->id == CLIENT_ID_AOF || c->flags &
+    /// CLIENT_MASTER`. These two sources are OBEYED, not validated -- a limit that would refuse
+    /// a normal client's write must not refuse a write that has already happened somewhere else.
+    ///
+    /// (frankenredis-obeyclient-strlen-qxdyn) The same two variants as
+    /// `counts_as_unexpected_error_reply`, and deliberately a SEPARATE predicate rather than a
+    /// shared one: they answer different questions and upstream can change one without the
+    /// other. Reusing the existing method would read as if the two rules were the same rule.
+    fn must_obey_client(self) -> bool {
+        matches!(self, Self::AofLoad | Self::ReplicationReplay)
+    }
 }
 
 /// Resolve a redis 7 multi-part AOF manifest from a configured AOF path: the
@@ -38055,8 +38067,18 @@ impl Runtime {
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
         let previous = std::mem::replace(&mut self.execution_source, source);
+        // (frankenredis-obeyclient-strlen-qxdyn) Publish it where the limits are enforced. Store cannot
+        // see `execution_source`, and the checks that need it (the proto-max-bulk-len cap on
+        // APPEND) live there. Saved and restored with the source itself so a nested replay -- or
+        // an early return out of `f` -- cannot leave the exemption stuck on, which would silently
+        // lift the cap for ordinary clients.
+        let previous_obey = std::mem::replace(
+            &mut self.server.store.must_obey_client,
+            source.must_obey_client(),
+        );
         let output = f(self);
         self.execution_source = previous;
+        self.server.store.must_obey_client = previous_obey;
         output
     }
 
