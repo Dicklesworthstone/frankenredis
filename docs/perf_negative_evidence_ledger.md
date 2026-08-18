@@ -48471,3 +48471,73 @@ standing fact about a diffuse cost and spend the window on a shape whose deficit
 Reopen only IF a future profile shows any single data address or frame above 20 pct on this
 shape, which three independent instruments now say does not exist. The reusable output of this
 row is the invocation above, not the geo result.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP), WORKLOAD-MIX — hoisting the arity-1 PING arm above the floor classifier takes PING dispatch **301.0 -> 108.0 instr/op (-64.1 pct)** for a flat **+4** on the shapes below it, with an **EXACT 0.0 null on GET**; break-even is a 2.2 pct PING share (`frankenredis-iqicb`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: move the existing arity-1 PING arm above `try_dispatch_floor_classified_action`. Shipped
+in `7275e6221`. Same condition, parser, executor and reply — only the POSITION changes.
+
+WHY IT EXISTS: PING is the only hot command besides GET that the floor token table does not name
+(census `4a43ca455`: 135 tokens, 35 of 37 hot commands classified, only GET and PING missing). So
+the classifier walked PING's header, failed to name it, returned None, and PING's own arm served
+it afterwards — 129.0 instr/op in the classifier plus 34.0 in the dispatcher.
+
+MEASURED, `shape_instr_per_op.py --fr-only`, N=20,000, two interleaved rounds per arm, both arms
+from a worktree pinned at HEAD `e7e0998ce` differing only in this move.
+`bench_elf_sha256=d670859ac6795020738703cded52a9b899bd193e2c6af06999ef6e1e8f9ff363` (before), `bench_elf_sha256=1b0693d1e58c6ff20f429f2cd7d294f090683f55ef0f5d74af846cca637c0c3c` (after). Host: load
+7.03/11.58/11.59 then 9.98/11.17/11.43, CPU idle 89.4 then 80.8 pct measured from `/proc/stat`,
+iowait 0 pct, mean 2129-2367 MHz across 64 cores, /data 104G.
+
+| shape | dispatch before | after | delta | role |
+|---|---|---|---|---|
+| **ping** | 301.0 / 301.0 | **108.0 / 108.0** | **-193.0** | beneficiary |
+| sadd_existing | 597.7 / 597.1 | 602.0 / 602.0 | **+4.3** | tax |
+| ttl_nonvolatile | 490.0 / 490.0 | 494.0 / 494.0 | **+4.0** | tax |
+| **get_control** | 190.0 / 190.0 | 190.0 / 190.0 | **+0.0** | **EXACT null** |
+
+**THE NULL IS EXACT AND STRUCTURAL, which is what makes the cost model visible rather than
+argued.** `get_control` moves by 0.0 in both rounds because GET was hoisted above this arm in
+`91f652459` and therefore never reaches it. The two shapes that DO sit below the new arm each
+move +4 — the guard, paid once. Whole-op corroborates: PING 1009.0 -> 811.2.
+
+PING's dispatch is now **the cheapest on the board at 108.0**, below the hoisted GET's 190.0.
+
+**WORKLOAD-MIX CLAIM, and the heading says so.** Quoting the WORST bound, the tax is **+4.3
+instr/op on SADD**; break-even is a PING share of **2.2 pct**, against 8.1 pct for the GET hoist.
+The difference is entirely guard cost: GET's guard is an 8-byte header compare plus a 3-byte name
+test and charges +7 to +18, while PING's is `borrowed_arity_is(unparsed, b'1')` — one byte, and
+this arm's OWN pre-existing condition rather than a new test. **A workload with no PING in it
+pays 4 instr/op per command for nothing.**
+
+Only the arity-1 arm moved. The arity-2 `PING message` form deliberately stays below the
+classifier: it is rarer and its guard is not as cheap. `.text` is unchanged at 6,520,498 bytes.
+
+CORRECTNESS: nine PING forms answer byte-identically on both arms — upper, lower and mixed case
+with no argument, two with a message, the 2-argument arity error, and a `PONG` near-miss — plus
+GET and TTL afterwards. Lowercase `ping` still answering `+PONG` is the load-bearing case: the
+hoisted arm serves only the UPPERCASE no-arg form, so that reply proves the fallthrough to the
+general parser below the classifier is intact.
+
+**ESTIMATE CHECK, recorded because my read-derived estimates have a track record.** I predicted
+~163 saved and ~2-3 charged (`f4560f7bb`). Measured **-193.0 and +4.0 to +4.3**: the saving was
+LARGER because the hoist also skips the arms between the classifier and PING's old position, and
+the tax was about half again my guess. Both errors are small, which is the first time this
+session a read-derived estimate has landed close.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run
+interleaving both arms across two rounds, so drift falls on both alike. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this row;
+no CV was computed. Host state is likewise provenance, not a gate. The verdict rests on the
+dispatch FRAME, which reproduced EXACTLY across both rounds for every shape.
+
+RETRY PREDICATE: revisit only if the target workload's PING share falls below 2.2 pct, or if the
+classifier's own cost falls below ~163 instr/op — either shrinks the prize under the tax, and
+both are measurable on the dispatch FRAME (`ping` 108.0, `sadd_existing` 602.0 are now the
+references). **There is no third command to do this to.** After GET and PING the floor table names
+every hot command measured, so the pair that had "unclassifiable AND cheap guard" is exhausted;
+a third hoist would charge every command below it for a beneficiary that does not exist.
