@@ -34,12 +34,14 @@ fn fuzz_resp_parser_corpus_never_panics() {
         max_array_len: 16,
         max_recursion_depth: 4,
         allow_resp3: false,
+        pre_auth: None,
     };
     let permissive = ParserConfig {
         max_bulk_len: 64 * 1024 * 1024,
         max_array_len: 1_048_576,
         max_recursion_depth: 64,
         allow_resp3: true,
+        pre_auth: None,
     };
 
     let mut count = 0_usize;
@@ -85,6 +87,7 @@ fn fuzz_resp_parser_resp3_seeds_parse_to_expected_variants() {
         max_array_len: 1_048_576,
         max_recursion_depth: 64,
         allow_resp3: true,
+        pre_auth: None,
     };
 
     let dir = corpus_dir();
