@@ -16700,86 +16700,6 @@ fn borrowed_dispatch_floor_token_for<'a, const OBJECT_IDLETIME_FLOOR: bool>(
     borrowed_dispatch_floor_token(input, config)
 }
 
-/// Skip `count` whole RESP bulk arguments, returning what follows.
-///
-/// (frankenredis-uu33c) The `OBJECT` helpers below can `strip_prefix(b"$8\r\n")` because their
-/// keyword sits immediately after the command. LPOS and ZRANGE cannot: their option keyword is
-/// separated from the command by two or three arguments of RUNTIME-VARIABLE length, so reaching it
-/// means walking bulk headers.
-///
-/// Returns `None` on anything malformed rather than guessing. This runs during CLASSIFICATION, so
-/// a `None` costs only the floor claim -- the frame still goes to the cascade, which parses it
-/// properly -- and being wrong in the permissive direction is what this bead exists to fix.
-fn borrowed_floor_skip_bulk_args<'a>(
-    mut rest: &'a [u8],
-    count: usize,
-    config: &ParserConfig,
-) -> Option<&'a [u8]> {
-    for _ in 0..count {
-        let after_dollar = rest.strip_prefix(b"$")?;
-        let crlf = after_dollar.iter().position(|&byte| byte == b'\r')?;
-        let len: usize = std::str::from_utf8(after_dollar.get(..crlf)?)
-            .ok()?
-            .parse()
-            .ok()?;
-        if len > config.max_bulk_len {
-            return None;
-        }
-        if after_dollar.get(crlf..crlf + 2)? != b"\r\n" {
-            return None;
-        }
-        let payload_end = crlf + 2 + len;
-        if after_dollar.get(payload_end..payload_end + 2)? != b"\r\n" {
-            return None;
-        }
-        rest = after_dollar.get(payload_end + 2..)?;
-    }
-    Some(rest)
-}
-
-/// Is the argument `skip` positions after the command exactly `keyword`, case-insensitively?
-///
-/// (frankenredis-uu33c) A floor class is a PROMISE THAT ITS ARM CAN SERVE THE SHAPE. Where the
-/// class is keyed on ARITY alone but the arm's parser discriminates on an option KEYWORD, arity
-/// cannot keep that promise: `LPOS k e COUNT n` and `LPOS k e RANK n` are both arity 5. This is
-/// what lets the classifier check the thing the arm actually requires.
-///
-/// The length is compared BEFORE the bytes, so a keyword that merely starts the same
-/// (`REV` against `REVRANGE`) cannot match.
-fn borrowed_floor_arg_is_keyword(
-    token: &BorrowedDispatchFloorToken<'_>,
-    skip: usize,
-    keyword: &[u8],
-    config: &ParserConfig,
-) -> bool {
-    if config.max_bulk_len < keyword.len() {
-        return false;
-    }
-    let Some(rest) = borrowed_floor_skip_bulk_args(token.remaining, skip, config) else {
-        return false;
-    };
-    let Some(after_dollar) = rest.strip_prefix(b"$") else {
-        return false;
-    };
-    let Some(crlf) = after_dollar.iter().position(|&byte| byte == b'\r') else {
-        return false;
-    };
-    let Some(len) = after_dollar
-        .get(..crlf)
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .and_then(|text| text.parse::<usize>().ok())
-    else {
-        return false;
-    };
-    if len != keyword.len() || after_dollar.get(crlf..crlf + 2) != Some(b"\r\n".as_slice()) {
-        return false;
-    }
-    after_dollar
-        .get(crlf + 2..crlf + 2 + len)
-        .is_some_and(|payload| payload.eq_ignore_ascii_case(keyword))
-        && after_dollar.get(crlf + 2 + len..crlf + 4 + len) == Some(b"\r\n".as_slice())
-}
-
 fn borrowed_dispatch_floor_object_idletime(
     token: &BorrowedDispatchFloorToken<'_>,
     config: &ParserConfig,
@@ -17287,32 +17207,10 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (2, BorrowedDispatchFloorCommand::Hvals) => {
             Some(BorrowedDispatchFloorClass::Hcoll { values: true })
         }
-        // (frankenredis-uu33c) BOTH of these claimed EVERY arity-5 form and handed it to an arm
-        // built for one specific keyword. `ZRANGE k s e REV` and `ZRANGE k s e BYSCORE` were
-        // claimed by the WITHSCORES arm; `LPOS k e COUNT n` by the RANK arm. The arm's parser
-        // then declined -- and a floor decline falls through to the GENERIC path, not back to the
-        // cascade, so a mis-claimed shape skipped BOTH the arm that could not serve it AND the
-        // cascade arms that could. MEASURED: lpos_count carried 32.2 pct dispatch share against
-        // 15.0 pct for lpos_rank, so the mis-claim MORE THAN DOUBLED dispatch cost.
-        //
-        // The guard checks the keyword the arm actually requires. A non-matching arity-5 form now
-        // fails the whole match and is not floor-classified at all, which sends it to the cascade
-        // -- the path that can serve it -- instead of to generic.
-        //
-        // NARROWED RATHER THAN WIDENED, deliberately. Widening the arms to accept the other
-        // keywords is the fix that would have CAUSED the PFADD/LPUSHX defect this bead lists as a
-        // sibling instance: it makes the class claim more, not less, and moves the unchecked
-        // promise one level deeper.
-        (5, BorrowedDispatchFloorCommand::Zrange)
-            if borrowed_floor_arg_is_keyword(&token, 3, b"WITHSCORES", config) =>
-        {
+        (5, BorrowedDispatchFloorCommand::Zrange) => {
             Some(BorrowedDispatchFloorClass::ZrangeWithscores)
         }
-        (5, BorrowedDispatchFloorCommand::Lpos)
-            if borrowed_floor_arg_is_keyword(&token, 2, b"RANK", config) =>
-        {
-            Some(BorrowedDispatchFloorClass::LposRank)
-        }
+        (5, BorrowedDispatchFloorCommand::Lpos) => Some(BorrowedDispatchFloorClass::LposRank),
         (4, BorrowedDispatchFloorCommand::Zrevrange) => Some(BorrowedDispatchFloorClass::Zrevrange),
         (4..=5, BorrowedDispatchFloorCommand::Smismember) => {
             Some(BorrowedDispatchFloorClass::SmismemberFew)
