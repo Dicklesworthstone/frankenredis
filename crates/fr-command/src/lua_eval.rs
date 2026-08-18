@@ -14852,6 +14852,13 @@ fn lua_value_to_u32_for_bitop(
 /// is the only value a script can ever observe and matching it exactly is the whole requirement.
 const CJSON_ENCODE_MAX_DEPTH: u32 = 1000;
 
+/// Upstream lua_cjson's `DEFAULT_DECODE_MAX_DEPTH` (deps/lua/src/lua_cjson.c:69).
+///
+/// (frankenredis-cjson-encode-depth-zo5ac) Separate constant from the encode limit even though
+/// both are 1000 upstream: they are separate `json_config_t` fields with separate setters, so
+/// tying them together here would be inventing a relationship the incumbent does not have.
+const CJSON_DECODE_MAX_DEPTH: u32 = 1000;
+
 /// Encode a Lua value as JSON the way Redis-bundled cjson does.
 ///
 /// (frankenredis-cjson-encode-depth-zo5ac) The recursion is depth-BOUNDED, and that bound is load-bearing rather
@@ -15054,6 +15061,12 @@ fn json_to_lua_value(s: &str) -> Result<LuaValue, String> {
 struct JsonParser<'a> {
     bytes: &'a [u8],
     pos: usize,
+    /// Nesting depth of the object/array context currently being parsed.
+    ///
+    /// (frankenredis-cjson-encode-depth-zo5ac) Upstream's `json_parse_t::current_depth`. Without
+    /// it `parse_value` -> `parse_array`/`parse_object` -> `parse_value` had no terminating
+    /// condition and a nested-enough input ran the native stack out.
+    depth: u32,
 }
 
 impl<'a> JsonParser<'a> {
@@ -15061,6 +15074,7 @@ impl<'a> JsonParser<'a> {
         Self {
             bytes: input.as_bytes(),
             pos: 0,
+            depth: 0,
         }
     }
 
@@ -15219,10 +15233,23 @@ impl<'a> JsonParser<'a> {
 
     fn parse_array(&mut self) -> Result<LuaValue, String> {
         self.pos += 1;
+        // (frankenredis-cjson-encode-depth-zo5ac) Upstream json_decode_descend: increment
+        // FIRST, then refuse. The bracket has already been consumed above, so `self.pos` here is
+        // exactly upstream's `json->ptr - json->data` -- and that value is reported RAW, without
+        // the +1 every other error in this parser applies, because upstream's nesting error does
+        // not apply it either (contrast json_throw_parse_error, which documents the +1).
+        self.depth += 1;
+        if self.depth > CJSON_DECODE_MAX_DEPTH {
+            return Err(format!(
+                "Found too many nested data structures ({}) at character {}",
+                self.depth, self.pos
+            ));
+        }
         let table = LuaTable::new();
         self.skip_ws();
         if self.bytes.get(self.pos) == Some(&b']') {
             self.pos += 1;
+            self.depth -= 1;
             return Ok(LuaValue::Table(table));
         }
         loop {
@@ -15235,6 +15262,7 @@ impl<'a> JsonParser<'a> {
                 }
                 Some(b']') => {
                     self.pos += 1;
+                    self.depth -= 1;
                     return Ok(LuaValue::Table(table));
                 }
                 _ => {
@@ -15250,10 +15278,23 @@ impl<'a> JsonParser<'a> {
 
     fn parse_object(&mut self) -> Result<LuaValue, String> {
         self.pos += 1;
+        // (frankenredis-cjson-encode-depth-zo5ac) Upstream json_decode_descend: increment
+        // FIRST, then refuse. The bracket has already been consumed above, so `self.pos` here is
+        // exactly upstream's `json->ptr - json->data` -- and that value is reported RAW, without
+        // the +1 every other error in this parser applies, because upstream's nesting error does
+        // not apply it either (contrast json_throw_parse_error, which documents the +1).
+        self.depth += 1;
+        if self.depth > CJSON_DECODE_MAX_DEPTH {
+            return Err(format!(
+                "Found too many nested data structures ({}) at character {}",
+                self.depth, self.pos
+            ));
+        }
         let table = LuaTable::new();
         self.skip_ws();
         if self.bytes.get(self.pos) == Some(&b'}') {
             self.pos += 1;
+            self.depth -= 1;
             return Ok(LuaValue::Table(table));
         }
         loop {
@@ -15284,6 +15325,7 @@ impl<'a> JsonParser<'a> {
                 }
                 Some(b'}') => {
                     self.pos += 1;
+                    self.depth -= 1;
                     return Ok(LuaValue::Table(table));
                 }
                 _ => {
@@ -21845,6 +21887,55 @@ end
             lua_value_to_json(&LuaValue::Table(cyclic)).unwrap_err(),
             "Cannot serialise, excessive nesting (1001)",
             "a self-referential table must terminate at the depth limit, not at the stack floor"
+        );
+    }
+
+    /// cjson.decode must STOP at upstream's nesting limit, and must not count siblings as depth.
+    ///
+    /// (frankenredis-cjson-encode-depth-zo5ac) The decode side is the easier of the two to reach:
+    /// the input is a plain string, so `cjson.decode(string.rep('[', 100000))` needed no table
+    /// construction at all and ran the native stack out.
+    ///
+    /// THE SIBLING CASE IS THE ONE THAT CATCHES A HALF-FIX. A guard that increments on entry but
+    /// never decrements still stops the crash, so a depth-only test passes with the ascend
+    /// missing -- and that version would reject `[[],[],[]...]`, a document two levels deep that
+    /// Redis accepts. Upstream ascends at four sites; fr's equivalents are the four successful
+    /// exits of the two context parsers.
+    ///
+    /// The reported character is 0-BASED here, unlike every other error this parser emits. That
+    /// is upstream's own inconsistency: `json_throw_parse_error` documents "token->index is 0
+    /// based, display starting from 1" and adds the +1, while the nesting error reports
+    /// `json->ptr - json->data` raw. Asserting the exact number is what keeps a future tidy-up
+    /// from "fixing" it into disagreement with Redis.
+    #[test]
+    fn cjson_decode_bounds_nesting_at_upstreams_limit_zo5ac() {
+        let ok = "[".repeat(1000) + &"]".repeat(1000);
+        assert!(
+            json_to_lua_value(&ok).is_ok(),
+            "1000 deep is within upstream's limit and must not be refused"
+        );
+
+        let too_deep = "[".repeat(1001) + &"]".repeat(1001);
+        assert_eq!(
+            json_to_lua_value(&too_deep).unwrap_err(),
+            "Found too many nested data structures (1001) at character 1001",
+            "depth and character are both upstream's, and the character is NOT 1-based here"
+        );
+
+        // Objects descend through the same guard.
+        let deep_obj = "{\"a\":".repeat(1001) + "1" + &"}".repeat(1001);
+        assert!(
+            json_to_lua_value(&deep_obj)
+                .unwrap_err()
+                .starts_with("Found too many nested data structures (1001)"),
+            "object contexts must descend too, not just arrays"
+        );
+
+        // Siblings are not nesting: 2000 of them are still depth 2.
+        let wide = format!("[{}]", vec!["[]"; 2000].join(","));
+        assert!(
+            json_to_lua_value(&wide).is_ok(),
+            "sibling arrays must not accumulate depth -- this fails if the ascend is missing"
         );
     }
 
