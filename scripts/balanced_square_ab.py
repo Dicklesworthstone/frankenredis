@@ -577,6 +577,16 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("zrevrangebylex", ["ZADD zl 0 a 0 b 0 c 0 d 0 e"],
          ["ZREVRANGEBYLEX", "zl", "[e", "[b"]),
         ("zdiff", ["ZADD zd1 1 a 2 b 3 c", "ZADD zd2 1 b"], ["ZDIFF", "2", "zd1", "zd2"]),
+        # (frankenredis-eh2ct) 64-member siblings. At three members ZDIFF/ZINTER measure
+        # their fixed cost: the set-up dominates a difference of three elements.
+        ("zdiff_64",
+         ["ZADD z64 " + " ".join(f"{i} m{i:02d}" for i in range(64)),
+          "ZADD zd64b " + " ".join(f"{i} m{i:02d}" for i in range(32, 96))],
+         ["ZDIFF", "2", "z64", "zd64b"]),
+        ("zinter_64",
+         ["ZADD z64 " + " ".join(f"{i} m{i:02d}" for i in range(64)),
+          "ZADD zd64b " + " ".join(f"{i} m{i:02d}" for i in range(32, 96))],
+         ["ZINTER", "2", "z64", "zd64b"]),
         ("zinter", ["ZADD zd1 1 a 2 b 3 c", "ZADD zd2 1 b"], ["ZINTER", "2", "zd1", "zd2"]),
         ("sscan0", ["SADD ss m1 m2 m3 m4 m5 m6 m7 m8"], ["SSCAN", "ss", "0"]),
         ("hscan0", ["HSET hh f1 v1 f2 v2 f3 v3 f4 v4"], ["HSCAN", "hh", "0"]),
@@ -806,6 +816,12 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
          ["SORT_RO", "sl64", "ALPHA"]),
         ("sintercard2", ["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"], ["SINTERCARD", "2", "s1", "s2"]),
         ("smismember2", ["SADD st m1 m2 m3"], ["SMISMEMBER", "st", "m1", "nope"]),
+        # (frankenredis-eh2ct) SMISMEMBER's size axis is the number of members QUERIED --
+        # that is what the reply length tracks -- so the sibling asks about 64, half of
+        # which miss, rather than enlarging the set behind a two-member question.
+        ("smismember_64",
+         ["SADD s64a " + " ".join(f"m{i:02d}" for i in range(64))],
+         ["SMISMEMBER", "s64a"] + [f"m{i:02d}" for i in range(32, 96)]),
         ("zrangebylex", ["ZADD z 0 a 0 b 0 c"], ["ZRANGEBYLEX", "z", "-", "+"]),
         ("zcount", ["ZADD z 1 a 2 b 3 c"], ["ZCOUNT", "z", "1", "3"]),
         ("hrandfield_c", ["HSET h f1 v1"], ["HRANDFIELD", "h", "1"]),
@@ -974,6 +990,14 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     "misclaim": [
         ("zrange_ws", ["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "WITHSCORES"]),
         ("zrange_rev", ["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "REV"]),
+        # (frankenredis-eh2ct) These two are the shapes uu33c quoted for the arity-5
+        # mis-claim (16.1 pct dispatch share against 11.5). A dispatch-share row read off a
+        # three-element reply is the intercept case this bead is about, so the pair now
+        # carries a 64-member sibling and the two can be read against each other.
+        ("zrange_ws_64", ["ZADD z64 " + " ".join(f"{i} m{i:02d}" for i in range(64))],
+         ["ZRANGE", "z64", "0", "-1", "WITHSCORES"]),
+        ("zrange_rev_64", ["ZADD z64 " + " ".join(f"{i} m{i:02d}" for i in range(64))],
+         ["ZRANGE", "z64", "0", "-1", "REV"]),
         ("lpos_base", ["RPUSH l a b c d e"], ["LPOS", "l", "c"]),
         ("lpos_count_opt", ["RPUSH l a b c d e"], ["LPOS", "l", "c", "COUNT", "1"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
@@ -984,6 +1008,15 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("pfadd_existing", ["PFADD hll a b c"], ["PFADD", "hll", "a"]),
         ("sinter_2", ["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"], ["SINTER", "s1", "s2"]),
         ("mget_3", ["MSET a 1 b 2 c 3"], ["MGET", "a", "b", "c"]),
+        # (frankenredis-eh2ct) MGET's size axis is the KEY COUNT and SINTER's is the set
+        # size; at three of either the reply is smaller than the dispatch that produced it.
+        ("mget_64",
+         ["MSET " + " ".join(f"k{i:02d} v{i:02d}" for i in range(64))],
+         ["MGET"] + [f"k{i:02d}" for i in range(64)]),
+        ("sinter_64",
+         ["SADD s64a " + " ".join(f"m{i:02d}" for i in range(64)),
+          "SADD s64b " + " ".join(f"m{i:02d}" for i in range(32, 96))],
+         ["SINTER", "s64a", "s64b"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
     # (frankenredis-ee41v) Fifth batch: single-command shapes no sweep had
@@ -1121,6 +1154,10 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("getrange_full", ["SET s abcdefghijklmnop"], ["GETRANGE", "s", "0", "-1"]),
         ("lrange_neg", ["RPUSH l a b c d e"], ["LRANGE", "l", "-3", "-1"]),
         ("hmget_2", ["HSET h f1 v1 f2 v2"], ["HMGET", "h", "f1", "f2"]),
+        # (frankenredis-eh2ct) HMGET's size axis is the FIELD COUNT requested.
+        ("hmget_64",
+         ["HSET h64 " + " ".join(f"f{i:02d} v{i:02d}" for i in range(64))],
+         ["HMGET", "h64"] + [f"f{i:02d}" for i in range(64)]),
         ("mset_2", [], ["MSET", "ma", "1", "mb", "2"]),
         ("zadd_xx", ["ZADD z 1 a"], ["ZADD", "z", "XX", "1", "a"]),
         ("expire_nx", ["SET s v", "EXPIRE s 10000"], ["EXPIRE", "s", "500", "NX"]),
