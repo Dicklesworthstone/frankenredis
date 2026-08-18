@@ -30303,6 +30303,36 @@ pub fn sort_alpha_compare_with_ascii_fast_path(
 // `sliced` Vec into the reply. Both leave BYTE-IDENTICAL output (the window indices are a
 // permutation, each taken once; `sliced`/`elements` are dropped right after) — locked by the
 // sort differ + `sort_move_matches_clone_reference`. Production calls `::<true>`.
+/// Upstream's `ACLUserCheckCmdWithUnrestrictedKeyAccess` for the SORT options.
+///
+/// (frankenredis-yx1wa) SORT's BY and GET are refused unless the caller has FULL key access, and
+/// "full" is not a property of the root permission set alone. acl.c:1757 walks EVERY selector and
+/// returns true as soon as one both admits the command (`ACLSelectorCheckCmd` == ACL_OK) and has
+/// unrestricted key access. In redis the root set is simply the first selector in that list, so a
+/// root-only test is upstream's loop stopped after one iteration.
+///
+/// Reading `all_keys` off the root set alone therefore FALSELY REFUSES a legal call: a user like
+/// `ACL SETUSER u ... (%RW~* +sort)` has unrestricted key access through the selector, and would
+/// be told its own SORT is denied. That is the 9hori direction -- losing a call the incumbent
+/// allows, which no differ built from denied cases would report.
+///
+/// The `dispatch_acl_is_command_allowed` conjunct is load-bearing in the other direction, and is
+/// the half a bare `all_keys` scan would drop: a selector with unrestricted keys that does NOT
+/// grant SORT must not qualify, or an unrelated `~*` selector would hand out the very access this
+/// check exists to withhold.
+fn sort_acl_unrestricted_key_access(argv: &[Vec<u8>], store: &Store) -> bool {
+    let Some(permissions) = store.dispatch_client_ctx.acl_permissions.as_ref() else {
+        return true;
+    };
+    if permissions.all_keys && dispatch_acl_is_command_allowed(argv, permissions) {
+        return true;
+    }
+    permissions
+        .selectors
+        .iter()
+        .any(|selector| selector.all_keys && dispatch_acl_is_command_allowed(argv, selector))
+}
+
 fn sort_generic<const MOVE: bool>(
     argv: &[Vec<u8>],
     store: &mut Store,
@@ -30372,6 +30402,40 @@ fn sort_generic<const MOVE: bool>(
     }
 
     // ── Determine if sorting should be skipped (BY with constant pattern) ──
+    // (frankenredis-yx1wa) ACL: SORT's BY and GET dereference keys the SERVER picks at run time
+    // from a pattern, so a key-pattern check cannot see them in advance. Upstream's answer is to
+    // refuse the OPTION unless the caller has full key access (sort.c:245 and :260), and fr had no
+    // equivalent -- neither phrase appears anywhere in the workspace. A user restricted to
+    // `~allowed:*` could therefore run `SORT mylist BY secret:*->field` or `GET secret:*` and read
+    // keys outside its patterns. The reply carries the dereferenced VALUES, so this is a read
+    // primitive rather than an existence oracle. Same class as the PUBLISH channel-ACL bypass in
+    // project_borrowed_fastpath_skips_generic_check_vein.
+    //
+    // `acl_permissions` is None when no restriction applies, so the unrestricted default user is
+    // unaffected; only a user with a narrowed key set can be refused. That mirrors upstream's
+    // `if (u == NULL) return 1` at acl.c:1763.
+    if !sort_acl_unrestricted_key_access(argv, store) {
+        // BY is refused only for a REAL pattern. Upstream treats a BY with no `*` as the
+        // `dontsort` no-op, which dereferences nothing and stays allowed -- so refusing it would
+        // break a legal, harmless call.
+        if by_pattern.as_ref().is_some_and(|p| p.contains(&b'*')) {
+            return Ok(RespFrame::Error(
+                "ERR BY option of SORT denied due to insufficient ACL permissions.".to_string(),
+            ));
+        }
+        // GET is refused whenever it is PRESENT, `#` included. It is tempting to exempt `GET #`
+        // on the grounds that it returns the element itself and dereferences no other key, and
+        // that is a true statement about what `GET #` DOES -- but it is not what upstream CHECKS.
+        // sort.c:254-264 refuses on any `get` token, before the operation is even recorded, and
+        // `#` only becomes special much later in `lookupKeyByPattern`. Exempting it here accepts
+        // `SORT k GET #` from a restricted user that 7.2.4 refuses.
+        if !get_patterns.is_empty() {
+            return Ok(RespFrame::Error(
+                "ERR GET option of SORT denied due to insufficient ACL permissions.".to_string(),
+            ));
+        }
+    }
+
     let dontsort = by_pattern.as_ref().is_some_and(|p| !p.contains(&b'*'));
 
     // ── Get elements from the source key ─────────────────────────────
