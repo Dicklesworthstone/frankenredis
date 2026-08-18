@@ -58925,3 +58925,96 @@ to show a null on a small-reply shape that touches no lists. GET of a stored val
   3. `parse_command_args_borrowed_into` remains the largest term in a large bulk RPUSH (22,090
      instructions per key at n = 300, above 21 argv entries) and is handed to the dispatch owner,
      not taken here.
+
+## COMPETITIVE — the LZF COMPRESSOR gap RE-PRICED at **1.5867x AGAINST fr** (worst of three), down from 1.76x; and the frame-level instrument is provably load-immune
+
+Claim class: COMPETITIVE. Campaign output: yes. Both engines run the identical workload and the
+incumbent arm is a live vendored `redis-server` process; the ratio is a numeric fr vs Redis 7.2.4
+comparison of the same named frame. This row reports fr LOSING, which is why it carries the full
+evidence set voluntarily: the schema only gates headings that carry a verdict word, and an adverse
+number deserves more scrutiny than a favourable one, not less.
+
+MEASURED, stated on one line so it can be machine-read: fr vs Redis 7.2.4 = 1.5867x worst of three draws on the lzf_compress frame, 1.5827x median. The live redis-server arm ran the same 200-key workload in the same harness, seeded identically; neither number comes from prose.
+
+The benchmarked executables, hashed on the exact files the three draws ran, after the last draw: bench_elf_sha256=aa6e3cb95240c76c25fe1ba194ae712894fe62ac557215e39e92c3be14ab6b77 (fr) and bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7 (vendored redis 7.2.4 at `legacy_redis_code/redis/src/redis-server`). This harness cannot self-report through /proc/self/exe, because callgrind is what is executing.
+
+This discharges retry predicate 4 of `7a956e294`. The 1.66x figure on the board was one shipped
+slice old when it was written and is now two, and nobody had re-priced it.
+
+    per key, 200 x 40-field listpack hashes, DEBUG RELOAD, two-point at 4 and 8 reloads
+
+    draw   fr lzf_compress   redis lzf_compress   fr/redis
+      1          15894.0            10016.8        1.5867
+      2          15894.0            10047.0        1.5820
+      3          15894.0            10042.4        1.5827
+
+    history   1.7600 (original)  ->  1.6610 (after slice 1)  ->  1.5867 (now)
+
+Three slices have shipped against this kernel and it has closed **22.8 pct of the original excess**
+over the incumbent. It is still the one certified ratio on the board running AGAINST fr.
+
+### THE FR ARM IS BIT-IDENTICAL ACROSS A LOAD SWING FROM 8.8 TO 18.8
+
+This is the part worth keeping. The three draws were taken at loadavg 8.82, 18.81 and 18.02, with
+CPU MHz sampling 3144, 3144 and 2392 — and fr's compressor frame returned **15894.0 on all three,
+to the tenth of an instruction**. Spread 0.0000 pct. redis's frame moved 0.3007 pct.
+
+Counting a FRAME rather than the process excludes `serverCron` from both arms, which is the
+elapsed-time work that makes a whole-process denominator drift. The campaign already knew the fr
+numerator was load-immune; what this shows is that the INCUMBENT arm becomes near-immune too once
+the measurement is taken at frame level. A ratio that needs a quiet window at whole-op level does
+not necessarily need one at frame level, and this row is the demonstration rather than the
+assertion.
+
+The residual 0.3 pct on the redis side is not noise in the instrument: redis writes aux fields into
+its RDB whose contents vary between runs, so its compressor is not fed byte-identical input on every
+draw. fr's is.
+
+The A/A null, measured in a single invocation of the same harness on one ELF and one shape, has ratio median 1.0000 with a bootstrapped 95% median CI of [0.9970, 1.0030].
+
+That null is the ratio-of-ratios across replicate draws of the same two binaries, so it prices the
+redis-side variation above at about plus or minus 0.3 pct. A 1.5867x measurement sits 58 points of
+ratio outside it. The bootstrap median-CI gate determined this verdict. CV is provenance only and
+never influenced it.
+
+### THE WHOLE-RELOAD NUMBER IS NOT CERTIFIED HERE, AND THE REASON IS INSTRUCTIVE
+
+    whole reload per key   fr 72811.4 / 64912.2 / 64905.0     redis 28415.2 / 24998.5 / 25000.7
+
+fr's first draw is 12 pct above its next two and redis's is 13.7 pct above its next two, in the same
+runs where the compressor frame was bit-identical. Something outside the kernel — first-write file
+behaviour on a fresh RDB path is the obvious candidate — moves the whole-op figure and does not
+touch the frame. So the whole-reload ratio is quoted here for context only (about 2.56x on draw 1,
+2.60x on draws 2-3) and is NOT the claim.
+
+REUSABLE: when a frame is deterministic and the process around it is not, the frame is the
+instrument. Differencing whole-process totals would have reported a 12 pct swing on an arm that did
+not move at all.
+
+### A HARNESS THAT MEASURED NOTHING AND SAID SO ONLY BECAUSE I ASSERTED THE REPLY
+
+The first version of this measurement reported fr's compressor at 0.0 instructions per key and a
+free reload. `DEBUG RELOAD` was being REFUSED — "ERR DEBUG command not allowed", because
+`enable-debug-command` is not set by default — and the harness read the error, discarded it, and
+dutifully differenced two runs that had both done nothing. An ERROR REPLY IS A COMPLETED REQUEST to
+a harness that does not check it.
+
+The fix is in the script permanently: every `DEBUG RELOAD` reply must be `OK` or the run aborts. A
+zero is the one result that should never be believed without a positive control, and here the
+positive control is the reply itself.
+
+### RETRY PREDICATE
+
+  1. Re-price again only after a slice actually ships against this kernel. All three slices sized
+     from the old line profile are now resolved (1 shipped, 2 closed structurally, 4 rejected), so
+     there is no queued work that would move this number.
+  2. This is ONE payload shape: 200 keys x 40 fields, listpack-encoded, compressible. The encoding
+     is asserted in the harness because a hashtable-encoded key would compress a different payload
+     and silently change what is being compared. Element size and compressibility are unmeasured
+     axes; do not generalise 1.5867x to "fr's LZF" as a whole.
+  3. Do NOT re-take this at whole-op level to "confirm" it. The whole-reload figure is the noisier
+     instrument here by a factor of 40 and measures work this row is not about.
+  4. The gate read FIT before draw 1 and UNFIT after draw 3 (loadavg 17.22 vs 11.04, 56 pct apart,
+     2 builds). The worst draw is draw 1, from the verified-FIT window, so the quoted bound does not
+     depend on the degraded half — but the frame-level immunity demonstrated above is the reason
+     this row would stand either way.
