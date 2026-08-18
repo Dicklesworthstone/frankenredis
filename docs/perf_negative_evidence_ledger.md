@@ -59575,3 +59575,76 @@ and it was measured rather than argued:
   3. `25d7cdc9a` flagged this path as a CANDIDATE explanation for the four unclosed
      `queue RPUSH+LPOP` DUMP divergences. This lever did NOT change them — still 4 of 42 — so that
      candidate is now eliminated.
+
+## SHIPPED (SELF-SPEEDUP) 07db0dadc — LZF SLICE 5: THE EPOCH CHECK FOLDED INTO A RANGE CHECK THE CALLER ALREADY DOES, -240 instr/op (-1.41 pct)
+
+Claim class: SELF-SPEEDUP. Campaign output: no. This is fr against fr in one binary. It serves the
+one COMPETITIVE gap still running against fr (the LZF compressor, last priced at 1.5867x in
+`564597af6`), but it does not re-price it and makes no claim about the incumbent.
+bench_elf_sha256=d86a7b03e0bb5b9537586920e355dec2be4830e1e858b2a910beaa35e96e9484
+
+The previous row said there was no sized candidate left and that a slice 5 needed a fresh profile.
+It did not need one. **This lever came from reading the INCUMBENT'S source instead of our own.**
+
+Vendored `lzf_c.c` sets `INIT_HTAB 0`: it never clears its 512 KiB match table, and lets its range
+and byte checks reject whatever stale garbage it reads. So it pays a raw load per probe. fr emulates
+a CLEAN table with an epoch tag, and pays a shift, a compare, a branch and a mask on every probe.
+That asymmetry is work the incumbent simply does not do, and no amount of profiling fr alone would
+have named it — a profile shows where time goes, not which of two engines is doing something the
+other skips entirely.
+
+The fix keeps fr's clean-table semantics and drops the arithmetic. The probe returns `slot XOR tag`:
+a matching tag cancels the top byte and yields exactly `pos_plus_one`, bit for bit what the compare
+form returned; a differing tag leaves the top byte set, so the value is at least `1 << 24`. The
+second case is rejected FOR FREE by the caller's existing `r < ip` guard, because this table
+representation is only chosen when `in_len < 16 MiB`, so `ip < in_len <= (1 << 24) - 1` while a stale
+slot yields `r >= (1 << 24) - 1 > ip`.
+
+    payload                                       tag     xortag    delta      pct
+    listpack (the shape DUMP feeds it)          16968      16728     -240    -1.41
+    random   (incompressible)                  118217     117959     -258    -0.22
+    runs     (match-heavy)                      11304      11213      -91    -0.80
+
+I predicted about 2000 from counting source operations and got 240. The compiler had already folded
+most of the probe; what survived was the branch and one mask. **Counting operations in the SOURCE
+over-predicts by an order of magnitude in a loop this hot** — the same lesson slice 4 taught from the
+other direction, where a source-level "removal" cost 820.
+
+The A/A null, measured in a single invocation of the same harness on one ELF and one shape, has ratio median 1.0000 with a bootstrapped 95% median CI of [1.0000, 1.0000].
+
+Degenerate again, and for the same reason as slices 3 and 4: a pure compute kernel in a short-lived
+process has no cron, no epoll and no clock-dependent work, so all three draws of every arm returned
+bit-identical counts. Read it as "no observed noise on this kernel", not as unlimited precision. The
+bootstrap median-CI gate determined this verdict. CV is provenance only and never influenced it.
+
+### THE FAILURE MODE IS A DIFFERENT PAYLOAD ON THE WIRE, NOT A CRASH
+
+A stale slot that is wrongly ACCEPTED does not corrupt anything: the byte comparison that follows
+would still have to agree, so the output stays decompressible. It produces a valid but DIFFERENT
+compressed stream — which is observable, because DUMP payloads are compared against redis byte for
+byte, and because the raw-versus-compressed decision depends on the result fitting its budget.
+
+`lzf_xor_tag_probe_matches_compare_arm_byte_for_byte` is built for exactly that. It compresses every
+equivalence payload REPEATEDLY, in three rounds, against the shared thread-local scratch, sweeping
+the budget densely for each. A single pass over fresh payloads would barely exercise the epoch logic
+at all: a stale slot is only reachable when the table is still WARM from a previous call, so a test
+that never reuses the scratch cannot fail for the reason this change could break. 260 fr-persist
+tests pass, including `lzf_compress_matches_vendored_wire_format_for_all_xs_z4tsz`, which is the
+byte-exactness guard a probe-semantics change has to satisfy.
+
+The trait contract is now documented as "pos + 1, or anything the caller's guard rejects", because a
+non-zero result is no longer guaranteed in range. The wide table (`in_len >= 16 MiB`) still returns 0
+and is untouched — the trick depends on the 24-bit precondition the packed representation carries.
+
+### RETRY PREDICATE
+
+  1. The compressor ratio is stale AGAIN by 1.41 pct on the listpack shape. Re-price with
+     `scripts/lzf_compressor_ratio.py` when `certification_window.py --for ratio` returns FIT; it
+     should land near 1.564x if the kernel win carries, but that is arithmetic, not a measurement.
+  2. Do NOT extend this trick to the wide table. It is sound only because a stale value exceeds any
+     valid position, which requires the 24-bit bound the packed representation guarantees and the
+     wide one exists precisely to escape.
+  3. The method is the reusable part: READ THE INCUMBENT'S SOURCE for work it does not do. `INIT_HTAB
+     0` is one line of C and it named a lever that four rounds of profiling fr alone had missed. The
+     next question of the same kind is what else fr does per probe or per position that `lzf_c.c`
+     skips outright.
