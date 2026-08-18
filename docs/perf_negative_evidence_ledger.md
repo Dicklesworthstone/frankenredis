@@ -45168,3 +45168,75 @@ normaliser for this group needs its own row: a normaliser 16.6 pct wide against 
 is not removing variance, and every control-normalised figure in the `sizepairs` group inherits
 that. The allocator's 31.68 pct miss reduction from `c4a2f6e91` stands as a mechanism result and
 remains unconverted into any user-visible number.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — a single-digit fast path in the floor decimal parser, which runs 2.000 times per op on EVERY command: dispatch **-6.0 instr/op**, worst bound -5.1, `.text` +64 bytes (`frankenredis-iqicb`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: `parse_borrowed_dispatch_floor_decimal` gets a single-digit fast path, shipped in
+`6dc4a27d6`. It runs **2.000 times per op on every command** — once for the array length, once
+for the command's bulk length — and both are one digit for all real traffic (arities 1-9,
+command names 3-9 bytes). It was running the general loop for them: leading-zero bookkeeping,
+`checked_mul`, `checked_add` and per-byte bounds.
+
+MEASURED, callgrind two-point (N=20,000 and 2N=40,000). The BEFORE arm is the ELF already built
+at `7860d231d`, valid because `git diff 7860d231d..HEAD -- crates/` is EMPTY, so this cost ONE
+build rather than two. `bench_elf_sha256=4cf777a8371b9ff7bb99834c5aeef624b54053b77f3891b8b390e4ed2046a81e` (before),
+`bench_elf_sha256=667a40f9fb116599f4ffbc2120bfcab59f202ab1fc5ccdb348c7b0765deb7895` (after). Per-arm host state: load 22.45/16.06/11.44 then
+10.59/13.72/11.07, CPU idle 87.5 pct then 80.5 pct measured from `/proc/stat`, iowait 0.1 then
+0.0 pct, mean 2153-2344 MHz across 64 cores, /data 130G. Instruction counts are software-counted
+and immune to load and MHz.
+
+| shape | dispatch before | after | delta |
+|---|---|---|---|
+| get | 401.0 | 395.0 | **-6.0** |
+| ttl | 481.0 | 475.0 | **-6.0** |
+| ping | 300.0 | 294.0 | **-6.0** |
+| sadd | 596.1 | 591.0 | **-5.1** (596.6 -> 590.1, -6.5, in the other round) |
+
+**Quoting the WORST bound: -5.1 instr/op.** The constant is the evidence — those shapes' dispatch
+spans 300 to 596 and the saving does not scale with it, which is what two removed loop iterations
+look like and what per-command work does not. It works out at roughly 3 instructions per call,
+twice per op.
+
+**THE SHAPE WAS CHOSEN FROM THE PREVIOUS ROW'S LESSON, and that is the transferable part.** An
+hour earlier, `90ecb5696` REJECTED a lever on this same surface because widening an interface
+here costs 8-16 instr/op on every command — measured three separate times. This lever
+restructures the INSIDE of one function and changes no signature. Same target area, opposite
+technique, opposite result: **-5.1 to -6.5 instead of +8.0 to +9.5.**
+
+EQUIVALENCE with the loop it short-circuits, case by case, because "it passed the tests" is a
+weaker claim than an argument: one digit then CRLF returns exactly what the loop returns; `0\r\n`
+is accepted by both, since the loop returns at the `\r` before its leading-zero flag can reject;
+two or more digits fail the fast path's CRLF test and fall into the loop; a non-digit, including
+a `\r` at the cursor, falls into the loop and returns None as before.
+
+CORRECTNESS: 14 command forms answer byte-identically on both arms, chosen to include the
+multi-digit paths this must FALL THROUGH on — a 200-byte key (`$200\r\n`) and a 12-byte command
+name (`$12\r\n`) — plus both GET arity errors and the near-misses TTL, DEL and GETDEL.
+
+NOT CLAIMED, recorded rather than credited: `SMISMEMBER` has a 10-byte name, so exactly one of
+its two parses should fall through and a half dose predicts about -3.0. It measured **-8.6**. I
+have not explained that, so it is excluded from the claim, which rests on the four shapes above.
+The prediction failing is itself worth recording — the dose-response reasoning that worked for
+the SINTER probe vein does not obviously transfer to a parser called twice with different
+arguments.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run
+interleaving both arms across two rounds, so drift falls on both alike. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this row;
+no CV was computed. Host state is likewise provenance, not a gate. The whole-process totals
+again spanned the effect several times over (GET read 1164.7-1250.2 across draws against a 6.0
+effect), so the verdict rests on the dispatch FRAME, whose figures are exact integers and whose
+BEFORE column reproduces values measured on earlier days at earlier bases.
+
+RETRY PREDICATE: revisit only if a profile shows the decimal parser back above ~10 instr/op per
+call, which would mean the fast path stopped firing — measure it by re-reading the dispatch
+FRAME on `get` and `ping`, whose 395.0 and 294.0 are now the reference. The same single-digit
+argument applies to any other length parser on a hot path, but do NOT assume it: this one paid
+because it runs TWICE per op, and a parser called once would return about half of it, below the
+~40 instr/op resolution of the whole-process instrument and therefore only measurable on the
+frame.
