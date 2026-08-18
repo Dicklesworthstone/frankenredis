@@ -73657,7 +73657,6 @@ mod tests {
         assert_eq!(out, RespFrame::BulkString(Some(b"echoed".to_vec())));
     }
 
-    #[test]
     /// FUNCTION LOAD REPLACE must change what FCALL runs, cache or no cache.
     ///
     /// (frankenredis-kbyhy) `da4cd4fe4` memoised the transformed FCALL wrapper, which had been
@@ -73670,10 +73669,10 @@ mod tests {
     /// build and one library; the function_load differ stops at load. A stale wrapper is only
     /// visible if a test REPLACES a library and then calls it again, which is what this does.
     ///
-    /// The cache is keyed on `(function name, full library BYTES)`, so REPLACE changes the key
-    /// and the stale entry becomes unreachable rather than merely unlikely. This test is what
-    /// says so out loud: it fails if the key is ever weakened to the library NAME, or to a hash
-    /// that collides, or to anything that does not move when the body does.
+    /// The cache is keyed on the full library BYTES and then on function name, so REPLACE
+    /// changes the outer key and the stale entry becomes unreachable rather than merely unlikely.
+    /// This test is what says so out loud: it fails if the key is ever weakened to the library
+    /// NAME, or to a hash that collides, or to anything that does not move when the body does.
     #[test]
     fn fcall_reflects_function_load_replace_and_not_a_cached_wrapper_kbyhy() {
         let mut store = Store::new();
