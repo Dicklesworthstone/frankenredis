@@ -60899,3 +60899,127 @@ digit-leading and all common.
      spot closes independently of the fix.
   3. Do NOT re-quote the 1.0051x from STR draw 1. It is void for a 25.6 pct null and would falsely
      read as the string lead having evaporated.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 BrownIbis: `geosearch_64`'s deficit is PER-ELEMENT locality — fr pays **2.51-2.73 simulated L1 read misses and 2.77-2.80 write misses per added member** against redis's 0.79-0.81 and 0.71-0.74, and the candidate is an owned `member.to_vec()` per hit into a `Vec::new()` (`frankenredis-ozrro`)
+
+Claim class: MEASUREMENT plus a lever SPECIFIED NOT BUILT. No ratio is certified here.
+Campaign output: no — it names where to look next, and rules out the shape of fix that
+`fe76a4034` already showed cannot help.
+
+### WHERE THIS PICKS UP
+
+`fe76a4034` put `geosearch_64` on the instruction axis at worst bound **0.6887x** — fr retires
+31 pct FEWER instructions — while its throughput ratio has straddled 1.0 across six replicates.
+That established what the deficit is NOT (work volume) and left open what it IS.
+
+`37977` (GentleStream, `eh2ct`) already answered that for the TWO-member shape with hardware
+counters: IPC 1.387 vs 1.818, L1 miss rate 3.02 vs 1.92 pct, and fr burning 4 pct MORE cycles on
+21 pct fewer instructions. Their lever was data locality in the packed-zset walk. **That row is
+`geosearch_2` — `GEOSEARCH g FROMLONLAT 15 37 BYRADIUS 200 km ASC` over a two-member key.** The
+64-member shape, which is the one whose throughput straddles, had never been measured this way.
+
+### THE MEASUREMENT
+
+Four draws, all FIT, same ELF, same simulator, cooldown-gated per
+`fe76a4034`'s scheduling note.
+
+    shape          draw  instr    Dr       D1mr    Dw       D1mw    loadavg at arm
+    geosearch_64   d1    0.6891   0.8127x  3.1509x 0.9489x  3.7995x 5.99 / 5.77 / 6.24
+    geosearch_64   d2    0.6889   0.8123x  3.1747x 0.9474x  3.6599x 6.07 / 5.80 / 6.24
+    geosearch_2    d1    0.7138   0.8371x  3.0320x 1.0493x  2.6345x 5.20 / 5.62 / 6.13
+    geosearch_2    d2    0.7163   0.8318x  1.4786x 1.0493x  2.4342x 5.25 / 5.62 / 6.13
+
+**fr touches LESS data and misses MORE.** `Dr` 0.81x and `Dw` 0.95x on the 64-member shape: fr
+performs fewer data reads and fewer writes than redis, and still takes over three times the L1
+misses. And for a READ-ONLY command, fr's simulated write misses (184/op) EXCEED its read misses
+(175/op), which is the detail that pointed at the allocation site below rather than at the walk.
+
+### THE PART THAT IS ROBUST: A PER-ELEMENT SLOPE
+
+Absolute per-op ratios from a simulator are a sign and a rank, never a size — GentleStream
+calibrated this instrument at 3.6855x simulated versus 1.4722x on hardware, an overstatement of
+about 2.5x, and that calibration is inherited here rather than re-derived. **A slope between two
+sizes measured on the SAME instrument is far more trustworthy than either endpoint**, because the
+systematic overstatement largely cancels.
+
+Differencing 64 members against 2, and quoting the LEAST favourable pairing for the claim
+(smallest fr slope against largest redis slope):
+
+    event   fr per added member   redis per added member   ratio WORST   best
+    D1mr    2.51 - 2.73           0.79 - 0.81              **3.11x**     3.47x
+    D1mw    2.77 - 2.80           0.71 - 0.74              **3.75x**     3.96x
+
+Each additional member costs fr roughly three L1 misses where it costs redis roughly one. The
+deficit is LINEAR in element count, not a fixed overhead and not a blow-up.
+
+### THE 2-MEMBER SHAPE CANNOT MEASURE THIS, AND SAYS SO LOUDLY
+
+`geosearch_2`'s `D1mr` ratio read **3.0320x and then 1.4786x on two draws of the same binary** —
+it moved by a factor of two. The absolute counts are why: 10 to 20 misses per op, differenced
+from two runs, is small enough that 2N-N differencing is dominated by noise. At 64 members the
+same measurement is stable to 0.8 pct (3.1509 and 3.1747).
+
+Anyone repeating GentleStream's simulated 3.6855x on the two-member shape should expect it not
+to reproduce, and that is a property of the shape size, not a contradiction of their row — their
+HARDWARE numbers are unaffected by this and stand.
+
+### THE CANDIDATE, SPECIFIED NOT BUILT
+
+`fr_command::geosearch` accumulates into
+
+    let mut results: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
+
+and each surviving candidate does, at three call sites (`crates/fr-command/src/lib.rs:6528`,
+`:6558`, `:6592`):
+
+    results.push((member.to_vec(), score, dist, lon, lat));
+
+So every hit costs **one heap allocation for the member name** plus a push into a Vec that was
+never reserved — 64 hits means 64 scattered small allocations and about seven reallocate-and-copy
+cycles of a 56-byte tuple. That is a write-heavy, poor-locality pattern that scales linearly with
+element count, which is exactly the slope measured above, and it explains why a read-only command
+shows more write misses than read misses.
+
+**This is the `hscan0_borrow_scan` pattern again** (`b8e9f503f`, +600.7 instr/op, the largest
+single lever of this campaign): a collection materialised in owned form for a sink that may not
+need it. The difference is that GEOSEARCH genuinely must materialise — it SORTS before encoding —
+so the fix is NOT "borrow instead of collect". Two smaller things are available and neither is
+built or measured here:
+
+1. **Reserve the Vec.** The candidate count is bounded by the zset length, known before the scan.
+   `Vec::with_capacity` removes the reallocate-and-copy cycles without changing any semantics.
+2. **Stop allocating the member name per hit.** The tuple owns a `Vec<u8>` only so it can outlive
+   the scan callback. A borrowed slice, or an inline small-string, would remove 64 allocations
+   per op — but the borrow must outlive `zset_for_each_in_score_ranges`, which is a real lifetime
+   question and the reason this is specified rather than done.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No A/B and no null: this is a diagnostic on one binary, not a lever, and nothing is claimed to
+have got faster. The control against mis-specification is the reply check from `fe76a4034` —
+both engines answer `:64` and return 64 members. Per-arm loadavg and CPU MHz recorded per draw.
+All four windows FIT, zero builds running. CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           fr `4b2dd580cfaa158c...` at `643df0862`, NOT current main; see `fe76a4034` for
+                why that is labelled rather than hidden.
+  incumbent     vendored redis 7.2.4, harness-verified per arm.
+  host          /data 47G, 5G above the brake. No local builds — measurement only.
+  disposition   MEASUREMENT + SPECIFIED NOT BUILT. No source file changed.
+
+### RETRY PREDICATE
+
+1. **Do not size the prize from these ratios.** They are simulated and this instrument is
+   calibrated at ~2.5x overstatement. Use them to RANK candidates; measure the winner on
+   hardware with `perf stat` as `37977` did.
+2. Anyone building fix (1) should measure `geosearch_64` AND a small-cardinality geo shape: a
+   reserve helps only when the count is large, and the 2-member shape is where a regression from
+   over-reserving would show.
+3. Do NOT re-run this on `geosearch_2` expecting stable miss ratios. It reads 1.48x and 3.03x on
+   consecutive draws of one binary. Use 64 members or larger for any miss-ratio claim.
+4. If fix (2) is attempted, the blocker to establish FIRST is whether the member slice can
+   outlive `zset_for_each_in_score_ranges`'s callback. If it cannot, the allocation is structural
+   and only (1) is available.
