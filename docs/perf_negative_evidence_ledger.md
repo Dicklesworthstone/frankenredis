@@ -46602,3 +46602,71 @@ standing convention takes the worst of the two draws, which is 0.3182x. And do n
 shape as GET in general — it is `get_control`, a single-key hit with a short value, seeded
 without a TTL; a volatile key changes the expire-cycle work on every command and would need its
 own row.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: REJECT — jemalloc's 31.68 pct D1-miss reduction does NOT convert into a certifiable throughput gain on `geosearch_2`: the effect is SMALLER than the treatment arm's own between-draw spread. And I CORRECT my own "8 for 8" load rule (`frankenredis-eh2ct`)
+
+Two admissible jemalloc draws now exist, so the flaky-gate objection from `14091fc7b` is
+discharged and the comparison can finally be made. It does not survive it.
+
+  mimalloc ELF bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  jemalloc ELF bench_elf_sha256=1fd257d3bc1ee0723f38373db2a58202f1886a1a20c5d1c4945b06bc96402ce9
+  incumbent    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+`balanced_square_ab.py --shapes sizepairs`, ABBAABBA, rounds=36, ops=50,000, -P16, null +/-0.02,
+`--expect-elf` pinned. Third jemalloc draw: loadavg 7.34 9.25 12.31 -> 10.75 10.16 11.79, CPU MHz
+mean 2409 before / 2324 after, 0 rustc.
+
+### The counted reason for that verdict
+
+  ARM        normalised points    own spread   worst bound   raw points        raw spread
+  mimalloc   0.8969 / 0.8956       0.15 pct      0.8578      1.0089 / 1.0210    1.20 pct
+  jemalloc   0.9351 / 0.9023       3.64 pct      0.8727      1.0434 / 1.0186    2.43 pct
+
+  EFFECT at the worst bound:  normalised +1.74 pct   raw +0.96 pct
+  jemalloc's OWN between-draw spread:   normalised  3.64 pct   raw  2.43 pct
+
+THE EFFECT IS SMALLER THAN THE TREATMENT ARM'S OWN DRAW-TO-DRAW SPREAD, on both quantities and
+by roughly a factor of two. This ledger's standing law is that you may not claim an effect
+smaller than your own null bias; the same logic forbids claiming one smaller than your own
+replication spread. mimalloc replicated to 0.15 pct and jemalloc to 3.64 pct on the identical
+harness, config and shape, so the spread is a property of the jemalloc arm rather than of the
+window.
+
+A/A NULL from the harness's same-binary null arms across the two admissible jemalloc draws,
+whose true value is exactly 1.0000: median 0.991300, bootstrapped 95% median CI [0.980100,
+0.996700]. Every arm and null was taken within one top-level invocation of the harness per draw.
+THE VERDICT IS GATED ON THAT BOOTSTRAP MEDIAN-CI and on the spread comparison above. CV is
+provenance only and was never used as a gate here; no CV was computed.
+
+### The mechanism result still stands, and this is what it is worth
+
+`c4a2f6e91` measured jemalloc cutting `geosearch_2` D1 misses by at least 31.68 pct with data
+accesses flat -- a real locality effect, replicated to 0.15 points. It does not show up as a
+certifiable throughput difference. That is not a contradiction: 63.3 simulated D1 misses per op
+against ~13,200 instructions is a small fraction of the op's time, so a third of them is a small
+fraction of a small fraction. THE LESSON IS THE TRANSFER, not the allocator -- a large RELATIVE
+movement in a SMALL absolute term does not become a user-visible number, and the miss row should
+have carried that arithmetic before the throughput runs were spent.
+
+### I CORRECT MY OWN "8 FOR 8" CLAIM from `14091fc7b`
+
+That row said load DIRECTION predicted admissibility 8 times out of 8, with "rose" always
+failing. The third jemalloc draw ROSE 7.34 -> 10.75 and CERTIFIED, which refutes the strict
+form. The corrected rule is MAGNITUDE, and on all nine runs it separates perfectly:
+
+    -63 pct PASS | -53 pct PASS | -25 pct PASS | +46 pct PASS
+    +69 pct FAIL | +94 pct FAIL | +95 pct FAIL | +128 pct FAIL | +469 pct FAIL
+
+Every run at or below +46 pct certified; every run at or above +69 pct did not. Direction is a
+proxy that happened to hold for eight runs because no modest rise had yet been sampled. The
+threshold sits somewhere in (+46, +69) pct and nine points cannot place it more finely.
+
+RETRY PREDICATE: do NOT run a fourth jemalloc draw to chase the +1.74 pct -- the arm's own
+spread is 3.64 pct, so more draws of the same shape narrow the mean without making a
+sub-spread effect claimable, and the honest fix is a shape where the allocator's absolute term
+is larger. Reopen the allocator question only on a shape whose profile shows misses as a
+DOUBLE-DIGIT percentage of the op, which `geosearch_2` at ~63 misses against ~13,200
+instructions is not. The mimalloc standing of 0.8578 worst bound (`f8067cba3`) is untouched by
+this row and remains the certified figure for `geosearch_2`.
