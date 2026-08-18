@@ -23400,7 +23400,7 @@ fn client_info_line(store: &Store, sub: &str) -> Vec<u8> {
         // (frankenredis-cudmd) Upstream networking.c::catClientInfoString
         // terminates each per-client info string with a single '\n', not
         // CRLF — see the matching change in fr-runtime.
-        "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl={} oll=0 omem=0 tot-mem={} events=r cmd=client|{} user={} redir={} resp={} lib-name={} lib-ver={}\n",
+        "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl={} oll=0 omem=0 tot-mem={} events={} cmd=client|{} user={} redir={} resp={} lib-name={} lib-ver={}\n",
         ctx.client_id,
         ctx.peer_addr,
         store.server_port,
@@ -23427,6 +23427,14 @@ fn client_info_line(store: &Store, sub: &str) -> Vec<u8> {
             .saturating_add(ctx.qbuf_free_bytes)
             .saturating_add(16384)
             .saturating_add(ctx.output_buffer_bytes),
+        // (frankenredis-edwnn) `events` is upstream's installed-handler pair, not a constant:
+        // networking.c:2800-2803 writes 'r' when a read handler is installed and appends 'w'
+        // when a write handler is, so a client with pending output reports `rw`. Emitting a
+        // constant `r` made a backlogged client look idle. This mirrors the expression
+        // `74b30ed5e` used in fr-runtime's builder, against the same quantity -- the runtime
+        // already mirrors it into this context for `obl=` and `tot-mem=`, so the fix needs no
+        // new plumbing and the two builders cannot drift on this field.
+        if ctx.output_buffer_bytes > 0 { "rw" } else { "r" },
         sub.to_ascii_lowercase(),
         user,
         redir,
