@@ -63214,3 +63214,170 @@ used, as a gate or otherwise.
    an already-converted route.
 3. Before profiling a shape to test a claim about a FUNCTION, confirm the shape's route reaches
    that function. Absence in a profile is evidence only when presence was possible.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the omission is **1012.4 instr/key**, work-per-key is **1.6167x** against the certified frame-only 1.5159x; and my own certification's "Campaign output: yes" overstates Policy 2
+
+Claim class: COMPETITIVE. Campaign output: no — deliberately, see the last section. Nothing was run:
+the freeze holds (/data 34G, no cargo, no artifact writes), and every number here comes from four
+callgrind dumps already on disk from the pre-slice-7 run, read only.
+
+`0af43152d` derived the omitted memset at ~1170 instr/key and said explicitly that it was arithmetic
+across two shapes and must not be quoted as a measurement. It can now be measured, because the dumps
+that produced the published 15196.0 and 10024.6 were still sitting in `scripts/` — the litter from
+the harness bug fixed in `f1fb2aea6`, which turns out to be a usable fixture.
+
+    per key, from cg.lzfr.{fr,redis}.{n,2n}, two-point at 4 and 8 reloads, 200 keys
+
+    arm      compressor frame     memset frame        sum
+    fr                15196.0           1012.4    16208.4
+    redis             10024.6              1.3    10025.9
+
+Both frame figures reproduce the published numbers to the decimal, which is what makes these dumps
+trustworthy as a fixture rather than merely available. The fr dump's dispatch symbol carries SIX const
+parameters, confirming it is the pre-slice-7 build.
+
+    work-per-key ratio   16208.4 / 10025.9  =  1.6167x
+    certified frame-only 15196.0 / 10024.6  =  1.5159x
+
+**The frame-only metric understates fr's disadvantage by 6.65 pct relative.** The derived 1170 was
+15 pct high; the conclusion it supported was right.
+
+**redis's 1.3 instr/key is the empirical confirmation of the source reading.** `lzf_c.c` puts its
+table clear inside `#if INIT_HTAB` and `lzfP.h` defines `INIT_HTAB 0`, so the clear is compiled out.
+That is now measured, not inferred: the incumbent spends essentially nothing on table clearing while
+fr spent 1012.4 per key before slice 7.
+
+### THE HARNESS NOW REPORTS BOTH, BECAUSE THE AMBIGUITY IS WHAT CAUSED THE ERROR
+
+`d44d816cb` makes `scripts/lzf_compressor_ratio.py` print the compressor frame, the memset frame,
+program totals, and their sum, with the sum labelled as the figure for a work-per-key ratio. The
+docstring names all three and says which one the historical series used. A metric that has to be
+remembered is a metric that will be misquoted; two rows in one session is the evidence.
+
+### AND A COMPLIANCE PROBLEM IN MY OWN CERTIFICATION, WHICH I WOULD RATHER STATE THAN LEAVE
+
+`6177c6ac2` is labelled **Campaign output: yes**. Policy 2 in `perf_candidate_preflight.py` defines
+campaign output as a ratio "produced by a harness that runs the incumbent arm side-by-side in the same
+invocation". **`lzf_compressor_ratio.py` takes ONE engine per invocation.** I ran three fr draws, then
+three redis draws, minutes apart. That is not side-by-side, and the label overstates it.
+
+The preflight passed the row anyway, and the reason is worth recording: `incumbent_same_invocation`
+looks for a same-invocation PHRASE within 260 characters of a redis mention, and my A/A sentence
+supplies that phrase legitimately for the A/A. **The check is satisfied by proximity, not by the
+property.** So it will not catch this class of overstatement in anyone's row, not just mine.
+
+What the policy is guarding against is host drift differing between arms, and that guard was supplied
+here by other means — the gate was FIT at both brackets, the fr arm is bit-identical across draws, and
+the redis arm reproduced to 0.09 pct. So I do not think the 1.5139x number is wrong. But the LABEL is
+wrong, and the fix is to make the harness run both engines in one invocation rather than to argue the
+exemption.
+
+Until that lands: **treat 1.5139x as a bracketed two-invocation ratio on the compressor frame, not as
+Policy 2 campaign output**, and treat 1.6167x as the work-per-key figure with the same caveat.
+
+### RETRY PREDICATE
+
+  1. Change `lzf_compressor_ratio.py` to run BOTH engines in one invocation, then re-take the ratio and
+     re-label. That is a build-free source change but needs a run to validate, so it is frozen.
+  2. Do not re-derive the 1.7600 -> 1.5139 history onto the work-per-key metric. Those earlier figures
+     were frame-only and their memset components were never captured; the dumps are gone. Keep the
+     series as frame-only and start a second column from here.
+  3. `incumbent_same_invocation` is satisfied by a nearby phrase rather than by the harness's actual
+     structure. Worth tightening, and worth knowing about when reading any COMPETITIVE row in this
+     ledger — including the XREAD certification, which DOES qualify (`shape_instr_per_op.py` runs both
+     engines in one invocation) but is not distinguishable from this one by the checker.
+  4. The four dumps in `scripts/` are now a load-bearing fixture for this row. If they are removed,
+     this measurement is not reproducible without an unfrozen window.
+
+## 2026-08-18 CrimsonHawk: FOUND — lever 2 is not a new idea, it is an UNPORTED FUSION: `cc_fr` fused this exact two-pass scan in fr-persist on 2026-07-10 and measured **1.399x** (`ac77762d8`); fr-store's twin still has the two-pass shape, and `2a4617295` is where I rebuilt it without noticing (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: source reading and ledger archaeology only. **No measurement of any kind was taken
+this turn** — /data stood at 34G against a 42G brake under a hard build freeze; no cargo, no
+callgrind, no artifact write, and the source tree was not modified. CV was NOT used and no timing
+verdict is claimed. The 1.399x quoted below is `ac77762d8`'s OWN measurement, cited, not re-measured.
+
+Claim class: not applicable — nothing new is banked. Campaign output: no. What this row changes is
+lever 2's status: from "specified, magnitude unknown" to "port of a measured win".
+
+### THE SIZE RULE IS IMPLEMENTED TWICE, AND ONLY ONE COPY WAS FUSED
+
+    fr_persist::parse_listpack_integer   (fr-persist/src/lib.rs:2888)   SINGLE-PASS, fused
+    fr_store::list_lp_int                (fr-store/src/packed_set.rs:4436)   TWO-PASS
+
+fr-persist's form, and its own comment names the change:
+
+    if digits.is_empty() { return None; }
+    if digits[0] == b'0' && (digits.len() > 1 || neg) { return None; }   // O(1), FIRST
+    for &b in digits {                                                  // ONE pass
+        if !b.is_ascii_digit() { return None; }
+        acc = acc.checked_mul(10)?.checked_sub((b - b'0') as i64)?;
+    }
+
+fr-store's form:
+
+    if !list_lp_int_bytes_are_canonical(entry) { return None; }   // all(is_ascii_digit) FULL SCAN,
+                                                                 // THEN leading-zero, THEN "-0"
+    for &d in digits { magnitude = magnitude.checked_mul(10)?.checked_add(...)?; }   // SECOND pass
+
+**`ac77762d8` (cc_fr, 2026-07-10) is exactly this fusion, landed, A/B null-gated, byte-identical
+acceptance: 1.399x on 2048 canonical decimals, 1.25x mixed.** fr-persist even retains
+`parse_listpack_integer_orig` as a bench-only two-pass baseline so the A/B can be re-run.
+
+So lever 2 as I specified it last turn — swap the leading-zero test ahead of the all-digits scan —
+is the WEAKER half of a change that already exists, measured, one crate away. The full form also
+fuses the per-digit check into the accumulate loop, eliminating the second pass entirely, and folds
+the `-0` rejection into the leading-zero branch via `(digits.len() > 1 || neg)`, removing a third
+branch fr-store still has.
+
+### `2a4617295` IS WHERE THIS WAS MISSED, AND IT IS MINE
+
+`2a4617295` open-coded fr-store's decimal fold to repair the `308db786f` regression, replacing
+`str::from_utf8().parse::<i64>()` with a `checked_mul`/`checked_add` loop. It measured −11.96 pct on
+integers and stands. But it built the SECOND pass by hand and left
+`list_lp_int_bytes_are_canonical` in front of it — **reconstructing the two-pass shape cc_fr had
+deleted from the twin three weeks earlier.** Had I read the twin then rather than only the function I
+was editing, the fused form was sitting there to copy.
+
+An earlier row also came close: the `EQUIVALENCE` section at ledger line ~40367 compared the two
+implementations deliberately and wrote *"I read both: same branch structure, same width boundaries,
+same canonical rules... and both reject overflow"*. On its own axis — ACCEPTANCE semantics — that is
+correct and remains correct; it was checking that the two agree on which strings are integers, and
+they do. It is simply not a statement about SCAN STRUCTURE, and the two diverge there. **Two
+functions can be semantically identical and differ by 1.4x**, and an equivalence review is not a
+performance review.
+
+### WHY THE PORT IS LOWER RISK THAN THE REORDER I PROPOSED
+
+`list_lp_entry_bytes_matches_fr_persist_twin_qj6jn` (`packed_set.rs:8519`) already pins the two
+implementations against each other over 40-odd cases, including `"007"`, `"-0"`, `"+1"`, `"1.0"`,
+`" 1"`, `"0x10"`, `i64::MIN`, `i64::MAX` and **`"9223372036854775808"`** — a canonical decimal that
+overflows. Porting fr-persist's body into fr-store makes the two structurally identical rather than
+merely equivalent, so it moves that test from "detects drift" to "has less drift to detect".
+
+That also retires the gap I named last turn. `7ce1306b6` asked for `b"99999999999999999999999"` to
+be added because no fixture held a canonical decimal that overflows `i64`. The twin test already
+holds `"9223372036854775808"` for the WIDTH function, and the fold test covers derivation-vs-walk on
+canonical cases, so the logical gap is closed by composition. The extra entry is belt-and-braces, not
+a prerequisite — downgraded accordingly.
+
+### THE OTHER TYPES ARE CLEAR, FOR A SECOND INDEPENDENT REASON
+
+`fr_store::estimate_listpack_entry_bytes` (`fr-store/src/lib.rs:38446`) is the hash/set/zset
+entry-size path and is purely LENGTH-based — `n <= 63 -> n + 2`, `n <= 4095 -> n + 4`, else
+`n + 10`. **It never parses an integer**, so it has no digit-dependence at all. Combined with the
+`derivable` guard being list-only (`65d48d897`), the cliff is confined to lists for two unrelated
+reasons rather than one.
+
+### RETRY PREDICATES
+
+  1. Lever 2 becomes: PORT `parse_listpack_integer`'s single-pass body into `list_lp_int`, do not
+     merely reorder. Cite `ac77762d8` for the mechanism and expect the same direction; do NOT quote
+     1.399x as fr-store's number — that was measured on fr-persist's kernel with a different
+     caller mix, and the fr-store call sites are the RESTORE fold and `list_lp_entry_bytes`.
+  2. Re-run `list_lp_entry_bytes_matches_fr_persist_twin_qj6jn` and
+     `restored_quicklist2_fused_growth_totals_match_rebuild_walk_c92f6` after the port. Both must
+     pass unchanged: the port is byte-identical in acceptance by construction, and if either fails
+     the port was not faithful.
+  3. Read the TWIN before optimising either copy of a duplicated rule. This is the second time this
+     duplication has cost something — once when `2a4617295` rebuilt a deleted shape, once when an
+     equivalence review passed over it. A third occurrence is a process failure, not bad luck.
