@@ -58151,3 +58151,95 @@ same two draws differ by **0.18 pct**.
   3. Any future vs-incumbent WRITE ratio on this bead must state its fill. The same measurement
      reads 0.5037x at 128 and 0.5865x at 1024 — a 16 pct swing in the headline from a config knob,
      which is larger than most levers this bead has landed.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: MY OWN "DO NOT EXTEND THIS SET" PREDICATE IS STALE — my later map conversion removed the mechanism it was protecting against, and the correct fall-through control is no longer `substr`
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this retires a constraint I registered, so peers stop obeying a rule whose
+premise I later deleted myself.
+
+### THE PREDICATE, AND WHY IT NO LONGER BINDS
+
+The row shipping the ten direct histogram fields measured a **+20.3 instr/op worst-bound tax** on
+`substr` and registered: *"**Do NOT extend this set again.** The fall-through tax is +20.3 and
+growing with set size. A further batch must be rejected unless it also lowers the tax."* and
+*"Any change to the direct-field set must include `substr`, or another confirmed fall-through
+command, as a control in the same invocation."*
+
+**Both clauses are now wrong, and my own later work is what broke them.** The tax existed because
+~68 literal call sites walked a 25-arm `match` on the command name to discover they were not in
+the set. The map conversion routed every one of those sites to `record_map_with_kind`, which
+skips the match entirely. Counted at HEAD:
+
+    canonical (still walks the match)  ...   **9** sites
+    map      (no match)                ...  65 sites
+    slot     (no match)                ...  38 sites
+
+**`substr` is one of the map-converted commands.** It does not traverse the match any more, so it
+can no longer measure a tax, and a future batch controlled on `substr` would read zero and
+conclude — wrongly — that extending the set is free.
+
+The set has meanwhile grown 25 -> **32** (`del setnx getset setbit lpushx setex expiretime`
+added). Under the stale predicate that was a violation; under the corrected one it is close to
+harmless, and the peer who did it was right in substance even though my registered rule said
+otherwise.
+
+### THE TAX IS NOT ZERO — IT IS CONCENTRATED
+
+Adding an entry still lengthens the `match` in `record_canonical_with_kind`, so the cost is real
+for whatever still reaches it. What changed is the CALLER COUNT: from ~68 sites down to 9, none
+of which passes a literal. Those nine, and the families they serve:
+
+  `record_plain_sintercard_borrowed_metrics_named`   sintercard
+  `record_plain_expire_borrowed_metrics`             expire family (`kind.name_lower()`)
+  `record_plain_setex_borrowed_metrics`              setex family
+  `record_plain_zremrange_borrowed_metrics`          zremrange family
+  `record_plain_keymeta_borrowed_metrics`            keymeta (`cmd.name_lower()`)
+  `execute_plain_bitfield_get_borrowed`              bitfield
+  `execute_plain_bitfield_ro_two_get_borrowed`       bitfield_ro
+  `record_plain_zrank_borrowed_metrics`              zrank family
+  `record_plain_hcoll_borrowed_metrics`              hcoll family
+
+**The correct fall-through control is therefore `sintercard_base` or `zremrangebyrank_none` or
+`expire_same` — a shape served by one of those nine — and NOT `substr`.** Anyone extending the
+set should measure one of those in the same invocation.
+
+### A LEFTOVER THE MAP CONVERSION MISSED
+
+`execute_plain_bitfield_ro_two_get_borrowed` passes the **literal** `"bitfield_ro"` to the
+canonical entry point. `bitfield_ro` has no direct field, so it belongs on the map path and my
+`convert_direct_literals.py` correctly declined it — but the earlier map conversion should have
+caught it and did not. It is the last literal still walking the match. Small, real, and named
+here rather than fixed, because it is one site and deserves its own measurement rather than a
+drive-by.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement is made by this row — it is a source census (call-site counts by entry point, and
+the enclosing function of each surviving canonical site) plus a re-reading of two already-banked
+measurements. No A/A, no bootstrap interval, no ratio and no quiet window apply and none is
+claimed. The +20.3 figure is quoted FROM the row that measured it and is not re-derived.
+
+### PROVENANCE
+
+  ELF           NONE — no binary was run for this row.
+  incumbent     NOT RUN — no ratio is claimed.
+  method        `git show HEAD:crates/fr-runtime/src/lib.rs` counted by entry point, with each
+                surviving `record_command_histogram_canonical_with_kind` site attributed to its
+                enclosing `fn`. Direct-field list read from `with_direct_histogram_fields!`.
+  host          /data 58G free, load 6.79 6.82 8.05. Irrelevant to a source census and recorded
+                only because the standing orders ask for it on every row.
+  disposition   RETIRES A REGISTERED PREDICATE. No source file changed.
+
+### RETRY PREDICATE
+
+1. The "do not extend the direct-field set" rule is RETIRED. Extending it is now cheap because
+   only 9 callers still traverse the match.
+2. Do NOT use `substr` as the fall-through control for this vein again — it is map-converted and
+   will read zero regardless. Use `sintercard_base`, `zremrangebyrank_none` or `expire_same`.
+3. If the set grows much further, re-measure with one of those controls. The mechanism (a longer
+   length-bucketed match) is unchanged; only the number of callers paying it has fallen.
+4. `bitfield_ro` at `execute_plain_bitfield_ro_two_get_borrowed` is the last literal on the match
+   path and is unconverted.
