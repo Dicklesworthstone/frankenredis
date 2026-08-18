@@ -513,6 +513,22 @@ SHAPES = {
           + "".join("redis.register_function('fcl8_f%d', function(keys, args) return 1 end)\n" % i
                     for i in range(8))]],
         ["FCALL", "fcl8_f0", "0"]),
+    # (frankenredis-kbyhy) THE DESIGN-DECIDING SHAPE. fcall_lib32 confounds two variables:
+    # it has 32x the TEXT and 32x the CLOSURES. This one has the text of a 32-function library
+    # and the closures of a 1-function library -- 31 comment lines instead of 31 registrations.
+    #
+    # If it costs like fcall_lib32, the cost is TEXT SIZE and caching the rebuilt wrapper fixes
+    # it (contained change, fr-command only).
+    # If it costs like fcall_lib1, the cost is CLOSURE COUNT -- FCALL evaluates the whole
+    # library chunk per call, defining every function before calling one -- and no amount of
+    # caching the wrapper text helps; the fix is structural.
+    "fcall_lib1_pad": (
+        [["FUNCTION", "LOAD", "REPLACE", "#!lua name=fclp\n"
+          + "".join("-- padding line %d to match a 32-function library's text size\n" % i
+                    for i in range(31))
+          + "redis.register_function('fclp_f0', function(keys, args) return 1 end)\n"]],
+        ["FCALL", "fclp_f0", "0"]),
+
     "fcall_lib32": (
         [["FUNCTION", "LOAD", "REPLACE", "#!lua name=fcl32\n"
           + "".join("redis.register_function('fcl32_f%d', function(keys, args) return 1 end)\n" % i

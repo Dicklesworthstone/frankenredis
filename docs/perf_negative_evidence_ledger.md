@@ -45516,3 +45516,108 @@ the only hot one the classifier cannot name, and no second command has both prop
 classifier costing 120-200 instr/op while a hoisted GET costs 190 total is the datum that
 should drive the NEXT lever — make the classifier cheaper for everyone rather than route more
 commands around it.
+
+## 2026-08-18 CrimsonHawk: REJECT (SELF-SPEEDUP) — the FCALL fix I was about to reach for recovers **9 pct**. A padded-library shape splits the 413,466 instr/op into 37,334 of TEXT and 349,890 of CLOSURE COUNT (`frankenredis-kbyhy`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this row ships nothing. It kills a fix that would have looked like a
+success, and it sizes the one that would not.
+
+### THE CONFOUND IN MY OWN SHAPE
+
+`fcall_lib32` varies TWO things at once against `fcall_lib1`: 32x the library TEXT and 32x the
+number of registered CLOSURES. Every conclusion about what FCALL spends its time on rests on
+separating them, and the ladder I shipped in `7860d231d` could not.
+
+`fcall_lib1_pad` does: ONE registered function, but 31 lines of Lua COMMENT so the library text
+matches a 32-function library. Same closure count as `fcall_lib1`, same text size as
+`fcall_lib32`.
+
+  shape             functions   text     instr/op
+  fcall_lib1            1       small     26,242.1
+  fcall_lib1_pad        1       32-lib    63,576.4
+  fcall_lib32          32       32-lib   413,466.4
+
+  attributable to TEXT SIZE     63,576.4 - 26,242.1  =  +37,334   ( 9.0 pct of the total)
+  attributable to CLOSURE COUNT 413,466.4 - 63,576.4 = +349,890   (84.6 pct of the total)
+
+### WHAT THIS KILLS
+
+The obvious fix — cache the rebuilt wrapper text, keyed by (library, function) — removes the
+`from_utf8_lossy`, the per-line `String` allocations, the `join`, and the full-body hash. That
+is the TEXT term. **It recovers 37,334 of 413,466 instr/op, and would move `fcall_lib32` from
+55.3013x to roughly 50x against Redis 7.2.4.**
+
+My own retry predicate on `b748dbc98` set the bar at 100,000 instr/op precisely so this could
+not be shipped as a win, and it is now measured rather than asserted: 37,334 is below it. **Do
+not write the wrapper cache.** It is a contained, tempting, fr-command-only change that would
+appear to have fixed FCALL while leaving 85 pct of the cost in place.
+
+### WHAT THE REAL COST IS
+
+FCALL builds a wrapper that turns every `register_function(...)` into `local function NAME(...)`
+and appends `return TARGET(KEYS, ARGV)`, then EVALUATES THE WHOLE CHUNK. So a 32-function
+library defines 32 closures on every invocation and then calls one. The frames agree: ~53,000
+instr/op of allocator traffic and ~23,000 in `clone`/`drop_glue` of
+`Vec<(String, Rc<RefCell<LuaValue>>)>` and `captured_locals`, on `fcall_lib32`.
+
+Redis does not do this — it registers the functions once at FUNCTION LOAD and calls one
+thereafter, which is why its cost is FLAT across library size (7,297.6 -> 7,742.8 instr/op,
++6.1 pct, banked in `b748dbc98`).
+
+So the fix is structural: evaluate the library ONCE and retain the callable, rather than
+re-deriving every closure per call. That is a change to how FCALL relates to FUNCTION LOAD, not
+a caching tweak, and it is NOT costed here.
+
+### WHY EMITTING ONLY THE TARGET FUNCTION IS NOT THE SHORTCUT
+
+The tempting cheap version — emit `local function TARGET` and skip the other 31 — is UNSAFE.
+Non-registration lines are preserved verbatim into the wrapper, so a library's functions may
+reference shared locals and each other by name. Dropping the siblings would break any library
+whose functions call one another, and it would do so silently at runtime rather than at load.
+Anyone attempting the structural fix must preserve that reachability.
+
+### COUNTED MECHANISM
+
+Three shapes, two-point callgrind subtraction at N=1000 and 2N=2000 with startup and seeding
+cancelled, so the FUNCTION LOAD seeding is not in these figures. The decomposition is two
+subtractions of exact instruction counts: 37,334 and 349,890 instr/op, summing to 387,224 of the
+387,224 difference between the extreme rungs, i.e. the split is exhaustive by construction.
+
+The instrument carries its own null, measured in a single invocation of the same harness on one
+ELF and one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios (banked in `0bf781d57`). The smaller
+of the two terms is 37,334 instr/op on a 26,242 baseline, which is orders of magnitude outside
+that interval.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           77bc28f80d32d3f0, plain `--release`, no feature flags, built locally with
+                RCH_CARGO_WRAPPER_BYPASS=1, path from `--message-format=json`, copied to a
+                private path and sha256'd there. It carries the shipped EVALSHA lever
+                (`0c70eaec3`), which does not touch the FCALL path.
+  bench_elf_sha256=77bc28f80d32d3f0d389acffc47b435804a5199eb28d29a263a0bf3390b45618
+  incumbent     NOT RUN for this row; the Redis flatness figure quoted above is from
+                `b748dbc98`, where it was measured live in the same invocation as its fr arm.
+  harness       `scripts/shape_instr_per_op.py --fr-only`; the `fcall_lib1_pad` shape is added
+                with this row.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 129G free checked
+                immediately before the runs. loadavg 23.98 33.12 24.61; **CPU idle 80.4 pct with
+                1.3 pct iowait** in a 10 s /proc/stat delta, the redis build having finished.
+  admissibility Instruction counts are deterministic and load-immune. No timed row is claimed.
+
+### RETRY PREDICATE
+
+1. The 100,000 instr/op bar on `fcall_lib32` stands and is now justified by measurement rather
+   than by estimate. A fix that does not reduce the CLOSURE-COUNT term cannot clear it.
+2. Before attempting the structural fix, reproduce this decomposition on the then-current ELF —
+   `fcall_lib1`, `fcall_lib1_pad`, `fcall_lib32`. If the padded rung has moved toward
+   `fcall_lib1`, someone has already cached the wrapper and the remaining work is different.
+3. Any structural fix must keep sibling functions reachable from one another. A library whose
+   functions call each other is the acceptance case, and no such shape exists yet — add one
+   before writing the fix, not after.
+4. `frankenredis-sf510` is DONE and is not a template for this. Its cost was the cache key; this
+   one's is not.
