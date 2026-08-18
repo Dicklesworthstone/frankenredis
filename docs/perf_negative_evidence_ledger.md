@@ -62299,3 +62299,87 @@ carries no semantics, and `digits[0]` stays in bounds because the emptiness test
      this lever needs re-deriving; it needs a build.
   2. If the anchor check ever reports a count other than 1, STOP and re-read the function. A
      generator that force-applies a drifted anchor is how a mechanical change becomes a bug.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 BrownIbis: RETRACTING "the write-gate vein is CLOSED" from `643df0862` — I read a TWELVE-SHAPE census as a population and the source says **80 executors still derive the gate inline** (`frankenredis-ozrro`)
+
+Claim class: RETRACTION of my own claim. No new measurement; source count only, under a build
+freeze.
+Campaign output: no — it reopens a vein I wrongly closed.
+
+### WHAT I CLAIMED AND WHY IT WAS WRONG
+
+`643df0862` said, in terms I chose deliberately to sound rigorous:
+
+> THE VEIN IS NOW CLOSED, and that is a census result rather than an impression. Twelve write
+> shapes were measured on the pre-batch binary: only del, unlink and lrem still had a live
+> write-gate frame... All three are converted here.
+
+Twelve shapes is not a population. Counting the SOURCE on `9c3bd1795`:
+
+    plain_borrowed_default_key_write_allows(now_ms)   81 call sites, one call form only
+    distinct executors deriving it inline             **80**
+    routes taking a supplied `default_write_allowed`  **40**
+    registered census shapes, all commands            245
+
+So roughly **77 executors still re-derive the gate and have never been measured for it**. What my
+census actually established is narrower and still true: of the twelve write shapes that HAVE
+coverage, only `del`, `unlink` and `lrem` had a live frame, and those three are converted
+(`bc05733bf`, `643df0862`). Everything else is unmeasured, not converted.
+
+### THIS IS THE SAME ERROR THE READ-GATE VEIN MADE FOUR TIMES
+
+The read-gate vein was under-counted four separate times, and the standing note says why: *every
+instrument reported a SAMPLE and I read it as a POPULATION* — a peer's sweep, a survey window
+past a function's end, a source scan that knew two of three derivation forms, and a census over
+the shapes that happened to exist. The rule written down after that was to **reconcile BOTH — a
+call-count census AND a source scan — before quoting a total.**
+
+I did the census and skipped the source scan, then used the word "closed". The shape of the
+mistake is identical; only the gate changed.
+
+One thing that survives and is worth separating from the retraction: the write gate really did
+fall from **187.0 to 98.0 instr/op**, because the ACL cache lever cut it as well as the read
+gate. `frankenredis-ghmgp`'s headline still quotes 187.0 and its two named shapes,
+`sadd_existing` and `zadd_base`, now read 0.000 calls/op. So that bead is stale in its SIZE while
+this row shows the vein is not stale in its EXTENT.
+
+### WHAT IS ACTUALLY OPEN
+
+  * 80 executors derive inline; 40 take a supplied value. The 40 grew from the 4 recorded on
+    `ghmgp` on 2026-08-17, so the conversion work is real and ongoing — it is the CLAIM OF
+    COMPLETION that was false.
+  * Whether the remaining 77 are convertible is a separate and unanswered question. A route is
+    only convertible if some caller holds a per-pass cache; `9069c9eb0` and the UNWATCH lever
+    both turned on exactly that, and in both cases the cache existed and the last hop was
+    missing. Nobody has run the transitive reachability check for the WRITE gate the way
+    `read_gate_coverage.py` does for the read gate.
+  * At 98.0 instr/op against commands in the 1,000-3,000 instr/op range, each unconverted route
+    is worth 3-10 pct of its own command.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement, no ratio, no A/A, no build, no dumps — the box is under a build freeze at /data
+38G and this row is a source count plus a retraction. The counts are exact greps over
+`crates/fr-runtime/src/lib.rs` at `9c3bd1795`, not estimates. CV was not used, as a gate or
+otherwise.
+
+### PROVENANCE
+
+  source        `main` at `9c3bd1795`.
+  host          /data 38G, BELOW the 42G brake; build freeze in force. loadavg 5.01 / 8.91 /
+                8.93 at the time of the count, recorded although an exact grep does not depend
+                on it.
+  disposition   RETRACTION. No source file changed.
+
+### RETRY PREDICATE
+
+1. Anyone quoting "the write-gate vein is closed" should be pointed at this row. It is not.
+2. Before the next claim of completion on EITHER gate, run both instruments and reconcile them:
+   the per-shape call-count census AND a source scan for every derivation form. A number from one
+   of them alone is a sample.
+3. The cheap next step needs no build: extend the transitive detector in
+   `scripts/read_gate_coverage.py` to the WRITE gate and report which of the 80 derivers have a
+   cache reachable through any chain of callers. That bounds the convertible subset before anyone
+   spends a build window on it.
