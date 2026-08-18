@@ -4291,14 +4291,47 @@ const fn list_node_exceeds_limit(fill: i64, new_sz: u64, new_count: u64) -> bool
 /// Decimal integer that round-trips to its canonical form — mirrors
 /// `parse_listpack_integer` in `lib.rs` so listpack int-encoding decisions
 /// (and thus byte sizing) match the byte-exact encoder.
+/// (frankenredis-qj6jn) The decimal fold is OPEN-CODED rather than a `str` parse, and the reason
+/// is a stack frame, not the parse.
+///
+/// `i64`'s `FromStr` is an out-of-line call returning through an outparam, so any function
+/// containing it needs a frame — which is why `308db786f` had to push the integer half behind
+/// `#[inline(never)]` to get that frame off the string path, and why doing so cost an all-integer
+/// list 2.4 pct (measured; `bd84d97d2`). With the fold open-coded there is no call and no frame,
+/// so BOTH halves inline and neither shape pays for the other's needs.
+///
+/// The accepted language is unchanged. Canonicity is still decided by
+/// `list_lp_int_bytes_are_canonical` before a digit is folded, so the leading-zero, `+`, `-0` and
+/// empty cases are refused exactly where they were, and the range check still rejects everything
+/// the `str` parse rejected — INCLUDING `-9223372036854775808`, which is why the magnitude is
+/// accumulated in `u64` and negated afterwards rather than built as an `i64`.
+#[inline]
 fn list_lp_int(entry: &[u8]) -> Option<i64> {
     if entry.is_empty() || entry.len() >= 21 {
         return None;
     }
     if !list_lp_int_bytes_are_canonical(entry) {
-        None
+        return None;
+    }
+    let negative = entry[0] == b'-';
+    let digits = if negative { &entry[1..] } else { entry };
+    let mut magnitude: u64 = 0;
+    for &d in digits {
+        magnitude = magnitude
+            .checked_mul(10)?
+            .checked_add(u64::from(d - b'0'))?;
+    }
+    if negative {
+        // `i64::MIN` has magnitude 2^63 — one MORE than `i64::MAX`.
+        if magnitude > (i64::MAX as u64) + 1 {
+            return None;
+        }
+        Some((magnitude as i64).wrapping_neg())
     } else {
-        std::str::from_utf8(entry).ok()?.parse::<i64>().ok()
+        if magnitude > i64::MAX as u64 {
+            return None;
+        }
+        Some(magnitude as i64)
     }
 }
 
@@ -4383,12 +4416,13 @@ fn list_lp_string_data_len(len: usize) -> u64 {
 
 /// The integer half of [`list_lp_entry_bytes`], VERBATIM, kept out of line.
 ///
-/// (frankenredis-qj6jn) This is the half that needs a stack frame: `list_lp_int` ends in
-/// `str::from_utf8(..).parse::<i64>()`, which is an out-of-line call with an outparam. Leaving it
-/// fused with the string half made EVERY call — including the string ones that touch none of it —
-/// pay `push %rbx` + `sub $0x20,%rsp` and the matching epilogue, which is what the disassembly of
-/// the fused form shows. Callers that only ever see strings now branch past all of it.
-#[inline(never)]
+/// (frankenredis-qj6jn) This USED to be `#[inline(never)]`, because `list_lp_int` ended in a `str`
+/// parse and so forced a stack frame the string path was paying for. That split won 0.92-6.37 pct
+/// on string lists and LOST 2.4 pct on all-integer ones — the cost of the extra call it added to
+/// the integer path. With the fold open-coded there is no frame to hide from, so the hint is gone
+/// and the compiler is free to inline this into the wrapper. The first-byte split above stays: it
+/// is still exact, and it still keeps the canonicity scan off the string path.
+#[inline]
 fn list_lp_entry_data_len_maybe_int(elem: &[u8]) -> u64 {
     if let Some(v) = list_lp_int(elem) {
         if (0..=127).contains(&v) {
@@ -6206,6 +6240,66 @@ impl CompactFieldMap {
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-qj6jn) `list_lp_int` folds its own decimal now instead of going through
+    /// `i64`'s `FromStr`. The reference here IS the standard library parse, which is the thing
+    /// the fold replaced — an independent implementation by construction, so this is not
+    /// tautological. It must agree on the accepted set AND on the value, including the
+    /// asymmetric `i64::MIN` magnitude and every overflow just past the boundary.
+    #[test]
+    fn list_lp_int_open_coded_fold_matches_the_std_parse_qj6jn() {
+        fn reference(entry: &[u8]) -> Option<i64> {
+            if entry.is_empty() || entry.len() >= 21 {
+                return None;
+            }
+            if !super::list_lp_int_bytes_are_canonical(entry) {
+                return None;
+            }
+            std::str::from_utf8(entry).ok()?.parse().ok()
+        }
+
+        let mut corpus: Vec<Vec<u8>> = Vec::new();
+        for edge in [
+            0i128,
+            127,
+            4095,
+            32767,
+            8_388_607,
+            2_147_483_647,
+            i64::MAX as i128,
+            i64::MIN as i128,
+            10_000_000_000_000_000_000,
+        ] {
+            for delta in [-2i128, -1, 0, 1, 2] {
+                corpus.push(format!("{}", edge + delta).into_bytes());
+                corpus.push(format!("{}", -(edge + delta)).into_bytes());
+            }
+        }
+        // Non-canonical and non-numeric forms, plus the 20/21-byte length boundary.
+        // Space-separated so the table reads as a table; the entries containing a space are
+        // added on their own line below.
+        for s in "- +1 007 -0 00 1.5 12a 1e3 --1 0 99999999999999999999 999999999999999999999 \
+                  -99999999999999999999 9223372036854775808 -9223372036854775809 \
+                  18446744073709551615 18446744073709551616"
+            .split(' ')
+        {
+            corpus.push(s.as_bytes().to_vec());
+        }
+        for s in ["", " 1", "1 "] {
+            corpus.push(s.as_bytes().to_vec());
+        }
+        for n in -1050i64..1050 {
+            corpus.push(format!("{n}").into_bytes());
+        }
+        for elem in &corpus {
+            assert_eq!(
+                super::list_lp_int(elem),
+                reference(elem),
+                "open-coded fold diverged from the std parse for {:?}",
+                String::from_utf8_lossy(elem)
+            );
+        }
+    }
 
     /// (frankenredis-qj6jn) The first-byte split in `list_lp_entry_bytes` must be EXACT, not a
     /// heuristic: an element whose first byte is neither a digit nor `-` cannot be canonical
