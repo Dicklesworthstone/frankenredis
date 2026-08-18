@@ -62383,3 +62383,83 @@ otherwise.
    `scripts/read_gate_coverage.py` to the WRITE gate and report which of the 80 derivers have a
    cache reachable through any chain of callers. That bounds the convertible subset before anyone
    spends a build window on it.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: MY OWN "fixed per-call cost in SORT" HYPOTHESIS IS NOT SUPPORTED — the collator's share GROWS with n (25.3 pct at n=3, 60 pct at n=64), so the size-dependent advantage is redis's per-element cost, not fr's constant
+
+Claim class: SELF-SPEEDUP (retraction of a hypothesis I registered one row earlier).
+Campaign output: no — it closes a lead of mine before anyone spends a build on it. Source reading
+only, under a build freeze: no cargo, no benches, no dumps.
+
+One row ago I measured `sort_ro_alpha` at **0.9914x** (worst of two FIT draws) and
+`sort_ro_alpha_64` at **0.1937x** (SIZING, both draws UNFIT), and inferred: *"fr's per-element
+SORT work is far cheaper than the incumbent's, while something FIXED per call is not... a
+constant overhead in fr's SORT path, invisible at n=64 and dominant at small n."* I registered a
+frame census as the way to test it. **The answer was already in the source, and it says no.**
+
+### WHAT THE SOURCE ALREADY MEASURES
+
+`crates/fr-command/src/lib.rs:29790`, documenting the ASCII collation fast path, carries a
+callgrind two-point measurement of **the exact shape I was chasing** — `SORT_RO sl ALPHA` over a
+three-element list of one-character values:
+
+    n=3    CollationElements::next + CollatorBorrowed::compare + iter_next + init + trie
+           = **3,147 instr/op = 25.3 pct** of the whole command
+    n=64   the same frames = **81,297 instr/op = 60 pct**
+
+**The collator's SHARE RISES with n, from 25.3 pct to 60 pct.** A fixed per-call cost does the
+opposite — its share falls as n grows. So collation is not the constant I hypothesised, and it is
+the largest identified block in the command at both sizes.
+
+### AND THE FIT I WANTED TO DO WOULD HAVE BEEN A PHANTOM
+
+The tempting next step is to solve `F + n*P` from the two size points and read off fr's fixed
+term. I started to and stopped: this campaign has already banked **"a two-point fit across a
+regime boundary is a phantom"**, and n=3 to n=64 crosses at least one — a three-element sort and a
+sixty-four-element sort differ in comparison count by more than a factor of twenty, and SORT's
+comparison count is not linear in n at all.
+
+Sanity-checking it anyway confirmed the trap rather than the model: the same arithmetic applied to
+the incumbent yields a **NEGATIVE fixed term**, which is not a physical quantity. A model that
+returns nonsense on one arm has not validated on the other.
+
+### WHAT THE SIZE DEPENDENCE ACTUALLY SHOWS
+
+fr's advantage grows from 0.99x at n=3 to 0.19x at n=64 because **the incumbent's per-element cost
+is far worse than fr's**, not because fr carries a large constant. At n=3 there is almost no
+per-element work for fr's advantage to express itself in, so the two engines land at parity — that
+is the whole story, and it needs no fixed-cost term.
+
+The corollary matters for anyone eyeing this shape: **`sort_ro_alpha` at 0.99x is not a deficit
+waiting to be found. It is the small-n limit of a lever that has already been taken.** The
+collator memo and the ASCII collation fast path are both shipped, and `29865` records the fast
+path's one-time probe cost — ~6.8M instructions, amortised after ~6,400 in-domain comparisons —
+which is the design decision that produced the n=64 win.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement was taken by this row: it is source reading plus two figures quoted from an
+in-source callgrind note (ELF `a9426571fcb48c07`, not the ELF behind my own draws, so the two are
+not pooled and no combined figure is computed). No ratio, no A/A, no bootstrap interval and no
+quiet window apply, and none is claimed. CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           NONE built or run. The 3,147 / 81,297 figures are quoted from
+                `crates/fr-command/src/lib.rs:29790` (ELF `a9426571fcb48c07`); my own 0.9914x and
+                0.1937x are from ELF `114bcea75f8296ae` and are NOT combined with them.
+  incumbent     NOT RUN by this row.
+  host          /data 37-40G free — BELOW the 42G brake, build freeze in force. No cargo, no
+                benches, no perf dumps written.
+  disposition   HYPOTHESIS RETRACTED. No source file changed, no lever opened.
+
+### RETRY PREDICATE
+
+1. Do NOT open a fixed-cost lever on `sort_ro_alpha`. The collator's share RISES with n, which is
+   the opposite signature, and the shape's 0.99x is the small-n limit of a shipped lever.
+2. Do NOT fit `F + n*P` across n=3 and n=64 on this shape. It crosses a regime boundary, SORT's
+   comparison count is not linear in n, and the same fit returns a negative fixed term for the
+   incumbent.
+3. If `sort_ro_alpha` is ever measured ABOVE 1.0 in a FIT window, that IS worth opening — but on
+   evidence, not on the UNFIT 1.0014x draw already recorded and refused.
