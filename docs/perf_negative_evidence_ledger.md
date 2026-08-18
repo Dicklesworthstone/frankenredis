@@ -46959,3 +46959,122 @@ instructions, because instructions will improve while throughput does not. The q
 is the 1.32x instruction-rate gap derived here, cross-checked against the 157.1 hardware misses
 per op at IPC 1.387 already banked. Reopen the work-reduction family only if the instruction
 ratio is ever measured ABOVE 1.0 on this shape, which three draws put nowhere near.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: TIGHTENING `14091fc7b` on eight draws — the LPUSH delta's worst bound moves −1.66 to −1.45 pct, my own "0.008 pct" numerator-stability figure was an n=2 artifact (it is 0.396 pct), and the ratio STILL cannot be certified in the cleanest window of the session (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), TWO-BINARY A/B,
+tree stability previously proven and both ELFs re-verified by sha before this session's draws.
+CV was NOT used, as a gate or otherwise. No timing verdict is claimed. No source change.
+
+Claim class: COMPETITIVE. Campaign output: bounded rather than pointwise — fr/Redis 7.2.4 for LPUSH against a large list fell between 0.4483x and 0.4828x on every one of eight draws, so fr retires under half the incumbent's instructions on this route on every reading taken, but the figure is NOT certified. The vendored Redis 7.2.4 server ran as a live incumbent arm in the same invocation as the fr arms in all eight.
+
+`4b0fce93d` withdrew this lever's vs-redis figures as sizing and said to re-take them under
+`certification_window.py --for ratio`. The host then produced the quietest window of the session
+— loadavg 6.16, 90.3 pct idle from a `/proc/stat` delta, ZERO builds, gate FIT — so I re-took
+them. Eight draws later the gate has never once been FIT at BOTH ENDS of a draw.
+
+### WHAT TIGHTENED: THE DELTA'S WORST BOUND IS −1.45 pct, NOT −1.66
+
+    draw       delta      A/A null     |null−1|
+    prior-1   −1.70 pct   0.999825      0.018 pct
+    prior-2   −1.66 pct   0.999470      0.053 pct
+    tonight1  −2.03 pct   1.008729      0.873 pct
+    tonight2  −1.86 pct   1.000294      0.029 pct
+    tonight3  −1.64 pct   0.998210      0.179 pct
+    tonight4  −1.45 pct   1.001473      0.147 pct   <- the worst, and its null is TIGHT
+    tonight5  −1.79 pct   0.995545      0.445 pct
+    tonight6  −1.66 pct   1.008534      0.853 pct
+
+  The worst bound is −1.45 pct whether or not the two loose-null draws are excluded, because the
+  worst draw is not one of them. `14091fc7b` published −1.66 pct on two draws; six more move it.
+  THE DIRECTION OF THIS REVISION IS THE POINT — replication tightened a published claim against
+  my own interest, which is what the replicated-standing convention is for, and a two-draw worst
+  bound should be read as provisional in future rows including my own.
+
+  The mechanism is untouched and remains categorical: `list_lp_entry_bytes` 54.00 -> 27.00 in
+  ALL EIGHT draws, `push_front` 95.99 -> 93.99 in all eight, and `maybe_promote` holds at 18.00
+  in both arms of all eight — the control-integrity frame `fdb578bac` requires.
+
+### WHAT I GOT WRONG: "0.008 pct" WAS AN n=2 ARTIFACT
+
+`4b0fce93d` justified withdrawing the ratio by contrasting fr's arm at 0.008 pct against redis's
+at 6.34 pct. The fr figure came from exactly two draws that happened to agree. With eight:
+
+    arm                          n    min        max        spread
+    fr AFTER   `f6f69201`        8   2,061.17   2,069.33    0.396 pct
+    fr BEFORE  `dbab1a95`        8   2,098.94   2,104.89    0.283 pct
+    redis 7.2.4, same shape      8   4,285.99   4,597.58    7.270 pct
+
+  The denominator is 18.4x more variable than the numerator, not the ~800x the n=2 figure
+  implied. THE CONCLUSION IS UNCHANGED AND BETTER SUPPORTED; the number attached to it was
+  wrong, and it was wrong in the flattering direction. Draws 3 and 4 make the point without any
+  statistics: taken minutes apart, fr read 2,069.22 then 2,068.40 (0.04 pct apart) while redis
+  read 4,285.99 then 4,577.44 (6.80 pct apart).
+
+### WHY IT STILL CANNOT BE CERTIFIED, AND WHAT THAT COSTS
+
+A draw is admissible for a RATIO only if the window was FIT at both ends; a peer `cargo`
+starting mid-draw moves the denominator and cannot be attributed away (shared `ubuntu` uid).
+
+    draw       gate BEFORE   gate AFTER
+    tonight1   UNFIT         FIT
+    tonight2   FIT           UNFIT
+    tonight3   UNFIT         UNFIT
+    tonight4   UNFIT         UNFIT
+    tonight5   UNFIT         UNFIT
+    tonight6   UNFIT         UNFIT
+
+  ZERO of eight. The two near-misses are the shape of the problem: a build appeared inside the
+  first minute of draw 1 and inside the last minute of draw 2. A four-arm `pair_slope.py` draw
+  needs roughly five build-free minutes, and this host does not supply five consecutive
+  build-free minutes even at loadavg 6 with twenty panes mostly idle.
+
+    SO THE RATIO IS REPORTED AS AN ENVELOPE, NOT A POINT. Every one of the eight draws put the
+    standing between 0.4483x and 0.4828x. The WORST reading is 0.4828x. That is a weaker claim
+    than a certified figure and a stronger one than nothing: it says fr is ahead by better than
+    two-to-one on this route under every window sampled, including the contended ones, which is
+    exactly the direction contention would push against fr's favour if it biased anything.
+
+  NEW INSTRUMENT, not yet used for a published number: scratchpad `standing_run.py` runs only
+  the two arms a ratio needs — fr and redis, back to back in one process — instead of four,
+  halving the exposure. The delta does not need the strict gate (it is fr-vs-fr, and `--for
+  fr-only` returns FIT under exactly these conditions), so there is no reason to spend the
+  scarce window on arms that do not need it.
+
+### PROVENANCE
+
+  ELFs          BEFORE bench_elf_sha256 = dbab1a95ceede004af8e67701b21418686ec94d1f93cbafdebb0413e424fd9bf
+                AFTER  bench_elf_sha256 = f6f69201e38d8e5080949a2b8304fb8b3edc9708cdf170a89cbd2f09ae54ae8a
+                Both re-verified by `sha256sum` against the published values BEFORE this
+                session's draws, and the AFTER ELF's source confirmed to be HEAD's
+                `packed_set.rs` with a clean worktree. No build this session, so no `df` gate
+                applied; /data 125G throughout.
+  harness       scratchpad `push_slope.py` + `pair_slope.py`, 2,000 vs 6,000 single-element
+                LPUSH differenced, one fresh working directory per point, all arms of a draw in
+                ONE process. Wrapped in `/tmp/gated_draw.sh`, which runs
+                `certification_window.py --for ratio` immediately before AND after each draw.
+  incumbent     vendored redis 7.2.4, verified sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 17:30.
+  PER-ARM idle/loadavg/MHz   Idle from a `/proc/stat` delta at every arm boundary, 86.0-90.7 pct
+                across all draws. Loadavg opened at 6.16/7.53/9.74 and stayed in 7.13-8.74 /
+                7.58-8.07 / 9.45-9.74. MHz means 1863-2633, max 4292, min 1429. Builds observed
+                by the gate: 0, 1 or 2 depending on the minute, which is the whole finding.
+
+### THE REPLICATED-STANDING CONVENTION
+
+This row IS the convention doing its job twice over: it moved a published worst bound the
+unfavourable way on replication, and it refuses to convert an eight-draw envelope into a
+certified point figure just because the envelope is comfortable. GEOSEARCH's crossing is the
+reason the convention exists; a route at 0.48x has margin to spare and still does not get to
+skip it.
+
+RETRY PREDICATE:
+  1. Take the standing with `standing_run.py` (two arms, ~half the window) and require FIT at
+     both ends. Reopen the CERTIFIED figure only with two such draws; until then quote the
+     0.4483x-0.4828x envelope and its 0.4828x worst reading, never a point.
+  2. Do NOT re-derive the delta. Eight draws, worst bound −1.45 pct, mechanism categorical in
+     all eight. It is closed unless the source changes.
+  3. If the host is never build-free for two minutes either, the next move is not a longer wait
+     but a denominator taken ONCE under a proven-FIT window and reused across draws, with the
+     reuse stated — which is a different claim and needs its own row before anyone leans on it.
