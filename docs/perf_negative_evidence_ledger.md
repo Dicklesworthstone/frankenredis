@@ -61399,3 +61399,103 @@ and prefer an instrument that ranks by the quantity in question.
   3. `<ChunkedList as From<VecDeque>>` at +51.20/elem is UNEXPLAINED. It is 2.74x dearer on
      digit-leading data and no hypothesis in this row accounts for it. Do not fold it into lever
      2's expected win.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: `publish` REGISTERED on the instruction axis and MEASURED — fr retires **2.2x FEWER instructions** (worst of two FIT draws **0.4578x**), which settles that its throughput shortfall is NOT server CPU
+
+Claim class: COMPETITIVE (instruction axis).
+Campaign output: **yes** — a vs-incumbent instruction ratio, both engines in ONE invocation, on
+the shape whose shortfall the campaign has been unable to attribute.
+
+### WHY THIS SHAPE COULD NOT BE ATTRIBUTED BEFORE
+
+`publish` is the campaign's clearest throughput-shortfall-with-no-CPU-story. Banked at **0.9558
+and 0.9317 normalised** across two admissible draws — a 4-7 pct shortfall against the control —
+while its **CYCLE ratio matched the control at 0.9980x**. Those cannot both be server-CPU
+statements. The row that found it said so and named the next instrument: measure SYSCALLS, not
+cycles.
+
+The missing third axis was work volume. `publish` existed in `balanced_square_ab.py` but was
+**never registered in `shape_instr_per_op.py`**, so it had no instruction count, and
+throughput-vs-cycles alone cannot distinguish "fr does more work" from "fr does the same work
+less efficiently" from "the cost is not on the CPU at all".
+
+### THE REGISTRATION, MIRRORED AND VERIFIED
+
+Added to `shape_instr_per_op.py` mirroring `balanced_square_ab.py` **byte for byte**, using the
+verification method `60418` established for `geosearch_64` — comparing a NEARBY shape's
+instruction ratio against a different shape's throughput ratio is the cross-shape error the size
+pairs exist to remove:
+
+    throughput tool   seeds=[]  cmd=["PUBLISH", "ch", "hello"]
+    instruction tool  seeds=[]  cmd=["PUBLISH", "ch", "hello"]
+    seed identical: True        cmd identical: True
+
+### THE MEASUREMENT — THREE DRAWS, WINDOW GATE RECORDED PER DRAW
+
+  draw   window                       fr instr/op   redis instr/op   fr/redis
+    1    **UNFIT** (17 pct apart)        1611.2         3422.0        0.4708x   SIZING ONLY
+    2    FIT                             1611.0         3518.9        **0.4578x**
+    3    FIT                             1612.3         3698.2        0.4360x
+
+**Worst of the two FIT draws: 0.4578x.** fr retires **2.2x fewer instructions** than Redis 7.2.4
+to serve a PUBLISH. Draw 1 is quoted for completeness and is NOT part of the bound: its window
+failed the gate at 17 pct non-stationary, and a number whose window the gate refused is not a
+result.
+
+### WHAT THIS SETTLES
+
+Three axes on one shape now agree on what the shortfall is NOT:
+
+    work volume   fr **0.4578x**  — fr does 2.2x LESS work
+    cycles        fr  0.9980x     — parity
+    throughput    fr  0.9558 / 0.9317 normalised — a 4-7 pct SHORTFALL
+
+fr does less than half the work, spends the same cycles doing it, and still loses on throughput.
+**The cost is not server CPU by any of the three measures available**, and the remaining
+candidates are syscalls, wakeups and the reply path — exactly where the earlier row pointed
+before it could rule out work volume. A `PUBLISH` with no subscribers returns `:0` and does almost
+no work, so per-op FIXED costs dominate it, which is consistent with a syscall-bound explanation.
+
+### AN INSTRUMENT OBSERVATION THE THREE DRAWS MAKE UNAVOIDABLE
+
+    fr     1611.2, 1611.0, 1612.3   spread **0.08 pct**
+    redis  3422.0, 3518.9, 3698.2   spread **8.07 pct**
+
+fr's instruction count is essentially deterministic; **the incumbent's moves 100x more**, and it
+moved MONOTONICALLY UPWARD across three consecutive draws. That is the `serverCron`
+elapsed-time confound already banked for this instrument: redis does work proportional to wall
+time, so its per-op denominator inflates with run duration. The practical consequence is that
+this ratio is FLATTERED by a slow run, and the conservative reading is the draw with the SMALLEST
+redis denominator — which is draw 2 at 0.4578x, the bound quoted.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Instructions by two-point subtraction (N=2000, 2N=4000) with BOTH engines in one invocation, so
+startup and seeding cancel exactly. The harness's own window gate ran per draw and REFUSED draw 1;
+that refusal is the null control for the window, and it is honoured rather than argued with. fr's
+0.08 pct spread across three draws is itself an A/A on the fr arm. No bootstrap median-CI is
+quoted: the claim is a worst-of-FIT-draws bound, not a median. CV was not used, as a gate or
+otherwise.
+
+### PROVENANCE
+
+  ELF           fr `114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f`
+  bench_elf_sha256=114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+  incumbent     Redis 7.2.4, vendored, measured in the SAME INVOCATION as fr in every draw.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops, both arms, window gate per draw.
+  host          /data 47G free, 5G above the brake; loadavg 6.63 -> 6.34, MHz 2426; zero
+                frankenredis builds in flight. NO local build was performed — the shape
+                registration is a Python edit and the ELF already existed.
+  disposition   SHIPPED (the shape registration). The measurement is a two-FIT-draw bound.
+
+### RETRY PREDICATE
+
+1. The syscall measurement is now the ONLY remaining candidate for `publish` and it is unblocked:
+   work volume is ruled out at 0.4578x, cycles at 0.9980x. `strace -c` or syscall tracepoints on
+   the server pid for the duration of a `redis-benchmark` run is the instrument.
+2. Do NOT quote draw 1's 0.4708x. Its window failed the gate.
+3. When comparing instruction ratios across draws on ANY shape, check the redis denominator for
+   monotonic drift. It moved 8.07 pct here while fr moved 0.08 pct, and a ratio built on a
+   drifting denominator improves for the wrong reason.

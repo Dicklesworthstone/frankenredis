@@ -316,6 +316,14 @@ SHAPES = {
     # one-argument sibling -- it parses a bulk argument but still touches no key -- which
     # separates "parses an argument" from "looks something up".
     "ping": ([], ["PING"]),
+    # (frankenredis-getexgate) PUBLISH is the campaign's clearest throughput shortfall
+    # with no CPU story: 0.9558 and 0.9317 normalised across two admissible draws, while its
+    # CYCLE ratio matched the control at 0.9980x. Those cannot both be server-CPU
+    # statements, so the cost is in syscalls, wakeups or the reply path -- and with no
+    # instruction count the two could not be separated. Mirrors balanced_square_ab.py
+    # byte for byte; a PUBLISH with no subscribers returns `:0` and does almost no work,
+    # so per-op fixed costs dominate it.
+    "publish": ([], ["PUBLISH", "ch", "hello"]),
     "echo_arg": ([], ["ECHO", "abcdefgh"]),
     "strlen": (["SET s abcdefghijklmnop"], ["STRLEN", "s"]),
     "sismember": (["SADD st m1 m2 m3"], ["SISMEMBER", "st", "m2"]),
