@@ -44,6 +44,7 @@ import hashlib
 import os
 import re
 import select
+import shutil
 import socket
 import difflib
 import subprocess
@@ -1605,6 +1606,11 @@ def emit_bench_elf_sha(engine: str, tag: str) -> str:
     return _sha256_file(engine)
 
 
+def _wipe(path: str) -> None:
+    """Remove a per-point working directory. Confined to paths under the harness workdir."""
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
              locale: str | None = None) -> int:
     sha_before = emit_bench_elf_sha(engine, tag)
@@ -1627,7 +1633,18 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
     env = None
     if locale:
         env = dict(os.environ, LC_ALL=locale, LC_COLLATE=locale, LANG=locale)
-    proc = subprocess.Popen(argv, cwd=workdir, env=env,
+    # PER POINT, not per harness run (frankenredis-pcio8). Both slope points used the shared
+    # `workdir` as cwd AND as the engine's data dir. A slope's two points must differ in
+    # NOTHING but the repeated operation, and they did not: whichever point ran first left
+    # state behind that the second then booted on, so the second paid startup work the first
+    # never did and the subtraction stopped cancelling exactly. The two ENGINES shared the
+    # directory too, so redis could boot onto a file fr had written. The same defect was
+    # already fixed in command_profile_frames.py; this is the other half of that bead.
+    point = os.path.join(workdir, "point.%s" % tag)
+    _wipe(point)
+    os.makedirs(point, exist_ok=True)
+    argv = argv + ["--dir", point]
+    proc = subprocess.Popen(argv, cwd=point, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     sock = None
     try:
