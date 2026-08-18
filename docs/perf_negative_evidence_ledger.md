@@ -53569,3 +53569,236 @@ cap are refused exactly where they were.
      charging the cold one an extra call. If the cold path is common in ANY workload, the split
      is a trade and must be measured on both shapes before it lands. `308db786f` measured one
      shape and predicted the other, and the prediction was wrong by a factor of five.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 BrownIbis: CENSUS REFRESH — the read-gate vein goes **29 -> 23 shapes still paying**, the six that moved are exactly batch 5's beneficiaries, and a ratio certification was REFUSED by the gate at 92 pct idle (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+`d6f97f48e`'s retry predicate says to re-run the census after each batch rather than reason from
+source. This is that re-run, on `b5_after1.elf` (HEAD `9a937431c` plus batch 5, i.e. the shipped
+state of `e766788a8`), one draw per shape, calls/op to `plain_borrowed_default_key_read_allows`.
+
+**23 still paying, 23 converted.** The previous census (`a1600b784`, on `b4_after1.elf`) read 29
+and 13. **29 - 6 = 23, and the six that moved are exactly batch 5's six measured beneficiaries** —
+`zrangebyscore_plain`, `zrangebyscore_l`, `zrange_rev`, `zrange_withscores`, `zcount_base`,
+`zscore_base` — all of which now appear in the converted list at 0.000. The arithmetic closes with
+no unexplained movement in either direction, which is the cheapest available check that a batch
+did what its row claimed and nothing else.
+
+**STILL PAYING — 23 shapes**, ordered by what 86.0 costs them (the gate is 86.0 since
+`2bdc560df`, not 175.0):
+
+| shape | instr/op | 86.0 as pct | shape | instr/op | 86.0 as pct |
+|---|---|---|---|---|---|
+| dbsize_base | 1194.4 | **7.2** | zmscore_2 | 2472.5 | 3.5 |
+| getbit_base | 1514.7 | 5.7 | keys_star | 2552.4 | 3.4 |
+| hstrlen_base | 1612.6 | 5.3 | xpending_empty | 2721.9 | 3.2 |
+| getrange_base | 1733.6 | 5.0 | scan_zero | 3688.5 | 2.3 |
+| smembers_base | 1851.4 | 4.6 | sinter_2 | 3961.0 | 2.2 |
+| substr | 1854.8 | 4.6 | scan_count | 3993.8 | 2.2 |
+| geohash_base | 2066.7 | 4.2 | geopos_base | 4179.9 | 2.1 |
+| hgetall_base | 2108.4 | 4.1 | scan_type | 4412.6 | 1.9 |
+| hmget_2 | 2145.6 | 4.0 | scan_match | 4459.5 | 1.9 |
+| smismember_2 | 2165.3 | 4.0 | xpending_populated | 4552.5 | 1.9 |
+| lrange_base | 2166.8 | 4.0 | pubsub_channels | 4953.1 | 1.7 |
+| | | | geodist_base | 6680.9 | **1.3** |
+
+**THE PERCENTAGES ARE HALF WHAT THEY WERE, AND THAT IS THIS VEIN EATING ITSELF.** `a1600b784`
+quoted 13.0 pct down to 2.6 pct against a 175.0 gate; the same shapes now read 7.2 down to 1.3
+against 86.0. Every further conversion is worth half what it was before `2bdc560df` halved the
+gate. That is not an argument against finishing — 7.2 pct of a DBSIZE is still the largest
+per-command win on the board — but it does mean the remaining 23 are worth roughly what 11 were
+worth this morning, and a lever that halves the gate again would be worth more than all of them.
+
+NEXT, in the order the census argues for: the **collection `_into` family** (`smembers_base`
+4.6 pct, `hgetall_base` 4.1, `lrange_base` 4.0, `sinter_2` 2.2) is the largest coherent cluster;
+the **SCAN family** is four shapes at 1.9-2.3 pct; the **geo family** (`geohash_base`,
+`geopos_base`, `geodist_base`) is three at 1.3-4.2 pct. The cheap singletons — `dbsize_base`,
+`getbit_base`, `hstrlen_base`, `getrange_base` — carry the best percentages and have no cluster
+to wait for.
+
+**NO CERTIFICATION THIS TURN, AND THE REASON IS WORTH RECORDING.** The operator's no-certify hold
+was explicitly lifted and CPU idle was **92 pct**, so the brief said go. `certification_window.py
+--for ratio` returned **UNFIT** anyway: six cargo/rustc processes were live and, under a shared
+uid, none can be attributed away — three of them were another session's `-p fr-server` build.
+This is the same lesson as `d22cf2d10`: **a lifted hold is permission, not a measurement, and the
+gate's verdict beats apparent quiet.** I also note that my own build-slot check (`pgrep -c
+rustc`) returned **0** while those three `-p fr-server` builds were running; the reliable form
+greps `ps -eo args=` for `-p <package>`.
+
+GATE AND ITS OWN NULL. This row makes no A/B claim — single-draw call counts, which are exact
+integers — so there is no lever to gate. A/A null on the whole-process instrument, same ELF, four
+draws of GET, resampled ratio-of-medians: median 1.00000, bootstrap 95% median CI [0.99730,
+1.00244]. The verdict gate for any lever built on this must be that bootstrap median-CI, and CV
+is provenance only and was not used as a gate anywhere in this row; no CV was computed. Host:
+/data 88G, loadavg 12.94/14.29/11.93 falling, CPU idle 92 pct, mean 1999 MHz across 64 cores;
+three peer `-p fr-server` builds in flight throughout, which is why this turn measured an existing
+ELF, built nothing and certified nothing.
+`bench_elf_sha256=81630963a263180b4b6293e215070716dcc45d69bdf2873583b46205464a20d9`.
+
+RETRY PREDICATE: re-run this census after the next batch and check the same arithmetic — the
+count must fall by exactly the number of measured beneficiaries that batch claimed, and the
+shapes that moved must be exactly the ones named. A count that falls by more means something
+converted that the row did not claim; by less means a beneficiary did not take, which is what
+caught `zrange_withscores` in `d6f97f48e`. **Do not size this vein from source**, and check the
+census entry rather than the command name before assuming a route is unconverted.
+
+--------------------------------------------------------------------------------
+
+## KEEP (SELF-SPEEDUP) — ten more borrowed reads stop hashing a String per command: **92.8 to 114.5 instr/op each, 6.05 to 8.53 pct** — and the fall-through tax grew from +12.0 to **+20.3**, which is where this pattern should stop
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — instruction-level self-speedup, no vs-incumbent ratio is claimed.
+
+`f9c0d03f7` gave direct histogram fields to seven borrowed reads and measured the trade honestly:
+fall-through commands paid **+12.0** instr/op. This extends the set by ten more, each MEASURED
+paying the `HashMap<String, CommandHistogram>::get_mut::<str>` probe at 83-93 instr/op before the
+change. The wins are large and uniform. **The tax is now +20.3 and that is the finding that
+matters more than the wins.**
+
+### THE PAIR
+
+Both ELFs from HEAD `092150b5d`, built back to back, one build at a time. Instructions by
+two-point subtraction, so load-immune; per-arm loadavg 11.82 13.80 11.87 at 2511 MHz rising to
+21.56 15.53 12.57 across the run, which does not enter an instruction count.
+
+| shape | before | after | delta | pct |
+|---|---|---|---|---|
+| ttl_nonvolatile | 1349.4 | 1234.9 | **-114.5** | -8.49 |
+| zscore_base | 1637.9 | 1525.3 | -112.6 | -6.87 |
+| hlen | 1300.6 | 1190.2 | -110.4 | -8.49 |
+| getrange_base | 1799.4 | 1690.5 | -108.9 | -6.05 |
+| type | 1269.1 | 1160.8 | -108.3 | -8.53 |
+| zcard | 1338.0 | 1233.5 | -104.5 | -7.81 |
+| zrank_base | 1527.2 | 1424.9 | -102.3 | -6.70 |
+| hstrlen_base | 1644.1 | 1542.7 | -101.4 | -6.17 |
+| getbit_base | 1553.7 | 1457.6 | -96.1 | -6.19 |
+| exists_1 | 1342.4 | 1249.6 | -92.8 | -6.91 |
+
+### THE TAX, REPLICATED THREE TIMES BECAUSE IT IS THE REASON TO STOP
+
+`substr` is a confirmed-literal command deliberately LEFT OUT of the set — the fall-through
+control that `f9c0d03f7` established as mandatory for this lever:
+
+    draw 1   1898.7 -> 1918.8   **+20.1**   +1.06 pct
+    draw 2   1900.6 -> 1920.9   **+20.3**   +1.07 pct
+    draw 3   1899.0 -> 1918.2   **+19.2**   +1.01 pct
+
+Worst bound **+20.3 instr/op, +1.07 pct**, paid by every generically-dispatched command to speed
+up ten. Three draws, sign never in doubt, spread 1.1 instr/op. **The tax was +12.0 at fifteen
+commands and is +20.3 at twenty-five.** It is growing with the set, which is exactly what a
+`match` on a name string does once the length buckets fill.
+
+### A REGRESSION I SUSPECTED AND REPLICATION REFUTED
+
+Draw 1 put `get_control` at **+4.5 instr/op (+0.48 pct)** and I expected that to be real: GET has
+its own direct field, but adding `"ttl"` puts a second entry in GET's three-character length
+bucket, which is a plausible mechanism for a genuine regression on the campaign's most important
+command. Two further draws:
+
+    draw 1   933.8 -> 938.3   +4.5   +0.48 pct
+    draw 2   939.4 -> 931.5   -7.9   -0.84 pct
+    draw 3   933.2 -> 931.1   -2.1   -0.23 pct
+
+**The sign flips.** Mean -1.8, spread 12.4 instr/op against an A/A interval of about +/-3.7 on a
+934 instr/op shape. There is no GET regression here and the bucket-collision mechanism is NOT
+demonstrated. Had I stopped at one draw I would have shipped a false alarm — or worse, quoted
++4.5 as a real cost and rejected a good lever on it. Commands WITH direct fields do not pay the
+tax; only fall-through commands do.
+
+### WHY THIS SHIPS, AND WHERE IT STOPS
+
+It ships because the ten winners are borrowed fast paths where 100 instr/op is 6-8.5 pct, the
+losers are generically-dispatched commands where +20.3 is 1.07 pct of a much larger baseline, and
+no direct-field command regresses.
+
+**It stops here.** The tax is a function of set size and has grown 69 pct while the set grew 67
+pct. The next batch would push it further onto every command outside the set, and there is no
+version of this pattern that does not. **The correct next move is not a longer list but a
+different key**: the caller already knows the command's identity when it dispatches, so passing a
+command ID or enum discriminant instead of a `&str` name removes BOTH the name match and the
+hash. Threading a parameter through dispatch is banked at 8-16 instr/op, against 87-93 for the
+probe and 20.3 for the match — so the ID form should beat both arms of this trade rather than
+picking a side of it.
+
+### THE DEFECT THIS SET NEARLY INHERITED
+
+Found while measuring, not by a test: `f9c0d03f7` extended the RECORDER to seven reads and left
+`get()`, `all()` and `reset()` covering only the original eight writes, so LLEN, HGET, STRLEN,
+SCARD, SISMEMBER, HEXISTS and LINDEX were written to fields nothing read and vanished from `INFO
+commandstats`. Verified live against Redis 7.2.4, which reports all seven. Fixed in `092150b5d`
+BEFORE this extension landed — had it not been, this row would have made the defect
+seventeen commands wide. The fix replaced four hand-maintained copies with one
+`with_direct_histogram_fields!` list that generates every consumer, and the regression guard is
+generated from the same list, so it now covers all twenty-five automatically.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+**A/A measured in the SAME INVOCATION as the A/B**, on the BEFORE binary, six shapes spanning the
+range of the table, so the null and the effect share one host state rather than being compared
+across runs -- a separate-invocation null has been measured on this campaign to underreport by 9x:
+
+    substr        1900.5 -> 1901.5   +1.0   ratio 1.000526
+    zcard         1339.8 -> 1339.5   -0.3   ratio 0.999776
+    hlen          1303.7 -> 1306.3   +2.6   ratio 1.001994
+    type          1268.7 -> 1269.3   +0.6   ratio 1.000473
+    get_control    941.9 ->  938.4   -3.5   ratio 0.996284
+    exists_1      1358.0 -> 1351.1   -6.9   ratio 0.994919
+
+**A/A null median 1.000125; bootstrap 95% median CI [0.995602, 1.001260]**, six ratios,
+20,000 resamples. Widest single deviation 0.508 pct. CV was not used, as a gate or otherwise; the
+bootstrap median-CI above is the gate, and an effect inside it is not claimed.
+
+**This null is WIDER than the first two pairs suggested and it changes how the tax must be
+read.** Had I stopped at `substr` and `zcard` I would have reported a +/-1.0 instr/op null and
+called the tax 20x it. With `exists_1` and `get_control` in the sample the honest figure is
+0.508 pct worst deviation, so the +1.07 pct tax is about **2x** the widest A/A movement, not 20x.
+
+The wins are unaffected by that correction: 6.05 to 8.53 pct is 12-17x the widest A/A deviation
+and far outside the CI, on ten shapes with the same sign and a mechanism counted before the
+change. **The tax's credibility rests on REPLICATION, not on its size relative to the null** --
++20.1, +20.3, +19.2 across three draws, spread 1.1 instr/op, sign never in doubt. A single draw
+of it would not have been quotable against this null and is not what is being quoted.
+
+The `get_control` movement sits inside the interval, and the A/A on `get_control` itself reads
+-3.5 instr/op -- the same order as the A/B draws whose sign flipped. That is why no GET effect is
+claimed in either direction.
+
+No throughput ratio and no incumbent comparison is claimed by this row, so no quiet window is
+required; per-arm loadavg and MHz are recorded in PROVENANCE regardless.
+
+### PROVENANCE
+
+  ELF           before `4ddf1b3f3f3c85f11e0558198d3199509b27b42e31add11cccc867dfd2387e7b`,
+                after  `b9020687621a86bcf60963b997bc6b0bd2d31d177b8e7580d71dea80a22a3b8a`
+  bench_elf_sha256=b9020687621a86bcf60963b997bc6b0bd2d31d177b8e7580d71dea80a22a3b8a
+  incumbent     NOT RUN for the ratio; Redis 7.2.4 WAS used as the correctness oracle for the
+                `INFO commandstats` differential described above.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`.
+  host          /data 88G free, checked immediately before each build. Per-arm loadavg
+                11.82 13.80 11.87 at 2511 MHz to 21.56 15.53 12.57. Instructions, so load and MHz
+                do not enter.
+  pair          Both ELFs from the SAME HEAD `092150b5d`, built back to back, one at a time, both
+                exit-checked, DISTINCT SHA-256. The first BEFORE build was DISCARDED: `git
+                archive | tar -x` restores an older mtime, cargo skipped the rebuild in 0.11s and
+                emitted a binary byte-identical to AFTER. Caught by comparing SHA-256, rebuilt
+                with a forced `touch`, which took 29.84s and produced a distinct ELF.
+  tests         `cargo test -p fr-store --lib` 939 passed, 0 failed, 13 ignored.
+                `cargo check --all-targets -p fr-server -p fr-runtime` clean.
+  disposition   SHIPPED.
+
+### RETRY PREDICATE
+
+1. **Do NOT extend this set again.** The fall-through tax is +20.3 and growing with set size.
+   A further batch must be rejected unless it also lowers the tax.
+2. Re-open as a COMMAND-ID dispatch, not a longer name match. Success predicate: the fall-through
+   tax returns to 0.0 within the A/A interval AND the winners keep their 90+ instr/op.
+3. Any change to the direct-field set must include `substr`, or another confirmed fall-through
+   command, as a control in the same invocation. Without it this ships as a clean win and is not.
+4. Do NOT quote a one-draw control on this lever. `get_control` read +4.5 on draw 1 and the sign
+   flipped twice after.
+5. If `git archive | tar -x` feeds a build, `touch` the changed file first and CHECK THE SHA-256
+   differs from the other arm. A 0.11s "build" is a skipped build.
