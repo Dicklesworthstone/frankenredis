@@ -6214,6 +6214,37 @@ fn preserve_store_load_context(replacement: &mut Store, original: &Store) {
 /// deliberately excludes `notify_keyspace_events` — applying it before the
 /// rebuild would make the replay fire keyspace notifications, which an RDB load
 /// must not.
+/// Re-register a persisted FUNCTION library by EXECUTING its body.
+///
+/// (frankenredis-9hori) THE RELOAD HALF of the registration fix. `FUNCTION LOAD` already registers
+/// from the specs `lua_eval::function_load_execute` collects, but fr persists the library SOURCE and
+/// every reload path used to re-derive its registrations with `Store::function_load`'s source-text
+/// scan. That scan requires string and function LITERALS in `redis.register_function`'s argument
+/// positions, so a library naming its function from a local loaded once and then vanished on the
+/// next restart, and a replica diverged from its primary. Executing here is also what upstream does:
+/// it stores source and re-evaluates it on load, so the registrations always come from the run.
+///
+/// ON FAILURE, FALL BACK TO THE SCAN. A body that raises during a reload must not cost us a library
+/// that reloads today, so the error arm reproduces the previous behaviour exactly. The change is
+/// therefore one-directional: it can only recover libraries that currently fail, never drop one that
+/// currently succeeds.
+///
+/// Errors stay swallowed here, as they were at all five call sites: a reload is not a command and has
+/// no client to answer, and a library that cannot be re-registered must not abort the surrounding
+/// dataset load.
+fn reload_function_library(store: &mut Store, now_ms: u64, code: &[u8]) {
+    match fr_command::lua_eval::function_load_execute(store, now_ms, code) {
+        Ok(specs) => {
+            let registrations: Vec<fr_store::FunctionEntry> =
+                specs.iter().map(|spec| spec.to_function_entry()).collect();
+            let _ = store.function_load_with_registrations(code, true, &registrations);
+        }
+        Err(_) => {
+            let _ = store.function_load(code, true);
+        }
+    }
+}
+
 fn copy_encoding_thresholds(replacement: &mut Store, original: &Store) {
     replacement.hash_max_listpack_entries = original.hash_max_listpack_entries;
     replacement.hash_max_listpack_value = original.hash_max_listpack_value;
@@ -6620,7 +6651,7 @@ impl Runtime {
                 return Err(PersistError::InvalidFrame);
             }
             for code in functions {
-                let _ = self.server.store.function_load(code, true);
+                reload_function_library(&mut self.server.store, now_ms, code);
             }
         }
         for (index, record) in records.iter().enumerate() {
@@ -6677,7 +6708,7 @@ impl Runtime {
         // Re-register FUNCTION libraries carried in the dump so FUNCTION LIST /
         // FCALL survive a restart, matching redis. (frankenredis-tm139)
         for code in &functions {
-            let _ = store.function_load(code, true);
+            reload_function_library(&mut store, now_ms, code);
         }
         store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
         store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
@@ -6729,7 +6760,7 @@ impl Runtime {
                     // Restore FUNCTION libraries through the round-trip, matching the
                     // in-memory branch. (frankenredis-i0yd6)
                     for code in &functions {
-                        let _ = store.function_load(code, true);
+                        reload_function_library(&mut store, now_ms, code);
                     }
                     store.stat_rdb_last_load_keys_expired =
                         u64::try_from(counts.expired).unwrap_or(u64::MAX);
@@ -6805,7 +6836,7 @@ impl Runtime {
             };
         // Restore FUNCTION libraries through the round-trip too. (frankenredis-c0u9q)
         for code in &decoded.functions {
-            let _ = store.function_load(code, true);
+            reload_function_library(&mut store, now_ms, code);
         }
         store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
         store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
@@ -7094,7 +7125,7 @@ impl Runtime {
                 // the full-sync snapshot so FCALL / FUNCTION LIST work on the
                 // replica too, matching the master.
                 for code in &decoded.functions {
-                    let _ = store.function_load(code, true);
+                    reload_function_library(&mut store, now_ms, code);
                 }
                 store.stat_rdb_last_load_keys_expired =
                     u64::try_from(counts.expired).unwrap_or(u64::MAX);
