@@ -56638,3 +56638,114 @@ retry predicate 3 refuses to quote these as incumbent gains.
      no lists.
   3. Do NOT quote these as incumbent gains. `48eb38749` measured redis's marginal read at 3.08x
      (strings) and 5.34x (integers) fr's, so the read side is a lead being widened.
+
+## 2026-08-18 CrimsonHawk: SELF-SPEEDUP TARGET — XREAD is a STRANDED route: its zero-copy executor and cascade arm both exist, but no floor-table entry, so every XREAD walks the cascade for 1469.0 instr/op of `process_buffered_frames` self plus 551.2 of memcmp (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — no code changed and no build was run for the fix; `crates/fr-server/src/main.rs`
+is leased to another agent. No fr/Redis ratio is claimed.
+
+### THE PROFILE THAT REDIRECTED THIS CAMPAIGN
+
+Seven levers in this vein have chased allocations and memcpys. Profiling the two most EXPENSIVE
+shapes for their largest frames rather than their memcpy counts says the remaining money is in
+DISPATCH:
+
+  xread_one (9500.1 instr/op)                          self instr/op
+    frankenredis::process_buffered_frames                  1469.0    15.5 pct
+    __memcmp_avx2_movbe                                     551.2     5.8 pct
+    parse_borrowed_plain_key_arg2_packet                    429.0
+    execute_plain_xread_single_borrowed_into                288.0
+    parse_borrowed_plain_keys_multi_packet                  281.0
+
+  xrevrange_base (8177.2 instr/op)
+    execute_frame_internal 396.0 + classify_command 372.0 +
+    dispatch_with_client_context 331.0 + parse_command_args_borrowed_into 310.0  = 1409.0
+
+`process_buffered_frames` self at 1469.0 is the CASCADE WALK. The 551.2 of `memcmp` is that walk
+comparing command names, and the 429.0 + 281.0 are PARSERS THAT RUN AND FAIL before the right arm
+is reached.
+
+### XREAD IS STRANDED, AND THAT IS THE CHEAP LEVER
+
+`XREAD COUNT 1 STREAMS xrd 0` already has everything except the classifier entry:
+
+  * `parse_borrowed_plain_xread_single_packet` — exists.
+  * `execute_plain_xread_single_borrowed_into` — exists, and its own comment records 12.14x on a
+    store A/B. The profile shows it running, at 288.0 instr/op.
+  * a cascade arm wiring the two together — exists.
+  * `BorrowedDispatchFloorCommand::Xread` — **absent**. Zero occurrences in the token table.
+
+So every XREAD pays the full cascade walk to arrive at a fast path that is already written. This
+is the same shape as the four routes that crossed ~1.5x to ~0.5x by gaining a floor-table entry.
+
+### THE IMPLEMENTATION, WHICH IS DELIBERATELY A DELEGATION
+
+  1. Add `Xread` to `BorrowedDispatchFloorCommand`, and `[b'X', b'R', b'E', b'A', b'D']` to the
+     FIVE-letter group of `borrowed_dispatch_floor_command` (XREAD is 5 bytes; XADD's 4-letter row
+     is the wrong group and a row in the wrong group is dead code that still compiles).
+  2. Classify `(4, Xread)` and `(6, Xread)` — `XREAD STREAMS k id` and
+     `XREAD COUNT n STREAMS k id` — to one new class.
+  3. The arm calls `parse_borrowed_plain_xread_single_packet` then
+     `execute_plain_xread_single_borrowed_into` and falls through to
+     `parse_borrowed_multibulk_action` on any decline, i.e. VERBATIM what the cascade arm does.
+
+Written as a delegation, behaviour is identical by construction, including the RESP2-only rule:
+the executor takes `client_resp3` and declines RESP3 itself, so the floor arm must pass it and
+must NOT decide protocol on its own.
+
+### XREVRANGE IS **NOT** THE SAME FINDING — DO NOT "FIX" IT
+
+`(4, Xrevrange)` IS classified, to `XrevrangeZero`. Its arm still fell through to the generic path
+on this shape, which looks like the stranded pattern and is not: that class is deliberately narrow,
+documented as "the invariant-backed empty-range floor" for exact `XREVRANGE key 0-0 0-0`.
+`xrevrange_base` asks for a real range, so declining is CORRECT.
+
+Front-classifying a general XREVRANGE would require a borrowed reverse-range implementation, which
+is a different and much larger piece of work than XREAD's missing table row. The 1409.0 instr/op of
+generic dispatch it pays is real, but it is not cheap to remove.
+
+### WHAT IS AND IS NOT CLAIMED
+
+CLAIMED: the frame costs above, and that `BorrowedDispatchFloorCommand::Xread` does not exist while
+its parser, executor and cascade arm do.
+
+NOT CLAIMED: that front-classification recovers 1469.0 + 551.2. The floor classifier itself costs
+about 159 instr/op (measured across eight commands), the packet still has to be parsed once, and
+some of the cascade self-cost is the buffered-frame loop's own bookkeeping which runs regardless.
+A realistic expectation is the walk and the failed parser attempts, not the whole 2020.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timed quantity and no ratio are claimed. The frame costs are exact two-point differences of
+callgrind counts at N=2000 and 2N=4000 on one ELF.
+
+For the instrument generally, measured in a single invocation of the same harness on one ELF and
+one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios, banked in `0bf781d57`.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above, and
+an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           plain `--release` build of HEAD `6fb775b43`, taken this turn.
+  bench_elf_sha256=0072d4db319d664e5b67bc1d966f09ec58eddfc8f0c07d3c80556c4308750d5a
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py`, `callgrind_annotate --auto=no`.
+  host          /data 62G free. loadavg 6.43 10.32 11.88, CPU idle 86 pct, iowait 0, zero
+                frankenredis builders verified against the rustup toolchain path.
+  disposition   NO CODE CHANGED. `crates/fr-server/src/main.rs` is leased to another agent.
+
+### RETRY PREDICATE
+
+1. Accept only if `process_buffered_frames` SELF falls substantially on `xread_one` AND
+   `__memcmp_avx2_movbe` falls with it — the memcmp is the walk's name comparisons, so a win that
+   moves one without the other has not front-classified anything.
+2. `parse_borrowed_plain_key_arg2_packet` (429.0) and `parse_borrowed_plain_keys_multi_packet`
+   (281.0) are parsers that RUN AND FAIL on the way to XREAD's arm. Both should fall to ~0 on this
+   shape; if they do not, the classifier entry is not being taken.
+3. Do NOT add a row to the 4-letter group. XREAD is five bytes, and a row in the wrong length
+   group compiles and is never reached — the same defect a comment in that table already records
+   for MOVE.
+4. Leave `XrevrangeZero` alone. It declines `xrevrange_base` correctly.
