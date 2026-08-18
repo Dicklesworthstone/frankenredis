@@ -44480,3 +44480,72 @@ RETRY PREDICATE:
   2. Reopen the chaining question ONLY IF someone builds a single ELF carrying all the toggles,
      so every arm shares one control. That is the only way these rows become commensurable, and
      it is worth one build when the hold lifts.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: SOURCE TRACE — three plausible GEOSEARCH locality levers, and the arithmetic that disqualifies all three for `geosearch_2`, the shape that is actually behind (`frankenredis-eh2ct`)
+
+SOURCE-DERIVED, NOT MEASURED. Written under a build hold; every figure is read from source or
+quoted from an existing row. Nothing here claims a ratio or a delta. Its whole purpose is to
+stop three windows being spent on levers that cannot pay on the shape that needs one.
+
+CONTEXT, from the row at :38143 and the harness sources: `geosearch_2` is the shape certified
+at 1.0202 raw / **0.9162 normalised, fr BEHIND**. Its hardware profile is 157.1 L1 misses per
+op at IPC 1.387, a 1.4722x worse miss rate than the incumbent, and the deficit is explicitly
+NOT allocation volume -- fr makes 9.0 allocations per op against redis's 25.8.
+
+### 1. `geo_collect_candidate` is the named target and it is 5.90 pct of misses
+
+The prior row names `fr_command::geo_collect_candidate` as THE target for whoever holds the
+file. It is 5.90 pct of misses. A frame at 5.90 pct cannot produce a 1.4722x whole-shape miss
+ratio: eliminating it entirely leaves the other 94.1 pct untouched. It is a correct target for
+a self-speedup and the wrong one for closing this deficit, and the row that named it did not
+make that distinction.
+
+### 2. The borrow asymmetry I thought I had found DOES NOT EXIST
+
+`geo_collect_searchstore_box_candidate`'s doc comment says it works "borrowing every raw-score
+member and cloning only survivors", while `geo_collect_candidate` visibly does
+`results.push((member.to_vec(), ...))`. That reads like one sibling borrowing where the other
+copies, which would be a clean lever. It is not: "borrowing" there describes the ITERATION,
+and all three collectors -- `geo_collect_candidate`, `geo_collect_box_candidate`,
+`geo_collect_searchstore_box_candidate` -- do the identical `member.to_vec()` on survivors
+only. Recorded because the docstring genuinely invites the misreading and I made it before
+checking the third collector.
+
+### 3. fr's result element IS 40 pct larger than upstream's, and it still cannot be the lever
+
+  redis  `geoPoint` (geo.h:8)   4 doubles + `char *member`            = 40 bytes
+  fr     `(Vec<u8>, f64, f64, f64, f64)`   24-byte Vec + 4 doubles    = 56 bytes
+
+That is a real structural difference in a array walked twice more (sort, then reply build), and
+"what is allocated, how large" is exactly what the prior row nominated as the open question. It
+is still not the answer for `geosearch_2`, and the arithmetic is decisive rather than
+suggestive:
+
+  n = 2   (geosearch_2)   fr 112 B, redis 80 B  -- BOTH span 2 cache lines. Identical line
+                          count, so the size difference costs zero misses at this n.
+  n = 64  (geosearch_64)  fr 3,584 B = 56 lines, redis 2,560 B = 40 lines -- 16 extra lines,
+                          where the 40 pct would genuinely bite.
+
+AND THAT IS THE INVERSION: `geosearch_64` is the shape where this lever would pay, and
+`geosearch_64` is already AHEAD at 1.0094 normalised. The shape that is behind is the one where
+the element size provably does not matter. Shrinking the tuple is a legitimate large-N
+self-speedup and is NOT a fix for the certified deficit.
+
+### What this leaves
+
+Of the three surfaces the prior row's retry predicate left open -- `geo_collect_candidate`, the
+geo cell walk, and reply construction -- the first is bounded at 5.90 pct by that row's own
+number, and the result-tuple angle on the third is disqualified at n=2 by the arithmetic above.
+The geo cell walk is untouched by this trace. The prior row's other hypothesis is also
+untouched and is now the largest un-eliminated one: allocator BEHAVIOUR, mimalloc against
+redis's jemalloc, on identical allocation counts. Nobody has tested that.
+
+RETRY PREDICATE: do not open a `geosearch_2` locality lever on the result tuple's size or on
+`geo_collect_candidate`'s share without first showing a miss count that survives the two
+arithmetic checks above -- 5.90 pct against a 1.4722x whole-shape ratio, and identical cache
+line spans at n=2. Reopen the tuple-size angle only if a LARGE-N geosearch row is measured
+BEHIND, which `geosearch_64` at 1.0094 currently is not. The measurement worth taking first is
+still the one the size pairs were built for and nobody has run: `geosearch_2` read on BOTH
+metrics, since it now carries a registered instruction shape and a certified throughput figure.
