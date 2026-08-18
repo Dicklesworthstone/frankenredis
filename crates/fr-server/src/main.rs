@@ -7004,17 +7004,17 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some(action) = try_dispatch_floor_classified_action(
-                    unparsed,
-                    parser_config,
-                    runtime,
-                    ts,
-                    &mut conn.write_buf,
-                    &mut argv_scratch,
-                                    &mut plain_write_gate_cache,
-                    &mut plain_get_read_gate_cache,
-                ) {
-                    action
+                // (frankenredis-iqicb) PING AHEAD OF THE CLASSIFIER, for the same reason
+                // GET is: PING is the only other hot command the floor table cannot name, so
+                // the classifier walked its header, failed, and returned None on every PING --
+                // 129.0 instr/op in the classifier plus 34.0 in the dispatcher, 163.0 of the
+                // 301.0 this command spent on dispatch. Same condition, parser, executor and
+                // reply; only the position changes.
+                //
+                // The guard is why this is cheap for everyone else: `borrowed_arity_is(.., b'1')`
+                // is ONE byte compare, and it is this arm's own pre-existing condition rather
+                // than a new test. The arity-2 `PING message` form deliberately stays below the
+                // classifier -- it is rarer and its guard is not as cheap.
                 } else if borrowed_arity_is(unparsed, b'1')
                     && let Some(consumed) =
                         parse_borrowed_plain_ping_upper_noarg_packet(unparsed, &parser_config)
@@ -7040,6 +7040,17 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if let Some(action) = try_dispatch_floor_classified_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    &mut conn.write_buf,
+                    &mut argv_scratch,
+                                    &mut plain_write_gate_cache,
+                    &mut plain_get_read_gate_cache,
+                ) {
+                    action
                 } else if borrowed_arity_in(unparsed, b'1', b'2')
                     // PING's command token is 4 bytes in every form it accepts, so the bulk
                     // header at offset 4 is literally `$4\r\n` in all three branches of
