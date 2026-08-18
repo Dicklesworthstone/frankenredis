@@ -56130,3 +56130,96 @@ in both directions:
   3. The integer deficit is still the eager decimal render, priced at 57.09 instr/elem by
      `a30758265` and constrained by `frankenredis-33832`. Nothing in this row changes that; it only
      narrows the number the render has to beat, from 2.1998x to 2.1438x.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the b1o02 break-even for LISTS is 0.124 reads/RESTORE on strings and 0.242 on integers, so the 2.1438x "integer deficit" is not one — and the eager decimal render is PREPAYMENT, not waste (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) with a LIVE redis
+7.2.4 arm, replicated as two independent passes. CV was NOT used, as a gate or otherwise — no
+coefficient of variation appears in this row's decision path and none was computed. No timing
+verdict is claimed: the measurand is a retired-instruction COUNT. No code changed and NO BUILD was
+run — the host was carrying two other projects' builds at loadavg 20-44.
+
+Claim class: not applicable — nothing is kept and no ratio is banked as campaign output.
+
+### WHY THIS ROW EXISTS
+
+`b1o02`'s standing law says a RESTORE-in-isolation ratio flatters redis: fr decodes eagerly, redis
+attaches the listpack shallowly and WALKS IT ON EVERY READ, and the break-even is well under one
+read per RESTORE. `scripts/hash_restore_read_premise_run.sh` measured that for HASHES. My last two
+rows quoted list ratios and said, twice, that neither figure is a workload result without a stated
+break-even. Nobody had stated one for lists. This states it.
+
+The instrument is the callgrind Ir slope, not the driver's `perf stat`, because `perf stat` needs
+a quiet host and this one was carrying redis and scipy builds.
+
+    cost(N) = a + b*N per key, for N full reads (LRANGE 0 -1) after one RESTORE
+    break-even N* = (a_fr - a_redis) / (b_redis - b_fr)
+
+### WHAT IT READS
+
+    LIST RESTORE + N x LRANGE(0,-1), 300 elements, fill 128, per-key slope 10 vs 30 keys
+    two independent passes; both are shown because the second is not a re-quote of the first
+
+    ALL-STRING          pass 1                    pass 2
+      reads=0     fr 43,459.1 / redis 33,150.4   fr 43,360.1 / redis 32,600.7   ratio 1.3110 / 1.3300
+      reads=1     fr 89,865.6 / redis 175,473    fr 92,433.1 / redis 175,164    ratio 0.5121 / 0.5277
+      reads=3     fr 183,630  / redis 467,413    fr 182,846  / redis 460,696    ratio 0.3929 / 0.3969
+      fr    = 43,323 + 46,746*N        44,465 + 46,311*N
+      redis = 32,108 + 144,928*N       32,543 + 142,708*N
+      BREAK-EVEN 0.114 / 0.124 reads   -> WORST 0.124
+
+    ALL-INTEGER         pass 1                    pass 2
+      reads=0     fr 62,011.2 / redis 17,644.5   fr 62,411.6 / redis 17,990.0   ratio 3.5145 / 3.4692
+      reads=1     fr 101,435  / redis 236,396    fr 101,295  / redis 236,577    ratio 0.4291 / 0.4282
+      reads=3     fr 182,438  / redis 653,552    fr 182,221  / redis 660,279    ratio 0.2791 / 0.2760
+      fr    = 61,704 + 40,194*N        61,960 + 40,012*N
+      redis = 20,551 + 211,485*N       19,915 + 213,776*N
+      BREAK-EVEN 0.240 / 0.242 reads   -> WORST 0.242
+
+  88.6-91.0 pct idle, loadavg 7.84-14.34, MHz mean 1923-2541 against a 1429-4296 spread.
+
+  ONE READ IS ALREADY PAST THE CROSSING ON BOTH SHAPES: 0.5277x on strings, 0.4291x on integers,
+  quoting the worse pass. The isolation numbers — 1.3300x and 3.5145x — describe a workload that
+  restores a list and never looks at it.
+
+### THIS CORRECTS MY OWN TWO PREVIOUS ROWS
+
+`a30758265` and `fea6ebf98` quoted 2.1998x and 2.1438x for the integer shape. Both engaged the law
+and called those an upper bound, which was right as far as it went. It did not go far enough: the
+bound is passed at a QUARTER of one read. Nobody should cite either number as an integer deficit,
+including me.
+
+Note also that RESTORE+DUMP is not isolation and not a read: true isolation reads 3.5145x on
+integers where RESTORE+DUMP read 2.1438x, so the DUMP was already doing part of fr's amortising.
+
+### AND THE RENDER IS PREPAYMENT, WHICH CLOSES A VEIN I WAS STEERING INTO
+
+`a30758265` priced fr's eager decimal render at 57.09 instructions per element and called it "the
+whole integer premium", naming it as the target. The marginal read cost says that framing was
+wrong:
+
+    marginal cost of ONE full read, integers    fr 40,012   redis 213,776    redis 5.34x dearer
+    marginal cost of ONE full read, strings     fr 46,311   redis 142,708    redis 3.08x dearer
+
+  Redis is dearer on integer reads SPECIFICALLY, and by more than on string reads, because it
+  renders each integer to decimal EVERY TIME it emits it. fr renders once, at decode. The 57.09
+  instructions per element are not waste — they are the payment redis makes again on every read.
+
+  So an attempt to remove fr's eager render would trade a one-time cost for a per-read one, and it
+  would move fr toward redis's curve, not away from it. `frankenredis-33832`'s refusal to carry the
+  `i64` on the span now looks better founded than its stated reason: the size argument was the one
+  it gave, but the read-side argument is the stronger one.
+
+### RETRY PREDICATES
+
+  1. DO NOT attack the eager decimal render as waste. Reopen ONLY IF a workload is found whose
+     reads-per-RESTORE is measured BELOW 0.242 — a MIGRATE target that never serves a read is the
+     only candidate shape I can name, and `project_restore_isolation_gap_is_never_the_lever` already
+     covers it. Any such attempt must quote its own break-even, not this one.
+  2. The read-side numbers are the ones with headroom now, and they are unmeasured as a vein: fr's
+     full-read cost is 46,311 instr/key on strings and 40,012 on integers, for 300 elements —
+     roughly 150 and 133 instructions per element emitted. Nobody has profiled LRANGE on a restored
+     list; that is where this bead should look next.
+  3. This row is TWO passes at three read counts, not a certified ratio, and the window carried two
+     other projects' builds throughout. The effects are 3x to 5x, far outside anything the host
+     could contribute, but a certified read-side row still needs `--for ratio` FIT at both ends.
