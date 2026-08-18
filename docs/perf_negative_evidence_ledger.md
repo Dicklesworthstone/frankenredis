@@ -61108,3 +61108,75 @@ gets left dirty. It is specified here instead, in full, so it can be built from 
      unavailable: `--dump-instr=yes`, then join per-address costs to `objdump -d`. Note the dump
      format trap — with `positions: instr line` the cost is the LAST field, and reading the second
      field yields a silent, plausible column of zeros.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: SEVEN more shapes on the instruction axis, all fr-ahead **0.2517x to 0.7968x** — I went looking for a WORK-VOLUME deficit to falsify my own IPC pattern row and did not find one
+
+Claim class: COMPETITIVE (instruction axis; no throughput ratio is claimed).
+Campaign output: yes — seven vs-incumbent instruction ratios, both engines in ONE invocation.
+
+`50071` claims the campaign's remaining deficit is **IPC, not work**. That is a campaign-level
+statement resting on the shapes that motivated it, and the cheapest way to break it is to find a
+shape where fr retires MORE instructions than the incumbent — a work-volume deficit, which would
+be far more tractable than a diffuse locality problem. I looked for one.
+
+### THE SURVEY — fr/redis INSTRUCTIONS PER OP, LOWER IS FR-BETTER
+
+    smembers_base    0.2517x        bitcount         0.4924x
+    getbit_base      0.3597x        zrandmember_1    0.5525x
+    lpos_base        0.4094x        scan_match       0.6522x
+    xrange_base      0.7968x
+
+**All seven below 1.0.** fr retires **1.25x to 3.97x fewer instructions** than Redis 7.2.4 across
+a set spanning set reads, bitmaps, list search, stream range, cursor scan and a random-member
+read. No work-volume deficit appears anywhere in the sample.
+
+### WHAT THIS DOES NOT SHOW, STATED BECAUSE THE TEMPTING READING IS WRONG
+
+**It does not confirm `50071`.** That row's claim is about shapes where fr is BEHIND ON
+THROUGHPUT, and I did not measure throughput here. These seven were chosen for family diversity
+and for being unprofiled, not for being confirmed-behind. A survey that finds no counterexample
+in a sample not drawn from the relevant population is weak evidence, and calling it confirmation
+would be exactly the sampling error this ledger exists to catch.
+
+What it does establish: fr's work-volume advantage is **broad**, not confined to the handful of
+shapes where it has been demonstrated, and any future deficit found on these seven will be an
+IPC/locality story rather than an instruction-count one — because the instruction count is
+already 1.25-3.97x in fr's favour.
+
+`getbit_base` is worth naming: **0.3597x instructions**, so fr does 2.8x less work, on a shape
+whose normalised throughput I measured earlier at 0.9681 and explicitly declined to claim because
+the normaliser was wider than the effect. Its raw throughput in that same run was 1.0931x, fr
+ahead. So it is not a counterexample either — it is simply a shape where fr leads on both axes by
+very different margins, which is the signature `50071` describes.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Instructions by two-point subtraction (N=2000, 2N=4000) with BOTH engines in one invocation, so
+startup and seeding cancel exactly and the ratio is load-immune — the survey spanned loadavg 4.78
+to 5.77 and is unaffected by construction. No A/A was taken: a single instruction ratio per shape
+is a sizing, and this row claims a DIRECTION (all seven below 1.0) rather than a margin on any
+one of them. No shape here is quoted as a certified standing. CV was not used, as a gate or
+otherwise.
+
+### PROVENANCE
+
+  ELF           fr `114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f`
+  bench_elf_sha256=114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+  incumbent     Redis 7.2.4, vendored, measured in the SAME INVOCATION as fr for every shape.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops, both arms.
+  host          /data 47G free, 5G above the brake, loadavg 4.78-5.77; NO local build; every run
+                reaped its own dump (4969 before, 4969 after) under the fix landed in `c432b58ac`.
+  disposition   MEASUREMENT ONLY. No source file changed.
+
+### RETRY PREDICATE
+
+1. To actually test `50071`, the sample must be drawn from shapes MEASURED behind on throughput,
+   and each needs BOTH axes in the same window. This row does not do that and does not claim to.
+2. A shape measuring fr/redis instructions ABOVE 1.0 is a work-volume deficit and is worth more
+   than any IPC lever — it would be the first one found. None of these seven is it.
+3. `publish` is NOT a registered shape in `shape_instr_per_op.py` (`error: no such shape`),
+   though it exists in `balanced_square_ab.py`. It is the campaign's clearest
+   throughput-shortfall-without-a-CPU-story shape, so registering it on the instruction axis is
+   the single most useful addition to this survey.
