@@ -49212,3 +49212,99 @@ holds at the tip. **Do not quote 0.3653x**: the replicated standing convention t
 the two draws. And do not read this as PING in general — it is the uppercase no-arg form, which is
 the only one the hoisted arm serves; `PING message` still goes below the classifier and would need
 its own row.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: ARCHITECTURAL — "3 of 14" does NOT generalise; DUMP node parity for MULTI-NODE quicklists is unreachable by boundary re-derivation, and this RETIRES my own prefix-offset retry predicate as a symptom patch (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: differential behaviour against a live vendored redis 7.2.4 in the same probe
+invocation, compared at NODE-TABLE level across six shapes. No timing verdict is claimed, no
+instruction counts are quoted, and CV was NOT used, as a gate or otherwise. No source change.
+This row banks no vs-incumbent ratio. Campaign output: no.
+
+`a1332ccc2` closed four mutations and carried a scope limit in its own retry predicate: the
+sweep covered ONE shape, and the 3-of-14 figure must not be believed until re-run at other
+fills. Re-run at six. It does not generalise, and WHY it does not is the finding.
+
+### THE SPLIT IS EXACTLY SINGLE-NODE vs MULTI-NODE
+
+    shape                  baseline node table        diverging
+    fill -1  seed 250      [4257]                      3 of 14
+    fill -2  seed 500      [8507]                      3 of 14
+    fill -2  seed 540      [9187]                      3 of 14
+    fill 128 seed 250      [2183 2081]                 7 of 14
+    fill 32  seed 100      [551 551 551 75]            7 of 14
+    fill -1  seed 500      [4087 4087 347]             8 of 14
+
+  ALL SIX BASELINES AGREE. A freshly built list matches redis in every shape, one node or four.
+  The divergence is entirely in what happens AFTER a mutation, and it more than doubles the
+  moment the list has more than one node.
+
+### THE MECHANISM, IN ONE PAIR OF ROWS
+
+    RPOP x1 (tail)     every shape                    fr == redis
+    LPOP x1 (head)     fill 32  seed 100    redis [534 551 551 75]   fr [551 551 551 58]
+                       fill 128 seed 250    redis [2166 2081]        fr [2183 2064]
+                       fill -1  seed 500    redis [4070 4087 347]    fr [4087 4087 330]
+
+  Redis shrinks the node the element was IN. fr re-derives boundaries front-to-back from the
+  current contents, so removing one element at the HEAD leaves every boundary where it was and
+  pushes the shortfall all the way to the LAST node.
+
+    fr's node boundaries are a function of the list's CURRENT CONTENT.
+    redis's are a function of its HISTORY.
+
+  A tail mutation is invisible to that difference, which is why RPOP agrees everywhere and why
+  every fix on this bead so far has held: they were all tail-side or single-node. A head or
+  interior mutation is not, and no amount of prefix bookkeeping changes that — the prefix
+  describes ONE retained node, and these shapes have four.
+
+### THIS RETIRES MY OWN RETRY PREDICATE
+
+`a1332ccc2` predicate 1 said to fix LPUSH "and ONLY with a prefix START offset". That would have
+made `LPUSH head` green on the single-node shapes and left the multi-node ones exactly as wrong,
+while adding a field to a struct in the DUMP path. It treats a symptom. I am marking it
+SUPERSEDED rather than leaving it to be picked up as ready work.
+
+  WHAT THE REAL FIX LOOKS LIKE: `ChunkedList` would have to carry the NODE BOUNDARY LIST as
+  state that mutations edit in place — shrink the node an element left, split the node an
+  insertion lands in — instead of `quicklist_packed_nodes` re-deriving boundaries at DUMP time
+  from a single `rpush_conversion_prefix_len`. That is a representation change, not a patch, and
+  it should be costed against what DUMP byte-parity for multi-node lists is actually worth
+  before anyone starts.
+
+### WHAT IS AND IS NOT AT STAKE
+
+The probe asserts ELEMENT sequences on every case and they matched throughout, in all six shapes
+and all fourteen mutations — as they have in every row of this four-commit arc. Nothing here is
+a data-correctness bug. What diverges is the BYTE LAYOUT of a DUMP payload, which matters for
+byte-comparison of DUMP output and for anything checksumming it; RESTORE round-trips both ways
+and the elements come back identical.
+
+    SO THIS IS A SCOPE FINDING, NOT AN ALARM, and the honest headline is that the four fixes
+    already landed (`37e7b724b`, `92c750886`, `7e0d847d0`, `a1332ccc2`) cover single-node lists
+    and tail mutations, which is where the previously-measured divergences were — and that the
+    multi-node interior case was never measured before tonight and is bigger than all of them.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = 32ad6582720b5bc1c452ac9e8cd06d40337c4c9d69c05e2a7a2fdc13f538ef7c
+                — the `a1332ccc2` build, unchanged; NO BUILD was run for this row.
+  probe         scratchpad `prefix_sweep_shapes.py`, the `a1332ccc2` mutation probe
+                parameterised over (fill, seed). Fourteen mutations x six shapes, each applied
+                to a freshly seeded list on BOTH engines, compared on the decoded node table.
+  incumbent     vendored redis 7.2.4, `legacy_redis_code/redis/src/redis-server`, booted per
+                probe on a free port with its own temp dir; fr and redis in the SAME invocation.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 18:42,
+                loadavg 7.87/8.99/10.06 at the start of the sweep, /data 102G. Recorded for
+                completeness: this row's evidence is byte equality, immune to load.
+
+RETRY PREDICATE:
+  1. SUPERSEDED: `a1332ccc2` predicate 1 (LPUSH prefix START offset). Do not build it as
+     specified. If LPUSH parity is wanted on single-node lists ONLY, say so explicitly in the
+     row that ships it, because it will not move any multi-node shape.
+  2. Before any representation change, COST IT: run `prefix_sweep_shapes.py` against the shapes
+     a real workload produces. Every divergence found here needed a list past the conversion
+     threshold AND a head/interior mutation. If that combination is rare in the workloads this
+     campaign benchmarks, the correct decision may be to record the limit and stop.
+  3. The six shapes here are all uniform-width elements. Mixed widths change where redis's nodes
+     fall and were not probed; do not assume the single-node/multi-node split is the only axis.
