@@ -44353,8 +44353,17 @@ The certified figure lives in the harness sources:
 `scripts/shape_instr_per_op.py:648` states the hazard in its own words -- "comparing an
 instruction ratio from one shape against a throughput ratio from another is exactly the
 cross-shape error the size pairs exist to remove" -- and registers `geosearch_2` on the
-instruction board precisely so the two are comparable. The ledger never received either
-number, so the only GEOSEARCH ratio greppable here is the one that comment warns against using.
+instruction board precisely so the two are comparable.
+
+PRECISION ON MY OWN CLAIM, corrected within the hour of writing it. An earlier draft of this
+row said the ledger "never received either number". That is too strong and the exact form of
+the overstatement is the interesting part. `0.9162` DOES appear twice in this ledger before
+this row, at :38036 and :38143 -- but only as PROSE REFERENCES to a figure certified elsewhere
+("the same shape the throughput board certifies at 0.9162"), never as a certifying row, and
+never with the trailing `x` the campaign's ratio convention uses. `1.0202`, the raw figure,
+appears nowhere at all. So the accurate statement is narrower and still sufficient: a reader
+searching for ratios in the conventional `N.NNNNx` form -- which is how every certified ratio
+in this file is written -- gets `geosearch_1` and nothing else.
 
 ### Three ways this single number is misread, in increasing order of how easy it is to miss
 
