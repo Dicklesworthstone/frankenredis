@@ -75,7 +75,7 @@ fn borrowed_touch_and_exists_allocate_nothing_per_key_by_default() {
         // A None means the borrowed route DECLINED its gate and the census would be
         // counting nothing while passing — the vacuous-and-green failure mode.
         assert_eq!(
-            rt.execute_plain_touch_borrowed(&keys, 1),
+            rt.execute_plain_touch_borrowed(&keys, 1, None),
             Some(fr_protocol::RespFrame::Integer(0)),
             "borrowed TOUCH must serve missing keys and report 0"
         );

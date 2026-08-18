@@ -50748,7 +50748,7 @@ mod tests {
         let mut ts = 2;
         for (key, bit) in cases {
             let f = direct
-                .execute_plain_bitpos_borrowed(key, bit, None, ts)
+                .execute_plain_bitpos_borrowed(key, bit, None, ts, None)
                 .expect("bitpos fast path");
             let g = generic.execute_frame(command(&[b"BITPOS", key, bit]), ts);
             assert_eq!(f, g, "key={key:?} bit={bit:?}");
@@ -50757,12 +50757,12 @@ mod tests {
         // bad bit arg -> defer
         assert!(
             direct
-                .execute_plain_bitpos_borrowed(b"s", b"2", None, ts)
+                .execute_plain_bitpos_borrowed(b"s", b"2", None, ts, None)
                 .is_none()
         );
         assert!(
             direct
-                .execute_plain_bitpos_borrowed(b"s", b"x", None, ts)
+                .execute_plain_bitpos_borrowed(b"s", b"x", None, ts, None)
                 .is_none()
         );
         assert_eq!(
@@ -50816,7 +50816,7 @@ mod tests {
                 _ => unreachable!(),
             };
             let f = direct
-                .execute_plain_bitpos_borrowed(key, bit, range, ts)
+                .execute_plain_bitpos_borrowed(key, bit, range, ts, None)
                 .expect("ranged bitpos fast path should engage");
             let mut argv = vec![b"BITPOS".to_vec(), key.to_vec(), bit.to_vec()];
             argv.extend(tail.iter().map(|a| a.to_vec()));
@@ -50842,7 +50842,7 @@ mod tests {
             };
             assert!(
                 direct
-                    .execute_plain_bitpos_borrowed(key, bit, range, ts)
+                    .execute_plain_bitpos_borrowed(key, bit, range, ts, None)
                     .is_none(),
                 "ranged bitpos must defer key={key:?} bit={bit:?} tail={tail:?}"
             );
@@ -50881,7 +50881,7 @@ mod tests {
         }
         for (ts, key) in (2..).zip([b"s".as_slice(), b"empty", b"missing", b"l"]) {
             let f = direct
-                .execute_plain_bitcount_borrowed(key, None, ts)
+                .execute_plain_bitcount_borrowed(key, None, ts, None)
                 .expect("bitcount fast path should engage");
             let g = generic.execute_frame(command(&[b"BITCOUNT", key]), ts);
             assert_eq!(f, g, "key={key:?}");
@@ -51511,7 +51511,7 @@ mod tests {
         }
         for (ts, key) in (2..).zip([b"i".as_slice(), b"s", b"l", b"is", b"h", b"z", b"missing"]) {
             let f = direct
-                .execute_plain_object_encoding_borrowed(key, ts)
+                .execute_plain_object_encoding_borrowed(key, ts, None)
                 .expect("object encoding fast path should engage");
             let g = generic.execute_frame(command(&[b"OBJECT", b"ENCODING", key]), ts);
             assert_eq!(f, g, "key={key:?}");
@@ -51531,7 +51531,7 @@ mod tests {
         // case-insensitive subcommand still recognized + canonical name
         let mut lc = Runtime::default_strict();
         lc.execute_frame(command(&[b"SET", b"i", b"1"]), 1);
-        assert!(lc.execute_plain_object_encoding_borrowed(b"i", 2).is_some());
+        assert!(lc.execute_plain_object_encoding_borrowed(b"i", 2, None).is_some());
         assert_eq!(lc.session.last_command_name, Some("object|encoding"));
     }
 
@@ -51690,14 +51690,14 @@ mod tests {
         let mut direct = Runtime::default_strict();
         let mut generic = Runtime::default_strict();
         let f = direct
-            .execute_plain_command_count_borrowed(2)
+            .execute_plain_command_count_borrowed(2, None)
             .expect("command count fast path should engage");
         let g = generic.execute_frame(command(&[b"COMMAND", b"COUNT"]), 2);
         assert_eq!(f, g);
         assert!(matches!(f, RespFrame::Integer(n) if n > 0));
         assert_eq!(direct.session.last_command_name, Some("command|count"));
         // case-insensitive
-        assert!(direct.execute_plain_command_count_borrowed(3).is_some());
+        assert!(direct.execute_plain_command_count_borrowed(3, None).is_some());
     }
 
     #[test]
