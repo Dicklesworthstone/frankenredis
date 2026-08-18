@@ -25,8 +25,22 @@ FR = int(sys.argv[2])
 SHEBANG = "#!lua name=%s\n"
 
 
+class Resp3OnResp2(RuntimeError):
+    """A RESP3-only frame arrived on a connection that never negotiated RESP3.
+
+    Carries the tag so the report names which shape leaked. The frame's PAYLOAD is left
+    unread by design -- there is no safe way to skip a frame whose encoding the reader does
+    not implement -- so any connection that raises this is desynced and must be replaced.
+    """
+
+    def __init__(self, tag, line):
+        super().__init__(f"RESP3 frame {tag!r} on a RESP2 connection: {line!r}")
+        self.tag = tag
+
+
 class Conn:
     def __init__(self, port):
+        self.port = port
         self.s = socket.create_connection(("127.0.0.1", port), 10)
         self.s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.buf = b""
@@ -68,6 +82,14 @@ class Conn:
             if n == -1:
                 return None
             return [self._read() for _ in range(n)]
+        if tag in (b"%", b"~", b",", b"#", b"(", b"="):
+            # A RESP3-only frame on a connection that never sent HELLO 3. This is the shape
+            # of frankenredis-luaresp2map: fr-protocol writes `%N\r\n` for a RespFrame::Map
+            # whatever the client speaks, so a reply path that skips
+            # downconvert_lua_reply_to_resp2 leaks one to a RESP2 caller. Raise a TYPED error
+            # rather than the generic one below: the caller reconnects and records a
+            # divergence, instead of the whole run dying on a "bad tag" traceback.
+            raise Resp3OnResp2(tag.decode(), line.decode(errors="replace"))
         raise RuntimeError(f"bad tag {line!r}")
 
     def cmd(self, *args):
@@ -164,10 +186,34 @@ ROUND_TRIP_CASES = [
     ("rt_callback_local",
      "local cb = function(k,a) return 41 end\nredis.register_function('%s', cb)",
      "callback from a local"),
+    # (frankenredis-luaresp2map, regression case for d15b2e455) The ONLY case here that
+    # returns something other than an integer, and the only one that exercises the reply
+    # CONVERSION rather than just the registration. `{map=...}` becomes RespFrame::Map, which
+    # fr-protocol writes as `%N` regardless of the caller's protocol, so a path missing
+    # downconvert_lua_reply_to_resp2 leaks a RESP3 frame to this RESP2 connection. The callback
+    # is an IDENTIFIER on purpose: transform_register_function requires a literal `function`
+    # keyword in that position, so the scan cannot express it and fcall_cmd takes the EXECUTING
+    # path -- which is exactly where the conversion was missing.
+    ("rt_map_reply",
+     "local cb = function(k,a) return { map = { f = 41 } } end\nredis.register_function('%s', cb)",
+     "map reply through the executing path"),
     ("rt_CONTROL_literal",
      "redis.register_function('%s', function(k,a) return 41 end)",
      "CONTROL: everything literal"),
 ]
+
+
+def step(conn, *args):
+    """Run one command, tolerating a RESP3 frame leaked onto this RESP2 connection.
+
+    Returns (classified_reply, replacement_conn_or_None). The connection is REPLACED rather
+    than reused: the offending frame's payload was never consumed, so everything after it on
+    that socket is misaligned and would produce invented divergences for the rest of the run.
+    """
+    try:
+        return classify(conn.cmd(*args)), None
+    except Resp3OnResp2 as exc:
+        return f"RESP3-FRAME {exc.tag}", Conn(conn.port)
 
 
 def round_trip(conn, lib, fname, body):
@@ -177,28 +223,46 @@ def round_trip(conn, lib, fname, body):
     bytes are an implementation detail and may legitimately differ between engines, while the
     OUTCOME -- that the function still answers 41 afterwards -- is the parity claim.
     """
+    # Own connection per case: a leaked RESP3 frame desyncs the socket it arrived on (its
+    # payload is never consumed), and reusing it would turn one real bug into a screen of
+    # invented divergences in every later case.
+    c = Conn(conn.port)
     out = []
-    conn.cmd("FUNCTION", "FLUSH")
+    c.cmd("FUNCTION", "FLUSH")
     src = (SHEBANG % lib) + (body % fname)
-    out.append(("load", classify(conn.cmd("FUNCTION", "LOAD", "REPLACE", src))))
-    out.append(("fcall", classify(conn.cmd("FCALL", fname, "0"))))
+
+    def record(label, *args):
+        nonlocal c
+        reply, replacement = step(c, *args)
+        if replacement is not None:
+            c = replacement
+        out.append((label, reply))
+
+    record("load", "FUNCTION", "LOAD", "REPLACE", src)
+    record("fcall", "FCALL", fname, "0")
 
     # seam 2: the registration must survive a reload. DEBUG RELOAD round-trips the dataset
     # through RDB in-process, which is the same path a restart takes.
-    out.append(("reload", classify(conn.cmd("DEBUG", "RELOAD"))))
-    out.append(("fcall_after_reload", classify(conn.cmd("FCALL", fname, "0"))))
+    record("reload", "DEBUG", "RELOAD")
+    record("fcall_after_reload", "FCALL", fname, "0")
 
     # seam 3: the library must come back from its own FUNCTION DUMP.
-    dumped = conn.cmd("FUNCTION", "DUMP")
+    try:
+        dumped = c.cmd("FUNCTION", "DUMP")
+    except Resp3OnResp2 as exc:
+        out.append(("dump", f"RESP3-FRAME {exc.tag}"))
+        out.append(("restore", "SKIPPED: dump failed"))
+        out.append(("fcall_after_restore", "SKIPPED: dump failed"))
+        return out
     if not isinstance(dumped, bytes) or dumped.startswith(b"ERRREPLY:"):
         out.append(("dump", classify(dumped)))
         out.append(("restore", "SKIPPED: dump failed"))
         out.append(("fcall_after_restore", "SKIPPED: dump failed"))
         return out
     out.append(("dump", "OK %d bytes" % len(dumped)))
-    conn.cmd("FUNCTION", "FLUSH")
-    out.append(("restore", classify(conn.cmd("FUNCTION", "RESTORE", dumped))))
-    out.append(("fcall_after_restore", classify(conn.cmd("FCALL", fname, "0"))))
+    c.cmd("FUNCTION", "FLUSH")
+    record("restore", "FUNCTION", "RESTORE", dumped)
+    record("fcall_after_restore", "FCALL", fname, "0")
     return out
 
 
