@@ -50685,6 +50685,7 @@ instance of this lever** — `object_encoding` is the only unconverted route lef
 it calls the gate three times, so it needs its own analysis rather than this transformation.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: CONFOUND — the `pttl` and `expiretime` "CPU shortfalls" cannot be attributed to those commands: one VOLATILE KEY in the keyspace costs an UNCHANGED `GET` 4.6-10.2 pct, and both shapes seed one while the control does not
 
 WITHDRAWN from `550509c58`: the designation of `pttl` and `expiretime` as "CPU shortfall, worth a
@@ -50748,6 +50749,7 @@ Whoever takes it should start from the standing note that one volatile key tripl
 `Timespec::now` per op.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: TARGET — the volatile-key tax is NAMED and SIZED: fr runs the active expire cycle 2.02x PER COMMAND and calls `clock_gettime` 3.02x PER COMMAND, where upstream runs both once per EVENT-LOOP ITERATION. +298.1 instr/op on an unchanged GET
 
 NO LEVER IS CLAIMED AS MEASURED. This names the mechanism behind the tax `761c9e65d` identified
@@ -50819,3 +50821,107 @@ CHANGE IS CORRECTNESS-SENSITIVE and must not be taken as a pure perf edit: expir
 observable through `TTL`, keyspace notifications and replica propagation
 (`propagate_expired_key_deletions` is 2.00/op here), so it needs a differential against the
 vendored incumbent on expiry-visible behaviour before any ratio is quoted.
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: RPUSH adopts the CURRENT fill before building — parity unmoved, and a measured −0.095 pct worst bound that I am NOT banking, because its A/A null was a separate invocation (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), TWO-BINARY A/B.
+CV was NOT used, as a gate or otherwise — no coefficient of variation appears in this row's
+decision path and none was computed. No timing verdict is claimed and no bootstrap median CI is
+reported, because the measurand is a retired-instruction COUNT; the same-invocation A/A null IS
+the resolution statement and it is reported below. Dressing an Ir-count row in timing statistics
+to clear a gate is the failure this ledger exists to prevent, and `8c27bee30` already flagged
+that contract gap.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — this row banks no vs-incumbent ratio; the
+incumbent appears only as the parity oracle that must NOT move.
+
+NOT BANKED AS A KEEP, AND THE REASON IS A REAL SHORTFALL RATHER THAN A LABEL. The ledger's
+KEEP contract requires the A/A and the A/B in ONE invocation; mine were separate runs of
+`dump_slope.py`, which is exactly the weakness the contract exists to catch — a null taken in a
+different process cannot rule out a between-invocation shift. `8c27bee30` named "retitle it so
+the KEEP checks do not run" as a loophole I would not use twice, so I am declining the claim
+instead of relabelling around it. THE CODE STILL SHIPS: it is the faithful ordering, its parity
+is verified unchanged, and the measurement is recorded for whoever re-takes it properly.
+
+`cfa7b4d64` found RPUSH shares the late-fill ordering `8c3376c09` fixed for LPUSH, masked because
+the forward accumulator gets a tail-grown list right anyway. Its retry predicate was explicit:
+DO NOT land this as a "consistency" fix without a number, because it changes chunk boundaries on
+the most heavily benchmarked list path. Here is the number.
+
+### FIRST, WHERE THE COST IS
+
+    build + DUMP per key    297,440 instr
+    build only (control)    156,460 instr
+    DUMP alone              140,980 instr   = 47.4 pct, ~470 per element at n=300
+
+  The DUMP half is worth attacking at all, which is why the lever was measured rather than
+  reasoned about. NOTE the harness uses DISTINCT KEYS per dump: `Store::dump_payload_cache`
+  memoises a list's DUMP by `modification_count`, so dumping one key repeatedly measures the
+  cache and not the encoder.
+
+### THE LEVER
+
+    draw   BEFORE        AFTER         delta
+      1    297,172.55    296,891.55    −281.00 instr   −0.095 pct
+      2    297,481.47    296,964.83    −516.64 instr   −0.174 pct
+    A/A null (BEFORE vs BEFORE)  297,177.60 / 297,106.42 = 1.000240  (0.024 pct)
+
+  WORST BOUND −0.095 pct, which is ~4x the null; the better draw is ~7x. Both draws agree in
+  sign. Quoted as the worst per the replicated-standing convention, NOT the mean and NOT the
+  favourable draw.
+
+    THIS IS A SMALL WIN AND THE ROW SAYS SO. 281 instructions on a 297,000-instruction
+    build+dump is not a headline; it is the honest size of correcting an ordering that was
+    already wrong, on a path where the wrongness was invisible.
+
+### PARITY IS THE CONSTRAINT, AND IT DID NOT MOVE
+
+    workload sweep    4 of 42 diverging, UNCHANGED from `8c3376c09`
+    node table, fill 128, 300-element bulk RPUSH:
+        BEFORE [2183, 2183, 755]   AFTER [2183, 2183, 755]   redis [2183, 2183, 755]
+    fr-store 935 / fr-persist 227, 0 failures; clippy clean.
+
+  That identity is the whole safety argument. `cfa7b4d64` warned this change touches chunk
+  boundaries on the RPUSH path; the boundaries fr EMITS are byte-identical before and after and
+  match the incumbent, so what changed is which internal path produced them.
+
+### WHAT I EXPECTED AND DID NOT GET
+
+I predicted the win would come from the DUMP switching off the forward accumulator onto the
+chunk path. The node table is identical either way, so that switch is NOT observable from
+outside, and a −0.095 pct total is far smaller than skipping a 300-element walk would be. So the
+mechanism is NOT established — only the effect is. Two draws, both negative, both outside the
+null, is what this row claims; "the chunk path now serves bulk-RPUSH DUMPs" is NOT claimed.
+
+### PROVENANCE
+
+  ELF           BEFORE bench_elf_sha256 = d7ca6e28f844845b5a45e12ba5011fefb93cab72078900244fe1e7ff93cb2bf5
+                AFTER  bench_elf_sha256 = f7f311cfc3628a21b00c120c04496f9e1aab63ee38fd1a776cb048d335435484
+                `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1, build log checked
+                for BOTH `^error` and rch refusals: 0 of each. ONE build this turn under the
+                one-per-project rule; the BEFORE arm is the `8c3376c09` binary, re-verified by
+                `sha256sum` and confirmed to match HEAD's `fr-store`/`fr-persist` sources with a
+                clean worktree. `df` run immediately before the build; /data 97-98G.
+  harness       scratchpad `dump_slope.py`, NEW for this row: 20 vs 60 keys differenced, each key
+                built by ONE bulk RPUSH of 300 elements and dumped once, one fresh working
+                directory per point. Its build-only control isolates the DUMP half.
+  incumbent     vendored redis 7.2.4 — used ONLY as the parity oracle here, via
+                `workload_shapes_probe.py` and a direct node-table comparison. No ratio claimed.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 19:43.
+                PER-ARM idle/loadavg/MHz: null 87.3 pct, 8.88/8.20/9.01, MHz mean 2237 then 2194;
+                draw 1 88.2 pct, 9.03/8.14/9.03, MHz mean 2456 then 2481; draw 2 86.6 pct,
+                8.55/8.18/8.98, MHz mean 2152 then 2332. Every idle figure measured from a
+                `/proc/stat` delta, not quoted.
+
+RETRY PREDICATE:
+  0. TO BANK THIS AS A KEEP, teach `dump_slope.py` to run the A/A and the A/B inside ONE
+     invocation and take enough draws for a median with a bootstrap CI over the DRAWS. Two draws
+     do not support a CI. That is the whole gap; the effect itself is already replicated.
+  1. Do NOT re-derive this delta casually; it is small and replicated. If someone wants the MECHANISM,
+     instrument which of `encode_dump_quicklist2`'s three paths serves a bulk-RPUSH DUMP — the
+     frame names are all inlined to 0.00 in this harness, so it needs a `#[inline(never)]` arm or
+     a counter, not another slope.
+  2. The 300-element, fill-128 shape is ONE point. The DUMP share (47.4 pct) and the lever will
+     both scale with element count; neither was measured at another size.
+  3. Parity must be re-checked on any follow-up: `workload_shapes_probe.py` at 4 of 42 is the
+     line this row promises not to cross.

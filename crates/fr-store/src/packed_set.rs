@@ -4720,8 +4720,15 @@ impl ListValue {
         chunk_bytes_carry_enabled_impl()
     }
 
-    pub fn bulk_from_back(values: Vec<Vec<u8>>) -> (Self, u64) {
+    pub fn bulk_from_back(values: Vec<Vec<u8>>, fill: i64) -> (Self, u64) {
         let mut list = ListValue::default();
+        // (frankenredis-qj6jn) Chunk against the CURRENT `list-max-listpack-size`. This used to
+        // run at `ListValue::default()`'s `-2`, because `note_rpush_command_grow` adopts the
+        // real fill only AFTER the batch is built — the same late-fill ordering `8c3376c09`
+        // fixed for LPUSH. On the back path it was MASKED: the over-large chunks are refused by
+        // `quicklist_packed_nodes` and the forward accumulator produces the right answer anyway,
+        // so no parity row ever moved. What it cost was the accumulator walk.
+        list.adopt_fill(fill);
         let mut raw_add = 0u64;
 
         // The count test is O(1) and it is the ONLY reason to look ahead at all. A batch that
@@ -7875,7 +7882,7 @@ mod tests {
 
         for (label, values) in &cases {
             let (want, want_raw) = incremental(values);
-            let (got, got_raw) = ListValue::bulk_from_back(values.clone());
+            let (got, got_raw) = ListValue::bulk_from_back(values.clone(), -2);
 
             assert_eq!(want_raw, got_raw, "{label}: raw byte total diverged");
             assert_eq!(want.len(), got.len(), "{label}: length diverged");
@@ -7910,7 +7917,7 @@ mod tests {
         // it stops anyone replacing this builder with the shorter-looking one.
         let straddling: Vec<Vec<u8>> = (0..200).map(short).collect();
         let naive = ListValue::from(straddling.iter().cloned().collect::<VecDeque<Vec<u8>>>());
-        let (correct, _) = ListValue::bulk_from_back(straddling.clone());
+        let (correct, _) = ListValue::bulk_from_back(straddling.clone(), -2);
         assert_eq!(
             naive.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
             correct.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),

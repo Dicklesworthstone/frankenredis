@@ -17830,6 +17830,8 @@ impl Store {
                 match &mut entry.value {
                     Value::List(l) => {
                         let lp_pre = l.listpack_byte_len();
+                        // (frankenredis-qj6jn) as for LPUSH: chunk against the CURRENT fill.
+                        l.adopt_fill(self.list_max_listpack_size);
                         let mut raw_add = 0u64;
                         for v in values {
                             raw_add += v.len() as u64;
@@ -17859,9 +17861,10 @@ impl Store {
                 // against the incremental path on elements, lp_bytes and -- the part that
                 // could silently change bytes on the wire -- quicklist NODE boundaries.
                 let (mut l, raw_add) = if Self::list_bulk_build_enabled() {
-                    ListValue::bulk_from_back(values)
+                    ListValue::bulk_from_back(values, self.list_max_listpack_size)
                 } else {
                     let mut l = ListValue::default();
+                    l.adopt_fill(self.list_max_listpack_size);
                     let mut raw_add = 0u64;
                     for v in values {
                         raw_add += v.len() as u64;
