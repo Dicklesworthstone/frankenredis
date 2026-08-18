@@ -444,9 +444,6 @@ pub struct LuaFunc {
     /// Lua 5.1 function environment used for unresolved global reads and
     /// writes. `None` means the interpreter's default protected globals.
     pub env_table: Rc<RefCell<Option<LuaTable>>>,
-    /// For `local function f(x) ... end`, stores the name so the function
-    /// can be injected into its own call scope for self-recursion.
-    pub self_name: Option<String>,
     /// Source-location label this function uses for runtime error
     /// prefixes. Set by `loadstring`/`load` so chunk errors carry the
     /// chunk's name (e.g. `[string "src"]:1:`) instead of the outer
@@ -5871,8 +5868,7 @@ impl<'a> LuaState<'a> {
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
                     env_table: Rc::new(RefCell::new(env.current_global_env())),
-                    self_name: None,
-                    source_label: self.current_source_label.clone(),
+                        source_label: self.current_source_label.clone(),
                     identity: next_function_identity(),
                 });
                 if names.len() == 1 {
@@ -5894,8 +5890,7 @@ impl<'a> LuaState<'a> {
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
                     env_table: Rc::new(RefCell::new(env.current_global_env())),
-                    self_name: None,
-                    source_label: self.current_source_label.clone(),
+                        source_label: self.current_source_label.clone(),
                     identity: next_function_identity(),
                 });
                 if !env.set_existing_local(name, func.clone()) {
@@ -6853,7 +6848,6 @@ impl<'a> LuaState<'a> {
                 is_variadic: *is_variadic,
                 captured_env: Some(env.snapshot()),
                 env_table: Rc::new(RefCell::new(env.current_global_env())),
-                self_name: None,
                 source_label: self.current_source_label.clone(),
                 identity: next_function_identity(),
             })),
@@ -7340,8 +7334,12 @@ impl<'a> LuaState<'a> {
         self.eval_call_args(exprs, env, varargs)
     }
 
+    /// (frankenredis-kbyhy) NO `func_value` PARAMETER, deliberately. It used to take the callee
+    /// as a `LuaValue` so the dead `self_name` branch could bind the function into its own call
+    /// scope. Both call sites had to CLONE the callee to produce it, and `LuaValue::Function`
+    /// holds a `Box<LuaFunc>`, so that clone was a deep copy of the params, the `Block` body and
+    /// the captured environment -- on every Lua function call, for a branch that never ran.
     fn prepare_lua_function_env(
-        func_value: LuaValue,
         lua_func: &LuaFunc,
         args: &[LuaValue],
     ) -> (Env, Vec<LuaValue>) {
@@ -7351,9 +7349,13 @@ impl<'a> LuaState<'a> {
         };
         new_env.global_env = lua_func.env_table.borrow().clone();
         new_env.push_scope();
-        if let Some(name) = &lua_func.self_name {
-            new_env.set_local(name, func_value);
-        }
+        // (frankenredis-kbyhy) `local function f` needs NO name injected here. Lua 5.1's own
+        // desugaring is already what `Stmt::LocalFunctionDecl` does: declare the local as nil,
+        // snapshot the environment so the closure captures that CELL, then fill the same cell
+        // with the function. `LuaCell` is an `Rc<RefCell<LuaValue>>`, so the captured upvalue
+        // observes the assignment and `f` resolves to itself inside its own body. The
+        // `self_name` field this used to read was `None` at all five of its construction sites,
+        // so the injection never happened and self-recursion has always come from the cell.
         for (i, param) in lua_func.params.iter().enumerate() {
             let val = args.get(i).cloned().unwrap_or(LuaValue::Nil);
             new_env.set_local(param, val);
@@ -7747,8 +7749,7 @@ impl<'a> LuaState<'a> {
                     continuation,
                 )
             } else {
-                let func_value = LuaValue::function(func.clone());
-                let (env, func_varargs) = Self::prepare_lua_function_env(func_value, &func, args);
+                let (env, func_varargs) = Self::prepare_lua_function_env(&func, args);
                 (func, env, func_varargs, pc, continuation)
             }
         };
@@ -8329,7 +8330,7 @@ impl<'a> LuaState<'a> {
             }
             LuaValue::Function(lua_func) => {
                 let (mut new_env, mut func_varargs) =
-                    Self::prepare_lua_function_env(func.clone(), lua_func, args);
+                    Self::prepare_lua_function_env(lua_func, args);
                 // (frankenredis-ycaog) Functions carrying a source_label
                 // (loaded via loadstring/load) push their chunk label so
                 // any inner function definitions inherit it and runtime
@@ -9073,8 +9074,7 @@ impl<'a> LuaState<'a> {
                         is_variadic: true,
                         captured_env: Some(env.snapshot()),
                         env_table: Rc::new(RefCell::new(env.current_global_env())),
-                        self_name: None,
-                        // (frankenredis-ycaog) Tag the chunk so runtime
+                                // (frankenredis-ycaog) Tag the chunk so runtime
                         // errors raised from inside it are reported with
                         // the loadstring chunk-label prefix instead of
                         // the outer script's `user_script:1:` prefix.
@@ -9181,8 +9181,7 @@ impl<'a> LuaState<'a> {
                                 is_variadic: true,
                                 captured_env: Some(env.snapshot()),
                                 env_table: Rc::new(RefCell::new(env.current_global_env())),
-                                self_name: None,
-                                source_label: Some(chunk_label),
+                                                source_label: Some(chunk_label),
                                 identity: next_function_identity(),
                             })]),
                             Err((line, msg)) => Ok(vec![
