@@ -44104,3 +44104,105 @@ candidates on a GET, each still at 1.000 calls/op, are
 (261 B) — but note `parse_borrowed_plain_set_bulk` is NOT one of them despite its name and
 its 46.0 instr/op: it is the general bulk-string parser and its cost on a GET is the real
 work of parsing the key.
+
+## 2026-08-18 CrimsonHawk: REJECT (SELF-SPEEDUP) — the READ-gate vein is 37 predicates, not 7, and ONE of them has TWENTY-TWO executors. My "six predicates, eight commands" plan described a fifth of it (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — no code ships. Source enumeration only; no build was started, on a host
+whose free space was falling 1 G/min.
+
+### THE SCALE, WHICH I HAD WRONG BY 5x
+
+My execution plan and `90ec27f52` framed the read-gate work as "six predicates, eight commands",
+later corrected to seven. Enumerated properly:
+
+  4   read predicates ALREADY take a cached answer  (ozrro's HGET/GET/TYPE work)
+  37  read predicates DO NOT
+  54  executors call the read gate DIRECTLY, with no predicate in between
+
+So the seven I planned were not the vein; they were the eight shapes I happened to have
+measured. The vein is five times larger, and the 54 direct callers are a separate design
+question again — as on the write side, they have no predicate to thread and are NOT costed here.
+
+### THE MULTI-EXECUTOR MAP, AND THE RISKIEST EDIT ON THE BOARD
+
+Thirteen of the 37 are multi-executor. One dominates everything:
+
+  22  can_execute_plain_zbyscore_borrowed   the whole ZRANGEBYSCORE / ZREVRANGEBYSCORE /
+                                            ZRANGE-BYLEX-adjacent family, plain, _into,
+                                            _limit, _withscores and rev variants
+   4  can_execute_plain_zrangebylex_borrowed
+   3  can_execute_plain_getrange_borrowed   getrange, getrange_into, AND substr
+   3  can_execute_plain_rand_member_borrowed hrandfield_into, rand_member, srandmember_into
+   2  exists, geopos, hmget, lindex, object_encoding, smismember, zmscore,
+      zrevrangebylex, zscore                (nine predicates with two executors each)
+  24  single-executor
+
+**`can_execute_plain_zbyscore_borrowed` is simultaneously the largest lever and the largest
+hazard left in this campaign.** One edit reaches 22 executors; missing any ONE of them
+reproduces the SCARD regression exactly, and SCARD was a single missed executor out of two.
+Nobody should attempt it without the enumeration in front of them, and it should not be the
+first read conversion attempted.
+
+Two entries deserve naming for the same reason `PlainCardinalityCmd` did — their coverage
+cannot be read off the predicate name:
+  * `can_execute_plain_getrange_borrowed` also serves **SUBSTR**, a differently-named command.
+  * `can_execute_plain_rand_member_borrowed` serves **HRANDFIELD, SRANDMEMBER and a generic
+    rand_member** — three families under one predicate.
+
+The `_into` twin pattern accounts for most of the multiplicity, as it did on the write side, so
+it is mechanically checkable rather than something to remember.
+
+### COUNTED MECHANISM
+
+No NEW measurement was taken for this row. The mechanism it targets was counted earlier and is
+banked in `90ec27f52`: the read gate is a flat **175.0 instructions per op** on every
+unconverted route and 0.0 on the converted ones, with an exact call count of 1.0000 calls/op
+unconverted against 0.0000 calls/op converted, and no intermediate value on any of the sixteen
+shapes measured. At 175.0 instr/op each, the size of the vein is what the predicate count
+measures, which is why an accurate count matters more than another profile.
+
+The instrument those counts came from carries its own null, measured in a single invocation of
+the same harness on one ELF and one shape: A/A null median 1.000002, bootstrapped over 20,000
+resamples, 95% median CI [0.996069, 1.003947], from six draws and 30 pairwise ratios (banked in
+`0bf781d57`). Call counts are deterministic integers, so that null bounds the instruction arm
+rather than the counts.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  source        `crates/fr-runtime/src/lib.rs` at HEAD `e892886b4`, read only.
+  ELF           NONE BUILT for this row. The 175.0 instr/op and the 1.0000/0.0000 call counts it
+                cites were measured earlier on `fr_head2`, re-verified by sha256sum:
+  bench_elf_sha256=c13d2f7f6a349a8212c4173b8d327af07e23ac55f9887a4fe8f49caff9caa42a
+  incumbent     NOT RUN.
+  host          thinkstation1, 64 cores observed, powersave governor. **/data 69G free and
+                falling 1 G/min, measured 70G -> 69G over 60 s** against a 42G floor, i.e. about
+                27 minutes of headroom at that rate — a build was declined for that reason as
+                well as for contention. loadavg 42.47 32.23 29.92; CPU idle 87.5 pct with 0.0
+                pct iowait in a 10 s /proc/stat delta, having measured 1.5 pct idle minutes
+                earlier, so the host is bursty rather than steadily loaded.
+  admissibility No ratio, instruction count or timed row is claimed here, so host state does not
+                bear on validity.
+
+### RETRY PREDICATE
+
+Reopen this surface only on a measured condition, not on a plan: **re-run the enumeration and
+reopen if the unthreaded read-predicate count differs from 37, or if any predicate's executor
+count differs from the map above** — both are exact integers from source and change only when a
+peer lands an executor. Reopen an individual predicate only when its executors read **1.0000
+calls/op** on `plain_borrowed_default_key_read_allows` before conversion and **0.0000 calls/op**
+after; anything else means the wiring is wrong, as it was for SCARD. Reject any conversion
+saving materially under **140 instr/op** per route, since the gate is a fixed 175.0.
+
+1. **Do NOT start the read side with `zbyscore`.** 22 executors is the wrong place to learn
+   whether the wiring is right. Start with LINDEX (2 executors, both named, already reached
+   0.0000 on the failed build), prove the pattern end to end, then widen.
+2. The read vein is 37 predicates at 175.0 instr/op. That is worth an order of magnitude more
+   than the 17-predicate write remainder at 187.0, and it is the largest single body of
+   uncosted work this campaign has identified. It needs a plan, not a batch.
+3. Enumerate coverage, never infer it from a name: `getrange` serves SUBSTR, `rand_member`
+   serves three families, `PlainCardinalityCmd` excluded SCARD. Three for three so far.
+4. The 54 direct read-gate callers are NOT costed and must not be folded into a predicate batch.
