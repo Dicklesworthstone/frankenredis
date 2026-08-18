@@ -59223,3 +59223,96 @@ mirror of what `front_biased` already does for repeated LPUSH, using a flag that
   3. This is also a candidate explanation for the four unclosed `queue RPUSH+LPOP` DUMP
      divergences, since it is the same path that rewrites the head chunk. NOT tested — do not
      assume the two are the same bug without measuring.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: `zintercard_limit` RE-DRAWN as my own predicate required — the effect is REAL (distributions DISJOINT over 5+5 runs) and my quoted bound was OPTIMISTIC: **-2.57 pct**, not -3.41 pct
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this corrects a figure I published one row earlier and does not ship
+anything new.
+
+The numkeys-trio row flagged `zintercard_limit` as the least certain of its four targets and
+registered: *"RE-DRAW `zintercard_limit` before quoting it. Its own A/A moved 90.3 instr/op, and
+it is the only target whose effect is not comfortably outside its own noise."* Re-drawn, five
+runs per arm rather than three A/B pairs, because a shape that noisy needs its DISTRIBUTION
+characterised and not its draws averaged.
+
+### THE SELF-NOISE IS REAL, AND LARGER THAN I ASSUMED
+
+Five consecutive runs of the SAME BEFORE binary:
+
+    3249.8   3197.1   3250.3   3236.6   3271.5      spread **74.4 instr/op = 2.29 pct**
+
+The 90.3 instr/op A/A swing that prompted this was not an outlier — it is what this shape does.
+Any single A/B draw on `zintercard_limit` carries about +/-2.3 pct of pure noise.
+
+### THE EFFECT SURVIVES IT, BECAUSE THE DISTRIBUTIONS DO NOT OVERLAP
+
+Five runs of the AFTER binary:
+
+    3115.0   3076.8   3081.7   3112.5   3114.4      spread 38.2 instr/op = 1.23 pct
+
+    BEFORE   min 3197.1   max 3271.5   median 3249.8
+    AFTER    min 3076.8   max 3115.0   median 3112.5
+
+**The worst AFTER run is still 82.1 instr/op better than the best BEFORE run.** The two
+distributions are DISJOINT with a gap, over ten runs. That is a stronger statement than any
+worst-of-three bound: it does not depend on pairing, on which draws happened to line up, or on an
+A/A envelope estimated from a single pair.
+
+### AND IT REVISES MY OWN NUMBER DOWNWARD
+
+    median-to-median                                   -137.3 instr/op   -4.22 pct
+    worst AFTER vs best BEFORE (fully adversarial)      -82.1 instr/op   **-2.57 pct**
+    previously quoted worst-of-three                                     -3.41 pct
+
+**The -3.41 pct I published was optimistic.** Worst-of-three pairs the draws in the order they
+were taken; with 2.29 pct of self-noise on one arm that ordering is arbitrary, and three pairings
+can easily miss the adversarial corner. The honest conservative figure for this shape is
+**-2.57 pct**, and that is what should be quoted from now on.
+
+The other three targets in that row are unaffected — their A/A pairs agreed within 0.406 pct and
+none of them showed this shape's variance.
+
+### REUSABLE — WHEN TO STOP PAIRING AND START COMPARING DISTRIBUTIONS
+
+Worst-of-N pairing is the campaign's convention and it is right for shapes whose self-noise is
+small against the effect. It degrades exactly where this shape sits: when one arm's spread
+approaches the effect size, the pairing order becomes a free parameter and the quoted bound
+depends on it.
+
+**Test for it: run one arm N times and look at the spread before trusting any paired bound.** If
+that spread is within ~2x the effect, run both arms N times and quote worst-vs-best instead. It
+costs 2N runs rather than 2N/2 and it removes the pairing from the argument entirely.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The BEFORE-arm five-run series IS the A/A for this row — same binary, same shape, same
+invocation style, and its 2.29 pct spread is the null against which the effect is judged. No
+bootstrap median-CI is quoted because the claim here is a DISJOINT-RANGE claim, not a
+median-difference claim: the two ranges do not intersect, which is a stronger and simpler
+statement than an interval on a median. CV was not used, as a gate or otherwise. Instructions by
+two-point subtraction with `--fr-only`, so load-immune and no incumbent arm; no ratio is claimed.
+
+### PROVENANCE
+
+  ELF           before `4491969bfb7b9be3c1905163ee521a2abec2125d6be627fb239f876571a07dd8`,
+                after  `2c46b7522eca42f15f92eb441dd1b4235b3a03069d1a3189ccddbd47af355bd2`
+  bench_elf_sha256=2c46b7522eca42f15f92eb441dd1b4235b3a03069d1a3189ccddbd47af355bd2
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`, ten runs.
+  host          /data 54G free, above the 42G brake. loadavg 7.40 8.75 8.80 at 2396 MHz falling
+                to 6.61 8.45 8.70; zero frankenredis builds in flight throughout. Instructions,
+                so load and MHz do not enter.
+  disposition   MEASUREMENT ONLY, and a CORRECTION to the row before it. NO BUILD was performed —
+                both ELFs were already on disk. No source file changed by this row.
+
+### RETRY PREDICATE
+
+1. Quote `zintercard_limit` at **-2.57 pct**, not -3.41 pct. The stronger claim is that the
+   distributions are disjoint over 5+5 runs.
+2. Before quoting ANY paired bound on a shape, run one arm 5x and check the spread. `zcard`,
+   `hlen` and `get_control` have all shown multi-percent self-noise in this session and are
+   candidates for the same treatment.
+3. Re-open this shape only if a 5-run AFTER series overlaps a 5-run BEFORE series.
