@@ -58,6 +58,23 @@ const DEFAULT_MODE: &str = "strict";
 /// connection handles start at `MAX_LISTENERS`. Lets CONFIG SET bind rebind a
 /// multi-address listener set without colliding with client tokens.
 const MAX_LISTENERS: usize = 16;
+
+/// (frankenredis-w1djx) Token of the Unix domain socket listener, taken from the LAST slot of the
+/// listener range.
+///
+/// Two properties forced this choice rather than the obvious `Token(listeners.len())`:
+///
+///   * `CONFIG SET bind` grows and shrinks the TCP listener set at runtime (`rebind_listeners`),
+///     so `listeners.len()` is not stable and a token derived from it would start colliding with a
+///     TCP listener the moment an address was added.
+///   * `rebind_listeners` CLEARS the listener `Vec` and drops every socket in it. A unix listener
+///     stored in that vector would be silently closed by an unrelated `CONFIG SET bind` -- the
+///     socket file would linger while nothing accepted on it. That is why the unix listener is
+///     held as its own `Option` rather than pushed in with the others.
+const UNIX_LISTENER_TOKEN: usize = MAX_LISTENERS - 1;
+
+/// TCP listeners may use every listener token except the one reserved above.
+const MAX_TCP_LISTENERS: usize = MAX_LISTENERS - 1;
 const BACKGROUND_WAKE_TOKEN: Token = Token(usize::MAX);
 const WRITER_POOL_WORKERS: usize = 2;
 const WRITER_QUEUE_BOUND: usize = 1024;
@@ -5675,10 +5692,40 @@ fn split_bind_spec(spec: &str) -> (Vec<String>, Vec<String>) {
     (all, required)
 }
 
+/// Bind and register the configured Unix domain socket, if one is configured.
+///
+/// (frankenredis-w1djx) Upstream creates the unix listener only when `server.unixsocket` is set
+/// (`server.c` guards the whole listener on `server.unixsocket != NULL`); fr's config default for
+/// `unixsocket` is the empty string, so an empty path means "no unix listener" and is NOT an
+/// error.
+///
+/// The listener is returned rather than pushed into the TCP listener vector on purpose -- see
+/// `UNIX_LISTENER_TOKEN` for why sharing that vector would let `CONFIG SET bind` close the socket.
+#[cfg(unix)]
+#[allow(dead_code)]
+fn bind_and_register_unix(
+    poll: &Poll,
+    path: &str,
+    perm: u32,
+) -> Result<Option<mio::net::UnixListener>, String> {
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let mut listener = bind_unix_listener(path, perm)?;
+    poll.registry()
+        .register(
+            &mut listener,
+            Token(UNIX_LISTENER_TOKEN),
+            Interest::READABLE,
+        )
+        .map_err(|e| format!("failed to register unix listener '{path}': {e}"))?;
+    Ok(Some(listener))
+}
+
 fn bind_and_register(poll: &Poll, addrs: &[String], port: u16) -> Result<Vec<TcpListener>, String> {
-    if addrs.len() > MAX_LISTENERS {
+    if addrs.len() > MAX_TCP_LISTENERS {
         return Err(format!(
-            "too many bind addresses ({} > {MAX_LISTENERS})",
+            "too many bind addresses ({} > {MAX_TCP_LISTENERS})",
             addrs.len()
         ));
     }
