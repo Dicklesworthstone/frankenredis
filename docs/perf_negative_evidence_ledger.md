@@ -43162,3 +43162,78 @@ CV was not used, as a gate or otherwise.
    pattern works when the wiring is right — then widen one command at a time.
 3. `execute_plain_scard_borrowed` is a second executor reaching the cardinality predicate and
    must be threaded too; the discriminant covers the predicate, not the executors.
+
+## 2026-08-17 BrownIbis: REJECT — caching `ParserConfig` in an `Option` removes the call (1.000 -> 0.000 calls/op) and is still **+5.9 to +7.0 instr/op WORSE on all five shapes**: the `cached_plain_write_gate` pattern generalises to a SCALAR, not to a struct (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: cache `Runtime::parser_config` for the read batch in an
+`Option<fr_protocol::ParserConfig>`, invalidated at the six points
+`plain_write_gate_cache`, `plain_get_read_gate_cache` and `output_hard_limit_cache` are
+dropped. NOT SHIPPED. This is the exact retry predicate the previous row registered when it
+declined the `#[inline]` variant — "remove the call instead of duplicating the body" — and it
+is REFUTED: the mechanism it predicted happened, and the sign was wrong.
+
+MEASURED, callgrind two-point (N=20,000 and 2N=40,000), both arms from the pinned worktree at
+base `5b323fa6a`, the BEFORE arm carrying the shipped `inline(always)` of `c5a3b6d2f` so this
+pair isolates the cache alone.
+`bench_elf_sha256=0d192e87204be51d376209ae1e6aa3363059384f197111288a85a810a0e75bd0` (before),
+`bench_elf_sha256=f87b0f1e676b1e3c89d3cb198ed9f03cb9f835a41b460e1b48754f2e249d4799` (after). Host, per arm: load 11.89/17.99/14.40
+rising to 17.39/16.22/14.71, CPU idle 89.6 pct then 83.0 pct measured directly from
+`/proc/stat`, iowait 0.0 then 0.8 pct, mean 2144-2259 MHz across 64 cores, /data 123G free.
+Instruction counts are software-counted and immune to load and MHz.
+
+| shape | dispatch before | after | delta | `parser_config` calls/op |
+|---|---|---|---|---|
+| get | 437.0 | 444.0 | **+7.0** | 1.000 -> 0.000 |
+| sadd | 604.6 | 611.0 | **+6.4** | 1.000 -> 0.000 |
+| ping | 311.0 | 318.0 | **+7.0** | 1.000 -> 0.000 |
+| ttl | 489.0 | 496.0 | **+7.0** | 1.000 -> 0.000 |
+| zadd | 644.1 | 650.0 | **+5.9** | 1.000 -> 0.000 |
+
+**THE CALL REALLY IS GONE AND IT STILL LOSES.** `cached_parser_config` itself is inlined
+(0.000 calls/op), so nothing was substituted for the removed call — the cache is simply more
+expensive than the thing it replaced. `ParserConfig` is three `usize` plus a `bool`, so
+`Option<ParserConfig>` costs a discriminant test and a 32-byte copy on EVERY frame, against a
+rebuild that is three field loads and a `min`. **A per-batch cache pays for itself on a
+SCALAR (`cached_plain_write_gate` caches one `bool`) and loses on a struct.** That is the
+reusable half of this row, and it applies to every "cache it for the batch" lever anyone
+files against this dispatch loop next.
+
+Code size is NOT the objection this time: `.text` 6,516,402 -> 6,516,658, **+256 bytes**, a
+twenty-fourth of what the `#[inline]` variant cost. The size problem was solved and the
+instruction problem replaced it.
+
+WHAT DOES WORK, measured in the same session and landing separately: a **plain local**, no
+`Option` — computed once per batch and recomputed at those same six sites — takes dispatch
+**-6.0 to -9.0 instr/op** across the same five shapes with the same 1.000 -> 0.000 call
+removal (`bench_elf_sha256=b2509fcfc3c00be916cedb67f417d478f18f42836231b8b560a092f759aa952c`, `.text` +2,432). The difference
+between -7 and +7 is the `Option` and nothing else.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run
+that interleaved both arms across two rounds, so drift falls on both alike. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this
+row; no CV was computed. Host state is likewise provenance, not a gate. The dispatch frames
+quoted here are exact integers that reproduce across independently built ELFs, which is why
+a +7 on five shapes is reportable where a whole-process +7 would not be.
+
+**A GUARD TEST THAT PROVED NOTHING, recorded so the next person does not repeat it.** I tried
+to mutation-test the invalidation by deleting all six sites, rebuilding, and rerunning a
+same-batch probe: `[CONFIG SET proto-max-bulk-len 1048576][SET k <2 MiB value>]` in ONE write,
+where a stale config would accept the oversized bulk. **The mutant passed identically to the
+guarded build** (`+OK` then `-ERR Protocol error: invalid bulk length` on both). The test has
+no teeth, and the reason is structural: `proto-max-bulk-len` has a 1 MiB floor, so the frame
+that would expose staleness cannot fit in the same read batch as the `CONFIG SET` that
+precedes it — it always lands in a later batch with a freshly built config. The restored
+build hashed byte-identical to the pre-mutation ELF, so the tree held still across the pair.
+**No probe built on that knob can demonstrate one of these per-batch caches is load-bearing.**
+
+RETRY PREDICATE: do not retry `parser_config` as an `Option` cache, and do not retry it as an
+inline (previous row). Both routes on this accessor are now closed and the plain-local form is
+the answer. More generally, before caching a value per batch in this loop, check its SIZE: at
+32 bytes the copy already exceeds an 11 instr/op rebuild, so a struct-valued per-batch cache
+needs a rebuild cost well above ~20 instr/op before it can pay, and it must be measured on the
+dispatch FRAME, not on whole-process totals.
