@@ -60790,3 +60790,112 @@ difference (15196 vs 10034), not a lever inventory, and no sized candidate curre
   3. Keep bracketing. This row is the first cleanly-bracketed certification of the session, and the
      one before it had to be split into a FIT half and a degraded half because the window closed
      mid-measurement.
+
+## 2026-08-18 CrimsonHawk: CERTIFIED — fr's string RESTORE lead does NOT survive the FIRST BYTE: letter-leading 0.9115x AHEAD, digit-leading 1.5998x BEHIND, same bytes and same encoding, while redis does not move at all (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) with a LIVE redis
+7.2.4 arm, both sides in ONE INVOCATION and INTERLEAVED fr / redis / fr / redis per draw so each
+side is bracketed by the other. CV was NOT used, as a gate or otherwise — no coefficient of
+variation appears in this row's decision path and none was computed. No timing verdict is claimed:
+the measurand is a retired-instruction COUNT. No code changed and NO BUILD was run; callgrind
+output went to a `TemporaryDirectory` and was reclaimed, so this row cost no disk.
+
+Claim class: COMPETITIVE. Campaign output: YES, and it is a LOSS being banked, not a win.
+
+  gate    OPEN FIT / CLOSE FIT, computed by this invocation under runstamp 1787067825
+  ELAPSED 45.56 s for twenty-four callgrind points
+  fr arm  `99e32657383c8a9ef60468534a02f92f6e7afe76a4f8c68424a2e803ffd1b81b` (`e32cc8b71`)
+  incumbent vendored redis 7.2.4, `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+
+### THE TWO SHAPES DIFFER ONLY IN THE FIRST BYTE OF EACH ELEMENT
+
+Both are 300 string elements of exactly 15 bytes, fill 128, both string-ENCODED in the listpack
+(`%015d` carries a redundant leading zero, so it is not a canonical decimal and neither engine
+integer-encodes it). Same element count, same byte count, same encoding, same command sequence.
+
+    DIGITSTR (%015d)     1.5811 / 1.5998 / 1.5852     WORST 1.5998x    <- fr BEHIND
+      fr    102,136.4 / 102,181.2 / 102,432.4
+      redis  64,378.8 /  64,497.5 /  64,667.8
+      per-draw fr A/A −0.039 / −2.578 / +0.239 pct; redis A/A −0.718 / −0.678 / +0.393 pct
+      idle 84.7-92.6 pct, loadavg 6.04-6.32, MHz mean 1759-2157 against a 1429-4292 spread
+
+    STR control (letter-leading), same run, draws 2 and 3 only — SEE THE VOID BELOW
+      0.9066 / 0.9055,  fr 58,637.2 / 57,890.3,  redis 64,365.0 / 64,307.1
+      idle 78.6-89.8 pct, loadavg 6.06-6.14, MHz mean 2024-2287
+
+**QUOTED BOUND: 1.5998x on digit-leading strings**, against the standing certified **0.9115x** on
+letter-leading strings. A **1.77x swing** produced by the first byte of each element.
+
+### REDIS DOES NOT MOVE, SO THE ENTIRE SWING IS fr's
+
+    redis, letter-leading   64,381 / 64,365 / 64,307
+    redis, digit-leading    64,379 / 64,497 / 64,668
+
+Six draws across two shapes span 0.56 pct — the incumbent is flat to within its own noise, which is
+exactly what `frankenredis-qj6jn`'s architecture note predicts: redis installs the validated
+listpack as an opaque blob and never looks at an element, so the leading byte cannot reach it.
+fr goes 58,226 -> 102,136, **+75 pct**.
+
+This is a two-sided control and it is the reason the row can be read at all. A change that moved
+BOTH arms would implicate the harness or the payload; a change that moves one arm 75 pct while the
+other stays inside 0.6 pct implicates the code under test.
+
+### ONE DRAW IS VOID, AND THE GATE DID NOT CATCH IT
+
+STR draw 1 is DISCARDED. Its redis arm read 64,381.1 then 51,269.1 in the same draw — a
+**+25.575 pct A/A null**, thirty times the 0.84 pct floor. It would have reported 1.0051x and would
+have made the control look like it had crossed 1.0.
+
+**The window gate returned FIT at both ends of this run.** A FIT window did not prevent a corrupt
+draw and cannot: the gate reads host state, and the A/A null reads the measurement.
+`feedback_a_fit_window_is_necessary_not_sufficient` is on record and this is a clean instance —
+the run is certifiable, the draw is not. The remaining two STR draws (0.9066, 0.9055) sit inside
+the standing certified band and are quoted as the control; the DIGITSTR draws all carry nulls under
+2.6 pct and are unaffected.
+
+Note also which direction the void ran: discarding it makes the CONTROL look better, not the
+finding. The digit-leading result does not depend on it in any way.
+
+### THE 2.6 PCT NULL ON DIGITSTR DRAW 2 IS RECORDED, NOT SMOOTHED
+
+Draw 2's fr arm read 102,181.2 then 104,884.9, a −2.578 pct null, above the 0.84 pct floor. That
+draw produced the WORST ratio, 1.5998x, and **it is the one quoted** — discarding it would improve
+the bound to 1.5852x, so keeping it is the conservative choice. Against a 60 pct margin a 2.6 pct
+null cannot change the verdict; it is recorded because a null above the floor should never be
+silently dropped when it happens to be inconvenient in the safe direction.
+
+### THIS IS THE `b83ee8ecc` CLIFF, PRICED AS A RATIO
+
+The frame row measured `from_restored_quicklist2_nodes` at 8,118 -> 51,960 (6.40x) on exactly these
+two patterns. The whole-op difference here is 102,136 − 58,226 = **43,910 instr/key**, against the
+frame's 51,960 − 8,118 = **43,842**. The two instruments agree to **0.16 pct**, so the ratio swing
+is fully accounted for by that one frame and nothing else in the op moved.
+
+The cause is `7c45e08ad`'s derivation guard at `packed_set.rs:4148`: a `String` span whose first
+byte is a digit or `-` disables the chunk-total derivation and forces the per-entry walk. None of
+these elements is a canonical decimal, so the derivation would have been correct for every one of
+them.
+
+### THE CAMPAIGN BATTERY CANNOT SEE THIS
+
+`scripts/shape_instr_per_op.py` builds its list fixtures from letter payloads — `RPUSH l a b c d e`,
+`RPUSH lp a b c d e f g h`, `"v"`. **Every list shape in the battery leads with a non-digit**, so
+all of them take the fast path and none of them would ever register this cliff. The shape that
+loses 1.5998x to the incumbent is not in the suite that reports how fr is doing.
+
+That is a fixture blind spot rather than a bug in the battery, and it generalises: a suite whose
+payloads are all drawn from one character class cannot detect a branch that keys on character
+class. Stringified IDs, zero-padded keys, ISO timestamps, prices and order numbers are all
+digit-leading and all common.
+
+### RETRY PREDICATES
+
+  1. Build the tightened guard (`list_lp_int_bytes_are_canonical`, `packed_set.rs:4468`) and
+     re-certify THIS shape. Predicted: 1.5998x collapses toward the letter-leading 0.9115x, since
+     the whole difference is one frame that the tightened test would skip. Falsified if the
+     digit-leading ratio stays above ~1.2x, which would mean a second digit-dependent cost exists
+     that this row has not found.
+  2. Add a digit-leading list fixture to the battery whatever happens to the lever, so the blind
+     spot closes independently of the fix.
+  3. Do NOT re-quote the 1.0051x from STR draw 1. It is void for a 25.6 pct null and would falsely
+     read as the string lead having evaporated.
