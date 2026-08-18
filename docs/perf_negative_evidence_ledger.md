@@ -44023,3 +44023,84 @@ before sizing anything: a shape fr already wins can be made to look like a win t
 Concretely, reopen this surface only if `config_get_star` EXCEEDS 0.6361x on a replicated
 worst bound of at least five draws, or if fr's own cost on it FALLS below ~350,000 instr/op
 and someone wants the ratio restated. Until one of those happens, treat this cell as won.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — every GET paid a full 35-instruction PING parse to learn it is not a PING; a 4-byte prefix test the parser already implies takes **GET dispatch 431.0 -> 401.0 instr/op, -30.0**, with an EXACT-ZERO null on TTL (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: guard the `parse_borrowed_plain_ping_packet` call in `process_buffered_frames` with
+`matches!(unparsed.get(4..8), Some(b"$4\r\n"))`. Shipped in `313a546ce`. The arm already had
+a guard — `borrowed_arity_in(unparsed, b'1', b'2')` — and it CANNOT discriminate, because GET
+is arity 2 exactly like `PING message`. So a GET ran the whole parser: two config bounds
+tests, a nested call to `parse_borrowed_plain_ping_upper_noarg_packet`, and three
+`strip_prefix` attempts, **1.000 calls/op and 35.0 instr/op, 8.1 pct of GET's dispatch**.
+
+WHY THE GUARD CANNOT CHANGE BEHAVIOUR, which is the argument that makes this safe rather
+than merely tested: PING's command token is 4 bytes in every form the parser accepts, so the
+bulk header at offset 4 is byte-for-byte `$4\r\n` in all three of its branches —
+`UPPER_NOARG_MULTIBULK_PING` is `*1\r\n$4\r\nPING\r\n`, and the other two arms are
+`strip_prefix(b"*1\r\n$4\r\n")` and `strip_prefix(b"*2\r\n$4\r\n")`. The test is therefore
+IMPLIED by the parser: it can only skip calls the parser would have refused. It is a strict
+weakening of WORK, not of acceptance. A multi-digit arity such as `*12\r\n` passes the
+existing arity guard (it only reads `input[1]`) and is rejected by both the new test and the
+parser's own prefixes, so the two agree there too.
+
+MEASURED, callgrind two-point (N=20,000 and 2N=40,000), both arms from a worktree pinned at
+`ed8a6c3ca` carrying the shipped `4462ea8b6`, differing only in this guard.
+`bench_elf_sha256=e13722a686f4e7e6a9b6ee6c2c46ff6ad64e6634a5f4d8527d24416e9c292617` (before),
+`bench_elf_sha256=77c35575d6e71a61889ad9aa175dcd7149ebfc18447218391ce0d7b06d5013ac` (after). Per-arm host state: load 29.58/21.65/26.79 then
+31.83/28.43/28.66, **CPU idle 1.6 pct measured at the first arm and 68.5 pct at the second**
+— the brief called this a clean window and my own `/proc/stat` sample said the host was
+saturated, which is exactly why this row claims instruction counts and no ratio. iowait 0.0
+then 0.1 pct, mean 2248-3817 MHz across 64 cores, /data 78G falling to 70G.
+
+| shape | dispatch before | after | delta | ping-parse calls/op |
+|---|---|---|---|---|
+| get | 431.0 | 401.0 | **-30.0** | 1.000 -> 0.000 |
+| ttl | 481.0 | 481.0 | **+0.0** | 0.000 -> 0.000 |
+| sadd | 596.0 | 595.6 | -0.4 | 0.000 -> 0.000 |
+| ping | 304.0 | 300.0 | -4.0 | 0.000 -> 0.000 |
+
+**THE NULL IS EXACT AND IT IS STRUCTURAL.** TTL moves by 0.0 and sadd by -0.4, and the call
+counts say why: neither reaches this cascade arm at all, so the guard cannot touch them. That
+is a zero-unit null of the kind the previous two rows in this vein could not construct, and
+it was measured rather than assumed. It also corrects an assumption I started from — I
+expected every arity-2 command to pay this probe, and TTL does not; **only GET does**, which
+narrows the lever's reach and is worth stating plainly, since GET being the most-executed
+command is the whole of its value.
+
+**THE -4.0 ON PING IS NOT CLAIMED.** PING makes 0.000 calls to this parser in BOTH arms, so
+it never took this route and the guard cannot explain a saving there. It is above the ~1
+instr/op layout noise this campaign has measured, and I have not explained it. It is recorded
+as an observation, not credited to the lever.
+
+CORRECTNESS: nine PING forms answer byte-identically on both arms — upper, lower and mixed
+case with no argument, two forms with a message, the 2-argument arity error, and a `PONG`
+near-miss, which is the case that matters: `PONG` is a 4-byte token that PASSES the new
+prefix test and must still be refused by the parser behind it, and it is (`-ERR unknown
+command 'PONG'`). GET and TTL still answer correctly after the PING traffic.
+
+`.text` grows 64 bytes.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run
+interleaving both arms across two rounds, so drift falls on both alike. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this
+row; no CV was computed. Host state is likewise provenance, not a gate — instruction counts
+do not move with load, which is why a row was takeable at 1.6 pct idle at all. Quoting the
+WORST bound: **-30.0 instr/op on GET and zero on every other shape measured**, so no shape
+pays for it.
+
+RETRY PREDICATE: the reusable shape is "a cascade arm's existing guard does not discriminate
+the arm's own precondition". Look for arms whose guard tests ARITY while the parser behind it
+tests a literal TOKEN — the arity guard admits every command of that arity and the parser
+then re-derives the token. Find them by call count, not by reading: a parser at 1.000
+calls/op on a shape it cannot possibly serve is the signature, and
+`scratchpad/call_counts.py <dumps> <ops> <armA>,<armB> <needle>` prints it. The next
+candidates on a GET, each still at 1.000 calls/op, are
+`execute_plain_get_borrowed_into_with_default_read_gate` (83 B) and `drain_pending_pubsub`
+(261 B) — but note `parse_borrowed_plain_set_bulk` is NOT one of them despite its name and
+its 46.0 instr/op: it is the general bulk-string parser and its cost on a GET is the real
+work of parsing the key.
