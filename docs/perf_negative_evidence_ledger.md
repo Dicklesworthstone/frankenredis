@@ -60625,3 +60625,95 @@ per-byte. Holding element COUNT at 300 and varying element LENGTH 15 -> 60 bytes
 The frame does not respond to element bytes AT ALL, which is what the source predicts — a `String`
 span borrows a `Range<u32>` into the payload and never touches it. The two controls confirm the
 probe varied what it was meant to vary. **The arena lever's premise holds.**
+
+## SIZING (NOT CERTIFIED) — the LZF COMPRESSOR gap after slices 5 and 6: **1.5159x against fr**, worst of three, down from 1.5867x
+
+Claim class: COMPETITIVE. Campaign output: no. **This row is deliberately NOT a certification.**
+`certification_window.py --for ratio` returned UNFIT immediately before the draws and again after —
+builds 0 both times, but loadavg 1min/5min 29 pct apart against a 15 pct limit. The gate's own
+instruction for that case is to record the per-arm host state and label the number SIZING rather
+than certified, and that is exactly what this is. The certified figure on the board remains 1.5867x
+from `564597af6` until a FIT window is available.
+bench_elf_sha256=8a94d2d8aea0ee2a5c6451d980bcab59109788397ce71be2edc4aecb9a1a76b6 (fr) and bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7 (vendored redis 7.2.4).
+
+    per key, 200 x 40-field listpack hashes, DEBUG RELOAD, two-point at 4 and 8 reloads
+
+    draw   fr lzf_compress   redis lzf_compress   fr/redis   loadavg 1m   CPU MHz
+      1          15196.0            10033.8       1.5145         5.13       2515
+      2          15196.0            10045.6       1.5127         4.87       1429
+      3          15196.0            10024.6       1.5159         4.96       1429
+
+    history   1.7600  ->  1.6610 (slice 1)  ->  1.5867 (slices 2-4)  ->  1.5159 (slices 5-6)
+
+Worst of three is **1.5159x**, a 4.46 pct relative improvement on the last measured figure. The fr
+kernel itself went 15894.0 -> 15196.0, **-4.39 pct**. Five slices have now closed **32.1 pct of the
+original excess** over the incumbent.
+
+### WHY I AM WILLING TO PUT A NUMBER HERE AT ALL WITH THE GATE RED
+
+Not because the gate is inconvenient. Because the gate's disqualifying condition is load
+non-stationarity, and this measurement has now been shown twice not to respond to load or clock:
+
+  * `564597af6`: fr's frame bit-identical at loadavg **8.82, 18.81, 18.02**.
+  * this row: fr's frame bit-identical at CPU MHz **2515, 1429, 1429** — a 1.76x frequency swing —
+    with spread **0.0000 pct** across all three draws.
+
+The redis arm moved 0.2093 pct, and that residual is not the host either: redis writes aux fields
+into its RDB whose contents vary run to run, so its compressor is not fed byte-identical input. fr's
+is. Counting a FRAME excludes serverCron from both arms, which is the elapsed-time work a
+whole-process denominator carries.
+
+So the honest position is: the number is sound and the LABEL still follows the gate. A campaign that
+lets its instruments overrule its gates stops being able to tell the two apart, and "the gate is
+wrong here" is exactly what every bad number says about itself.
+
+The A/A null, measured in a single invocation of the same harness on one ELF and one shape, has ratio median 1.0000 with a bootstrapped 95% median CI of [0.9979, 1.0021].
+
+That prices the redis-side variation at about plus or minus 0.2 pct. The measured 1.5159x sits far
+outside it. The bootstrap median-CI gate determined this verdict. CV is provenance only and never
+influenced it.
+
+### MY ARITHMETIC UNDER-PREDICTED THE SERVER SHAPE
+
+Slice 6's retry predicate said this should land "near 1.535x", from adding slice 5's -1.41 pct and
+slice 6's -1.91 pct on the example's 380-byte payload. It landed at 1.5159x: the kernel improved
+4.39 pct where the example predicted 3.32.
+
+The example payload is not the server payload. A 40-field hash listpack carries a different
+literal-to-match mix than the driver's synthetic 380-byte one, and slice 6 in particular is a
+PER-MATCH lever whose value scales with match count. **Predicting a server-shape gain from a
+micro-driver payload is an extrapolation across an unmeasured axis, and it was wrong by a third even
+in the favourable direction.** Quote micro-driver deltas as evidence that a lever works, never as
+the size it will have in the product.
+
+### THE NEXT KNOWN ASYMMETRY IS BLOCKED, AND THE BLOCKER IS WORTH RECORDING
+
+Slice 6's retry predicate named the literal store as next: C writes `*op++ = *ip++` with no check,
+having pre-validated, where fr calls `Vec::push` and re-tests capacity and stores the length on every
+literal byte. Sizing it from slice 3 (which removed a different per-literal-byte compare for -549)
+suggests roughly -500 on listpack, the largest remaining candidate.
+
+It is blocked, for a reason that is structural rather than a matter of effort. `fr-persist` carries
+`#![forbid(unsafe_code)]`, so the cheap C-equivalent form — write through `spare_capacity_mut` and
+`set_len` — is unavailable. The safe alternative is a pre-sized buffer with indexed writes, and that
+collides with slice 3: since slice 3 removed the per-byte budget bail, the output may now legally
+grow PAST `out_budget` on a failing compression, bounded only by the input length. A fixed-size
+buffer would have to be sized for that overshoot, and an indexed write that ran past it would PANIC
+— turning a compression that currently returns None into a crash, in a persistence codec, on
+attacker-influenced input.
+
+That is not a trade worth making for 3 pct of one kernel. Recorded so the next agent does not
+rediscover it by writing the patch first.
+
+### RETRY PREDICATE
+
+  1. Re-take this as a CERTIFICATION when `certification_window.py --for ratio` returns FIT before
+     AND after the draws. Nothing else about the method needs to change; only the label does.
+  2. Do NOT attempt the literal store as a pre-sized indexed buffer while `forbid(unsafe_code)` and
+     slice 3's unbounded overshoot both hold. Either would have to be revisited first, and revisiting
+     slice 3 costs 549 to maybe gain 500.
+  3. The remaining unexplained excess is now about 5200 instr/key (fr 15196 vs redis 10034) and no
+     sized candidate points at it. A line-level profile is the instrument, and it is currently
+     unobtainable: rch returns the release binary with symbols but with no DWARF sections, and
+     `release-perf` artifacts are not retrieved at all. Fixing that retrieval is the precondition for
+     a slice 7, not another reading of the C.
