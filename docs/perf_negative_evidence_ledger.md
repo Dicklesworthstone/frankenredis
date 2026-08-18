@@ -46784,3 +46784,105 @@ RETRY PREDICATE:
   3. Run `certification_window.py --for ratio` before publishing ANY vs-incumbent figure, and
      `--for fr-only` for a candidate-vs-control delta. The two gates disagree by design and the
      cheap mistake is to use the loose verdict for the strict claim.
+
+## 2026-08-18 CrimsonHawk: SIZING the blocked read-gate fix — **143 floor arms return FastReply** and were all gated by the one cleared line; the 31 that already worked are exactly the `FastEncodedReply` ones (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — no code ships here. The fix itself is written, tested and measured but
+cannot be committed (see BLOCKED below). This row sizes what it unlocks so the next person does
+not have to re-derive it.
+
+### THE COUNT
+
+Classifying every `BorrowedDispatchFloorClass` arm by the reply variant it returns:
+
+  FastEncodedReply only   31 arms   <- cache was NEVER cleared for these; LINDEX is one, which
+                                       is the only reason it converted while five siblings did not
+  FastReply (any)        143 arms   <- the `plain_get_read_gate_cache = None` in that arm ran
+                                       after every one of them
+
+  unthreaded read predicates remaining: 36
+
+So the single line removed in the blocked patch was not gating six routes. It was gating the
+read-gate technique across the **FastReply population, which is 143 of 174 floor arms**. The 31
+that already worked are precisely the `_into` arms that bypass the clear by construction — the
+`FastEncodedReply` variant writes its reply in place and lands in a different match arm.
+
+That also retro-explains the shape of the earlier failure: five conversions returned 0 of 5 not
+because the wiring was wrong but because every one of them was a FastReply arm, and LINDEX
+"worked" only by being the single `_into` route in the set.
+
+### WHAT IS AND IS NOT CLAIMED FROM THIS COUNT
+
+CLAIMED: the blocked fix removes a per-packet gate re-derivation for any FastReply arm that
+takes the cached read gate, and 143 arms are FastReply.
+
+NOT CLAIMED: that 143 arms will each gain 175.0 instr/op. Most are WRITE arms and use
+`plain_write_gate_cache`, which was never cleared in that arm and is why every write conversion
+this campaign shipped already reads 0.0000 calls/op. The read-gate benefit lands on the 36
+unthreaded READ predicates plus those already threaded. The count above is the size of the
+POPULATION the clear touched, not a sum of savings.
+
+ALSO MEASURED, and it does apply broadly: `zcard` — unconverted, still calling the gate every
+packet — gained **2.5 pct** from the removal alone, because deleting a store from the hot loop
+helps a FastReply arm whether or not it takes the cached gate. That term arrives once, for
+everybody, and it is why the conversion figure to quote is ~12.5 pct rather than the headline
+14-15 pct.
+
+### BLOCKED, AND THE REASON MATTERS
+
+The fix is complete: 608-line patch, six routes at 1.0000 -> 0.0000 calls/op, llen -15.1 pct,
+green on `cargo test -p fr-runtime` (633+44) and `-p fr-server` (380+12+2) against a tree that
+already includes the peer commit `dd335769b`. It cannot be committed.
+
+The pre-commit guard refuses `crates/fr-server/src/main.rs`, `crates/fr-runtime/src/lib.rs` and
+`crates/fr-store/src/lib.rs`, naming BrownIbis as holder. `check_file_reservation_conflicts`
+disagrees: at 06:06:15Z it reported `conflict_free: true`, all three in `clear_paths`, and two of
+them in my own `own_active`.
+
+**I initially wrote that the guard was stale. That was probably wrong and is corrected here.**
+The likelier reading is that the reservation GRANT over-granted — it returned `conflicts: []`
+for files a peer held — and that the guard is the accurate authority. BrownIbis is demonstrably
+active across all three files, with commits landing throughout. On that reading a bypass would
+clobber a working peer, so `AGENT_MAIL_GUARD_MODE=warn` has NOT been used, on six attempts.
+
+### COUNTED MECHANISM
+
+A source enumeration over `crates/fr-server/src/main.rs`: every
+`BorrowedDispatchFloorClass::<X> => {` arm, classified by which `BorrowedMultibulkAction::Fast*`
+variants appear in its body. Exact arm counts, not estimates: 31 FastEncodedReply-only, 143
+containing FastReply, and 36 unthreaded read predicates in `crates/fr-runtime/src/lib.rs`.
+
+The instruction figures cited (llen -15.1 pct, zcard -2.5 pct, 175.0 instr/op) are from
+`3a3bf4698`, measured on a paired build one change apart. The instrument carries its own null:
+A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], six draws and 30 pairwise ratios (banked in `0bf781d57`).
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  source        `crates/fr-server/src/main.rs` and `crates/fr-runtime/src/lib.rs` at HEAD
+                `0f4af52d0`, read only. No ELF was built for this row.
+  bench_elf_sha256=e4b65d245592e6bb084e28e64f6027548f5f50ace40955eb126d9acfdd5d0ca4
+  incumbent     NOT RUN for this row.
+  harness       source enumeration only; the cited instruction counts come from
+                `scripts/shape_instr_per_op.py` and `scripts/call_count_delta.py` runs banked in
+                `3a3bf4698`.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 125G free. loadavg
+                8.97 9.83 11.03, CPU idle 89 pct, no builds running. No build was started.
+  admissibility No ratio or timed row is claimed; arm counts are exact.
+
+### RETRY PREDICATE
+
+1. Land `scratchpad/readgate_UNBLOCK_ready.patch` (608 lines) when the guard and the reservation
+   service agree, or hand it to whoever holds the files. Re-verify the acceptance test after:
+   six routes at 0.0000 calls/op on `plain_borrowed_default_key_read_allows`, `zcard` still
+   1.0000 as the null.
+2. A second blocked change is `scratchpad/`-parked too: a 52-line fr-store test pinning
+   `has_pending_pubsub`, which `dd335769b` made load-bearing for correctness and which shipped
+   with ZERO test references anywhere in the tree. fr-store 929 passed with it.
+3. When converting further read routes, classify the arm FIRST. A `FastEncodedReply` arm needs
+   no clear removal and converts today; a `FastReply` arm cannot convert until the patch lands,
+   and attempting one before then reproduces the 0-of-5 result exactly.
