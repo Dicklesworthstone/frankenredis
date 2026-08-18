@@ -42,7 +42,7 @@ fn run_twoprobe(s: &mut Store, keys: &[&[u8]]) -> usize {
     let mut acc = 0usize;
     for &k in keys {
         if let Ok(Some(v)) = s.get_string_bytes_lfu_twoprobe_bench(k, 1) {
-            acc = acc.wrapping_add(v.len());
+            acc = acc.wrapping_add(v.as_slice().len());
         }
     }
     acc
@@ -52,7 +52,7 @@ fn run_collapse(s: &mut Store, keys: &[&[u8]]) -> usize {
     let mut acc = 0usize;
     for &k in keys {
         if let Ok(Some(v)) = s.get_string_bytes_lfu_collapsed_bench(k, 1) {
-            acc = acc.wrapping_add(v.len());
+            acc = acc.wrapping_add(v.as_slice().len());
         }
     }
     acc

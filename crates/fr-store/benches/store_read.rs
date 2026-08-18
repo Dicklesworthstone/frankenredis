@@ -57,7 +57,7 @@ fn bench_get(c: &mut Criterion) {
             let got = store
                 .get_string_bytes(std::hint::black_box(b"target:key"), 2_000)
                 .unwrap();
-            std::hint::black_box(got.map(|v| v.len()))
+            std::hint::black_box(got.map(|v| v.as_slice().len()))
         })
     });
     g.bench_function("mget_8_ttl_lru_hit", |b| {
