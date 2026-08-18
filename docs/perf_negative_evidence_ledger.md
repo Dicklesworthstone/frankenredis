@@ -58815,3 +58815,113 @@ a gate or otherwise.
 3. The general lesson is MossyOrchid's and it just applied to them: **re-measure the cell before
    working a target named more than a day ago.** Two shapes lost 57-62 pct of their cost in
    twenty-four hours.
+
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the `len == 8` bulk-reply arm fused into an `[u8; 10]` the compiler will not inline, costing 16 instructions per element MORE than not fusing; unfusing that ONE arm is −16.06 per element with no regression anywhere (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: TWO-BINARY A/B with the A/A and the A/B in ONE INVOCATION and the candidate arm
+BRACKETED by control arms, plus deterministic instruction counts differenced across READ COUNTS at
+a FIXED key count, replicated, on a list shape AND a non-list shape. CV was NOT used, as a gate or
+otherwise — no coefficient of variation appears in this row's decision path and none was computed.
+No timing verdict is claimed: the measurand is a retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 1.000457, bootstrap 95% CI [0.999195, 1.004536] over five
+draws, taken in the same invocation as the A/B it gates. The bootstrap median-CI is the verdict
+gate and it excludes zero.
+
+    RESTORE + THREE reads per key, EIGHT-byte elements, slope 10 vs 30 keys
+      −9.3306 / −9.1154 / −9.0676 / −8.5391 / −9.0566 pct
+      A/B median −9.0676 pct, bootstrap 95% CI [−9.3306, −8.5391], n=5
+      WORST SINGLE DRAW −8.5391 pct  <- the whole-op figure this row claims
+      88-91 pct idle, loadavg 8.71-8.82, MHz mean 1900-2500 against a 1429-4292 spread.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### FIRST, A METHOD ERROR OF MINE THAT COST TEN WINDOWS
+
+Ten consecutive rows on this bead said "no build — this project's slot is held". That was WRONG,
+and it was my own detector. I was checking with `pgrep -f 'cargo build|cargo test|cargo clippy'`,
+which matches ANY process whose command line contains those strings — including the very shell
+running the check. Its `cwd` is the repo, so every check reported a frankenredis build in flight.
+Counting actual `cargo`/`rustc` executables by `comm` instead shows the slot was free.
+
+  The correct check is `ps -eo pid,comm --no-headers | awk '$2=="cargo" || $2=="rustc"'` and then
+  the cwd of THOSE pids. A pattern that can match the observer is not an observation. The rows that
+  claimed the slot was taken are not withdrawn — their measurements stand — but their stated reason
+  for not building was wrong in most cases, and the work below is what should have happened sooner.
+
+### PROVENANCE
+
+  ELF           AFTER `cbb7395f7a3c01d2d8ac751e182eae0a87e8a27f90ab04ac858af708af0ef18f`,
+                BEFORE `4eceae6c624c670fb4111eceae3068632e8b9223b0ef822440b5015f9c89fce5`.
+  bench_elf_sha256=cbb7395f7a3c01d2d8ac751e182eae0a87e8a27f90ab04ac858af708af0ef18f
+
+### THE LEVER, AND THE VARIANT THAT DID NOT SHIP
+
+`81d24e224`'s predecessor found `encode_small_payload::<8, 10>` costs about 18 instructions per
+element MORE than not fusing, because at `M = 10` the compiler materialises the array on the stack
+and copies it out with a `memcpy` call. TWO fixes were built and measured:
+
+    per-element cost of one LRANGE(0,-1), by element length
+      len      BEFORE      A: bound lowered to 7      B: arm kept, len 8 falls through
+        4       91.48                      93.01                              91.36
+        6       95.37                      98.09                              95.08
+        7       92.83                      95.55                              93.49
+        8      130.35                     106.96                             114.22
+        9      112.33                     107.07                             112.40
+       15      111.61                     111.08                             111.15
+       32      110.04                     111.55                                 —
+
+  VARIANT A — lowering the bound to `len <= 7` and dropping the arm — wins MORE at len 8 (−23.39)
+  and also at len 9, but REGRESSES every length in 1..7 by 1.5 to 2.7 instructions per element.
+  Removing a match arm changed the codegen of the arms that remained. Those are the lengths the
+  fusion exists to serve, and there is no measured element-length distribution in this repo that
+  would justify trading them for one length; so A is REJECTED, not shipped.
+
+  VARIANT B — keep all eight arms, make the `len == 8` arm fall through to the generic pair — is
+  what shipped. The match's shape is untouched, so arms 1..7 are untouched.
+
+    replicated, BEFORE vs B      len 4   91.16 / 91.48  ->  91.23 / 91.36
+                                 len 7   93.06 / 92.83  ->  93.22 / 93.49
+                                 len 8  130.21 / 130.35 -> 114.21 / 114.22    −16.06 per element
+
+  The len 8 delta reproduces to 0.01 instructions. Lengths 4 and 7 move by 0.4 pct or less, inside
+  what this instrument resolves (`feedback_ir_ratio_resolves_to_0p84_pct_in_a_quiet_window`).
+
+### THE NON-LIST NULL THE PREDICATE DEMANDED
+
+`84fca03ad` required any change to `encode_bulk_string_slice` — it is on the UNIVERSAL reply path —
+to show a null on a small-reply shape that touches no lists. GET of a stored value:
+
+    value length      BEFORE      AFTER    delta
+               4     4,201.1    4,178.7   −0.53 pct
+               8     4,253.1    4,199.7   −1.26 pct
+              15     4,218.9    4,220.8   +0.04 pct
+
+  Not merely a null: a plain GET of an EIGHT-BYTE value is 1.26 pct cheaper, which is the same
+  defect seen away from lists entirely. Every other length is unchanged.
+
+  ORACLE: `encode_bulk_string_slice_is_canonical_at_every_length_qj6jn` builds the expected
+  `$<len>\r\n<payload>\r\n` by hand for every length 0..=40 — crossing both the fused/unfused
+  boundary at 7-8-9 and the header's one-digit/two-digit boundary at 9-10 — and pins the RESP2 and
+  RESP3 nil forms, which live in the same function.
+
+### PARITY
+
+    LRANGE / LINDEX / LLEN, four pools x five fills x n 3..300 x built-vs-RESTORED,
+      BEFORE vs AFTER: 0 of 160 diverging; the same 160 vs redis 7.2.4: 0 of 160 diverging
+    BEFORE-vs-AFTER DUMP BYTES: 0 of 84 diverging
+    workload sweep vs redis 7.2.4: 4 of 42, UNCHANGED
+    fr-protocol 102 / fr-store 943, 0 failures; clippy clean; fmt unchanged by this change.
+
+### RETRY PREDICATES
+
+  1. Do NOT revisit variant A without a MEASURED element-length distribution. Its aggregate over
+     the lengths sampled is better than B's, but it pays for that with a regression across 1..7,
+     and "aggregate over lengths I happened to sample" is not a workload.
+  2. Do NOT widen the fused arm set upward. Every arm above 7 needs `M >= 10`, which is the shape
+     that failed here. `feedback_const_fusion_stops_paying_past_a_register_store` has the general
+     form.
+  3. `parse_command_args_borrowed_into` remains the largest term in a large bulk RPUSH (22,090
+     instructions per key at n = 300, above 21 argv entries) and is handed to the dispatch owner,
+     not taken here.

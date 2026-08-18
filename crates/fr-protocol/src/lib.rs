@@ -395,6 +395,21 @@ fn encode_bulk_string_slice_impl<const SMALL_FAST: bool, const SMALL_PAYLOAD: bo
                 out.reserve(1 + decimal_usize_len(len) + 2 + len + 2);
                 push_len_header::<true>(out, b'$', len as u64);
             }
+            // (frankenredis-qj6jn) `len <= 7`, NOT `<= 8`. The fused arm builds an `[u8; len + 2]`
+            // and hands it to `extend_from_slice`, which is only free while the compiler emits
+            // that as inline stores. At `M <= 9` it does; at `M = 10` it does NOT -- the array is
+            // materialised on the STACK and copied out with a `memcpy` CALL, so the `len == 8` arm
+            // paid a stack round-trip AND copied 10 bytes where the generic fallback copies 8 and
+            // writes CRLF as a 2-byte immediate.
+            //
+            // MEASURED per element on one `LRANGE 0 -1`: len 7 costs 92.83, len 8 costs 130.35
+            // (re-measured 129.90), len 9 costs 112.33. The fused arm was about EIGHTEEN
+            // instructions per element WORSE than not fusing. Against the incumbent the same
+            // defect showed as the ratio degrading from 0.1904x at len 7 to 0.2677x at len 8 and
+            // recovering to 0.2304x at len 9.
+            //
+            // This is also why the arm set must NOT be widened to 16: every added arm would have
+            // `M >= 11`, i.e. eight more copies of the shape that already fails.
             if SMALL_PAYLOAD && len <= 8 {
                 match len {
                     1 => encode_small_payload::<1, 3>(bytes, out),
@@ -404,7 +419,16 @@ fn encode_bulk_string_slice_impl<const SMALL_FAST: bool, const SMALL_PAYLOAD: bo
                     5 => encode_small_payload::<5, 7>(bytes, out),
                     6 => encode_small_payload::<6, 8>(bytes, out),
                     7 => encode_small_payload::<7, 9>(bytes, out),
-                    _ => encode_small_payload::<8, 10>(bytes, out),
+                    // len == 8 would need `M = 10`, which the compiler does not emit as inline
+                    // stores -- it materialises the array on the stack and copies it out with a
+                    // `memcpy` CALL. Fall through to the generic pair instead, which copies 8
+                    // bytes and writes CRLF as a 2-byte immediate. Same bytes, 18 fewer
+                    // instructions per element. The arm is KEPT rather than the bound lowered so
+                    // the match's shape -- and the codegen of arms 1..7 -- is untouched.
+                    _ => {
+                        out.extend_from_slice(bytes);
+                        out.extend_from_slice(b"\r\n");
+                    }
                 }
             } else {
                 out.extend_from_slice(bytes);
@@ -3005,6 +3029,40 @@ mod d2string_edge_cases {
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-qj6jn) `encode_bulk_string_slice` no longer FUSES the `len == 8` payload with
+    /// its CRLF: that arm needed an `[u8; 10]`, which the compiler materialises on the stack and
+    /// copies out with a `memcpy` call, costing 18 instructions per element MORE than the generic
+    /// pair. The arm is kept and made to fall through, so the match's shape — and the codegen of
+    /// arms 1..7 — is untouched.
+    ///
+    /// Every length must still emit exactly `$<len>\r\n<payload>\r\n`. The reference is written
+    /// out here rather than taken from the encoder, and the sweep crosses BOTH boundaries that
+    /// matter: the fused/unfused one at 7-8-9, and the header's one-digit/two-digit one at 9-10.
+    #[test]
+    fn encode_bulk_string_slice_is_canonical_at_every_length_qj6jn() {
+        for len in 0..=40usize {
+            let payload: Vec<u8> = (0..len).map(|i| b'a' + (i % 26) as u8).collect();
+            let mut got = Vec::new();
+            super::encode_bulk_string_slice(Some(&payload), false, &mut got);
+
+            let mut want = Vec::new();
+            want.push(b'$');
+            want.extend_from_slice(len.to_string().as_bytes());
+            want.extend_from_slice(b"\r\n");
+            want.extend_from_slice(&payload);
+            want.extend_from_slice(b"\r\n");
+
+            assert_eq!(got, want, "bulk encoding diverged at len {len}");
+        }
+        // The nil forms are on the same function and must not have moved.
+        let mut resp2 = Vec::new();
+        super::encode_bulk_string_slice(None, false, &mut resp2);
+        assert_eq!(resp2, b"$-1\r\n");
+        let mut resp3 = Vec::new();
+        super::encode_bulk_string_slice(None, true, &mut resp3);
+        assert_eq!(resp3, b"_\r\n");
+    }
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
         RespParseError, bench_encode_bulk_string_slice_small, bench_encode_integer,
