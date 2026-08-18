@@ -55039,3 +55039,92 @@ compares per entry:
      two compares. `raw_total` feeds `forced_quicklist`, which compares it against
      `LIST_DEFAULT_BUDGET`; if a future lever wants it O(1) as well it must answer what
      `forced_quicklist` should report for a chunk whose raw total was never summed.
+
+## 2026-08-18 BrownIbis: ASSESSMENT — what the read gate's remaining **86.0** is made of: **19 scattered field tests, no hot spot**, and collapsing them into one flag would need **~42 mutation sites** against the ACL cache's ONE. Priced and NOT recommended in that form (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+`00ffdd6a5`'s retry predicate left this open: *"the next structural question is what the remaining
+86.0 consists of — the same disassembly method applies."* This answers it, and the answer is an
+argument against the obvious lever rather than for it.
+
+**MEASURED, by disassembling the shipped ELF** (`b6_after1.elf`; the release build has no line
+info so `callgrind_annotate` reports `???`). The gate is 848 bytes, **223 instructions, 2 calls**,
+and executes **86.0 instr/op** on the fast path.
+
+**The `"default"` name compare is now free of any call**, which confirms `2bdc560df` did what its
+row claimed at the machine level:
+
+    cmp  $0x7,%rax                 ; length check
+    mov  $0x61666564,%eax          ; "defa"
+    xor  0x10(%rdx),%eax
+    mov  $0x746c7561,%ecx          ; "ault"
+    xor  0x13(%rdx),%ecx
+    or   %eax,%ecx
+    je   <cached path>
+
+Two 4-byte immediate compares. **Both remaining `call` instructions sit on the NOT-default
+branch** — the BTreeMap descent for a session authenticated as some other user — which the fast
+path never reaches. There is no libc call left on the hot path at all.
+
+**WHERE THE 86.0 GOES.** From the name match to the return, the fast path touches **19 distinct
+`self`-relative field offsets** with **21 branches**:
+
+    0x2e30 0x2e8c 0x2da9 0x2daa 0x2ab8 0x2ae8 0x2b18 0x2e40 0x2d10 0x2be8
+    0x2898 0x25e0 0x2628 0x2620 0x2ba0 0x254c 0x1a88 0x2a90 0x2d08
+
+Roughly: ~15 instructions of prologue/epilogue, ~10 for the name compare, and **~60 for 19
+independent load-compare-branch triples**. **There is no hot spot left — the cost is the breadth
+of the predicate**, one field at a time, and they span offsets 0x1a88 to 0x2e8c, about 5 KB apart.
+
+**THE OBVIOUS LEVER, PRICED.** Collapse the ~13 server-level conditions into one precomputed
+`server_permits_borrowed_fast_path: bool`, refreshed where the inputs change — exactly the shape
+that took the ACL half of this gate from two BTreeMap lookups to two bool reads in `2bdc560df`.
+On instruction count it should be worth **~50 to 60 instr/op**, on every route that pays the gate
+per command, which `f30ba2ad7`'s census puts at 23 shapes. That is larger than any remaining
+conversion batch.
+
+**And it is NOT recommended in that form, because the invalidation surface is 42x the one that
+made the ACL cache safe.** Counted mutation sites:
+
+| field | sites | field | sites |
+|---|---|---|---|
+| `notify_keyspace_events` | **18** | `monitor_clients` | 3 |
+| replication `role`/`replicas` | 6 | `blocked_client_ids` | 2 |
+| `client_tracking_bcast_clients` | 6 | `maxmemory_bytes` | 2 |
+| `aof_path` | 3 | `client_tracking_observed_keys` | 1 |
+| | | `keyspace_notifications` | 1 |
+
+**~42 sites across 9 fields.** The ACL cache was safe because `bump_dispatch_permissions_generation`
+**already existed** as the single choke point every mutator ended with — I added a recompute in
+one place and a `debug_assert` proved no path skipped it. Nothing equivalent exists here: a flag
+would have to be invalidated at 42 call sites, and **a missed one is not a slow path, it is a
+fast path taken when keyspace notifications should have fired, or when a monitor was attached** —
+silent, and only visible to a test that happens to combine the two. That is the sidecar shape
+this ledger already rejected once in `project_modcount_sidecar_measured_loss`.
+
+**THE SAFE ROUTE, IF SOMEONE WANTS THE 50-60.** Split it in two and claim nothing on the first
+half: (1) a pure refactor introducing `bump_server_fastpath_generation()` that all ~42 sites
+call, landed with **no perf claim and no measurement**, reviewed only for completeness; then (2)
+the cached flag on top, with a `debug_assert_eq!` against a fresh computation at each read, which
+is what would turn a missed site from a silent correctness bug into a test failure. Attempting
+(2) without (1) is how this goes wrong.
+
+GATE AND ITS OWN NULL. This row makes no A/B claim — it is a disassembly, a field-offset count
+and a grep of mutation sites, none of which is a timing verdict — so there is no lever to gate.
+A/A null on the whole-process instrument, same ELF, four draws of GET, resampled
+ratio-of-medians: median 1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate
+for any lever built on this must be that bootstrap median-CI, and CV is provenance only and was
+not used as a gate anywhere in this row; no CV was computed. Host: /data 68G, loadavg
+9.47/10.33/11.22, CPU idle 78 pct; two peer builds (`fnp-python`, `frankenlibc-abi`, `fsqlite`)
+in flight, so `certification_window.py --for ratio` returned UNFIT and this turn certified
+nothing and built nothing.
+`bench_elf_sha256=a803b2e03f0f93f67525a2dfac70d60637715e89d2a405da08fda265319ce2da`.
+
+RETRY PREDICATE: this assessment is wrong if the mutation-site count for the server-level fields
+falls below ~10 total (at which point one eager choke point is as tractable as the ACL one was),
+or if a `bump_server_fastpath_generation()` choke point lands as its own refactor — either makes
+the cached flag the same safe shape `2bdc560df` used. Re-count with
+`grep -cE "\.<field>\s*(=[^=]|\.(insert|remove|clear|push|retain|extend|take)\b)"` over
+`fr-runtime` and `fr-store` before believing this row's 42.
