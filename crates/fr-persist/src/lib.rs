@@ -3273,7 +3273,7 @@ pub fn bench_lzf_compress_table<const HOIST: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, HOIST, true, true>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, HOIST, true, true, false>(input, out_budget, &mut scratch.borrow_mut())
     })
 }
 
@@ -3292,7 +3292,7 @@ pub fn bench_lzf_compress_literals<const BATCH: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, true, BATCH, true>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, true, BATCH, true, false>(input, out_budget, &mut scratch.borrow_mut())
     })
 }
 
@@ -3307,13 +3307,33 @@ pub fn bench_lzf_compress_literals<const BATCH: bool>(
 /// monotonic. That equality is asserted by
 /// `lzf_budget_guard_removal_matches_guarded_arm_byte_for_byte` and re-asserted by the
 /// bench driver before it reports a number.
+/// Same-binary A/B hook for the packed table's epoch check (slice 5).
+///
+/// XORTAG == false is today's production probe: shift, compare, branch, mask.
+/// XORTAG == true returns slot XOR tag and lets the caller's existing range guard reject
+/// a stale slot. Both arms MUST return byte-identical output -- asserted by
+/// lzf_xor_tag_probe_matches_compare_arm_byte_for_byte.
+#[doc(hidden)]
+pub fn bench_lzf_compress_xortag<const XORTAG: bool>(
+    input: &[u8],
+    out_budget: usize,
+) -> Option<Vec<u8>> {
+    LZF_SCRATCH.with(|scratch| {
+        lzf_compress_dispatch::<true, true, false, false, XORTAG>(
+            input,
+            out_budget,
+            &mut scratch.borrow_mut(),
+        )
+    })
+}
+
 #[doc(hidden)]
 pub fn bench_lzf_compress_guard<const GUARD: bool>(
     input: &[u8],
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, true, false, GUARD>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, true, false, GUARD, false>(input, out_budget, &mut scratch.borrow_mut())
     })
 }
 
@@ -3348,6 +3368,10 @@ fn lzf_idx(h: u32) -> usize {
 /// dispatch collapses. Every implementor stores and returns the same values in
 /// the same order, so the compressed bytes are identical whichever is chosen.
 trait LzfHashTable {
+    /// Returns the stored `pos + 1` if the slot belongs to THIS call, and otherwise any
+    /// value the caller's `r >= 1 && r < ip` guard rejects -- either 0, or something
+    /// larger than any valid position. Callers must not assume that a non-zero result is
+    /// in range; that is what the guard is for.
     fn get(&self, index: usize, generation: u32) -> u32;
     fn set(&mut self, index: usize, generation: u32, pos_plus_one: u32);
 }
@@ -3355,13 +3379,37 @@ trait LzfHashTable {
 /// Packed table view (`in_len < 16 MiB`): `(gen8 << 24) | pos_plus_one`.
 /// Indexing a `&mut [u32; LZF_HSIZE]` with a value the caller masked to
 /// `LZF_HSIZE - 1` lets the bounds check fold away, unlike the `Vec` deref.
-struct LzfPackedTable<'a>(&'a mut [u32; LZF_HSIZE]);
+struct LzfPackedTable<'a, const XORTAG: bool>(&'a mut [u32; LZF_HSIZE]);
 
-impl LzfHashTable for LzfPackedTable<'_> {
+impl<const XORTAG: bool> LzfHashTable for LzfPackedTable<'_, XORTAG> {
     #[inline]
     fn get(&self, index: usize, generation: u32) -> u32 {
         let slot = self.0[index];
-        if (slot >> 24) == (generation & 0xFF) {
+        if XORTAG {
+            // (frankenredis-qj6jn slice 5) FOLD THE EPOCH CHECK INTO A RANGE CHECK THE
+            // CALLER ALREADY PERFORMS. The tagged form costs a shift, a compare, a branch
+            // and a mask on EVERY probe -- vendored lzf_c.c pays none of that, because
+            // INIT_HTAB is 0 there and it lets its range and byte checks reject stale
+            // slots. This arm gets the same effect without adopting C's dirty table.
+            //
+            // XOR the whole word with the epoch tag:
+            //   * tag MATCHES -> the top byte cancels to zero and the result is exactly
+            //     pos_plus_one, bit for bit what the tagged form returned;
+            //   * tag DIFFERS -> the top byte is nonzero, so the result is at least
+            //     1 << 24.
+            //
+            // The second case is rejected for free. This table is only selected when
+            // in_len < 16 MiB (that is the packed representation's precondition), so
+            // ip < in_len <= (1 << 24) - 1, while a stale slot yields r = cand - 1 >=
+            // (1 << 24) - 1 > ip. The caller's existing `r < ip` test therefore discards
+            // it at exactly the point the tagged form returned 0 -- no new branch, and
+            // the subtraction that follows is never reached with a stale value.
+            //
+            // cand == 0 still means "empty", as before: it requires slot == gen_tag,
+            // i.e. a stored pos_plus_one of 0, which never happens because the compressor
+            // stores ip + 1 >= 1.
+            slot ^ ((generation & 0xFF) << 24)
+        } else if (slot >> 24) == (generation & 0xFF) {
             slot & 0x00FF_FFFF
         } else {
             0
@@ -3370,7 +3418,13 @@ impl LzfHashTable for LzfPackedTable<'_> {
 
     #[inline]
     fn set(&mut self, index: usize, generation: u32, pos_plus_one: u32) {
-        self.0[index] = ((generation & 0xFF) << 24) | (pos_plus_one & 0x00FF_FFFF);
+        if XORTAG {
+            // The mask on pos_plus_one is redundant under the same precondition: with
+            // in_len < 16 MiB the stored ip + 1 cannot reach the tag byte.
+            self.0[index] = ((generation & 0xFF) << 24) | pos_plus_one;
+        } else {
+            self.0[index] = ((generation & 0xFF) << 24) | (pos_plus_one & 0x00FF_FFFF);
+        }
     }
 }
 
@@ -3612,7 +3666,13 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
     // incompressible payload, where a "bail later" arm should do strictly MORE work, got
     // FASTER instead. A caller passing a budget far below the input length would lose that
     // early exit; the loop is still bounded by the input length and still returns None.
-    lzf_compress_dispatch::<SIMD, true, false, false>(input, out_budget, scratch)
+    // XORTAG == true: the packed table's probe returns slot XOR tag and lets the caller's
+    // existing `r < ip` guard reject a stale slot, instead of paying a shift, compare,
+    // branch and mask on every probe. MEASURED -240 instr/op (-1.41 pct) on the listpack
+    // shape, -258 on incompressible and -91 on run-heavy -- a win on every payload, and
+    // bit-identical across three draws. Sound only while in_len < 16 MiB, which is exactly
+    // when this table representation is chosen.
+    lzf_compress_dispatch::<SIMD, true, false, false, true>(input, out_budget, scratch)
 }
 
 /// Choose the match-table representation ONCE per call and hand the compressor a
@@ -3624,7 +3684,13 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
 /// `LzfScratch::{get,set}` — and exists so one binary can measure both arms.
 /// Both arms read and write the same slots in the same order and therefore emit
 /// byte-identical compressed output.
-fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool, const BATCH: bool, const GUARD: bool>(
+fn lzf_compress_dispatch<
+    const SIMD: bool,
+    const HOIST: bool,
+    const BATCH: bool,
+    const GUARD: bool,
+    const XORTAG: bool,
+>(
     input: &[u8],
     out_budget: usize,
     scratch: &mut LzfScratch,
@@ -3644,7 +3710,7 @@ fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool, const BATCH: bool,
                 return lzf_compress_core::<SIMD, BATCH, GUARD, _>(
                     input,
                     out_budget,
-                    &mut LzfPackedTable(table),
+                    &mut LzfPackedTable::<XORTAG>(table),
                     generation,
                 );
             }
@@ -7483,6 +7549,50 @@ mod tests {
                         "unguarded output did not round-trip (len={}, budget={budget})",
                         p.len()
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lzf_xor_tag_probe_matches_compare_arm_byte_for_byte() {
+        // Slice 5 removes the epoch COMPARE from the packed table's probe and relies on
+        // the caller's `r < ip` guard to reject a stale slot, which it can only do while
+        // in_len stays under the packed representation's 16 MiB precondition.
+        //
+        // The failure this must catch is a stale slot being ACCEPTED: that produces a
+        // valid-but-different compressed stream, which is observable on the wire because
+        // DUMP payloads are compared against redis byte for byte. A table that is still
+        // warm from a previous call is what makes a stale slot reachable at all, so the
+        // payloads are compressed REPEATEDLY here, in varying order, against the shared
+        // thread-local scratch -- a single pass over fresh payloads would leave the epoch
+        // logic barely exercised.
+        let payloads = lzf_equivalence_payloads();
+        for round in 0..3 {
+            for p in &payloads {
+                let hi = p.len() + 8;
+                for budget in 0..=hi {
+                    let compared = super::bench_lzf_compress_xortag::<false>(p, budget);
+                    let xored = super::bench_lzf_compress_xortag::<true>(p, budget);
+                    assert_eq!(
+                        compared,
+                        xored,
+                        "xor-tag probe diverged (round={round}, len={}, budget={budget})",
+                        p.len()
+                    );
+                    if let Some(encoded) = xored {
+                        assert!(
+                            encoded.len() <= budget,
+                            "xor-tag arm overran its budget (len={}, budget={budget})",
+                            p.len()
+                        );
+                        assert_eq!(
+                            super::lzf_decompress(&encoded, p.len()).as_deref(),
+                            Some(p.as_slice()),
+                            "xor-tag output did not round-trip (len={}, budget={budget})",
+                            p.len()
+                        );
+                    }
                 }
             }
         }

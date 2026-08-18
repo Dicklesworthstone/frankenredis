@@ -55,19 +55,21 @@ fn run_heavy(len: usize) -> Vec<u8> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 4 {
-        eprintln!("usage: lzf_literal_ab <batch|push|guard|noguard> <listpack|random|runs> <reps>");
+        eprintln!("usage: lzf_literal_ab <batch|push|guard|noguard|tag|xortag> <listpack|random|runs> <reps>");
         std::process::exit(2);
     }
     // slice 2 arms: batch|push. slice 3 arms: guard|noguard (the per-literal-byte
     // budget test, present or deleted). All four run the same driver so one binary
     // can answer both questions.
     let arm = args[1].as_str();
-    if !matches!(arm, "batch" | "push" | "guard" | "noguard") {
+    if !matches!(arm, "batch" | "push" | "guard" | "noguard" | "tag" | "xortag") {
         eprintln!("unknown arm {arm}");
         std::process::exit(2);
     }
     let batch = arm == "batch";
     let slice3 = matches!(arm, "guard" | "noguard");
+    // slice 5 arms: tag|xortag -- the packed table's epoch probe.
+    let slice5 = matches!(arm, "tag" | "xortag");
     let payload = match args[2].as_str() {
         "listpack" => listpack_like(40),
         "random" => incompressible(3000),
@@ -87,6 +89,9 @@ fn main() {
     let g = fr_persist::bench_lzf_compress_guard::<true>(&payload, budget);
     let u = fr_persist::bench_lzf_compress_guard::<false>(&payload, budget);
     assert_eq!(g, u, "guard arms diverged; a speedup here would be meaningless");
+    let t0 = fr_persist::bench_lzf_compress_xortag::<false>(&payload, budget);
+    let t1 = fr_persist::bench_lzf_compress_xortag::<true>(&payload, budget);
+    assert_eq!(t0, t1, "xor-tag arms diverged; a speedup here would be meaningless");
     println!(
         "arm={} payload={} len={} budget={budget} encoded={:?} reps={reps}",
         args[1],
@@ -97,7 +102,13 @@ fn main() {
 
     let mut sink = 0usize;
     for _ in 0..reps {
-        let out = if slice3 {
+        let out = if slice5 {
+            if arm == "tag" {
+                fr_persist::bench_lzf_compress_xortag::<false>(black_box(&payload), black_box(budget))
+            } else {
+                fr_persist::bench_lzf_compress_xortag::<true>(black_box(&payload), black_box(budget))
+            }
+        } else if slice3 {
             if arm == "guard" {
                 fr_persist::bench_lzf_compress_guard::<true>(black_box(&payload), black_box(budget))
             } else {
