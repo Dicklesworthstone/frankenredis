@@ -13940,36 +13940,11 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // register_function call so FCALL errors can report
     // user_function:<line> with the same line vendored would (the line
     // of the function definition inside the library code).
-    let code_str = String::from_utf8_lossy(&script);
-    let mut lua_lines = Vec::new();
-    let mut target_func_line: Option<usize> = None;
-    for (idx, line) in code_str.lines().enumerate() {
-        let line_no = idx + 1;
-        let trimmed = line.trim();
-        if trimmed.starts_with("#!") {
-            lua_lines.push(String::new());
-            continue;
-        }
-        if trimmed.contains("register_function") {
-            if let Some(transformed) = transform_register_function(trimmed) {
-                if let Some(name) = transformed
-                    .strip_prefix("local function ")
-                    .and_then(|s| s.find('(').map(|i| &s[..i]))
-                    && name == func_name
-                    && target_func_line.is_none()
-                {
-                    target_func_line = Some(line_no);
-                }
-                lua_lines.push(transformed);
-            } else {
-                lua_lines.push(String::new());
-            }
-            continue;
-        }
-        lua_lines.push(line.to_string());
-    }
-    lua_lines.push(format!("return {func_name}(KEYS, ARGV)"));
-    let wrapper_script = lua_lines.join("\n");
+    // (frankenredis-kbyhy) The transform is now CACHED. It used to run on every FCALL:
+    // `from_utf8_lossy` over the whole library, a `lines()` walk, a `String` per line, and the
+    // `register_function` scan -- all O(library size) per invocation, for a result that depends
+    // only on (library source, function name) and therefore cannot change between calls.
+    let (wrapper_script, target_func_line) = fcall_wrapper_script(func_name, &script);
 
     let keys_vec: Vec<Vec<u8>> = keys.to_vec();
     let args_vec: Vec<Vec<u8>> = args.to_vec();
@@ -14028,6 +14003,86 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
     result
+}
+
+thread_local! {
+    /// (frankenredis-kbyhy) Transformed FCALL wrappers, keyed by (function name, library bytes).
+    ///
+    /// KEYED ON THE FULL SOURCE BYTES, not a hash and not the library NAME. The transform's
+    /// output depends only on those two inputs, so keying on them makes invalidation automatic:
+    /// FUNCTION LOAD REPLACE, FUNCTION DELETE, FUNCTION FLUSH, a reload and a replica resync all
+    /// change the bytes, which changes the key, so a stale wrapper is unreachable rather than
+    /// merely unlikely. A hash would be smaller and would run the WRONG library body on a
+    /// collision -- not a trade worth making for a cache.
+    ///
+    /// Thread-local rather than a field on `Store`, because `fr-store` is not this crate's to
+    /// change and the cache is a pure memo of a pure function: two threads computing it
+    /// independently get the same answer.
+    static FCALL_WRAPPER_CACHE: std::cell::RefCell<
+        std::collections::HashMap<(String, Vec<u8>), (String, Option<usize>)>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Number of distinct (function, library) wrappers held before the cache is dropped wholesale.
+///
+/// (frankenredis-kbyhy) A bound is required because the key contains library BYTES: a client
+/// looping `FUNCTION LOAD REPLACE` with changing source would otherwise grow this without limit.
+/// Clearing everything is deliberate over evicting one entry -- there is no recency information
+/// here worth maintaining, and the miss that follows costs exactly what every call cost before
+/// this cache existed.
+const FCALL_WRAPPER_CACHE_MAX: usize = 64;
+
+/// Build (or reuse) the Lua wrapper FCALL executes for `func_name` in `script`.
+///
+/// Returns the wrapper source and the source line of the matching `register_function` call, which
+/// FCALL reports as `user_function:<line>` on a runtime error (frankenredis-tos1j). `None` means
+/// the scan could not express the function as text -- a name or callback held in a local -- which
+/// is what makes the caller fall back to executing the body instead (frankenredis-9hori).
+fn fcall_wrapper_script(func_name: &str, script: &[u8]) -> (String, Option<usize>) {
+    let key = (func_name.to_string(), script.to_vec());
+    if let Some(hit) = FCALL_WRAPPER_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+
+    let code_str = String::from_utf8_lossy(script);
+    let mut lua_lines = Vec::new();
+    let mut target_func_line: Option<usize> = None;
+    for (idx, line) in code_str.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim();
+        if trimmed.starts_with("#!") {
+            lua_lines.push(String::new());
+            continue;
+        }
+        if trimmed.contains("register_function") {
+            if let Some(transformed) = transform_register_function(trimmed) {
+                if let Some(name) = transformed
+                    .strip_prefix("local function ")
+                    .and_then(|s| s.find('(').map(|i| &s[..i]))
+                    && name == func_name
+                    && target_func_line.is_none()
+                {
+                    target_func_line = Some(line_no);
+                }
+                lua_lines.push(transformed);
+            } else {
+                lua_lines.push(String::new());
+            }
+            continue;
+        }
+        lua_lines.push(line.to_string());
+    }
+    lua_lines.push(format!("return {func_name}(KEYS, ARGV)"));
+    let wrapper_script = lua_lines.join("\n");
+
+    FCALL_WRAPPER_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= FCALL_WRAPPER_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(key, (wrapper_script.clone(), target_func_line));
+    });
+    (wrapper_script, target_func_line)
 }
 
 /// Reformat an eval_script error to match vendored Redis 7.0+ FCALL
