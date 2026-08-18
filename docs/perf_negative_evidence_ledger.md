@@ -52211,3 +52211,119 @@ and an effect inside that interval is not claimed.
    outcome is to leave it and say so.
 3. Before optimising any arithmetic on the strength of a type width, disassemble or measure first.
    Constant divisors are compiled to multiplies; `u128` alone is not a cost signal.
+
+--------------------------------------------------------------------------------
+
+## The expire-cycle lever did not move `get_control`, and this instrument could not have seen it if it had
+
+`da47c18ca` cut a plain `GET` from 1165.0 to 848.1 instr/op (-26.08 pct conservative). Since
+`get_control` IS a plain `GET`, and since `get_control` is the divisor under every
+control-normalised standing this campaign has banked, the obvious worry was that I had
+invalidated my own denominator. I re-measured to find out. I had it backwards twice over: the
+divisor did not move, and this instrument could not have resolved the move if it had.
+
+### WHAT WAS MEASURED
+
+`scripts/balanced_square_ab.py --shapes cascade --rounds 36`, fr and the incumbent in the SAME
+INVOCATION with the control re-measured alongside every row, on a binary built from the
+post-lever HEAD. Ten rows, all ten admissible, zero null-failed.
+
+| row | fr/redis | 95 pct CI | null A | null B |
+|---|---|---|---|---|
+| get_control | 1.1292 | [1.1121, 1.1627] | 0.9942 | 1.0071 |
+| srandmember | 1.1323 | [1.1204, 1.1451] | 0.9978 | 0.9990 |
+| geohash | 1.1323 | [1.1030, 1.1430] | 0.9962 | 0.9974 |
+| copy | 1.1277 | [1.1079, 1.1495] | 0.9812 | 1.0064 |
+| publish | 1.1209 | [1.1078, 1.1415] | 1.0088 | 1.0010 |
+| expiretime | 1.1138 | [1.1012, 1.1332] | 1.0055 | 0.9994 |
+| pttl | 1.0986 | [1.0883, 1.1255] | 0.9919 | 1.0087 |
+| getbit | 1.0931 | [1.0709, 1.1095] | 0.9944 | 1.0027 |
+
+### THE DIVISOR DID NOT MOVE
+
+Today's `get_control` is 1.1292. The prior banked draws are 1.0233, 1.0827, 1.0971, 1.1116,
+1.1125, 1.1299 and 1.1508. Today's draw is 0.06 pct from one of them and sits inside the range of
+all of them. A 26 pct instruction reduction on the exact command this row runs produced NO
+resolvable change in its throughput ratio.
+
+So the standings normalised against `get_control` are NOT stale, and nothing needs re-deriving on
+account of `da47c18ca`. That was the question worth asking and it is answered in the safe
+direction.
+
+### BUT THE DIVISOR IS WIDER THAN EVERYTHING IT DIVIDES
+
+The negative result above is only half of it, and the other half is a caution against this
+instrument, including against the rows in the table above.
+
+Discarding the 1.0233 draw (taken at `rounds=9`, already banked as the marginal-admissibility
+config) and the 1.1116 draw (a different shape group, `copyreplace`), five comparable draws still
+span 1.0827 to 1.1508 -- **6.29 pct**. The ten shapes this divisor normalises today span 1.0931 to
+1.1323 -- **3.59 pct**. The divisor's own draw-to-draw spread is nearly twice the entire spread
+across the family it is supposed to normalise, and every row's own CI is 2.2-4.5 pct wide.
+
+`balanced_square_ab.py` already prints this per line ("normaliser WIDER than the row"). What is
+new here is the ACROSS-DRAW measurement of it: the inline warning compares one draw's widths, and
+could be read as an artifact of a single noisy invocation. Five draws spanning 6.29 pct says it is
+the divisor's stable character, not one bad run.
+
+The consequence is that a control-normalised verdict in this family is not separable from divisor
+drift. Concretely, this run's two "BEHIND" verdicts -- `zrandmember` 0.9682 [0.9266, 0.9920] and
+`getbit` 0.9681 [0.9211, 0.9976] -- are 3.2 pct effects read off a divisor that moves 6.29 pct
+between draws. **Neither is quoted as a standing and neither should be opened as a lever.** Their
+worst bounds, 0.9266 and 0.9211, are recorded here only so a future draw has something to
+replicate against.
+
+### THIS DOES NOT DISCHARGE THE `getbit` OBLIGATION
+
+`50462` owes a second draw on `getbit` at 1.0196x. That figure is CYCLE-normalised, measured with
+`perf stat` against a cycle control reading 0.8632/0.8679/0.8688. Today's 0.9681 is
+THROUGHPUT-normalised. They are different instruments measuring different quantities and one is
+not a replicate of the other. The `getbit` second draw REMAINS OWED, on cycles.
+
+### WHAT THIS SAYS ABOUT THE LEVER ITSELF
+
+It says nothing, and that is the honest reading. `da47c18ca`'s -26.08 pct is an INSTRUCTION
+result, two-point subtracted, with a 24x margin over its own A/A null, and it stands on that
+instrument. This row does not confirm it in throughput and does not contradict it: a divisor with
+6.29 pct draw-to-draw spread cannot adjudicate a few-percent throughput movement in EITHER
+direction. `-P16` `GET` is already banked as syscall-bound, which is the likely reason the
+instruction saving does not surface here, but this row does not prove that mechanism either -- it
+only shows the saving is not visible, which is a different claim.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The instrument carries its own null per row, both arms, all twenty passing and spanning
+0.9812-1.0088 -- a worst null bias of 1.88 pct. Every effect this row declines to claim (3.2 pct)
+is within a factor of two of that null bias, which is the second independent reason not to claim
+it. No CV gate was used; admissibility is the harness's own `effect_gt_null_bias` test, and every
+row above passed it.
+
+### PROVENANCE
+
+  ELF           fr `1997c099ffb0ca5eab7fd21b3f27e1ff46760c2a6185000156531573f5e8ad47`
+  bench_elf_sha256=1997c099ffb0ca5eab7fd21b3f27e1ff46760c2a6185000156531573f5e8ad47
+  incumbent     vendored `legacy_redis_code/redis/src/redis-server`, measured in the SAME
+                INVOCATION as fr, control re-measured alongside every row.
+  harness       `scripts/balanced_square_ab.py` sha `bd2266b51e95ec14`, `--rounds 36`,
+                `--expect-elf` asserted against the fr binary at launch.
+  host          /data 88G free, checked immediately before the build. Per-arm: loadavg
+                8.72 11.27 11.01 and CPU 2444 MHz at the opening arm, loadavg 8.02 8.36 9.68 and
+                CPU 1429 MHz at the closing arm. Zero cargo/rustc at launch, verified by process
+                name.
+  pair          Single-invocation square; no paired build, so no build-stability claim is made or
+                needed. Peer files were uncommitted in `crates/fr-store` and `.beads` throughout
+                and NONE were built into this ELF, which was built from `git archive HEAD` into a
+                private tree.
+  disposition   MEASUREMENT ONLY. No source file changed.
+
+### RETRY PREDICATE
+
+1. Do NOT re-derive any banked control-normalised standing on account of `da47c18ca`. The divisor
+   is measured unmoved.
+2. Do NOT open a lever on `zrandmember` or `getbit` from THIS row. A 3.2 pct normalised effect on
+   a divisor with 6.29 pct spread and a 1.88 pct null bias is not a target. Re-open only with an
+   instrument whose normaliser is narrower than the effect -- instructions, two-point subtracted,
+   is the one that qualifies.
+3. The `getbit` cycles second draw is still owed and this row does not supply it.
+4. Before quoting ANY control-normalised figure from this family, check how many control draws it
+   rests on. One draw buys about 6 pct of resolution, not the 2-4 pct the row's own CI advertises.
