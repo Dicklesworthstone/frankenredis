@@ -4463,6 +4463,22 @@ impl ListValue {
     /// default `-2` budget. `lp_before_command` is the list's `lpBytes`
     /// snapshotted BEFORE the command's pushes; `raw_add` is the sum of the RAW
     /// byte lengths of the newly-added elements. (frankenredis-rc49s)
+    /// (frankenredis-qj6jn) Adopt the CURRENT `list-max-listpack-size` BEFORE a batch is pushed.
+    ///
+    /// `note_command_grow` sets `self.fill` too, but it runs AFTER the push loop, so a
+    /// multi-value command chunks its whole batch against whatever fill the value happened to
+    /// carry — the default `-2` on a fresh key. Upstream pushes into a quicklist already
+    /// configured with the server's current value, so adopting it up front is the faithful
+    /// order, not merely a convenient one.
+    ///
+    /// Measured: `LPUSH k a b c ...` of 300 elements at `list-max-listpack-size 128` chunked
+    /// against the 8 KiB default budget, and the resulting chunks were then refused by the DUMP
+    /// path for exceeding the real budget, sending the list to the forward accumulator that
+    /// reverses its node order.
+    pub fn adopt_fill(&mut self, fill: i64) {
+        self.fill = fill;
+    }
+
     pub fn note_command_grow(&mut self, lp_before_command: u64, raw_add: u64, fill: i64) {
         self.fill = fill;
         self.decided_by_write = true;

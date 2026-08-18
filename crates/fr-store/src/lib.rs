@@ -17601,6 +17601,10 @@ impl Store {
                         // redis decides listpack→quicklist ONCE per command over
                         // the batch's raw total (frankenredis-rc49s).
                         let lp_pre = l.listpack_byte_len();
+                        // (frankenredis-qj6jn) Chunk the batch against the CURRENT fill, not
+                        // whatever this value was last told; `note_command_grow` below only
+                        // learns it after the loop.
+                        l.adopt_fill(self.list_max_listpack_size);
                         let mut raw_add = 0u64;
                         for v in values {
                             let bytes = v.as_ref();
@@ -17630,6 +17634,7 @@ impl Store {
             }
             None => {
                 let mut l = ListValue::default();
+                l.adopt_fill(self.list_max_listpack_size);
                 let mut raw_add = 0u64;
                 for v in values {
                     let bytes = v.as_ref();
@@ -74742,6 +74747,62 @@ mod tests {
         assert_eq!(
             store2.lrange(b"l", 0, -1, 100).unwrap(),
             vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+    }
+
+    /// (frankenredis-qj6jn) A MULTI-VALUE LPUSH must chunk against the CURRENT fill, not the one
+    /// the value happened to be carrying.
+    ///
+    /// `note_command_grow` adopts `list-max-listpack-size` — but it runs AFTER the push loop, so
+    /// `LPUSH k a b c ...` chunked its whole batch against the default `-2` (8 KiB) on a fresh
+    /// key. Those chunks then exceeded the real budget, the DUMP path refused them, and the
+    /// forward accumulator emitted the node order REVERSED. The one-at-a-time path never showed
+    /// it because the fill is already correct from the second command onward.
+    ///
+    /// Measured against vendored redis 7.2.4 at `list-max-listpack-size 128`, 300 elements in ONE
+    /// LPUSH: redis [755 2183 2183], fr [2183 2183 755]. Closing this took the workload sweep
+    /// from 8 of 42 diverging to 4, leaving only the history-dependent queue family.
+    #[test]
+    fn bulk_lpush_chunks_against_the_current_fill_qj6jn() {
+        fn first_node_smaller(store: &mut Store, key: &[u8]) -> bool {
+            let payload = store.dump_key(key, 100).unwrap();
+            assert_eq!(payload[0], RDB_TYPE_LIST_QUICKLIST_2);
+            let data_end = payload.len() - DUMP_TRAILER_LEN;
+            let (count, consumed) = decode_length(&payload, 1).unwrap();
+            assert!(count > 1, "precondition -- must be multi-node");
+            let mut cursor = 1 + consumed;
+            let mut sizes = Vec::new();
+            for _ in 0..count {
+                let (_c, consumed) = decode_length(&payload, cursor).unwrap();
+                cursor += consumed;
+                let (blob, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+                cursor += consumed;
+                sizes.push(blob.len());
+            }
+            sizes[0] < sizes[1]
+        }
+
+        let items: Vec<Vec<u8>> = (0..300)
+            .map(|i| format!("vvvvvvvvvv{i:05}").into_bytes())
+            .collect();
+
+        // ONE command, fresh key.
+        let mut store = Store::new();
+        store.list_max_listpack_size = 128;
+        store.lpush(b"bulk", &items, 100).unwrap();
+        assert!(
+            first_node_smaller(&mut store, b"bulk"),
+            "bulk LPUSH must keep its PARTIAL node FIRST, like the incremental path"
+        );
+
+        // ONE command onto an EXISTING key takes the other branch; it must agree.
+        let mut store = Store::new();
+        store.list_max_listpack_size = 128;
+        store.lpush(b"grow", &items[..10], 100).unwrap();
+        store.lpush(b"grow", &items[10..], 100).unwrap();
+        assert!(
+            first_node_smaller(&mut store, b"grow"),
+            "bulk LPUSH onto an existing key must chunk against the current fill too"
         );
     }
 

@@ -50211,6 +50211,7 @@ RETRY PREDICATE:
      predicate. This row exists because I did not.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: CORRECTION — "TWO NEW DEFICITS" overstated what a control-normalised figure says: fr uses FEWER cycles than the incumbent on `pttl` on two hardware draws. And the implied-IPC method I called validated is off by 21 pct here
 
 TWO CLAIMS OF MINE ARE WITHDRAWN, both from rows landed within the last two turns.
@@ -50283,3 +50284,78 @@ row in these groups. Do NOT use the inferred-IPC arithmetic across instruments; 
 directly with the `perf stat` invocation in `2ff051637`, which costs one run. `publish`,
 `expiretime` and `getbit` still have NO cycle measurement and should not be described as deficits
 until they do.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: PARITY FIX — a multi-value LPUSH chunked its batch against the DEFAULT fill because `note_command_grow` adopts it only AFTER the push loop; workload sweep 8 of 42 diverging → 4, leaving only the history family (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: differential behaviour against a live vendored redis 7.2.4 in the same probe
+invocation, compared at NODE-TABLE level, with three prior sweeps re-run as regressions. No
+timing verdict is claimed, no instruction counts are quoted, and CV was NOT used, as a gate or
+otherwise. This row banks no vs-incumbent ratio. Campaign output: no.
+
+`de5fd317d` left four `LPUSH bulk` rows still reversed and called them a BUILDER problem rather
+than a DUMP problem. That was right, and the builder problem is an ORDERING one.
+
+### THE FILL ARRIVES ONE STEP TOO LATE
+
+`ListValue::note_command_grow` adopts `list-max-listpack-size` — it opens with `self.fill = fill`
+— but `lpush_impl` calls it AFTER the push loop. So a multi-value `LPUSH k a b c ...` chunks its
+entire batch against whatever fill the value was already carrying, which on a fresh key is the
+`-2` default (8 KiB). Those chunks then exceed the REAL budget, the DUMP path refuses them, and
+the forward accumulator emits the node order reversed.
+
+    fill 128, 300 elements in ONE LPUSH   redis [755 2183 2183]   fr [2183 2183 755]
+
+  The one-at-a-time path never showed this because the fill is already correct from the second
+  command onward — which is exactly why `de5fd317d` closed that family and not this one.
+
+  The fix is `ListValue::adopt_fill`, called before both LPUSH loops. It is not a convenience:
+  upstream pushes into a quicklist already configured with the server's current value, so
+  adopting it up front is the faithful ORDER.
+
+### THE ARC, AND WHAT IS LEFT
+
+    workload sweep       23 of 42  ->  8 (`de5fd317d`)  ->  4 (this row)
+      LPUSH one-at-a-time, stack, alternating     closed by `de5fd317d`
+      LPUSH bulk (4 shapes)                       closed here
+      queue RPUSH+LPOP (4 shapes)                 REMAIN
+
+  The four survivors are the history-dependent family and nothing else:
+  fr [4087 4087 2047] against redis [1537 4087 4087 517]. Not a reversal, not a fill problem —
+  redis's nodes record WHERE each element was added and fr's record the current contents. That is
+  the representation change `9af5168f0` described, and it is now the ONLY thing left in this
+  sweep.
+
+    REGRESSIONS, all re-run against the same binary: mutation sweep 3 of 14 UNCHANGED; restore
+    idempotence still holds on all three shapes; fr-store 935 and fr-persist 227, 0 failures;
+    clippy clean.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = d7ca6e28f844845b5a45e12ba5011fefb93cab72078900244fe1e7ff93cb2bf5
+                — `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1, build log
+                checked for BOTH `^error` and rch refusals: 0 of each. ONE build this turn under
+                the one-per-project rule. `df` run immediately before it; /data 98G, the lowest
+                of this campaign and still well above the 42G floor.
+  probes        scratchpad `workload_shapes_probe.py` (the lever's oracle),
+                `prefix_mutation_probe.py` and `restore_roundtrip_probe.py` (regressions).
+  incumbent     vendored redis 7.2.4, booted per probe on a free port with its own temp dir; fr
+                and redis in the SAME invocation.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 19:21,
+                loadavg 6.55/8.58/9.83, CPU idle 89 pct as briefed. Recorded for completeness:
+                this row's evidence is byte equality, immune to load.
+
+RETRY PREDICATE:
+  1. ONLY the queue/history family remains in this sweep, and it needs the node-boundary
+     representation, not another ordering fix. Before building it, re-read `36ab77cc4`'s cost
+     argument: four shapes out of forty-two, all requiring RPUSH-then-LPOP churn past the
+     conversion threshold. That is a much weaker case for a representation change than the 23 of
+     42 that justified this arc, and "record the limit and stop" is a legitimate answer here in a
+     way it was not then.
+  2. `LINSERT BEFORE mid` in the MUTATION sweep is still fr [2132 2139] vs redis [2139 2132] —
+     an exact reversal that neither of this arc's two ordering fixes touched. It is the cheapest
+     remaining lead and is NOT covered by the workload sweep.
+  3. Check whether RPUSH has the same late-fill ordering bug. It does not SHOW in the sweep,
+     because back-chunking against too large a budget still yields boundaries the DUMP path
+     accepts — but "does not show" is not "is not there", and `rpush_owned` calls
+     `note_rpush_command_grow` after its loop exactly as `lpush_impl` did.
