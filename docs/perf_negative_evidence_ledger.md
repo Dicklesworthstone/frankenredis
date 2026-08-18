@@ -59109,7 +59109,14 @@ same list. Behavioural check against Redis 7.2.4 as oracle, three runs each afte
                 DISCLOSED: one frankenredis cargo was observed at the launch of the BEFORE build
                 and may have overlapped its tail. Instructions are load-immune, so this does not
                 affect the numbers, but it is recorded rather than omitted.
-  disposition   SHIPPED.
+  disposition   MEASURED AND HELD, not yet shipped. The pre-commit guard refused the code
+                against an exclusive reservation on BOTH `crates/fr-store/src/lib.rs` and
+                `crates/fr-runtime/src/lib.rs` held by BrownIbis to 15:32:49Z, and the guard
+                was NOT overridden. The diff is preserved as
+                `RECOVERY_CrimsonHawk_numkeys_trio.patch` and as blobs
+                `ef530e119dc7628a6ebeda4e7917adfd68b506e1` (fr-store) and
+                `60c2f65dbda9ac6bb0312d680ce2821f718ee649` (fr-runtime). This row records the
+                MEASUREMENT, which stands regardless of when the code lands.
 
 ### RETRY PREDICATE
 
