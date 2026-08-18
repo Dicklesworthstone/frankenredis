@@ -58314,3 +58314,109 @@ a 128-element one. That is a STEP, not a slope. Bracketing it:
      representation is what lets a retained listpack hand out borrowed spans (`84fca03ad`).
   3. Both numbers are from ONE binary at 15-byte elements. The argv threshold should not depend on
      element size — it counts entries, not bytes — but that is an expectation, not a measurement.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: COMPETITIVE, REPLICATED — six MORE shapes, weakest worst-of-two **1.0959x** on `sismember`, bringing this vein to **FOURTEEN replicated shapes** where fr leads Redis 7.2.4 (`frankenredis-getexgate`)
+
+Claim class: COMPETITIVE
+Campaign output: **yes** — vs-incumbent ratios, both engines in the SAME invocation, replicated
+across two draws each, worst of the two quoted.
+
+This certifies the SECOND half of the commandstats vein — the shapes whose gains were measured in
+instructions but never against the incumbent. All eight were verified to reach the converted call
+sites BEFORE measuring: `hexists`, `sismember`, `zscore`, `hstrlen` via literal->slot, `zrank`
+via the enum seam, `lpos` and `memory_usage` via the map conversion.
+
+### THE REPLICATED STANDING — WORST OF TWO DRAWS
+
+| shape | draw 1 worst | draw 2 worst | **worst of two** |
+|---|---|---|---|
+| hstrlen | 1.1191 | 1.1176 | **1.1176** |
+| memory_usage | 1.1142 | 1.1154 | **1.1142** |
+| get_control | 1.1390 | 1.1068 | **1.1068** |
+| lpos | 1.1023 | 1.1198 | **1.1023** |
+| zrank | 1.0966 | 1.1021 | **1.0966** |
+| sismember | 1.1092 | 1.0959 | **1.0959** |
+
+Six replicated, fr ahead on every one in both draws. **Weakest: `sismember` at 1.0959x.**
+
+### COMBINED WITH THE `unswept` STANDING
+
+That row replicated eight shapes (`hget` 1.1229, `strlen` 1.0893, `ttl_nonvolatile` 1.0889,
+`llen` 1.0862, `type` 1.0847, `scard` 1.0831, `hlen` 1.0777, `zcard` 1.0744). With these six:
+
+**FOURTEEN replicated shapes, fr ahead of Redis 7.2.4 on every one, across four independent
+draws. The weakest worst-of-two bound anywhere in the set is `zcard` at 1.0744x** — fr does at
+least 7.44 pct more ops/s than the incumbent on the weakest shape at the low end of its interval
+in the worse of its two draws.
+
+### TWO SHAPES EXCLUDED, AND A PATTERN FORMING
+
+  `zscore`   NULL-FAILED in BOTH draws — **and on OPPOSITE arms**: draw 1 failed the fr side at
+             0.9765, draw 2 failed the redis side at 1.0271. A shape that fails on either arm
+             depending on the run is unstable in itself, not in one engine. Its ratios (1.1259,
+             1.1394) are NOT results and are not quoted.
+
+  `hexists`  NULL-FAILED draw 1 (fr side, 0.9794), ADMISSIBLE draw 2. One admissible draw is not
+             a replication, so it is excluded rather than quoted at 1.1037.
+
+**`zscore` joins `getrange` as a shape this instrument cannot hold still.** `getrange` failed
+twice on the redis side within 0.0008; `zscore` failed twice on alternating sides. Two of the
+eighteen shapes measured across this vein are systematically inadmissible, which is a property of
+the shapes on this harness and worth knowing before anyone spends a window on them.
+
+### `get_control` IS INTERMITTENT, NOT UNIFORMLY BROKEN
+
+It null-failed in `unswept` draw 2 at 1.0346 and is admissible in BOTH draws here, replicating at
+1.1068. So the earlier reading — that it is the noisiest shape in the campaign — stands, but the
+failure is INTERMITTENT rather than systematic. It is quoted here as one of the six because it
+earned admissibility twice; it is still not used as a normaliser anywhere in this vein, and the
+retirement of it as a reliable divisor is unchanged.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Per-row A/A on BOTH engines, in the SAME INVOCATION as the A/B, pooled over each draw's 16 nulls:
+
+    draw 1   **A/A null median 0.996950; bootstrap 95% median CI [0.986200, 1.004100]**, widest 2.350 pct
+    draw 2   **A/A null median 1.002900; bootstrap 95% median CI [0.996900, 1.008700]**, widest 2.710 pct
+
+20,000 resamples each. The weakest replicated effect (`sismember`, 9.59 pct at its worst bound)
+is 3.5x the wider of the two widest deviations. CV was not used, as a gate or otherwise; the
+bootstrap median-CI is the gate, admissibility is the harness's per-row null test, and an effect
+inside that interval is not claimed.
+
+Consistent with the finding banked on the `unswept` pair: draw 2 ran at 11 pct of capacity
+against draw 1's 8 pct, and the QUIETER draw again produced the NARROWER median but a WIDER
+tail. Window quietness is not the lever on this instrument's residual variance.
+
+### PROVENANCE
+
+  ELF           fr `114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f`
+  bench_elf_sha256=114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+                BYTE-IDENTICAL across all four draws of this vein (10,890,064 bytes, full
+                SHA-256 verified before each pair).
+  redis_elf_sha256  e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  incumbent     Redis 7.2.4 `v=7.2.4 sha=d2c8a4b9:0 malloc=jemalloc-5.3.0 bits=64`, vendored,
+                measured in the SAME INVOCATION as fr in each draw.
+  host          thinkstation1, kernel 6.17.0-41-generic, 64 cores, governor powersave, avx2.
+                draw 1 loadavg 5.39 6.81 8.33 (**8 pct** of 1-min capacity), MHz mean 2361 ->
+                2602; draw 2 loadavg 7.25 7.12 8.01 (**11 pct**), MHz mean 2384 -> 2189.
+  threads       fr 3 observed, redis 5 observed, both draws.
+  allocator     fr mimalloc vs redis jemalloc-5.3.0 — both SHIPPING configurations.
+  builds        ZERO frankenredis builds in flight for either draw, verified by process name AND
+                by project. NO BUILD was performed for this row — artifact reuse throughout.
+  disposition   MEASUREMENT. No source file changed.
+
+### RETRY PREDICATE
+
+1. These six are REPLICATED and quotable at their worst-of-two bounds. Re-open a shape only if it
+   measures BELOW its bound in a window at or under 11 pct of capacity.
+2. Do NOT spend a window on `zscore` or `getrange` expecting a standing. Both are systematically
+   inadmissible on this harness — `zscore` on alternating arms, `getrange` twice on redis within
+   0.0008. Characterise the instability first or pick another shape.
+3. `hexists` needs ONE more draw. It was admissible once at 1.1037 and is excluded only for want
+   of a replicate; it is the cheapest addition to this standing.
+4. `get_control` may be quoted as a measured shape where it replicates. It may NOT be used as a
+   normaliser — that retirement rests on its instruction-instrument behaviour and on the
+   `unswept` draw-2 failure, neither of which this row disturbs.
