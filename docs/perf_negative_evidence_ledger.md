@@ -54202,3 +54202,95 @@ caught a mistake:
      instructions per integer entry if you need a number before someone measures those.
   3. A list of STRINGS is unaffected by construction — the arm never runs — and was not measured
      as an A/B here. If a future row needs that null, take it; do not infer it from this one.
+
+## 2026-08-18 CrimsonHawk: SELF-SPEEDUP evidence for the const-length ARRAY header shipped in `6c76dfe52` — +27.2 on ZRANGE, +28.6 on MGET, memcpy 1.0010 -> 0.0005 calls/op, with a three-digit fall-through control (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — no fr/Redis ratio was taken for this change, so nothing here is a
+competitive claim. The row exists because the code landed in a commit that carries none of its
+measurement, and the numbers, controls and provenance would otherwise be unrecoverable.
+
+### WHY THE CODE AND ITS EVIDENCE ARE IN DIFFERENT PLACES
+
+I measured this change and left it in the working tree while writing it up. A peer committed the
+shared file in that window and swept it in as `6c76dfe52`, with a one-line message. The code is
+correct and intact — I verified the nested form byte for byte in `HEAD` — but the evidence below
+was in my commit message, which never ran. Recording it here rather than re-landing anything.
+
+### THE DEFECT
+
+`push_len_header` builds `*N\r\n` in a stack buffer and emits `&buf[pos..24]` — a RUNTIME-VARIABLE
+length, which rustc lowers to a `memcpy` CALL. Measured at **1.000 calls/op** on `zrange_plain`.
+The call's size-dispatch preamble dwarfs a four-byte header.
+
+`encode_bulk_string_slice_impl` ALREADY does exactly this for the per-element `$<len>\r\n` headers
+(`frankenredis-vlis9`). The ARRAY header sitting beside it was left on the slow shape, so every
+multi-element reply — LRANGE, HGETALL, SMEMBERS, ZRANGE, MGET — paid it once per reply.
+
+### MEASURED
+
+Paired build one change apart, three replicates, `--fr-only`:
+
+  shape          before                      after                      worst  median
+  mget_3        2731.6 2733.8 2735.5        2705.7 2705.2 2704.6       +25.9  +28.6
+  zrange_plain  2207.0 2208.9 2203.7        2179.8 2180.7 2171.7       +23.0  +27.2
+  sinter_128    370944.4 370906.0 370889.2  370993.4 370922.9 370906.3 -104.2  -16.9
+  llen          1175.0 1177.5 1177.2        1176.9 1177.1 1176.5        -2.1   +0.3
+  sinter_9      11511.4 11497.8 11531.5     11510.4 11504.5 11531.6     -33.8   +1.0
+  sinter_2      4044.4 3961.5 4012.5        4016.2 4017.9 3966.9       -56.4   -3.7
+
+### COUNTED MECHANISM
+
+`memcpy` goes **1.0010 -> 0.0005 calls/op** on `zrange_plain`, same ELF pair. That is the binary
+acceptance test; noise cannot produce it.
+
+### THE TWO CONTROLS, AND THE TWO SHAPES THAT PROVE NOTHING
+
+`llen` has no array header at all and does not move (+0.3 median). `sinter_128` has a THREE-DIGIT
+header, so it falls through the new arms — the fall-through control that the two preceding rows in
+this vein LACKED — and moves -16.9 on 370,900 instr/op, 0.005 pct. Nothing is taxed to buy this.
+
+NOT CLAIMED: `sinter_2` and `sinter_9`. Both are on the changed path and neither resolves the
+effect — `sinter_9` is 11,500 instr/op where +27 is 0.23 pct, and `sinter_2`'s before arm spans
+82.9 this run. They are listed as measured rather than dropped, and no gain is claimed from them.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The instrument carries its own null, measured in a single invocation of the same harness on one
+ELF and one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios, banked in `0bf781d57`. On a ~2200
+instr/op shape that interval is about +/-8.7, so the +27.2 median on `zrange_plain` clears it by
+roughly 3x, and the flat controls sit inside it.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above, and
+an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           AFTER `4a16b4242e7c86ea774a7f973ecf0dfd6b66493292cd43527d15d764151273ec`,
+                BEFORE `f2940214f9248909126d65ce5d4c705133c4f2cbf0ab7fc756993eee4e9799db`.
+  bench_elf_sha256=4a16b4242e7c86ea774a7f973ecf0dfd6b66493292cd43527d15d764151273ec
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` sha `e8e743a90d08c490`, captured at both ends of
+                the run and unchanged; `scripts/call_count_delta.py`.
+  host          /data 84G free, checked immediately before the build. loadavg 7.77 8.48 9.61 at
+                build time, CPU idle 86-89 pct, iowait 0, zero peer frankenredis builds verified
+                by process args.
+  pair          HEAD held (`4c0e7cadc` both ends), ZERO uncommitted peer files at both ends, both
+                AFTER ELFs BIT-IDENTICAL with BEFORE distinct, every build's exit status checked
+                before its binary was copied.
+  gates         `cargo test -p fr-protocol -p fr-runtime -p fr-server`, 1439 passed, 0 failed.
+
+### RETRY PREDICATE
+
+1. Reopen if `memcpy` returns to ~1.0 calls/op on `zrange_plain` or `mget_3` — cheaper than any
+   ratio and it needs no incumbent arm.
+2. Do NOT split the nested test into two sequential `if`s. A value of 100 or more then falls
+   through two comparisons instead of one, and the preceding row in this vein measured that exact
+   shape costing +7.1 on a fall-through shape.
+3. Remaining sites from the same census, none fixed: `get_control` via
+   `encode_bulk_string_slice` (1.000, genuinely variable PAYLOAD), `set_same` via
+   `canonical_string_value_from_slice` (1.000), `type` via the keymeta `_into` executor (1.000),
+   `object_encoding` via `Store::object_encoding` (1.000), `substr` via `RespFrame::encode_into`
+   (2.000), `mget_3` via `integer_decimal_bytes` (3.000), `hmset_2` via
+   `PackedStrMap::insert_borrowed` (4.000).
