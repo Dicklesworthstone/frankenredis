@@ -45003,3 +45003,89 @@ and an effect inside that interval is not claimed.
    is the floor below which the asymptote has not moved.
 4. Re-run the ladder, not a single size. `fcall_lib1` alone reads 3.5988x and would have been
    filed as a modest gap; the same code reads 55.3x at 32 functions.
+
+## 2026-08-18 BrownIbis: REJECT — handing the classifier's header cursor back saves GET **-3.0 instr/op** and costs **+8.0 to +9.5 on every other command**, because the out-param is paid by all and the saving accrues to one (`frankenredis-iqicb`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: publish the floor tokenizer's header cursor as a `usize` out-param so GET's cascade arm
+stops re-walking `*2\r\n$3\r\nGET\r\n`. NOT SHIPPED. Specified across six build-hold turns on
+this bead (`241b10e86`, `ae2ae03c5`, `e6d4e7f0f`, `e1cd8dcf3`) with a predicted ~20-25 instr/op
+and an explicit instruction to expect a REJECT. The prediction was wrong by an order of
+magnitude on the benefit and right about the mechanism of the risk.
+
+MEASURED, callgrind two-point (N=20,000 and 2N=40,000), both arms from a worktree pinned at
+HEAD `7860d231d` differing only in this change.
+`bench_elf_sha256=4cf777a8371b9ff7bb99834c5aeef624b54053b77f3891b8b390e4ed2046a81e` (before),
+`bench_elf_sha256=54c4900996046eefdbed3fd271837b9a84a4321023ad6658abb89a226327da8c` (after). Per-arm host state: load 11.94/9.27/8.26 then
+7.54/8.83/8.45, CPU idle 86.0 pct then 88.4 pct measured from `/proc/stat`, iowait 0.1 then
+0.0 pct, mean 2370-2523 MHz across 64 cores, /data 132G falling to 131G. Instruction counts
+are software-counted and immune to load and MHz.
+
+| shape | dispatch before | after | delta | role |
+|---|---|---|---|---|
+| get | 401.0 | 398.0 | **-3.0** | the beneficiary |
+| ttl | 481.0 | 489.0 | **+8.0** | classified — pays, gains nothing |
+| sadd | 595.6 | 605.1 | **+9.5** | classified — pays, gains nothing |
+| ping | 300.0 | 308.0 | **+8.0** | never reaches the GET arm — pays, gains nothing |
+
+**THE SHAPES I REGISTERED AS NULLS ARE THE COST SIDE.** That is the whole result. The cursor is
+written inside `classify_borrowed_dispatch_floor_packet_impl`, which runs at 1.000 calls/op on
+EVERY command, so every command pays the extra parameter and the store; only GET reads it.
+Quoting the WORST bound, this is **+9.5 instr/op on SADD**, and the mix is negative on any
+workload that is not essentially all GET.
+
+WHY THE BENEFIT WAS 3 AND NOT 25. The removed work -- an 8-byte `strip_prefix`, a CRLF check
+and two decimal re-parses -- is real, but the replacement is not free: a cursor-value test, an
+arity-digit test and a case-insensitive 3-byte name compare, plus the `.or_else` fallback arm
+that must still exist. Reading a prologue and counting its steps predicted the gross cost and
+ignored the substitute, which is the error to take away: **an estimate from reading is an
+estimate of what is REMOVED, not of what is SAVED.**
+
+THIS IS THE THIRD MEASUREMENT OF THE SAME CONSTANT, and it is now a rule rather than an
+anecdote. Adding a parameter to this dispatch path costs on the order of 8-16 instr/op on
+EVERY command:
+
+    getexgate threading `Option<bool>` through predicates      +16.0 on GET's dispatch
+    my `Option<ParserConfig>` per-batch cache (`5509645aa`)    +5.9 to +7.0 on five shapes
+    this cursor out-param                                      +8.0 to +9.5 on three shapes
+
+Every one of the three removed real work and still lost. **Before threading anything new
+through `classify_borrowed_dispatch_floor_packet_impl` or `try_dispatch_floor_classified_action`,
+budget ~8-16 instr/op per command against it** -- a lever must clear that on the COMMON path,
+not on one command.
+
+CORRECTNESS was not the problem, and is recorded so the design is reusable if the economics
+ever change: 14 GET forms answer byte-identically on both arms -- upper, lower and mixed case,
+missing key, a 200-byte key, both arity errors, and the near-misses that the `header_end == 13`
+test could confuse (`TTL key` and `DEL key` have byte-identical 13-byte headers, and
+`SOMETHINGGET` ends in the three bytes the name test reads). `.text` grew 896 bytes.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run
+interleaving both arms across two rounds, so drift falls on both alike. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this
+row; no CV was computed. Host state is likewise provenance, not a gate. The whole-process
+totals were useless here exactly as predicted -- GET read 1164.7/1250.2 before and
+1217.2/1218.6 after, spanning the effect several times over -- so the verdict rests on the
+dispatch FRAME, whose figures are exact integers (`get` 401.0 reproduces the value measured on
+two earlier days at two earlier bases).
+
+RETRY PREDICATE: reopen this surface ONLY IF the per-command parameter tax measured on its own falls below 3.0 instr/op. That is one build with no lever attached: add an UNUSED `&mut usize` parameter to `classify_borrowed_dispatch_floor_packet_impl` and `try_dispatch_floor_classified_action`, write nothing to it, and read the dispatch FRAME on `ttl`, `sadd` and `ping`; if that tax still measures 8-16 instr/op the surface stays closed, and if it clears 3.0 the same null also re-prices every other lever on this path. Do NOT retry this on another command. The saving is bounded by one arm's
+prologue while the cost is levied on all commands, so widening it to the classified arms makes
+the arithmetic WORSE, not better -- their prologues are the same size and they would each still
+pay the +8 to +9.5. The only version that could pay is one where the cursor costs NOTHING to
+publish, i.e. where it is already in a register the arm can reach without a parameter -- which
+is a codegen accident, not a design. **The re-parse duplication documented in `241b10e86` is
+real and remains unfixed; this row closes the out-param route to fixing it.**
+
+MEASURABLE CONDITION FOR REOPENING THIS SURFACE, and it is one build with no lever attached:
+add an UNUSED `&mut usize` parameter to `classify_borrowed_dispatch_floor_packet_impl` and
+`try_dispatch_floor_classified_action`, write nothing to it, and read the dispatch FRAME on
+`ttl`, `sadd` and `ping`. That isolates the per-command parameter tax from any saving. **Reopen
+only if that tax measures below 3.0 instr/op on all three** -- at which point a prologue lever
+worth ~3 on GET could clear it, and the same null also re-prices every other lever on this path.
+If the tax still measures 8-16, no amount of prologue trimming on one command can pay for it and
+this surface stays closed.
