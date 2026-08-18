@@ -13390,18 +13390,37 @@ fn function_cmd(
         // its own message and line) and BEFORE `function_load`, so a body that raises
         // leaves the store untouched exactly as a failed recompile does.
         //
-        // Registration itself still goes through `store.function_load`'s scan; the names
-        // collected here are not yet authoritative. Replacing the scan with them is a
-        // separate change with its own parity surface (FUNCTION LIST/DUMP ordering), and
-        // bundling it here would put two behaviour changes behind one differ run.
-        if let Err((line, message)) =
-            lua_eval::function_load_execute(store, now_ms, &argv[code_idx])
-        {
-            return Err(CommandError::Custom(format!(
-                "ERR Error registering functions: ERR user_function:{line}: {message}"
-            )));
-        }
-        match store.function_load(&argv[code_idx], replace) {
+        // (frankenredis-9hori) THE REGISTRATIONS COLLECTED HERE ARE NOW AUTHORITATIVE, replacing
+        // `store.function_load`'s source-text scan. The scan required string and function
+        // LITERALS in `register_function`'s argument positions, so a name or callback held in a
+        // LOCAL was invisible to it and fr FALSELY REJECTED a library that 7.2.4 loads:
+        //
+        //     local n = 'dyn'; register_function(n, fn)          fr: ERR ... must be string
+        //     local n = 'a'..'b'; register_function(n, fn)       fr: ERR ... must be string
+        //     local cb = function() end; register_function('f', cb)  fr: ERR ... must be function
+        //
+        // all three OK on the incumbent. That direction matters: a false REJECTION loses
+        // libraries on a migration, where a false acceptance would only gain them.
+        //
+        // Upstream registers whatever `redis.register_function` was actually called with at
+        // runtime (function_lua.c::luaRegisterFunction), which is what executing the body
+        // already gives us — the specs were simply discarded before.
+        //
+        // The validation that follows is unchanged and still shared: `finish_function_load`
+        // applies the name CHARSET gate, upstream's `ERR No functions registered` for a library
+        // that registers nothing (functions.c:1005) and `ERR Function <name> already exists` for
+        // a cross-library clash (functions.c:367), to names however they were obtained.
+        let specs = match lua_eval::function_load_execute(store, now_ms, &argv[code_idx]) {
+            Ok(specs) => specs,
+            Err((line, message)) => {
+                return Err(CommandError::Custom(format!(
+                    "ERR Error registering functions: ERR user_function:{line}: {message}"
+                )));
+            }
+        };
+        let registrations: Vec<fr_store::FunctionEntry> =
+            specs.iter().map(|spec| spec.to_function_entry()).collect();
+        match store.function_load_with_registrations(&argv[code_idx], replace, &registrations) {
             Ok(name) => Ok(RespFrame::BulkString(Some(name.into_bytes()))),
             Err(e) => Err(CommandError::Store(e)),
         }
