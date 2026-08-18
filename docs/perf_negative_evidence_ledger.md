@@ -59709,3 +59709,131 @@ row does not test it. What is measured is that the cost does not appear at this 
      is chunked but has just crossed 129, where the chunk still holds ~128 entries.
   2. Do not treat B and C as covering the single-chunk case by name until the chunk count can be
      observed. The measurement is sound; the label would be an overstatement.
+
+## 2026-08-18 CrimsonHawk: CERTIFIED — fr is AHEAD of redis 7.2.4 on string list RESTORE+DUMP at a worst bound of 0.9115x, with the window gate FIT at BOTH ends of one run, and the harness that claimed to check both ends was printing a hardcoded string (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) with a LIVE redis
+7.2.4 arm, both sides in ONE INVOCATION and INTERLEAVED fr / redis / fr / redis per draw so each
+side is bracketed by the other. CV was NOT used, as a gate or otherwise — no coefficient of
+variation appears in this row's decision path and none was computed. No timing verdict is claimed:
+the measurand is a retired-instruction COUNT. No code changed and NO BUILD was run — a build would
+have disqualified the window, and the fr arm is an artifact already on disk.
+
+Claim class: COMPETITIVE. Campaign output: YES. This row closes the retry predicate left by the
+`0.9074x` row above, which asked for one run with the gate FIT at both ends.
+
+### THE GATE HELD AT BOTH ENDS, AND THE RUN PROVED IT AGAINST ITSELF
+
+    OPEN    loadavg 6.63 / 7.24 / 8.00   builds 0   VERDICT for ratio: FIT
+    CLOSE   loadavg 6.61 / 7.20 / 7.97   builds 0   VERDICT for ratio: FIT
+    persisted at /tmp/gate_open_1787065944.txt and /tmp/gate_close_1787065944.txt
+
+Both checks were run BY THE MEASUREMENT INVOCATION, tagged with that invocation's own runstamp, so
+neither can be a file left behind by a different run. The harness prints `BOTH ENDS FIT: True`,
+derived from the two verdicts it actually collected, as its last line.
+
+  fr arm        `99e32657383c8a9ef60468534a02f92f6e7afe76a4f8c68424a2e803ffd1b81b`
+                (release artifact at `e32cc8b71`, the `pop_front_owned` lever)
+  incumbent     `legacy_redis_code/redis/src/redis-server`, vendored 7.2.4,
+                sha256 `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+                — the SAME incumbent sha as the uncertified row above, so the arms are comparable
+
+### WHAT IT READS
+
+    RESTORE+DUMP, 300 elements, fill 128, slope 10 vs 30 keys, distinct keys, fr/redis interleaved
+    ALL-STRING, certified run, three draws:
+
+      draw 1  fr 58633.1 / 58353.1   redis 64161.1 / 64178.1   0.9115x
+              fr A/A +0.480 pct   redis A/A −0.027 pct   idle 92.0 pct  load 6.58/7.22/7.99  MHz 1915
+      draw 2  fr 58287.1 / 58552.2   redis 64503.1 / 64665.1   0.9046x
+              fr A/A −0.453 pct   redis A/A −0.251 pct   idle 92.0 pct  load 6.41/7.17/7.97  MHz 2188
+      draw 3  fr 58164.6 / 58518.2   redis 64112.2 / 64705.2   0.9058x
+              fr A/A −0.604 pct   redis A/A −0.916 pct   idle 91.6 pct  load 6.61/7.20/7.97  MHz 2225
+
+    WORST (largest, least favourable to fr) 0.9115x    best 0.9046x
+    MHz spread on the host 1429-4292 throughout; every draw's own A/A is under 1.0 pct on both arms.
+
+**QUOTED BOUND: 0.9115x.** fr retires ~8.9 pct FEWER instructions per string RESTORE+DUMP than the
+incumbent.
+
+### THE CERTIFIED WINDOW DID NOT FLATTER THE NUMBER
+
+Three runs were taken today, nine draws in total, all on the same two ELFs:
+
+    run 1   gate FIT at open, close NOT verified      0.9045 / 0.9012 / 0.9039
+    run 2   gate UNFIT (2 cargo builds in flight)     0.9040 / 0.9041 / 0.8978
+    run 3   gate FIT at BOTH ends  <- CERTIFIED       0.9115 / 0.9046 / 0.9058
+
+The certified run is the LEAST favourable of the three. Quoting its worst draw therefore costs
+0.7 pct against what an uncertified run would have supported, and 0.9115x is simultaneously the
+certified worst AND the worst of all nine draws — so the replicated-standing bound and the
+certified bound are the same number and there is no tension to adjudicate.
+
+Run 2 is a usable control on the window itself: it ran with two cargo builds in flight and
+reproduced the ratio to within 0.7 pct of the certified run. That is MEASURED insensitivity for
+this specific probe at this margin, not an appeal to the >6 pct rule of thumb in
+`feedback_ir_ratio_resolves_to_0p84_pct_in_a_quiet_window`. It does not license relaxing the gate.
+
+### THE HARNESS CLAIMED TO CHECK BOTH ENDS AND DID NOT
+
+`restore_ratio.py` opened every run by printing the literal string
+`window gate CHECKED AT BOTH ENDS -- see gate_start/gate_end`, unconditionally. It never invoked
+the gate and never wrote those files. The `/tmp/gate_start.txt` and `/tmp/gate_end.txt` it pointed
+at were **three hours stale**, left by the run behind the `0.9074x` row above — so the harness was
+citing that row's UNFIT close as evidence for every later run's window. Its module docstring
+likewise hardcoded "THIS IS SIZING, NOT A CERTIFIED RATIO", which would have mislabelled a
+genuinely certified run in the other direction.
+
+Both are the failure family in `feedback_a_pgrep_pattern_that_matches_the_observer`: **an output
+line that says the same thing regardless of reality is not an observation.** It is worse than
+silence, because it reads as provenance. Fixed: the harness now runs the real gate at open and at
+close, writes a per-invocation gate file tagged with that run's own runstamp, and prints a
+`BOTH ENDS FIT` verdict computed from the two verdicts it collected.
+
+### WHY THIS WAS UNREACHABLE FOR ELEVEN TURNS, AND WHAT ACTUALLY UNBLOCKED IT
+
+The certified ratio has been owed since the gate started refusing. The unblocking fact was not a
+quieter host — it was **timing the run**: `/usr/bin/time` reports ELAPSED 21.54 s for all twelve
+callgrind points, because the workload is 10 and 30 keys and the cost is dominated by valgrind
+boot. A 22-second run fits inside a stationary window with room to spare. Every previous attempt
+polled for FIT and then started a run whose duration was never measured, so the close-gate failure
+looked like host noise rather than a harness that was simply running longer than the window held.
+
+That 22 seconds was itself checked before it was trusted: it looked impossibly fast for twelve
+valgrind points, so the harness was re-run under `time`. It reproduced at 21.54 s AND returned
+different figures (fr 58212.8 to 58077.8, redis 64491.0 to 64409.7), which rules out a cached or
+replayed result. A suspiciously fast measurement is a caching hypothesis until a re-run disagrees
+with itself in the last digits.
+
+### STANDING LAW: b1o02, RESTORE IN ISOLATION FLATTERS REDIS
+
+RESTORE+DUMP is neither isolation nor a read, and this row does not claim it is.
+`project_list_restore_read_breakeven` puts the string break-even at **0.105 reads per RESTORE**
+after the read levers landed, and true isolation reads 3.5145x on integers where RESTORE+DUMP reads
+2.1438x — the DUMP is already doing part of fr's amortising. So 0.9115x describes a workload that
+restores a string list and reads it less than once. **Any workload that reads even once is further
+ahead than this row says**, at 0.4670x on strings. The bound is quoted where it is because it is
+the conservative end, not because it is the operating point.
+
+### WHAT MOVED: NOTHING, AND THAT IS THE ROW
+
+The uncertified row above read 0.9074x on this shape at `9cf845b22`. This certified row reads
+0.9115x at `e32cc8b71`. The two differ by 0.45 pct, INSIDE the 0.84 pct instrument floor for this
+probe, so **no movement is claimed or implied**. The three levers that landed between those
+binaries (`68e1d4990`, `5fe0cff19`, `e32cc8b71`) are read-side and pop-side; none touches the
+RESTORE decode path, and the ratio's refusal to move is consistent with that. The deliverable here
+is the CERTIFICATION of a standing reading, not a change to it.
+
+### RETRY PREDICATES
+
+  1. Certify the other two shapes the same way. MIXED (1.3079x) and ALL-INTEGER (2.1438x) are
+     still uncertified and are the two where fr is BEHIND, so they are the ones a sceptic will
+     press. The 22-second budget makes this cheap: three shapes still fit one stationary window.
+  2. Re-certify if any lever lands on the RESTORE decode path. A draw outside 0.895-0.920x on
+     all-string means something moved; inside that band means the instrument, not the code.
+  3. Audit the other scratchpad harnesses for the same defect. `restore_ratio.py` printed a
+     provenance claim it never computed; the harnesses that share its lineage — `restore_annot.py`,
+     `lrange_annot.py`, `read_ratio_by_len.py` — were copied from the same shape and have NOT been
+     checked for hardcoded window or gate banners.
+  4. Do NOT quote 0.9045x or 0.9040x from runs 1 and 2. They are the more favourable numbers and
+     the less defensible ones; the certified run is the one with provenance.
