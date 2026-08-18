@@ -3273,7 +3273,7 @@ pub fn bench_lzf_compress_table<const HOIST: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, HOIST, true, true, false>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, HOIST, true, true, false, false>(input, out_budget, &mut scratch.borrow_mut())
     })
 }
 
@@ -3292,7 +3292,7 @@ pub fn bench_lzf_compress_literals<const BATCH: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, true, BATCH, true, false>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, true, BATCH, true, false, false>(input, out_budget, &mut scratch.borrow_mut())
     })
 }
 
@@ -3313,13 +3313,33 @@ pub fn bench_lzf_compress_literals<const BATCH: bool>(
 /// XORTAG == true returns slot XOR tag and lets the caller's existing range guard reject
 /// a stale slot. Both arms MUST return byte-identical output -- asserted by
 /// lzf_xor_tag_probe_matches_compare_arm_byte_for_byte.
+/// Same-binary A/B hook for the match-path budget test (slice 6).
+///
+/// TIER == false evaluates the exact test on every match; TIER == true filters with the
+/// cheaper conservative test first, as vendored lzf_c.c does. The exact test still decides
+/// whenever it is reached, so both arms MUST return byte-identical output -- asserted by
+/// lzf_two_tier_match_budget_matches_exact_arm_byte_for_byte.
+#[doc(hidden)]
+pub fn bench_lzf_compress_tier<const TIER: bool>(
+    input: &[u8],
+    out_budget: usize,
+) -> Option<Vec<u8>> {
+    LZF_SCRATCH.with(|scratch| {
+        lzf_compress_dispatch::<true, true, false, false, true, TIER>(
+            input,
+            out_budget,
+            &mut scratch.borrow_mut(),
+        )
+    })
+}
+
 #[doc(hidden)]
 pub fn bench_lzf_compress_xortag<const XORTAG: bool>(
     input: &[u8],
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, true, false, false, XORTAG>(
+        lzf_compress_dispatch::<true, true, false, false, XORTAG, false>(
             input,
             out_budget,
             &mut scratch.borrow_mut(),
@@ -3333,7 +3353,7 @@ pub fn bench_lzf_compress_guard<const GUARD: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, true, false, GUARD, false>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, true, false, GUARD, false, false>(input, out_budget, &mut scratch.borrow_mut())
     })
 }
 
@@ -3672,7 +3692,7 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
     // shape, -258 on incompressible and -91 on run-heavy -- a win on every payload, and
     // bit-identical across three draws. Sound only while in_len < 16 MiB, which is exactly
     // when this table representation is chosen.
-    lzf_compress_dispatch::<SIMD, true, false, false, true>(input, out_budget, scratch)
+    lzf_compress_dispatch::<SIMD, true, false, false, true, true>(input, out_budget, scratch)
 }
 
 /// Choose the match-table representation ONCE per call and hand the compressor a
@@ -3690,6 +3710,7 @@ fn lzf_compress_dispatch<
     const BATCH: bool,
     const GUARD: bool,
     const XORTAG: bool,
+    const TIER: bool,
 >(
     input: &[u8],
     out_budget: usize,
@@ -3707,7 +3728,7 @@ fn lzf_compress_dispatch<
     if HOIST {
         if scratch.use_packed {
             if let Ok(table) = <&mut [u32; LZF_HSIZE]>::try_from(scratch.packed.as_mut_slice()) {
-                return lzf_compress_core::<SIMD, BATCH, GUARD, _>(
+                return lzf_compress_core::<SIMD, BATCH, GUARD, TIER, _>(
                     input,
                     out_budget,
                     &mut LzfPackedTable::<XORTAG>(table),
@@ -3717,7 +3738,7 @@ fn lzf_compress_dispatch<
         } else if let Ok(table) =
             <&mut [LzfHashSlot; LZF_HSIZE]>::try_from(scratch.htab.as_mut_slice())
         {
-            return lzf_compress_core::<SIMD, BATCH, GUARD, _>(
+            return lzf_compress_core::<SIMD, BATCH, GUARD, TIER, _>(
                 input,
                 out_budget,
                 &mut LzfWideTable(table),
@@ -3725,10 +3746,21 @@ fn lzf_compress_dispatch<
             );
         }
     }
-    lzf_compress_core::<SIMD, BATCH, GUARD, _>(input, out_budget, &mut LzfDynTable(scratch), generation)
+    lzf_compress_core::<SIMD, BATCH, GUARD, TIER, _>(
+        input,
+        out_budget,
+        &mut LzfDynTable(scratch),
+        generation,
+    )
 }
 
-fn lzf_compress_core<const SIMD: bool, const BATCH: bool, const GUARD: bool, T: LzfHashTable>(
+fn lzf_compress_core<
+    const SIMD: bool,
+    const BATCH: bool,
+    const GUARD: bool,
+    const TIER: bool,
+    T: LzfHashTable,
+>(
     input: &[u8],
     out_budget: usize,
     table: &mut T,
@@ -3878,7 +3910,25 @@ fn lzf_compress_core<const SIMD: bool, const BATCH: bool, const GUARD: bool, T: 
                 // inner test implies the outer, so collapse to the inner form.
                 // (frankenredis-wmh2p)
                 let vlen = if BATCH { out.len() + lit } else { out.len() };
-                if vlen - usize::from(lit == 0) + 4 >= out_budget {
+                // (frankenredis-qj6jn slice 6) TIER == true is what vendored lzf_c.c does:
+                //
+                //     if (expect_false (op + 3 + 1 >= out_end))   /* faster conservative */
+                //       if (op - !lit + 3 + 1 >= out_end)         /* exact but rare */
+                //
+                // fr computed the EXACT form on every match, and the exact form is the one
+                // that costs: `usize::from(lit == 0)` is a compare and a materialise, plus
+                // a subtraction, once per match.
+                //
+                // The conservative test is sound as a filter because it is WEAKER: it omits
+                // the `- (lit == 0)` term, and subtracting 0 or 1 only makes the left side
+                // SMALLER. So `exact => conservative`, hence `!conservative => !exact`, and
+                // short-circuiting cannot skip a bail. When the cheap test does fire -- near
+                // the budget, which is rare -- the exact test still runs and decides, so the
+                // bail point is bit-identical. It also evaluates the subtraction strictly
+                // LESS often than before, so it cannot underflow where the old form did not.
+                if (!TIER || vlen + 4 >= out_budget)
+                    && vlen - usize::from(lit == 0) + 4 >= out_budget
+                {
                     return None;
                 }
 
@@ -7593,6 +7643,44 @@ mod tests {
                             p.len()
                         );
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lzf_two_tier_match_budget_matches_exact_arm_byte_for_byte() {
+        // Slice 6 puts a cheaper, WEAKER test in front of the exact match-path budget
+        // check. The argument is that `exact => conservative`, so short-circuiting can
+        // never skip a bail -- and the whole argument lives at the budget where the two
+        // tests disagree, which is a single value per payload.
+        //
+        // A sampled budget would step straight over it, so the budget is swept densely,
+        // and the bail point is what is being pinned: `None` is what makes DUMP fall back
+        // to the raw encoding, so moving it by one changes bytes on the wire.
+        for p in lzf_equivalence_payloads() {
+            let hi = p.len() + 8;
+            for budget in 0..=hi {
+                let exact = super::bench_lzf_compress_tier::<false>(&p, budget);
+                let tiered = super::bench_lzf_compress_tier::<true>(&p, budget);
+                assert_eq!(
+                    exact,
+                    tiered,
+                    "two-tier budget test diverged (len={}, budget={budget})",
+                    p.len()
+                );
+                if let Some(encoded) = tiered {
+                    assert!(
+                        encoded.len() <= budget,
+                        "tiered arm overran its budget (len={}, budget={budget})",
+                        p.len()
+                    );
+                    assert_eq!(
+                        super::lzf_decompress(&encoded, p.len()).as_deref(),
+                        Some(p.as_slice()),
+                        "tiered output did not round-trip (len={}, budget={budget})",
+                        p.len()
+                    );
                 }
             }
         }
