@@ -57716,3 +57716,79 @@ Counting CALLS rather than reading source, on the same shape:
      times on every read. It may be the cascade trying shapes in order, in which case
      `project_cascade_arm_order_is_a_lever` already covers the fix; confirm which before treating
      it as a bug.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the vs-incumbent Ir ratio reproduces to 0.84 pct across six draws in a QUIET window, and one draw at 4.6 pct idle sat 6.24 pct off it: the certification gate is right, and here is the number a thin-margin row needs (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir) with a LIVE redis 7.2.4 arm, six
+independent draws of ONE quantity, both arms alternating within each draw, read counts differenced
+at a FIXED key count. CV was NOT used, as a gate or otherwise; none was computed. No timing verdict
+is claimed: the measurand is a retired-instruction COUNT. No code changed and NO BUILD was run —
+/data is at the 58G floor and this project's build slot has been held for a SIXTH consecutive
+window.
+
+Claim class: not applicable — nothing is kept. This row is about the INSTRUMENT.
+
+  fr arm `4eceae6c624c670fb4111eceae3068632e8b9223b0ef822440b5015f9c89fce5`, incumbent 7.2.4.
+
+### WHY THIS, AND WHY NOW
+
+`scripts/certification_window.py --for ratio` has returned UNFIT on SIX consecutive turns. Every
+refusal has been the same clause — "N cargo/rustc process(es) running, shared uid, so none can be
+attributed away" — and with four sibling projects building on one host, a zero-cargo window may
+simply never arrive. Before arguing about the gate, the honest move is to measure what it is
+protecting against. The standing brief asks for the replicated-standing convention on thin margins;
+this is the number that convention needs and nobody had produced it.
+
+### THE INSTRUMENT'S PRECISION IN A QUIET WINDOW
+
+Six draws of ONE quantity — per-element cost of `LRANGE 0 -1`, 300 elements, 15 bytes — taken
+back to back at 90.2-92.6 pct idle, loadavg 5.61-5.74:
+
+    fr      110.80  111.09  111.18  111.22  111.41  111.42    spread 0.56 pct
+    redis   486.30  486.36  486.41  486.74  486.88  487.57    spread 0.26 pct
+    ratio   0.2272  0.2283  0.2284  0.2287  0.2289  0.2291    spread 0.84 pct
+
+  0.84 PCT IS THE FLOOR ON A RATIO CLAIM, even at 92 pct idle with both arms interleaved inside one
+  invocation. A margin thinner than that is not a margin; it is the instrument.
+
+### AND WHAT LOW IDLE DOES, WHICH IS NOT A FIXED BIAS
+
+Two earlier draws of the same quantity at the same shape, both flagged when they were taken:
+
+    len 15 @  4.6 pct idle   fr 112.67  redis 464.27   ratio 0.2427   +6.24 pct off the quiet mean
+    len  9 @  1.7 pct idle   fr 112.25  redis 487.86   ratio 0.2301   +0.72 pct off the quiet mean
+
+  The 4.6 pct draw is off by 6.24 pct and the 1.7 pct draw by 0.72 pct. THAT IS THE ARGUMENT FOR
+  THE GATE, and it is a stronger one than a fixed bias would have been: low idle does not shift the
+  ratio by a knowable amount that could be corrected for, it shifts it UNPREDICTABLY. In the 4.6 pct
+  draw the damage was almost entirely on the INCUMBENT arm — redis read 464.27 against a quiet-window
+  486.30-487.57, 4.6 pct cheap — so the corruption favoured the incumbent, which is the direction
+  that would make fr look worse rather than better. A row taken there and quoted would have been
+  wrong in the conservative direction, which is exactly the kind of error that never gets caught.
+
+### WHAT THIS LICENSES AND WHAT IT DOES NOT
+
+  * A margin above about 6 pct is safe to quote from a loaded window, and this bead's read ratios
+    (0.19x-0.27x, i.e. margins of 270-420 pct) are far outside anything the host can do to them.
+    That is why they have been published as sizing without hedging their SIGN.
+  * A margin under 1 pct is not readable at all, in any window, on this instrument.
+  * A margin between 1 and 6 pct needs the gate to be FIT — which is precisely the band the
+    RESTORE+DUMP string crossing sits in: `fea6ebf98` quoted 0.9074x, a 9.3 pct margin, from a
+    window that was FIT at the open and UNFIT at the close. That row was right to refuse to call
+    itself certified.
+  * NOTHING here licenses relaxing the gate. It quantifies the risk; it does not remove it.
+
+### RETRY PREDICATES
+
+  1. The certified ratio is owed for a SEVENTH turn and the blocker is environmental, not
+     methodological. If a zero-cargo window does not appear, the options are to run the arms on a
+     host without sibling projects, or to have the gate distinguish Ir-based ratios from
+     wall-clock ones — but the second needs evidence that Ir ratios are load-immune, and the 6.24
+     pct draw above is evidence that they are NOT.
+  2. Re-take this six-draw precision figure whenever the harness changes shape. 0.84 pct is a
+     property of THIS probe (read-count difference at a fixed key count), not of callgrind. The
+     key-count slope form is much worse — `feedback_a_key_count_slope_is_not_deterministic` puts it
+     at 0.33-1.07 pct on ONE binary, before any ratio is formed.
+  3. Do NOT use this row to justify quoting a sub-1 pct effect from any instrument in this repo.
+     The number here is a floor on what the ratio can resolve, not a licence to claim anything at
+     that boundary.
