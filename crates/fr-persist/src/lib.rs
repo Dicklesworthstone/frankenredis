@@ -14,14 +14,28 @@ pub mod listpack;
 pub(crate) mod rdb_stream;
 pub mod ziplist;
 
-pub(crate) fn decimal_i64_scratch(value: i64) -> ([u8; 20], usize) {
-    let mut scratch = [0u8; 20];
-    let end = scratch.len();
-    let mut start = fr_protocol::write_u64_digits(&mut scratch, end, value.unsigned_abs());
+/// Render `value`'s decimal ASCII RIGHT-aligned into `dst`, returning the start index.
+///
+/// (frankenredis-qj6jn) The in-place form. `decimal_i64_scratch` returns `([u8; 20], usize)` BY
+/// VALUE, so its only listpack caller — which stores that buffer straight into a struct field —
+/// paid for the 28-byte return slot and the move out of it, plus a call frame, on EVERY integer
+/// entry decoded. Callgrind charged `decimal_i64_scratch` 6,000 instr/key, 20.00 per element, on
+/// a 300-integer list RESTORE, for work that is a zero-fill and a call to `write_u64_digits`.
+/// Writing into the caller's buffer removes the return slot; the buffer that will be KEPT is the
+/// buffer that gets written.
+pub(crate) fn decimal_i64_into(dst: &mut [u8; 20], value: i64) -> usize {
+    let end = dst.len();
+    let mut start = fr_protocol::write_u64_digits(dst, end, value.unsigned_abs());
     if value < 0 {
         start -= 1;
-        scratch[start] = b'-';
+        dst[start] = b'-';
     }
+    start
+}
+
+pub(crate) fn decimal_i64_scratch(value: i64) -> ([u8; 20], usize) {
+    let mut scratch = [0u8; 20];
+    let start = decimal_i64_into(&mut scratch, value);
     (scratch, start)
 }
 
@@ -4973,6 +4987,37 @@ pub fn read_rdb_file_with_functions(
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-qj6jn) `decimal_i64_into` writes where the caller wants the bytes; the
+    /// tuple-returning `decimal_i64_scratch` is now a thin wrapper over it. Both must agree with
+    /// each other AND with `to_string`, and the in-place form must leave the bytes BEFORE `start`
+    /// untouched — a caller that keeps the buffer (as `ListpackIntegerBytes` does) would
+    /// otherwise carry whatever was there into its derived `PartialEq`.
+    #[test]
+    fn decimal_i64_into_matches_the_tuple_form_and_leaves_the_prefix_alone_qj6jn() {
+        let mut values: Vec<i64> = vec![0, 1, -1, i64::MIN, i64::MAX, i64::MIN + 1, i64::MAX - 1];
+        for p in 0..19u32 {
+            let base = 10i64.saturating_pow(p);
+            values.extend([base - 1, base, base + 1, -base, -(base - 1)]);
+        }
+        values.extend(-3000i64..3000);
+        for v in values {
+            let (tuple_buf, tuple_start) = super::decimal_i64_scratch(v);
+            let mut buf = [0u8; 20];
+            let start = super::decimal_i64_into(&mut buf, v);
+            assert_eq!(start, tuple_start, "start index diverged for {v}");
+            assert_eq!(buf, tuple_buf, "buffer diverged for {v}");
+            assert_eq!(
+                &buf[start..],
+                v.to_string().as_bytes(),
+                "not canonical for {v}"
+            );
+            assert!(
+                buf[..start].iter().all(|b| *b == 0),
+                "prefix was disturbed for {v}"
+            );
+        }
+    }
 
     /// (frankenredis-qj6jn) `lzf_match_tail_len::<true>` routes long tails through
     /// AVX2 behind a scalar 128-byte probe. It must return EXACTLY what the scalar

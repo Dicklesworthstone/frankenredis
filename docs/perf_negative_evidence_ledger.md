@@ -54391,3 +54391,130 @@ and an effect inside that interval is not claimed.
    the memcpy call go.
 4. `string_owned`, `into_string_owned` and `materialize_string` have the same Integer arm. They are
    NOT on the MGET path and are not sized here; do not assume they carry the same weight.
+
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the integer span paid a call to build its bytes and another to hand them out; rendering in place and inlining the accessor is −3.59 pct worst bound on integer RESTORE (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) and deterministic
+per-frame SELF costs, TWO-BINARY A/B with the A/A and the A/B in ONE INVOCATION and the candidate
+arm BRACKETED by control arms, replicated as TWO independent six-draw sets. CV was NOT used, as a
+gate or otherwise — no coefficient of variation appears in this row's decision path and none was
+computed. No timing verdict is claimed: the measurand is a retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 0.998546, bootstrap 95% CI [0.997826, 0.999305] in the
+first draw set and 0.999408, CI [0.996750, 1.002744] in the second, each taken in the same
+invocation as the A/B it gates. The bootstrap median-CI is the verdict gate and it excludes zero
+in BOTH sets.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### PROVENANCE
+
+  ELF           AFTER `e1fb725a28dbc346dc408e7b755fe7098a2695ecd89a30d946ec9f6f3d5ea696`,
+                BEFORE `98e30539be41ee70f594b77b72d29cdd0e70387d763fb30f0099bf0bef640457`.
+  bench_elf_sha256=e1fb725a28dbc346dc408e7b755fe7098a2695ecd89a30d946ec9f6f3d5ea696
+
+  Booted and hashed from `/proc/<pid>/exe`, the kernel's view of the RUNNING image. The server ELF
+  does not self-report a hash and no claim is made that this is one. Arms built three minutes
+  apart from the same tree.
+
+### TWO CALLS AROUND TWENTY BYTES
+
+`6f1341a61` made `ListpackIntegerBytes` keep the renderer's buffer instead of relocating the
+digits. That left the plumbing on both sides of it visible in the profile:
+
+    fr_persist::decimal_i64_scratch                    6,000.0   20.00/elem
+    <ListpackIntegerBytes>::as_slice                   2,400.0    8.00/elem
+
+  `decimal_i64_scratch` returns `([u8; 20], usize)` BY VALUE, so its caller — which stores that
+  buffer straight into a struct field — paid for a 28-byte return slot, the move out of it, and a
+  call frame, for work that is a zero-fill plus a call to `write_u64_digits`. `as_slice` is a
+  sub-slice taken ONCE PER DECODED ENTRY by every span consumer, and it was its own frame: a call
+  and a return around two loads and a subtraction.
+
+  THE FIX IS BOTH SIDES OF THE SAME OBJECT. `decimal_i64_into(dst, value)` writes into the
+  caller's buffer and returns the start index, so the buffer that will be KEPT is the buffer that
+  gets written; `decimal_i64_scratch` survives as a thin wrapper for its other caller.
+  `as_slice` gains `#[inline]`.
+
+  These are two edits and they are reported as one lever because they are one object's plumbing,
+  but the frame counts below attribute them SEPARATELY, so a reader need not take the pairing on
+  trust.
+
+    frame                              BEFORE      AFTER      delta
+    decimal_i64_scratch               6,000.0    ABSENT     −6,000.0
+    decimal_i64_into                   ABSENT      600.0       +600.0   net −5,400.0 (−18.00/elem)
+    <ListpackIntegerBytes>::as_slice  2,400.0    ABSENT     −2,400.0    (−8.00/elem)
+    decode_value_spans (self)        19,104.0   20,604.0     +1,500.0   (`new` inlined into it)
+    fr_protocol::write_u64_digits    17,126.0   17,126.0         0.0
+
+### THE MEASUREMENT
+
+    ALL-INTEGER list, RESTORE+DUMP, 300 elements, slope 10 vs 30 keys, distinct keys.
+
+    set 1   draw   BEFORE_a     BEFORE_b     AFTER        cand-pct    null-pct
+              1    140,928.70   141,139.05   135,526.75   −3.9048     −0.1490
+              2    141,212.00   141,214.15   135,939.60   −3.7344     −0.0015
+              3    141,016.70   141,210.70   135,451.45   −4.0125     −0.1374
+              4    141,003.60   141,203.70   135,878.75   −3.7029     −0.1417
+              5    141,040.00   141,321.90   135,517.30   −4.0116     −0.1995
+              6    141,004.65   141,337.20   135,890.10   −3.7407     −0.2353
+            median −3.8228 pct, CI [−4.0121, −3.7186]; null ratio 0.998546, CI [0.997826, 0.999305]
+
+    set 2   draw   BEFORE_a     BEFORE_b     AFTER        cand-pct    null-pct
+              1    140,950.10   141,140.05   135,292.55   −4.0785     −0.1346
+              2    141,250.70   141,124.40   135,649.90   −3.9222     +0.0895
+              3    141,028.90   141,264.95   135,777.50   −3.8041     −0.1671
+              4    141,593.50   140,946.05   136,098.15   −3.6608     +0.4594
+              5    141,075.80   141,053.00   136,001.40   −3.5891     +0.0162
+              6    141,043.10   141,727.60   135,724.35   −4.0040     −0.4830
+            median −3.8632 pct, CI [−4.0412, −3.6250]; null ratio 0.999408, CI [0.996750, 1.002744]
+
+    WORST SINGLE DRAW ACROSS BOTH SETS: −3.5891 pct  <- the figure this row claims
+
+  Host state: 84-90 pct idle, loadavg 13.0-14.6, MHz mean 1900-2500 against a 1429-4292 spread;
+  the window degraded to loadavg 29 immediately after set 2 and no arm was taken there.
+
+  ONE THING THE NULL IS SAYING THAT SHOULD NOT BE GLOSSED. In set 1 five of six A/A readings are
+  NEGATIVE (median −0.145 pct), i.e. the FIRST control arm was consistently cheaper than the
+  second within a draw. That is a systematic within-draw drift, not noise, and it is exactly what
+  the bracketed design exists to absorb — the candidate is compared against the MEAN of the two
+  controls, so a monotone drift cancels to first order. It is reported because a null with a SIGN
+  is evidence about the harness, and a reader who saw only its magnitude would not know it was
+  there. At 0.145 pct against a 3.59 pct effect it does not threaten the verdict.
+
+### PARITY — CONTENT, NOT JUST LENGTH
+
+    INTEGER round-trip (LRANGE after RESTORE + DUMP bytes), BEFORE vs AFTER:  0 of 30 diverging
+    INTEGER elements vs redis 7.2.4 (same probe, live incumbent arm):         0 of 30 diverging
+    BEFORE-vs-AFTER DUMP BYTES, string shapes:                                0 of 84 diverging
+    workload sweep vs redis 7.2.4:                                            4 of 42, UNCHANGED
+    fr-persist 229 / fr-store 940, 0 failures; clippy clean; fmt clean.
+
+  ORACLE: `decimal_i64_into_matches_the_tuple_form_and_leaves_the_prefix_alone_qj6jn` compares the
+  in-place form against the tuple form and against `to_string` at `i64::MIN`/`i64::MAX` and their
+  neighbours, every power of ten ±1 with both signs, and every value in −3000..3000. It also
+  asserts the bytes BEFORE `start` are untouched — `ListpackIntegerBytes` keeps that buffer and
+  derives `PartialEq` over the whole of it, so a disturbed prefix would make equal values compare
+  unequal, and no other test would have caught it.
+
+### RETRY PREDICATES
+
+  1. `write_u64_digits` STILL has not moved: 17,126.0 instr/key, 57.09 per element, identical
+     across this lever and the last, and now more than half of what remains on the integer decode
+     path. Take it next, and take it ONLY IF a candidate shows a per-element figure below 57.09 on
+     `fr-persist/benches/int_render_itoa2.rs`, which is already its A/B harness — a rewrite that
+     merely reorganises the loop and lands at or above that number is this row's own baseline
+     measured twice.
+  2. The bigger structural fact this profiling exposed, recorded so it is not lost: the decoder
+     renders a binary integer to decimal (write_u64_digits + the buffer work) and then
+     `from_restored_quicklist2_nodes` — 57,600.0 instr/key, 192.00 per element on this shape, the
+     single largest term — PARSES THAT DECIMAL BACK to an i64 inside `list_lp_entry_bytes` to pick
+     the entry width. A full round trip per element. The obvious fix, carrying the `i64` on the
+     span, is REFUSED by `frankenredis-33832` (8 bytes on every span, including the string spans
+     that are the whole of a typical hash) and deriving the total from the blob is REFUSED by
+     `frankenredis-c92f6` (non-canonical payloads must keep their `lp_bytes`). Any attempt here
+     must answer BOTH of those rows, not just notice the round trip.
+  3. This row measures a list of integers. Do not re-derive its percentage for hash/set/zset
+     RESTORE; quote 26.00 instructions per integer entry (18.00 + 8.00) until those shapes are
+     measured — `feedback_quote_instr_per_element_when_the_denominator_moves`.

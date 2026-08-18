@@ -128,14 +128,18 @@ impl ListpackIntegerBytes {
     /// derived `PartialEq` semantics — `decimal_i64_scratch` is deterministic and zero-fills, so
     /// one value still has exactly one representation.
     fn new(value: i64) -> Self {
-        let (bytes, start) = crate::decimal_i64_scratch(value);
-        Self {
-            bytes,
-            start: start as u8,
-        }
+        // Render straight into the field that will keep the bytes — see `decimal_i64_into`.
+        let mut bytes = [0u8; 20];
+        let start = crate::decimal_i64_into(&mut bytes, value) as u8;
+        Self { bytes, start }
     }
 
+    /// (frankenredis-qj6jn) `#[inline]`: this is a sub-slice, and it is taken ONCE PER DECODED
+    /// ENTRY by every consumer of a span — the list restore fold, the hash/set/zset builders.
+    /// Un-inlined it was its own callgrind frame at 2,400 instr/key, 8.00 per element, on a
+    /// 300-integer list RESTORE, which is a call and a return around two loads and a subtraction.
     #[must_use]
+    #[inline]
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes[usize::from(self.start)..]
     }
