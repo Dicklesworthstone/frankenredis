@@ -40108,7 +40108,19 @@ impl Runtime {
 
     pub fn execute_bytes(&mut self, input: &[u8], now_ms: u64) -> Vec<u8> {
         let packet_id = next_packet_id();
-        let parser_config = self.parser_config();
+        // (frankenredis-2ubu0) INTERNAL LINK, not a client socket. Every caller hands this
+        // frames fr itself produced or re-encoded -- the sharded partition fallbacks
+        // (`execute_shared_nothing_fast_command`) and the job path -- never raw bytes off a
+        // client connection, which the front-end parses before anything reaches here.
+        //
+        // It is exempt for the same reason the replica stream and the sentinel links are, and
+        // saying so in code rather than relying on an accident: partitions are built with
+        // `Runtime::new(RuntimePolicy::default())` and never have requirepass applied, so today
+        // `default_user_is_nopass()` is true there and the caps happen not to fire. The moment
+        // anyone propagates requirepass to partitions -- to make ACLs work on them, say -- a
+        // re-encoded command with more than ten arguments or a value over 16 KiB would start
+        // being refused, with no client-visible error to explain it.
+        let parser_config = self.internal_link_parser_config();
 
         match fr_protocol::parse_frame_with_config(input, &parser_config) {
             Ok(parsed) => {
