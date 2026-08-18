@@ -50746,3 +50746,76 @@ mere PRESENCE of one volatile key, on commands that never touch it. That is an e
 property affecting every workload with any TTL, and it is worth more than either command path.
 Whoever takes it should start from the standing note that one volatile key triples
 `Timespec::now` per op.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: TARGET — the volatile-key tax is NAMED and SIZED: fr runs the active expire cycle 2.02x PER COMMAND and calls `clock_gettime` 3.02x PER COMMAND, where upstream runs both once per EVENT-LOOP ITERATION. +298.1 instr/op on an unchanged GET
+
+NO LEVER IS CLAIMED AS MEASURED. This names the mechanism behind the tax `761c9e65d` identified
+as the target worth more than the two command paths it dissolved, sizes it, and verifies the
+architectural comparison against upstream source rather than asserting it.
+
+fr ELF bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399.
+Two arms, IDENTICAL binary and IDENTICAL command (`GET kk`), differing only in whether the
+keyspace also holds one unrelated key with a TTL. Two-point callgrind (N=2000/2N=4000) so
+startup and seeding cancel; instruction counts, load-immune, loadavg 6.86.
+
+  WHOLE COMMAND   plain 1165.0 -> volatile 1463.1 instr/op   +298.1 (+25.59 pct)
+
+  frame                                        delta instr/op
+  <fr_store::Store>::get_string_bytes                 +62.0
+  <fr_runtime::ServerState>::run_active_expire_cycle  +59.3
+  <fr_store::Store>::run_active_expire_cycle          +46.2
+  <Timespec>::sub_timespec                            +36.2
+  <Timespec>::now                                     +32.2
+  <Instant>::elapsed                                  +26.1
+  clock_gettime@@GLIBC_2.17                           +22.1
+  propagate_expired_key_deletions                     +17.1
+
+  grouped: TIME READING 116.6 (39 pct) | EXPIRE CYCLE 105.5 (35 pct) | lookup 62.0 | propagate 17.1
+
+### The call counts, which are what make this architectural rather than a hot frame
+
+  per op                            plain   volatile
+  run_active_expire_cycle            1.01     2.02
+  clock_gettime                      1.01     3.02
+  Timespec::now                      1.01     3.02
+  propagate_expired_key_deletions    1.00     2.00
+  Instant::elapsed                   0.00     1.00
+
+fr runs the active expire cycle TWICE PER COMMAND and reads the clock THREE TIMES PER COMMAND
+when any volatile key exists. This confirms the campaign's standing note ("one volatile key
+triples `Timespec::now`, 1.00 -> 3.00/op") to two decimal places, from an independent measurement.
+
+NOTE THE PLAIN ARM: even with NO volatile key anywhere, fr calls `clock_gettime` 1.01x and
+`run_active_expire_cycle` 1.01x PER COMMAND. The volatile key doubles and triples those; it does
+not introduce them.
+
+### What upstream does, read from the vendored source rather than assumed
+
+  `activeExpireCycle(ACTIVE_EXPIRE_CYCLE_FAST)` at `server.c:1677`, inside `beforeSleep` --
+      ONCE PER EVENT-LOOP ITERATION, not per command.
+  `activeExpireCycle(ACTIVE_EXPIRE_CYCLE_SLOW)` at `server.c:1053`, inside `serverCron` -- 10 Hz.
+  `updateCachedTime()` at `server.c:1130`, called from `serverCron` and around blocking
+      operations; commands then read the CACHED `server.mstime` (`server.c:1103`).
+
+At -P16 one event-loop iteration serves roughly sixteen commands, so upstream amortises both
+costs by about that factor while fr pays them per command.
+
+### Why this is worth more than the shapes it came from
+
+The tax applies to EVERY command whenever ANY key in the keyspace carries a TTL -- the measured
+arm is a `GET` that never touches the volatile key. Any workload using expiry at all pays it on
+every operation. That is a far wider surface than `pttl` or `expiretime`, which is what
+`761c9e65d` predicted and this quantifies.
+
+RETRY PREDICATE: the lever is to hoist BOTH costs from per-command to per-event-loop-iteration,
+matching the cadence verified above, and it is TWO separable changes -- the clock cache is
+independent of the expire-cycle cadence and is the smaller and safer of the two at 116.6
+instr/op. Neither is measured here as a win and neither should be quoted as one. A clock-cache
+lever SUCCEEDS only IF `clock_gettime` falls to at most 1.00 calls per EVENT-LOOP ITERATION with
+`GET`'s instr/op falling by at least 100 on the volatile arm, measured two-point on this same
+pair of seeds, with the plain arm as the null since it must move far less. THE EXPIRE-CADENCE
+CHANGE IS CORRECTNESS-SENSITIVE and must not be taken as a pure perf edit: expiry timing is
+observable through `TTL`, keyspace notifications and replica propagation
+(`propagate_expired_key_deletions` is 2.00/op here), so it needs a differential against the
+vendored incumbent on expiry-visible behaviour before any ratio is quoted.
