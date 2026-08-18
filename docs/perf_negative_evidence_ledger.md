@@ -55761,3 +55761,93 @@ ones passed while the `Other` ones did not would indict the `Other` arm specific
    the compiler.
 3. Diff the FULL `cmdstat_*` key set, not only the commands under test. A mis-map inflates a
    bucket that may not be in your list.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — the collection `_into` family takes the cached gate: **86.0 -> ABSENT on all four measured shapes**, and the structural verdict **REPRODUCED ACROSS TWO BASES** with a peer's 127-instr/op lever landing in between (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: **SMEMBERS, SUNION, SDIFF, SINTER, HGETALL, HKEYS/HVALS (`hcoll`) and LRANGE** now take
+the per-pass `read_gate_cache`. All seven derive the gate as **form C** — the gate as the last
+disjunct of the bounds check — so all seven get the identical rewrite, and because `||`
+short-circuits with the gate always last, lifting it into its own `if` preserves evaluation
+order exactly. Shipped in `3afa733d1`.
+
+**MEASURED TWICE, ON TWO BASES**, because this commit sat ~50 minutes behind a peer's file
+reservation and `155246b67` (integer-encoded reads stopped allocating; GET moved 127 instr/op)
+landed underneath it in the meantime:
+
+| shape | base `276ce5a78` | base `0c3b1adda` | whole-op (2nd base) | role |
+|---|---|---|---|---|
+| **smembers_base** | 1.000 -> 0.000 / 86.0 -> ABSENT | **same** | 1799.4 -> 1741.6 (+57.8) | beneficiary |
+| **hgetall_base** | 1.000 -> 0.000 / 86.0 -> ABSENT | **same** | 2116.1 -> 2110.0 (+6.1) | beneficiary |
+| **lrange_base** | 1.000 -> 0.000 / 86.0 -> ABSENT | **same** | 2250.8 -> 2201.3 (+49.5) | beneficiary |
+| **sinter_2** | 1.000 -> 0.000 / 86.0 -> ABSENT | **same** | 3864.8 -> 3823.3 (+41.5) | beneficiary |
+| keys_star | 1.000 -> 1.000 / 86.0 -> 86.0 | **same** | 2458.1 -> 2404.8 (+53.3) | **EXACT null** |
+| llen | 0.000 -> 0.000 / ABSENT | **same** | 1174.9 -> 1172.7 (+2.2) | converted control |
+
+**Quoting the WORST bound: 86.0 instr/op**, the same integer on all four, on both bases.
+
+**THE STRUCTURAL VERDICT IS BASE-INDEPENDENT, AND THIS ROW DEMONSTRATES IT RATHER THAN ASSERTING
+IT.** The frame and the call count are identical across two binaries separated by a lever worth
+127 instr/op elsewhere in the same code. That is the concrete payoff of putting the verdict on
+the frame: **a peer landing work underneath does not invalidate it**, where a whole-op claim
+would have had to be re-derived from scratch. I re-measured rather than argue the old numbers
+still held, which cost one sweep and converted an argument into a demonstration.
+
+**AND THE SECOND BASE MADE THE WHOLE-OP COLUMN WORSE EVIDENCE, WHICH IS THE PART TO READ.** The
+untouched **null moved +53.3** — more than three of the four beneficiaries (+6.1, +41.5, +49.5).
+A reader taking whole-op alone would rank `keys_star`, a route this commit does not touch, above
+`hgetall`, `lrange` and `sinter`. The frame separates all four cleanly and the null does not move
+at all. This vein has now produced three separate demonstrations that whole-op cannot adjudicate
+an 86-to-175 effect; this is the starkest.
+
+**SCOPE: 4 of the 7 executors are measured.** SUNION and SDIFF have only `*_big` shapes, which
+run **half a million instr/op** under callgrind where 86.0 is 0.017 pct — no signal, so I stopped
+that sweep rather than spend an hour on two numbers that cannot discriminate. `hcoll`
+(HKEYS/HVALS) has no shape at all and is one of the four routes `59919c70d`'s coverage tool
+reports the census is blind to. Those three are inference from sharing the form and the floor arm
+with the four that are measured.
+
+TWO STRUCTURAL DETAILS worth carrying: **LRANGE routes through
+`dispatch_floor_fast_lrange_into`**, so the helper takes the parameter and forwards it, as
+`exists`/`lpos`/`object_encoding` do — converting only the executor would have left the arm
+passing nothing. And **`Hcoll` is a STRUCT variant** (`Hcoll { values }`), not a unit or tuple
+one; an arm-anchoring regex that matches only `Name =>` and `Name(..) =>` silently skips it, as
+mine did until an assert caught it.
+
+CORRECTNESS: **105 commands byte-identical on BOTH pairs.** This family writes replies straight
+into the output buffer, so the specific risk beyond a stale gate is **a decline happening with
+bytes already emitted** — a partial reply would desynchronise the stream rather than merely
+return the wrong value. The battery therefore mixes empty, single- and multi-element containers
+with the forms that must decline (WRONGTYPE on every family, missing keys, bad arity,
+non-integer and out-of-range LRANGE indices), keeps sending afterwards so a desync would surface
+in every later reply, and **ends on an `ECHO` sentinel**. 19 replies are `-ERR` or `WRONGTYPE`
+and the stream ends on the sentinel, so the declines fired and nothing desynchronised. 633
+`fr-runtime` lib tests pass. `cargo check --all-targets` clean on both bases and again on the
+landing base.
+
+BUILD PROVENANCE: paired build at `0c3b1adda`, built AFTER, BEFORE, AFTER again; the two AFTERs
+bit-identical
+(`bench_elf_sha256=8ede026a595e4320ef549a5d8ea515ef98c0ef76729193f2e65051b7c758b68a`) and BEFORE
+distinct
+(BEFORE recorded as the prefix `b3c517b823c5d17a5a276ea329` only — the full digest was never written down before the artifact was deleted, and I would rather record a truncated hash than invent the rest). Host at build time: /data 61G, loadavg
+12.21/11.44/11.75. **Those binaries no longer exist** — I deleted them in a disk sweep whose
+exclusion filter matched nothing (`ls` is aliased to `lsd`, so a `^`-anchored filename pattern
+never matches). The measurements survive because the row carries the hashes, which is the
+argument for recording a sha256 rather than a path.
+
+GATE AND ITS OWN NULL. Both arms were measured in one same-invocation interleaved run, one round
+per arm on the second base. The A/A null and the A/B pairing are same-invocation. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this row;
+no CV was computed. Host state is provenance, not a gate — the verdict rests on integers that
+reproduced across two bases.
+
+RETRY PREDICATE: revisit a converted route only if it is observed calling
+`plain_borrowed_default_key_read_allows` above **0.001 calls/op** (0.000-0.001 is the per-pass
+cache-fill floor from `a1600b784`). **The vein remains open**, and before quoting its size again
+run `scripts/read_gate_coverage.py` — it reconciles the source scan against shape coverage and
+exits non-zero when they disagree, which is the check that would have caught all four of this
+vein's undercounts.
