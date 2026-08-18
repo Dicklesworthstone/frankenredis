@@ -570,6 +570,38 @@ pub fn bench_write_i64_to_slice<const DIRECT: bool>(n: i64, buf: &mut [u8; 24]) 
 #[inline]
 fn encode_integer_reply<const FUSED: bool>(n: i64, out: &mut Vec<u8>) {
     if FUSED {
+        // (frankenredis-getexgate) CONSTANT-LENGTH FAST PATHS FIRST. The general path below
+        // already fuses everything into ONE `extend_from_slice`, but that slice is
+        // `&buf[pos..24]` -- a RUNTIME-VARIABLE length -- so rustc lowers it to a `memcpy`
+        // CALL. Measured on `llen`, whose whole reply is `:6\r\n`:
+        //     __memcpy_avx_unaligned_erms   63.1 instr/op   (1.000 calls/op, caller = this fn)
+        //     encode_integer_reply self     47.0 instr/op
+        // i.e. ~110 instr/op, 9 pct of the command, to emit five bytes. Nearly all of the 63.1
+        // is memcpy's own size-dispatch preamble, not the copy.
+        //
+        // A slice of CONSTANT length has no such call: rustc inlines it to a couple of stores.
+        // Single- and double-digit values cover the replies that dominate here -- EXISTS,
+        // SISMEMBER, HEXISTS and friends answer 0 or 1, and collection cardinalities are small
+        // in every benchmark shape -- so the two arms below are the common case, not a
+        // curiosity. Larger values fall through to the identical general path.
+        //
+        // Byte-identical to the general path by construction: same ':' prefix, same DIGIT_PAIRS
+        // rendering, same "\r\n".
+        if (0..10).contains(&n) {
+            out.extend_from_slice(&[b':', b'0' + n as u8, b'\r', b'\n']);
+            return;
+        }
+        if (10..100).contains(&n) {
+            let pair = (n as usize) * 2;
+            out.extend_from_slice(&[
+                b':',
+                DIGIT_PAIRS[pair],
+                DIGIT_PAIRS[pair + 1],
+                b'\r',
+                b'\n',
+            ]);
+            return;
+        }
         // Build ":<n>\r\n" right-aligned in one stack buffer and emit it with a SINGLE
         // extend_from_slice. The digits are written exactly ONCE (two-at-a-time via DIGIT_PAIRS,
         // same core as write_u64_digits) directly into their final position — no intermediate
