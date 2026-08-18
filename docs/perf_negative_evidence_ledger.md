@@ -62814,3 +62814,63 @@ is now a number.
      on `lp_bytes`. The failure mode is a moved boundary, and only the wire shows it.
   3. Re-count the 28 before starting. This is a shared tree and the number is a snapshot of one
      working copy on one day.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: TWO obvious SORT levers are ALREADY TAKEN — the July "discarded UTF-8 validation" next-lever is bypassed by the ASCII fast path, and the per-element clone is already a `mem::take`
+
+Claim class: SELF-SPEEDUP sizing. No ratio is claimed. Campaign output: no.
+Source reading only, under the build freeze: no cargo, no benches, no artifact writes.
+
+`sort_ro_alpha`'s n=3 parity (0.9914x, worst of two FIT draws) is undiagnosed, and a profile of it
+would surface two attractive-looking candidates. **Both are already implemented.** Recorded so the
+next reader does not propose them.
+
+### 1. "DISCARDED UTF-8 VALIDATION" — the named next-lever from `8456`, now moot
+
+`NEGATIVE_EVIDENCE.md:8456` (2026-07-10) attributed a `SORT L ALPHA STORE D` gap and said *"next
+lever is discarded UTF-8 validation (not a code KEEP yet)"*. In
+`sort_alpha_compare_with_ascii_fast_path` today:
+
+    if ascii_fast_path && let Some(ordering) = ascii_alnum_collate(left, right) { return ordering; }
+    match (std::str::from_utf8(left), std::str::from_utf8(right)) { ... collator.compare(l, r) ... }
+
+The fast path returns **before** `from_utf8` is reached, and when it IS reached the result is
+*used* by `collator.compare` — so the validation is neither discarded nor performed for in-domain
+values. Both sort shapes are in-domain (`c a b`; `w00A, w01b, ...`). The lever named in July no
+longer exists.
+
+### 2. PER-ELEMENT CLONE — already a move
+
+`Store::sort_elements` returns `Vec<Vec<u8>>`, cloning each element, which reads as pure waste for
+`SORT_RO` with no STORE since the result is immediately encoded. But `sort_generic<const MOVE:
+bool>` already handles it: `true` does `mem::take` on the window slots out of the soon-dropped
+`elements` and `into_iter`s the `sliced` Vec into the reply, byte-identical to the clone reference
+and locked by `sort_move_matches_clone_reference`. The source states **"Production calls
+`::<true>`"**.
+
+### CONSEQUENCE
+
+The two catalogued patterns I would reach for — the campaign's "redundant `to_vec`" shape and a
+discarded-validation shape — are both spent on this path. **`sort_ro_alpha`'s n=3 parity therefore
+has no source-level candidate I can name**, and it stays undiagnosed rather than being pinned on a
+frame that is already optimised. That is the honest state; the frame census that would settle it
+needs `--keep-dumps` and is blocked by the freeze.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement, no ratio, no A/A, no build, no artifact written but this row. CV was not used, as a
+gate or otherwise.
+
+### PROVENANCE
+
+  ELF           NONE built or run. The 0.9914x is quoted from my own earlier row.
+  host          /data 34G free, BELOW the 42G brake; freeze in force.
+  disposition   NO LEVER OPENED. No source file changed.
+
+### RETRY PREDICATE
+
+1. Do NOT propose removing SORT's per-element clone. `sort_generic::<true>` already moves.
+2. Do NOT cite `8456`'s "discarded UTF-8 validation" as open. The fast path returns before it.
+3. `sort_ro_alpha` n=3 remains undiagnosed. Start from a frame census on a current ELF, not from
+   either pattern above.
