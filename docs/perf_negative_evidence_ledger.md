@@ -61608,3 +61608,88 @@ request. CV was not used, as a gate or otherwise.
 3. The next measurement on this bead is not in the command path. Count syscalls (or event-loop
    passes) per op for both engines under `-P 16` and see whether the 1.29-1.65x asymmetry
    reproduces and scales.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the `From<VecDeque>` frame I flagged UNEXPLAINED is the SAME cost at a second, INLINED call site: identical call counts in both arms, and the disassembly carries the leading-zero test inline (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: callgrind CALL COUNTS parsed from the raw `calls=` records, plus static
+disassembly of the shipping ELF. Neither is a timing measurement and no timing verdict is claimed.
+CV was NOT used, as a gate or otherwise — no coefficient of variation appears in this row's
+decision path and none was computed. Call counts are exact integers, not estimates. No code
+changed and NO BUILD was run; callgrind output went to a `TemporaryDirectory` and was reclaimed,
+so this row cost no disk.
+
+Claim class: MEASUREMENT. Campaign output: no. **This row CORRECTS an instruction I issued in the
+row above**, which is its main reason for existing.
+
+  fr arm  `99e32657383c8a9ef60468534a02f92f6e7afe76a4f8c68424a2e803ffd1b81b` (`e32cc8b71`)
+  host    loadavg 5.44-5.90, MHz 1429-4292 spread, no build running, /data 47G
+
+### THE CALL COUNT IS IDENTICAL, SO THE 5.69x IS ENTIRELY PER-CALL
+
+    RPUSH(300)+LTRIM, 30 keys, list_lp_entry_bytes
+      letter-leading   13,500 calls   1.50 per element
+      digit-leading    13,500 calls   1.50 per element
+
+**Exactly equal.** The digit arm does not call the walk more often; each call costs more. The 1.50
+decomposes cleanly: 300 pushed elements plus 150 survivors walked by `on_remove_bulk` after the
+`LTRIM key 0 149`, per key, which is 450 = 1.50 x 300.
+
+`owned_listpack_bytes`, `list_lp_int`, `list_lp_entry_data_len_maybe_int` and
+`list_lp_string_data_len` produced **no call records at all** — they are inlined, and none of them
+is its own frame. `feedback_count_calls_before_chasing_a_hot_frame` is the reason this was checked
+before any hypothesis was written down, and the check paid: "the cost moved to a different site"
+and "each call got dearer" are indistinguishable in a self-cost profile and are fixed by different
+levers.
+
+### THE DISASSEMBLY SETTLES IT: `From` HAS BOTH AN INLINED COPY AND AN OUT-OF-LINE CALL
+
+`<ChunkedList as From<VecDeque<Vec<u8>>>>::from` is 2,201 bytes at `0x7b57e0` and contains BOTH:
+
+    0x7b59c7  cmp $0x2d,%r9b     leading '-'      \  the canonicality tests,
+    0x7b5a21  cmp $0x30,%dl      leading '0'       >  INLINED into this symbol
+    0x7b5a26  cmp $0x30,%dl                       /   (seven such compares in the body)
+    0x7b5d68  call ...packed_set::list_lp_entry_bytes    <- and an OUT-OF-LINE call
+
+So one call site was inlined and another was not, in the same function. That reconciles every
+observation: the out-of-line site produces the 13,500 identical calls, and the inlined site puts
+digit-dependent work into `From`'s own SELF cost, which is why it moved 2.74x without calling
+anything more.
+
+The source has no content-dependent logic in `From` at all — it chunks and calls
+`ListChunk::from_vec` -> `owned_listpack_bytes` -> `list_lp_entry_bytes`. **The digit dependence
+in that frame is a codegen artifact of inlining, not a second algorithm**, and reading the source
+alone would never have shown it.
+
+### CORRECTION TO THE ROW ABOVE
+
+That row's retry predicate 3 said: *"`<ChunkedList as From<VecDeque>>` at +51.20/elem is
+UNEXPLAINED. Do not fold it into lever 2's expected win."* **That instruction was too conservative
+and is withdrawn.** The frame is the same root cause at a second site, and the leading-zero compare
+that lever 2 reorders is physically present in that symbol's own instruction stream.
+
+Consequence for the lever, stated as a bound rather than a prediction: the canonicality reorder now
+has **two sites in scope instead of one**, so its ceiling on this workload is the full **+70,260
+instr/key** rather than the `list_lp_entry_bytes` frame's +54,900. It remains a CEILING — the
+reorder removes the wasted `all(is_ascii_digit)` scan, not the whole digit-leading penalty, and
+what fraction of each site's cost that scan represents is not measurable without building.
+
+### WHAT THIS DOES NOT SHOW
+
+The inlining is read from ONE symbol in ONE binary. It is a property of this build, not a
+guarantee about the next one — a later edit that changes inlining would move this cost between
+frames with no source change and no ledger entry. If a future row depends on where this cost is
+attributed, it must re-read the disassembly rather than cite this one.
+
+Nor does the disassembly prove the inlined copy runs once per element. The seven compares could sit
+on a path taken more or less often than the walk; the call-count instrument covers only the
+out-of-line site, by construction.
+
+### RETRY PREDICATES
+
+  1. When levers 1 and 2 are built, check `From<VecDeque>` as well as `list_lp_entry_bytes`. If
+     `list_lp_entry_bytes` falls and `From` does not, the inlined copy took a different path
+     through the canonicality test and the two sites need separate treatment.
+  2. Re-read the disassembly after any build that touches these functions, before attributing cost
+     to a frame. This row is dated evidence about one ELF.
+  3. Still open and untouched: `decode_value_spans` (the arena lever) is unaffected by any of this
+     and remains the largest single frame in list RESTORE.
