@@ -15,6 +15,21 @@ of times.
 
 Two-point method: run the identical workload at N and 2N DEBUG RELOADs and difference the
 frame totals, so startup, seeding and teardown cancel exactly.
+
+THREE METRICS ARE REPORTED, ON PURPOSE. Quoting one of them as "the ratio" without saying
+which is what produced two contradictory ledger rows in one session:
+
+  * compressor frame -- the kernel's own instructions. This is the historical series
+    (1.7600 -> 1.5139) and it EXCLUDES fr's epoch-wrap table clear, because that clear is
+    charged to a libc memset frame and not to the compressor.
+  * memset frame     -- that clear. It is a cost only fr pays: vendored lzf_c.c puts its
+    table clear inside `#if INIT_HTAB` and lzfP.h defines INIT_HTAB 0, so redis never
+    clears its match table at all. Measured at 1013.3 instr/key for fr against 1.3 for
+    redis before slice 7.
+  * program totals   -- everything, including the memset and the RDB machinery around it.
+
+A frame-only comparison is the right instrument for a kernel change and the wrong one for
+"who does more work per key". Report both and say which you mean.
 """
 
 import os
@@ -165,6 +180,8 @@ def lzf_total(fr_map, needles):
     hits = []
     for k, v in fr_map.items():
         low = k.lower()
+        # The decompress exclusion applies to the lzf needles; a memset frame can never
+        # contain it, so one filter serves both callers.
         if any(n in low for n in needles) and "decompress" not in low:
             tot += v
             hits.append((v, k))
@@ -190,10 +207,19 @@ def main():
     print("%s lzf frames at N: %s" % (which, [(int(v), k[:60]) for v, k in ha]))
     print("%s lzf_compress per reload = %.1f ; per key = %.1f"
           % (which, per_reload, per_reload / KEYS))
+    # The clear. Charged to libc, so it is invisible to the compressor frame above -- and
+    # it is an asymmetry, not noise: redis compiles its table clear out entirely.
+    ms_a, _ = lzf_total(a, ["memset"])
+    ms_b, _ = lzf_total(b, ["memset"])
+    ms_per_key = (ms_b - ms_a) / (n2 - n) / KEYS
+    print("%s memset per key = %.1f   (fr pays this on epoch wrap; redis has no table clear)"
+          % (which, ms_per_key))
     tot_a = a.get("PROGRAM TOTALS", 0)
     tot_b = b.get("PROGRAM TOTALS", 0)
     print("%s whole reload per key = %.1f"
           % (which, (tot_b - tot_a) / (n2 - n) / KEYS))
+    print("%s SUM frame+memset per key = %.1f   <- use THIS for a work-per-key ratio"
+          % (which, per_reload / KEYS + ms_per_key))
 
 
 main()
