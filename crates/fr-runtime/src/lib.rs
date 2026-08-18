@@ -9136,13 +9136,59 @@ impl Runtime {
 
     #[must_use]
     pub fn parser_config(&self) -> fr_protocol::ParserConfig {
+        // (frankenredis-2ubu0) PRE-AUTH LENGTH CAPS. Upstream refuses a multibulk count over 10
+        // or a bulk length over 16384 from a client that has not authenticated
+        // (networking.c::processMultibulkBuffer, both guarded by `authRequired(c)`), and closes
+        // the connection. It is the defence against pre-auth memory exhaustion: without it an
+        // unauthenticated client can make the server allocate an arbitrarily large query buffer
+        // by DECLARING a huge bulk length, before proving it may talk to the server at all.
+        //
+        // `authRequired` is "the default user has a password or is disabled, AND this client has
+        // not authenticated" -- which is exactly `!default_user_is_nopass() && !is_authenticated()`
+        // here, reusing the accessor that already encodes upstream's `USER_FLAG_NOPASS` test.
+        //
+        // The caps are deliberately above what authentication itself needs: AUTH and HELLO are
+        // 2-4 element arrays with sub-16KiB arguments, so a client can always still authenticate.
+        //
+        // The wording follow-up this comment used to defer is now DONE, in b0ae8c95e: the two
+        // `Unauthenticated*Length` variants and the `pre_auth` carrier exist, so the caps below
+        // report upstream's text rather than "invalid ... length". The deferral rested on a
+        // census that came out inverted -- `ParserConfig` is built by 189 literal expressions of
+        // which 185 already use `..default()` and only FOUR are exhaustive (this one, and three
+        // in fr-protocol/tests/fuzz_corpus_smoke.rs). It was a four-site edit, not a 184-site one.
+        //
+        // `pre_auth` carries the limits that WOULD apply after AUTH, because upstream checks the
+        // ordinary limit first: a count over INT_MAX is "invalid multibulk length" even before
+        // AUTH, and only a well-formed but oversized one gets the unauthenticated wording. The
+        // parser reads it only after it has already decided to reject, so the steady state still
+        // runs exactly one comparison per length.
+        let authed_max_bulk_len = self
+            .policy
+            .gate
+            .max_bulk_len
+            .min(self.server.proto_max_bulk_len);
+        let authed_max_array_len = self.policy.gate.max_array_len;
+        let pre_auth = (!self.server.default_user_is_nopass() && !self.is_authenticated())
+            .then_some(fr_protocol::AuthedLimits {
+                max_bulk_len: authed_max_bulk_len,
+                max_array_len: authed_max_array_len,
+            });
         fr_protocol::ParserConfig {
-            max_bulk_len: self
-                .policy
-                .gate
-                .max_bulk_len
-                .min(self.server.proto_max_bulk_len),
-            max_array_len: self.policy.gate.max_array_len,
+            // `min`, not assignment: the pre-auth cap may only TIGHTEN a configured limit. A
+            // server whose policy already refuses at 1024 bytes must not hand an UNAUTHENTICATED
+            // client the looser 16384 -- that would make the hardening measure a relaxation for
+            // exactly the clients it exists to constrain.
+            max_bulk_len: if pre_auth.is_some() {
+                authed_max_bulk_len.min(fr_protocol::UNAUTH_MAX_BULK_LEN)
+            } else {
+                authed_max_bulk_len
+            },
+            max_array_len: if pre_auth.is_some() {
+                authed_max_array_len.min(fr_protocol::UNAUTH_MAX_MULTIBULK_LEN)
+            } else {
+                authed_max_array_len
+            },
+            pre_auth,
             max_recursion_depth: 128,
             // Server-side parsing of CLIENT → SERVER command frames
             // stays RESP2-only; the RESP3 downgrade helpers are
@@ -77941,6 +77987,7 @@ user bob reset off nopass +@all
             max_array_len: 1024,
             max_recursion_depth: 128,
             allow_resp3: false,
+            pre_auth: None,
         };
 
         // Hardcoded list of 0x00-prefixed seeds the generator
