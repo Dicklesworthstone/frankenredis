@@ -7136,8 +7136,23 @@ fn process_buffered_frames(
                 } else if let Some(consumed) =
                     parse_borrowed_plain_unwatch_packet(unparsed, &parser_config)
                 {
+                    // (frankenredis-ozrro) UNWATCH was recorded as unreachable for the cached
+                    // gate -- "no floor class, so no caller has a cache to hand it". The floor
+                    // class is genuinely absent and that was never the binding constraint: THIS
+                    // site is inside `process_buffered_frames`, where `plain_get_read_gate_cache`
+                    // is declared ~400 lines up and every neighbouring arm already uses it. The
+                    // OTHER call site, in `parse_borrowed_multibulk_action`, has no cache in
+                    // scope and correctly keeps its `None`.
+                    let default_read_allowed = Some(
+                        *plain_get_read_gate_cache
+                            .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+                    );
                     if runtime
-                        .execute_plain_unwatch_borrowed_into(ts, &mut conn.write_buf, None)
+                        .execute_plain_unwatch_borrowed_into(
+                            ts,
+                            &mut conn.write_buf,
+                            default_read_allowed,
+                        )
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
