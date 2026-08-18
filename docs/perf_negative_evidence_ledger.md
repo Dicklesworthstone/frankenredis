@@ -51407,3 +51407,81 @@ RETRY PREDICATE:
      (RESTORE-loaded lists take `retained_listpack_chunks` instead) before assuming −11 pct
      generalises; on an accepting shape the expected effect is zero.
   3. Do NOT re-measure with `dump_slope.py`. `1cec37cc6` withdrew a number taken that way.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: VALIDATED AND HELD — the FAST expire-cycle rate limit passes all three correctness checks and cuts a plain `GET` 26.08 pct / volatile-keyspace `GET` 37.10 pct, but `fr-runtime` is reserved by a peer so the code is NOT committed (`frankenredis-eh2ct`)
+
+NO CODE IS COMMITTED BY THIS ROW. The measurement is an fr-side instruction reduction measured
+fr-against-fr with NO live Redis arm, so it would be maintenance rather than campaign output in
+any case. The patch is validated and ready; `crates/fr-runtime/src/lib.rs` is held by BrownIbis
+and I am not overriding a reservation to land a number, however good it looks. My hunks were
+reverse-patched back out of the shared tree so they cannot ride into a peer's commit.
+
+  before bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  after  server ELF sha-256: e2424dcf1a2a1602c92e3ab75af024d8a6427c8d69635f6998a8e82beb2843ef
+
+Both built from `git archive HEAD` in a private tree so no peer WIP entered either arm. The
+measured AFTER ELF was built on HEAD `acaf5f45d`; the patch landing here applies unchanged to the
+current HEAD (`patch --dry-run` clean, 148 call sites and the target field both unmoved), so the
+shipping code is the same change on a newer base rather than the exact bytes measured. Two-point
+callgrind (N=2000/2N=4000) on an unchanged `GET kk`; instruction counts, load-immune, loadavg
+9.70-10.99 across the draws.
+
+### The gap
+
+`expire.c:181` refuses a FAST cycle starting within `config_cycle_fast_duration * 2` of the
+previous one and stamps `last_fast_cycle`; `ACTIVE_EXPIRE_CYCLE_FAST_DURATION` is 1000
+MICROseconds (`expire.c:110`), so upstream's floor is 2 ms. fr had no such guard, and 148 borrowed
+fast paths call `run_active_expire_cycle(now_ms, Fast)` per COMMAND on top of the correct
+once-per-tick call at `fr-server/src/main.rs:5185`. Attributed from the dump, not inferred:
+`execute_plain_get_borrowed_into_with_default_read_gate` accounted for 1.000 calls per op against
+0.007 from the event-loop path, while the incumbent ran its cycle 0.00-0.01 times per op.
+
+The change is one guard, one field and one constant, all sourced from upstream's numbers. SLOW is
+untouched, matching upstream, which rate-limits only the fast cycle.
+
+  arm         before draws        after draws      CONSERVATIVE
+  plain      1165.0 / 1159.9    848.1 / 857.4      -26.08 pct
+  volatile   1463.1 / 1465.0    920.3 / 912.8      -37.10 pct
+  clock_gettime per op, volatile arm: 3.02 -> 1.022
+
+The conservative figure is the smallest reduction the draw pairings allow. The residual volatile
+tax is +55.4 to +72.2 instr/op, almost all `get_string_bytes`, which is the LAZY expiry check on
+the key actually read and should remain.
+
+A/A NULL, same ELF on both sides, four same-binary ratios across the two draws of each arm, gives
+a median 1.001550 with a bootstrapped 95% median CI of [0.989153, 1.008216] and a worst bias of
+1.08 pct. Every arm and its null were taken within one top-level invocation of the harness per
+draw. THE VERDICT IS GATED ON THAT BOOTSTRAP MEDIAN-CI: 26.08 pct and 37.10 pct against a 1.08
+pct null are margins of 24x and 34x. CV is provenance only and was not used as a gate anywhere in
+this row; no CV was computed.
+
+### Correctness, all three checks that were owed
+
+  `cargo test -p fr-runtime`   633 passed, 0 failed, across every sub-suite
+  keyspace notifications        fr stock 100 | fr patched 100 | incumbent 100 `expired` events
+                                for 100 actively-expired keys never read by any client
+  replica propagation           master dbsize 1 and replica dbsize 1 on BOTH builds, link up,
+                                immortal key intact on the replica
+  behavioural                   dbsize 151/159/181 -> 1 on stock fr, patched fr and the
+                                incumbent; TTL -2, EXISTS 0, GET '' on all three
+
+`26b7686b2` held this patch precisely because the notification and replication paths were
+unverified and `cargo test` would not compile at HEAD. `57b289ba1` repaired the build; these three
+differentials close the rest. The notification and replication probes NEVER read the expiring
+keys, so they exercise ACTIVE reaping rather than lazy expiry on access.
+
+### A criterion of mine that is still not met, and is still not reworded
+
+`66e2455e3` asked for `run_active_expire_cycle` at "at most 0.10 calls per op". It reads
+1.010-1.014 after the change, because the guard is in the CALLEE: the 148 sites still call and the
+body returns early. The criterion should have been written on instructions. I am recording it as
+unmet rather than restating it to fit the result.
+
+RETRY PREDICATE: this closes the FAST-cycle cadence and nothing else. The remaining volatile-key
+cost is the ~62 instr/op lazy check inside `get_string_bytes`, which is load-bearing and should
+NOT be removed. Do not re-derive the 148 call sites or upstream's guard; both are cited with line
+numbers here and in `cdbc69ebf`. Reopen only IF `run_active_expire_cycle`'s BODY is measured
+executing more than once per 2 ms, or if a workload shows expiry latency regressing -- the
+differentials above cover reaping, notification and replication but not tail latency of expiry
+under memory pressure, which nothing here measures.
