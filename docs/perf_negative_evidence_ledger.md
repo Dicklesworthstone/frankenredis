@@ -56524,3 +56524,117 @@ against itself.
    `getrange` and `hstrlen` are the longest names in the set and most likely to collide in their
    length buckets; `get` and `set` are the shortest and least likely.
 3. Do not average the draws. Three draws, worst bound, as with every row in this vein.
+
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — a full-range LRANGE kept the `take` counter on the STACK and decremented it per element to enforce a bound the range already enforced; skipping it is −1.71 pct worst (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), deterministic
+whole-shape SELF-cost totals differenced across READ COUNTS at a fixed key count, and TWO-BINARY
+A/B with the A/A and the A/B in ONE INVOCATION and the candidate arm BRACKETED by control arms, on
+two element kinds. CV was NOT used, as a gate or otherwise — no coefficient of variation appears in
+this row's decision path and none was computed. No timing verdict is claimed: the measurand is a
+retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 0.996680, bootstrap 95% CI [0.992670, 1.006025] on the
+string read shape and 0.999296, CI [0.997334, 1.000239] on the integer one, each taken in the same
+invocation as the A/B it gates. The bootstrap median-CI is the verdict gate and it excludes zero on
+both.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### PROVENANCE
+
+  ELF           AFTER `9220de17cab74826c120816fe20dbb14e2f4b2911262d0e5a92c13502006d905`,
+                BEFORE `327deee584e403ae4bf896aba3c6bedc6890fa1128ce4c2fe3d2c0a81405380d`.
+  bench_elf_sha256=9220de17cab74826c120816fe20dbb14e2f4b2911262d0e5a92c13502006d905
+
+  Booted and hashed from `/proc/<pid>/exe`. Not a self-report and not claimed as one. The BEFORE
+  arm's SHA is byte-identical to `84fca03ad`'s AFTER arm, which is the check that no peer moved
+  `fr-store` between the two rows.
+
+### WHAT THE DISASSEMBLY SHOWED
+
+`84fca03ad` left `lrange_borrow_scan_impl` at 46.50 instructions per element, having absorbed the
+two iterator forwarders. Its inner loop reads:
+
+    mov  0x58(%rsp),%r12 ; test ; je      <- the take counter, LOADED FROM THE STACK
+    dec  %r12 ; mov %r12,0x58(%rsp)       <- decremented and STORED BACK, every element
+    mov  0x10(%rsp),%rdx ; cmp $-2 ; jne  <- the iterator discriminant, also stack-resident
+
+  Three memory operations per element to enforce a bound the RANGE HAS ALREADY ENFORCED. `LRANGE
+  key 0 -1` is the shape a full read takes, and there `e - s + 1` already equals the element count,
+  so `take` can never fire.
+
+  `emit_list_range` picks the plain iterator when `s == 0 && e + 1 == l.len()` and the `take` form
+  otherwise. It exists as a helper rather than as three inline branches because that loop appears
+  in the non-LFU, COLLAPSE and non-COLLAPSE arms of `lrange_borrow_scan_impl`, and writing it six
+  ways would move code layout in a function that has already proved layout-sensitive twice
+  (`36a66d696`, `69f8a0f72`). It is called once per LRANGE, not once per element, so an outlined
+  call would cost nothing measurable — which is the distinction `69f8a0f72` got wrong.
+
+  ORACLE: `emit_list_range_fast_arm_matches_the_take_form_qj6jn` drives both arms against a
+  reference that is the `take` form written by hand, at ten list lengths across the 128-element
+  chunk boundary, and at every combination of start and end that includes `s > 0`, `e < len - 1`,
+  single-element ranges and the full range — so the arm that must NOT be chosen is exercised as
+  hard as the one that must.
+
+### THE MEASUREMENT
+
+    deterministic, per LRANGE(0,-1), differenced across read counts
+      all-string    40,413.6 -> 39,037.3    −1,376.3    −3.41 pct
+      all-integer   33,112.5 -> 32,082.2    −1,030.3    −3.11 pct
+
+    whole-op A/B, RESTORE + THREE reads per key, slope 10 vs 30 keys
+      ALL-STRING   median −2.2796 pct, CI [−2.6748, −1.7799], n=5; null ratio 0.996680
+        WORST SINGLE DRAW −1.7799 pct
+      ALL-INTEGER  median −1.8292 pct, CI [−2.1327, −1.7066], n=4; null ratio 0.999296
+        WORST SINGLE DRAW −1.7066 pct  <- the figure this row claims
+
+    87-92 pct idle, loadavg 9.6-14.8, MHz mean 1900-2500 against a 1429-4292 spread.
+
+  The whole-op figures are smaller than the per-LRANGE ones because the shape carries a RESTORE
+  the lever does not touch; the per-LRANGE numbers are what the change is worth on the read itself.
+
+### THE RESTORE SHAPE, CHECKED BECAUSE THE LAST ROW COST IT SOMETHING
+
+`84fca03ad` paid +0.26 pct on RESTORE+DUMP for its inlining. This one does not:
+
+    RESTORE+DUMP   all-string 58,111.7 -> 58,171.0  (+0.10 pct)
+                   all-integer 72,866.9 -> 72,714.6  (−0.21 pct)
+
+  Both are inside the drift this instrument shows between rebuilds of identical code, and they go
+  in opposite directions, which is what layout noise looks like rather than a cost.
+
+### THE RESTORE-ISOLATION LAW, ENGAGED
+
+`b1o02`'s law fires because this row's shapes name RESTORE. It does not constrain the claim: every
+figure here is a SELF-speedup, fr against fr, and the law governs how a vs-incumbent ratio may be
+read. It is relevant in the other direction, though — this row improves the READ side, which is the
+side the law says redis is weak on, so `48eb38749`'s measured break-even of 0.124 reads/RESTORE on
+strings and 0.242 on integers moves DOWN with every read-side lever, not up. That is also why
+retry predicate 3 refuses to quote these as incumbent gains.
+
+### PARITY
+
+    LRANGE / LINDEX / LLEN over str, int, mixed and 200-byte pools, x fills −2/−1/4/128/300,
+    x n 3..300, x built-vs-RESTORED — BEFORE vs AFTER:                0 of 160 diverging
+      the same 160 vs redis 7.2.4:                                    0 of 160 diverging
+    workload sweep vs redis 7.2.4:                                    4 of 42, UNCHANGED
+    fr-store 942, 0 failures; clippy clean; fmt unchanged by this change.
+
+  The read probe's negative and out-of-range bounds are the point here, not decoration: this row
+  adds a BRANCH on the range, so the failure it could produce is the fast arm being taken for a
+  range that is not actually the whole list.
+
+### RETRY PREDICATES
+
+  1. The iterator discriminant is STILL stack-resident — the `cmp $-2` above survives this change.
+     That is the enum-of-chunk-iterators being too big to keep in registers. Reopen ONLY with a
+     candidate that shrinks the iterator state, and expect layout contagion on the RESTORE shapes;
+     do NOT expect a plain `#[inline]` to help, that ground is spent.
+  2. `encode_bulk_string_slice` remains the largest read term at 58.00 instructions per element.
+     It is on the UNIVERSAL reply path and has already had two beads (`vlis9`, `iqicb`). Reopen
+     ONLY with a candidate showing below 58.00/elem AND a null on a small-reply shape that touches
+     no lists.
+  3. Do NOT quote these as incumbent gains. `48eb38749` measured redis's marginal read at 3.08x
+     (strings) and 5.34x (integers) fr's, so the read side is a lead being widened.

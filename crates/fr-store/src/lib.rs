@@ -6958,7 +6958,6 @@ pub struct FunctionEntry {
     pub flags: Vec<String>,
 }
 
-
 /// Emit `l[s..=e]` to `sink`, skipping the `Iterator::take` adapter when the range is the WHOLE
 /// list.
 ///
