@@ -44798,3 +44798,76 @@ RETRY PREDICATE:
      whole-op delta is inside its null. If it is not inlined, keep the twin and keep the test.
   3. Do not "verify" this again by reading. The check above is a dozen lines of source
      extraction and it is reproducible; a reading is not.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: MEASURED — the GEOSEARCH allocator hypothesis is SUPPORTED on its own banked exit condition: jemalloc cuts `geosearch_2` D1 misses by at least 31.68 pct while instructions move 0.5 pct (`frankenredis-eh2ct`)
+
+NO RATIO IS CLAIMED and this is not campaign output. It is an fr-versus-fr mechanism result
+answering the exit condition banked in `fd1b728e9`, which said the hypothesis is supported ONLY
+if the jemalloc arm moves the L1 MISS rate, and that an instruction-count difference alone does
+not support it.
+
+  mimalloc arm  bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  jemalloc arm  bench_elf_sha256=1fd257d3bc1ee0723f38373db2a58202f1886a1a20c5d1c4945b06bc96402ce9
+
+Both built from `git archive HEAD` at `7860d231d` in a private tree, IDENTICAL source, differing
+only in `--no-default-features --features jemalloc`. Verified rather than assumed: the jemalloc
+arm carries 4 jemalloc symbols and the mimalloc arm none, and `main.rs:12`'s `compile_error!`
+makes a both-features build fail loudly rather than silently pick one. Per-arm loadavg 7.60-8.61,
+CPU MHz 1429-2395.
+
+### The result, and the two draws that produced it
+
+  event            mimalloc   jemalloc     delta        draw
+  D1 read miss         38.1       22.1   -42.10 pct     1
+  D1 write miss        25.2       21.2   -15.93 pct     1
+  TOTAL D1/op          63.3       43.2   -31.68 pct     1
+  TOTAL D1/op          36.8       25.1   -31.83 pct     2
+  instructions     13,264.9   13,189.6    -0.57 pct     1
+  instructions     13,260.8   13,194.6    -0.50 pct     2
+  data reads        3,137.9    3,159.4    +0.68 pct     1
+  data writes       2,512.4    2,489.2    -0.92 pct     1
+
+WORST BOUND -31.68 pct, per the replicated-standing convention. The signature is exactly what
+the hypothesis predicted and what an instruction lever cannot produce: DATA ACCESSES ARE FLAT
+(+0.68 pct reads, -0.92 pct writes) while a third of the L1 misses disappear. The same accesses
+are being made; fewer of them miss. That is locality, not work volume.
+
+### THE ABSOLUTE MISS COUNTS DO NOT REPLICATE, and quoting one would be wrong
+
+Between the two draws the absolute per-op miss counts nearly HALVED -- mimalloc 63.3 then 36.8,
+jemalloc 43.2 then 25.1 -- while the PAIRED RATIO held to 0.15 points (-31.68 vs -31.83 pct).
+Instructions over the same pair held to 0.03 pct. So on this shape the instruction instrument is
+stable in absolute terms and the miss instrument is NOT: per-op misses here are tens, not
+thousands, and are sensitive to where the heap lands, which differs run to run. Only the paired
+difference is quotable. Anyone reporting "geosearch_2 does N D1 misses per op" from this row is
+quoting a number that moved 42 pct between two draws of the same binary.
+
+### What this does NOT establish
+
+It does NOT close the certified deficit. `geosearch_2` is certified at 0.9162 control-normalised
+on the THROUGHPUT board, and simulated misses are not time. A 31.68 pct miss reduction is a
+mechanism result that makes the throughput question worth asking; it does not answer it.
+
+These are SIMULATED misses and are NOT comparable to the standing 157.1 HARDWARE misses per op
+from the row at :38143 -- the campaign has measured that `--cache-sim` overstates the fr/redis
+miss RATIO about 2.5x. That caveat is about comparing two ENGINES; here the simulator's bias
+applies to both arms of one engine and cancels in the difference, which is why the paired figure
+is usable and an absolute comparison against hardware is not.
+
+AND IT IS NOT AN ARGUMENT TO CHANGE THE GLOBAL DEFAULT. `crates/fr-server/Cargo.toml` chose
+mimalloc on "63.6 pct vs 36.5 pct geomean parity, 70x better p99 tails". This row is one shape.
+It is evidence that geosearch_2 is in the ~36.5 pct where jemalloc wins, which is what a geomean
+default predicts will exist; it is not evidence about the other 63.6 pct, and a global swap on
+this basis would trade a measured average for a single cell.
+
+RETRY PREDICATE: the next measurement is THROUGHPUT, not more misses -- run `geosearch_2` on
+`balanced_square_ab.py` with both arms and see whether the 0.9162 control-normalised figure
+moves, quoting the worst bound of a replicated draw. Expect that to be the hard half: that
+harness's own note at :743 records `xrange_2` as NEVER CERTIFIED in two attempts, straddling 1
+then null-failing, so a small-N throughput row on this family is not a given. Do NOT re-run the
+miss A/B to confirm this -- it replicated to 0.15 points and the absolute level is known
+unstable, so a third draw adds nothing. If the throughput figure does not move, the finding
+stands as a locality mechanism with no user-visible consequence on this shape, and that is worth
+recording rather than burying.
