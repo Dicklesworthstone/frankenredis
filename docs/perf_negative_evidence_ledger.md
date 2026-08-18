@@ -50683,3 +50683,66 @@ which point removing it stops being worth a parameter. Measure with
 references are the eight beneficiaries at 0.000 and `substr` at 1.000. **Do not open a tenth
 instance of this lever** — `object_encoding` is the only unconverted route left with a shape and
 it calls the gate three times, so it needs its own analysis rather than this transformation.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: CONFOUND — the `pttl` and `expiretime` "CPU shortfalls" cannot be attributed to those commands: one VOLATILE KEY in the keyspace costs an UNCHANGED `GET` 4.6-10.2 pct, and both shapes seed one while the control does not
+
+WITHDRAWN from `550509c58`: the designation of `pttl` and `expiretime` as "CPU shortfall, worth a
+lever", and its retry predicate naming them "the two shapes on this board worth opening a lever
+against". The MEASUREMENTS stand; the attribution to those command paths does not.
+
+  fr    bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  redis bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  `perf stat` on the server pid, `redis-benchmark -n 1000000 -P 16`, loadavg 7.96-8.41.
+
+### The control I should have run first
+
+`get_volatile` is `get_control` with ONE difference: an unrelated volatile key exists in the
+keyspace. Same command (`GET kk`), same key, same value, same everything else -- plus
+`SET vv x` + `PEXPIRE vv 900000000`.
+
+  draw   get_volatile   get_control   volatile-key tax
+    1       0.9670x        0.8773x        1.1022x
+    2       0.9054x        0.8655x        1.0461x
+
+MERELY HAVING ONE VOLATILE KEY COSTS fr 4.6-10.2 PCT OF ITS CYCLE ADVANTAGE ON A COMMAND THAT
+DOES NOT TOUCH IT. That is not news to this campaign -- a standing note already records that one
+volatile key triples `Timespec::now` and quadruples expire-cycle cost on every command including
+a plain GET -- but it had never been quantified as a RATIO against the incumbent, and I did not
+apply it to my own shapes until after publishing them.
+
+### Why that dissolves the attribution
+
+  shape        shortfall vs get_control    volatile key in its seed?
+  pttl             1.0680 - 1.0751              YES (PEXPIRE bb 900000000)
+  expiretime       1.0535 - 1.0736              YES (EXPIREAT kk 4102444800)
+  getbit           1.0196 (one draw)            no  (SET only)
+  publish          0.9980 (one draw)            no  (no seed at all)
+  VOLATILE TAX     1.0461 - 1.1022              -- by construction
+
+The tax range OVERLAPS both shortfalls and its upper end exceeds them. I am NOT claiming it
+explains them exactly -- two draws each cannot support that -- but it is at least as large as
+the effect, which is enough to make the attribution unsafe. And the correlation across all four
+candidates is exact: the two shapes that showed a shortfall are precisely the two whose seed
+creates a volatile key, and the two that did not are precisely the two whose seed does not.
+
+Normalised against `get_volatile` instead, both shapes straddle 1.0 rather than sitting above it.
+
+### What this means for the screen, beyond these two shapes
+
+ANY shape whose seed creates a volatile key is being compared against a control that has none,
+and inherits a penalty of up to 10 pct that has nothing to do with its command. In
+`balanced_square_ab.py`'s `cascade` group that is `pttl` and `expiretime`; other groups should be
+audited for the same pattern before their normalised figures are read as command properties. This
+is a defect in the COMPARISON, not in the harness's arithmetic, and it is invisible in the output
+because the seed lines are not printed beside the ratio.
+
+RETRY PREDICATE: do NOT open a lever on `pttl` or `expiretime` on the strength of `550509c58`;
+this row is why. To reinstate either as a target, measure it against a control with MATCHED
+keyspace state -- `get_volatile` as defined here is that control -- and show the shape still
+exceeds it with both draws' bounds clear of the tax range 1.0461-1.1022. The genuinely open
+question this exposes is larger and better: fr loses 4.6-10.2 pct of its cycle advantage to the
+mere PRESENCE of one volatile key, on commands that never touch it. That is an engine-wide
+property affecting every workload with any TTL, and it is worth more than either command path.
+Whoever takes it should start from the standing note that one volatile key triples
+`Timespec::now` per op.
