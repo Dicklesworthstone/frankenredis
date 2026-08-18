@@ -6999,6 +6999,15 @@ fn process_buffered_frames(
                         )
                     }
                 } else if borrowed_arity_in(unparsed, b'1', b'2')
+                    // PING's command token is 4 bytes in every form it accepts, so the bulk
+                    // header at offset 4 is literally `$4\r\n` in all three branches of
+                    // `parse_borrowed_plain_ping_packet` (see UPPER_NOARG_MULTIBULK_PING and
+                    // the two `strip_prefix` arms). Testing it here cannot reject a frame that
+                    // parser would have accepted; it only skips the call for frames it would
+                    // have refused. The arity guard alone does not discriminate -- GET is
+                    // arity 2 exactly like `PING message` -- so every GET and TTL was paying a
+                    // full 35.0 instr/op parse attempt to learn it is not a PING.
+                    && matches!(unparsed.get(4..8), Some(b"$4\r\n"))
                     && let Some(packet) = parse_borrowed_plain_ping_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
