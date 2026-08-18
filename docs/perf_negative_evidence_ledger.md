@@ -51186,6 +51186,7 @@ still. Before claiming the vein is finished, run the census — `call_count_delt
 not a source scan and not a peer's sample.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: MEASURED AND HELD — fr's FAST expire cycle has no rate limit and upstream's does; adding upstream's guard cuts a plain `GET` 27.2 pct and a volatile-keyspace `GET` 37.1 pct. held because a test build is broken at PRISTINE HEAD
 
 NO RATIO AGAINST THE INCUMBENT IS CLAIMED and NO CODE IS LANDED. The patch is measured, the
@@ -51261,6 +51262,7 @@ obstacle to route around. Do NOT re-derive the 148 call sites or the upstream gu
 cited above with line numbers.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: ADDENDUM — the blocker on the expire-cycle patch is CLEARED and the patch still applies; what remains owed is the suite run and the notification/replication check, not the build
 
 `26b7686b2` held a measured expire-cycle rate limit (plain `GET` -27.2 pct, volatile-keyspace
@@ -51288,3 +51290,120 @@ keyspace-notification and replica-propagation check on ACTIVELY expired keys.
 differential in `26b7686b2` deliberately never reads the expiring keys -- it proves reaping still
 happens and proves nothing about what is published when it does. A -37 pct number is exactly the
 kind that makes skipping that check attractive.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the list DUMP encoded every node blob BEFORE the check that throws them all away; rejecting first is −11.11 pct worst bound on build+DUMP, 40x its own null (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), TWO-BINARY A/B
+with the A/A and the A/B in ONE INVOCATION and the candidate arm BRACKETED by control arms
+(`BEFORE_a, AFTER, BEFORE_b`). The verdict gate is an explicit percentile-bootstrap MEDIAN-CI
+over the draws, reported below and required to exclude zero. CV was NOT used, as a gate or
+otherwise — no coefficient of variation appears in this row's decision path and none was
+computed. No timing verdict is claimed: the measurand is a retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 0.997301, bootstrap 95% CI [0.993751, 1.000942] over six
+draws, taken in the same invocation as the A/B it gates; the full per-draw table is below.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — this row banks no vs-incumbent ratio; the
+incumbent appears only as the parity oracle that must NOT move.
+
+### HOW IT WAS FOUND: ATTRIBUTE FIRST
+
+`cc2a132c2` put the DUMP half at ~47 pct of build+DUMP but every frame name read 0.00, inlined.
+Differencing the PER-FUNCTION marginals of (build+dump) against (build only) forced the residue
+into view — 139,595 instr/key, of which:
+
+    25,075  18.0 pct  Store::dump_key
+    13,500   9.7 pct  parse_listpack_integer
+    11,924   8.5 pct  memcpy
+     9,052   6.5 pct  ChunkedListIter::next
+     7,800   5.6 pct  fr_persist::encode_listpack_string_entry
+     7,800   5.6 pct  fr_store::encode_listpack_string_entry
+     5,727   4.1 pct  fr_persist::encode_listpack_strings_blob_with_capacity
+     4,500   3.2 pct  fr_store::encode_listpack_backlen
+     4,500   3.2 pct  fr_persist::encode_listpack_backlen
+
+  THE TELL IS THE PAIR OF EQUAL COSTS IN TWO CRATES. `encode_listpack_string_entry` bills 7,800
+  in fr_persist AND 7,800 in fr_store; `encode_listpack_backlen` bills 4,500 in each. Two
+  independent encoders (the same pair `37e7b724b` found) each doing one pass over 300 elements
+  means the payload is encoded TWICE.
+
+### THE BUG: ENCODE, THEN DECIDE TO THROW IT AWAY
+
+`quicklist_packed_nodes`'s chunk loop built the node blob for an `Owned` chunk and only THEN let
+the shared `list_node_exceeds_limit` check reject it — and that check `return None`s for the
+WHOLE list, so every blob encoded up to that point is discarded and the caller's fallback
+accumulator re-encodes the entire list from scratch.
+
+  The chunk already carries `lp_bytes`, its EXACT listpack length: the same line handed it to
+  `encode_node_blob` as the capacity that has to be right, and reversing for `front_biased`
+  permutes entries without changing their encoded sizes. So the limit was decidable from state
+  the chunk already held, and the encode was pure waste on the rejecting path.
+
+    THE FIX IS THE CHECK MOVING ABOVE THE ENCODE. Nothing else changed — same predicate, same
+    arguments, same result. A `debug_assert_eq!(blob.len(), lp_bytes)` now pins the equality the
+    early reject depends on, and it runs in every test build.
+
+### THE MEASUREMENT
+
+    draw   BEFORE_a     BEFORE_b     AFTER        cand-pct     null-pct
+      1    295,673.05   296,521.10   262,597.45   −11.3137     −0.2860
+      2    295,486.75   296,238.85   261,709.80   −11.5435     −0.2539
+      3    295,586.40   296,762.60   261,604.85   −11.6721     −0.3963
+      4    296,379.55   296,295.30   261,898.55   −11.6215     +0.0284
+      5    293,400.70   295,926.25   261,926.95   −11.1098     −0.8534
+      6    296,717.20   296,243.60   262,578.70   −11.4347     +0.1599
+
+    A/B  median −11.4891 pct, bootstrap 95% CI [−11.6468, −11.2118], n=6 draws
+    null  median 0.997301 as a ratio BEFORE_a/BEFORE_b (within 2 pct of unity); the same six
+          draws as absolute percentages have median 0.2699 pct, CI [0.0942, 0.6249]
+    MEDIAN-CI GATE: the bootstrap median-CI is the verdict gate and it excludes zero = TRUE
+    WORST SINGLE DRAW −11.1098 pct  <- the figure this row claims
+
+  ~34,000 instructions per key on a 300-element list, and the effect is 40x its own null. Quoted
+  as the WORST draw per the replicated-standing convention, not the median and not draw 3.
+
+  DRAWS 4 AND 5 RAN ON A BADLY CONTENDED HOST — idle 1.6 pct and 26.5 pct, loadavg rising to
+  17.38 — and returned −11.62 and −11.11 pct. That is the load-immunity of Ir counting behaving
+  as `feedback_callgrind_ir_is_immune_to_load_and_mhz` says it should, and it is why those draws
+  are reported rather than discarded. They are also the two least favourable, so keeping them can
+  only have hurt the claim.
+
+### PARITY IS THE CONSTRAINT AND IT DID NOT MOVE
+
+    workload sweep 4 of 42 diverging, UNCHANGED
+    fr-store 935 / fr-persist 227, 0 failures; clippy clean.
+
+  The change reorders a test and an encode that produce the same bytes, so the DUMP payload is
+  unchanged by construction; the sweep confirms it rather than assuming it.
+
+### PROVENANCE
+
+  ELFs          BEFORE bench_elf_sha256 = f7f311cfc3628a21b00c120c04496f9e1aab63ee38fd1a776cb048d335435484
+                AFTER  bench_elf_sha256 = da7140d9a1309d7905281ce2231a7d3c6d9c3025f64e7077ff8763b1f8f3242b
+                `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1, build log checked
+                for BOTH `^error` and rch refusals: 0 of each. ONE build this turn under the
+                one-per-project rule. `df` run immediately before it; /data 95G.
+  harness       scratchpad `dump_paired.py` — the instrument `1cec37cc6` built after a
+                separate-invocation null under-reported by 9x. Per draw: BEFORE_a, AFTER,
+                BEFORE_b in ONE process; A/B vs mean(BEFORE_a, BEFORE_b) so a monotone drift
+                cancels to first order; A/A from the same draw. 10 vs 30 keys, each key built by
+                ONE bulk RPUSH of 300 elements and dumped once. DISTINCT KEYS because
+                `Store::dump_payload_cache` memoises by `modification_count`. Percentile
+                bootstrap, 20,000 resamples, resample unit = the DRAW, seeded.
+                Attribution by `dump_attrib.py`, also new.
+  incumbent     vendored redis 7.2.4 as the parity oracle only, via `workload_shapes_probe.py`.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 20:09.
+                PER-DRAW idle/loadavg/MHz inline above: idle 1.6-88.3 pct, loadavg 7.11-17.75 /
+                7.72-10.09 / 8.98-9.72, MHz mean 2017-3667, max 4293, min 1429. Every idle
+                figure measured from a `/proc/stat` delta, not quoted.
+
+RETRY PREDICATE:
+  1. The residue table above is the map for the NEXT lever and three entries are unexplained:
+     `parse_listpack_integer` at 13,500 instr/key (45 per element) on a workload whose elements
+     are all NON-integer strings, `memcpy` at 11,924, and `Store::dump_key` itself at 25,075.
+     Attribute those before touching them.
+  2. This lever only pays when the chunk path REJECTS. Measure a shape where it ACCEPTS
+     (RESTORE-loaded lists take `retained_listpack_chunks` instead) before assuming −11 pct
+     generalises; on an accepting shape the expected effect is zero.
+  3. Do NOT re-measure with `dump_slope.py`. `1cec37cc6` withdrew a number taken that way.

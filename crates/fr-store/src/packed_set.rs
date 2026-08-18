@@ -5243,15 +5243,36 @@ impl ListValue {
                     front_biased,
                     lp_bytes,
                 } if !elems.is_empty() => {
+                    // (frankenredis-qj6jn) REJECT BEFORE ENCODING. This arm used to build the
+                    // node blob and only then let the shared `list_node_exceeds_limit` check
+                    // below reject it — and that check returns None for the WHOLE list, so every
+                    // blob encoded up to that point was thrown away and the caller's fallback
+                    // accumulator re-encoded the entire list from scratch.
+                    //
+                    // The chunk already carries `lp_bytes`, its EXACT listpack length: the line
+                    // below hands it to `encode_node_blob` as the capacity that must be right,
+                    // and reversing for `front_biased` permutes entries without changing their
+                    // encoded sizes. So the limit is decidable from state the chunk already
+                    // holds, and the encode is pure waste on the rejecting path.
+                    //
+                    // Attributed cost of the discarded pass, differencing (build+dump) against
+                    // (build only) at fill 128 / 300 elements: `encode_listpack_string_entry`
+                    // 7,800 + `encode_listpack_backlen` 4,500 + `encode_listpack_strings_blob`
+                    // 5,727 instr/key in fr_persist, on a 139,595 instr/key DUMP.
+                    if list_node_exceeds_limit(fill, *lp_bytes, elems.len() as u64) {
+                        return None;
+                    }
                     let slices: Vec<&[u8]> = if *front_biased {
                         elems.iter().rev().map(Vec::as_slice).collect()
                     } else {
                         elems.iter().map(Vec::as_slice).collect()
                     };
-                    // (frankenredis-qj6jn) The chunk already carries its exact listpack
-                    // length; reversing for `front_biased` permutes the entries but not
-                    // their encoded sizes, so the total is the same either way.
                     let blob = Self::encode_node_blob(&slices, *lp_bytes)?;
+                    debug_assert_eq!(
+                        blob.len() as u64,
+                        *lp_bytes,
+                        "lp_bytes must be the EXACT blob length; the early reject above relies on it"
+                    );
                     (Cow::Owned(blob), elems.len())
                 }
                 _ => return None,
