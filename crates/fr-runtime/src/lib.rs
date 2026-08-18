@@ -49729,11 +49729,22 @@ fn protocol_error_to_resp(error: RespParseError) -> RespFrame {
         RespParseError::InvalidUtf8 => {
             RespFrame::Error("ERR Protocol error: invalid UTF-8 payload".to_string())
         }
+        // (frankenredis-mzkxl) Upstream words the OVERSIZED case the same as the
+        // malformed one: networking.c:2331 rejects `ll < 0` and `ll > proto_max_bulk_len`
+        // through a single `addReplyError(c, "Protocol error: invalid bulk length")`. The
+        // internal split is kept -- the two conditions differ and fr-protocol carries both
+        // variants -- but the WIRE text is upstream's, because "exceeds limit" is a string no
+        // redis ever sends.
         RespParseError::BulkLengthTooLarge => {
-            RespFrame::Error("ERR Protocol error: bulk length exceeds limit".to_string())
+            RespFrame::Error("ERR Protocol error: invalid bulk length".to_string())
         }
+        // (frankenredis-mzkxl) Same as above: networking.c:2280 rejects a non-numeric
+        // count and `ll > INT_MAX` with one "Protocol error: invalid multibulk length". fr's
+        // default max_array_len IS i32::MAX, so this is the identical rejection under a
+        // different name; the hardened profile refuses earlier by policy, and now does so with
+        // redis's wording rather than an invented one.
         RespParseError::MultibulkLengthTooLarge => {
-            RespFrame::Error("ERR Protocol error: multibulk length exceeds limit".to_string())
+            RespFrame::Error("ERR Protocol error: invalid multibulk length".to_string())
         }
         RespParseError::RecursionLimitExceeded => {
             RespFrame::Error("ERR Protocol error: recursion depth limit exceeded".to_string())
