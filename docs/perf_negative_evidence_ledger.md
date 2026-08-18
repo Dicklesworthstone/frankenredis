@@ -47078,3 +47078,77 @@ RETRY PREDICATE:
   3. If the host is never build-free for two minutes either, the next move is not a longer wait
      but a denominator taken ONCE under a proven-FIT window and reused across draws, with the
      reuse stated — which is a different claim and needs its own row before anyone leans on it.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: MECHANISM — `geosearch_2`'s stall is D1 READ misses (2.70x, depth-independent); branch mispredicts are ELIMINATED and the write/memset lever I nearly published was MY OWN HARNESS ARTIFACT (`frankenredis-eh2ct`)
+
+NO RATIO IS CLAIMED. This narrows the mechanism behind the certified deficit (`f8067cba3`,
+0.8578 worst bound BEHIND) and the stall diagnosis (`e96a9b03b`, fr retires 24.7 pct fewer
+instructions and still loses, implying redis_IPC/fr_IPC 1.32-1.34). Both arms run the identical
+callgrind simulator on one shape, so cross-engine comparison is by difference; the campaign's
+measured ~2.5x overstatement of the fr/redis miss RATIO by `--cache-sim` applies to the absolute
+level, not to the direction.
+
+  fr    bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  redis bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  Two-point (N=1000/2N=2000), loadavg 8.03-8.19, CPU MHz 1429-2562.
+
+### Branch mispredicts are NOT the mechanism
+
+  event                 fr      redis   fr/redis
+  total mispredicts   98.6      104.6    0.9425x
+  mispredict rate    3.986 pct  4.152 pct
+
+fr mispredicts LESS than the incumbent, in both count and rate. That retires the branch-miss
+hypothesis for this shape, which was worth testing because this campaign already recorded a
+stall-bound route (`zrangebyscore`) at ~6x redis's branch misses with IPC 1.57 against 2.71.
+`geosearch_2` shares the IPC signature and does NOT share the mechanism, so the two routes need
+different levers and the earlier row does not transfer.
+
+### THE WRITE/MEMSET FINDING WAS MY OWN HARNESS, AND THE CONTROL CAUGHT IT
+
+At my first measurement I found fr doing 1.3738x redis's data WRITES, D1 write-misses at
+4.1236x, and traced the entire fr/redis write excess (683 per op) to `__memset_avx2_unaligned_erms`
+called from `frankenredis::handle_readable` at 671.7 writes per op two-point -- 26.13 pct of all
+fr data writes. `fr-server/src/main.rs:6446` documents that memset as a DELIBERATE tradeoff
+("that memset is cheaper than the byte copy it replaces"), whose cost had been reasoned about
+rather than measured. It looked like a broad lever on every command, not just this shape.
+
+It is not. My harness sent 100 commands per `sendall`; the certified rows use -P16. Re-running
+the identical measurement at a chunk of 16:
+
+  event              depth 100   depth 16
+  Dw fr/redis          1.3738x    0.9955x     <- write excess GONE
+  D1 write miss        4.1236x    1.1687x     <- write-miss gap GONE
+  D1 read miss         2.7279x    2.7013x     <- UNCHANGED
+  total D1 misses      3.2119x    2.1170x
+  data accesses/op                0.8995x     <- fr makes FEWER accesses at -P16
+
+Deep pipelining fills `read_buf` far enough to trigger the LARGE-chunk resize path, and the
+zero-fill that path performs is what I measured. At the pipeline depth the certified figures
+actually use, fr's writes match the incumbent to 0.45 pct. THE MEMSET IS REAL AND IS NOT THE
+DEFICIT. Anyone tempted by it should note it may still matter at deep pipelining, which is a
+different claim needing its own shape.
+
+### What survives is the read side, and it survives a 6x change in pipeline depth
+
+D1 READ misses are 2.7279x at depth 100 and 2.7013x at depth 16 -- a 0.98 pct difference across
+a 6x change in the parameter that destroyed the write result. At -P16 fr makes 0.8995x the data
+accesses of the incumbent and still takes 2.12x the D1 misses overall. Fewer accesses, more
+misses, on both depths: that is locality and nothing else.
+
+So the mechanism chain for `geosearch_2` now reads: work volume ELIMINATED (fr 24.7 pct fewer
+instructions, `e96a9b03b`); branch mispredicts ELIMINATED (fr 5.75 pct fewer); data-write volume
+ELIMINATED at the operative depth (0.9955x); allocator REJECTED on magnitude (`a277535d7`).
+What remains is D1 READ-miss locality.
+
+RETRY PREDICATE: a `geosearch_2` lever must reduce D1 READ misses and must be measured at the
+pipeline depth of the row it claims to move -- this row exists because a 100-deep harness
+manufactured a 4.12x write-miss gap that vanishes at 16. Do NOT re-test branches, writes,
+instructions or the allocator on this shape; each is retired above with a number. The read-miss
+target is 2.70x, and the layout candidates worth profiling are the ones actually READ per
+candidate point: the `PackedZSet` record stride hit by `record_at`, and the score/member
+indirection in `zset_for_each_in_score_ranges`, neither of which this row has profiled. Reopen
+the memset question only against a DEEP-PIPELINE shape, where it is a real effect on its own
+terms rather than an artifact of measuring one.
