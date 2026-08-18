@@ -51409,6 +51409,7 @@ RETRY PREDICATE:
   3. Do NOT re-measure with `dump_slope.py`. `1cec37cc6` withdrew a number taken that way.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: VALIDATED AND HELD — the FAST expire-cycle rate limit passes all three correctness checks and cuts a plain `GET` 26.08 pct / volatile-keyspace `GET` 37.10 pct, but `fr-runtime` is reserved by a peer so the code is NOT committed (`frankenredis-eh2ct`)
 
 NO CODE IS COMMITTED BY THIS ROW. The measurement is an fr-side instruction reduction measured
@@ -51485,6 +51486,96 @@ numbers here and in `cdbc69ebf`. Reopen only IF `run_active_expire_cycle`'s BODY
 executing more than once per 2 ms, or if a workload shows expiry latency regressing -- the
 differentials above cover reaping, notification and replication but not tail latency of expiry
 under memory pressure, which nothing here measures.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: `5d6f53a43`'s mechanism is borne out by frame DISAPPEARANCE (−23.7 pct residue), and the next lever is COUNTED rather than guessed: `parse_listpack_integer` runs THREE times per element where the encoder runs once (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts and CALL COUNTS (callgrind Ir + `calls=`
+attribution, slope method for the residue). No timing verdict is claimed and CV was NOT used, as
+a gate or otherwise. NO BUILD — the project's build slot was in flight, so this row measures with
+the `5d6f53a43` binary and changes no code. Campaign output: no; no vs-incumbent ratio is banked.
+
+### `5d6f53a43`'s MECHANISM IS BORNE OUT, NOT JUST ITS EFFECT
+
+`5d6f53a43` claimed the list DUMP encoded every node blob and then threw them away. Re-running
+the attribution against the SHIPPED binary settles it: every fr_persist encoder frame has
+VANISHED from the residue.
+
+    frame                                       BEFORE      AFTER
+    fr_persist::encode_listpack_string_entry     7,800      absent
+    fr_persist::encode_listpack_strings_blob     5,727      absent
+    fr_persist::encode_listpack_backlen          4,500      absent
+    __memcpy_avx_unaligned_erms                 11,924       8,027
+    DUMP residue, total                        139,595     106,443   (−23.7 pct)
+
+  18,027 instr/key of fr_persist encoding disappeared and memcpy fell 3,897, which is 21,924 of
+  the 33,152 drop named by frames; the rest is inlined code the frame table cannot attribute.
+  A predicted mechanism whose frames disappear on the predicted side is a stronger result than
+  the end-to-end delta alone, and `5d6f53a43` was published before this check existed.
+
+### THE NEXT LEVER, COUNTED BEFORE CHASING IT
+
+The post-fix residue is 106,443 instr/key, of which:
+
+    25,075  23.6 pct  Store::dump_key
+    13,500  12.7 pct  fr_store::parse_listpack_integer
+     9,052   8.5 pct  ChunkedListIter::next
+     8,027   7.5 pct  memcpy
+     7,800   7.3 pct  fr_store::encode_listpack_string_entry
+     4,500   4.2 pct  fr_store::encode_listpack_backlen
+     4,214   4.0 pct  ListValueIter::next
+
+`feedback_count_calls_before_chasing_a_hot_frame` says count first. Counted, on 30 keys x 300
+elements = 9,000 elements:
+
+    fr_store::parse_listpack_integer        27,000 calls   3.00 per element
+    fr_store::encode_listpack_string_entry   9,000 calls   1.00 per element
+    fr_store::encode_listpack_backlen        9,000 calls   1.00 per element
+
+  THE ENTRY IS ENCODED ONCE AND CLASSIFIED THREE TIMES. The classification is not free: it is
+  45 instr/element in total, so ~30 of that is redundant — roughly 9,000 instr/key, 8.5 pct of
+  the DUMP residue, for deciding the same question twice more.
+
+  WHERE THE THREE COME FROM: `listpack_entry_encoded_len` (lib.rs:36077) parses the entry to
+  decide its encoded length, and it has four callers on this path; `encode_listpack_entry`
+  (lib.rs:36851) parses it AGAIN to decide how to encode. Two length computations plus one
+  encode is three.
+
+    THIS IS THE SHAPE ALREADY SOLVED ONCE ON THIS BEAD. `list_lp_entry_bytes` was computed twice
+    per element until `EntryBytes` carried the answer from the caller that already had it; the
+    same newtype discipline applies here, and the same hazard does — a wrong classification is a
+    WRONG ENCODING, not a slow one, so whatever carries it must make the wrong value fail to
+    compile rather than fail at runtime.
+
+### WHAT THIS ROW DOES NOT CLAIM
+
+No lever is built or measured. 8.5 pct of a DUMP residue is an UPPER BOUND on what removing two
+of the three calls could give, and only if the carried classification costs nothing — which the
+`EntryBytes` work says is not automatic (`feedback_ported_lever_fails_in_the_control_regime`: the
+naive carry grew its own function by 3 instructions on the regime that never used it).
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = da7140d9a1309d7905281ce2231a7d3c6d9c3025f64e7077ff8763b1f8f3242b
+                — the `5d6f53a43` build, unchanged. NO BUILD was run for this row.
+  probes        scratchpad `dump_attrib.py` (residue by differencing build+dump against
+                build-only) and `callcount.py`, NEW: parses callgrind's `cfn=`/`calls=` records
+                so a frame's cost can be split into per-call cost and call COUNT.
+  incumbent     not exercised; no ratio claimed.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 20:2x,
+                loadavg 11.08/9.42/9.36 at the brief, /data 91G — the lowest of this campaign and
+                still above the 42G floor. Recorded for completeness: instruction counts and call
+                counts are immune to load.
+
+RETRY PREDICATE:
+  1. Carry the classification, do not recompute it. Model it on `EntryBytes`: one constructor,
+     the wrong value uncompilable. Oracle: `callcount.py` must show
+     `parse_listpack_integer` at 1.00 per element and the encoders unchanged at 1.00.
+  2. Measure with `dump_paired.py` and NOTHING else on this path; `1cec37cc6` withdrew a number
+     taken with the separate-invocation harness.
+  3. `Store::dump_key` at 25,075 instr/key (23.6 pct, 84 per element) is the LARGEST frame and is
+     entirely unexplained — it is orchestration that should delegate. Attribute it before
+     assuming the classification lever is the biggest one left.
 
 ## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — nine more read routes take the cached gate at **175.0 instr/op each**, and a **THIRD derivation form** turns up, which is most of why I kept underestimating this vein's size (`frankenredis-getexgate`)
 
