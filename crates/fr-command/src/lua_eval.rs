@@ -14838,7 +14838,26 @@ fn lua_value_to_u32_for_bitop(
 // — return the exact error wording vendored emits for unserialisable values.
 // The script error wrap adds 'user_script:N: ' prefix and the trailing
 // 'script: <sha>, on @user_script:N.' tail.
+/// Upstream lua_cjson's `DEFAULT_ENCODE_MAX_DEPTH` (deps/lua/src/lua_cjson.c:68).
+///
+/// (frankenredis-cjson-encode-depth-zo5ac) Not a tuning knob: `cjson.setmaxdepth` is not exposed by Redis, so 1000
+/// is the only value a script can ever observe and matching it exactly is the whole requirement.
+const CJSON_ENCODE_MAX_DEPTH: u32 = 1000;
+
+/// Encode a Lua value as JSON the way Redis-bundled cjson does.
+///
+/// (frankenredis-cjson-encode-depth-zo5ac) The recursion is depth-BOUNDED, and that bound is load-bearing rather
+/// than defensive. `lua_value_to_json` had no depth parameter, so a self-referential table --
+/// `local t = {} t.x = t return cjson.encode(t)` -- had no terminating condition and recursed
+/// until the native stack was exhausted. That is a process death reachable from any EVAL, not a
+/// wrong reply, and upstream's depth limit is exactly what bounds it there.
 fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
+    // Upstream json_encode seeds the walk at 0 (lua_cjson.c:725); the counter counts TABLES
+    // entered, so a top-level table is depth 1 and the limit admits 1000 of them.
+    lua_value_to_json_at_depth(val, 0)
+}
+
+fn lua_value_to_json_at_depth(val: &LuaValue, current_depth: u32) -> Result<String, String> {
     match val {
         LuaValue::Nil => Ok("null".to_string()),
         LuaValue::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
@@ -14859,6 +14878,17 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
         }
         LuaValue::Str(s) => Ok(json_escape_bytes(s)),
         LuaValue::Table(t) => {
+            // (frankenredis-cjson-encode-depth-zo5ac) Upstream increments on entry and checks immediately
+            // (lua_cjson.c:680-682), so the depth reported in the error is the FAILING one and
+            // a table nested exactly 1000 deep still encodes. Shadowing here is what carries the
+            // incremented value into every recursive call below, matching upstream passing
+            // `current_depth` on to json_append_array / json_append_object.
+            let current_depth = current_depth + 1;
+            if current_depth > CJSON_ENCODE_MAX_DEPTH {
+                return Err(format!(
+                    "Cannot serialise, excessive nesting ({current_depth})"
+                ));
+            }
             // (frankenredis-pt4d4) Mirror Lua-bundled cjson's
             // lua_array_length: a table encodes as an array iff every
             // key is a positive integer AND the result isn't "too
@@ -14946,7 +14976,7 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
                         out.push(',');
                     }
                     match by_idx.get(&i) {
-                        Some(v) => out.push_str(&lua_value_to_json(v)?),
+                        Some(v) => out.push_str(&lua_value_to_json_at_depth(v, current_depth)?),
                         None => out.push_str("null"),
                     }
                 }
@@ -14971,7 +15001,7 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
                 }
                 first = false;
                 let _ = write!(out, "\"{}\":", i + 1);
-                out.push_str(&lua_value_to_json(v)?);
+                out.push_str(&lua_value_to_json_at_depth(v, current_depth)?);
             }
             drop(inner);
             for (k, v) in &hash_pairs {
@@ -14981,7 +15011,7 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
                 first = false;
                 out.push_str(&json_escape_bytes(&k.to_display_string()));
                 out.push(':');
-                out.push_str(&lua_value_to_json(v)?);
+                out.push_str(&lua_value_to_json_at_depth(v, current_depth)?);
             }
             out.push('}');
             Ok(out)
@@ -21762,6 +21792,52 @@ end
             "true"
         );
         assert_eq!(lua_value_to_json(&LuaValue::Nil).expect("nil"), "null");
+    }
+
+    /// cjson.encode must STOP at upstream's nesting limit rather than recurse to the stack floor.
+    ///
+    /// (frankenredis-cjson-encode-depth-zo5ac) Both sides of the boundary are asserted because
+    /// only the pair pins the limit. An "is_err on something deep" test passes against a limit of
+    /// 10 as easily as against 1000, and a limit that is too LOW is its own parity break: it
+    /// refuses documents Redis encodes.
+    ///
+    /// The self-referential case is the reason this is a bug and not a nit. Without a bound it has
+    /// no terminating condition at all -- fr recursed until the native stack was exhausted, which
+    /// kills the process, and any client that can run EVAL can construct it in three tokens.
+    #[test]
+    fn cjson_encode_bounds_nesting_at_upstreams_limit_zo5ac() {
+        fn nest(depth: usize) -> LuaValue {
+            let mut v = LuaValue::Number(1.0);
+            for _ in 0..depth {
+                let t = LuaTable::new();
+                t.inner.borrow_mut().array.push(v);
+                v = LuaValue::Table(t);
+            }
+            v
+        }
+
+        // 1000 tables deep is exactly upstream's DEFAULT_ENCODE_MAX_DEPTH and must still encode.
+        assert!(
+            lua_value_to_json(&nest(1000)).is_ok(),
+            "1000 deep is within upstream's limit and must not be refused"
+        );
+        assert_eq!(
+            lua_value_to_json(&nest(1001)).unwrap_err(),
+            "Cannot serialise, excessive nesting (1001)",
+            "the reported depth is the FAILING one, as upstream reports it"
+        );
+
+        let cyclic = LuaTable::new();
+        cyclic
+            .inner
+            .borrow_mut()
+            .array
+            .push(LuaValue::Table(cyclic.clone()));
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Table(cyclic)).unwrap_err(),
+            "Cannot serialise, excessive nesting (1001)",
+            "a self-referential table must terminate at the depth limit, not at the stack floor"
+        );
     }
 
     /// (frankenredis-whyor) Lua 5.1.5 llex.c::read_string treats
