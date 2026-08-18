@@ -45089,3 +45089,82 @@ only if that tax measures below 3.0 instr/op on all three** -- at which point a 
 worth ~3 on GET could clear it, and the same null also re-prices every other lever on this path.
 If the tax still measures 8-16, no amount of prologue trimming on one command can pay for it and
 this surface stays closed.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: INADMISSIBLE — the GEOSEARCH allocator question is UNRESOLVED on throughput, and `geosearch_2` failed to certify in BOTH arms including one at 11 pct of host capacity (`frankenredis-eh2ct`)
+
+NO RATIO IS CLAIMED FOR EITHER ALLOCATOR. This is the throughput half owed by `c4a2f6e91`,
+which found jemalloc cuts `geosearch_2` D1 misses by at least 31.68 pct and said the next
+measurement was throughput. It was run. It did not settle the question, and the reason is the
+SHAPE and its NORMALISER rather than the allocator.
+
+  mimalloc arm  bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  jemalloc arm  bench_elf_sha256=1fd257d3bc1ee0723f38373db2a58202f1886a1a20c5d1c4945b06bc96402ce9
+  incumbent     bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+Both fr ELFs from `git archive HEAD` at `7860d231d`, identical source, one allocator flag apart,
+each pinned at run time with `--expect-elf`. `balanced_square_ab.py --shapes sizepairs`,
+square=ABBAABBA, rounds=9, 50,000 ops/slot, -P16, null bound +/-0.02.
+
+  ARM         loadavg before -> after    CPU MHz mean before/after   builds
+  mimalloc    6.91 8.36 8.39 -> 13.44         2373 / 2541              2
+  jemalloc    16.00 11.00 9.33 -> 27.03       2368 / 3058              5
+
+### Neither arm produced an admissible normalised figure
+
+  ARM        shape          raw ratio            95% CI       nulls          verdict
+  mimalloc   geosearch_2       1.0321   [0.9976, 1.0622]   0.9946/1.0178   STRADDLES-1
+  mimalloc   geosearch_64      1.1042   [1.0428, 1.1454]   0.9915/1.0070   ADMISSIBLE
+  mimalloc   get_control       1.1647   [1.0314, 1.2253]   0.9942/0.9964   ADMISSIBLE
+  jemalloc   geosearch_2       1.0254   [0.9978, 1.0631]   1.0301/0.9820   NULL-FAILED
+  jemalloc   geosearch_64      1.1290   [1.0971, 1.1325]   1.0010/1.0127   ADMISSIBLE
+  jemalloc   get_control       1.1728   [1.0765, 1.2024]   0.9756/1.0529   NULL-FAILED
+
+The jemalloc arm's failures are substantially WINDOW: its loadavg went 16.00 -> 27.03 with 5
+builds running, and both its null-failures are the harness catching that. I am not treating
+that arm as evidence about the allocator, and neither should anyone else.
+
+THE MIMALLOC ARM IS THE ONE THAT MATTERS, and it ran in the quietest window this host has
+offered all session -- loadavg 6.91 on 64 cpus, which the harness itself prints as 11 PCT OF
+1-MIN CAPACITY. `geosearch_2` STILL straddled 1. So the shape's non-certification is not a
+contended-host problem that a better window fixes.
+
+### The normaliser is the weak link, and it is what the standing GEOSEARCH figure is built on
+
+`geosearch_2`'s certified standing is 0.9162 CONTROL-NORMALISED (`balanced_square_ab.py:746`).
+Normalisation divides by `get_control`. In these two runs `get_control` was 1.1647 with a CI of
+[1.0314, 1.2253] -- a 19-point-wide normaliser -- and in the second run it NULL-FAILED outright.
+On the sibling row the harness printed its own diagnosis verbatim:
+
+    geosearch_64  0.9481  [0.8510, 1.1106]  STRADDLES-1
+    <- normaliser WIDER than the row (16.6 vs 9.3 pct): it injects more variance than it removes
+
+THIS IS NOT A CLAIM THAT 0.9162 IS WRONG. It is a certified, admissible figure from a run I did
+not perform and am not contradicting. What is recorded here is that two fresh attempts could not
+reproduce an ADMISSIBLE normalised row for `geosearch_2` at all -- once by straddling 1 in a
+near-idle window, once by null-failing in a loaded one -- and that the quantity doing the
+normalising was, on the same runs, wider than the rows it normalises.
+
+That makes three recorded non-certifications on this size-pair family: `balanced_square_ab.py`'s
+own note at :743 records `xrange_2` as NEVER CERTIFIED in two attempts, straddling 1 and then
+null-failing, which is the identical pair of failure modes seen here on `geosearch_2`.
+
+### What IS admissible from these runs
+
+`geosearch_64` certified in BOTH arms, raw: mimalloc 1.1042 [1.0428, 1.1454], jemalloc 1.1290
+[1.0971, 1.1325]. Both put fr AHEAD on the large-N sibling. The jemalloc point is higher but the
+intervals overlap heavily and its arm's window was degraded, so NO allocator effect may be
+claimed from this pair -- the correct reading is that both allocators leave `geosearch_64`
+comfortably ahead.
+
+RETRY PREDICATE: do NOT re-run this pair hoping for a quieter host -- the mimalloc arm already
+had one at 11 pct capacity and the row still straddled 1. The blocker is measurement RESOLUTION
+on a two-member shape, so the thing to change is the shape or the ops count, not the window:
+raise ops/slot until `geosearch_2`'s CI half-width falls below its distance from 1, or accept
+that a 2-element GEOSEARCH is an intercept row in the sense `frankenredis-eh2ct` was filed
+about, and certify the family on `geosearch_64` instead. Separately, `get_control` as the
+normaliser for this group needs its own row: a normaliser 16.6 pct wide against a 9.3 pct row
+is not removing variance, and every control-normalised figure in the `sizepairs` group inherits
+that. The allocator's 31.68 pct miss reduction from `c4a2f6e91` stands as a mechanism result and
+remains unconverted into any user-visible number.
