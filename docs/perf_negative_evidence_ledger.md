@@ -47974,3 +47974,68 @@ from this harness -- it cannot be told from the 18.26 pct null. Do NOT quote cyc
 without the ~0.8 pct order correction, or swap the arm order and show the bias reverses. Do NOT
 use `--branch-sim`, which reverses sign on this shape (`8c4f86a63`). Instructions are not the
 axis: fr already leads them by 21 pct.
+
+## 2026-08-18 BrownIbis: REJECT — removing a genuinely redundant `\r` re-read from the bulk parser made it **SLOWER by +6.4 instr/op on a shape whose own spread is 0.1**: source-level redundancy is not machine-level redundancy (`frankenredis-iqicb`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: in `parse_borrowed_plain_set_bulk`'s single-digit fast path, replace
+`if input.get(idx..idx + 2)? != b"\r\n"` with `if input.get(idx + 1).copied()? != b'\n'`.
+NOT SHIPPED; nothing was applied to the repo.
+
+THE REASONING WAS CORRECT AND THE OUTCOME IS THE OPPOSITE. The guard above that line has already
+established `input[idx + 1] == b'\r'`, and after `idx += 1` the index points AT that byte — the
+code's own comment says so: "idx now points at the `\r` we just confirmed; the `\n` still needs
+checking." Yet it fetches a two-byte slice and compares both bytes. Checking only the `\n` is
+provably the same accept/reject set: the slice form requires `idx + 2 <= len`, `input[idx] ==
+b'\r'` and `input[idx + 1] == b'\n'`; the first is the same bound `?` enforces on `get(idx + 1)`,
+and the second is the guard's own postcondition.
+
+MEASURED, `shape_instr_per_op.py --fr-only`, N=20,000, two interleaved rounds per arm, both arms
+from a worktree pinned at HEAD `2f3230224`, differing only in this line.
+`bench_elf_sha256=5db8fb53a8f54e0654f31d9acab212589883c568fc26aa83051edc32d211c430` (before), `bench_elf_sha256=b974f7cf12f551f740ebe3dae21423ab0a706be0f388a0b68735402f01862ff4` (after).
+Host: load 10.53/9.72/10.34, CPU idle 66.6-89.4 pct measured from `/proc/stat`, iowait 0 pct,
+mean 3492 MHz across 64 cores, /data 120-124G.
+
+| shape | calls/op of the parser | before | after | median delta | before spread |
+|---|---|---|---|---|---|
+| sadd_existing | 2.000 | 1665.0 / 1664.9 | 1668.7 / 1671.4 | **+6.4** | **0.1** |
+| ttl_nonvolatile | 1.000 | 1441.8 / 1448.2 | 1461.3 / 1394.5 | +13.1 | 6.4 before, **66.8 after** |
+| get_control | 1.000 | 977.9 / 1006.5 | 973.5 / 1008.9 | +2.4 | 28.6 |
+
+**`sadd_existing` settles it, and it is the ONLY shape here that can.** Its before-arm draws
+differ by 0.1 instr/op — the tightest I have measured on this harness — and it moved **+6.4**,
+sixty-four times its own noise, in the WRONG direction.
+
+The other two shapes are quoted for completeness and carry NO weight: `get_control`'s before
+spread is 28.6 against a +2.4 move, and `ttl_nonvolatile`'s AFTER arm spans 1461.3 to 1394.5, a
+spread of 66.8, so its +13.1 is not evidence in either direction. I am not claiming "every shape
+moved the same way" — one shape moved decisively and the other two are mute.
+
+**WHY, and this is the reusable part.** `input.get(idx..idx + 2)? != b"\r\n"` is ONE bounds check
+and ONE two-byte comparison, and LLVM can fold the pair into a single 16-bit load and compare.
+`input.get(idx + 1).copied()?` is a separate bounds check on a different index followed by a
+single-byte compare, and it does NOT reuse the bound the slice form established. **The
+"redundant" byte was free; the bounds check I introduced was not.** Source-level redundancy is
+not machine-level redundancy, and a comment noting that a byte is already known is not evidence
+that re-reading it costs anything.
+
+`.text` grew 64 bytes, which is itself a hint the change was not a simplification.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run
+interleaving both arms across two rounds, so drift falls on both alike. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this row;
+no CV was computed. Host state is likewise provenance, not a gate. A ZERO-DOSE null was intended
+— `PING` makes 0 calls to this parser — but **`ping` is not a shape in this harness**, so the
+intended null could not be run; the verdict rests instead on the dose-response failing in sign
+on all three dosed shapes, which is stronger than a null would have been.
+
+RETRY PREDICATE: do NOT retry this rewrite, and treat the general shape with suspicion — reopen
+only if a disassembly first shows the two-byte compare is NOT being folded into a single 16-bit
+load on this target, which is the assumption that made the change look free. **Use
+`sadd_existing` as the instrument for anything touching this parser**: it calls it 2.000 times
+per op and its between-draw spread is 0.1 instr/op, so it resolves single-instruction effects
+that `get_control` (spread 28.6) cannot see at all.
