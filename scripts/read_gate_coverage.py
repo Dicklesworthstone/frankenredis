@@ -123,10 +123,26 @@ def main() -> int:
     covered, invisible = [], []
     for fn, form in sorted(derivers.items()):
         c = command_of(fn)
-        # EXACT match only. Prefix matching mapped `sdiff` -> SDIFFSTORE (a WRITE command) and
-        # `getbit` -> GET, marking blind routes as covered -- a coverage checker that flatters
-        # itself is worse than none.
-        hit = [k for k in cmds if k == c]
+        # Match by SHORTENING the route's own token, never by accepting a LONGER command.
+        # The original bug was lengthening: `sdiff` matched SDIFFSTORE (a WRITE command) because
+        # the command started with the route name. Forbidding that but requiring an exact match
+        # then swung too far the other way -- `bitfield_get` no longer matched its real BITFIELD
+        # shape, and 23 routes were reported blind when most had shapes. Shortening handles the
+        # qualifier suffixes routes carry (`_get`, `_single`, `_count`, a trailing `0`) without
+        # ever matching a different, longer command.
+        hit = []
+        probe = c
+        while probe:
+            if probe in cmds:
+                hit = [probe]
+                break
+            stripped = probe.rstrip("0123456789")
+            if stripped != probe and stripped:
+                probe = stripped
+                continue
+            if "_" not in probe:
+                break
+            probe = probe.rsplit("_", 1)[0]
         (covered if hit else invisible).append((fn, form, hit[0] if hit else None))
 
     print(f"{len(derivers)} functions still derive the read gate directly "
