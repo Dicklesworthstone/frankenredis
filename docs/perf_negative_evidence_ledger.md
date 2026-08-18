@@ -59316,3 +59316,85 @@ two-point subtraction with `--fr-only`, so load-immune and no incumbent arm; no 
    `hlen` and `get_control` have all shown multi-percent self-noise in this session and are
    candidates for the same treatment.
 3. Re-open this shape only if a 5-run AFTER series overlaps a 5-run BEFORE series.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: `sintercard_base` re-drawn 5+5 — the adversarial bound is **-3.35 pct**, STRONGER than the -2.86 pct I published, which REFINES the lesson in the row before: worst-of-N pairing errs in BOTH directions, not just optimistically
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — corrects a second figure from the numkeys row and sharpens a methodological
+claim I made one row ago.
+
+The previous row re-drew `zintercard_limit` and found worst-of-three had been OPTIMISTIC
+(-3.41 -> -2.57 pct). I wrote that up as pairing "missing the adversarial corner", which implied a
+direction. Applying the same 5+5 treatment to `sintercard_base`, the weakest of the four targets,
+shows the implication was wrong.
+
+### `sintercard_base`, FIVE RUNS PER ARM
+
+    BEFORE   3590.7  3622.0  3599.5  3606.6  3595.5     min 3590.7  max 3622.0  spread **0.87 pct**
+    AFTER    3456.0  3455.4  3470.3  3440.6  3455.3     min 3440.6  max 3470.3  spread **0.86 pct**
+
+    DISJOINT — worst AFTER (3470.3) beats best BEFORE (3590.7) by **120.4 instr/op**
+    median-to-median                                  -144.1 instr/op   -4.00 pct
+    adversarial (worst AFTER vs best BEFORE)          -120.4 instr/op   **-3.35 pct**
+    previously published worst-of-three                                 -2.86 pct
+
+Unlike `zintercard_limit`, this shape is QUIET — both arms spread under 0.9 pct. The effect is
+unambiguous and my published bound was **understated by 0.49 pct**.
+
+### THE REFINEMENT, WHICH IS THE POINT OF THIS ROW
+
+    shape              published worst-of-3     adversarial 5+5      direction of my error
+    zintercard_limit         -3.41 pct              -2.57 pct        OVERSTATED
+    sintercard_base          -2.86 pct              -3.35 pct        UNDERSTATED
+
+**Worst-of-N pairing is not conservative. It is ARBITRARY.** It pairs draws in the order they
+were taken, and whether that ordering lands on a pessimistic or an optimistic corner is chance.
+The previous row said pairing "can easily miss the adversarial corner", which reads as though the
+bias were one-directional. It is not: the same method overstated one shape and understated
+another in the same batch of four, from the same ten-run budget.
+
+The convention is still right for its purpose — it is cheap and it is honest about being a bound
+rather than an estimate. But **a worst-of-N bound should not be described as conservative**, and
+where a figure matters, comparing distributions removes the pairing from the argument entirely.
+
+### WHAT THIS DOES AND DOES NOT CHANGE
+
+Both shapes' effects are CONFIRMED REAL — disjoint distributions over ten runs each, which is a
+stronger claim than either published bound. What moved is the number attached to them:
+
+    zintercard_limit    quote **-2.57 pct**
+    sintercard_base     quote **-3.35 pct**
+
+`xpending_empty` (-4.50 pct) and `zintercard_2` (-3.54 pct) have NOT been re-drawn this way and
+their worst-of-three bounds carry the same arbitrariness in an unknown direction. They are not
+restated here because they have not been measured this way; that is the honest position, not an
+implication that they are fine.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The five-run BEFORE series IS the A/A: same binary, same shape, 0.87 pct spread, and the effect
+clears it by nearly 4x at its most adversarial. No bootstrap median-CI is quoted because the
+claim is a DISJOINT-RANGE claim rather than a median-difference claim. CV was not used, as a gate
+or otherwise. Instructions by two-point subtraction with `--fr-only`: load-immune, no incumbent
+arm, no ratio claimed.
+
+### PROVENANCE
+
+  ELF           before `4491969bfb7b9be3c1905163ee521a2abec2125d6be627fb239f876571a07dd8`,
+                after  `2c46b7522eca42f15f92eb441dd1b4235b3a03069d1a3189ccddbd47af355bd2`
+  bench_elf_sha256=2c46b7522eca42f15f92eb441dd1b4235b3a03069d1a3189ccddbd47af355bd2
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`, ten runs.
+  host          /data 54G free, above the 42G brake. loadavg 14.24 10.13 9.23; zero frankenredis
+                builds in flight. Instructions, so load and MHz do not enter.
+  disposition   MEASUREMENT ONLY. NO BUILD — both ELFs already on disk. No source file changed.
+
+### RETRY PREDICATE
+
+1. Quote `sintercard_base` at **-3.35 pct** and `zintercard_limit` at **-2.57 pct**.
+2. Do NOT describe a worst-of-N bound as "conservative" anywhere in this ledger. It is a bound
+   whose error direction is set by draw order. Measured both ways in one batch of four.
+3. `xpending_empty` and `zintercard_2` still rest on worst-of-three. Re-draw them 5+5 before
+   quoting either in a summary, or state that they have not been.
