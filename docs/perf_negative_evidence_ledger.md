@@ -63624,3 +63624,80 @@ routes whose answers were known independently. CV was not used, as a gate or oth
    them is the cheapest possible use of the first build window after the freeze.
 3. Re-run the tool after each batch. The CONVERTIBLE count must fall by exactly the batch size;
    anything else means a supply did not land where it was thought to.
+
+---
+
+## REJECT (SCOPE) — making fr-protocol's RESP2 encoder downconvert RESP3-only frames. The recurrence was TWO unguarded callers, not a missing encoder rule (frankenredis-luaresp2map, frankenredis-9hori)
+
+`RespFrame::encode_into` is the encoder selected for RESP2 callers (`if resp3 {
+encode_into_resp3(out) } else { encode_into(out) }`) and it emits **RESP3 wire types**: `%` for a
+populated Map, `~` for a Set, and likewise `,` Double, `#` Bool, `(` BigNumber, `=` Verbatim. Its
+sibling's own doc states the two "encode identically" apart from null leaves, so this is
+deliberate, not an oversight.
+
+That looks exactly like a class defect, because the same bug shipped **twice**: `luaresp2map`
+fixed a `%` frame leaking to RESP2 clients on EVAL, and `d15b2e455` fixed the identical leak on
+FCALL after `c9dd27e99` wired the executing path. Upstream has no such hazard — `addReplyMapLen`
+is protocol-aware and downgrades inside the encoder — so porting that rule into `encode_into` was
+the obvious structural fix.
+
+### THE REACHABILITY ARGUMENT
+
+**There is no third instance, and the convention that prevents one is real.** Commands branch on
+the protocol and build a Map only for RESP3; every sampled construction site sits under an
+`if resp_protocol_version == 3` / `if resp3` guard. The only UNCONDITIONAL producers are:
+
+  * `lua_to_resp`'s RESP3 type-hint group (`{map=...}`, `{set=...}`, ...), whose branches ignore
+    the function's own `resp3` argument — **exactly 2 callers**, `eval_script` and
+    `function_call_execute`, and both now downconvert.
+  * `fr_sentinel`'s per-instance info maps, downconverted at the single call site in
+    `sentinel_cmd` under `frankenredis-sentmap`.
+
+So the encoder's RESP3 arms are not reachable by a RESP2 client through any path found here. The
+change would alter the wire format for every Map/Set/Double/Bool/Verbatim/BigNumber a
+RESP2-selected encoder ever sees, while fixing no live defect. Under a build freeze it could not
+be compiled, and it would invalidate the encoder tests that assert the current bytes.
+
+### COUNTS
+
+COUNTED MECHANISM, exact call count, no timing anywhere in this row: lua_to_resp has 2 call
+sites and downconvert_lua_reply_to_resp2 has 3, and that pairing is the whole reachability
+result. No work is removed or added by this row -- it changes no engine source, so the
+before/after instruction count is identical by construction.
+
+      construction sites outside fr-protocol   Map 145 - Set 40 - Verbatim 26 - Double 23 -
+                                               Bool 21 - BigNumber 9
+      unconditional producers                  2 (lua_to_resp hint tables; fr_sentinel maps)
+      lua_to_resp callers                      2, both downconvert
+      downconvert_lua_reply_to_resp2 sites     3 (eval_script, function_call_execute, sentinel_cmd)
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement, no ratio, no A/A, no build — build freeze in force at /data 28G, below the 42G
+brake. This is a reachability argument over exact greps, not a performance claim, so it carries no
+timing exposure. Its weak point is stated rather than hidden: the guard check was a SAMPLE of Map
+sites, not a census of all 145, so it establishes that the convention holds where it was looked
+at, not that no unguarded site exists anywhere.
+
+### PROVENANCE
+
+      source        main at 007e0f803.
+      host          /data 28G, 99 pct used, below the 42G brake; build freeze. loadavg
+                    20.63 / 14.10 / 10.94, recorded although exact source counts do not depend
+                    on it.
+      disposition   ANALYSIS. No engine source changed by this row; the two live leaks it
+                    discusses were fixed separately in d15b2e455, with the differ case that can
+                    see them in 007e0f803.
+
+### RETRY PREDICATE
+
+1. **Fix the CALLER, not the encoder, for a third instance.** A new consumer of `lua_to_resp`, or
+   a new crate returning `RespFrame::Map` without a protocol guard, is one more downconvert call —
+   the same shape as the three that already exist.
+2. Revisit the encoder only if the guarded-by-convention rule is broken in **more than two** places
+   at once, or if fr grows a generic reply API whose callers genuinely cannot know the client's
+   protocol. At that point the encoder is the only place the rule can live, and the cost of
+   changing it is the encoder tests plus a full protocol differ run — not a freeze-time change.
+3. A census of all 145 Map sites would upgrade this from "the convention holds where sampled" to a
+   closed set. It is cheap to script, and was not done here because both live leaks are already
+   fixed and the row's verdict would not change.
