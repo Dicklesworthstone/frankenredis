@@ -26802,28 +26802,57 @@ fn script_shebang_invalid_error(script: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn script_shebang_line_has_no_writes(line: &[u8]) -> bool {
+/// Whether a shebang LINE carries `flags=...,<flag>,...`.
+///
+/// (frankenredis-oo3aw) Extracted from `script_shebang_line_has_no_writes`, which is now a
+/// caller, so that `allow-oom` is read by the SAME parser as `no-writes` rather than by a second
+/// one. A security-adjacent gate whose flag is parsed in its own place is how the two drift: the
+/// shebang validator already accepts `allow-oom`, so a divergent parser would be silently wrong
+/// only for scripts that set it, which are exactly the scripts the gate must not refuse.
+fn script_shebang_line_has_flag(line: &[u8], wanted: &str) -> bool {
     let trimmed = line.strip_prefix(b"#!").unwrap_or(b"");
     let trimmed = trimmed.strip_prefix(b"lua").unwrap_or(b"");
-    // The remainder may be empty, whitespace, or `name=...` /
-    // `flags=...` tokens separated by whitespace. Find a `flags=`
-    // prefix (case-insensitive) and check its csv list for
-    // "no-writes".
-    let text = match std::str::from_utf8(trimmed) {
-        Ok(t) => t,
-        Err(_) => return false,
+    let Ok(text) = std::str::from_utf8(trimmed) else {
+        return false;
     };
     for token in text.split_whitespace() {
         let lower = token.to_ascii_lowercase();
-        if let Some(flags_csv) = lower.strip_prefix("flags=") {
-            for flag in flags_csv.split(',') {
-                if flag == "no-writes" {
-                    return true;
-                }
-            }
+        if let Some(flags_csv) = lower.strip_prefix("flags=")
+            && flags_csv.split(',').any(|flag| flag == wanted)
+        {
+            return true;
         }
     }
     false
+}
+
+/// Whether a script's shebang sets `allow-oom`.
+///
+/// (frankenredis-oo3aw) Upstream `script.c::scriptVerifyOOM` returns C_OK immediately for
+/// `SCRIPT_ALLOW_OOM`, so such a script writes over maxmemory. fr's shebang VALIDATOR has always
+/// accepted the flag while nothing read it -- deliberately, per the note at the no-writes twin,
+/// because fr modelled no maxmemory path for scripts to gate. Adding that gate is what makes the
+/// flag load-bearing, and adding it WITHOUT this accessor would turn a false acceptance into a
+/// false rejection for every `#!lua flags=allow-oom` script.
+///
+/// `no-writes` implies it (script.c:191): a script that cannot write can never hit the gate. That
+/// is folded in here rather than at the call site so the implication cannot be forgotten by a
+/// future caller.
+#[must_use]
+pub fn script_shebang_is_oom_exempt(script: &[u8]) -> bool {
+    let line = match script.iter().position(|&b| b == b'\n') {
+        Some(end) => &script[..end],
+        None => script,
+    };
+    script_shebang_line_has_flag(line, "allow-oom")
+        || script_shebang_line_has_flag(line, "no-writes")
+}
+
+fn script_shebang_line_has_no_writes(line: &[u8]) -> bool {
+    // The remainder of the line may be empty, whitespace, or `name=...` / `flags=...` tokens
+    // separated by whitespace; the shared parser finds a case-insensitive `flags=` prefix and
+    // checks its csv list.
+    script_shebang_line_has_flag(line, "no-writes")
 }
 
 fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
@@ -56496,6 +56525,54 @@ mod tests {
             .expect("eval");
             assert_eq!(out, RespFrame::Error((*expected).to_string()), "{script}");
         }
+    }
+
+    #[test]
+    fn script_shebang_oom_exemption_shares_the_no_writes_parser_oo3aw() {
+        // (frankenredis-oo3aw) `allow-oom` is about to become load-bearing: the OOM gate for a
+        // script's inner calls must NOT fire for a script that sets it, or a false acceptance
+        // becomes a false rejection. Until now the shebang validator accepted the flag and
+        // nothing read it, so nothing pinned its parsing.
+        //
+        // The rows below are the ones a second, private parser would get wrong -- which is why
+        // `no-writes` now goes through the same function, and why the last two rows re-assert the
+        // twin: the refactor that shared the parser could regress it silently.
+        for script in [
+            &b"#!lua flags=allow-oom\nreturn 1"[..],
+            // `no-writes` implies it (script.c:191): a script that cannot write never reaches
+            // the gate, and must not produce a DIFFERENT error.
+            b"#!lua flags=no-writes\nreturn 1",
+            // A csv beside other flags, and a `name=` token before it.
+            b"#!lua name=x flags=allow-stale,allow-oom\nreturn 1",
+            // Tokens are lowercased before matching, matching the validator.
+            b"#!lua FLAGS=ALLOW-OOM\nreturn 1",
+            // A shebang with no trailing newline is the whole line.
+            b"#!lua flags=allow-oom",
+        ] {
+            assert!(
+                super::script_shebang_is_oom_exempt(script),
+                "must be OOM-exempt: {:?}",
+                String::from_utf8_lossy(script)
+            );
+        }
+        for script in [
+            &b"#!lua flags=allow-stale\nreturn 1"[..],
+            b"#!lua name=lib\nreturn 1",
+            // No shebang at all: a body that merely mentions the flag grants nothing.
+            b"return 'flags=allow-oom'",
+        ] {
+            assert!(
+                !super::script_shebang_is_oom_exempt(script),
+                "must NOT be OOM-exempt: {:?}",
+                String::from_utf8_lossy(script)
+            );
+        }
+        assert!(super::script_shebang_has_no_writes_flag(
+            b"#!lua flags=no-writes\nreturn 1"
+        ));
+        assert!(!super::script_shebang_has_no_writes_flag(
+            b"#!lua flags=allow-oom\nreturn 1"
+        ));
     }
 
     #[test]

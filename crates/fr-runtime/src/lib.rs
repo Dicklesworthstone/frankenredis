@@ -40135,6 +40135,7 @@ impl Runtime {
     ) -> Option<RespFrame> {
         if self.server.maxmemory_bytes == 0 {
             self.server.last_eviction_loop = None;
+            self.server.store.over_maxmemory_live = false;
             return None;
         }
         // (frankenredis-w1djx) A REPLICA does not enforce maxmemory itself. Upstream's
@@ -40153,11 +40154,21 @@ impl Runtime {
         ) && self.server.replica_ignore_maxmemory_enabled()
         {
             self.server.last_eviction_loop = None;
+            self.server.store.over_maxmemory_live = false;
             return None;
         }
         // Redis only enforces maxmemory on write-ish commands. Reads should not
         // trigger eviction loops or overwrite the last eviction result.
-        if !Self::command_advances_replication_offset(argv) {
+        //
+        // (frankenredis-oo3aw) A SCRIPT ENTRYPOINT is the exception, and it is why this gate is
+        // reached at all for EVAL. `command_advances_replication_offset` is false for EVAL, so
+        // before this the eviction loop never ran for a script and fr had no equivalent of
+        // upstream's `server.pre_command_oom_state` to sample. Upstream calls `performEvictions`
+        // from processCommand for EVERY command when maxmemory is set and records the verdict
+        // before dispatch; fr narrows that to writes for cost, so scripts have to be added back
+        // explicitly or the per-inner-call gate has nothing to read.
+        let script_entrypoint = Self::command_is_script_entrypoint(argv);
+        if !Self::command_advances_replication_offset(argv) && !script_entrypoint {
             return None;
         }
 
@@ -40170,6 +40181,18 @@ impl Runtime {
             self.server.eviction_safety_gate,
         );
         self.server.last_eviction_loop = Some(loop_result);
+        // (frankenredis-oo3aw) Publish the verdict for the script gate. Written on BOTH outcomes,
+        // never only on failure: a stale `true` left over from an earlier command would make the
+        // next script refuse writes on a server that is no longer over its limit.
+        self.server.store.over_maxmemory_live = loop_result.status != EvictionLoopStatus::Ok;
+
+        // A script entrypoint is sampled, never REJECTED here. Refusing EVAL itself would
+        // over-reject every read-only-body script, which 7.2.4 runs happily over maxmemory --
+        // upstream puts the refusal on the script's inner denyoom calls
+        // (script.c::scriptVerifyOOM), not on the entrypoint.
+        if script_entrypoint {
+            return None;
+        }
 
         if loop_result.status == EvictionLoopStatus::Ok {
             return None;
@@ -40272,6 +40295,27 @@ impl Runtime {
     }
 
     fn command_uses_script_propagation(command: &[u8]) -> bool {
+        eq_ascii_token(command, b"EVAL")
+            || eq_ascii_token(command, b"EVALSHA")
+            || eq_ascii_token(command, b"EVAL_RO")
+            || eq_ascii_token(command, b"EVALSHA_RO")
+            || eq_ascii_token(command, b"FCALL")
+            || eq_ascii_token(command, b"FCALL_RO")
+    }
+
+    /// Whether `argv` starts a SCRIPT, i.e. upstream's EVAL/FCALL family.
+    ///
+    /// (frankenredis-oo3aw) These are the commands whose OOM state must be sampled before they
+    /// run, because the refusal happens later, on their inner calls. The read-only forms are
+    /// included deliberately: `EVAL_RO` cannot write, so its gate never fires, but sampling for
+    /// it keeps the published verdict a property of "a script is starting" rather than of which
+    /// variant was used -- and a read-only script that calls a denyoom command still has to see
+    /// the same answer as the writable one to stay consistent with upstream, where the sample is
+    /// taken in processCommand for every command alike.
+    fn command_is_script_entrypoint(argv: &[Vec<u8>]) -> bool {
+        let Some(command) = argv.first() else {
+            return false;
+        };
         eq_ascii_token(command, b"EVAL")
             || eq_ascii_token(command, b"EVALSHA")
             || eq_ascii_token(command, b"EVAL_RO")

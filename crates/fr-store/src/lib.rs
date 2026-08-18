@@ -6659,6 +6659,20 @@ pub struct Store {
     pub server_maxclients: u64,
     /// Live maxmemory setting, synced from runtime.
     pub maxmemory_bytes_live: usize,
+    /// Whether the last pre-command eviction attempt left the server OVER maxmemory.
+    ///
+    /// (frankenredis-oo3aw) Synced from the runtime under the same contract as
+    /// `maxmemory_bytes_live` above, and for the same reason: this is fr's
+    /// `server.pre_command_oom_state`, the value upstream samples ONCE before a script runs
+    /// and that `script.c::scriptVerifyOOM` then consults on every inner call.
+    ///
+    /// It is published rather than recomputed because Store cannot derive it. Its
+    /// `classify_maxmemory_pressure` needs a NOT-COUNTED figure that only the runtime holds
+    /// (`server.maxmemory_not_counted_bytes`), and passing 0 for it would understate what is
+    /// excluded, overstate pressure, and make a script gate fire EARLIER than the runtime's own
+    /// eviction decision -- a false rejection, which is the worse direction for this defect.
+    /// The eviction VERDICT is likewise kept in `server.last_eviction_loop` and never lands here.
+    pub over_maxmemory_live: bool,
     /// Current client/session metadata for delegated dispatch paths such as Lua.
     pub dispatch_client_ctx: DispatchClientContext,
     /// ACL log events raised inside delegated dispatch paths such as Lua scripts.
@@ -6958,6 +6972,7 @@ impl Default for Store {
             server_repl_backlog_size: 1_048_576,
             server_maxclients: 10000,
             maxmemory_bytes_live: 0,
+            over_maxmemory_live: false,
             dispatch_client_ctx: DispatchClientContext::default(),
             pending_acl_log_events: Vec::new(),
             active_expire_enabled: true,
