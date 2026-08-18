@@ -21442,6 +21442,61 @@ end
     }
 
     #[test]
+    /// (frankenredis-oo3aw) The four conjuncts of `script.c::scriptVerifyOOM`, one row each.
+    ///
+    /// `over_maxmemory_live` is what the runtime publishes BEFORE the script runs -- upstream's
+    /// `server.pre_command_oom_state` -- so setting it directly here is the same state a script
+    /// starts in on a server that was already over the limit.
+    #[test]
+    fn script_oom_gate_matches_upstream_scriptverifyoom_oo3aw() {
+        // ROW 1: a denyoom inner call is refused while the script has written nothing.
+        let mut store = Store::new();
+        store.maxmemory_bytes_live = 1;
+        store.over_maxmemory_live = true;
+        let err = eval_script(b"return redis.call('set','k','v')", &[], &[], &mut store, 0)
+            .expect_err("a write over maxmemory must be refused");
+        assert!(
+            err.contains("OOM command not allowed"),
+            "expected the OOM refusal, got {err}"
+        );
+
+        // ROW 2: a READ-ONLY body still runs. GET is not CMD_DENYOOM, and this is the row that
+        // fails if the gate is ever moved up to reject EVAL itself at dispatch.
+        eval_script(b"return redis.call('get','k')", &[], &[], &mut store, 0)
+            .expect("a read-only body must still run over maxmemory");
+
+        // ROW 3: `allow-oom` short-circuits the gate entirely.
+        //
+        // The flag is SET by the command layer (`eval_cmd` derives it from the shebang, `fcall_cmd`
+        // from the function's registered flags) and only READ here, so this sets it directly --
+        // `eval_script` never populates it, and a test that merely passed a `#!lua
+        // flags=allow-oom` script would exercise the shebang parser rather than this gate and
+        // would fail for a reason that has nothing to do with what it claims to pin.
+        store.script_allow_oom = true;
+        eval_script(b"return redis.call('set','k','v')", &[], &[], &mut store, 0)
+            .expect("an allow-oom script must still write over maxmemory");
+        store.script_allow_oom = false;
+
+        // ROW 4: SCRIPT_WRITE_DIRTY. Seed with the OOM sample OFF so the key exists -- a DEL of a
+        // MISSING key returns 0 and does not dirty, which would leave the flag false and pass
+        // this row for the wrong reason.
+        let mut store = Store::new();
+        store.maxmemory_bytes_live = 1;
+        store.over_maxmemory_live = false;
+        eval_script(b"return redis.call('set','k','v')", &[], &[], &mut store, 0)
+            .expect("seed write with the OOM sample off");
+        store.over_maxmemory_live = true;
+        eval_script(
+            b"redis.call('del','k') return redis.call('set','k','v')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("a script that has ALREADY written must not be stopped mid-way");
+    }
+
+    #[test]
     fn cjson_decode_unescapes_slash_and_rejects_stray_commas_4h221() {
         // (frankenredis-4h221) cjson.decode parity with vendored:
         // 1. `\/` unescapes to `/` (symmetric with the always-on
