@@ -104,30 +104,40 @@ const _: () = assert!(
 /// to serve nobody.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListpackIntegerBytes {
+    /// The rendered decimal, RIGHT-aligned in the buffer, exactly as
+    /// `decimal_i64_scratch` produced it. Bytes before `start` are the zeros the
+    /// scratch was initialised with.
     bytes: [u8; 20],
-    len: u8,
+    /// Index of the first rendered byte. The value always runs to the END of the
+    /// buffer, so no separate length is needed.
+    start: u8,
 }
 
 impl ListpackIntegerBytes {
+    /// (frankenredis-qj6jn) KEEP THE DIGITS WHERE THE RENDERER PUT THEM.
+    ///
+    /// `decimal_i64_scratch` writes the decimal RIGHT-aligned into a zeroed `[u8; 20]` and hands
+    /// back `(buffer, start)`. This used to then zero a SECOND `[u8; 20]` and `copy_from_slice`
+    /// the digits to the front of it, so that `as_slice` could return `bytes[..len]`. In the
+    /// disassembly that is two 20-byte zeroings, a call to `memcpy@GLIBC` and a further pair of
+    /// 16-byte moves, per INTEGER listpack entry, to relocate at most 20 bytes that were already
+    /// sitting in a buffer of exactly the right size.
+    ///
+    /// Storing the start index instead of a length removes all of it: the renderer's buffer IS
+    /// the field, and `as_slice` slices from `start` to the end. Same bytes, same order, same
+    /// derived `PartialEq` semantics — `decimal_i64_scratch` is deterministic and zero-fills, so
+    /// one value still has exactly one representation.
     fn new(value: i64) -> Self {
-        // (frankenredis-vqjz1) Render the magnitude with fr-protocol's itoa2
-        // (two decimal digits per division via DIGIT_PAIRS) instead of a single-digit
-        // `% 10` / `/= 10` loop — halves the divisions per integer entry on the
-        // listpack decode path (RESTORE / DEBUG RELOAD). Byte-identical output
-        // (i64::MIN magnitude is 19 digits, +sign = 20, fits scratch[20]).
-        let (scratch, start) = crate::decimal_i64_scratch(value);
-        let len = scratch.len() - start;
-        let mut bytes = [0u8; 20];
-        bytes[..len].copy_from_slice(&scratch[start..]);
+        let (bytes, start) = crate::decimal_i64_scratch(value);
         Self {
             bytes,
-            len: len as u8,
+            start: start as u8,
         }
     }
 
     #[must_use]
     pub fn as_slice(&self) -> &[u8] {
-        &self.bytes[..usize::from(self.len)]
+        &self.bytes[usize::from(self.start)..]
     }
 }
 
@@ -1169,6 +1179,72 @@ fn decode_value_spans_impl<const PRESIZE: bool>(
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-qj6jn) `ListpackIntegerBytes` now keeps the renderer's RIGHT-aligned buffer
+    /// and a start index instead of relocating the digits to the front behind a length. The
+    /// reference below is the OLD construction written out by hand — a second zeroed buffer plus
+    /// a `copy_from_slice` — so this compares two independent expressions of the same rule rather
+    /// than the implementation against itself.
+    ///
+    /// It also pins the two properties the change could have broken quietly: `as_slice` must be
+    /// byte-identical, and the derived `PartialEq` must still mean "same value", which requires
+    /// one value to have exactly ONE representation.
+    #[test]
+    fn listpack_integer_bytes_right_aligned_matches_the_relocating_form_qj6jn() {
+        fn reference(value: i64) -> Vec<u8> {
+            let (scratch, start) = crate::decimal_i64_scratch(value);
+            let len = scratch.len() - start;
+            let mut bytes = [0u8; 20];
+            bytes[..len].copy_from_slice(&scratch[start..]);
+            bytes[..len].to_vec()
+        }
+
+        let mut values: Vec<i64> = vec![
+            0,
+            i64::MIN,
+            i64::MAX,
+            i64::MIN + 1,
+            i64::MAX - 1,
+            -1,
+            1,
+            10,
+            -10,
+            99,
+            100,
+            -99,
+            -100,
+        ];
+        for p in 0..19u32 {
+            let base = 10i64.saturating_pow(p);
+            values.extend([base - 1, base, base + 1, -base, -(base - 1)]);
+        }
+        values.extend(-2000i64..2000);
+        for v in values {
+            let made = ListpackIntegerBytes::new(v);
+            assert_eq!(
+                made.as_slice(),
+                reference(v).as_slice(),
+                "right-aligned form diverged from the relocating form for {v}"
+            );
+            assert_eq!(
+                made.as_slice(),
+                v.to_string().as_bytes(),
+                "rendered decimal is not the canonical text for {v}"
+            );
+            // One value, one representation — otherwise the derived PartialEq would be
+            // comparing padding rather than the number.
+            assert_eq!(
+                made,
+                ListpackIntegerBytes::new(v),
+                "representation is not stable"
+            );
+        }
+        assert_ne!(
+            ListpackIntegerBytes::new(1),
+            ListpackIntegerBytes::new(10),
+            "distinct values must not compare equal"
+        );
+    }
     use super::*;
 
     // ── (frankenredis-qj6jn) in-place span decode: equivalence oracle ──────────

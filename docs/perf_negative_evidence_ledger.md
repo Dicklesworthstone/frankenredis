@@ -54066,3 +54066,139 @@ must read 3/3 for the run to mean anything, and both do.
    the harness against one engine before writing up a divergence.
 3. Anchor every `INFO commandstats` field parse. `calls=` is a substring of two other fields and
    `usec=` of a third.
+
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — every INTEGER listpack entry zeroed a second 20-byte buffer and called `memcpy` to move digits already sitting in a buffer of the right size; keeping them where the renderer put them is −4.52 pct worst bound on integer RESTORE (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) and deterministic
+per-frame SELF costs, TWO-BINARY A/B with the A/A and the A/B in ONE INVOCATION and the candidate
+arm BRACKETED by control arms, replicated as TWO independent six-draw sets. CV was NOT used, as a
+gate or otherwise — no coefficient of variation appears in this row's decision path and none was
+computed. No timing verdict is claimed: the measurand is a retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 0.998952, bootstrap 95% CI [0.991166, 1.002671] in the
+first draw set and 0.999843, CI [0.993965, 1.000525] in the second, each taken in the same
+invocation as the A/B it gates. The bootstrap median-CI is the verdict gate and it excludes zero
+in BOTH sets.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### PROVENANCE
+
+  ELF           AFTER `b849a89484fcea09ce808ac0aa2380123355020ce17eecb612f1ffe086ab4368`,
+                BEFORE `4a16b4242e7c86ea774a7f973ecf0dfd6b66493292cd43527d15d764151273ec`.
+  bench_elf_sha256=b849a89484fcea09ce808ac0aa2380123355020ce17eecb612f1ffe086ab4368
+
+  Booted and hashed from `/proc/<pid>/exe`, the kernel's view of the RUNNING image. The server ELF
+  does not self-report a hash and no claim is made that this is one. Arms built back-to-back so
+  the peer's `fr-protocol` WIP is in both and cancels.
+
+### THE DISASSEMBLY FOUND THIS, NOT THE SOURCE
+
+`276ce5a78` named `decode_value_spans` as the largest remaining RESTORE term at 42.68 instr per
+element and nothing obviously redundant in its source. It has already had the presize lever, the
+push-in-place lever and the backlen fast path. Line-level annotation was unavailable — the release
+profile carries no debug info — so the function was disassembled instead, and the 7-bit-integer arm
+reads:
+
+    xorps %xmm0,%xmm0 ; movaps %xmm0,0x50(%rsp) ; movl $0x0,0x60(%rsp)   <- zero 20 bytes
+    call   write_u64_digits                                              <- render the decimal
+    mov / movaps x4                                                      <- move the buffer about
+    xorps %xmm0,%xmm0 ; movaps %xmm0,0x20(%rsp) ; movl $0x0,0x30(%rsp)   <- zero 20 MORE bytes
+    call   *memcpy@GLIBC_2.14                                            <- relocate the digits
+    movaps 0x20(%rsp),%xmm0 ; movaps %xmm0,0x70(%rsp)                    <- and copy again
+
+`decimal_i64_scratch` renders the decimal RIGHT-aligned into a zeroed `[u8; 20]` and returns
+`(buffer, start)`. `ListpackIntegerBytes::new` then zeroed a SECOND `[u8; 20]` and
+`copy_from_slice`d the digits to the FRONT of it, purely so `as_slice` could return `bytes[..len]`.
+Two zeroings, a libc `memcpy` and two further 16-byte moves, per integer entry, to relocate at
+most 20 bytes that were already in a buffer of exactly the right size.
+
+### THE FIX — STORE THE START, NOT THE LENGTH
+
+The struct now keeps the renderer's buffer verbatim and records `start: u8` instead of `len: u8`;
+`as_slice` slices from `start` to the END. The value always runs to the end of the buffer, so no
+length is needed. Same bytes, same order, and the derived `PartialEq` still means "same value"
+because `decimal_i64_scratch` is deterministic and zero-fills, so one value has exactly one
+representation. The struct is 21 bytes where it was 21, so the `<= 32` assertion that guards the
+span size is untouched.
+
+  ORACLE: `listpack_integer_bytes_right_aligned_matches_the_relocating_form_qj6jn` writes the OLD
+  relocating construction out by hand — a second zeroed buffer plus `copy_from_slice` — rather
+  than calling it, and compares `as_slice` against it and against `v.to_string()` at `i64::MIN`,
+  `i64::MAX`, both neighbours of each, every power of ten ±1 with both signs, and every value in
+  −2000..2000. It also asserts one-value-one-representation and that distinct values compare
+  unequal, because a derived `PartialEq` over padding would fail silently otherwise.
+
+### THE MEASUREMENT
+
+    ALL-INTEGER list, RESTORE+DUMP, 300 elements, slope 10 vs 30 keys, distinct keys.
+
+    set 1   draw   BEFORE_a     BEFORE_b     AFTER        cand-pct    null-pct
+              1    149,575.40   149,128.05   141,360.85   −5.3504     +0.3000
+              2    149,011.90   149,415.40   141,206.40   −5.3663     −0.2701
+              3    146,970.00   149,203.30   141,390.55   −4.5217     −1.4968
+              4    149,075.45   149,222.00   141,114.30   −5.3869     −0.0982
+              5    149,198.55   149,364.95   140,903.80   −5.6122     −0.1114
+              6    149,613.95   149,264.40   141,044.45   −5.6175     +0.2342
+            median −5.3766 pct, CI [−5.6148, −4.9361]; null ratio 0.998952, CI [0.991166, 1.002671]
+
+    set 2   draw   BEFORE_a     BEFORE_b     AFTER        cand-pct    null-pct
+              1    149,294.80   149,184.25   140,946.10   −5.5571     +0.0741
+              2    149,165.20   149,242.70   139,042.35   −6.8105     −0.0519
+              3    149,645.70   151,394.55   143,495.60   −4.6668     −1.1552
+              4    149,299.95   149,253.75   141,140.70   −5.4504     +0.0310
+              5    149,152.60   149,170.30   141,160.75   −5.3638     −0.0119
+              6    149,362.55   149,391.85   141,128.60   −5.5220     −0.0196
+            median −5.4862 pct, CI [−6.1838, −5.0153]; null ratio 0.999843, CI [0.993965, 1.000525]
+
+    WORST SINGLE DRAW ACROSS BOTH SETS: −4.5217 pct  <- the figure this row claims
+
+  Both sets ran with loadavg between 11.4 and 16.2 as other projects built; that is why the row is
+  replicated rather than taken once, and why the worst draw is quoted across both sets rather than
+  within one. The two draws that carry the worst figures (set 1 draw 3, set 2 draw 3) are also the
+  two with the largest A/A — 1.50 and 1.16 pct — which is the slope-under-load exposure
+  `308db786f`'s row documented; they are reported rather than discarded and they are what the
+  claim rests on.
+
+  THE DETERMINISTIC FRAME COUNTS, which have no such exposure, name the mechanism exactly:
+
+    frame                                  BEFORE      AFTER      delta
+    __memcpy_avx_unaligned_erms            7,005.7    2,511.7    −4,494.0   (−14.98/elem)
+    decode_value_spans (self)             18,204.0   19,104.0      +900.0
+    ListpackIntegerBytes:: (self)          1,800.0    2,400.0      +600.0
+    fr_protocol::write_u64_digits         17,126.0   17,126.0         0.0
+
+  The `memcpy` that disappears is the whole of the relocation; the +900 and +600 are the slicing
+  arithmetic that replaced it, now inline where the buffer lives.
+
+### PARITY — CONTENT, NOT JUST LENGTH
+
+The bytes this change moves ARE the Redis-observable element, so payload length would not have
+caught a mistake:
+
+    INTEGER round-trip (LRANGE after RESTORE + DUMP bytes), BEFORE vs AFTER:  0 of 30 diverging
+    INTEGER elements vs redis 7.2.4 (same probe, live incumbent arm):         0 of 30 diverging
+    BEFORE-vs-AFTER DUMP BYTES, string shapes:                                0 of 84 diverging
+    workload sweep vs redis 7.2.4:                                            4 of 42, UNCHANGED
+
+  The integer probe walks 0, ±1, ±127/128, ±4095/4096, ±32767/32768, ±8388607/8388608,
+  ±2147483647/2147483648 and `i64::MAX` — every listpack integer encoding width and both signs —
+  across fills −2/−1/4/128/300 and n 3..600, and compares LRANGE on both the source key and the
+  RESTOREd one.
+
+  fr-persist 228 / fr-store 940, 0 failures; clippy clean; fmt clean.
+
+### RETRY PREDICATES
+
+  1. `write_u64_digits` is now the dominant term on this path at 17,126.0 instr/key, 57.09 per
+     element, and it did NOT move. That is 57 instructions to render a seven-digit decimal.
+     Reopen there, not here, and note `fr-persist/benches/int_render_itoa2.rs` already exists as
+     its A/B harness.
+  2. This row measures a list of integers. The same `ListpackIntegerBytes` is built by the hash,
+     set and zset listpack decode paths, so the saving should carry — but "should" is not a
+     measurement, and per `feedback_quote_instr_per_element_when_the_denominator_moves` the
+     PERCENTAGE will differ because those shapes have different denominators. Quote 14.98
+     instructions per integer entry if you need a number before someone measures those.
+  3. A list of STRINGS is unaffected by construction — the arm never runs — and was not measured
+     as an A/B here. If a future row needs that null, take it; do not infer it from this one.
