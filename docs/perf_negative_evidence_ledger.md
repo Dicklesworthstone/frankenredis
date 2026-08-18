@@ -45803,3 +45803,107 @@ RETRY PREDICATE:
   2. `ChunkedList::push_back` (packed_set.rs, hardcoded fill -2) is the last unsized caller.
      It is internal and its call rate is unmeasured; attribute before touching it.
   3. Do not reuse draw 1's −2.52 pct. Its null failed.
+
+## 2026-08-18 CrimsonHawk: REJECT (SELF-SPEEDUP) — the five-route read-gate batch FAILED its acceptance test and was reverted. LINDEX (arity 3) caches at 0.0000 calls/op while LLEN (arity 2) fires 1.0000 on the SAME ELF (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — nothing ships. A batch was written, measured, refused by its own gate, and
+reverted; what survives is a discriminator that the remaining 36 predicates depend on.
+
+### THE BATCH AND ITS VERDICT
+
+After LINDEX converted cleanly (`068cd5ba7`, 1.0000 -> 0.0000 calls/op, -10.4 pct), I threaded
+five more read predicates — LLEN, STRLEN, SISMEMBER, HEXISTS, SCARD — all verified
+SINGLE-EXECUTOR by name first, which is the check whose absence caused the earlier SCARD
+regression. 15 call sites wired, 5 floor arms hoisted, both suites green.
+
+  ACCEPTANCE TEST (registered in `90ec27f52`, binary): 1.0000 -> 0.0000 calls/op
+
+    llen 1.0000 · strlen 1.0000 · sismember 1.0000 · hexists 1.0000 · scard 1.0000
+    ZERO of five converted.
+
+  AND IT COSTS SOMETHING, fr-side, two replicates each:
+
+    llen    1664.5 1663.1 -> 1674.7 1675.7   +0.7 pct WORSE
+    scard   1709.8 1710.6 -> 1702.8 1719.7   flat within noise
+    lindex  1812.3 1810.6 -> 1810.9 1812.2   flat  (CONTROL: untouched by this batch)
+
+REVERTED. A conversion that does not convert, and costs 0.7 pct on the cheapest route in the
+set, is not a partial win.
+
+### THE DISCRIMINATOR, WHICH IS THE ACTUAL RESULT
+
+On ONE ELF, with near-identical shapes seeded by the same `RPUSH l a b c d e`:
+
+  lindex   ["LINDEX", "l", "2"]   arity 3   read_gate 0.0000/op   read_allows 0.0000/op
+  llen     ["LLEN", "l"]          arity 2   read_gate 1.0000/op   read_allows 1.0000/op
+
+Both are floor-dispatched — `try_dispatch_floor_classified_action` reads 1.0000 calls/op for
+LLEN — and both arms are byte-for-byte the same shape: the hoist, then
+`get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts))`, then the executor
+taking `default_read_allowed`. The executor genuinely stops calling the gate in BOTH cases: on
+LLEN the only remaining caller is my own hoist.
+
+So for LLEN the cache is `None` at the start of EVERY packet, and for LINDEX it survives the
+whole buffered pass. **The difference tracks command ARITY**, 2 against 3, on the same binary,
+the same key and the same seed.
+
+That is a mechanism I have NOT identified, and I am not guessing a fourth time on this lever —
+three previous mechanism claims of mine on it were wrong (the cache-persistence hypothesis, the
+second-executor claim, and the discriminant claim), each corrected by counting rather than by
+reading. What is established is the discriminator, reproducibly, on one ELF.
+
+### WHY THIS MATTERS MORE THAN THE FIVE ROUTES
+
+The read vein is 37 predicates (`7ed242659`). If arity-2 routes cannot hold the cache, a large
+fraction of it is unreachable by this technique, and the per-route figures in `90ec27f52` —
+which predicted ~175 instr/op each — are wrong for every arity-2 command in the list. LLEN,
+STRLEN and SCARD are all arity 2, and all three are among the cheapest commands where the fixed
+175.0 is the LARGEST share (10.2-10.4 pct). The batch was aimed squarely at the part of the vein
+that does not work.
+
+### COUNTED MECHANISM
+
+Two-point callgrind subtraction at N=2000 and 2N=4000 with startup and seeding cancelled. Exact
+call counts on one ELF (`7bc975bd01a01cc0`): `plain_borrowed_default_key_read_gate` 0.0000
+calls/op on lindex against 1.0000 calls/op on llen; `plain_borrowed_default_key_read_allows`
+identically 0.0000 against 1.0000; `try_dispatch_floor_classified_action` 1.0000 calls/op on
+llen, so the floor path IS taken. Instruction figures replicated twice per cell.
+
+The instrument carries its own null, measured in a single invocation of the same harness on one
+ELF and one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios (banked in `0bf781d57`). The +0.7
+pct on llen is small but it is a REGRESSION and is reported rather than rounded away; the
+verdict rests on the call counts, which are exact integers.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELFs          `7bc975bd01a01cc0` (the reverted batch) against `489236a2aeb4584f` (LINDEX only,
+                shipped in `068cd5ba7`). Both plain `--release`, no feature flags, built locally
+                with RCH_CARGO_WRAPPER_BYPASS=1, path from `--message-format=json`, copied to a
+                private path and sha256'd there.
+  bench_elf_sha256=489236a2aeb4584fc9a68a4474c2746d292a5d637a2145e0f5ab6cfdcb9652e1
+  incumbent     NOT RUN. fr-side counts only; no ratio against the incumbent is claimed for the
+                reverted batch, and none would be meaningful for a change that does not ship.
+  harness       `scripts/shape_instr_per_op.py --fr-only`, `scripts/call_count_delta.py`.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 130G free checked
+                immediately before each build. loadavg 16.78-35.15; CPU idle 70.2 pct with 1.2
+                pct iowait in a 10 s /proc/stat delta, external contention present.
+  admissibility Call counts are deterministic and load-immune. No timed row is claimed.
+
+### RETRY PREDICATE
+
+1. **Do not re-attempt any arity-2 read route until the arity discriminator is explained.** The
+   test is one command: `call_count_delta.py --callers plain_borrowed_default_key_read_gate` on
+   the candidate. If it reads 1.0000 after conversion, the cache is not being held across
+   packets for that route and the conversion is a no-op with a small cost attached.
+2. The reverted patch is preserved at `scratchpad/readgate_batch5_FAILED.patch` (585 lines) so
+   the diagnosis can resume without redoing the edit.
+3. LINDEX stands. It is arity 3, it converted, and its numbers in `068cd5ba7` are unaffected by
+   this row — `lindex` was measured as the CONTROL here and did not move.
+4. When the discriminator is understood, re-derive the 37-predicate list by ARITY before
+   estimating the vein's value. The per-route 175.0 instr/op still holds as a cost; what is now
+   in doubt is how much of it this technique can recover.
