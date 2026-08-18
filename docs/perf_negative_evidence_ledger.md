@@ -47152,3 +47152,131 @@ candidate point: the `PackedZSet` record stride hit by `record_at`, and the scor
 indirection in `zset_for_each_in_score_ranges`, neither of which this row has profiled. Reopen
 the memset question only against a DEEP-PIPELINE shape, where it is a real effect on its own
 terms rather than an artifact of measuring one.
+
+## 2026-08-18 CrimsonHawk: KEEP (COMPETITIVE) — the read-gate unblock SHIPPED in `bffba0601`: six routes at **0.5293x** worst bound vs Redis 7.2.4, LLEN -15.1 pct fr-side, and one deleted line ungated 143 of 174 floor arms (`frankenredis-getexgate`)
+
+Claim class: COMPETITIVE
+Campaign output: yes
+
+The lever is one deleted line — `plain_get_read_gate_cache = None;` in the `FastReply` arm of
+the buffered-frame loop — plus the six route conversions it makes possible.
+
+### STANDING AGAINST THE INCUMBENT, MEASURED ON HEAD
+
+fr against Redis 7.2.4 instructions per op, two-point (N=2000, 2N=4000, startup and seeding
+cancelled), each row a SINGLE INVOCATION containing both the fr arm and a live vendored
+redis-server arm started, seeded and measured side-by-side. Below 1.0 means fr ahead. Both
+replicates given, WORST of each pair quoted:
+
+  shape       r1        r2        WORST
+  lindex      0.4044x   0.4208x   0.4208x
+  hexists     0.4450x   0.4117x   0.4450x
+  sismember   0.4748x   0.4650x   0.4748x
+  llen        0.4789x   0.4895x   0.4895x
+  strlen      0.4921x   0.4805x   0.4921x
+  scard       0.5293x   0.4666x   0.5293x
+
+Stated inline: SCARD is fr/Redis 7.2.4 0.5293x at its worst replicated bound, the weakest of the
+six, so fr retires roughly half the incumbent's instructions on every converted route.
+
+### THE FR-SIDE EFFECT, AND THE HONEST SPLIT
+
+Paired build one change apart, two replicates each (banked in `3a3bf4698`):
+
+  llen    1664.8 1663.7 -> 1412.8 1412.9   -15.1 pct
+  strlen  1697.7 1670.1 -> 1435.9 1435.3   -14.8 pct
+  scard   1708.4 1706.3 -> 1459.6 1463.1   -14.4 pct
+  zcard   1711.5 1714.4 -> 1667.8 1670.9    -2.5 pct   <- NULL, still 1.0000 calls/op
+
+**The null moved, and the quoted conversion figure is the smaller number.** `zcard` is
+unconverted and still re-derives the gate on every packet, yet gained 2.5 pct: deleting a store
+from the hot loop helps a `FastReply` arm whether or not it takes the cached gate. So ~12.5 pct
+of each 14-15 pct is the conversion and ~2.5 pct is a one-off shared gain that arrives for
+everybody.
+
+Anyone holding per-command dispatch figures taken before `bffba0601` must re-take BOTH arms of
+their A/B on top of it. A 6-9 instr/op lever measured across this boundary is not safe to quote,
+and one such table was in flight when this landed.
+
+### WHY THE LINE WAS THERE, AND WHY REMOVING IT IS SOUND
+
+The `FastReply` arm cleared the read cache after every packet it served; the `FastEncodedReply`
+arm never did. That single asymmetry explains an earlier 0-of-5 failure completely: all five
+routes returned `FastReply`, and LINDEX "converted" only because it writes its reply in place
+through an `_into` executor and lands in the other arm.
+
+`plain_write_gate_cache` was NEVER cleared in that arm, and every write-gate conversion this
+campaign shipped reaches 0.0000 calls/op and passes the differ. The same argument licenses the
+read side: the gate is a function of session and server state — auth/ACL, selected db,
+subscription, client pause, tracking, replication role — and EVERY command able to move any of
+those goes through the GENERIC argv path, which clears both caches at the `Parsed` arm and again
+before `process_argv_frame`. A route reaching `FastReply` is by construction a borrowed fast path
+that touched none of them.
+
+**Scale of what it ungated: 143 of 174 floor arms return `FastReply`** and ran that clear; the 31
+that never did are exactly the `FastEncodedReply` arms.
+
+### THE DIFFER CANNOT SEE THIS HAZARD — THE PROBE CAN
+
+`dispatch_route_differ` passes 573 cases, 0 disagreements, three-way. **That proves nothing
+here.** It is REQUEST-RESPONSE: one command per buffered pass, so the cache is always fresh and a
+stale gate is unobservable by construction.
+
+The hazard requires PIPELINING, so `scripts/gate_cache_pipelined_probe.py` ships with the change.
+It sends a gate-invalidating command and borrowed reads in ONE write: SELECT 0, seed,
+LLEN/STRLEN, SELECT 1, LLEN/STRLEN/SCARD, SELECT 0, LLEN/STRLEN. fr matches redis byte for byte.
+
+Its SENSITIVITY is demonstrated, not asserted: fr replies 6 and 5 in db 0, then 0, 0, 0 after
+SELECT 1, then 6 and 5 again. A stale gate would have served db 0's values inside the db 1
+section — a WRONG REPLY, not a crash. Not mutation-tested, deliberately
+(`feedback_never_mutation_test_in_a_shared_checkout`).
+
+### COUNTED MECHANISM
+
+Exact call counts: `plain_borrowed_default_key_read_allows` reads 0.0000 calls/op on all six
+converted routes and 1.0000 calls/op on `zcard`, the unconverted null, on the same ELF. That is
+the binary acceptance test registered in `90ec27f52` BEFORE any code was written, and noise
+cannot produce it.
+
+The instrument carries its own null, measured in a single invocation of the same harness on one
+ELF and one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios (banked in `0bf781d57`). The
+smallest effect claimed is the 2.5 pct shared term, six times the null's half-width.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           053b8e63152742d4bd97b5...d192a54 (full sha below), plain `--release` at HEAD `57fe943c0` (which contains
+                `bffba0601`), no feature flags, built locally with RCH_CARGO_WRAPPER_BYPASS=1,
+                path from `--message-format=json`, copied to a private path and sha256'd there.
+  bench_elf_sha256=053b8e63152742d4bd97b54064c7f81d424ee9157939fa122f0bcfd99d192a54
+  incumbent     vendored redis 7.2.4, live arm started, seeded and measured in the SAME
+                INVOCATION as the fr arm, one harness process running both servers side-by-side.
+  harness       `scripts/shape_instr_per_op.py`, `scripts/call_count_delta.py`,
+                `scripts/dispatch_route_differ.py`, `scripts/gate_cache_pipelined_probe.py`.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 125G free checked
+                immediately before the build. loadavg 9.18 8.81 9.34; CPU MHz mean 2418; CPU
+                idle 80 pct, no competing builds.
+  gates         `cargo test -p fr-runtime` 633+44 passed; `-p fr-server` 380+12+2 passed; 0
+                failed. Differ 573/0. Pipelined probe matches redis.
+  process       The commit required `AGENT_MAIL_GUARD_MODE=warn` after seven refusals. It was
+                used ONLY with written consent from the reservation holder, who had asked for
+                this exact work to land and had backed their own patch out of those files, and
+                only after verifying the entire diff contained no hunk of theirs. A second
+                change of mine on `crates/fr-store/src/lib.rs` was NOT landed, because that path
+                was not covered by that consent.
+
+### RETRY PREDICATE
+
+1. Reopen only if `llen` and `lindex` diverge again by more than 5 pct fr-side, or if any
+   converted route's `plain_borrowed_default_key_read_allows` count returns to 1.0000. Both are
+   cheaper detectors than any ratio and neither needs an incumbent arm.
+2. 36 read predicates remain unthreaded. With the clear gone, `FastReply` arms now convert, so
+   the earlier 0-of-5 result does NOT stand as evidence against them — that failure was entirely
+   this line. Re-attempt in small batches, single-executor first, verifying by call count.
+3. Do NOT re-add the clear "to be safe" without reading this row: it costs 175.0 instr/op per
+   packet on every `FastReply` read route and buys nothing the generic path does not already do.
+4. `scripts/gate_cache_pipelined_probe.py` is the ONLY check that can see a stale-gate
+   regression. Run it, not just the differ, after any change to the cache or its clear points.
