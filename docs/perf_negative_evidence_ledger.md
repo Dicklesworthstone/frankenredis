@@ -60055,3 +60055,105 @@ tests pass.
   3. Do not read "two-tier is faster" as general. It won here because the exact test carried a
      materialise and the conservative one did not, and because matches are frequent on the payload
      that matters. On the incompressible payload the same change is worth 0.08 pct.
+
+## 2026-08-18 CrimsonHawk: CERTIFIED — all THREE list RESTORE+DUMP shapes in one both-ends-FIT run: string 0.9115x (fr ahead, replicated over two certified runs), mixed 1.3049x, integer 2.1383x (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) with a LIVE redis
+7.2.4 arm, both sides in ONE INVOCATION and INTERLEAVED fr / redis / fr / redis per draw so each
+side is bracketed by the other. CV was NOT used, as a gate or otherwise — no coefficient of
+variation appears in this row's decision path and none was computed. No timing verdict is claimed:
+the measurand is a retired-instruction COUNT. No code changed and NO BUILD was run. Callgrind
+outputs went to a `TemporaryDirectory` and were reclaimed on exit, so this row cost no disk.
+
+Claim class: COMPETITIVE. Campaign output: YES. This closes retry predicate 1 of the row above,
+which asked for the two shapes where fr is BEHIND to be certified the same way as the string shape.
+
+### THE GATE HELD AT BOTH ENDS OF ONE 67-SECOND RUN
+
+    OPEN    builds 0   VERDICT for ratio: FIT     (/tmp/gate_open_1787066531.txt)
+    CLOSE   builds 0   VERDICT for ratio: FIT     (/tmp/gate_close_1787066531.txt)
+    ELAPSED 66.75 s for all thirty-six callgrind points
+
+Both checks were computed by the measurement invocation under its own runstamp. The gate refused
+seventeen consecutive polls before this one and was fired on the eighteenth, the moment it returned
+FIT.
+
+  fr arm        `99e32657383c8a9ef60468534a02f92f6e7afe76a4f8c68424a2e803ffd1b81b`
+                (release artifact at `e32cc8b71`)
+  incumbent     vendored redis 7.2.4,
+                sha256 `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+
+### WHAT IT READS
+
+    RESTORE+DUMP, 300 elements, fill 128, slope 10 vs 30 keys, distinct keys, fr/redis interleaved
+
+    ALL-STRING   0.9024 / 0.9050 / 0.9014    WORST 0.9050x    <- fr AHEAD
+      idle 93.1-93.9 pct, loadavg 7.17-8.08, MHz mean 1918-2104 against a 1429-4292 spread
+    50/50 MIXED  1.3049 / 1.3017 / 1.3038    WORST 1.3049x    <- fr behind
+      idle 89.5-89.9 pct, loadavg 7.04-7.23, MHz mean 2129-2334
+    ALL-INTEGER  2.1264 / 2.1165 / 2.1383    WORST 2.1383x    <- fr behind
+      idle 90.2-90.7 pct, loadavg 6.65-6.95, MHz mean 1912-2331
+
+**QUOTED BOUNDS: string 0.9115x, mixed 1.3049x, integer 2.1383x.** For the two shapes where fr is
+behind, the worst bound is the LARGEST ratio and that is what is quoted.
+
+### THE STRING BOUND IS NOW REPLICATED ACROSS TWO CERTIFIED RUNS
+
+    certified run A (353776cb8)   0.9115 / 0.9046 / 0.9058    worst 0.9115x
+    certified run B (this row)    0.9024 / 0.9050 / 0.9014    worst 0.9050x
+    six certified draws, range 0.9014-0.9115 = 1.12 pct spread
+
+**The standing string bound stays 0.9115x** — the worst draw of the two certified runs, not this
+run's more favourable 0.9050x. Run B does not improve the bound; it replicates it. The 1.12 pct
+spread over six draws sits just above the 0.84 pct instrument floor from
+`feedback_ir_ratio_resolves_to_0p84_pct_in_a_quiet_window`, which is the expected behaviour of that
+floor rather than a contradiction of it.
+
+Mixed and integer moved 0.2 pct and 0.3 pct against their previous UNCERTIFIED readings (1.3079x
+and 2.1438x). Both deltas are inside the floor, so **no movement is claimed** — the change is that
+they now have provenance, not that they improved.
+
+### THREE DRAWS CARRY AN A/A NULL ABOVE ONE PERCENT
+
+    INT   draw 3   fr A/A +1.560 pct     <- the largest null in this run
+    INT   draw 1   redis A/A +1.037 pct
+    MIXED draw 2   redis A/A +1.017 pct
+
+These exceed the 0.84 pct floor and are recorded rather than smoothed away. They do not threaten
+the mixed or integer verdicts, whose margins are 30 pct and 114 pct — three orders of magnitude
+above the null in the integer case. They WOULD threaten a string verdict, whose margin is 9.5 pct;
+the string draws' own nulls are all under 0.65 pct, which is why that bound is readable. A null is
+only tolerable relative to the margin it sits under, and the tolerance has to be checked per shape.
+
+### THE 22-SECOND LESSON GENERALISES: THREE SHAPES STILL FIT ONE WINDOW
+
+The previous row established that the single-shape run takes 21.54 s and therefore fits inside a
+stationary window, which is what made certification reachable after eleven turns of refusals. Three
+shapes at three draws each is 36 callgrind points and **66.75 s — still short enough**, and it
+certified on the first firing. The generalisation worth carrying is that the budget is per-point
+and predictable, so the question "will this fit the window" has an arithmetic answer before the run
+starts rather than an empirical one after it fails.
+
+### STANDING LAW: b1o02, RESTORE IN ISOLATION FLATTERS REDIS
+
+This applies with most force to the two shapes fr LOSES. `project_list_restore_read_breakeven`
+measures the integer break-even at **0.235 reads per RESTORE**: at one full read fr is 0.3961x on
+integers, so the 2.1383x certified here inverts to a 2.5x LEAD as soon as the restored list is read
+once. The 2.1383x is real and is quoted without hedging, but it describes a MIGRATE-shaped workload
+that restores an integer list and never looks at it. Do not read it as the operating point, and do
+not open a lever against the eager decimal render on the strength of it — that render is the reason
+the read side wins, and `project_list_restore_read_breakeven` is on record that removing it trades
+a one-time cost for a per-read one.
+
+### RETRY PREDICATES
+
+  1. Re-certify all three if any lever lands on the RESTORE decode path. Bands that mean "the
+     instrument, not the code": string 0.895-0.920x, mixed 1.295-1.315x, integer 2.105-2.150x. A
+     draw outside its band means something moved.
+  2. The integer shape is the one worth attacking, and it is NOT the render. 2.1383x with a
+     0.235-read break-even means the deficit is in the decode-side rebuild, which
+     `frankenredis-qj6jn`'s own header prices at 14.07x on the non-codec half. That is where a
+     lever belongs.
+  3. Audit the sibling harnesses for hardcoded provenance banners — carried forward UNDONE from the
+     row above. `restore_annot.py`, `lrange_annot.py` and `read_ratio_by_len.py` share
+     `restore_ratio.py`'s lineage and have still not been checked.
