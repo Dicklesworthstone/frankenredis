@@ -51184,3 +51184,78 @@ unconverted shapes are `mget_3` (held as the null), `zrangebylex` (2960), `zrang
 still. Before claiming the vein is finished, run the census — `call_count_delta.py <dump> 20000
 --callers plain_borrowed_default_key_read_allows` over a broad shape set — and quote its output,
 not a source scan and not a peer's sample.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: MEASURED AND HELD — fr's FAST expire cycle has no rate limit and upstream's does; adding upstream's guard cuts a plain `GET` 27.2 pct and a volatile-keyspace `GET` 37.1 pct. held because a test build is broken at PRISTINE HEAD
+
+NO RATIO AGAINST THE INCUMBENT IS CLAIMED and NO CODE IS LANDED. The patch is measured, the
+behaviour is differentially checked, and it is being held because `cargo test -p fr-runtime` does
+not compile at HEAD for reasons that are not mine.
+
+  before bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  after  bench_elf_sha256=e2424dcf1a2a1602... (patched, built from `git archive HEAD` + the patch)
+  Two-point callgrind on an unchanged `GET kk`, load-immune, loadavg 9.70.
+
+### The gap, located exactly
+
+`expire.c:181` refuses a FAST cycle that starts within `config_cycle_fast_duration * 2` of the
+previous one, then stamps `last_fast_cycle`. `ACTIVE_EXPIRE_CYCLE_FAST_DURATION` is 1000
+MICROseconds (`expire.c:110`), so upstream's floor is 2 ms.
+
+fr has NO such guard -- `rg last_fast_cycle|fast_cycle_ms` over `fr-runtime` and `fr-store`
+returns nothing -- and **148 borrowed fast paths** call
+`self.run_active_expire_cycle(now_ms, Fast)` per COMMAND, on top of the correct once-per-tick
+call the event loop already makes at `fr-server/src/main.rs:5185`. Attributed from the dump
+rather than inferred: `execute_plain_get_borrowed_into_with_default_read_gate` accounts for
+1.000 calls per op, against 0.007 per op from the event-loop path.
+
+### The change and what it bought
+
+One guard in `ServerState::run_active_expire_cycle`, plus one field and one constant sourced
+from upstream's own numbers. The SLOW cycle is untouched, matching upstream, which rate-limits
+only the fast one.
+
+  arm            before        after       delta
+  plain GET     1165.0        848.1     -316.9 instr/op  (-27.2 pct)
+  volatile GET  1463.1        920.3     -542.8 instr/op  (-37.1 pct)
+  volatile-key tax  +298.1     +72.2     -75.8 pct of the tax
+  clock_gettime/op (volatile)  3.02 -> 1.022
+
+The residual +72.2 tax is almost entirely `get_string_bytes` (+62.0), which is the LAZY expiry
+check on the key actually being read -- the part that should remain.
+
+MY OWN SUCCESS CRITERION WAS MIS-SPECIFIED AND IS NOT MET AS WRITTEN. `66e2455e3` asked for
+`run_active_expire_cycle` at "at most 0.10 calls per op". It reads 1.010-1.014 after the change,
+because the guard lives in the CALLEE: the 148 call sites still call, and the body returns early.
+The criterion should have been stated on instructions or on body execution. The work is gone; the
+calls are not, and I am not going to reword the criterion to make it look met.
+
+### Correctness: one check done, the one that matters blocked
+
+BEHAVIOURAL DIFFERENTIAL, three engines, 200 keys at PX 300 plus one immortal key, then 1.2 s and
+50 unrelated GETs that never touch the expiring keys:
+
+  fr stock     dbsize 151 -> 1   TTL k7=-2  EXISTS k9=0  GET k11=''
+  fr patched   dbsize 159 -> 1   TTL k7=-2  EXISTS k9=0  GET k11=''
+  incumbent    dbsize 181 -> 1   TTL k7=-2  EXISTS k9=0  GET k11=''
+
+Background reaping still collapses the keyspace to the one immortal key, identically to stock fr
+and to the incumbent. (The differing "before" counts are the SET loop racing a 300 ms TTL, not a
+behavioural difference.)
+
+WHAT IS NOT CHECKED, and why the patch is held: `cargo test -p fr-runtime` FAILS TO COMPILE AT
+PRISTINE HEAD -- 13 errors of the form "this method takes N arguments but N-1 were supplied",
+reproduced by restoring HEAD's `lib.rs` into the same tree and rebuilding. That is a
+test-call-site lag behind a signature change in the read-gate work, not mine, and it means the
+unit suite cannot cover the two risks I have named in three prior rows: keyspace notifications
+and replica propagation of actively-expired keys (`propagate_expired_key_deletions` runs 2.00
+times per op on the before arm). A four-probe differential is not that suite.
+
+RETRY PREDICATE: the patch is preserved at `scratchpad/expire_ratelimit.patch` (2 hunks against
+`crates/fr-runtime/src/lib.rs` at HEAD `acaf5f45d`). LAND IT ONLY AFTER `cargo test -p fr-runtime`
+compiles and passes, and only with a keyspace-notification and replication check on actively
+expired keys -- the differential above deliberately never reads the expiring keys, so it proves
+active reaping happens and proves nothing about what is published when it does. If the suite
+shows a test depending on per-command expire cadence, that test is the evidence to weigh, not an
+obstacle to route around. Do NOT re-derive the 148 call sites or the upstream guard; both are
+cited above with line numbers.
