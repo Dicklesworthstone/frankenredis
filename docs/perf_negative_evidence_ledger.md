@@ -43745,3 +43745,98 @@ loop, check its SIZE, and prefer a plain local recomputed at the invalidation po
 `Option<T>` plus a clear. The remaining per-op calls on a GET, by out-of-line body size, are
 `execute_plain_get_borrowed_into_with_default_read_gate` 83 B, `drain_pending_pubsub` 261 B and
 `parse_borrowed_plain_set_bulk` 363 B; each is at 1.000 calls/op and none has been tried.
+
+## 2026-08-18 CrimsonHawk: REJECT (SELF-SPEEDUP) — the ACL sub-lever I filed against myself does NOT exist as a separate lever. Its two memcmps are SUBSUMED by the read-gate cache, and the predicate they live in carries a security fix (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this row ships nothing and closes a retry item I opened, so that nobody
+does risky surgery for a benefit they would get for free.
+
+### THE ITEM BEING CLOSED
+
+My read-gate row (`90ec27f52`) ended with retry item 4: "the two memcmps inside
+`current_acl_allows_default_key_command()` are a distinct sub-lever worth about 120 instr/op of
+the 175 if they can be avoided on the default-user path. Do not bundle it with the caching
+change."
+
+**That was wrong.** They are not a distinct sub-lever, they are part of the same 175, and they
+vanish with it.
+
+### THE MEASUREMENT THAT CLOSES IT
+
+memcmp calls per op attributed to `plain_borrowed_default_key_read_allows`, on one ELF:
+
+  hget    0.000 memcmp/op from the read gate      <- CONVERTED to the cached gate under ozrro
+  zcard   2.000 memcmp/op from the read gate      <- NOT converted
+
+Converting a route to the cached gate removes the ACL memcmps automatically, because the ACL
+check is inside the gate and the cache stops the gate running per packet. There is nothing left
+for a separate lever to remove on a converted route, and on an unconverted route the correct
+fix is the conversion.
+
+A second fact makes the "hoist the call" framing impossible anyway:
+`current_acl_allows_default_key_command` and `AuthState::get_user` both read **0.0000
+calls/op** — they are fully INLINED into the gate. That is why the memcmps attribute to the
+gate and not to the ACL function, and it means there is no call site to move. My row described
+them as "inside `current_acl_allows_default_key_command()`", which is true of the SOURCE and
+misleading about the BINARY.
+
+### THE SECOND REASON NOT TO TOUCH IT
+
+`check-candidate` returns BLOCKED with 4 rows, and one of them is a SECURITY FIX I wrote
+myself: `2026-07-03 SHIPPED (SECURITY FIX: PUBLISH/SPUBLISH ACL channel-permission BYPASS via
+borrowed fast path)`. The `user.all_channels` clause in that predicate exists precisely because
+the borrowed fast path skipped the ACL CHANNEL check, so a channel-restricted user could
+PUBLISH anywhere — verified divergent from redis 7.2.4, which returns NOPERM.
+
+So the predicate is not ordinary hot code. It is a conservative gate whose clauses each bail a
+class of user to the generic path, and one of them was added to close a real bypass. Optimising
+it for ~120 instr/op that the caching work removes for free is a bad trade in both directions:
+no gain that the conversion does not already give, and a non-zero chance of re-opening a
+security hole in a predicate with that history.
+
+### COUNTED MECHANISM
+
+Exact call counts, two-point callgrind subtraction at N=2000 and 2N=4000 with startup and
+seeding cancelled: memcmp attributed to the read gate is 2.000 calls/op on zcard and 0.000
+calls/op on hget; `current_acl_allows_default_key_command` and `get_user` are 0.0000 calls/op
+on both, being inlined. Total memcmp is 4.000-4.001 calls/op on both shapes, so the difference
+is entirely the gate's two, not a change in the rest of the command.
+
+No NEW instruction count, ratio or timing was taken beyond those call counts, and no build was
+performed for this row.
+
+The instrument carries its own null, measured in a single invocation of the same harness on one
+ELF and one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios (banked in `0bf781d57`). Call
+counts are deterministic integers, so that null bounds the instruction arm rather than the
+counts themselves.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           `fr_head2`, plain `--release`, no feature flags, re-verified by sha256sum at
+                the time of writing. No build was performed for this row.
+  bench_elf_sha256=c13d2f7f6a349a8212c4173b8d327af07e23ac55f9887a4fe8f49caff9caa42a
+  incumbent     NOT RUN. fr-side call counts only; no ratio against the incumbent is claimed.
+  harness       `scripts/shape_instr_per_op.py --fr-only`, `scripts/call_count_delta.py`
+                including `--callers`.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 80G free, checked
+                immediately before the runs. loadavg 18.14 25.88 29.74; CPU idle 85.1 pct with
+                0.1 pct iowait in a 10 s /proc/stat delta; one external pandas build running.
+  admissibility Call counts are deterministic and load-immune. No timed row is claimed.
+
+### RETRY PREDICATE
+
+1. Retry item 4 of `90ec27f52` is CLOSED as subsumed. Do not re-open it as a performance
+   lever. If `current_acl_allows_default_key_command` is ever touched, it should be for
+   correctness, and the `all_channels` clause must survive.
+2. The 175 instr/op is recovered ONLY by converting routes to the cached gate — the work
+   blocked behind `crates/fr-server/src/main.rs`, currently under a peer reservation to 05:02Z.
+   The corrected seven-predicate target list is in `9a82da1a4`, LINDEX first.
+3. General lesson for this ledger: a sub-lever named from SOURCE structure ("the memcmps inside
+   function X") can be an artefact of inlining. Attribute it in the BINARY with `--callers`
+   before filing it as separate work. This is the fifth static-structure claim of mine this
+   campaign that measurement corrected.
