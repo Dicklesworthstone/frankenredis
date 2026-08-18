@@ -60157,3 +60157,121 @@ a one-time cost for a per-read one.
   3. Audit the sibling harnesses for hardcoded provenance banners — carried forward UNDONE from the
      row above. `restore_annot.py`, `lrange_annot.py` and `read_ratio_by_len.py` share
      `restore_ratio.py`'s lineage and have still not been checked.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the certified 2.1383x integer deficit is TWO fr frames and fr's CRC is 2.54x FASTER than redis's; the shapes cross because redis's cost is byte-proportional and fr's is per-element (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: callgrind frame-level SELF cost, differenced across two key counts (10 vs 30) so
+per-invocation setup cancels, normalised per RESTORE+DUMP key and per element. CV was NOT used, as
+a gate or otherwise — no coefficient of variation appears in this row's decision path and none was
+computed. No timing verdict is claimed: the measurand is a retired-instruction COUNT. No code
+changed and NO BUILD was run; callgrind outputs went to a `TemporaryDirectory` and were reclaimed,
+so this row cost no disk.
+
+Claim class: MEASUREMENT, and it is a PROFILE — a frame ranking, not a small delta. The instrument
+differences two key counts in separate valgrind runs and `feedback_a_key_count_slope_is_not_
+deterministic` prices its spread at 0.33-1.07 pct, so **nothing below ~1 pct is claimed here**. The
+smallest quantity this row rests on is 12.06/elem and the largest is 70.68/elem; the ranking is not
+in question at that separation.
+
+  fr arm    `99e32657383c8a9ef60468534a02f92f6e7afe76a4f8c68424a2e803ffd1b81b` (`e32cc8b71`)
+  incumbent vendored redis 7.2.4, `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  host      loadavg 4.56-6.90 across the four profiles, MHz 1429-4292 spread
+
+### WHERE THE INTEGER DEFICIT ACTUALLY IS
+
+    ALL-INTEGER, 300 elements, fill 128, SELF cost per RESTORE+DUMP key
+
+    fr                                          redis
+      decode_value_spans     21204  70.68/el      crcspeed64little   11990  39.97/el
+      write_u64_digits       17100  57.00/el      memcpy              1368   4.56/el
+      crc64_pclmul            4720  15.73/el      je_malloc_usable_size 865   2.88/el
+      from_restored_..nodes   3618  12.06/el      processMultibulkBuf  582   1.94/el
+      memcpy                  2501   8.34/el      (nothing else above 1.7/el)
+      TOTAL listed           72898                TOTAL listed        34708
+
+fr's deficit is 38,190 instr/key. **Two frames account for 38,304 of it.** `decode_value_spans`
+and `write_u64_digits` have NO counterpart anywhere in redis's profile — redis's 22nd-ranked frame
+is 0.88/elem, so whatever redis does per element is below that.
+
+### fr's CRC IS 2.54x FASTER THAN REDIS'S, AND IT IS REDIS'S LARGEST FRAME
+
+    same shape, same key count:  fr crc64_pclmul 4,720   redis crcspeed64little 11,990
+
+fr's carry-less-multiply CRC retires 15.73/elem against redis's table-driven 39.97/elem. **CRC is
+35 pct of redis's entire integer RESTORE+DUMP cost and is its single largest frame.** This is worth
+stating plainly because it bounds where the deficit is NOT: the codec halves are already won, and
+`frankenredis-qj6jn`'s header has said so since the founding premise inverted. Any future reading
+of "fr is 2.14x behind on integers" that reaches for the codec is reaching for the one part fr
+already wins by a factor of two and a half.
+
+### THE SHAPES CROSS BECAUSE THE TWO ENGINES SCALE ON DIFFERENT VARIABLES
+
+From the certified ratio harness, draw 1 of each shape, ONE instrument, same run:
+
+    shape        fr        redis      ratio
+    ALL-STRING   58,345    64,802     0.9006x    fr ahead
+    ALL-INTEGER  73,143    34,517     2.1192x    fr behind
+    going string -> integer:  redis −46.7 pct,  fr +25.4 pct
+
+An integer listpack entry is SMALLER than a 15-byte string entry, and every byte-proportional frame
+duly gets cheaper on both engines — fr's CRC 26.92 -> 15.73/elem, its memcpy 16.91 -> 8.34, its
+node build 27.06 -> 12.06. **Redis is almost entirely byte-proportional, so a smaller payload is
+simply a cheaper RESTORE.** fr is not: `decode_value_spans` goes the OTHER way, 41.68 -> 70.68/elem,
+and `write_u64_digits` appears from nothing at 57.00/elem. fr does 127.68/elem of per-element work
+on a payload that shrank.
+
+That is the whole 0.90x -> 2.14x swing, and it is architectural rather than a hot loop: redis
+installs the validated listpack as an opaque blob and decodes nothing per element, so it has no
+frame to be slow in.
+
+### THE 57.00/elem RENDER IS PREPAYMENT AND STAYS
+
+`write_u64_digits` at 57.00/elem is the eager decimal render, confirmed three ways: it is absent
+from the all-string profile entirely, it reconciles to the decimal with the 57.09/elem
+`project_list_restore_gap_repriced` priced independently, and its magnitude cannot be reply
+emission (two replies per key, not three hundred). `project_list_restore_read_breakeven` is on
+record that removing it trades a one-time cost for a per-read one and moves fr toward redis's
+curve. **Do not attack it.** At one full read fr is 0.3961x on integers precisely because this work
+is already done.
+
+### THE LEVER IS THE OTHER FRAME, AND THE SIZE->COST LAW IS ALREADY ON RECORD
+
+`decode_value_spans` is the largest frame in the entire profile and it is NOT the render — the two
+are separate SELF costs. Building an integer span costs **+29.00 instr/elem** over a string span
+(70.68 vs 41.68) on top of the render, and the mechanism is visible in the type: `String` carries a
+`Range<u32>`, `Integer` carries a 21-byte right-aligned `[u8; 20]` + `start`.
+
+`crates/fr-persist/src/listpack.rs:88` already locks the enum at <= 32 bytes with the law spelled
+out in its own assertion message — *"decode_value_spans pays ~1 instruction per byte of it per
+listpack entry (frankenredis-33832)"* — and 33832 banked a win by removing 8 bytes. So a prior for
+this lever exists and is quantified.
+
+CANDIDATE, SPECIFIED NOT BUILT: move the rendered decimal into a per-chunk ARENA and make both
+variants `Range<u32>`. The span drops from <= 32 bytes to 8, which by the recorded law is worth up
+to ~24 instr/elem on EVERY entry — string lists included, since today they pay the integer
+variant's size for nothing. The render stays eager and stays where it is, writing into the arena
+instead of into a 32-byte span slot, so the read side is untouched and the break-even does not
+move. **This is not free**: `as_bytes` would need the arena alongside the listpack, and it has many
+call sites. The cost is a signature change across those sites, not an algorithmic risk.
+
+### RETRY PREDICATES
+
+  1. Build and measure the arena candidate. Predicted direction: DOWN on all three shapes, largest
+     on all-string in relative terms, because strings currently pay the integer variant's width.
+     Falsified if all-string does not move — that would mean the ~1 instr/byte law does not apply
+     to the array write, and the whole prior is wrong.
+  2. Do NOT reach for the codec on this route. fr wins CRC 2.54x and both LZF halves; a lever there
+     is spending effort on the one part that is already ahead.
+  3. The 0.88/elem bound on redis's per-element work is an ABSENCE from a top-22 listing, not a
+     measurement of zero. If a row ever needs "redis decodes nothing per element" as a load-bearing
+     claim rather than as context, it needs redis's listpack path profiled directly.
+
+### AUDIT CLOSED: THE PROVENANCE-BANNER DEFECT WAS CONFINED TO ONE HARNESS
+
+Carried undone twice, now done. Every harness in the scratchpad was grepped for unconditional
+claims about a gate, a window, a check having been performed, or a certification state.
+**`restore_ratio.py` was the only one.** `dump_paired.py` and `restore_paired.py` print
+`GATE: median-CI excludes zero = %s` COMPUTED from their own data; `frame_diff.py` and
+`standing_run.py` carry honest disclaimers about what they do not certify. One residual was found
+and fixed: `restore_ratio.py`'s docstring title still read "SIZING" after the harness had been
+given the ability to certify, which would have mislabelled its own output in the safe direction.
