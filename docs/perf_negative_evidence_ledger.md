@@ -62463,3 +62463,113 @@ quiet window apply, and none is claimed. CV was not used, as a gate or otherwise
    incumbent.
 3. If `sort_ro_alpha` is ever measured ABOVE 1.0 in a FIT window, that IS worth opening — but on
    evidence, not on the UNFIT 1.0014x draw already recorded and refused.
+
+## 2026-08-18 CrimsonHawk: SPECIFIED FROM SOURCE — lever 1 written exactly, and reading it REVISES my own prediction: lever 1 ALONE cannot collapse the 1.5998x, because it removes the width classification but still pays the parse; levers 1 and 2 have to ship together (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: source reading only. **No measurement of any kind was taken this turn** — /data
+stood at 34G against a 42G brake under a hard build freeze, and no cargo, callgrind or artifact
+write was performed. CV was NOT used and no timing verdict is claimed. Every number quoted below is
+a CITATION of an earlier certified or replicated row, not a new reading. The structural claims are
+derived from the code and are labelled as derivations.
+
+Claim class: not applicable — nothing is banked. Campaign output: no.
+
+### THE PATCH, EXACTLY
+
+`crates/fr-store/src/packed_set.rs`, in `from_restored_quicklist2_nodes`' fold (currently :4145):
+
+         let mut derivable = true;
+         for span in &entries {
+             raw_total += span.byte_len() as u64;
+             if derivable
+                 && span.is_string_encoded()
+                 && matches!(span.first_byte(&bytes), Some(b) if b.is_ascii_digit() || b == b'-')
+    +            && list_lp_int(span.as_bytes(&bytes)).is_some()
+             {
+                 derivable = false;
+             }
+         }
+
+**One added line.** `list_lp_int` is in the same module (:4436) so nothing moves and nothing is
+exported.
+
+### WHY THE CONDITION IS EXACTLY RIGHT, AND WHY IT IS `list_lp_int` AND NOT THE CANONICALITY TEST
+
+The derivation `bytes.len() - LIST_LP_OVERHEAD` is valid iff, for every entry,
+`list_lp_entry_bytes` computes the same width the SOURCE listpack used. That function routes a
+digit-leading entry into `list_lp_int`: **None** yields the string width, which matches a
+string-encoded source; **Some** yields the integer width, which does not. So the guard must fire
+exactly when `list_lp_int` returns `Some` on a string-encoded span — which is what the added line
+says.
+
+It is deliberately NOT `list_lp_int_bytes_are_canonical`. That function checks canonical FORM only;
+its own doc says "Range is still enforced by the parse in `list_lp_int`". A 25-digit canonical
+decimal passes the form test but overflows `i64`, so fr re-encodes it as a STRING and the
+derivation would have been correct — the form test alone would surrender the chunk for nothing.
+`list_lp_int` is form AND range, which is the precise condition.
+
+Integer-encoded spans are untouched because `is_string_encoded()` is false for them, and that is
+correct rather than lucky: for an integer-encoded source, `list_lp_entry_bytes` receives the
+rendered decimal, parses it back, and picks the integer width — matching the source. That is
+`dcd149230`'s finding that fr chooses the same widths redis does, and it is why this guard only ever
+needed to worry about STRING spans.
+
+### THE ORDERING IS LOAD-BEARING, NOT COSMETIC
+
+`as_bytes` materialises a bounds-checked subslice; `byte_len` and `first_byte` exist specifically to
+avoid it in this fold, and their doc comments say so ("asking `as_bytes` for them costs a
+bounds-checked subslice"). The added term sits LAST so `&&` short-circuits: **`as_bytes` is reached
+only for a string span whose first byte is a digit or `-`.**
+
+A letter-leading list therefore pays nothing new — not one subslice, not one parse. That is what
+protects the certified letter-leading controls (0.9115x RESTORE, 0.6077x RPUSH+LTRIM) BY
+CONSTRUCTION rather than by hope. Writing the same test with `as_bytes` first would reintroduce
+exactly the cost `9cf845b22` removed.
+
+### I WAS TOO OPTIMISTIC ABOUT LEVER 1 ALONE, AND THIS IS THE CORRECTION
+
+`b83ee8ecc` predicted that tightening this guard would make "1.5998x collapse toward the
+letter-leading 0.9115x". Reading the two code paths against each other says that is **wrong for
+lever 1 in isolation**:
+
+    today, digit-leading    guard fires -> full walk: per entry, as_bytes + list_lp_int
+                            + width classification (six range compares) + backlen bytes
+    lever 1 only            guard tests: per entry, as_bytes + list_lp_int
+                            then derivation, walk SKIPPED
+    lever 1 + lever 2       same, but list_lp_int now rejects a zero-padded numeric at byte 2
+                            instead of folding every digit
+
+So lever 1 alone removes the width classification and the backlen computation per entry and keeps
+the parse. **It is a partial win, not the collapse.** The collapse needs lever 2, which is what
+makes the retained parse cheap for the leading-zero family — the family carrying the largest
+measured penalty (183.00/elem on the walk, 173.20/elem on RESTORE).
+
+**Ship them together.** If lever 1 lands alone and the digit-leading RESTORE bound comes back at,
+say, 1.2x rather than 0.95x, that is the PREDICTED behaviour of half the fix and not evidence
+against the analysis. Recording that now, before the build, is the whole point of this row.
+
+### WHAT REMAINS UNDERIVABLE WITHOUT A BUILD
+
+The split of today's 43,910 instr/key digit-leading RESTORE penalty between the parse and the
+classification+backlen cannot be read off the source. `list_lp_entry_bytes` self-cost is a single
+frame (66,600 on the LTRIM shape) and its internals are inlined — `list_lp_int`,
+`list_lp_entry_data_len_maybe_int` and `list_lp_string_data_len` produced **no call records at
+all** in the `713bca6c4` count. So the ratio of lever 1's win to lever 2's is unknown, and no
+number for either is offered here. What is established is the SIGN of each and their ORDER of
+dependence.
+
+### RETRY PREDICATES
+
+  1. Build levers 1 and 2 TOGETHER, and measure the four certified shapes. Expected: digit-leading
+     RESTORE crosses back under 1.0x; letter-leading RESTORE and both write-path bounds do not
+     move at all.
+  2. If a build budget allows only one, take lever 2 first. It is one reordering, it needs no new
+     call, and it helps every walking path including `on_remove_bulk` where lever 1 cannot reach.
+     Lever 1's value is conditional on it.
+  3. If levers 1+2 land and digit-leading RESTORE is still above 1.0x, the remaining candidate is
+     the span arena (`decode_value_spans`, 70.68/elem, the largest single frame in list RESTORE),
+     which is independent of both and untouched by either.
+  4. Do NOT write the guard with `as_bytes` before the first-byte test, and do NOT substitute
+     `list_lp_int_bytes_are_canonical` for `list_lp_int`. Both are reasonable-looking edits that
+     this row rules out — the first reintroduces a removed cost on EVERY element including
+     letter-leading ones, the second surrenders chunks that did not need surrendering.
