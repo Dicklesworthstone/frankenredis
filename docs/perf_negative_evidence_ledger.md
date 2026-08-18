@@ -49308,3 +49308,58 @@ RETRY PREDICATE:
      campaign benchmarks, the correct decision may be to record the limit and stop.
   3. The six shapes here are all uniform-width elements. Mixed widths change where redis's nodes
      fall and were not probed; do not assume the single-node/multi-node split is the only axis.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: INSTRUMENT — `get_control` is admissible 1 time in 3 at the harness DEFAULT rounds=9 and 8 times in 8 at rounds=36, so a default-config screen yields NO normalised figures about two thirds of the time
+
+ANSWERS THE QUESTION `7669606d8` LEFT OPEN: why `get_control` was admissible in a `zsetreads`
+screen and null-failing in a `frontclass` screen an hour apart. It is neither the group nor the
+host. It is the ROUNDS COUNT, and at the default the control is close to a coin flip.
+
+fr ELF bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399.
+Every draw below is `get_control` ISOLATED with `--only get_control`, so nothing else in the
+group can be blamed, in a flat quiet window: loadavg 7.64-8.91 with the 1-min within 12 pct of
+the 5-min throughout, 0 cargo/rustc.
+
+  rounds=9   nulls 1.0344 / 0.9890   CI [1.1019, 1.1946]  8.2 pct   NULL-FAILED
+  rounds=9   nulls 0.9923 / 1.0258   CI [1.0846, 1.1928] 10.0 pct   NULL-FAILED
+  rounds=9   nulls 0.9913 / 1.0117   CI [1.0894, 1.1665]  7.1 pct   ADMISSIBLE
+  rounds=36  nulls 1.0001 / 0.9824   CI [1.1008, 1.1518]  4.5 pct   ADMISSIBLE
+  rounds=36  nulls 0.9938 / 0.9980   CI [1.1061, 1.1448]  3.5 pct   ADMISSIBLE
+
+  ISOLATED: 1 of 3 admissible at rounds=9, 2 of 2 at rounds=36.
+  Adding the six rounds=36 in-group runs from this session, all admissible: 8 of 8 at rounds=36.
+
+Doubling the rounds roughly HALVES the control's CI width (7.1-10.0 pct down to 3.5-4.5 pct) and
+moves both nulls inside the +/-0.02 bound.
+
+### Why this matters more than one shape's variance
+
+Normalisation requires an ADMISSIBLE control. When `get_control` fails, the harness prints
+"normalised: n/a -- get_control is NULL-FAILED ... quote RAW ratios only from this run" and the
+entire group yields no normalised figure, however well the individual rows behaved. That is
+exactly what happened to `frontclass`: 4 of 5 rows null-failed AND the control did, so a
+five-shape screen produced nothing quotable. At a 1-in-3 control success rate, a default-config
+screen is expected to waste about two runs in three.
+
+It also retroactively explains this session's pattern rather than leaving it as bad luck. My
+`sizepairs` work certified only once I moved to rounds=36 (`a2c04f62e`), and I attributed that to
+interleaving cancelling drift. Interleaving may still matter for the ROWS; for the CONTROL the
+plainer reading is that rounds=9 simply does not measure it precisely enough.
+
+### The cost argument, because 4x the rounds sounds expensive and is not
+
+rounds=36 at ops=50,000 is 4x the total operations of rounds=9 at the same ops. But three
+rounds=9 attempts cost 27 rounds -- 0.75 of one rounds=36 run -- and yield ONE admissible
+control on this evidence. Screening at rounds=36 is therefore roughly cost-neutral per USABLE
+result and deterministic instead of stochastic.
+
+RETRY PREDICATE: screen and certify with `--rounds 36`; do NOT use the harness default of 9 when
+a normalised figure is wanted, and do not read a rounds=9 null-failure as evidence about the
+SHAPE, since the control fails at that setting two times in three on its own. Raw ratios from a
+rounds=9 run remain readable as sighting shots. This row is 5 isolated draws plus 6 in-group;
+if someone measures the control admissible 3 of 3 at rounds=9 in a comparably flat window, that
+contradicts it and the rounds recommendation should be revisited. The obvious follow-on, which I
+have NOT done, is whether some rounds between 9 and 36 suffices -- 18 would halve the cost again
+if it holds, and nothing here rules it in or out.
