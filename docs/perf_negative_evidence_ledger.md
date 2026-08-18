@@ -58420,3 +58420,177 @@ tail. Window quietness is not the lever on this instrument's residual variance.
 4. `get_control` may be quoted as a measured shape where it replicates. It may NOT be used as a
    normaliser — that retirement rests on its instruction-instrument behaviour and on the
    `unswept` draw-2 failure, neither of which this row disturbs.
+
+## REJECT (SELF-SPEEDUP) LZF SLICE 4 — HOISTING THE ROLLING-HVAL BOUNDS CHECK IS +820 instr/op (+4.89 pct) SLOWER; THE CHECK WAS ALREADY GONE
+
+Claim class: SELF-SPEEDUP. Campaign output: no. Nothing shipped: production was never flipped, and
+the arm has been removed from the tree entirely, so this row is the only artifact.
+bench_elf_sha256=edc9dc0675907c5b0be4397426e63c5dcfe32ddd3db923b6dcafea5e295a3164
+
+The last sized slice from the line profile was the rolling `hval` update (1,152 instr/key). Its
+inner loop reads `input[ip + 2]` under `in_len >= 3 && ip < in_len - 2`. That bound is derived
+through a subtraction guarded by a SEPARATE loop-invariant test, re-evaluated every iteration, so
+the read looked like it should carry a bounds check the compiler could not discharge.
+
+The candidate binds the rolling byte's own slice once and lets the loop condition BE that slice's
+length, so the comparison immediately precedes the index on the same slice. Exactly equivalent at
+every input length. Measured, both arms in one binary, callgrind slope at 2000/4000 reps, three
+draws each:
+
+    payload                                     index      slice     delta      pct
+    listpack (the production shape)             16784      17604      +820     +4.89
+    random   (incompressible)                  115220     121791     +6571     +5.70
+    runs     (match-heavy control)              11225      11555      +330     +2.94
+
+Slower on every payload, by a margin no null can excuse.
+
+### THE MECHANISM, WHICH IS THE OPPOSITE OF THE PREMISE
+
+The premise was that a bounds check survives in the index form. It does not: had one been there,
+removing it could not have made the loop 4.89 pct slower. The compiler was already discharging it
+from the loop condition, so the candidate bought nothing and paid for a second live pointer and
+length in the hottest loop of the kernel — register pressure where there had been one induction
+variable.
+
+This is the third time this function has punished an inner-loop rewrite for codegen rather than for
+work: slice 2's batched literal arm got 530 instr/op MORE EXPENSIVE inside the compressor while
+doing strictly less per-byte work. Two of the three sized slices from that line profile have now
+died the same way. REUSABLE, and stronger than "measure it": in a loop this hot, an edit that does
+not REMOVE A COUNTED OPERATION should be assumed to cost, because the register allocator is the
+binding constraint, not the instruction count of the source line. Slice 3 won precisely because it
+deleted a compare that was provably redundant with the next line, and added nothing.
+
+### A CAVEAT ABOUT COMPARING THESE NUMBERS ACROSS BUILDS
+
+The index arm reads 16784 here; the equivalent configuration measured 16961 in the slice 3 binary.
+Both are correct and neither is noise: the two binaries' sources differ (this one also computes the
+extra slice binding unconditionally, whatever the arm), so the configurations are only nominally
+the same. Quoted here so nobody differences those two numbers and reports a phantom 177.
+
+The instrument is exact WITHIN a build and must be used that way. Both verdicts on this kernel —
+slice 3's win and slice 4's loss — compare arms compiled into ONE binary, which is why the const
+generic pattern is worth the signature noise.
+
+### THE NULL, AGAIN DEGENERATE
+
+The A/A null, measured in a single invocation of the same harness on one ELF and one shape, has ratio median 1.0000 with a bootstrapped 95% median CI of [1.0000, 1.0000].
+
+All three draws of every arm returned bit-identical counts, so the bootstrap has nothing to
+resample and the interval collapses to a point. Read it as "no observed noise on this kernel", not
+as unlimited precision; a pure compute kernel in a short-lived process has no cron, no epoll and no
+clock-dependent work. The bootstrap median-CI gate determined this verdict. CV is provenance only
+and never influenced it. A +820 result does not need a tight null to be believed, but the null is
+what lets the +330 control be quoted as real rather than as drift.
+
+### WHY THE ARM WAS REMOVED RATHER THAN KEPT, UNLIKE SLICE 2
+
+Slice 2's rejected arm is still reachable through a const generic, and that was right: when its
+flag is off it costs production NOTHING, because it only gates the bodies of branches. This arm
+cannot be kept on those terms. Its slice binding has to be computed before the loop whatever the
+flag says, because the loop CONDITION reads it — so keeping it reachable would leave real work on
+the production path to preserve a rejected experiment. The measurement is reproducible from this
+row and the removal keeps the hot loop honest.
+
+### RETRY PREDICATE
+
+  1. Do NOT re-attempt this as a bounds-check removal. The check is not there. Re-open only if a
+     line-level profile of the CURRENT binary shows a bounds check in that loop — the estimate that
+     motivated this slice predates three shipped changes to the same function.
+  2. All three slices sized from that line profile are now resolved: 1 shipped, 2 closed
+     structurally, 4 rejected here. Re-profile before proposing a slice 5; there is no remaining
+     sized candidate, and a fresh FRAME delta is the instrument, not the stale line profile.
+  3. The 1.66x-vs-redis compressor ratio remains unmeasured since slice 1 and is now two shipped
+     changes stale. That re-pricing, not another inner-loop guess, is the next thing this vein
+     needs, and it requires `certification_window.py --for ratio` to return FIT.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: `cod-b`'s WRITE-GATE retry predicate EXECUTED to a verdict — the gate is **5.0 instr/op, 0.33 pct** of a SET, so it is NOT a material hot frame and the lever STAYS CLOSED
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this ships nothing. It executes another agent's registered retry predicate
+to a verdict and retires a vein my own working notes still listed as "TOP OPEN".
+
+### THE PREDICATE, VERBATIM
+
+`NEGATIVE_EVIDENCE.md:16585`, 2026-06-21, cod-b: *"do not retry cached default write-gate or
+one-branch policy-gate micro-laziness unless a fresh profile names
+`plain_borrowed_default_key_write_allows` or the selected-DB write gate as a material hot
+frame."*
+
+Fresh profile taken. **The precondition is not met.**
+
+### WHAT THE PROFILE SHOWS
+
+`set_base`, 2000 ops, two-point subtraction, whole process 1503.8 instr/op:
+
+     215.0  process_buffered_frames
+     163.0  classify_borrowed_dispatch_floor_packet_impl::<true, true>
+     128.0  execute_plain_set_borrowed_with_default_write_gate
+     122.0  parse_borrowed_plain_set_bulk
+     101.0  Store::set_plain_borrowed
+     100.0  __memcpy_avx_unaligned_erms
+      93.0  HashMap<Box<[u8]>, Entry>::get_mut
+      89.0  HashMap<Box<[u8]>, Entry>::contains_key
+      62.0  record_plain_set_borrowed_metrics
+
+`plain_borrowed_default_key_write_allows` **does not appear at all**. The frame that does appear
+is `execute_plain_set_borrowed_with_default_write_gate` — the EXECUTOR, which TAKES the gate as
+an already-computed parameter and then performs the whole SET. Its 128.0 is the write, not the
+gate, and reading it as the gate would be the error this row exists to prevent.
+
+### ABSENCE IS NOT THE ARGUMENT — THE GATE WAS MEASURED DIRECTLY
+
+A frame missing from an optimised profile means "inlined OR not called", which settles nothing on
+its own; that lesson is already banked in this vein. So the verdict rests on a POSITIVE
+measurement taken earlier in this session, not on this absence:
+
+`cached_plain_write_gate` was marked `#[inline(never)]` and measured on `set_base` as a positive
+control for a different row:
+
+    **1.0000 calls/op, 5.0 instr/op**   (2000 -> 4000 calls across the two-point pair)
+
+The wrapper is entered once per operation and costs **5.0 instr/op**, because the cache behind it
+hits essentially always — the expensive derivation runs a handful of times per connection, not
+per command. Against a 1503.8 instr/op SET that is **0.33 pct**.
+
+**A gate that costs 0.33 pct of the command is not a material hot frame by any reading of that
+word.** `cod-b`'s precondition is unambiguously unmet, and the lever stays closed.
+
+### WHY MY OWN NOTES SAID OTHERWISE
+
+My working notes carried the write gate as a flat 187 instr/op tax and as a TOP OPEN VEIN. That
+figure describes the gate's cost when DERIVED, and the derivation is what `cached_plain_write_gate`
+removed from the per-command path. The 187 is not wrong; it is the cost of a thing that no longer
+happens per command. **A "flat N instr/op tax" is only a vein while the N is paid at the rate you
+assumed** — and the rate here is once per connection, not once per op.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Instructions by two-point subtraction (N=2000, 2N=4000), so startup and seeding cancel exactly
+and the figures are load-immune; `--fr-only`, so there is no incumbent arm and no `serverCron`
+elapsed-time confound. The 5.0 instr/op figure is quoted FROM the row that measured it under
+`#[inline(never)]` WITH a positive control, and is not re-derived here. No ratio, no A/A and no
+quiet window apply to a frame census and none is claimed. CV was not used, as a gate or
+otherwise.
+
+### PROVENANCE
+
+  ELF           fr `114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f`
+  bench_elf_sha256=114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`, then `frame_delta.py`.
+  host          /data 58G free, loadavg 6.64 6.87 7.54, zero frankenredis builds in flight.
+                Instructions, so load and MHz do not enter.
+  disposition   PREDICATE EXECUTED — verdict STAYS CLOSED. No source file changed. NO BUILD was
+                performed; artifact reuse.
+
+### RETRY PREDICATE
+
+1. The write-gate lever is CLOSED and cod-b's precondition is recorded as UNMET with a number.
+   Re-open only if a profile shows `cached_plain_write_gate` above **50.0 instr/op** on a write
+   shape, which would mean its cache had stopped hitting.
+2. Do NOT read `execute_plain_*_with_default_write_gate` frames as gate cost. They are executors
+   that receive the gate; their instructions are the command's work.
+3. Strike "write gate = flat 187 instr/op, TOP OPEN VEIN" from any working notes that still carry
+   it. The 187 was the DERIVATION cost and the derivation is no longer per-command.
