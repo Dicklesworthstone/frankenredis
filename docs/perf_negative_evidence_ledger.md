@@ -47739,3 +47739,170 @@ RETRY PREDICATE:
   3. Any future config that changes DUMP bytes must be added to `DumpPayloadCache` in the same
      commit. That struct is the third place a config has to be wired and the only one with no
      compiler error to remind you.
+
+## 2026-08-18 CrimsonHawk: KEEP (COMPETITIVE) — the four keymeta FastReply floor arms take the cached read gate: TTL **0.4972x** and PTTL **0.5646x** vs Redis 7.2.4, −215.3 instr/op fr-side, and the recorded reason for the earlier revert was wrong (`frankenredis-getexgate`)
+
+Claim class: COMPETITIVE
+Campaign output: yes
+
+TTL, PTTL, EXPIRETIME and PEXPIRETIME now take the read gate from the per-pass cache instead
+of re-deriving it per packet. Shipped in `7395a4edf`, `crates/fr-server/src/main.rs` only:
+`execute_plain_keymeta_borrowed_with_default_read_gate` already existed in `fr-runtime`, so
+no `fr-runtime` edit was needed and none was made.
+
+### STANDING AGAINST THE INCUMBENT
+
+fr against Redis 7.2.4, instructions per op, two-point, each row a SINGLE INVOCATION running
+both the fr arm and a live vendored redis-server arm side by side. FOUR replicates per shape.
+Below 1.0 means fr ahead. WORST of the four quoted, per the replicated-standing convention:
+
+  shape             r1        r2        r3        r4        WORST
+  ttl_nonvolatile   0.4972x   0.4822x   0.4507x   0.4578x   0.4972x
+  expiretime        0.5062x   0.4680x   0.4932x   0.4833x   0.5062x
+  pttl              0.5522x   0.5597x   0.5646x   0.5609x   0.5646x
+
+Stated inline: PTTL is fr/Redis 7.2.4 0.5646x at its worst replicated bound, the weakest of the
+three, so fr retires a little over half the incumbent's instructions on every converted route.
+
+**ONLY 2 OF THESE 12 ARMS WERE WINDOW-FIT, AND THE ROW SAYS SO RATHER THAN HIDING IT.** The
+harness disqualified the rest for a cargo/rustc process running under the shared uid, or for a
+1min-vs-5min loadavg spread above its 15 pct stationarity limit. Twelve arms were attempted
+across two quiet-looking windows; peers started builds inside both.
+
+That is survivable HERE, and the reason is structural rather than hopeful. fr's Ir numerator is
+load-immune and measured so on this very data: `ttl_nonvolatile` reads 1439.5, 1438.1, 1440.1,
+1439.6 across four arms spanning both FIT and UNFIT verdicts, a spread of 0.14 pct. The redis
+DENOMINATOR is the load-sensitive half (2895 to 3195 on the same shape, 10.4 pct), because
+`serverCron` does elapsed-time work. Contention therefore INFLATES the denominator, which
+FLATTERS fr.
+
+So the worst bound is the conservative one, and it is conservative in a checkable way: in all
+three shapes the WORST ratio is the arm with the LOWEST redis count — ttl 0.4972x at redis
+2895.2, expiretime 0.5062x at redis 3586.0, pttl 0.5646x at redis 3485.1, each the minimum of
+its four. The quoted number is the reading taken against the LEAST contended incumbent, so
+contention cannot be what produced the win.
+
+### THE ROW THIS CORRECTS
+
+These four arms were converted once and DELIBERATELY BACKED OUT, with this reason recorded in
+the source comment: a hoisted gate cost TTL 21 instr/op while TYPE, with an identical hoist,
+gained 189, therefore placement was the discriminator.
+
+**Placement was not the discriminator. The reply variant was.** TTL, PTTL, EXPIRETIME and
+PEXPIRETIME return `FastReply`; TYPE returns `FastEncodedReply`. Until `bffba0601` the
+`FastReply` arm of `process_buffered_frames` cleared `plain_get_read_gate_cache` after EVERY
+packet, and the `FastEncodedReply` arm never did. So the hoist populated a cache that was
+discarded before the next packet could read it: every op paid the full gate PLUS the
+`get_or_insert_with`. That is the +21. TYPE kept its entry and got the gate constant back.
+
+The prediction — that with the clear gone the SIGN FLIPS — was published to the arm's author
+BEFORE the measurement, in message 22110, together with the statement that if it did not flip
+the placement reading stood as written.
+
+### FR-SIDE EFFECT, PAIRED BUILD ONE CHANGE APART
+
+Two replicates per arm, `--fr-only`, instructions per op, two-point (N=2000, 2N=4000):
+
+  shape             before             after              delta
+  ttl_nonvolatile   1653.9 1653.8      1437.4 1439.7      -215.3   (-13.0 pct)
+  pttl              2184.8 2174.9      1964.7 1964.4      -215.3   ( -9.9 pct)
+  expiretime        2028.9 2030.0      1817.6 1813.9      -213.7   (-10.5 pct)
+  type   (control)  1315.5 1318.3      1318.6 1313.1        +0.0
+  zcard  (null)     1667.3 1672.6      1671.6 1663.7        -2.3
+
+The SAME constant on shapes whose totals span 1654 to 2185 is the per-arm signature of a
+removed fixed cost, not a proportional effect. Both nulls behave: `type` was already converted
+and must not move, and does not; `zcard` is an unconverted `FastReply` arm and is flat.
+
+### COUNTED MECHANISM
+
+Exact call counts for `plain_borrowed_default_key_read_allows`, same ELF:
+
+  ttl_nonvolatile  1.0000 -> 0.0000 calls/op
+  pttl             1.0000 -> 0.0000
+  expiretime       1.0000 -> 0.0000
+  zcard  (null)    1.0000 -> 1.0000   unchanged
+
+That is a binary acceptance test registered before the edit, and noise cannot produce it.
+
+The instrument carries its own null: A/A null median 1.000002, bootstrapped over 20,000
+resamples, 95% median CI [0.996069, 1.003947], six draws and 30 pairwise ratios, banked in
+`0bf781d57`. The smallest effect claimed here is 213.7 instr/op on a 2030 baseline, 10.5 pct,
+far outside that interval.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PAIRED BUILD PROVEN STABLE
+
+Built AFTER, BEFORE, AFTER again. The two AFTER ELFs are BIT-IDENTICAL
+(`c9841153...be6c35cc`), and the BEFORE ELF reproduced `053b8e63...d192a54` — the exact ELF an
+earlier row was measured on — so the tree held still across the pair and the peer commits in
+between were docs-only.
+
+### THE PROBE THAT COVERS THIS, AND THE VERSION OF IT THAT WAS WRONG
+
+`dispatch_route_differ` passes 573 cases with 0 disagreements, and for this hazard **that
+proves nothing**: it is request-response, one command per buffered pass, so the cache is always
+fresh and a stale gate is unobservable by construction. Only
+`scripts/gate_cache_pipelined_probe.py` can see it, and it did not cover these four commands
+until this change.
+
+**The first version of that batch was defective and is recorded here because it FIRED on
+correct code.** It set an EXPIREAT and compared TTL and PTTL byte for byte against the
+incumbent; the run DIVERGED, by one second on TTL and ~500 ms on PTTL. Those two replies are
+CLOCK-RELATIVE and the two engines are separate processes queried at different instants, so
+that comparison can never hold, on any build. A check that cannot pass on correct code is worse
+than no check: it reports noise as a defect and teaches the reader to ignore the instrument.
+
+The batch now uses a key with NO expiry, which removes the clock entirely and keeps exactly the
+observable that matters. Measured fr replies, matching the incumbent byte for byte:
+
+  +OK | +OK | -1 -1 -1 -1 | +OK | -2 -2 -2 -2 | +OK | -1 -1
+
+db 0 answers -1 (exists, no expiry) and db 1 answers -2 (missing). A gate that stayed cached
+across the SELECT would serve db 0's -1 inside the db 1 section — a WRONG REPLY, not a crash.
+The db 0 sections either side are what give the middle one meaning: a gate stuck at "deny"
+would send everything down the generic path and still print -2, so without them a pass would
+prove nothing. Not mutation-tested, deliberately
+(`feedback_never_mutation_test_in_a_shared_checkout`).
+
+A second defect in the same file is fixed here: the read loop stopped at
+`buf.count(CRLF) >= len(batch)`, which assumes one CRLF per reply and is false for any bulk
+string. On such a batch it stops early and drops the tail, and since both arms are read
+identically, a divergence in that dropped tail would be reported as a MATCH. It now drains to
+quiescence, which has no reply-shape assumption.
+
+### PROVENANCE
+
+  ELF           `c9841153123128a025050b60a317c38555d81752def6f2260801df15be6c35cc`, plain
+                `--release`, no feature flags, built locally, copied to a private path and
+                sha256'd there. The harness independently recomputes and re-verifies the sha
+                on both arms of every run.
+  bench_elf_sha256=c9841153123128a025050b60a317c38555d81752def6f2260801df15be6c35cc
+  incumbent     vendored redis 7.2.4, sha `d2c8a4b9` == vendored source HEAD, clean; started,
+                seeded and counted in the SAME INVOCATION as the fr arm.
+  harness       `scripts/shape_instr_per_op.py`, `scripts/call_count_delta.py`,
+                `scripts/dispatch_route_differ.py`, `scripts/gate_cache_pipelined_probe.py`.
+  gates         `cargo test -p fr-server -p fr-runtime` 1293 passed, 0 failed, cargo exit 0.
+                Differ 573/0. Pipelined probe 4 batches, 0 divergences, exit 0, re-run against
+                the ELF built before any peer WIP entered the tree.
+  CAVEAT        The differ's cascade-bypass ELF was built AFTER a peer's uncommitted edits
+                appeared in `fr-runtime` and `fr-persist`, so that 573/0 certifies these routes
+                with that WIP linked in, not in isolation. The instruction A/B is unaffected:
+                both its arms were built before those edits, and the BEFORE arm's sha proves
+                it. Recorded rather than quoted as if it were isolated.
+
+### RETRY PREDICATE
+
+1. Reopen if any of the four arms' `plain_borrowed_default_key_read_allows` count returns to
+   1.0000 calls/op, or if `ttl_nonvolatile` rises above 1500 instr/op fr-side. Both are cheaper
+   detectors than any ratio and neither needs an incumbent arm.
+2. Do NOT re-add the per-packet clear to the `FastReply` arm without reading this row and the
+   one for `bffba0601`: it costs the gate on every `FastReply` read route and buys nothing the
+   generic argv path does not already do.
+3. When converting further read routes, classify the arm's reply variant FIRST. The recorded
+   history of these four is the cost of not doing so: a correct conversion was backed out and
+   sat unconverted, with a wrong mechanism written into the source comment to explain it.
+4. `scripts/gate_cache_pipelined_probe.py` is the only check that can see a stale-gate
+   regression. Run it, not just the differ. Do not add TTL or PTTL to a byte-comparing batch.
