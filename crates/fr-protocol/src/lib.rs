@@ -192,6 +192,34 @@ fn push_usize(out: &mut Vec<u8>, n: usize) {
 #[inline]
 fn push_len_header<const FUSED: bool>(out: &mut Vec<u8>, prefix: u8, n: u64) {
     if FUSED {
+        // (frankenredis-getexgate) CONST-LENGTH ARMS FIRST. The general path below emits
+        // `&buf[pos..24]`, a RUNTIME-VARIABLE length, which rustc lowers to a `memcpy` CALL --
+        // measured at 1.000 calls/op on `zrange_plain`, where this writes the `*N\r\n` array
+        // header. The call's size-dispatch preamble dwarfs a four-byte header.
+        //
+        // `encode_bulk_string_slice_impl` already does exactly this for the PER-ELEMENT
+        // `$<len>\r\n` headers (frankenredis-vlis9); the ARRAY header it sits next to was left
+        // on the slow shape. Every multi-element reply -- LRANGE, HGETALL, SMEMBERS, ZRANGE,
+        // MGET -- emits one of these.
+        //
+        // Nested rather than two sequential `if`s, deliberately: a value of 100 or more falls
+        // through ONE comparison here instead of two. `n` is unsigned, so there is no sign case
+        // to order around.
+        if n < 100 {
+            if n < 10 {
+                out.extend_from_slice(&[prefix, b'0' + n as u8, b'\r', b'\n']);
+            } else {
+                let pair = (n as usize) * 2;
+                out.extend_from_slice(&[
+                    prefix,
+                    DIGIT_PAIRS[pair],
+                    DIGIT_PAIRS[pair + 1],
+                    b'\r',
+                    b'\n',
+                ]);
+            }
+            return;
+        }
         // prefix (1) + up to 20 digits (u64::MAX) + "\r\n" (2) = 23 bytes; 24 leaves buf[0] slack.
         let mut buf = [0u8; 24];
         buf[22] = b'\r';
