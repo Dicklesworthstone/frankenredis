@@ -5052,6 +5052,34 @@ fn main() -> ExitCode {
     #[cfg(feature = "io-uring-writes")]
     let mut uring_completions: Vec<fr_uring::OwnedSendCompletion> = Vec::new();
 
+    // (frankenredis-w1djx) THE PID FILE, which fr accepted as config and never wrote.
+    //
+    // Upstream writes it when daemonizing OR when the directive is set
+    // (`if (background || server.pidfile) createPidFile();`) and removes it on shutdown. fr has no
+    // daemonize, so the first half of that condition is vacuous here and an empty value means
+    // simply "no pid file" -- upstream's default-path fallback exists only for the daemonize case.
+    //
+    // An operator setting `pidfile /var/run/redis.pid` got NOTHING: no file, no warning. Any init
+    // script or monitor reading it saw a server that appeared not to be running.
+    //
+    // Resolved from the passthrough lists rather than a runtime accessor because `pidfile` is not
+    // a directive fr-server names, so it lands there verbatim. CLI beats config file: both are
+    // applied in order with last-wins, so the search runs from the back.
+    let pidfile_path: Option<String> = file_passthrough
+        .iter()
+        .chain(cli_passthrough.iter())
+        .rev()
+        .find(|(name, _)| name.eq_ignore_ascii_case("pidfile"))
+        .map(|(_, value)| value.clone())
+        .filter(|path| !path.is_empty());
+    if let Some(path) = pidfile_path.as_deref() {
+        // Best-effort exactly as upstream: a pid file that cannot be written warns and does not
+        // stop the server starting.
+        if let Err(e) = std::fs::write(path, format!("{}\n", std::process::id())) {
+            eprintln!("warn: Failed to write PID file: {e}");
+        }
+    }
+
     // (frankenredis-jd75g) Bind one listener per configured address. Startup
     // binds the single configured bind address; CONFIG SET bind can later grow
     // this to a set of up to MAX_LISTENERS. cur_binds / cur_listen_port track
@@ -5739,6 +5767,15 @@ fn main() -> ExitCode {
             // (`server.c`, closeListeningSockets): it logs at NOTICE, removes, and warns on
             // failure. A file left behind is not merely untidy -- the next start would find it and
             // have to remove it before binding.
+            // (frankenredis-w1djx) Upstream removes the pid file on shutdown, logging at
+            // NOTICE first (`server.c`: "Removing the pid file."). Leaving it behind tells every
+            // reader the server is still running.
+            if let Some(path) = pidfile_path.as_deref() {
+                eprintln!("info: Removing the pid file.");
+                if let Err(e) = std::fs::remove_file(path) {
+                    eprintln!("warn: Error removing the pid file: {e}");
+                }
+            }
             if let Some(path) = unix_socket_path.as_deref() {
                 eprintln!("info: Removing the unix socket file.");
                 if let Err(e) = std::fs::remove_file(path) {
