@@ -59903,3 +59903,80 @@ CV was not used, as a gate or otherwise.
    it; the blocker today is worker health and toolchain skew.
 3. If the workers are brought to the local toolchain, rch becomes a real escape for
    verification-only work and this row should be re-checked rather than cited.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: `shape_instr_per_op.py` LEAKS its callgrind dumps — **4,964 dirs, ~4.0 GB, 2,311 of them today** and nothing ever reaps them. Measured while the volume was losing ~1G per tick with ZERO builds running
+
+Claim class: INSTRUMENT. No ratio is claimed.
+Campaign output: no — but the disk brake stops builds for every agent, so the leak costs
+everyone's throughput, and I am one of the larger contributors to it.
+
+### THE NUMBERS
+
+    /data/tmp/fr_instr_*        **4,964 directories**
+    mean size (200 sampled)     **790 KB**
+    implied total               **~4.0 GB**
+
+    2026-08-16   1,613 dumps
+    2026-08-17   1,040 dumps
+    2026-08-18   **2,311 dumps** — and that is a partial day, measured at 15:20Z
+
+Oldest 2026-08-16 02:20Z, newest today. All owned by `ubuntu`, i.e. shared across every agent
+using the harness. **Nothing deletes them.** Each `shape_instr_per_op.py` invocation creates a
+dump dir under `/data/tmp/fr_instr_<random>`, extracts its numbers, and leaves the dir behind
+forever.
+
+### WHY IT MATTERS RIGHT NOW
+
+The volume was reported losing ~1 GB per tick with ZERO builds running, which is what prompted
+the measurement. At today's rate this harness alone accounts for roughly **1.8 GB/day and
+rising**. It is not the largest consumer on the volume — `cargo-target` is 109 GB and
+`claude-1000` 115 GB — but it is the one that is pure waste: the dumps are read once, seconds
+after they are written, and never again.
+
+I am not innocent here. I ran on the order of sixty profiles today across the numkeys 5+5
+re-draws, the write-gate verdict and the dispatch re-measurement, so a meaningful share of
+today's 2,311 is mine.
+
+### WHAT I DID NOT DO
+
+**I did not delete anything.** Standing orders are to report rather than reclaim, and a dump dir
+is indistinguishable from a peer's in-flight measurement without checking every one of 4,964
+mtimes against every running harness. A reaper that deletes a dir another agent is mid-read on
+would corrupt their row, which is a worse failure than the disk cost.
+
+### THE FIX, SPECIFIED NOT BUILT
+
+`shape_instr_per_op.py` already knows when it is finished with a dump — it prints the path after
+extracting the totals. The dir should be removed at that point unless the caller asks to keep it
+(`--keep-dumps` for the frame/call-count follow-ups, which is exactly why it currently keeps
+them). That preserves the workflow where `frame_delta.py` and `call_count_delta.py` are run
+against a dump afterwards, which is the reason the dumps exist at all and presumably why nobody
+removed the write.
+
+Failing that, a reaper keyed on mtime older than a few hours would be safe against in-flight
+readers.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement of fr or redis, no ratio, no A/A, no build, no quiet window. Disk census only,
+performed with `find` and `dust` under a no-local-build brake. CV was not used, as a gate or
+otherwise.
+
+### PROVENANCE
+
+  ELF           NONE — nothing was built or run.
+  host          /data 47G free, 5G above the 42G brake, losing ~1 GB per tick with zero builds.
+                /data/tmp totals 266 GB: cargo-target 109 GB, claude-1000 115 GB, frankensearch
+                12 GB, fr_instr dumps ~4.0 GB.
+  disposition   MEASUREMENT AND ESCALATION. Nothing deleted. No source file changed.
+
+### RETRY PREDICATE
+
+1. Anyone adding `--keep-dumps` and a default cleanup to `shape_instr_per_op.py` should MEASURE
+   the dir count before and after a run to confirm the write actually stops.
+2. Do NOT write a bulk reaper that deletes by glob alone. Key it on mtime with a margin, or it
+   will delete a dump a peer is mid-read on.
+3. Re-count with `ls -d /data/tmp/fr_instr_* | wc -l` before blaming the volume on builds. It was
+   4,964 at 15:20Z on 2026-08-18.
