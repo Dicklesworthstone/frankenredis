@@ -57792,3 +57792,189 @@ Two earlier draws of the same quantity at the same shape, both flagged when they
   3. Do NOT use this row to justify quoting a sub-1 pct effect from any instrument in this repo.
      The number here is a floor on what the ratio can resolve, not a licence to claim anything at
      that boundary.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the WRITE side, never measured against the incumbent on this bead: fr leads RPUSH at every size, WORST 0.8230x at one element and 0.5037x at 300, and the cost is NON-LINEAR in n on both engines (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir) with a LIVE redis 7.2.4 arm, both
+arms in ONE invocation alternating per size, two draws per size, differenced across KEY COUNTS. CV
+was NOT used, as a gate or otherwise; none was computed. No timing verdict is claimed: the
+measurand is a retired-instruction COUNT. No code changed and NO BUILD was run — this project's
+build slot has been held for a SEVENTH consecutive window and /data is at the 58G floor.
+
+**SIZING, NOT CERTIFIED.** `--for ratio` cannot return FIT while any cargo runs under the shared
+uid. Per-arm host state is on every line, and the instrument's limits are quoted rather than
+assumed: this is the KEY-COUNT slope form, which `feedback_a_key_count_slope_is_not_deterministic`
+puts at 0.33-1.07 pct on ONE binary, so only margins comfortably above that are read.
+
+Claim class: not applicable — nothing is kept and nothing is banked as campaign output.
+
+  fr arm `4eceae6c624c670fb4111eceae3068632e8b9223b0ef822440b5015f9c89fce5` (`68e1d4990`)
+
+### THE SIDE THIS BEAD HAD NEVER LOOKED AT
+
+Every vs-incumbent number here has been RESTORE or READ. `parse_command_args_borrowed_into` was the
+largest single term in the very first build+DUMP profile at 73.63 instructions per element, and
+nobody had asked what a plain RPUSH costs fr against redis. Shape: K keys, ONE bulk RPUSH of n
+15-byte elements each, no DUMP and no read.
+
+    cost of ONE bulk RPUSH of n elements
+       n    fr mean   redis mean   WORST fr/redis   fr draw spread   redis draw spread
+       1     6,648.5      8,234.0       0.8230x           0.59 pct          4.46 pct
+      16    11,351.2     25,546.8       0.4613x           9.57 pct          1.44 pct
+     300   154,381.0    306,742.6       0.5037x           0.10 pct          0.05 pct
+
+    88.7-90.6 pct idle, loadavg 8.67-8.85 throughout.
+
+  fr LEADS AT EVERY SIZE MEASURED. The n = 1 and n = 300 points are solid — draw spreads of 0.59
+  and 0.10 pct on fr, 4.46 and 0.05 pct on redis. THE n = 16 POINT IS NOT: fr's two draws differ by
+  9.57 pct, an order of magnitude past what this instrument should do, so 0.4613x is quoted as the
+  worst of two and should not be built on. It is reported rather than dropped because dropping the
+  noisy point would have made the curve look monotone when it is not.
+
+### THE COST IS NON-LINEAR IN n, SO NO FIT IS QUOTED
+
+    per-element cost between the measured points
+                   n 1 -> 16      n 16 -> 300
+      fr              313.5           503.6
+      redis         1,154.2           990.1
+
+  fr gets DEARER per element as the list grows; redis gets slightly cheaper. A two-point fit from
+  n = 1 and n = 300 would predict fr at 14,039 for n = 16 where it measures 11,351 — 24 pct high —
+  so the linear decomposition that worked for the READ (`935f9dcc8`) does NOT apply here and this
+  row deliberately does not publish one.
+
+  The shape is explicable and worth stating as a hypothesis rather than a finding: fr's per-element
+  write cost rising past 16 is consistent with the listpack-to-quicklist promotion at 128 entries
+  and the chunk allocation that follows it, and redis's falling is consistent with amortising a
+  per-push listpack reallocation over more elements. NEITHER IS MEASURED HERE.
+
+### WHAT IT ADDS TO THE PICTURE
+
+fr's per-command FIXED cost is the weak term on BOTH sides. At one element, RPUSH reads 0.8230x and
+LRANGE read 0.7495x (`935f9dcc8`); at 300 elements RPUSH reads 0.5037x and LRANGE 0.2213x. So fr's
+data-structure work is 2x better than redis's on writes and 5x on reads, while its per-command
+plumbing is only 13-25 pct better. `3e7a892cf` already established that the fixed read cost is 90
+pct shared per-command machinery and handed three countable redundancies in it to the dispatch
+owner; this row says the same term bounds the WRITE side too.
+
+### RETRY PREDICATES
+
+  1. Re-take n = 16 before anyone uses it. fr's 9.57 pct draw spread there is unexplained and is
+     the only point in this table that is not reproducible; a third and fourth draw would say
+     whether it is the instrument or a real bimodality around the listpack threshold.
+  2. Do NOT fit a line through this table. The measured per-element costs move in OPPOSITE
+     directions between the two intervals on the two engines, and a fit would hide that.
+  3. The promotion hypothesis for fr's rising per-element cost is untested. The cheap test is to
+     re-run at `list-max-listpack-size` well above 300 so no promotion occurs; if fr's 16->300
+     per-element cost drops toward 313, the promotion is the cause.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: COMPETITIVE, REPLICATED — fr is AHEAD of Redis 7.2.4 on EIGHT shapes across TWO draws, weakest worst-of-two bound **1.0744x** on `zcard` — and `get_control`, the campaign's own control, FAILED ITS NULL in the quieter draw (`frankenredis-getexgate`)
+
+Claim class: COMPETITIVE
+Campaign output: **yes** — a vs-incumbent ratio, both engines in the SAME invocation, now
+REPLICATED across two draws with the worst of the two quoted.
+
+This executes the retry predicate on the one-draw row: *"TAKE THE SECOND DRAW before calling any
+of these certified... Quote the worst of the two."* Done. It changes the headline, removes the
+control from the set, and confirms a suspicion about the instrument.
+
+### THE REPLICATED STANDING — WORST OF TWO DRAWS
+
+A shape is quoted ONLY if it was admissible in BOTH draws. Same ELF, same command, same ten
+shapes, `rounds=36`, both engines interleaved in one invocation each time.
+
+| shape | draw 1 worst | draw 2 worst | **worst of two** |
+|---|---|---|---|
+| hget | 1.1234 | 1.1229 | **1.1229** |
+| strlen | 1.0893 | 1.0899 | **1.0893** |
+| ttl_nonvolatile | 1.0939 | 1.0889 | **1.0889** |
+| llen | 1.0862 | 1.0862 | **1.0862** |
+| type | 1.1030 | 1.0847 | **1.0847** |
+| scard | 1.0853 | 1.0831 | **1.0831** |
+| hlen | 1.0777 | 1.0939 | **1.0777** |
+| zcard | 1.0827 | 1.0744 | **1.0744** |
+
+**Eight shapes, fr ahead on every one in both draws. The WEAKEST replicated worst bound is
+`zcard` at 1.0744x** — on the weakest shape, at the low end of its interval, in the worse of two
+draws, fr still does 7.44 pct more ops/s than the incumbent.
+
+The one-draw row put the headline at `hlen` 1.0777. Replication moves it to `zcard` 1.0744.
+**The headline got WEAKER, which is what quoting the worst of two is for.**
+
+### TWO SHAPES REMOVED, AND THE SECOND ONE MATTERS
+
+  `getrange`     NULL-FAILED in BOTH draws, redis side, at **1.0211 and 1.0219**. Two independent
+                 runs landing within 0.0008 of each other is not noise — it is a systematic
+                 instability of the redis arm on this shape. Its ratios (1.1144, 1.1197) are NOT
+                 results and are not quoted.
+
+  `get_control`  Admissible in draw 1, **NULL-FAILED in draw 2** on the FR side at **1.0346** —
+                 a 3.46 pct A/A deviation, the widest null in either run. It is therefore NOT
+                 part of this standing.
+
+**`get_control` is the campaign's designated normaliser.** This session has now measured it as
+the noisiest shape on BOTH instruments: it read -13.3 instr/op against ITSELF in one
+instruction A/A, drew ratio exactly 1.000000 in another while its A/B swung 60 instr/op, and has
+now failed its own null on the throughput instrument in the QUIETER of two windows. Any
+normalised standing in this campaign divides by that shape. This row divides by nothing and
+quotes raw ratios only.
+
+### THE INSTRUMENT, NOT THE HOST — A PREDICTION MADE BEFORE THE RUN
+
+Before draw 2 I recorded what would distinguish the two explanations: *"if its nulls come back
+WIDER despite [a quieter window], the variance is in the instrument rather than the host."*
+
+    draw 1   HOST LOAD 7.20 9.83 12.15 = **11 pct** of 1-min capacity   widest null 2.110 pct
+    draw 2   HOST LOAD 5.70 6.77  9.25 =  **9 pct** of 1-min capacity   widest null **3.460 pct**
+
+The quieter window produced the WIDER null. The residual variance on this instrument is not the
+host's background load, and chasing quieter windows will not shrink it. Pooled draw-2 A/A over
+its own 20 nulls: **A/A null median 0.999800; bootstrap 95% median CI [0.997350, 1.005800]**,
+20,000 resamples. CV was not used, as a gate or otherwise; the bootstrap median-CI is the gate,
+admissibility is the harness's per-row null test, and an effect inside that interval is not
+claimed.
+
+Draw 1's pooled null was median 0.996800, CI [0.990650, 1.000350]. **Draw 2's median is closer to
+1.0 while its widest deviation is worse** — the bias improved and the tail got longer, which is
+why the per-row null test, not the pooled median, is what admits a row.
+
+### PROVENANCE — SELF-REPORTED FROM INSIDE THE RUNNING PROCESSES, BOTH DRAWS
+
+  host                  thinkstation1, kernel 6.17.0-41-generic, 64 cores, governor powersave,
+                        ISA avx2 — identical in both draws
+  draw 1                loadavg 7.20 9.83 12.15 (11 pct of capacity); MHz mean 2109 before,
+                        2910 after; 9 of 10 admissible
+  draw 2                loadavg 5.70 6.77 9.25 (9 pct of capacity); MHz mean 2451 before,
+                        2015 after; 8 of 10 admissible
+  fr_elf_sha256         114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+  bench_elf_sha256=114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+                        BYTE-IDENTICAL across both draws, verified by full SHA-256 and by size
+                        (10,890,064 bytes) before draw 2 — a replication against a different
+                        binary would prove nothing.
+  redis_elf_sha256      e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  incumbent             Redis 7.2.4 `v=7.2.4 sha=d2c8a4b9:0 malloc=jemalloc-5.3.0 bits=64`,
+                        vendored, measured in the SAME INVOCATION as fr in each draw
+  threads               fr 3 observed, redis 5 observed, both draws
+  allocator             fr mimalloc vs redis jemalloc-5.3.0 — both engines' SHIPPING
+                        configurations, which is what a standing compares
+  builds                ZERO frankenredis builds in flight for either draw, verified by process
+                        name AND by project; a peer `cargo test -p fr-store` was waited out
+                        before draw 2 rather than measured through
+  disposition           MEASUREMENT. No source file changed by this row. NO BUILD was performed
+                        for draw 2 — pure artifact reuse of the draw-1 ELF.
+
+### RETRY PREDICATE
+
+1. This standing is REPLICATED and may be quoted at its worst-of-two bounds. Re-open a shape only
+   if it measures BELOW its worst-of-two bound in a window at or under 11 pct of capacity.
+2. Do NOT quote `getrange` or `get_control` from these runs in either direction. `getrange`
+   null-failed twice on the redis side within 0.0008; `get_control` failed on the fr side at
+   1.0346.
+3. **Stop treating `get_control` as a reliable normaliser.** It is now the noisiest shape
+   measured on both the instruction and throughput instruments in this session. A normalised
+   figure divided by it inherits that noise, and this row deliberately quotes raw ratios only.
+4. Do NOT chase quieter windows to shrink this instrument's null. Measured: 9 pct of capacity
+   produced a WIDER widest-null than 11 pct. Reduce it with more rounds or more shapes, or accept
+   it and quote worst bounds.
