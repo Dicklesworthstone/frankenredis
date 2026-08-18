@@ -52327,3 +52327,240 @@ row above passed it.
 3. The `getbit` cycles second draw is still owed and this row does not supply it.
 4. Before quoting ANY control-normalised figure from this family, check how many control draws it
    rests on. One draw buys about 6 pct of resolution, not the 2-4 pct the row's own CI advertises.
+
+## 2026-08-18 CrimsonHawk: REJECT — arm POSITION in the floor command table is NOT a lever: eight commands spanning positions 1 to 30 show no gradient, and the LAST arm measured is the CHEAPEST (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — no code changed, no build was run for this row, and no ratio against the
+incumbent is claimed. It refutes a hypothesis before anyone spends a build on it.
+
+### THE HYPOTHESIS, AND WHY IT WAS WORTH TESTING
+
+`classify_borrowed_dispatch_floor_packet_impl` costs **159.0 instr/op self** on `llen`, the second
+largest self-cost on that route after the executor. It resolves a command token through
+`borrowed_dispatch_floor_command`, which is a `match token.len()` with **32 arms at length 4** and
+**33 at length 6**, each arm comparing a fixed-size byte array.
+
+This repo has a MEASURED precedent that arm order is a lever: moving base SET from 14th to 2nd in
+the dispatch CASCADE took it 2129.6 -> 1719.1 instr/op. If the floor table compiled the same way,
+`llen` at position 12 and `hget` at 16 were each paying for the arms ahead of them, and either
+reordering or switching to an integer `match` would pay across every classified command.
+
+### THE DOSE-RESPONSE SAYS NO, AND THE EXTREMES SAY IT LOUDER
+
+`classify_borrowed_dispatch_floor_packet_impl` SELF cost per op, two-point differenced, one ELF:
+
+  command   position          classifier self/op
+  SUBSTR     1 of 33 (len 6)        165
+  HSET       2 of 32 (len 4)        158
+  SCAN       5 of 32                163
+  TYPE       9 of 32                152
+  LLEN      12 of 32                159
+  STRLEN    15 of 33 (len 6)        165
+  HGET      16 of 32                163
+  PTTL      30 of 32                152
+
+**There is no gradient.** Across a 28-arm span within ONE length group, HSET at position 2 costs
+158 and PTTL at position 30 costs **152** — the latest arm measured is among the cheapest. Within
+the length-6 group, position 1 and position 15 are identical at 165. The whole range across eight
+commands is 13 instr/op, and it does not order by position.
+
+If the arms were a compare chain at even ~2 instr each, PTTL would sit ~56 instr/op above HSET.
+It sits 6 BELOW.
+
+### WHAT THIS MEANS, AND THE DISTINCTION THAT MATTERS
+
+rustc compiles `match token.len()` followed by `match [u8; N]` into a **switch**, not a sequential
+comparison chain — the length dispatch buckets first, and the fixed-width array compare inside a
+bucket becomes an integer switch. Position is therefore irrelevant, and so are both fixes it
+suggested:
+
+  1. Reordering hot commands to the front of their length group: NO EFFECT AVAILABLE.
+  2. Rewriting the arms as `match u32::from_le_bytes(...)` against const patterns: this is what
+     the compiler already does. It would be churn with a measurement attached to it.
+
+**The reusable in this repo says the opposite for a DIFFERENT structure, and both are right.** The
+dispatch CASCADE in `process_buffered_frames` is a chain of `else if let Some(packet) =
+parse_..._packet(...)` — each arm runs a real PARSER, not a comparison, so position genuinely
+costs there and reordering genuinely paid. The floor TABLE is a `match` on a token. They look
+similar in source and behave oppositely. Before quoting "arm order is a lever", check which of the
+two you are standing in.
+
+### WHY THE CLASSIFIER'S 159.0 IS NOT A SCAN
+
+The cost is the classifier's actual work, not a search: `uppercase_ascii_token` normalising the
+token, the bulk-length parse, the `(array_len, command)` match with its per-arm
+`*_floor_enabled()` guards, and the token extraction that was already forced inline by `c5a3b6d2f`
+(worth -20.0 instr/op). It remains the second-largest self-cost on a borrowed read and is still
+open — but it will not be moved by reordering.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timed quantity is claimed. The figures are callgrind instruction counts differenced at N=2000
+and 2N=4000 on a single ELF, so they carry no sampling error; the eight commands are eight
+independent measurements of the same function and act as each other's controls.
+
+For the instrument generally: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95%
+median CI [0.996069, 1.003947], six draws and 30 pairwise ratios, banked in `0bf781d57`. The
+claim here is the ABSENCE of a gradient that would have to be ~56 instr/op to matter, against an
+observed spread of 13 that does not order by position.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           `head_now.elf`, a plain `--release` build of HEAD taken this turn, reused for all
+                eight measurements so the table layout is identical across them.
+  bench_elf_sha256=21158a2583e5822c08fdc082ae5f79b07933e1f852f9fc2e552a545876cd884b
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py`, `callgrind_annotate --auto=no`.
+  host          /data 86G free. loadavg 8.50 9.23 9.68, CPU idle 91 pct, iowait 0, zero peer
+                frankenredis builds verified by process args. No build was started for this row.
+  disposition   NO CODE CHANGED. The working tree carries no edit from this experiment.
+
+### RETRY PREDICATE
+
+1. Do NOT reorder `borrowed_dispatch_floor_command` for performance, and do NOT rewrite its arms
+   as integer patterns. Both are refuted above; a future profile showing a large classifier cost
+   is not new evidence for either.
+2. Re-open ONLY if a length group grows past what rustc will switch — the cheap detector is this
+   same dose test: measure the first and last arm of a group and require a spread under ~10
+   instr/op. Two shapes and no build.
+3. The classifier's 159.0 instr/op self remains OPEN as a target. Attack its actual work
+   (`uppercase_ascii_token`, the bulk-length parse, the per-arm guards), not the table's order.
+
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the list DUMP built each node's listpack in a SECOND buffer just to put a 6-byte header in front, and threw the accumulator's capacity away every node; building it in place is −2.09 pct worst bound and −7.00 pct at ten nodes (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) and callgrind CALL
+COUNTS, TWO-BINARY A/B with the A/A and the A/B in ONE INVOCATION and the candidate arm BRACKETED
+by control arms. CV was NOT used, as a gate or otherwise — no coefficient of variation appears in
+this row's decision path and none was computed. No timing verdict is claimed: the measurand is a
+retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 1.000048, bootstrap 95% CI [0.999282, 1.000396] over six
+draws, taken in the same invocation as the A/B it gates; the per-draw table is below. The
+bootstrap median-CI is the verdict gate and it excludes zero.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### WHAT THE FLUSH WAS DOING
+
+The fallback encoder accumulates a node's entries in `packed_entries`, then flushes. The flush was
+
+    finish_listpack_entries(std::mem::take(packed_entries), packed_len)
+
+which allocates a SECOND Vec, copies the whole node into it behind a 6-byte header, and returns
+it — after which `encode_rdb_string` copies it a third time into the output. `std::mem::take`
+also leaves `packed_entries` with ZERO capacity, so every node after the first re-allocates and
+re-grows from nothing.
+
+Counted on 30 keys x 300 elements at fill 128 (90 node flushes), `finish_listpack_entries`'
+own callees were exactly one set per flush:
+
+    __rust_alloc     90      __memcpy_avx_unaligned_erms   90      __rust_dealloc   90
+
+### THE FIX, AND WHY IT IS LEGAL HERE AND WAS NOT LEGAL ONE LEVEL UP
+
+The listpack header is FIXED width — u32 total bytes then u16 entry count. That is the whole
+argument. `9bf8ee80d` could NOT back-patch the node COUNT one level up, because `encode_length`
+writes it variable-width and the width is not known until the value is; it had to emit into a
+scratch buffer instead. Six bytes of listpack header have no such problem, so the buffer now
+carries its own six zero bytes, entries accumulate straight after them, and the flush fills the
+header in, appends the 0xFF terminator, emits, and `truncate`s back to the header — which KEEPS
+the capacity. One buffer, one copy, and no per-node allocator traffic.
+
+    AFTER, same shape:  finish_listpack_entries  0 calls (frame gone from the path)
+                        __rust_dealloc           120 -> 60 inside the encoder
+
+A `debug_assert_eq!` compares the in-place listpack against `finish_listpack_entries`' output
+byte for byte on every flush; it runs in every test build and is compiled out of release.
+
+### PROVENANCE
+
+  ELF           AFTER `fc8b38062895de097680bab06d231d7ddcb86dbb21be379c1dd5a963c502861a`,
+                BEFORE `102daa8baa2f5d141e1bbf8253139f12296b6dc94b2a40b9e62cdaf8fb7d0be6`.
+  bench_elf_sha256=fc8b38062895de097680bab06d231d7ddcb86dbb21be379c1dd5a963c502861a
+
+  HOW THAT HASH WAS OBTAINED, precisely, because the contract is about the EXECUTING binary and
+  it would be easy to overstate this. The `frankenredis` server ELF does not print its own
+  SHA-256 the way this repo's `benches/*` harnesses do — there is no such code in `fr-server` or
+  `fr-runtime`. So each arm was BOOTED and the hash read back from the kernel's view of the
+  running process, `/proc/<pid>/exe`, not from the file the build wrote. That identifies the
+  image that actually executed and would catch a relink under the harness, which is the failure
+  `feedback_target_release_is_a_rendezvous_not_an_output` is about. It is NOT the binary printing
+  its own identity, and no claim is made that it is.
+
+  Both arms are `--release` `frankenredis` ELFs built from the same tree minutes apart, with a
+  peer's uncommitted `fr-runtime` WIP present in BOTH arms so it cancels.
+
+### THE MEASUREMENT
+
+    draw   BEFORE_a     BEFORE_b     AFTER        cand-pct    null-pct
+      1    226,463.35   226,332.65   221,660.05   −2.0928     +0.0577
+      2    226,293.75   226,325.40   221,434.90   −2.1540     −0.0140
+      3    226,387.55   226,395.80   221,457.55   −2.1795     −0.0036
+      4    226,539.90   226,491.15   221,605.40   −2.1677     +0.0215
+      5    226,209.45   226,502.70   221,231.95   −2.2637     −0.1295
+      6    226,307.20   226,277.30   221,457.30   −2.1366     +0.0132
+
+    A/B median −2.1608 pct, bootstrap 95% CI [−2.2216, −2.1147], n=6 draws
+    WORST SINGLE DRAW −2.0928 pct  <- the figure this row claims
+    null  median 1.000048 as a ratio BEFORE_a/BEFORE_b (within 2 pct of unity); the same six
+          draws as absolute percentages have median 0.0178 pct, CI [0.0084, 0.0936]
+
+  Six draws at 89.6-92.2 pct idle, loadavg 8.38-10.26, MHz 1861-2460 mean against a 1429-4292
+  spread. The effect is ~118x the null. Quoted as the WORST draw per the replicated-standing
+  convention.
+
+### THE DOSE-RESPONSE, AND A CONTROL SHAPE THE CHANGED CODE NEVER RUNS ON
+
+A 2 pct effect on one shape is not evidence — `feedback_dose_response_validates_a_marginal_lever`
+is on record. The saving is per NODE, so `list-max-listpack-size` is the dose knob: same 300
+elements, more nodes.
+
+    fill   nodes/key   BEFORE       AFTER        saved      per node
+      32      10       239,200.0    222,359.5    16,840.5     1,684
+      64       5       230,952.4    221,454.8     9,497.6     1,900
+     128       3       226,353.8    221,547.5     4,806.3     1,602
+     300       1       230,993.4    230,865.0       128.3       128   <- negative control
+
+  Per-node saving is ~1,600-1,900 across a 4x range of NODE SIZE, so what was removed is the
+  ALLOCATOR PAIR, not the copy. The AFTER column is the tell: it is nearly flat at ~221,500
+  whatever the node count, while BEFORE climbs with it. This DUMP's cost no longer depends on
+  how many nodes the list is cut into.
+
+  The fill=300 row is a negative control with a MECHANISM, not just a small number: at that fill
+  `encode_dump_quicklist2` returns through `quicklist_packed_nodes` and the fallback never runs.
+  Callgrind confirms it — at fill 300 the encoder's callees are `quicklist_packed_nodes`,
+  `encode_length` and `encode_rdb_string` only, with no iterator, no classification and no flush
+  closure. The changed code is absent and the reading is −0.0023 pct worst.
+
+### PARITY
+
+    BEFORE-vs-AFTER DUMP BYTES: 0 of 84 diverging
+    workload sweep vs redis 7.2.4: 4 of 42 diverging, UNCHANGED
+
+  The before/after probe sweeps fill {−2, −1, 128, 4} x n {300, 600, 1500} x seven build
+  patterns. Fill 4 and n=1500 are in there deliberately: the in-place buffer is truncated back to
+  its header on every flush, so a many-node list and a plain-node interleave are the two ways a
+  stale byte could have survived. fr-store 936 / fr-persist 227, 0 failures; clippy clean.
+
+  COMPOUNDING: build+DUMP per key on the fill-128 shape has now gone 295,547 -> 262,434 ->
+  226,272 -> 221,458 across three levers.
+
+### RETRY PREDICATES
+
+  1. The remaining `__rust_alloc` 60 / `__rust_dealloc` 60 inside the encoder are the two
+     `Vec::with_capacity(8192)` buffers, one of which is the scratch `nodes_buf` that
+     `9bf8ee80d` introduced. Two per DUMP is not obviously wrong; do not chase it without a
+     count showing it is more.
+  2. This lever pays on the FALLBACK path only, and the fill=300 control above now DEMONSTRATES
+     that rather than assuming it. The RESTORE-loaded case goes through
+     `retained_listpack_chunks` and is still untested — the same gap `9bf8ee80d` and `5d6f53a43`
+     left open, now twice-carried and worth closing before another lever is added here.
+  3. The dose table's per-node figure varied 1,602-1,900 with no monotone trend in node size,
+     which is what a fixed allocator cost looks like. If a future lever claims to remove the
+     COPY rather than the allocation, it must show a per-node saving that GROWS with node size,
+     or it is measuring this one again.

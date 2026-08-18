@@ -35833,9 +35833,24 @@ fn encode_dump_quicklist2(
     // recompute what `encode_listpack_entry` is about to work out anyway, so the entry's encoded
     // size is now taken from how far the scratch buffer grew. The accept test never needed it —
     // it takes `item.len()`, the RAW length, which is free.
+    //
+    // (frankenredis-qj6jn) BUILD THE NODE'S LISTPACK IN PLACE. The flush used to hand
+    // `packed_entries` to `finish_listpack_entries`, which allocates a SECOND buffer and copies
+    // the whole node into it just to put a 6-byte header in front — then `encode_rdb_string`
+    // copies it a third time into the output. Worse, `std::mem::take` left `packed_entries` with
+    // ZERO capacity, so every node after the first re-allocated and re-grew from nothing.
+    //
+    // The listpack header is FIXED width (u32 total bytes + u16 entry count), so unlike the node
+    // COUNT above — which `encode_length` writes variable-width and therefore cannot be
+    // back-patched — this header CAN be reserved up front and patched at flush. So the buffer
+    // carries its own 6 zero bytes, entries accumulate straight after them, and the flush fills
+    // the header in, appends the terminator, emits, and truncates back to the header. One buffer,
+    // one copy, and the capacity survives every node.
+    const LISTPACK_HEADER_LEN: usize = 6;
     let mut nodes_buf: Vec<u8> = Vec::with_capacity(8192);
     let mut node_count = 0usize;
-    let mut packed_entries = Vec::with_capacity(8192);
+    let mut packed_entries: Vec<u8> = Vec::with_capacity(8192);
+    packed_entries.resize(LISTPACK_HEADER_LEN, 0);
     let mut packed_len = 0usize;
     let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
     let flush_packed = |packed_entries: &mut Vec<u8>,
@@ -35846,9 +35861,24 @@ fn encode_dump_quicklist2(
         if *packed_len == 0 {
             return Some(());
         }
-        let listpack = finish_listpack_entries(std::mem::take(packed_entries), *packed_len)?;
+        packed_entries.push(0xFF);
+        let total_bytes = u32::try_from(packed_entries.len()).ok()?;
+        packed_entries[0..4].copy_from_slice(&total_bytes.to_le_bytes());
+        let entry_count = u16::try_from(*packed_len).unwrap_or(u16::MAX);
+        packed_entries[4..6].copy_from_slice(&entry_count.to_le_bytes());
+        debug_assert_eq!(
+            packed_entries.as_slice(),
+            finish_listpack_entries(
+                packed_entries[LISTPACK_HEADER_LEN..packed_entries.len() - 1].to_vec(),
+                *packed_len
+            )
+            .expect("in-place header must reproduce finish_listpack_entries byte for byte")
+            .as_slice(),
+            "the in-place listpack must be byte-identical to the copying builder"
+        );
         encode_length(out, 2);
-        encode_rdb_string(out, &listpack);
+        encode_rdb_string(out, packed_entries);
+        packed_entries.truncate(LISTPACK_HEADER_LEN);
         *packed_len = 0;
         *node_count += 1;
         Some(())
