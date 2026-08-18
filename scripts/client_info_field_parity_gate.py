@@ -65,9 +65,9 @@ DECLARED_LITERALS = {
             "a reply too large to write inline queues an output list"),
     "omem": ("obufmem from getClientMemoryUsage",
              "same as oll -- a queued output list has memory attributed to it"),
-    "events": ("'r'/'w'/'rw' from connHasReadHandler/connHasWriteHandler",
-               "a client with a pending write has a write handler installed, so "
-               "upstream reports rw"),
+    # (frankenredis-edwnn) `events` was hardcoded to "r" and is now COMPUTED from
+    # session.output_buffer_bytes, so it is deliberately NOT declared here any more.
+    # Re-adding it would re-allow the constant this gate exists to catch.
 }
 
 # `laddr` is a partial literal: fr substitutes the real PORT but hardcodes the host to

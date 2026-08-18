@@ -40095,7 +40095,7 @@ impl Runtime {
             // single LF). Earlier versions emitted CRLF here, leaving
             // a stray 0x0d byte in the bulk-string payload that broke
             // raw-byte parsers diffing against vendored.
-            "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem={} multi-mem={} rbs=16384 rbp=16384 obl={} oll=0 omem=0 tot-mem={} events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
+            "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem={} multi-mem={} rbs=16384 rbp=16384 obl={} oll=0 omem=0 tot-mem={} events={} cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
             session.client_id,
             peer,
             self.server.store.server_port,
@@ -40131,6 +40131,15 @@ impl Runtime {
                 .saturating_add(session.qbuf_free_bytes)
                 .saturating_add(16384)
                 .saturating_add(session.output_buffer_bytes),
+            // (frankenredis-edwnn) `events` is upstream's installed-handler pair, not a
+            // constant: catClientInfoString appends 'r' for a read handler and 'w' for a
+            // write handler, and installClientWriteHandler runs exactly when a reply could
+            // not be written inline and is still pending. fr reads from every connected
+            // session, so 'r' is unconditional here; the 'w' is what was missing. A client
+            // with an output backlog previously reported `events=r` -- i.e. it looked idle
+            // and healthy at the moment upstream would show it backing up, which is the one
+            // state an operator reads this field to find.
+            if session.output_buffer_bytes > 0 { "rw" } else { "r" },
             session.last_command_name.unwrap_or("NULL"),
             String::from_utf8_lossy(session.current_user_name()),
             redir,
