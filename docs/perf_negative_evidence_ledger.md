@@ -63771,3 +63771,81 @@ guard in both profiles), and the control does not move.
   3. Do NOT quote a digit-leading vs-incumbent ratio until the timestamp shape stops regressing.
      `0bb42f113` certified 1.5998x on `%015d`; the corresponding AFTER number is not yet measured
      against the incumbent, and quoting the frame win as if it were the ratio would overstate it.
+
+## 2026-08-18 CrimsonHawk: ROOT CAUSE — the timestamp regression is LEVER 2, not lever 1: a fusion measured on inputs that SUCCEED costs more on inputs that FAIL LATE, and fr-store's caller is mostly the latter (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: source reading, against the measurement in the row above. No new measurement was
+taken — a disk throttle forbids cargo entirely, including `cargo check`. CV was NOT used and no
+timing verdict is claimed. The four frame counts this explains are the ones already recorded above.
+
+Claim class: MEASUREMENT (interpretation of one). Campaign output: no.
+
+### THE HYPOTHESIS IN THE ROW ABOVE IS REFUTED
+
+That row guessed the regression came from `rebuild_growth_state` walking the entries a second time
+for a single-node payload. It does not. `from_restored_quicklist2_nodes` sets the growth totals
+directly and says so: *"`from_restored_nodes` folds the growth-state totals during construction, so
+we set them directly instead of paying `rebuild_growth_state`'s second full walk over every
+restored element."* (`frankenredis-c92f6`). There is no downstream walk. Checking that before
+adjusting the guard is the only reason a wrong fix was not written.
+
+### WHAT ACTUALLY CHANGED, FROM THE DIFF OF `15b146e10`
+
+    OLD (two-pass)   list_lp_int_bytes_are_canonical: all(is_ascii_digit) over the digits --
+                     a PURE SCAN, no arithmetic -- and only then a separate fold loop doing
+                     checked_mul / checked_add per digit.
+
+    NEW (fused)      one loop: per byte, `is_ascii_digit` AND checked_mul + checked_sub.
+
+For an input that SUCCEEDS the fusion is a straight win: one pass instead of two. That is what
+`ac77762d8` measured — 1.399x on 2048 CANONICAL decimals, every one of which parses.
+
+For an input that FAILS LATE the fusion is a LOSS. The old form's `all(...)` scan reaches the first
+non-digit and returns having done no arithmetic at all. The fused form has already performed a
+multiply, a subtract and two overflow checks for every digit BEFORE that byte, and then throws the
+accumulator away.
+
+### THAT PREDICTS ALL FOUR MEASUREMENTS, INCLUDING THE CONTROL
+
+    pattern           where the parse fails          measured change
+    vvvvvvvvvv%05d    never reached (pre-filter)      +0.04 pct   control
+    %015d             byte 2, leading-zero test       -76.9 pct   bails BEFORE the loop
+    7f3a%011d         byte 2, first loop iteration    -19.0 pct   one wasted multiply
+    20260818T%06d     byte 9, after EIGHT digits      +22.6 pct   eight wasted multiplies
+
+The ordering of the wins is the ordering of how early the parse dies, which is the signature of
+this mechanism and not of the guard-tightening in lever 1.
+
+### THE REUSABLE LESSON, AND IT IS ABOUT PORTING
+
+`ec6eacac7` and `15b146e10` argued that auditing a duplicated rule in one direction leaves the
+other copy behind, and ported the fusion into fr-store on that reasoning. The reasoning was sound
+and the conclusion was still wrong, because a benchmark measures a rule TOGETHER WITH ITS INPUT
+MIX. cc_fr's kernel benchmark fed it 2048 strings that all parse; fr-store's RESTORE fold feeds it
+digit-leading strings that mostly DO NOT parse — that is the entire population the guard exists to
+classify. The same code is faster in one caller and slower in the other, and no amount of reading
+the two implementations side by side would have shown it. Only the caller's input distribution does.
+
+**Before porting a measured win across a caller boundary, ask what the new caller's inputs look
+like, and whether the benchmark's inputs looked like that.**
+
+### WHAT SHOULD HAPPEN, AND WHAT MUST NOT
+
+Do NOT revert lever 2 on this evidence alone: it is a large win on the leading-zero family and on
+early-failing strings, and a loss only on long-digit-prefix non-integers. The shape mix decides,
+and the mix is not known.
+
+The candidate that serves both: keep the fused loop for the SUCCEEDING path, but reject a
+late-failing input before the arithmetic — e.g. a cheap bounded pre-scan for the first non-digit
+when the entry is longer than a few bytes. That is a THIRD form, neither the old two-pass nor the
+current fusion, and it needs measuring rather than assuming.
+
+### RETRY PREDICATES
+
+  1. Measure the third form against BOTH populations — all-canonical (cc_fr's) and
+     long-digit-prefix-failing (`20260818T`) — in one invocation. A form that wins one and loses
+     the other is the situation this row is about, and picking without both numbers repeats it.
+  2. Keep `vvvvvvvvvv%05d` in every run. It is the only reason these deltas are readable on a host
+     that has been at loadavg 17-26 throughout.
+  3. Do not attribute this regression to lever 1. Its guard was mutation-pinned in `a845844ee`, and
+     the failure-point ordering above is not a signature it could produce.
