@@ -427,7 +427,11 @@ fn stamp_user_script_line(msg: String, line: u32) -> String {
 }
 
 type LuaCell = Rc<RefCell<LuaValue>>;
-type LuaCapturedScope = Vec<(String, LuaCell)>;
+/// (frankenredis-kbyhy) `Rc<str>` and not `String`: a captured scope is cloned once per
+/// closure creation, and `String::clone` measured 39,303 instr/op -- 12.3 pct of a
+/// 32-function FCALL, growing 91.6x for a 32x library. The cell is already shared; the name
+/// now is too.
+type LuaCapturedScope = Vec<(Rc<str>, LuaCell)>;
 type LuaCapturedEnv = Vec<LuaCapturedScope>;
 
 #[derive(Clone, Debug)]
@@ -3538,7 +3542,8 @@ impl RedisLrand48 {
 
 #[derive(Clone, Debug)]
 struct LocalBinding {
-    name: String,
+    /// (frankenredis-kbyhy) Interned so `captured_locals` shares it instead of copying it.
+    name: Rc<str>,
     cell: LuaCell,
 }
 
@@ -3557,12 +3562,12 @@ impl Scope {
             .locals
             .iter_mut()
             .rev()
-            .find(|local| local.name == name)
+            .find(|local| &*local.name == name)
         {
             existing.cell = cell;
         } else {
             self.locals.push(LocalBinding {
-                name: name.to_string(),
+                name: Rc::from(name),
                 cell,
             });
         }
@@ -3572,7 +3577,7 @@ impl Scope {
         self.locals
             .iter()
             .rev()
-            .find(|local| local.name == name)
+            .find(|local| &*local.name == name)
             .map(|local| &local.cell)
     }
 
@@ -3581,10 +3586,10 @@ impl Scope {
     }
 
     fn contains_local(&self, name: &str) -> bool {
-        self.locals.iter().rev().any(|local| local.name == name)
+        self.locals.iter().rev().any(|local| &*local.name == name)
     }
 
-    fn captured_locals(&self) -> Vec<(String, LuaCell)> {
+    fn captured_locals(&self) -> LuaCapturedScope {
         self.locals
             .iter()
             .map(|local| (local.name.clone(), local.cell.clone()))
