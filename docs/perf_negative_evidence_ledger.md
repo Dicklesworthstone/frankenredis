@@ -56749,3 +56749,84 @@ an effect inside that interval is not claimed.
    group compiles and is never reached — the same defect a comment in that table already records
    for MOVE.
 4. Leave `XrevrangeZero` alone. It declines `xrevrange_base` correctly.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the two read levers moved fr's marginal LRANGE −15.8 pct on strings and −20.4 pct on integers against a live incumbent arm that did NOT move, taking the read lead to 3.64x and 6.61x and the break-even to 0.105 and 0.235 reads/RESTORE (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) with a LIVE redis
+7.2.4 arm, two independent passes, each fitting `cost(N) = a + b*N` over three read counts. CV was
+NOT used, as a gate or otherwise — no coefficient of variation appears in this row's decision path
+and none was computed. No timing verdict is claimed: the measurand is a retired-instruction COUNT.
+No code changed and NO BUILD was run: three other projects were building and the brief said not to
+add a fourth.
+
+**SIZING, NOT CERTIFIED.** `certification_window.py --for ratio` returned UNFIT — non-stationary,
+1min 5.96 vs 5min 8.13, 27 pct apart against a 15 pct limit, with ten cargo/rustc processes under
+the shared uid. Fourth consecutive turn the gate has refused. Per-arm host state is on every line.
+
+Claim class: not applicable — nothing is kept and nothing is banked as campaign output.
+
+  fr arm    `9220de17cab74826c120816fe20dbb14e2f4b2911262d0e5a92c13502006d905` (`6fb775b43`)
+  incumbent `legacy_redis_code/redis/src/redis-server`, vendored 7.2.4
+
+### THE INCUMBENT ARM IS THE CONTROL, AND IT DID NOT MOVE
+
+`48eb38749` fitted the same model on the pre-lever binary. Four passes now exist across two
+binaries, and redis appears in all four:
+
+    marginal cost of ONE full read (LRANGE 0 -1, 300 elements), instructions per key
+
+                     fr, pre-lever      fr, post-lever     redis, pre       redis, post
+      all-string     46,746 / 46,311    39,358 / 39,049    144,928/142,708  145,172/142,264
+      all-integer    40,194 / 40,012    31,999 / 31,999    211,485/213,776  216,175/211,484
+
+  Redis's marginal read is the same on both binaries to within 2 pct, which is what a control
+  should do. fr's moved −15.8 pct on strings and −20.4 pct on integers, worst-to-worst.
+
+  AND IT MATCHES WHAT THE LEVERS CLAIMED. `84fca03ad` measured −13.81 / −17.15 pct per LRANGE by a
+  self-A/B, and `6fb775b43` a further −3.41 / −3.11 pct. Compounded that is −16.75 / −19.73 pct.
+  Measured here against a live arm, a turn later, on a different instrument: −15.8 / −20.4 pct.
+  That is the third time this vein's two instruments have agreed to about a point, and the first
+  time the agreement covers a two-lever compound.
+
+### WHERE THE READ SIDE STANDS
+
+    redis's marginal read, as a multiple of fr's — WORST of the two passes each time
+      all-string    3.08x  ->  3.64x
+      all-integer   5.26x  ->  6.61x
+
+    fr/redis at N reads per RESTORE, WORST of the two passes
+      N = 0 (isolation)   1.3320x (str)   3.5216x (int)
+      N = 1               0.4670x         0.3961x
+      N = 3               0.3484x         0.2418x
+
+    BREAK-EVEN, WORST of the two passes:  0.105 reads/RESTORE (str), 0.235 (int)
+      pre-lever it was 0.124 and 0.242.
+
+    85.3-92.4 pct idle, loadavg 7.15-9.82, MHz mean 1829-2420 against a 1429-4292 spread.
+
+  One pass fitted the string break-even at 0.077 and the other at 0.105; the larger is quoted. The
+  spread comes from redis's INTERCEPT, which the fit is least well determined on — 32,184 against
+  35,417 — not from anything on fr's side, where the two passes agree to 0.8 pct.
+
+### THE b1o02 LAW, WHICH THIS ROW IS THE MEASUREMENT OF
+
+The standing law says a RESTORE-in-isolation ratio flatters redis because fr decodes eagerly and
+redis walks the listpack on every read. This row does not argue with it — it re-states it with
+current numbers, and the direction is worth being explicit about: EVERY read-side lever pushes the
+break-even DOWN, so the isolation figures (1.3320x and 3.5216x) get less relevant with each one,
+not more. Anyone quoting them as a deficit is quoting a workload that restores a list and never
+reads it.
+
+### RETRY PREDICATES
+
+  1. The certified row is owed for a FIFTH turn. It needs `--for ratio` FIT at both the open and
+     the close of one run; the blockers so far have been other projects' cargo under the shared uid
+     (three turns) and loadavg drifting (twice). Nothing here changes what has to be measured — the
+     numbers are stable across four passes and two binaries; only the window is missing.
+  2. Do NOT take the 6.61x integer read lead as licence to attack fr's eager decimal render.
+     `48eb38749` established that the render is what BUYS that lead: redis re-renders every integer
+     on every read. This row widens the same gap for the same reason.
+  3. fr's marginal read is now 39,049 instructions per key on strings and 31,999 on integers at 300
+     elements — about 130 and 107 per element emitted. `encode_bulk_string_slice` is 58.00 of that
+     and is the only term above 20. It is the next thing on this path, and it is on the UNIVERSAL
+     reply path, so it needs a null on a small-reply non-list shape before anything lands.
