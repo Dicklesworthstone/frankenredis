@@ -733,6 +733,31 @@ SHAPES = {
     # THREE routes at 1.43x-1.48x, and my own zrangestore_all draw found the largest
     # absolute dispatch cost in the campaign. A blind-spot command is UNKNOWN, not fine.
     "zunion_2": (["ZADD zu1 1 a", "ZADD zu2 2 b"], ["ZUNION", "2", "zu1", "zu2"]),
+    # (frankenredis-getexgate) READ-GATE CENSUS SHAPES. The read-gate vein has been mis-sized
+    # three times, and the root cause is that most of the borrowed READ surface had no shape at
+    # all: ZCOUNT, ZSCORE, HGETALL, SMEMBERS, LRANGE, GETRANGE, ZMSCORE, SMISMEMBER, HMGET,
+    # GETBIT, HSTRLEN, XRANGE, GEODIST, GEOPOS, GEOHASH and DBSIZE were all unmeasurable, so a
+    # census could not see them and a source scan was the only option -- which is exactly the
+    # instrument that undercounted. These make the remaining surface countable.
+    "zcount_base": (["ZADD zcb 1 a 2 b 3 c"], ["ZCOUNT", "zcb", "1", "3"]),
+    "zscore_base": (["ZADD zsb 1 m"], ["ZSCORE", "zsb", "m"]),
+    "hgetall_base": (["HSET hgb f1 v1 f2 v2 f3 v3"], ["HGETALL", "hgb"]),
+    "smembers_base": (["SADD smb m1 m2 m3"], ["SMEMBERS", "smb"]),
+    "lrange_base": (["RPUSH lrb a b c d e"], ["LRANGE", "lrb", "0", "-1"]),
+    "getrange_base": (["SET grb abcdefghijklmnop"], ["GETRANGE", "grb", "0", "3"]),
+    "zmscore_2": (["ZADD zmb 1 a 2 b"], ["ZMSCORE", "zmb", "a", "b"]),
+    "smismember_2": (["SADD smmb a b"], ["SMISMEMBER", "smmb", "a", "b"]),
+    "hmget_2": (["HSET hmb f1 v1 f2 v2"], ["HMGET", "hmb", "f1", "f2"]),
+    "getbit_base": (["SETBIT gbb 7 1"], ["GETBIT", "gbb", "7"]),
+    "hstrlen_base": (["HSET hsb f abcdefgh"], ["HSTRLEN", "hsb", "f"]),
+    "xrange_base": (["XADD xrb 1-1 f v"], ["XRANGE", "xrb", "-", "+"]),
+    "dbsize_base": ([], ["DBSIZE"]),
+    "geodist_base": (
+        ["GEOADD gdb 13.361389 38.115556 P1", "GEOADD gdb 15.087269 37.502669 P2"],
+        ["GEODIST", "gdb", "P1", "P2"],
+    ),
+    "geopos_base": (["GEOADD gpb 13.361389 38.115556 P1"], ["GEOPOS", "gpb", "P1"]),
+    "geohash_base": (["GEOADD ghb 13.361389 38.115556 P1"], ["GEOHASH", "ghb", "P1"]),
     "georadius_ro_1": (
         ["GEOADD grk 13.361389 38.115556 P1"],
         ["GEORADIUS_RO", "grk", "13.361389", "38.115556", "200", "km"],
