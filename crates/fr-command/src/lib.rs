@@ -13916,6 +13916,16 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     }
 
     // Look up the function by name
+    //
+    // (frankenredis-kbyhy) `lib.code.clone()` below is the LAST O(library size) copy on this
+    // path, and it is still here on purpose. It exists because `store` is borrowed mutably
+    // further down -- `function_call_execute(store, .., &script, ..)` needs the source while
+    // holding that borrow -- so the rewriting path pays a copy that only the executing fallback
+    // actually requires. Removing it means computing the wrapper inside this match and cloning
+    // the code only when `target_func_line` is None, which is a borrow restructure, not a
+    // rename, and it is not worth landing blind: this commit is unbuilt under the /data freeze
+    // and the probe fix above already removes two copies of this same size per call. Sized, not
+    // guessed -- one library copy per FCALL, independent of how much work the function does.
     let (script, has_no_writes) = match store.function_get(func_name) {
         Some((lib, func)) => {
             let no_writes = func
@@ -14019,7 +14029,7 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 }
 
 thread_local! {
-    /// (frankenredis-kbyhy) Transformed FCALL wrappers, keyed by (function name, library bytes).
+    /// (frankenredis-kbyhy) Transformed FCALL wrappers: library bytes -> function name -> wrapper.
     ///
     /// KEYED ON THE FULL SOURCE BYTES, not a hash and not the library NAME. The transform's
     /// output depends only on those two inputs, so keying on them makes invalidation automatic:
@@ -14028,11 +14038,26 @@ thread_local! {
     /// merely unlikely. A hash would be smaller and would run the WRONG library body on a
     /// collision -- not a trade worth making for a cache.
     ///
+    /// NESTED RATHER THAN A `(String, Vec<u8>)` TUPLE KEY, and that is the whole point of the
+    /// shape. A tuple key cannot be BORROWED: probing it required
+    /// `(func_name.to_string(), script.to_vec())`, so every cache HIT allocated a fresh copy of
+    /// the entire library just to ask whether that library had already been transformed -- the
+    /// exact O(library size) per-call cost this cache exists to remove. Nested, the outer probe
+    /// is `get(script)` (`Vec<u8>: Borrow<[u8]>`) and the inner is `get(func_name)`
+    /// (`String: Borrow<str>`); neither allocates, and the library is hashed once.
+    ///
+    /// The wrapper is an `Rc<str>` for the same reason: the value is as large as the library, so
+    /// handing it back by clone put a SECOND full-size copy on the hit path. A refcount bump
+    /// cannot, and the wrapper is immutable once built.
+    ///
     /// Thread-local rather than a field on `Store`, because `fr-store` is not this crate's to
     /// change and the cache is a pure memo of a pure function: two threads computing it
     /// independently get the same answer.
     static FCALL_WRAPPER_CACHE: std::cell::RefCell<
-        std::collections::HashMap<(String, Vec<u8>), (String, Option<usize>)>,
+        std::collections::HashMap<
+            Vec<u8>,
+            std::collections::HashMap<String, (std::rc::Rc<str>, Option<usize>)>,
+        >,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
@@ -14043,6 +14068,12 @@ thread_local! {
 /// Clearing everything is deliberate over evicting one entry -- there is no recency information
 /// here worth maintaining, and the miss that follows costs exactly what every call cost before
 /// this cache existed.
+///
+/// COUNTED ACROSS THE NESTING, not as the outer map's length, so the bound means the same thing
+/// it did under the flat tuple key: at most this many wrappers are retained in total. Bounding
+/// only the outer map would leave a single many-function library free to hold an unbounded number
+/// of wrappers, each one as large as that library. The sum runs on the MISS path only, where the
+/// transform it guards already dominates it, and it walks at most this many maps.
 const FCALL_WRAPPER_CACHE_MAX: usize = 64;
 
 /// Build (or reuse) the Lua wrapper FCALL executes for `func_name` in `script`.
@@ -14051,9 +14082,13 @@ const FCALL_WRAPPER_CACHE_MAX: usize = 64;
 /// FCALL reports as `user_function:<line>` on a runtime error (frankenredis-tos1j). `None` means
 /// the scan could not express the function as text -- a name or callback held in a local -- which
 /// is what makes the caller fall back to executing the body instead (frankenredis-9hori).
-fn fcall_wrapper_script(func_name: &str, script: &[u8]) -> (String, Option<usize>) {
-    let key = (func_name.to_string(), script.to_vec());
-    if let Some(hit) = FCALL_WRAPPER_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+fn fcall_wrapper_script(func_name: &str, script: &[u8]) -> (std::rc::Rc<str>, Option<usize>) {
+    if let Some(hit) = FCALL_WRAPPER_CACHE.with(|c| {
+        c.borrow()
+            .get(script)
+            .and_then(|per_function| per_function.get(func_name))
+            .cloned()
+    }) {
         return hit;
     }
 
@@ -14086,14 +14121,18 @@ fn fcall_wrapper_script(func_name: &str, script: &[u8]) -> (String, Option<usize
         lua_lines.push(line.to_string());
     }
     lua_lines.push(format!("return {func_name}(KEYS, ARGV)"));
-    let wrapper_script = lua_lines.join("\n");
+    let wrapper_script: std::rc::Rc<str> = std::rc::Rc::from(lua_lines.join("\n"));
 
     FCALL_WRAPPER_CACHE.with(|c| {
         let mut cache = c.borrow_mut();
-        if cache.len() >= FCALL_WRAPPER_CACHE_MAX {
+        let retained: usize = cache.values().map(|per_function| per_function.len()).sum();
+        if retained >= FCALL_WRAPPER_CACHE_MAX {
             cache.clear();
         }
-        cache.insert(key, (wrapper_script.clone(), target_func_line));
+        cache.entry(script.to_vec()).or_default().insert(
+            func_name.to_string(),
+            (std::rc::Rc::clone(&wrapper_script), target_func_line),
+        );
     });
     (wrapper_script, target_func_line)
 }
@@ -73531,6 +73570,115 @@ mod tests {
     }
 
     #[test]
+    /// FUNCTION LOAD REPLACE must change what FCALL runs, cache or no cache.
+    ///
+    /// (frankenredis-kbyhy) `da4cd4fe4` memoised the transformed FCALL wrapper, which had been
+    /// rebuilt from the library source on EVERY call. A memo of a pure function is only pure while
+    /// its key covers every input, and the failure mode if it does not is the worst kind available
+    /// here: FCALL keeps running the OLD function body after the operator has replaced it, with a
+    /// correct-looking reply and no error anywhere.
+    ///
+    /// Nothing else would catch it. `scripts/dispatch_route_differ.py` compares routes for one
+    /// build and one library; the function_load differ stops at load. A stale wrapper is only
+    /// visible if a test REPLACES a library and then calls it again, which is what this does.
+    ///
+    /// The cache is keyed on `(function name, full library BYTES)`, so REPLACE changes the key
+    /// and the stale entry becomes unreachable rather than merely unlikely. This test is what
+    /// says so out loud: it fails if the key is ever weakened to the library NAME, or to a hash
+    /// that collides, or to anything that does not move when the body does.
+    #[test]
+    fn fcall_reflects_function_load_replace_and_not_a_cached_wrapper_kbyhy() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=cachelib\nredis.register_function('cached', function(keys, args) return 'one' end)"
+                    .to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(b"cachelib".to_vec())));
+
+        let out = dispatch_argv(
+            &[b"FCALL".to_vec(), b"cached".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(b"one".to_vec())));
+
+        // Same library name, same function name, DIFFERENT body -- the exact shape that a
+        // name-keyed cache would answer from its first entry.
+        let out = dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"REPLACE".to_vec(),
+                b"#!lua name=cachelib\nredis.register_function('cached', function(keys, args) return 'two' end)"
+                    .to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(b"cachelib".to_vec())));
+
+        let out = dispatch_argv(
+            &[b"FCALL".to_vec(), b"cached".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::BulkString(Some(b"two".to_vec())),
+            "FCALL served a stale wrapper: the memo outlived the body it was built from"
+        );
+    }
+
+    /// The memo must not confuse two functions that live in the SAME library.
+    ///
+    /// (frankenredis-kbyhy) The key is a pair, and the library half is identical for siblings, so
+    /// this is the row that pins the FUNCTION-NAME half of it. A cache keyed on the source alone
+    /// would return whichever sibling was called first -- again with a plausible reply.
+    #[test]
+    fn fcall_wrapper_memo_distinguishes_siblings_in_one_library_kbyhy() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=siblib\nredis.register_function('sib_a', function(keys, args) return 'a' end)\nredis.register_function('sib_b', function(keys, args) return 'b' end)"
+                    .to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        let a = dispatch_argv(
+            &[b"FCALL".to_vec(), b"sib_a".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let b = dispatch_argv(
+            &[b"FCALL".to_vec(), b"sib_b".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(a, RespFrame::BulkString(Some(b"a".to_vec())));
+        assert_eq!(
+            b,
+            RespFrame::BulkString(Some(b"b".to_vec())),
+            "the second sibling was answered from the first's wrapper"
+        );
+    }
+
     /// A library whose function NAME is computed at runtime must load AND be callable.
     ///
     /// (frankenredis-9hori) This is the bead's `local n = 'a'..'b'` case, and it pins BOTH halves
@@ -73645,6 +73793,38 @@ mod tests {
             line.is_some(),
             "a literal register_function must still yield a scanned definition line; None here \
              would send every literal library down the executing fallback"
+        );
+    }
+
+    /// A repeated FCALL must REUSE the transformed wrapper rather than rebuild it.
+    ///
+    /// (frankenredis-kbyhy) `Rc::ptr_eq` is the assertion with teeth here, and the text
+    /// comparison beside it is deliberately NOT the test. The transform is deterministic, so a
+    /// rebuilt wrapper is byte-identical to a cached one: `assert_eq!` on the text would keep
+    /// passing if the cache were deleted outright. Only pointer identity separates "served from
+    /// the cache" from "recomputed and happened to match", and being served is the whole claim.
+    ///
+    /// It also pins the property the nested key exists for. The probe is now
+    /// `get(script).and_then(|m| m.get(func_name))` against borrowed slices; if anyone restores a
+    /// tuple key, the borrowed probe stops compiling and the allocating one comes back with it.
+    #[test]
+    fn fcall_wrapper_cache_serves_a_repeat_call_from_the_same_allocation_kbyhy() {
+        let src: &[u8] = b"#!lua name=kbyhylib\nredis.register_function('kbyhyecho', function(keys, args) return args[1] end)";
+
+        let (first, first_line) = super::fcall_wrapper_script("kbyhyecho", src);
+        let (second, second_line) = super::fcall_wrapper_script("kbyhyecho", src);
+
+        assert_eq!(
+            first_line, second_line,
+            "the scanned definition line must not move between calls"
+        );
+        assert_eq!(
+            &*first, &*second,
+            "the wrapper text must not change between calls"
+        );
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &second),
+            "the second call rebuilt the wrapper instead of serving it from the cache"
         );
     }
 
