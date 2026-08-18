@@ -58243,3 +58243,74 @@ claimed. The +20.3 figure is quoted FROM the row that measured it and is not re-
    length-bucketed match) is unchanged; only the number of callers paying it has fallen.
 4. `bitfield_ro` at `execute_plain_bitfield_ro_two_get_borrowed` is the last literal on the match
    path and is unconverted.
+
+## 2026-08-18 CrimsonHawk: MEASURED — two exact thresholds behind the write-side shape: fr leaves its packed repr at 129 entries REGARDLESS of `list-max-listpack-size`, and the borrowed-argv fast path stops at 21 argv entries, after which the parse is the LARGEST term in a bulk RPUSH (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir) differenced across KEY COUNTS, per
+frame, at a series of element counts. CV was NOT used, as a gate or otherwise; none was computed.
+No timing verdict is claimed: the measurand is a retired-instruction COUNT. No code changed and NO
+BUILD was run — this project's build slot has been held for a NINTH consecutive window and
+`acquire_build_slot` is disabled in this deployment.
+
+Claim class: not applicable — nothing is kept. Both findings are thresholds, located to one
+element, and neither is mine to act on.
+
+  fr arm `4eceae6c624c670fb4111eceae3068632e8b9223b0ef822440b5015f9c89fce5` (`68e1d4990`)
+
+### WHY fr DID NOT CARE ABOUT THE FILL
+
+`4c448e32d` found that raising `list-max-listpack-size` from 128 to 1024 changed redis's 300-element
+RPUSH by −14.1 pct and fr's by −0.2 pct, and left the cause of fr's flatness open. Profiling the
+packed path per frame at fill 1024 answers it:
+
+    per-KEY SELF cost of a bulk RPUSH, fill = 1024
+       n        argv parse   ChunkedList::From   push_back_with_fill   rpush_impl
+      16               0.0                 0.0                   0.0        281.0
+      64           4,862.0                 0.0                   0.0        713.0
+     128           9,534.0                 0.0                   0.0      1,289.0
+     129           9,607.0             8,838.0                  63.0      1,299.0
+     256          18,878.0             8,838.0               8,064.0      2,442.0
+
+  `ChunkedList::From` is 0.0 at 128 entries and 8,838 at 129. **fr leaves its packed representation
+  at exactly 129 entries, and the configured fill does not enter into it** — at fill 1024 a
+  300-element list is one listpack for redis and a chunked list for fr. That is why raising the
+  fill moved redis and not fr, and it is a design fact rather than a defect: `OBJECT ENCODING`
+  parity is unaffected (0 of 105 diverging, `9cf845b22`), because the internal representation and
+  the reported encoding are separate. It does mean fr pays chunk machinery on lists redis keeps
+  flat, and it is worth knowing before anyone tunes a fill expecting fr to follow.
+
+### AND A THRESHOLD IN THE ARGV PARSER, LOCATED TO ONE ELEMENT
+
+The same table shows `parse_command_args_borrowed_into` at 0.0 for a 16-element RPUSH and 9,534 for
+a 128-element one. That is a STEP, not a slope. Bracketing it:
+
+       n elements    argv entries    parse cost per key
+              17              19                   0.0
+              18              20                   0.0
+              19              21               1,577.0
+              20              22               1,650.0
+              24              26               1,942.0
+
+  **The borrowed-argv fast path covers 20 argv entries and stops at 21.** Past it the parse costs
+  74-81 instructions PER ELEMENT and grows linearly: 4,862 at n = 64, 18,878 at n = 256, and 22,090
+  at n = 300 where it is the LARGEST SINGLE TERM in the whole command — larger than every list
+  operation the push performs.
+
+  A bulk `RPUSH key a b c ... ` of nineteen or more values is not an exotic shape; it is what a
+  pipeline or a batch writer produces. I did not find the constant in `fr-server/src/main.rs` and
+  stopped looking rather than spelunk 50k lines of a file another agent owns — the boundary is
+  located to one element, which is enough for whoever knows where the cap lives.
+
+### RETRY PREDICATES
+
+  1. The argv threshold is the lever here and it is NOT this bead's. It sits in the dispatch/parse
+     path (`frankenredis-getexgate`), the same territory as the three redundancies handed over in
+     `3e7a892cf`. Reopen here ONLY if that owner declines it. Before anyone raises the cap: the
+     fast path presumably has a fixed-size backing store, so raising it trades stack or code size
+     for the win, and that trade must be measured on a SMALL-argv shape too —
+     `feedback_inline_never_split_is_a_trade_measure_both_shapes`.
+  2. The 129-entry packed cap is a design fact, not a bug, and this row does NOT propose changing
+     it. If anyone does, the thing to measure is not the RPUSH — it is the READ, where the chunked
+     representation is what lets a retained listpack hand out borrowed spans (`84fca03ad`).
+  3. Both numbers are from ONE binary at 15-byte elements. The argv threshold should not depend on
+     element size — it counts entries, not bytes — but that is an expectation, not a measurement.
