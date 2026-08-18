@@ -55244,3 +55244,74 @@ is caught by the same test with the same `TruncatedEntry`.
   3. The mixed-list figure is NOT the average of the two pure ones — −6.40 pct where averaging
      −9.46 and +0.71 predicts −4.38 — because node packing differs with composition. Quote the
      shape, per `feedback_quote_instr_per_element_when_the_denominator_moves`.
+
+## 2026-08-18 BrownIbis: CENSUS EXTENSION — my own "23 still paying" was an UNDERCOUNT too: eleven more commands had no shape, **nine of them read 1.000**, so the vein is **32 shapes**, and `UNWATCH` at 8.8 pct is now the best fraction on the board (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+`a1600b784` added 16 shapes for read families that had none and said the reason this vein had
+been mis-sized three times was that most of its surface was unmeasurable. **That fix was itself
+incomplete, and this row is the same correction applied a second time.**
+
+A fresh source scan — this time knowing **all three** derivation forms, which the earlier one did
+not — found **eleven more commands still deriving the read gate with no shape at all**: BITFIELD,
+BITFIELD_RO, HSCAN, SSCAN, ZSCAN, PEXPIRETIME, UNWATCH, XREAD, XREVRANGE, ZDIFF, ZINTER. Shapes
+added in `9f2f10bd8`, each verified to return a real reply rather than an error or an unintended
+nil.
+
+**MEASURED on `b6b_after1.elf`, one draw per shape, calls/op to
+`plain_borrowed_default_key_read_allows` — NINE of the eleven were paying the gate the whole
+time and no census could see them:**
+
+| shape | instr/op | calls/op | 86.0 as pct |
+|---|---|---|---|
+| **unwatch_base** | **979.4** | **1.000** | **8.8** |
+| bitfield_get | 2336.4 | 1.000 | 3.7 |
+| sscan_zero | 2980.3 | 1.000 | 2.9 |
+| bitfield_ro_2get | 3443.2 | 1.000 | 2.5 |
+| zscan_zero | 3551.0 | 1.000 | 2.4 |
+| hscan_zero | 3569.0 | 1.000 | 2.4 |
+| zdiff_2 | 3747.4 | 1.000 | 2.3 |
+| zinter_2src | 3850.4 | 1.000 | 2.2 |
+| xread_one | 9290.0 | 1.000 | 0.9 |
+| pexpiretime_base | 1372.9 | **0.000** | converted |
+| xrevrange_base | 8247.2 | **0.000** | converted |
+
+**SO THE VEIN IS 32 SHAPES, NOT 23.** `f30ba2ad7` reported 23 still paying and that number was
+correct for the shapes that existed; it was not correct about the world. This is the fourth time
+this vein has been under-counted and the third time the cause was the same: **the census can only
+report on routes that have shapes, and a route added without one is invisible by construction.**
+
+**`UNWATCH` at 979.4 instr/op is now the best target on the board** — 86.0 is **8.8 pct** of it,
+beating `dbsize_base`'s 7.2 pct. A keyless command that does almost nothing is exactly where a
+flat 86.0 permission check costs the largest share, which is the same shape of finding as
+`pubsub_numpat` in batch 3.
+
+**WHAT I WOULD FLAG TO ANYONE CONTINUING THIS.** The pattern across four undercounts is that
+every instrument I reached for reported on a *sample* and I read it as a *population*: a peer's
+sweep (`d7c67e802`), a survey window that ran off the end of a function, a source scan that knew
+two of three forms, and now a census over the shapes that happened to exist. **The check that
+would have caught all four is the same one: cross-reference the instrument's coverage against an
+independent enumeration before quoting a total.** The source scan and the census are each
+incomplete alone and complete together — the scan finds routes with no shape, the census finds
+routes the scan mis-classifies.
+
+WATCH is deliberately absent from the new shapes: it accumulates watched keys per connection, so
+a 20,000-op loop would measure a growing structure rather than a steady-state command. UNWATCH
+reaches the same executor pair and is safe.
+
+GATE AND ITS OWN NULL. This row makes no A/B claim — single-draw call counts, which are exact
+integers — so there is no lever to gate. A/A null on the whole-process instrument, same ELF, four
+draws of GET, resampled ratio-of-medians: median 1.00000, bootstrap 95% median CI [0.99730,
+1.00244]. The verdict gate for any lever built on this must be that bootstrap median-CI, and CV
+is provenance only and was not used as a gate anywhere in this row; no CV was computed. Host:
+/data 61G, loadavg 10.88/13.10/12.71, CPU idle 88 pct; one peer build in flight and the ratio
+gate returned UNFIT (1 build, plus 17 pct non-stationary), so this turn certified nothing.
+`bench_elf_sha256=8ede026a595e4320ef549a5d8ea515ef98c0ef76729193f2e65051b7c758b68a`.
+
+RETRY PREDICATE: before quoting a total for this vein again, run BOTH instruments and reconcile
+them — `call_count_delta.py --callers plain_borrowed_default_key_read_allows` over every shape,
+AND a source scan for the three derivation forms — and add a shape for any route the scan finds
+that the census cannot see. A total quoted from either alone has been wrong four times out of
+four.
