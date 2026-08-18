@@ -42692,3 +42692,77 @@ three loads actually reaching its per-element fallback on a realistic RDB payloa
 that means duplicate fields in the saved hash, for SET it means a batch that is neither
 all-unique-ints nor all-unique-strings. Both are reachable but neither is the ordinary shape,
 so measure the fallback RATE first; a lever on a path taken 0 pct of the time is worth 0.
+
+## 2026-08-17 BrownIbis: REJECT — `#[inline]` on `Runtime::parser_config` buys a real, reproducible **-7.1 instr/op on every command** and pays for it by growing the HOTTEST function 5,786 bytes, and this harness cannot measure whether that trade is positive (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: `#[inline]` on `<fr_runtime::Runtime>::parser_config` (`crates/fr-runtime/src/lib.rs`).
+It is a 51-byte body called **1.000 times per op on every command**, and the `release`
+profile has NO LTO — `lto = "thin"` is set only on `release-perf` — so it cannot be inlined
+across the crate boundary without the attribute. NOT SHIPPED. This is the candidate the
+previous row named as the next one to take, and the answer is no.
+
+MEASURED, callgrind two-point (N=20,000 and 2N=40,000). Both arms from the same pinned
+worktree at base `5b323fa6a`, the BEFORE arm already carrying the shipped `inline(always)`
+of `c5a3b6d2f`, so this pair isolates `parser_config` alone.
+`bench_elf_sha256=0d192e87204be51d376209ae1e6aa3363059384f197111288a85a810a0e75bd0` (before)
+and `bench_elf_sha256=744a49e7e1ba540411df5863974e70ae8f6c3fbffa62cbe9943b6ccd138c75c4` (after). Per-arm host state load
+9.35/6.04/5.25 rising to 38.52/19.79/12.01 across the session, CPU idle 82.5 pct measured
+directly from `/proc/stat`, iowait 1.6 pct, mean 2847 MHz across 64 cores, /data 148G free.
+Instruction counts are software-counted and immune to load and MHz.
+
+**THE BENEFIT IS REAL AND REPRODUCIBLE.** Dispatch frame, five shapes:
+
+| shape | before | after | delta |
+|---|---|---|---|
+| get | 437.0 | 431.0 | **-6.0** |
+| sadd | 604.1 | 597.0 | **-7.1** |
+| ping | 311.0 | 303.0 | **-8.0** |
+| ttl | 489.0 | 482.0 | **-7.0** |
+| zadd | 644.0 | 636.6 | **-7.4** |
+
+The 11.0 instr/op frame becomes ~3-4 inlined, and the symbol leaves the profile entirely
+(`nm` 1 -> 0), so the attribute fired. The BEFORE column reproduces the previous row's
+numbers exactly (get 437.0, ttl 489.0), which is the frame instrument's own consistency
+check.
+
+**THE COST IS ALSO REAL, AND IT IS WHY THIS IS A REJECT.** `.text` grows **+6,208 bytes**,
+and it is not spread thinly across the 17 call sites — `nm` attributes **+5,786 of it to
+`process_buffered_frames` alone**, the hot dispatch loop itself. That is the case the
+2026-08-16 three-site inline row rejected: forcing a multi-site inline can cost more in
+i-cache than it saves in call overhead. The previous lever (`c5a3b6d2f`) was a clean KEEP
+precisely because it went the other way and SHRANK `.text` by 64 bytes.
+
+**AND THE INSTRUMENT CANNOT ADJUDICATE THE TRADE — that is the finding.** callgrind `Ir`
+is blind to i-cache, so I re-ran GET under `--cache-sim=yes`. Two independent draws:
+
+| draw | Ir/op delta | I1mr/op delta | D1mr/op delta |
+|---|---|---|---|
+| 1 | +10.5 | **+0.0292** | +0.3035 |
+| 2 | -10.8 | **-0.0180** | -0.1271 |
+
+**Every sign reverses between draws.** The simulated miss counts are noise at this effect
+size, so the i-cache cost of +5,786 bytes in the hot loop is neither demonstrated nor
+refuted — it is UNMEASURED, and a -7.1 instr/op benefit is too small to ship against an
+unmeasured cost of that shape. Anyone tempted to quote a single cache-sim draw as evidence
+for or against an inlining lever should read those two rows first.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run
+that interleaved both arms across two rounds, so drift falls on both alike. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this
+row; no CV was computed. Host state is likewise provenance, not a gate. The whole-process
+totals for this lever fall INSIDE that band on every shape and support nothing either way,
+exactly as the previous row predicted they would below ~40 instr/op.
+
+RETRY PREDICATE, and it names a better lever than this one. Do NOT retry this by widening
+the inline. Retry it by **removing the call instead of duplicating the body**: cache the
+`ParserConfig` once per read batch the way `cached_plain_write_gate` already caches the
+borrowed write gate (`main.rs`), invalidating alongside it. That takes the same 1.000
+calls/op to ~0 without adding a byte to `process_buffered_frames`, and it is the shape this
+codebase already uses for exactly this problem. A retry is a KEEP only if it reports the
+`.text` delta alongside the instruction delta — if `.text` grows in `process_buffered_frames`
+again, it is this row a second time.
