@@ -61023,3 +61023,88 @@ All four windows FIT, zero builds running. CV was not used, as a gate or otherwi
 4. If fix (2) is attempted, the blocker to establish FIRST is whether the member slice can
    outlive `zset_for_each_in_score_ranges`'s callback. If it cannot, the allocation is structural
    and only (1) is available.
+
+## 2026-08-18 CrimsonHawk: MEASURED — slice 7 is SIZED and it is a **memset**: the 8-bit epoch tag wraps every 255 calls and clears 256 KiB, costing **6.32 pct** of the compressor
+
+Claim class: SELF-SPEEDUP. Campaign output: no. Nothing is shipped by this row; it converts "a slice 7
+needs a line-level profile" from a blocked predicate into a sized target, and states the measurement
+that named it.
+bench_elf_sha256=eb0a972f859c5fe5db3a5edda5b14b528e1c613bb363ec8a3c8ff4d57ad1fce4
+
+The predicate on `6177c6ac2` said a slice 7 needed a line-level profile, and that a line-level
+profile was unobtainable because rch returns the release binary with symbols but no DWARF. Both
+halves were right and the conclusion was wrong: **line-level needs DWARF, INSTRUCTION-level needs
+only the symbol table**, which rch does return. `--dump-instr=yes` plus `objdump` gives per-address
+costs, and that was enough.
+
+Profiling the exact PRODUCTION monomorphisation
+(`lzf_compress_dispatch::<true, true, false, false, true, true>`, the arm the `tier` driver selects)
+on the listpack payload, 3000 reps:
+
+    45,279,088 (91.00%)  fr_persist::lzf_compress_dispatch::<...>   the compressor itself
+     3,145,989 ( 6.32%)  __memset_avx2_unaligned_erms               libc
+       273,728 ( 0.55%)  fr_persist::lzf_match_tail_len::<true>
+       105,513 ( 0.21%)  free
+       102,210 ( 0.21%)  malloc
+
+The hottest single INSTRUCTION in the whole profile is the indirect `call` that reaches that memset:
+2,970,932 Ir, 6.10 pct, at one call site.
+
+### WHERE THE MEMSET COMES FROM, AND WHY THE DESIGN INTENDED THE OPPOSITE
+
+`LzfScratch::begin_call` keeps `packed_generation: u8`. It increments once per compression, and on
+wrap it runs `self.packed.fill(0)` over 65,536 `u32` slots — **256 KiB**. So every 255 compressions
+the kernel clears a quarter megabyte.
+
+Amortised: 3,145,989 / 3000 = **1048 instructions per compression**, against a total compressor cost
+of 15,196 per key on the server shape. That is **~6.9 pct of fr's side of the certified 1.5139x
+gap**, spent on a clear.
+
+The epoch tag exists PRECISELY to avoid clearing. The comment above the field says so, and then
+records the trade honestly: "the 8-bit generation simply wraps — and clears — every 256 calls instead
+of 2^32". The trade was stated and never priced. **A comment that names a cost is not a measurement
+of it, and this one sat unmeasured through six slices against this kernel.**
+
+### THE FIX IS A WIDER TAG, AND IT IS SEMANTICS-PRESERVING BY CONSTRUCTION
+
+The tag is 8 bits only because the packed slot spends 24 on the position. Positions are bounded by
+`in_len`, and every payload this kernel sees in the DUMP path is far under 64 KiB, so 16 bits of
+position suffice — leaving a **16-bit tag that wraps every 65,535 calls instead of every 255**. That
+is a **256x reduction in clear frequency**, taking the amortised cost from ~1048 to ~4 instructions
+per compression.
+
+It changes no behaviour. Between wraps the tag uniquely identifies the generation in both schemes, so
+every call sees a logically clean table either way; only the frequency of the PHYSICAL clear moves.
+The slice 5 XOR-tag trick still applies with the shift changed from 24 to 16, and its soundness
+argument survives intact: a stale slot yields a value at least `1 << 16`, which exceeds `ip` whenever
+`in_len < 1 << 16`, so the caller's existing `r < ip` guard still rejects it for free.
+
+Shape: a fixed cost per CALL, not per position, per literal or per match. By the diagnostic in
+`852b3078d` it should therefore be worth the SAME absolute amount on all three driver payloads, and
+worth proportionally most on the smallest — the opposite signature from every slice so far. That is
+the prediction to check first; if the win scales with payload size, the mechanism is not what this
+row claims.
+
+### WHY THIS ROW STOPS AT A SPECIFICATION
+
+It needs a second packed-table representation selected on `in_len`, with its own generation counter
+and a clear when the representation changes — in a codec where the failure mode is a valid but
+DIFFERENT payload on the wire. A certification already landed this turn (`6177c6ac2`), and starting a
+refactor of that size against a byte-exactness-critical kernel with the turn half spent is how a tree
+gets left dirty. It is specified here instead, in full, so it can be built from a clean start.
+
+### RETRY PREDICATE
+
+  1. Build it as a SECOND concrete table type (16-bit tag) chosen at dispatch when
+     `in_len < 1 << 16`, NOT as a runtime-variable shift on the existing one — a variable shift adds
+     an instruction to every probe and would eat slice 5's win.
+  2. Clear the table when the REPRESENTATION changes, not only when a generation wraps. Two layouts
+     sharing one buffer with independent counters will otherwise read each other's tags as live.
+  3. Predicted saving is ~1044 instructions per compression, about 6.9 pct of fr's compressor and
+     enough to move the certified 1.5139x to roughly 1.41x. That arithmetic is a prediction and must
+     not be quoted as a measurement — the last such prediction from micro-driver deltas was wrong by
+     a third (`970486bc4`).
+  4. The instruction-level instrument that found this is now the standing fallback whenever DWARF is
+     unavailable: `--dump-instr=yes`, then join per-address costs to `objdump -d`. Note the dump
+     format trap — with `positions: instr line` the cost is the LAST field, and reading the second
+     field yields a silent, plausible column of zeros.
