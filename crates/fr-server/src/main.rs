@@ -8750,7 +8750,7 @@ fn process_buffered_frames(
                     b"EXISTS",
                 ) {
                     if runtime
-                        .execute_plain_exists_borrowed_into(&[packet.key], ts, &mut conn.write_buf)
+                        .execute_plain_exists_borrowed_into(&[packet.key], ts, None, &mut conn.write_buf)
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -9040,7 +9040,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_lpos_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_lpos_borrowed(packet.key, packet.member, ts)
+                        runtime.execute_plain_lpos_borrowed(packet.key, packet.member, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9064,6 +9064,7 @@ fn process_buffered_frames(
                         packet.key,
                         packet.member,
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9140,6 +9141,7 @@ fn process_buffered_frames(
                         packet.key,
                         packet.member,
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9799,7 +9801,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_zlexcount_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime
-                        .execute_plain_zlexcount_borrowed(packet.key, packet.min, packet.max, ts)
+                        .execute_plain_zlexcount_borrowed(packet.key, packet.min, packet.max, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10175,6 +10177,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -10235,6 +10238,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -11110,7 +11114,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_memory_usage_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_memory_usage_borrowed(packet.key, ts)
+                        runtime.execute_plain_memory_usage_borrowed(packet.key, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13351,7 +13355,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_exists_two_packet(unparsed, &parser_config)
                 {
                     if runtime
-                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, None, &mut conn.write_buf)
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -13371,7 +13375,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_exists_three_packet(unparsed, &parser_config)
                 {
                     if runtime
-                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, None, &mut conn.write_buf)
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -13391,7 +13395,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_exists_four_packet(unparsed, &parser_config)
                 {
                     if runtime
-                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, None, &mut conn.write_buf)
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -13411,7 +13415,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_exists_five_packet(unparsed, &parser_config)
                 {
                     if runtime
-                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, None, &mut conn.write_buf)
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -13431,7 +13435,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_exists_six_packet(unparsed, &parser_config)
                 {
                     if runtime
-                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, None, &mut conn.write_buf)
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -13451,7 +13455,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_exists_seven_packet(unparsed, &parser_config)
                 {
                     if runtime
-                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, None, &mut conn.write_buf)
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -13471,7 +13475,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_exists_eight_packet(unparsed, &parser_config)
                 {
                     if runtime
-                        .execute_plain_exists_borrowed_into(&packet.keys, ts, &mut conn.write_buf)
+                        .execute_plain_exists_borrowed_into(&packet.keys, ts, None, &mut conn.write_buf)
                         .is_some()
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -13494,6 +13498,7 @@ fn process_buffered_frames(
                         .execute_plain_exists_borrowed_into(
                             &packet.keys[..packet.len],
                             ts,
+                            None,
                             &mut conn.write_buf,
                         )
                         .is_some()
@@ -13877,7 +13882,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some(keys) = borrowed_plain_exists_args(&borrowed_args)
                             && runtime
-                                .execute_plain_exists_borrowed_into(keys, ts, out)
+                                .execute_plain_exists_borrowed_into(keys, ts, None, out)
                                 .is_some()
                         {
                             return Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -14049,7 +14054,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_rand_member_borrowed(cmd, key, ts)
+                                runtime.execute_plain_rand_member_borrowed(cmd, key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14169,7 +14174,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((key, element)) = borrowed_plain_lpos_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_lpos_borrowed(key, element, ts)
+                                runtime.execute_plain_lpos_borrowed(key, element, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14219,7 +14224,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some(key) = borrowed_plain_memory_usage_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_memory_usage_borrowed(key, ts)
+                                runtime.execute_plain_memory_usage_borrowed(key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14390,7 +14395,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_rand_member_borrowed(cmd, key, ts)
+                                runtime.execute_plain_rand_member_borrowed(cmd, key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14519,7 +14524,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_rand_member_borrowed(cmd, key, ts)
+                                runtime.execute_plain_rand_member_borrowed(cmd, key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14538,7 +14543,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((cmd, key, member)) = borrowed_plain_rank_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_rank_borrowed(cmd, key, member, ts)
+                                runtime.execute_plain_rank_borrowed(cmd, key, member, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -17772,9 +17777,11 @@ fn dispatch_floor_fast_lpos(
     parser_config: &ParserConfig,
     runtime: &mut Runtime,
     ts: u64,
+    default_read_allowed: Option<bool>,
 ) -> Option<(usize, RespFrame)> {
     let packet = parse_borrowed_plain_lpos_packet(unparsed, parser_config)?;
-    let response = runtime.execute_plain_lpos_borrowed(packet.key, packet.member, ts)?;
+    let response =
+        runtime.execute_plain_lpos_borrowed(packet.key, packet.member, ts, default_read_allowed)?;
     Some((packet.consumed, response))
 }
 
@@ -17900,6 +17907,7 @@ fn dispatch_floor_fast_exists_into(
     runtime: &mut Runtime,
     ts: u64,
     out: &mut Vec<u8>,
+    default_read_allowed: Option<bool>,
 ) -> Option<usize> {
     match nkeys {
         1 => {
@@ -17909,48 +17917,61 @@ fn dispatch_floor_fast_exists_into(
                 b"*2\r\n$6\r\n",
                 b"EXISTS",
             )?;
-            runtime.execute_plain_exists_borrowed_into(&[packet.key], ts, out)?;
+            runtime
+                .execute_plain_exists_borrowed_into(&[packet.key], ts, default_read_allowed, out)?;
             Some(packet.consumed)
         }
         2 => {
             let packet = parse_borrowed_plain_exists_two_packet(unparsed, parser_config)?;
-            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            runtime
+                .execute_plain_exists_borrowed_into(&packet.keys, ts, default_read_allowed, out)?;
             Some(packet.consumed)
         }
         3 => {
             let packet = parse_borrowed_plain_exists_three_packet(unparsed, parser_config)?;
-            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            runtime
+                .execute_plain_exists_borrowed_into(&packet.keys, ts, default_read_allowed, out)?;
             Some(packet.consumed)
         }
         4 => {
             let packet = parse_borrowed_plain_exists_four_packet(unparsed, parser_config)?;
-            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            runtime
+                .execute_plain_exists_borrowed_into(&packet.keys, ts, default_read_allowed, out)?;
             Some(packet.consumed)
         }
         5 => {
             let packet = parse_borrowed_plain_exists_five_packet(unparsed, parser_config)?;
-            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            runtime
+                .execute_plain_exists_borrowed_into(&packet.keys, ts, default_read_allowed, out)?;
             Some(packet.consumed)
         }
         6 => {
             let packet = parse_borrowed_plain_exists_six_packet(unparsed, parser_config)?;
-            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            runtime
+                .execute_plain_exists_borrowed_into(&packet.keys, ts, default_read_allowed, out)?;
             Some(packet.consumed)
         }
         7 => {
             let packet = parse_borrowed_plain_exists_seven_packet(unparsed, parser_config)?;
-            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            runtime
+                .execute_plain_exists_borrowed_into(&packet.keys, ts, default_read_allowed, out)?;
             Some(packet.consumed)
         }
         8 => {
             let packet = parse_borrowed_plain_exists_eight_packet(unparsed, parser_config)?;
-            runtime.execute_plain_exists_borrowed_into(&packet.keys, ts, out)?;
+            runtime
+                .execute_plain_exists_borrowed_into(&packet.keys, ts, default_read_allowed, out)?;
             Some(packet.consumed)
         }
         9..=KEYS_MULTI_MAX => {
             let packet =
                 parse_borrowed_plain_keys_multi_packet(unparsed, parser_config, b"EXISTS")?;
-            runtime.execute_plain_exists_borrowed_into(&packet.keys[..packet.len], ts, out)?;
+            runtime.execute_plain_exists_borrowed_into(
+                &packet.keys[..packet.len],
+                ts,
+                default_read_allowed,
+                out,
+            )?;
             Some(packet.consumed)
         }
         _ => None,
@@ -19893,12 +19914,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zrevrank => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_zrevrank_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_rank_borrowed(
                     PlainRankCmd::Zrevrank,
                     packet.key,
                     packet.member,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -20150,12 +20177,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zrank => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_zrank_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_rank_borrowed(
                     PlainRankCmd::Zrank,
                     packet.key,
                     packet.member,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -21200,8 +21233,20 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Exists(nkeys) => {
-            if let Some(consumed) =
-                dispatch_floor_fast_exists_into(nkeys, unparsed, &parser_config, runtime, ts, out)
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
+            if let Some(consumed) = dispatch_floor_fast_exists_into(
+                nkeys,
+                unparsed,
+                &parser_config,
+                runtime,
+                ts,
+                out,
+                default_read_allowed,
+            )
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
@@ -21386,8 +21431,14 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::MemoryUsage => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_memory_usage_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_memory_usage_borrowed(packet.key, ts)
+                && let Some(response) =
+                    runtime.execute_plain_memory_usage_borrowed(packet.key, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -21597,8 +21648,13 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Lpos => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some((consumed, response)) =
-                dispatch_floor_fast_lpos(unparsed, &parser_config, runtime, ts)
+                dispatch_floor_fast_lpos(unparsed, &parser_config, runtime, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
@@ -21645,12 +21701,18 @@ fn try_dispatch_floor_classified_action(
             // position changes, so the reply and every side effect are unchanged and a
             // declining executor still reaches the generic path. ZLEXCOUNT is arity 4 and
             // nothing else in the cascade parses a ZLEXCOUNT packet.
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_zlexcount_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_zlexcount_borrowed(
                     packet.key,
                     packet.min,
                     packet.max,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -22749,11 +22811,22 @@ fn try_dispatch_floor_classified_action(
             // construction. Parser+executor already shipped; only the routing is
             // new. The `HRANDFIELD key count [WITHVALUES]` forms are distinct
             // packets and fall through.
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let hit = parse_borrowed_plain_hrandfield_packet(unparsed, &parser_config).and_then(
                 |packet| {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     runtime
-                        .execute_plain_hrandfield_borrowed_into(packet.key, ts, client_resp3, out)
+                        .execute_plain_hrandfield_borrowed_into(
+                            packet.key,
+                            ts,
+                            client_resp3,
+                            out,
+                            default_read_allowed,
+                        )
                         .map(|()| packet.consumed)
                 },
             );
@@ -22778,11 +22851,22 @@ fn try_dispatch_floor_classified_action(
             // construction. Parser+executor already shipped (frankenredis-q38ap);
             // only the dispatch-floor routing is new. The `SRANDMEMBER key count`
             // form (array reply) is a distinct packet and falls through.
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let hit = parse_borrowed_plain_srandmember_packet(unparsed, &parser_config).and_then(
                 |packet| {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     runtime
-                        .execute_plain_srandmember_borrowed_into(packet.key, ts, client_resp3, out)
+                        .execute_plain_srandmember_borrowed_into(
+                            packet.key,
+                            ts,
+                            client_resp3,
+                            out,
+                            default_read_allowed,
+                        )
                         .map(|()| packet.consumed)
                 },
             );
@@ -23277,11 +23361,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zrandmember => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_zrandmember_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_rand_member_borrowed(
                     PlainRandMemberCmd::Zrandmember,
                     packet.key,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {

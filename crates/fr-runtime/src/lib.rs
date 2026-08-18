@@ -15896,7 +15896,12 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_exists_borrowed(&mut self, keys: &[&[u8]], now_ms: u64) -> bool {
+    fn can_execute_plain_exists_borrowed(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         // argv is [EXISTS, key, key, ...]; the gate bounds the whole multibulk.
         if keys.is_empty()
             || self.policy.gate.max_array_len < keys.len().saturating_add(1)
@@ -15905,7 +15910,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `EXISTS key [key ...]`:
@@ -15919,8 +15925,9 @@ impl Runtime {
         &mut self,
         keys: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_exists_borrowed(keys, now_ms) {
+        if !self.can_execute_plain_exists_borrowed(keys, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -15959,9 +15966,10 @@ impl Runtime {
         &mut self,
         keys: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.can_execute_plain_exists_borrowed(keys, now_ms) {
+        if !self.can_execute_plain_exists_borrowed(keys, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -18474,14 +18482,20 @@ impl Runtime {
         self.plain_borrowed_default_key_read_allows(now_ms)
     }
 
-    fn can_execute_plain_memory_usage_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_memory_usage_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"MEMORY".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for `MEMORY USAGE key` (the common, no-
@@ -18495,8 +18509,9 @@ impl Runtime {
         &mut self,
         key: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_memory_usage_borrowed(key, now_ms) {
+        if !self.can_execute_plain_memory_usage_borrowed(key, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -18988,7 +19003,13 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_lpos_borrowed(&mut self, key: &[u8], element: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_lpos_borrowed(
+        &mut self,
+        key: &[u8],
+        element: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"LPOS".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -18996,7 +19017,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for the no-option `LPOS key element` form
@@ -19009,8 +19031,9 @@ impl Runtime {
         key: &[u8],
         element: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_lpos_borrowed(key, element, now_ms) {
+        if !self.can_execute_plain_lpos_borrowed(key, element, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -30871,6 +30894,7 @@ impl Runtime {
         min_arg: &[u8],
         max_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"ZLEXCOUNT".len()
@@ -30880,7 +30904,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed runtime fast path for `ZLEXCOUNT key min max` — mirrors the
@@ -30895,8 +30920,9 @@ impl Runtime {
         min_arg: &[u8],
         max_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zlexcount_borrowed(key, min_arg, max_arg, now_ms) {
+        if !self.can_execute_plain_zlexcount_borrowed(key, min_arg, max_arg, now_ms, default_read_allowed) {
             return None;
         }
         // Validate BEFORE any side effect; a bad bound falls back to generic for
@@ -33208,6 +33234,7 @@ impl Runtime {
         cmd: PlainRandMemberCmd,
         key: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < cmd.name_upper().len()
@@ -33215,7 +33242,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for the no-count `SRANDMEMBER key` /
@@ -33232,8 +33260,9 @@ impl Runtime {
         cmd: PlainRandMemberCmd,
         key: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_rand_member_borrowed(cmd, key, now_ms) {
+        if !self.can_execute_plain_rand_member_borrowed(cmd, key, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -33312,11 +33341,13 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if !self.can_execute_plain_rand_member_borrowed(
             PlainRandMemberCmd::Srandmember,
             key,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -33410,9 +33441,14 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_rand_member_borrowed(PlainRandMemberCmd::Hrandfield, key, now_ms)
-        {
+        if !self.can_execute_plain_rand_member_borrowed(
+            PlainRandMemberCmd::Hrandfield,
+            key,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
 
@@ -34240,6 +34276,7 @@ impl Runtime {
         key: &[u8],
         member: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < cmd.name_upper().len()
@@ -34248,7 +34285,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `ZRANK key member` /
@@ -34265,8 +34303,9 @@ impl Runtime {
         key: &[u8],
         member: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_rank_borrowed(cmd, key, member, now_ms) {
+        if !self.can_execute_plain_rank_borrowed(cmd, key, member, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -51175,7 +51214,7 @@ mod tests {
         ];
         for (ts, (key, el)) in (2..).zip(cases) {
             let f = direct
-                .execute_plain_lpos_borrowed(key, el, ts)
+                .execute_plain_lpos_borrowed(key, el, ts, None)
                 .expect("lpos fast path should engage");
             let g = generic.execute_frame(command(&[b"LPOS", key, el]), ts);
             assert_eq!(f, g, "key={key:?} el={el:?}");
@@ -51501,7 +51540,7 @@ mod tests {
         }
         for (ts, key) in (2..).zip([b"s".as_slice(), b"l", b"missing"]) {
             let f = direct
-                .execute_plain_memory_usage_borrowed(key, ts)
+                .execute_plain_memory_usage_borrowed(key, ts, None)
                 .expect("memory usage fast path should engage");
             let g = generic.execute_frame(command(&[b"MEMORY", b"USAGE", key]), ts);
             assert_eq!(f, g, "key={key:?}");
@@ -51837,7 +51876,7 @@ mod tests {
         // duplicates counted: EXISTS a a missing l -> 3
         let keys: [&[u8]; 4] = [b"a", b"a", b"missing", b"l"];
         let fast_reply = fast
-            .execute_plain_exists_borrowed(&keys, 2)
+            .execute_plain_exists_borrowed(&keys, 2, None)
             .expect("default EXISTS should take borrowed fast path");
         let generic_reply =
             generic.execute_frame(command(&[b"EXISTS", b"a", b"a", b"missing", b"l"]), 2);
@@ -51845,7 +51884,7 @@ mod tests {
         assert_eq!(fast_reply, RespFrame::Integer(3));
 
         let one = fast
-            .execute_plain_exists_borrowed(&[b"missing"], 3)
+            .execute_plain_exists_borrowed(&[b"missing"], 3, None)
             .expect("single-key EXISTS should take borrowed fast path");
         assert_eq!(
             one,
@@ -51892,7 +51931,7 @@ mod tests {
         let mut out = Vec::new();
         assert!(
             direct
-                .execute_plain_exists_borrowed_into(&keys, 2, &mut out)
+                .execute_plain_exists_borrowed_into(&keys, 2, None, &mut out)
                 .is_some(),
             "default EXISTS should take borrowed encoded fast path"
         );
@@ -51910,13 +51949,13 @@ mod tests {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"a", b"1"]), 1);
         let keys: [&[u8]; 1] = [b"a"];
-        assert!(rt.execute_plain_exists_borrowed(&keys, 2).is_some());
+        assert!(rt.execute_plain_exists_borrowed(&keys, 2, None).is_some());
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
         assert!(rt.execute_plain_exists_borrowed(&keys, 4).is_none());
 
         let mut out = Vec::new();
         assert!(
-            rt.execute_plain_exists_borrowed_into(&keys, 5, &mut out)
+            rt.execute_plain_exists_borrowed_into(&keys, 5, None, &mut out)
                 .is_none()
         );
         assert!(out.is_empty());
@@ -52175,7 +52214,7 @@ mod tests {
         let mut golden = DefaultHasher::new();
         for (ts, &(cmd, name, key)) in (2u64..).zip(cases.iter()) {
             let f = fast
-                .execute_plain_rand_member_borrowed(cmd, key, ts)
+                .execute_plain_rand_member_borrowed(cmd, key, ts, None)
                 .expect("no-count rand-member should take the borrowed fast path");
             let g = generic.execute_frame(command(&[name, key]), ts);
             assert_eq!(f, g, "fast != generic for {} {:?}", cmd.name_upper(), key);
