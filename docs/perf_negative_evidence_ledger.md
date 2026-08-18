@@ -43237,3 +43237,106 @@ the answer. More generally, before caching a value per batch in this loop, check
 32 bytes the copy already exceeds an 11 instr/op rebuild, so a struct-valued per-batch cache
 needs a rebuild cost well above ~20 instr/op before it can pay, and it must be measured on the
 dispatch FRAME, not on whole-process totals.
+
+## 2026-08-18 CrimsonHawk: CORRECTION to my own plan AND to my own addendum — SCARD is not in `PlainCardinalityCmd`. The read-gate target list is SEVEN predicates, not six, and that single missing entry is the whole failure (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this row ships nothing. It corrects two things I published today, one of
+which would send the next reader looking for something that does not exist.
+
+Host was saturated (loadavg 42-77, CPU idle sampled at 16.8 pct then 72.6 pct, three cargo
+processes), so no build and no measurement was taken. Everything here is read from source, and
+it is the check my own retry predicate demanded I do before touching code again.
+
+### CORRECTION 1 — the plan's leverage claim was WRONG
+
+`90ec27f52` and the execution plan both said: "`can_execute_plain_cardinality_borrowed` takes a
+`PlainCardinalityCmd` discriminant, so ONE edit covers SCARD, ZCARD and HLEN."
+
+**SCARD is not in that enum.** Read from source:
+
+    pub enum PlainCardinalityCmd { Zcard, Hlen, Xlen, PFCOUNT-single-key }
+
+SCARD has its own floor class (`(2, ..::Scard) => ..::Scard` at main.rs:16736), its own arm
+(main.rs:22034), its own predicate `can_execute_plain_scard_borrowed`, and its own executor
+`execute_plain_scard_borrowed`. It shares nothing with the cardinality family.
+
+Two consequences, in opposite directions:
+  * The batch's target list was SIX predicates for EIGHT commands. It is really **SEVEN
+    predicates**, and the seventh — SCARD's — is the one I never threaded.
+  * The cardinality edit reaches FOUR commands, not three: ZCARD, HLEN, **XLEN** and the
+    single-key **PFCOUNT** fast path. Two of those were never in my measured set at all, so
+    the blast radius of that one edit was larger than I stated while its coverage was smaller.
+
+### CORRECTION 2 — my addendum described the defect wrongly
+
+`842bdcd13` said `execute_plain_scard_borrowed` is "a second executor reaching the cardinality
+predicate". **It is not.** Enumerated by name, every one of the six targets has exactly ONE
+executor reaching its predicate; `lindex` has two (`..._borrowed` and `..._borrowed_into`) and
+both were threaded. SCARD reaches a DIFFERENT predicate entirely.
+
+Anyone acting on the addendum would have gone looking for a second executor on the cardinality
+predicate and found none. The observable it was built on — SCARD measuring 2.0000 calls/op — was
+right; the structure I inferred behind it was wrong.
+
+The correct account: my hoist ran in SCARD's floor arm, and SCARD's executor still evaluated the
+gate through its own unthreaded predicate. 1.000 + 1.000 = 2.0000. The six shapes stuck at
+1.0000 are the separate line-number wiring error already recorded.
+
+**That is now three published statements of mine corrected on this lever** — the cache
+hypothesis, the second-executor claim, and the discriminant claim. All three came from reading
+structure and inferring, and all three were caught by counting or by enumerating names. The
+lever itself has produced one true measurement so far: LINDEX at 0.0000.
+
+### THE ENUMERATION THAT SHOULD HAVE COME FIRST
+
+Six lines, no build, and it answers "which predicate does each command's executor actually
+use" — the question I assumed rather than asked:
+
+  command      executor                              predicate reaching the gate
+  llen         execute_plain_llen_borrowed           llen
+  strlen       execute_plain_strlen_borrowed         strlen
+  sismember    execute_plain_sismember_borrowed      sismember
+  lindex       execute_plain_lindex_borrowed(_into)  lindex   (TWO executors)
+  hexists      execute_plain_hexists_borrowed        hexists
+  scard        execute_plain_scard_borrowed          scard    <- MISSING FROM MY LIST
+  zcard/hlen   (no executor of that name)            cardinality
+  cardinality  execute_plain_cardinality_borrowed    cardinality
+
+A name-based enumeration would have shown SCARD's own predicate in the first pass. A line-number
+split over 26 call sites could not, and did not.
+
+### COUNTED MECHANISM
+
+No measurement in this row; it is a source enumeration over `crates/fr-runtime/src/lib.rs`,
+resolving every `fn` body and asking which `can_execute_plain_*_borrowed` each executor calls
+and whether that predicate reaches `plain_borrowed_default_key_read_allows`. The enum contents
+and the floor-class lines are quoted directly.
+
+CV was not used, as a gate or otherwise. No A/A null applies because no timing or instruction
+claim is made.
+
+### PROVENANCE
+
+  source        `crates/fr-runtime/src/lib.rs` and `crates/fr-server/src/main.rs` at HEAD
+                `5509645aa`, read only. No ELF was built and none is cited.
+  incumbent     NOT RUN.
+  host          thinkstation1, /data 119G free, loadavg 42.86 50.70 33.92 at the time of the
+                enumeration, CPU idle sampled at 72.6 pct with 0.1 pct iowait in a 10 s
+                /proc/stat delta, three cargo processes belonging to other panes. A build was
+                explicitly NOT started.
+  admissibility No ratio, no instruction count and no timed row is claimed anywhere here, so
+                the saturated host does not bear on it.
+
+### RETRY PREDICATE
+
+1. The corrected target list is SEVEN predicates: llen, strlen, sismember, lindex, hexists,
+   cardinality, **scard**. Thread all seven or none — leaving scard out is what produced the
+   only regression in the failed attempt.
+2. Landing the cardinality edit also changes XLEN and single-key PFCOUNT. Neither has a shape
+   in the measured set. Add one for each before claiming that edit, or state explicitly that
+   two of its four commands are unmeasured.
+3. Still convert LINDEX FIRST and alone. It is the one route that reached 0.0000, it has TWO
+   executors so it exercises the multi-executor case, and it needs no discriminant reasoning.
+4. Run the name enumeration in this row before any future gate conversion, read or write. It
+   costs no build, and it would have caught this on the write side too had I run it there.
