@@ -49964,3 +49964,103 @@ does on `geosearch_2`, the lever is IPC and not work, and `e96a9b03b`'s reasonin
 directly. `expiretime` and `getbit` need one more admissible draw each at rounds=36 before they
 may be quoted at all -- they are candidates on one draw. Do NOT screen any group at the default
 rounds=9 and conclude it is clean; `frontclass` is unscreened, not clean.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — the cardinality floor arms re-derived a read gate the pass ALREADY HELD: HLEN and ZCARD each drop an **EXACT 175.0 instr/op** frame, 10.8 pct of the command, on an EXACT 175.0 null (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: thread `default_read_allowed: Option<bool>` through
+`can_execute_plain_cardinality_borrowed` / `execute_plain_cardinality_borrowed`, exactly as the
+ozrro-converted LLEN and SCARD arms already take it, and have the four floor arms
+(ZCARD/HLEN/XLEN/PFCOUNT) pass the per-pass `read_gate_cache` the dispatcher already holds.
+Shipped in `d307615c4`. Every other call site passes `None` and keeps deriving the gate itself,
+so only the floor route changes. **No new logic, no new predicate, no interface widening beyond
+the one parameter the sibling arms already carry.**
+
+WHY IT EXISTS: `plain_borrowed_default_key_read_allows` is the flat 175.0 instr/op read gate this
+ledger has been tracking. The dispatcher caches it once per pass for the converted arms; four
+cardinality arms sat next to that cache and called the gate themselves anyway. One executor
+serves all four commands, so one edit converts four arms.
+
+**THE VERDICT IS ON THE FRAME, AND WHOLE-OP IS QUOTED ONLY TO SHOW WHY IT CANNOT BE.** Two
+interleaved rounds per arm, `shape_instr_per_op.py --fr-only`, N=20,000:
+
+| shape | whole-op before | whole-op after | role |
+|---|---|---|---|
+| hlen | 1615.0 / 1604.1 | 1385.1 / 1414.1 | beneficiary |
+| zcard | 1615.8 / 1654.4 | 1429.6 / 1418.4 | beneficiary |
+| exists_1 | 1573.7 / 1541.7 | 1581.7 / 1590.7 | **null moved +49.0** |
+| llen | 1412.1 / 1400.1 | 1366.9 / 1359.2 | **control moved -40.9** |
+
+The null and the control are routes this edit does not touch, and they moved ±40-49 — the
+whole-binary layout wobble `fr-runtime` edits are known for. A whole-op verdict here would be
+quoting a number with a ±50 floor. The FRAME table has no such floor and reproduces exactly
+across both rounds:
+
+| shape | gate calls/op | read-gate frame | role |
+|---|---|---|---|
+| **hlen** | **1.000 -> 0.000** | **175.0 -> ABSENT** (both rounds) | beneficiary |
+| **zcard** | **1.000 -> 0.000** | **175.0 -> ABSENT** (both rounds) | beneficiary |
+| exists_1 | 1.000 -> 1.000 | **175.0 -> 175.0** | **EXACT null** |
+| llen | 0.000 -> 0.000 | ABSENT -> ABSENT | converted control |
+
+**THE NULL IS EXACT, NOT MERELY SMALL — 175.0 ON BOTH ARMS, THE SAME INTEGER.** And the control
+is a route already converted, which is what makes ABSENT mean *removed* rather than *renamed or
+inlined elsewhere*: if the frame had merely moved, the already-converted route would not have
+been reading zero before the edit. Caller frame corroborates —
+`execute_plain_cardinality_borrowed` drops 184.0 -> 179.0 on hlen and 186.0 -> 180.0 on zcard as
+the call setup goes away — so the removal is **175.0 plus 5 to 6**.
+
+**Quoting the WORST bound: 175.0 instr/op**, which is **10.8 pct of an HLEN** (of 1615.0) and
+**10.8 pct of a ZCARD** (of 1615.8). Counting the caller frame it is 180.0-181.0, but 175.0 is
+the figure that reproduced as the same integer four times.
+
+**SCOPE, STATED BECAUSE HALF OF IT IS INFERENCE.** The edit converts FOUR arms. The harness has
+shapes for only two of them, so **XLEN and PFCOUNT are NOT measured** — they share the one
+executor and the one predicate with the two that are, which is a strong argument and not a
+measurement. Anyone quoting a four-command figure is quoting me beyond my evidence.
+
+CORRECTNESS: **71 commands byte-identical** between the arms in ONE pipelined pass — which is the
+only way the cached gate is exercised at all, since the cache lives for a pass. The battery is
+built around the single risk this lever creates, a STALE cached `true` surviving state that a
+fresh derivation would have refused: CLIENT NO-TOUCH on and off, SELECT to db3 and back,
+MULTI/EXEC, a volatile key with a 50 ms TTL, lowercase forms, WRONGTYPE and arity errors on all
+four commands, and the two PFCOUNT paths that must NOT fast-path (multi-key, and a cache dirtied
+by an interleaved PFADD). **PFCOUNT's cache-hittability test is time-dependent and was
+deliberately left OUT of the cached gate** — folding it in would look tidy and would break
+PFCOUNT, a trap CrimsonHawk flagged before I wrote a line.
+
+BUILD PROVENANCE: paired build in a worktree pinned at `1ed5c75ef`, built AFTER, BEFORE, AFTER
+again. The two AFTERs are **bit-identical**
+(`bench_elf_sha256=4fd2ecb336b9a183e2da6b5697763377d094a3c8e69b0cd9a6da01d6a7c3c552`) and BEFORE
+is distinct
+(`bench_elf_sha256=38e3ec0648c51bbc343e8173f267df41b3de4c3bb1ef0ff6ac9ee610836d9b6d`), so the
+tree held still across the pair. A pinned worktree was used rather than the shared checkout
+because peers held uncommitted WIP in `fr-runtime` and `fr-store` throughout; either arm built
+in place would have carried it. Host: /data 99G, loadavg 16.34/12.00/10.32, mean 3679 MHz.
+
+**A PEER'S CLAIM THAT THE OTHER HALF WAS ALREADY LANDED WAS WRONG, AND CHECKING COST NOTHING.**
+The handoff I picked this up from stated the `fr-runtime` twin
+(`can_execute_plain_cardinality_borrowed_with_default_read_gate`) was already committed. `grep`
+found zero occurrences repo-wide; the `fr-runtime` commit that had landed was a different lever.
+Had I built on the claim I would have failed to compile at best. Related: the twin shape named in
+that handoff is NOT what shipped here — `Option<bool>` threading is the idiom the converted
+sibling arms use, and it avoids a second entry point per function.
+
+GATE AND ITS OWN NULL. Both arms were measured in one same-invocation interleaved run, two
+rounds, so drift falls on both alike. The A/A null and the A/B pairing are same-invocation.
+A/A null on the whole-process instrument, same ELF, four draws of GET, resampled
+ratio-of-medians: median 1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate
+for this row is that bootstrap median-CI, and CV is provenance only and was not used as a gate
+anywhere in this row; no CV was computed. Host state is provenance, not a gate — the verdict
+rests on the frame table and the call counts, which are integers that reproduced exactly.
+
+RETRY PREDICATE: revisit only if the read gate's own cost falls below ~40 instr/op (at which
+point the removal stops being worth a parameter), or if `hlen`/`zcard` are observed calling
+`plain_borrowed_default_key_read_allows` at anything above **0.000 calls/op**, which would mean a
+reset point or a new caller reintroduced it. Both are measurable with
+`scripts/call_count_delta.py <dump> 20000 --callers plain_borrowed_default_key_read_allows`; the
+references are hlen and zcard at 0.000 and `exists_1` at 1.000. **`exists_1` at 1.000 is also the
+next lever on this vein** — it is one of the twelve read routes still paying the gate, and the
+list is in `d7c67e802`.
