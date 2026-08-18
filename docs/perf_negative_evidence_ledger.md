@@ -53051,3 +53051,181 @@ beside them come from the instrument whose banked A/A is median 1.000002, 95 pct
    specific error I made.
 3. Use a positive control rather than frame-presence when a zero call count carries weight.
 4. Expect 86.0 on unconverted routes after `2bdc560df`, per `1f9d2805f`. Not a contradiction.
+
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — every list element paid for an integer parse it could not need: splitting the cold half out of `list_lp_entry_bytes` is −6.37 pct worst bound on RESTORE+DUMP and −0.92 pct on RPUSH+DUMP (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) on TWO shapes, plus
+deterministic per-frame SELF costs, TWO-BINARY A/B with the A/A and the A/B in ONE INVOCATION and
+the candidate arm BRACKETED by control arms. CV was NOT used, as a gate or otherwise — no
+coefficient of variation appears in this row's decision path and none was computed. No timing
+verdict is claimed: the measurand is a retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 0.999650, bootstrap 95% CI [0.999173, 1.001119] over six
+draws on the RPUSH shape and 0.997459, CI [0.995210, 1.002493] on the RESTORE shape, each taken in
+the same invocation as the A/B it gates; the per-draw tables are below. The bootstrap median-CI is
+the verdict gate and it excludes zero on both shapes.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### PROVENANCE
+
+  ELF           AFTER `f181637c73a40c9beb355dc71ffc45d63495262550d80c002ff3f07ca2595cfd`,
+                BEFORE `33ee6ed052a76d4f1e8b00d83090c8292ea1f2de929a0d7b7a45b3ae0094c1a2`.
+  bench_elf_sha256=f181637c73a40c9beb355dc71ffc45d63495262550d80c002ff3f07ca2595cfd
+
+  As in `fce3dd6d3`: the `frankenredis` server ELF does not print its own SHA-256 the way this
+  repo's `benches/*` harnesses do, so each arm was BOOTED and hashed from `/proc/<pid>/exe`, the
+  kernel's view of the RUNNING image. That identifies the image that executed and catches a
+  relink under the harness. It is NOT the binary reporting its own identity.
+
+### HOW THE FRAME WAS FOUND — BY CLOSING A GAP, NOT BY LOOKING FOR A LEVER
+
+`5d6f53a43`, `9bf8ee80d` and `fce3dd6d3` each carried the same untested claim: their effect on a
+RESTORE-loaded list should be ZERO. Closing that gap is what produced this lever, and it also
+CORRECTS the mechanism all three rows stated.
+
+  THE THREE ROWS NAMED THE WRONG BYPASS. They said a RESTORE-loaded list DUMPs through
+  `retained_listpack_chunks`. It does not. Counted over 30 RESTOREd keys, `dump_key` ran 31
+  times, `retained_listpack_chunks` ONCE — for the RPUSH-built source key — and
+  `quicklist_packed_nodes` 31 times. The restored keys never reach the fallback arm at all, and
+  the iterator/classification/encode counts confirm it: 300 steps total, all from the one source
+  key. The conclusion the three rows drew was right; the route they named was not.
+
+So the RESTORE path was profiled properly, and its cost is not in DUMP at all:
+
+    per RESTORE+DUMP key, nelem=300 fill=128, SELF cost
+      12,804.0   42.68/elem   fr_persist::listpack::decode_value_spans
+       9,900.0   33.00/elem   fr_store::packed_set::list_lp_entry_bytes    <- this row
+       8,076.0   26.92/elem   fr_simd::crc64_pclmul
+       6,610.0   22.03/elem   ListValue::from_restored_quicklist2_nodes
+       5,064.9   16.88/elem   __memcpy_avx_unaligned_erms
+
+### WHAT 33 INSTRUCTIONS WERE BUYING
+
+`list_lp_entry_bytes` answers "how many listpack bytes does this element occupy". On the string
+path that is a length compare, a three-way header pick and a five-way backlen pick. The
+disassembly says where the rest went:
+
+    push %rbx ; sub $0x20,%rsp        <- a 32-byte frame, on EVERY call
+    ...
+    call *0x1340f1(%rip)              <- str::from_utf8(..).parse::<i64>(), outparam on that frame
+
+The frame and the register save exist only for the integer branch. A string element pays for
+them and then jumps past the call.
+
+  A PLAIN `#[inline]` WAS TRIED FIRST AND WAS A NULL, byte for byte: `list_lp_entry_bytes` stayed
+  a separate frame at exactly 9,900.0 instr/key, 33.00/elem, and the shape total moved from
+  66,707.2 to 66,874.8 — the wrong way, inside noise. The cost was never a missing hint. It was
+  the frame the integer parse forces on every caller, and a hint cannot remove that.
+
+### THE SPLIT, AND WHY IT IS EXACT RATHER THAN A HEURISTIC
+
+`list_lp_int` accepts only the CANONICAL decimal form, so it requires `digits[0].is_ascii_digit()`
+after an optional leading `-`. An element whose first byte is neither a digit nor `-` therefore
+CANNOT be integer-encoded — the implication runs one way and is total. So:
+
+  * first byte is a digit or `-`  -> `list_lp_entry_data_len_maybe_int`, which is the ORIGINAL
+    fused body verbatim, `#[inline(never)]` so it keeps the frame to itself;
+  * anything else                 -> the string arithmetic, which is the same answer the fused
+    form computed, not an approximation of it.
+
+The wrapper is `#[inline]` and now inlines into both hot folds, so the call goes too.
+
+  ORACLE: `list_lp_entry_bytes_split_matches_the_fused_reference_qj6jn` writes the FUSED form out
+  by hand — not by calling it — and compares over every width boundary (0, ±127/128, ±4095/4096,
+  i16/i24/i32/i64 extremes, i64 overflow), the non-canonical decimals that must stay strings
+  ("007", "-0", "+5", "1.5", "12a", "-"), byte values on both sides of the ASCII digit block
+  including 0x2F/0x3A and 0x80/0xFF, and string lengths 63/64/4095/4096. Two independent
+  expressions of one rule, so it is not tautological.
+
+### THE MEASUREMENT — TWO SHAPES
+
+    RPUSH+DUMP (fill 128, nelem 300, slope 10 vs 30 keys)
+    draw   BEFORE_a     BEFORE_b     AFTER        cand-pct    null-pct
+      1    221,419.60   221,042.25   218,812.95   −1.0930     +0.1707
+      2    221,313.45   221,436.20   219,075.50   −1.0387     −0.0554
+      3    221,090.05   221,301.05   219,019.70   −0.9837     −0.0953
+      4    221,362.65   221,395.05   219,070.30   −1.0428     −0.0146
+      5    221,477.15   221,359.75   219,062.60   −1.0640     +0.0530
+      6    221,215.70   221,370.75   219,259.30   −0.9191     −0.0700
+
+    A/B median −1.0407 pct, bootstrap 95% CI [−1.0785, −0.9514], n=6 draws
+    WORST SINGLE DRAW −0.9191 pct  <- the figure this row claims for this shape
+    null median 0.999650 as a ratio (within 2 pct of unity); same six draws as absolute
+         percentages have median 0.0627 pct, CI [0.0338, 0.1330]. Effect is ~15x the null.
+    87.4-92.6 pct idle, loadavg 6.91-7.32, MHz mean 1822-2476 against a 1429-4292 spread.
+
+    RESTORE+DUMP (same fill/nelem; one source list, payload RESTOREd into K distinct keys)
+    draw   BEFORE_a     BEFORE_b     AFTER        cand-pct    null-pct
+      1     66,786.80    67,013.40    62,591.30   −6.4406     −0.3381
+      2     66,951.35    67,369.00    62,435.50   −7.0349     −0.6199
+      3     67,107.75    66,722.75    62,488.55   −6.6154     +0.5770
+      4     66,990.30    67,146.25    62,426.40   −6.9211     −0.2323
+      5     67,055.40    67,108.00    62,432.05   −6.9313     −0.0784
+      6     66,756.45    66,941.05    62,588.00   −6.3737     −0.2758
+
+    A/B median −6.7683 pct, bootstrap 95% CI [−6.9831, −6.4072], n=6 draws
+    WORST SINGLE DRAW −6.3737 pct  <- the figure this row claims for this shape
+    null median 0.997459 as a ratio; same six draws as absolute percentages have median
+         0.3070 pct, CI [0.1553, 0.5985]. Effect is ~21x the null.
+    89.6-92.1 pct idle, loadavg 6.81-8.43, MHz mean 1936-2347 against a 1429-4295 spread.
+
+  Distinct keys on the RESTORE shape are load-bearing: `Store::dump_payload_cache` memoises by
+  `modification_count`, so re-DUMPing one key would have measured the memo.
+
+  The deterministic frame-total instrument agrees and does not depend on the draw:
+
+    RESTORE+DUMP   66,707.2 -> 62,214.5   −4,492.7   (−6.735 pct)
+    RPUSH+DUMP    221,469.0 -> 219,347.1  −2,121.9   (−0.958 pct)
+
+### A NULL THIS ROW HAD TO THROW AWAY, AND WHY
+
+The FIRST RESTORE-shape run was taken while other projects drove loadavg to 23.9 and idle to 5.4
+pct. Its A/A null reached 7.49 pct on one draw and its null CI upper bound (5.63 pct) exceeded the
+candidate's own worst draw (5.04 pct), so that run gates NOTHING and is not quoted above.
+
+That is worth stating precisely, because it looks like a counter-example to
+`feedback_callgrind_ir_is_immune_to_load_and_mhz` and is not one. Repeating ONE binary four times
+at a FIXED key count shows the workload is essentially deterministic: whole-process totals
+3,488,261 / 3,490,157 / 3,493,457 / 3,486,399 — a 0.202 pct spread — with `decode_value_spans`,
+`list_lp_entry_bytes`, `crc64_pclmul` and `from_restored_quicklist2_nodes` all bit-identical
+across the four. The noise is not in the counts; it enters through the SLOPE, because the K1 and
+K2 points differ in wall-clock duration and this server does wall-clock-driven work between
+commands. Ir is immune to load; a slope between two points of different DURATION is not.
+
+  REUSABLE: quote a slope-method figure only from a window where the two points' wall-clock
+  differ by roughly what they differ by at rest. The frame instrument above has no such exposure
+  and is what to reach for when the window cannot be had.
+
+### PARITY
+
+    BEFORE-vs-AFTER DUMP BYTES: 0 of 84 diverging
+    OBJECT ENCODING + DUMP LENGTH, int / negative / string lists: 0 of 105 diverging
+    workload sweep vs redis 7.2.4: 4 of 42 diverging, UNCHANGED
+
+  The 105-shape probe is aimed at exactly what this change could have broken. `lp_bytes` is the
+  sum of `list_lp_entry_bytes` over a list, and it feeds chunk boundaries and OBJECT ENCODING —
+  `from_restored_nodes` says so in its own comment, which is why `frankenredis-c92f6` refused to
+  derive the total from the listpack header. So the probe drives lists whose elements are
+  integers and NEGATIVE integers, i.e. the elements that take the preserved slow path, across
+  fills −2/−1/4/128/300 and n 3..600, and compares encoding and payload length before and after.
+
+  fr-store 937 / fr-persist 227, 0 failures; clippy clean; fmt diffs 7, back to the pre-existing
+  baseline.
+
+### RETRY PREDICATES
+
+  1. `listpack_entry_encoded_len` in `fr-store/src/lib.rs` is the TWIN of this function and has
+     the identical fused shape and the identical stack frame. It was NOT changed here — one
+     lever, one commit — and it is the obvious next candidate. Do not assume the figure carries:
+     its callers are the DUMP encoders, and `fce3dd6d3` already removed one of its call sites.
+  2. This row does NOT claim the split helps a list of integers. Those elements take the
+     preserved slow path plus one extra branch, so the expected effect there is a small LOSS.
+     The 105-shape probe shows it is not a correctness loss; nobody has measured whether it is a
+     performance one. Measure an all-integer list before claiming this generalises.
+  3. `decode_value_spans` at 42.68 instr/elem is now the largest single term on the RESTORE
+     path and nothing here touched it. `NEGATIVE_EVIDENCE.md:5684` REJECTED making the decode
+     lazy on the premise that eager decode wins the realistic RESTORE-then-read workload; that
+     row is about laziness, not about the cost of the eager walk itself, so the walk is still
+     open ground.

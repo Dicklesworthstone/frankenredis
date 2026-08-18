@@ -4367,8 +4367,30 @@ impl EntryBytes {
     }
 }
 
-fn list_lp_entry_bytes(elem: &[u8]) -> u64 {
-    let data_len: u64 = if let Some(v) = list_lp_int(elem) {
+/// Data-byte count for an element that is NOT integer-encoded: encoding header (1/2/5) plus the
+/// payload. Split out so both `list_lp_entry_bytes` and its cold twin can name it.
+#[inline]
+fn list_lp_string_data_len(len: usize) -> u64 {
+    let header = if len < 64 {
+        1
+    } else if len < 4096 {
+        2
+    } else {
+        5
+    };
+    header + len as u64
+}
+
+/// The integer half of [`list_lp_entry_bytes`], VERBATIM, kept out of line.
+///
+/// (frankenredis-qj6jn) This is the half that needs a stack frame: `list_lp_int` ends in
+/// `str::from_utf8(..).parse::<i64>()`, which is an out-of-line call with an outparam. Leaving it
+/// fused with the string half made EVERY call — including the string ones that touch none of it —
+/// pay `push %rbx` + `sub $0x20,%rsp` and the matching epilogue, which is what the disassembly of
+/// the fused form shows. Callers that only ever see strings now branch past all of it.
+#[inline(never)]
+fn list_lp_entry_data_len_maybe_int(elem: &[u8]) -> u64 {
+    if let Some(v) = list_lp_int(elem) {
         if (0..=127).contains(&v) {
             1
         } else if (-4096..=4095).contains(&v) {
@@ -4383,14 +4405,31 @@ fn list_lp_entry_bytes(elem: &[u8]) -> u64 {
             9
         }
     } else {
-        let header = if elem.len() < 64 {
-            1
-        } else if elem.len() < 4096 {
-            2
-        } else {
-            5
-        };
-        header + elem.len() as u64
+        list_lp_string_data_len(elem.len())
+    }
+}
+
+/// (frankenredis-qj6jn) Called ONCE PER ELEMENT from two hot folds — the RESTORE growth-total
+/// fold in `from_restored_nodes` and the bulk push builders — and callgrind charged the fused
+/// form 33.00 instr/elem SELF on the RESTORE shape, for what is on the string path a length
+/// compare, a three-way header pick and a five-way backlen pick.
+///
+/// THE FIRST BYTE DECIDES IT, and the implication runs only one way, which is why this is exact
+/// rather than a heuristic. `list_lp_int` accepts only the CANONICAL decimal form, so it starts
+/// by requiring `digits[0].is_ascii_digit()` after an optional leading `-`. An element whose
+/// first byte is neither a digit nor `-` therefore CANNOT be integer-encoded, and the string
+/// branch below is the same answer the fused form computed — not an approximation of it. An
+/// element that DOES start with a digit or `-` still runs the original code, unchanged, in
+/// `list_lp_entry_data_len_maybe_int`.
+///
+/// A plain `#[inline]` on the fused form was measured FIRST and did NOTHING: `list_lp_entry_bytes`
+/// stayed a separate frame at exactly 9,900 instr/key, 33.00/elem, byte for byte. The cost was
+/// never the missing hint — it was the frame the integer parse forces on every caller.
+#[inline]
+fn list_lp_entry_bytes(elem: &[u8]) -> u64 {
+    let data_len: u64 = match elem.first() {
+        Some(&b) if b.is_ascii_digit() || b == b'-' => list_lp_entry_data_len_maybe_int(elem),
+        _ => list_lp_string_data_len(elem.len()),
     };
     data_len + list_lp_backlen_bytes(data_len)
 }
@@ -6167,6 +6206,90 @@ impl CompactFieldMap {
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-qj6jn) The first-byte split in `list_lp_entry_bytes` must be EXACT, not a
+    /// heuristic: an element whose first byte is neither a digit nor `-` cannot be canonical
+    /// decimal, so it takes the string branch without consulting `list_lp_int`.
+    ///
+    /// The reference below is the FUSED form the split replaced, written out here rather than
+    /// called, so this is two independent expressions of the same rule and not a tautology
+    /// (`feedback_test_oracle_derived_from_source_is_tautological`). Delete it when
+    /// `list_lp_entry_bytes` is deleted.
+    #[test]
+    fn list_lp_entry_bytes_split_matches_the_fused_reference_qj6jn() {
+        fn fused_reference(elem: &[u8]) -> u64 {
+            let data_len: u64 = if let Some(v) = super::list_lp_int(elem) {
+                if (0..=127).contains(&v) {
+                    1
+                } else if (-4096..=4095).contains(&v) {
+                    2
+                } else if i16::try_from(v).is_ok() {
+                    3
+                } else if (-8_388_608..=8_388_607).contains(&v) {
+                    4
+                } else if i32::try_from(v).is_ok() {
+                    5
+                } else {
+                    9
+                }
+            } else {
+                let header = if elem.len() < 64 {
+                    1
+                } else if elem.len() < 4096 {
+                    2
+                } else {
+                    5
+                };
+                header + elem.len() as u64
+            };
+            data_len + super::list_lp_backlen_bytes(data_len)
+        }
+
+        let mut corpus: Vec<Vec<u8>> = Vec::new();
+        // Space-separated so the table reads as a table. Three groups, in order: canonical and
+        // near-canonical decimals at every width boundary; digit- or `-`-leading strings that are
+        // NOT canonical integers, which the first-byte test deliberately does not decide; and
+        // elements whose first byte DOES decide them.
+        for s in "0 -0 007 00 1 127 128 -1 4095 4096 -4095 -4096 -4097 32767 32768 -32768 \
+                  -32769 8388607 8388608 -8388608 -8388609 2147483647 2147483648 -2147483648 \
+                  -2147483649 9223372036854775807 -9223372036854775808 9223372036854775808 \
+                  -9223372036854775809 99999999999999999999999 \
+                  12a 0x10 1.5 - --1 -a +5 1e3 0.0 \
+                  v vvvvvvvvvv00001 a1 +1 /1 :1 abc"
+            .split(' ')
+        {
+            corpus.push(s.as_bytes().to_vec());
+        }
+        // The empty element, the two entries that contain a space, and a high byte.
+        for s in ["", "1 ", " 1", "\u{7f}9"] {
+            corpus.push(s.as_bytes().to_vec());
+        }
+        // Byte values around the ASCII digit block, so an off-by-one in the first-byte test
+        // shows up rather than hiding between '0' and '9'.
+        for b in [
+            b'\0', b'/', b'0', b'5', b'9', b':', b',', b'-', b'.', 0x80, 0xff,
+        ] {
+            corpus.push(vec![b]);
+            corpus.push(vec![b, b'2', b'3']);
+        }
+        // String-header and backlen boundaries.
+        for len in [1usize, 62, 63, 64, 65, 4094, 4095, 4096, 4097] {
+            corpus.push(vec![b'v'; len]);
+            corpus.push(vec![b'7'; len]);
+            let mut neg = vec![b'-'];
+            neg.extend(std::iter::repeat_n(b'7', len));
+            corpus.push(neg);
+        }
+
+        for elem in &corpus {
+            assert_eq!(
+                super::list_lp_entry_bytes(elem),
+                fused_reference(elem),
+                "split diverged from the fused reference for {:?}",
+                String::from_utf8_lossy(&elem[..elem.len().min(24)])
+            );
+        }
+    }
     /// (frankenredis-fosf1) Can the PACKED hash representation carry a DUPLICATE field,
     /// the way redis 7.2.4 carries one in a listpack?
     ///
