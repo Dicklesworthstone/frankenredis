@@ -56223,3 +56223,107 @@ wrong:
   3. This row is TWO passes at three read counts, not a certified ratio, and the window carried two
      other projects' builds throughout. The effects are 3x to 5x, far outside anything the host
      could contribute, but a certified read-side row still needs `--for ratio` FIT at both ends.
+
+## 2026-08-18 CrimsonHawk: SELF-SPEEDUP TARGET — `hscan0_borrow_scan` copies every field and value into an owned Vec that its own sink never needed: 806.0 instr/op, 22 pct of HSCAN, the largest single frame in this census (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — the fix is written and compiles, but it is NOT measured and NOT committed:
+a peer build started in the same target directory mid-pair and the ELF-identity check refused the
+result. No fr/Redis ratio is claimed.
+
+### THE MEASUREMENT
+
+Sizing the census leaders by two-point instruction differencing, one ELF (`b149287b34a0d191`,
+which already contains the `encode_into` header fix):
+
+  shape             frame                              self instr/op   share
+  hscan_zero        Map<Filter<..PackedStrMap..>>          806.0        22.2 pct of 3637.2
+  xrevrange_base    copy_borrowed_argv_into_scratch        149.0         1.8 pct of 8169.2
+  zscan_zero        push_redis_double_ascii                136.0         3.8 pct of 3561.3
+  xrevrange_base    push_u64_ascii                          86.0         1.1 pct
+  xread_one         push_u64_ascii                          86.0         0.9 pct
+
+**806.0 instr/op is the largest single frame found anywhere in this census**, and it is not
+dispatch, parsing or protocol framing — it is an iterator adapter chain.
+
+### THE MECHANISM, WHICH CONTRADICTS THE FUNCTION'S OWN NAME
+
+`Store::hscan0_borrow_scan` is a BORROW scan: its sink takes
+`SscanReplyEvent::Member(&'a [u8])`, a reference. On the listpack path it nevertheless does
+
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = h.iter()
+        .filter(|(field, _)| scan_pattern_matches(pattern, field))
+        .map(|(f, v)| (f.to_vec(), v.to_vec()))
+        .collect();
+
+— TWO allocations and two byte copies PER FIELD — and then hands the sink references INTO those
+copies. The owned pairs are never needed by anyone. On the two-field `hscan_zero` shape that is
+memcpy 4.000 and allocations 6.000 per op.
+
+The only reason to collect at all is that RESP wants the array length before the elements, and a
+`Vec` of REFERENCES answers that just as well. The same function already collects
+`Vec<(&[u8], &[u8])>` on its resume path a few lines below, so the borrowed form is the
+established idiom in this very function rather than a new one.
+
+### WHY THIS ROW IS A TARGET AND NOT A RESULT
+
+The change is written and `cargo check -p fr-store` is clean. It is not measured, and the reason
+is worth recording because it is a harness gap rather than bad luck.
+
+The paired build produced two AFTER ELFs with DIFFERENT shas (`844d8cc11371a711` vs
+`0072d4db319d664e`) while HEAD held at `de407ba56` and the peer-file hash was unchanged and empty.
+Nothing in the tree had moved. What had happened is that a peer build started during the run —
+six `rustc` processes on this project — writing the SAME `./target` directory as mine. Two cargo
+processes interleaving artifacts in one target dir make the output non-deterministic.
+
+The ELF-identity check caught it; HEAD and peer-file comparison did not, and could not. The
+harness now refuses to start a pair while any `frankenredis` `rustc` process is running, which is
+the check that was missing.
+
+### WHAT IS AND IS NOT CLAIMED
+
+CLAIMED: the frame sizes above, and that the owned `Vec<(Vec<u8>, Vec<u8>)>` is not required by
+the sink's signature.
+
+NOT CLAIMED: any saving. 806.0 is the cost of the WHOLE adapter chain including the pattern
+filter and the iteration, not of the copies alone; the filter and the walk remain after the fix.
+Nobody should quote a number for this until the pair runs clean.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timed quantity and no ratio are claimed. The frame sizes are exact two-point differences of
+callgrind counts at N=2000 and 2N=4000 on a single ELF.
+
+For the instrument generally, measured in a single invocation of the same harness on one ELF and
+one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios, banked in `0bf781d57`.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           `b149287b34a0d191dcb9db9810388322a55e9d3e9a1427054dec3faf764e8ac4` for the
+                sizing. The refused pair produced `844d8cc11371a711` / `0072d4db319d664e` /
+                `327deee584e403ae`; all three are DISCARDED.
+  bench_elf_sha256=b149287b34a0d191dcb9db9810388322a55e9d3e9a1427054dec3faf764e8ac4
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py`, `scripts/call_count_delta.py`,
+                `callgrind_annotate --auto=no`.
+  host          /data 62G free. loadavg 7.51 12.18 13.57, CPU idle 88 pct, iowait 0 at sizing
+                time; a peer build began later in the turn.
+  disposition   NO CODE CHANGED. `crates/fr-store/src/lib.rs` is byte-identical to HEAD and the
+                change is banked outside the tree.
+
+### RETRY PREDICATE
+
+1. Land it when no other `frankenredis` build is running. Accept only if `__rust_alloc` falls from
+   6.0 toward 2.0 and `memcpy` from 4.0 toward 0.0 on `hscan_zero`, with a shape that does not
+   scan a hash unmoved as the control.
+2. Expect well UNDER 806. The filter and the walk stay; only the allocations and the byte copies
+   go.
+3. `sscan_zero` and `zscan_zero` reach sibling scans through the same event type. Check whether
+   they carry the same owned-collect before assuming they do — `zscan_zero`'s top caller is
+   `push_redis_double_ascii`, which is a different defect.
+4. Never run a paired build against a concurrent builder in the same target dir. The two AFTER
+   arms diverge with HEAD and every peer file unchanged, and only ELF identity reveals it.
