@@ -10614,6 +10614,7 @@ fn process_buffered_frames(
                         packet.to_meter,
                         packet.unit,
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10646,6 +10647,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -10667,7 +10669,7 @@ fn process_buffered_frames(
                 {
                     // GEOHASH key member member [member ...] (multi-member).
                     if let Some(response) =
-                        runtime.execute_plain_geohash_borrowed(packet.key, &packet.members, ts)
+                        runtime.execute_plain_geohash_borrowed(packet.key, &packet.members, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10687,7 +10689,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_geopos_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_geopos_borrowed(packet.key, &packet.members, ts)
+                        runtime.execute_plain_geopos_borrowed(packet.key, &packet.members, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10713,6 +10715,7 @@ fn process_buffered_frames(
                         packet.enc_arg,
                         packet.offset_arg,
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -11971,6 +11974,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -12005,6 +12009,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -12035,6 +12040,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -19123,9 +19129,14 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Geopos => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_geopos_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_geopos_borrowed(packet.key, &packet.members, ts)
+                    runtime.execute_plain_geopos_borrowed(packet.key, &packet.members, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -19143,6 +19154,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Geodist => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_geodist_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_geodist_borrowed(
                     packet.key,
@@ -19151,6 +19167,7 @@ fn try_dispatch_floor_classified_action(
                     packet.to_meter,
                     packet.unit,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -19806,6 +19823,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Scan0(which) => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             let name: &[u8] = match which {
                 PlainScan0Cmd::Hscan => b"HSCAN",
@@ -19826,6 +19848,7 @@ fn try_dispatch_floor_classified_action(
                         ts,
                         client_resp3,
                         out,
+                        default_read_allowed,
                     ),
                     PlainScan0Cmd::Sscan => runtime.execute_plain_sscan0_borrowed_into(
                         packet.key,
@@ -19833,6 +19856,7 @@ fn try_dispatch_floor_classified_action(
                         ts,
                         client_resp3,
                         out,
+                        default_read_allowed,
                     ),
                     PlainScan0Cmd::Zscan => runtime.execute_plain_zscan0_borrowed_into(
                         packet.key,
@@ -19840,6 +19864,7 @@ fn try_dispatch_floor_classified_action(
                         ts,
                         client_resp3,
                         out,
+                        default_read_allowed,
                     ),
                 };
                 ok.map(|()| packet.consumed)
@@ -21445,6 +21470,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::BitfieldGet(cmd) => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_bitfield_get_packet(unparsed, &parser_config)
                 && packet.cmd == cmd
                 && let Some(response) = runtime.execute_plain_bitfield_get_borrowed(
@@ -21454,6 +21484,7 @@ fn try_dispatch_floor_classified_action(
                     packet.enc_arg,
                     packet.offset_arg,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -21472,6 +21503,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::BitfieldRoTwoGet => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) =
                 parse_borrowed_plain_bitfield_ro_two_get_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_bitfield_ro_two_get_borrowed(
@@ -21483,6 +21519,7 @@ fn try_dispatch_floor_classified_action(
                     packet.enc2,
                     packet.offset2,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -22070,13 +22107,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Scan => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // (frankenredis-ozrro) The executor re-parses the cursor canonically and
             // declines the '+'/'-'/leading-zero/overflow forms, plus any session the
             // borrowed-read admission guard refuses. Those declines land on the generic
             // path — which is where every SCAN goes today — so unlike the other floor
             // classes there is no worse-than-status-quo case to protect against here.
             if let Some(packet) = parse_borrowed_plain_scan_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_scan_borrowed(packet.key, ts)
+                && let Some(response) = runtime.execute_plain_scan_borrowed(packet.key, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -23351,10 +23393,15 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Xpending => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let hit = parse_borrowed_plain_xpending_packet(unparsed, &parser_config).and_then(
                 |packet| {
                     runtime
-                        .execute_plain_xpending_borrowed(packet.key, packet.group, ts)
+                        .execute_plain_xpending_borrowed(packet.key, packet.group, ts, default_read_allowed)
                         .map(|response| (packet.consumed, response))
                 },
             );
@@ -24063,6 +24110,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::GeohashSingle => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let hit = parse_borrowed_plain_key_arg1_packet(
                 unparsed,
                 &parser_config,
@@ -24078,6 +24130,7 @@ fn try_dispatch_floor_classified_action(
                         ts,
                         client_resp3,
                         out,
+                        default_read_allowed,
                     )
                     .map(|()| packet.consumed)
             });

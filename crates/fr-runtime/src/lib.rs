@@ -17445,6 +17445,7 @@ impl Runtime {
         key: &[u8],
         group: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"XPENDING".len()
@@ -17453,7 +17454,9 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
         // Missing key, wrong type, or missing group: all three belong to the generic, and this
@@ -26478,7 +26481,7 @@ impl Runtime {
     /// cannot apply to a command whose status quo is already generic.
     ///
     /// Returns None (=> generic) for a non-canonical cursor or a disallowed session.
-    pub fn execute_plain_scan_borrowed(&mut self, cursor_arg: &[u8], now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_scan_borrowed(&mut self, cursor_arg: &[u8], now_ms: u64, default_read_allowed: Option<bool>) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"SCAN".len()
             || cursor_arg.len() > self.policy.gate.max_bulk_len
@@ -26488,7 +26491,9 @@ impl Runtime {
         // Strict subset of parse_scan_cursor_arg: same value for everything it accepts,
         // None for the '+'/'-'/leading-zero/overflow forms the generic must handle.
         let cursor = Self::parse_canonical_scan_cursor(cursor_arg)?;
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
         let packet_id =
@@ -26632,6 +26637,7 @@ impl Runtime {
         opts: &[(&[u8], &[u8])],
         min_array_len: usize,
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < min_array_len
             || self.policy.gate.max_bulk_len < b"SCAN".len()
@@ -26650,7 +26656,9 @@ impl Runtime {
             Self::apply_scan_option(keyword, value, &mut pattern, &mut type_filter, &mut count)?;
         }
 
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
         let argv_len_sum = b"SCAN".len()
@@ -26722,6 +26730,7 @@ impl Runtime {
             ],
             8,
             now_ms,
+            None,
         )
     }
 
@@ -26746,6 +26755,7 @@ impl Runtime {
             &[(keyword1, value1), (keyword2, value2)],
             6,
             now_ms,
+            None,
         )
     }
 
@@ -26768,7 +26778,7 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        self.execute_plain_scan_opts_borrowed(cursor_arg, &[(keyword, value)], 4, now_ms)
+        self.execute_plain_scan_opts_borrowed(cursor_arg, &[(keyword, value)], 4, now_ms, None)
     }
 
     /// (frankenredis-ozrro) Borrowed WRITE fast path for the base `SPOP key` form.
@@ -26830,6 +26840,7 @@ impl Runtime {
         key: &[u8],
         cursor_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < name_upper.len()
@@ -26841,7 +26852,9 @@ impl Runtime {
         if cursor_arg != b"0" {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
         let packet_id = self.plain_read_borrowed_preamble(
@@ -26921,7 +26934,7 @@ impl Runtime {
         cursor_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        self.execute_plain_scan0_borrowed(b'S', "sscan", "SSCAN", key, cursor_arg, now_ms)
+        self.execute_plain_scan0_borrowed(b'S', "sscan", "SSCAN", key, cursor_arg, now_ms, None)
     }
 
     /// (CrimsonHawk) Zero-copy `_into` fast path for `SSCAN key 0` — streams the batch members
@@ -26939,6 +26952,7 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"SSCAN".len()
@@ -26948,7 +26962,9 @@ impl Runtime {
             return None;
         }
         let cursor = Self::parse_canonical_scan_cursor(cursor_arg)?;
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
         let packet_id = self.plain_read_borrowed_preamble(
@@ -27050,6 +27066,7 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"HSCAN".len()
@@ -27059,7 +27076,9 @@ impl Runtime {
             return None;
         }
         let cursor = Self::parse_canonical_scan_cursor(cursor_arg)?;
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
         let packet_id = self.plain_read_borrowed_preamble(
@@ -27158,6 +27177,7 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"ZSCAN".len()
@@ -27169,7 +27189,9 @@ impl Runtime {
         if cursor_arg != b"0" {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return None;
         }
         let packet_id = self.plain_read_borrowed_preamble(
@@ -27271,7 +27293,7 @@ impl Runtime {
         cursor_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        self.execute_plain_scan0_borrowed(b'H', "hscan", "HSCAN", key, cursor_arg, now_ms)
+        self.execute_plain_scan0_borrowed(b'H', "hscan", "HSCAN", key, cursor_arg, now_ms, None)
     }
     pub fn execute_plain_zscan0_borrowed(
         &mut self,
@@ -27279,7 +27301,7 @@ impl Runtime {
         cursor_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        self.execute_plain_scan0_borrowed(b'Z', "zscan", "ZSCAN", key, cursor_arg, now_ms)
+        self.execute_plain_scan0_borrowed(b'Z', "zscan", "ZSCAN", key, cursor_arg, now_ms, None)
     }
 
     /// (frankenredis-lmpop1fast) Borrowed WRITE fast path for the common 1-key,
@@ -31003,6 +31025,7 @@ impl Runtime {
         m1: &[u8],
         m2: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"GEODIST".len()
@@ -31012,7 +31035,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed runtime fast path for `GEODIST key m1 m2 [unit]` — mirrors
@@ -31034,8 +31058,9 @@ impl Runtime {
         to_meter: f64,
         unit: Option<&[u8]>,
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_geodist_borrowed(key, m1, m2, now_ms) {
+        if !self.can_execute_plain_geodist_borrowed(key, m1, m2, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -31514,6 +31539,7 @@ impl Runtime {
         key: &[u8],
         members: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if members.is_empty()
             || self.policy.gate.max_array_len < members.len().saturating_add(2)
@@ -31525,7 +31551,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed runtime fast path for `GEOPOS key member [member ...]` — mirrors
@@ -32861,8 +32888,9 @@ impl Runtime {
         key: &[u8],
         members: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_geopos_borrowed(key, members, now_ms) {
+        if !self.can_execute_plain_geopos_borrowed(key, members, now_ms, default_read_allowed) {
             return None;
         }
         let packet_id = self.plain_read_borrowed_preamble(
@@ -32915,12 +32943,17 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"GEOHASH".len()
             || key.len() > self.policy.gate.max_bulk_len
             || member.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
         {
             return None;
         }
@@ -32990,8 +33023,9 @@ impl Runtime {
         key: &[u8],
         members: &[&[u8]],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_geopos_borrowed(key, members, now_ms) {
+        if !self.can_execute_plain_geopos_borrowed(key, members, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -33168,6 +33202,7 @@ impl Runtime {
         cmd: PlainBitfieldGetCmd,
         key: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < cmd.name_upper().len()
@@ -33175,17 +33210,19 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
-    fn can_execute_plain_bitfield_ro_two_get_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_bitfield_ro_two_get_borrowed(&mut self, key: &[u8], now_ms: u64, default_read_allowed: Option<bool>) -> bool {
         if self.policy.gate.max_array_len < 8
             || self.policy.gate.max_bulk_len < b"BITFIELD_RO".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     fn can_execute_plain_bitfield_set_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
@@ -33375,13 +33412,14 @@ impl Runtime {
         enc_arg: &[u8],
         offset_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if !get_arg.eq_ignore_ascii_case(b"GET") {
             return None;
         }
         let (signed, bits) = Self::bitfield_fast_parse_encoding(enc_arg)?;
         let bit_offset = Self::bitfield_fast_parse_offset(offset_arg, bits)?;
-        if !self.can_execute_plain_bitfield_get_borrowed(cmd, key, now_ms) {
+        if !self.can_execute_plain_bitfield_get_borrowed(cmd, key, now_ms, default_read_allowed) {
             return None;
         }
         let command_upper = cmd.name_upper();
@@ -33515,6 +33553,7 @@ impl Runtime {
         enc2: &[u8],
         offset2: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if !get1.eq_ignore_ascii_case(b"GET") || !get2.eq_ignore_ascii_case(b"GET") {
             return None;
@@ -33523,7 +33562,7 @@ impl Runtime {
         let bit_offset1 = Self::bitfield_fast_parse_offset(offset1, bits1)?;
         let (signed2, bits2) = Self::bitfield_fast_parse_encoding(enc2)?;
         let bit_offset2 = Self::bitfield_fast_parse_offset(offset2, bits2)?;
-        if !self.can_execute_plain_bitfield_ro_two_get_borrowed(key, now_ms) {
+        if !self.can_execute_plain_bitfield_ro_two_get_borrowed(key, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -49934,7 +49973,7 @@ mod tests {
             seed(&mut fast);
             seed(&mut generic);
 
-            let got = fast.execute_plain_xpending_borrowed(shape[1], shape[2], 100);
+            let got = fast.execute_plain_xpending_borrowed(shape[1], shape[2], 100, None);
             let want = generic.execute_frame(command(shape), 100);
             let label: Vec<String> = shape
                 .iter()
@@ -53082,7 +53121,7 @@ mod tests {
             for (ts, key) in (2u64..).zip([b"z".as_slice(), b"nokey".as_slice(), b"str".as_slice()])
             {
                 let mut fast_bytes = Vec::new();
-                fast.execute_plain_zscan0_borrowed_into(key, b"0", ts, resp3, &mut fast_bytes)
+                fast.execute_plain_zscan0_borrowed_into(key, b"0", ts, resp3, &mut fast_bytes, None)
                     .expect("well-formed ZSCAN key 0 should take fast path");
                 let generic_reply = generic.execute_frame(command(&[b"ZSCAN", key, b"0"]), ts);
                 assert_eq!(
@@ -53093,7 +53132,7 @@ mod tests {
             }
 
             assert!(
-                fast.execute_plain_zscan0_borrowed_into(b"z", b"1", 10, resp3, &mut Vec::new(),)
+                fast.execute_plain_zscan0_borrowed_into(b"z", b"1", 10, resp3, &mut Vec::new(), None)
                     .is_none()
             );
 
@@ -56305,7 +56344,7 @@ mod tests {
             for (ts, (key, member)) in (3..).zip(cases) {
                 let mut out = Vec::new();
                 direct
-                    .execute_plain_geohash_single_borrowed_into(key, member, ts, resp3, &mut out)
+                    .execute_plain_geohash_single_borrowed_into(key, member, ts, resp3, &mut out, None)
                     .expect("single-member GEOHASH direct encoder should take borrowed fast path");
                 let generic_reply =
                     generic.execute_frame(command(&[b"GEOHASH".as_slice(), key, member]), ts);
@@ -56524,6 +56563,7 @@ mod tests {
             b"u8",
             b"0",
             2,
+            None,
         );
         assert!(
             fast_reply.is_some(),
@@ -56591,6 +56631,7 @@ mod tests {
             let fast_reply = fast
                 .execute_plain_bitfield_ro_two_get_borrowed(
                     b"bf", b"GET", b"u8", b"0", b"get", b"i8", b"8", 2,
+                    None,
                 )
                 .expect("valid exact two-GET shape should take the packed floor");
             let generic_reply = generic.execute_frame(
@@ -56616,6 +56657,7 @@ mod tests {
             runtime
                 .execute_plain_bitfield_ro_two_get_borrowed(
                     b"bf", b"SET", b"u8", b"0", b"GET", b"u8", b"8", 1,
+                    None,
                 )
                 .is_none(),
             "write subcommands must fall through to generic BITFIELD_RO validation"
@@ -56624,6 +56666,7 @@ mod tests {
             runtime
                 .execute_plain_bitfield_ro_two_get_borrowed(
                     b"bf", b"GET", b"u64", b"0", b"GET", b"u8", b"8", 1,
+                    None,
                 )
                 .is_none(),
             "invalid encodings must fall through for exact Redis diagnostics"
@@ -77963,7 +78006,7 @@ user bob reset off nopass +@all
             seed(&mut generic);
 
             let fast_reply = fast
-                .execute_plain_scan_borrowed(cursor, 20)
+                .execute_plain_scan_borrowed(cursor, 20, None)
                 .unwrap_or_else(|| panic!("canonical cursor {cursor:?} must be served"));
             let generic_reply = generic.execute_frame(command(&[b"SCAN", cursor]), 20);
 
@@ -77995,7 +78038,7 @@ user bob reset off nopass +@all
             b"18446744073709551616", // u64 overflow
         ] {
             assert!(
-                rt.execute_plain_scan_borrowed(declined, 20).is_none(),
+                rt.execute_plain_scan_borrowed(declined, 20, None).is_none(),
                 "cursor {declined:?} must fall through to the generic path"
             );
         }
@@ -78006,7 +78049,7 @@ user bob reset off nopass +@all
         seed(&mut other_db);
         other_db.execute_frame(command(&[b"SELECT", b"1"]), 20);
         assert!(
-            other_db.execute_plain_scan_borrowed(b"0", 20).is_none(),
+            other_db.execute_plain_scan_borrowed(b"0", 20, None).is_none(),
             "SCAN on a non-zero db must fall through to the generic path"
         );
     }
