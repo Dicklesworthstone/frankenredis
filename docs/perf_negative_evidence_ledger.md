@@ -47557,3 +47557,78 @@ CONCRETELY: the branch axis may be declared eliminated for `geosearch_2` only IF
 the mechanism only IF fr's hardware branch misses per op EXCEED the incumbent's by enough to
 account for the standing instruction-rate gap. Until one of those readings exists, treat the
 axis as untested and cite this row rather than `ee11062ab`.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: HARDWARE — the branch axis is SETTLED for `geosearch_2` and the answer REVERSES the simulated one: fr mispredicts MORE (1.1559x worst), the IPC gap I inferred is confirmed at 1.3229, and cache misses are 2.6889x (`frankenredis-eh2ct`)
+
+NOT FILED AS A KEEP: this instrument has no A/A null in this row, so no claim is gated on it and
+none is offered as campaign output. It executes the reopen clause this ledger gives at `:21040`
+for the branch axis after rejecting `--branch-sim` for it at `:21031`, and it replaces the
+conclusion my `ee11062ab` drew from the rejected instrument and `8c4f86a63` retracted.
+
+  fr    bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  redis bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+METHOD. `perf stat` attached to the SERVER pid for exactly the duration of a `redis-benchmark
+-n 300000 -P 16` invocation, so client cost is excluded and the pipeline depth matches the
+certified throughput rows. Counters divided by `-n`. `kernel.perf_event_paranoid` is -1 here, the
+precondition `:21040` names. Per-arm state is stamped below; hardware counters are NOT
+load-immune the way callgrind instruction counts are, which is why both draws are shown.
+
+  metric               draw 1     draw 2     WORST     (fr/redis)
+  instructions/op      0.7884x    0.7923x       --     fr retires ~21 pct FEWER
+  cycles/op            1.0430x    1.0287x    1.0430x   fr burns MORE
+  branch-misses/op     1.1559x    1.0930x    1.1559x   fr misses MORE
+  cache-misses/op      2.6889x    2.3949x    2.6889x   fr misses MORE
+  fr IPC               1.8219     1.8309
+  redis IPC            2.4100     2.3771
+  redis_IPC / fr_IPC   1.3229     1.2984    1.3229
+
+  draw 1 loadavg 8.14 11.34 10.97, CPU MHz 2852-3437 across arms
+  draw 2 loadavg 18.66 13.60 11.73, CPU MHz 1429-3077 across arms
+  Both arms of each draw ran at the same loadavg; the ratios held across a 2.3x load difference.
+
+### The branch axis, settled in the direction the ledger warned about
+
+Simulated `--branch-sim` read fr at 0.9425x, i.e. fr mispredicting LESS. HARDWARE READS
+1.0930-1.1559x, i.e. fr mispredicting MORE. The instrument reverses the sign, which is precisely
+why `:21031` forbids conclusions from it "in either direction" and why `ee11062ab`'s
+"branch mispredicts ELIMINATED" had to be withdrawn. The correct statement is that fr executes
+27 pct FEWER branches (2695.8 against 3688.8) and mispredicts a LARGER FRACTION of them --
+1.6617 pct against 1.0506 pct, a 1.58x worse rate.
+
+MAGNITUDE, so nobody over-reads it: the excess is ~6 mispredicts per op. At a typical ~18-cycle
+penalty that is ~108 cycles against a measured total cycle gap of 330.4 (8017.0 against 7686.6).
+So branches are real and are roughly a THIRD of the gap. They are not the whole story and a
+branch lever alone cannot close this route.
+
+### What the confirmed IPC number does to an earlier inference of mine
+
+`e96a9b03b` inferred redis_IPC/fr_IPC = 1.3159-1.3374 by combining a callgrind instruction ratio
+with a native throughput ratio taken on a DIFFERENT harness at a possibly different pipeline
+depth, and I flagged that as a cross-context combination worth distrusting. Hardware, measured
+directly and on one instrument, gives 1.2984-1.3229. The inference was sound and is now
+independently confirmed rather than merely plausible.
+
+### Where the cycles actually go
+
+  extra cycles fr over redis        330.4 per op (worst draw)
+  extra branch-misses                 6.0 per op   ~108 cycles at ~18 each   ~33 pct
+  extra cache-misses                 48.2 per op   remainder
+
+fr also issues 1.7281x the cache-REFERENCES (1222.9 against 707.6) at a worse miss rate (6.3 pct
+against 4.0 pct). So fr touches more distinct memory AND retains less of it -- consistent with
+the simulated 2.70x D1 read-miss ratio in `ee11062ab`, which the `--cache-sim` instrument got
+RIGHT here even though `--branch-sim` did not. That asymmetry is itself worth carrying: the two
+simulators are not equally trustworthy, and this ledger already calibrated them separately at
+`:38016`.
+
+REOPEN CLAUSE: the mechanism for `geosearch_2` is now cache-miss dominated with a branch
+component of roughly a third, measured on hardware rather than inferred. A lever may be declared
+successful here only IF it moves fr's cycles/op below the incumbent's 7686.6 at unchanged
+correctness, and any candidate must be measured on CYCLES with `perf stat` attached to the
+server pid -- not on instructions, where fr already leads by 21 pct, and not on `--branch-sim`,
+which reverses sign on this shape. This row has no A/A null; before any figure here is promoted
+to a competitive claim, run the same invocation with both arms pointed at the SAME binary and
+show the null inside the usual bound.
