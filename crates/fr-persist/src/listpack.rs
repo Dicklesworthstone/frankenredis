@@ -311,7 +311,7 @@ fn decode_entry_raw(
     if first & 0x80 == 0 {
         let value = i64::from(first & 0x7F);
         let data_len = 1;
-        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
         return Ok((RawListpackValue::Integer(value), entry_len));
     }
     // 6-bit str: 10xxxxxx, length in low 6 bits, string follows.
@@ -339,7 +339,7 @@ fn decode_entry_raw(
             raw as i64
         };
         let data_len = 2;
-        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
         return Ok((RawListpackValue::Integer(signed), entry_len));
     }
     // 12-bit str: 1110xxxx + 1 byte = length, then string.
@@ -388,7 +388,7 @@ fn decode_entry_raw(
             }
             let raw = i16::from_le_bytes([data[cursor + 1], data[cursor + 2]]);
             let data_len = 3;
-            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
             Ok((RawListpackValue::Integer(i64::from(raw)), entry_len))
         }
         0xF2 => {
@@ -405,7 +405,7 @@ fn decode_entry_raw(
                 raw_u32 as i64
             };
             let data_len = 4;
-            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
             Ok((RawListpackValue::Integer(signed), entry_len))
         }
         0xF3 => {
@@ -420,7 +420,7 @@ fn decode_entry_raw(
                 data[cursor + 4],
             ]);
             let data_len = 5;
-            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
             Ok((RawListpackValue::Integer(i64::from(raw)), entry_len))
         }
         0xF4 => {
@@ -439,7 +439,7 @@ fn decode_entry_raw(
                 data[cursor + 8],
             ]);
             let data_len = 9;
-            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
             Ok((RawListpackValue::Integer(raw), entry_len))
         }
         _ => Err(ListpackError::InvalidEncoding(first)),
@@ -457,6 +457,46 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
     Ok((entry, entry_len))
 }
 
+/// The one-byte-backlen case of [`entry_len_with_backlen`], for call sites that KNOW `data_len` is
+/// a compile-time constant at or below 127.
+///
+/// (frankenredis-qj6jn) Every INTEGER arm of the decoder passes a literal — 1, 2, 3, 4, 5 or 9 —
+/// so out of line those constants bought nothing: `backlen_byte_count`'s five-way match ran, its
+/// result was compared against 1, and the whole thing cost a call. Callgrind charged that frame
+/// 8,700 instr/key, 29.00 per element, on a 300-integer list RESTORE, for what is on this path a
+/// bounds check and one byte compare. Inlined with a constant argument it folds to exactly that.
+///
+/// STRING arms deliberately still call `entry_len_with_backlen`. Their `data_len` is `1 + slen`,
+/// which folds nothing, and routing them here was MEASURED as a trade rather than a win: on the
+/// same pair of binaries integer RESTORE read −9.59 pct and string RESTORE read +0.85 pct, the
+/// string arms paying for a bigger decoder that bought them nothing. Splitting the call site
+/// instead of the function body keeps the string path byte-identical.
+///
+/// The dropped `checked_add` is safe: with a one-byte backlen, `backlen_start + 1 > data.len()`
+/// is `backlen_start >= data.len()`, and the overflow that guard caught (`backlen_start ==
+/// usize::MAX`) is caught by that same test with the same `TruncatedEntry`. Error variants and
+/// their precedence are unchanged.
+#[inline]
+fn entry_len_one_byte_backlen(
+    data: &[u8],
+    cursor: usize,
+    data_len: usize,
+) -> Result<usize, ListpackError> {
+    debug_assert!(
+        data_len <= 127,
+        "entry_len_one_byte_backlen is only valid for a one-byte backlen"
+    );
+    let backlen_start = cursor
+        .checked_add(data_len)
+        .ok_or(ListpackError::TruncatedEntry)?;
+    if backlen_start >= data.len() {
+        return Err(ListpackError::TruncatedEntry);
+    }
+    if data[backlen_start] != data_len as u8 {
+        return Err(ListpackError::InvalidBacklen);
+    }
+    Ok(data_len + 1)
+}
 fn entry_len_with_backlen(
     data: &[u8],
     cursor: usize,
@@ -878,7 +918,7 @@ fn decode_entry_value_span_into(
     if first & 0x80 == 0 {
         let value = i64::from(first & 0x7F);
         let data_len = 1;
-        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
         out.push(ListpackValueSpan::integer(value));
         return Ok(entry_len);
     }
@@ -905,7 +945,7 @@ fn decode_entry_value_span_into(
             raw as i64
         };
         let data_len = 2;
-        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
         out.push(ListpackValueSpan::integer(signed));
         return Ok(entry_len);
     }
@@ -953,7 +993,7 @@ fn decode_entry_value_span_into(
             }
             let raw = i16::from_le_bytes([data[cursor + 1], data[cursor + 2]]);
             let data_len = 3;
-            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
             out.push(ListpackValueSpan::integer(i64::from(raw)));
             Ok(entry_len)
         }
@@ -969,7 +1009,7 @@ fn decode_entry_value_span_into(
                 raw_u32 as i64
             };
             let data_len = 4;
-            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
             out.push(ListpackValueSpan::integer(signed));
             Ok(entry_len)
         }
@@ -984,7 +1024,7 @@ fn decode_entry_value_span_into(
                 data[cursor + 4],
             ]);
             let data_len = 5;
-            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
             out.push(ListpackValueSpan::integer(i64::from(raw)));
             Ok(entry_len)
         }
@@ -1003,7 +1043,7 @@ fn decode_entry_value_span_into(
                 data[cursor + 8],
             ]);
             let data_len = 9;
-            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
             out.push(ListpackValueSpan::integer(raw));
             Ok(entry_len)
         }
@@ -1183,6 +1223,42 @@ fn decode_value_spans_impl<const PRESIZE: bool>(
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-qj6jn) `entry_len_one_byte_backlen` is the folded form the INTEGER decoder
+    /// arms call with a literal width. It must agree with `entry_len_with_backlen` — a genuinely
+    /// separate implementation, still on the string arms — for every `data_len` it is allowed to
+    /// see, on both the accepting and the refusing paths.
+    ///
+    /// The ERROR VARIANT is pinned as well as the length, because the folded form drops a
+    /// `checked_add` whose only job was to catch `backlen_start == usize::MAX`; that case must
+    /// still come back as `TruncatedEntry` from the bounds test, and an equivalence like that is
+    /// easy to assert and easy to get wrong.
+    #[test]
+    fn entry_len_one_byte_backlen_matches_the_general_form_qj6jn() {
+        // Byte at index i is i-as-u8, so a correct one-byte backlen sits at exactly one placement
+        // per width and every other placement exercises the InvalidBacklen arm.
+        let data: Vec<u8> = (0..600u32).map(|i| i as u8).collect();
+        let mut checked = 0usize;
+        for data_len in [0usize, 1, 2, 3, 4, 5, 9, 100, 126, 127] {
+            let cursors: [usize; 12] =
+                [0, 1, 2, 127, 128, 300, 597, 598, 599, 600, 601, usize::MAX];
+            for cursor in cursors {
+                assert_eq!(
+                    entry_len_one_byte_backlen(&data, cursor, data_len),
+                    entry_len_with_backlen(&data, cursor, data_len),
+                    "diverged at cursor {cursor}, data_len {data_len}"
+                );
+                checked += 1;
+            }
+            assert_eq!(
+                entry_len_one_byte_backlen(&[], 0, data_len),
+                entry_len_with_backlen(&[], 0, data_len),
+                "diverged on an empty buffer at data_len {data_len}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 130, "corpus shrank to {checked} cases");
+    }
 
     /// (frankenredis-qj6jn) `ListpackIntegerBytes` now keeps the renderer's RIGHT-aligned buffer
     /// and a start index instead of relocating the digits to the front behind a length. The

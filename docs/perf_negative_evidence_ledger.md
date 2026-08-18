@@ -55128,3 +55128,119 @@ or if a `bump_server_fastpath_generation()` choke point lands as its own refacto
 the cached flag the same safe shape `2bdc560df` used. Re-count with
 `grep -cE "\.<field>\s*(=[^=]|\.(insert|remove|clear|push|retain|extend|take)\b)"` over
 `fr-runtime` and `fr-store` before believing this row's 42.
+
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the integer decoder arms fold their backlen check to a bounds test and one byte compare: −9.48 pct worst on integer RESTORE, −6.40 pct on a mixed list, and a REAL +0.71 pct cost on an all-string one (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) and deterministic
+per-frame and whole-shape SELF-cost totals, TWO-BINARY A/B with the A/A and the A/B in ONE
+INVOCATION and the candidate arm BRACKETED by control arms, on THREE compositions. CV was NOT used,
+as a gate or otherwise — no coefficient of variation appears in this row's decision path and none
+was computed. No timing verdict is claimed: the measurand is a retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 0.997275, bootstrap 95% CI [0.995301, 1.000253] on the
+integer shape it claims, taken in the same invocation as its A/B. The bootstrap median-CI is the
+verdict gate and it excludes zero there. On the STRING shape the same gate does NOT exclude zero,
+and this row does not hide behind that — see below.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### PROVENANCE
+
+  ELF           AFTER `ac336d8a39c9a2f33084ad89e854996ca8e44e9d41c8593f0726c7774d5f7e9a`,
+                BEFORE `ea8541b889796e396ee203b75ce35d1c11b6f422d35091b13858b6a08ed77c1e`.
+  bench_elf_sha256=ac336d8a39c9a2f33084ad89e854996ca8e44e9d41c8593f0726c7774d5f7e9a
+
+  Booted and hashed from `/proc/<pid>/exe`. Not a self-report and not claimed as one.
+
+  ALSO DISCHARGED HERE: `7c45e08ad` shipped without `cargo test -p fr-store` because a peer's
+  uncommitted `lib.rs` had the test build red, and its retry predicate said to re-run it. The tree
+  is green again and the suite passes — 940, 0 failures — with that change in it.
+
+### THE LEVER
+
+Every INTEGER arm of the listpack decoder calls `entry_len_with_backlen` with a literal `data_len`
+— 1, 2, 3, 4, 5 or 9. Out of line, those constants bought nothing: `backlen_byte_count`'s five-way
+match ran, its result was compared against 1, and the whole thing cost a call. The frame measured
+8,700.0 instr/key, 29.00 per element, on a 300-integer list RESTORE, for what is on that path a
+bounds check and one byte compare.
+
+`entry_len_one_byte_backlen` is that case, `#[inline]`, called from the twelve constant-width sites.
+With a constant argument it folds to exactly the bounds check and the compare. It also drops one
+`checked_add`: with a one-byte backlen, `backlen_start + 1 > data.len()` is
+`backlen_start >= data.len()`, and the overflow that guard caught (`backlen_start == usize::MAX`)
+is caught by the same test with the same `TruncatedEntry`.
+
+    entry_len_with_backlen   8,700.0 -> ABSENT from the integer profile
+    decode_value_spans self  20,604.0 -> 21,201.0   (the folded body, now inline)
+
+  THE STRING ARMS WERE DELIBERATELY LEFT ALONE, and finding out why cost two extra builds. The
+  first two attempts changed the SHARED function — once with `#[inline]`, once by restructuring its
+  body so the `data_len <= 127` case is tested first. Both made the integer shape faster and both
+  made the STRING shape slower, because a string arm's `data_len` is `1 + slen`, which folds
+  nothing, so all those sites received was a bigger decoder:
+
+    variant                              integer worst    string worst
+    shared fn, `#[inline]`                  −9.36 pct        +0.66 pct
+    shared fn, restructured body            −9.59 pct        +0.85 pct
+    SPLIT CALL SITE (this row)              −9.48 pct        +0.71 pct (deterministic)
+
+  ORACLE: `entry_len_one_byte_backlen_matches_the_general_form_qj6jn` compares the folded form
+  against `entry_len_with_backlen` — a genuinely separate implementation, still live on the string
+  arms — at every width it may see, at eleven cursor placements including `usize::MAX` and both
+  sides of the buffer end, and on an empty buffer. It pins the ERROR VARIANT, not just the length,
+  because the dropped `checked_add` is exactly the kind of equivalence that is easy to assert and
+  easy to get wrong.
+
+### THE MEASUREMENT, INCLUDING THE SHAPE THAT LOSES
+
+    ALL-INTEGER list, RESTORE+DUMP, 300 elements, slope 10 vs 30 keys
+      −9.6935 / −9.5087 / −9.6011 (median) pct across four draws, nulls −0.089 / −0.456
+      A/B median −9.6011 pct, CI [−9.7087, −9.4845]; null ratio 0.997275, CI [0.995301, 1.000253]
+      WORST SINGLE DRAW −9.4845 pct  <- the figure this row claims
+
+    Deterministic whole-shape totals, which have no draw-to-draw exposure at all:
+
+      shape          BEFORE      AFTER       delta      pct
+      all-integer    83,300.1    75,419.3    −7,880.8   −9.46
+      50/50 mixed    71,226.5    66,665.9    −4,560.6   −6.40
+      all-string     59,517.8    59,941.1      +423.3   +0.71   <- a REAL cost, not noise
+
+  THE STRING SHAPE LOSES AND THE ROW SAYS SO IN ITS HEADING. Its whole-op A/B reads +0.73 pct
+  median with a CI that STRADDLES zero — and it would have been easy to quote that straddle and
+  call the shape a null. The deterministic total refuses that reading: +423.3 instructions per key,
+  reproducible, on a source path whose bytes did not change. What changed is the module's layout,
+  because twelve inlined copies make the decoder bigger.
+
+  The trade is accepted on this evidence: the integer gain is 7,880.8 instructions per key against
+  a 423.3 loss, nineteen to one, and the composition a real workload has — the mixed list — reads
+  −6.40 pct. A list of pure strings is the only shape that pays, and it pays 0.71 pct.
+
+  Host: 88-91 pct idle, loadavg 11.6-12.7 on the quoted draws, MHz mean 1900-2500 against a
+  1429-4292 spread. The window degraded to loadavg 19.7 after the last arm and nothing was taken
+  there.
+
+### PARITY
+
+    digit-leading / mixed / canonical pools, BEFORE vs AFTER:            0 of 75 diverging
+      the same 75 vs redis 7.2.4 on ENCODING + LLEN + LRANGE:            0 of 75 diverging
+    INTEGER round-trip (LRANGE after RESTORE + DUMP bytes) before/after: 0 of 30 diverging
+      and vs redis 7.2.4:                                                0 of 30 diverging
+    BEFORE-vs-AFTER DUMP BYTES, string shapes:                           0 of 84 diverging
+    workload sweep vs redis 7.2.4:                                       4 of 42, UNCHANGED
+    fr-persist 230 / fr-store 940, 0 failures; clippy clean; fmt clean.
+
+### RETRY PREDICATES
+
+  1. The +0.71 pct on all-string RESTORE is a live cost, not a rounding artifact. Reopen ONLY IF
+     someone shows the string arms recovering it — the likely route is fewer inlined copies, e.g.
+     a `const N: usize` generic so the twelve sites share one folded body per width rather than
+     twelve. Do NOT attempt it by putting the fast path back into the shared function: that was
+     measured twice, at +0.66 and +0.85 pct, and is worse.
+  2. `write_u64_digits` is now the largest single term on the integer path at 57.09 instr per
+     element, unchanged across four levers, and `dcd149230`'s successor row REJECTED widening it
+     to four digits per step. It needs an approach that removes multiplies rather than regrouping
+     them; nothing else on this path is above 25 instructions per element.
+  3. The mixed-list figure is NOT the average of the two pure ones — −6.40 pct where averaging
+     −9.46 and +0.71 predicts −4.38 — because node packing differs with composition. Quote the
+     shape, per `feedback_quote_instr_per_element_when_the_denominator_moves`.
