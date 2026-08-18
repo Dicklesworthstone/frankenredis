@@ -11256,6 +11256,10 @@ fn process_buffered_frames(
                         && packet.d.eq_ignore_ascii_case(b"WITHSCORES")
                     {
                         let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                        let default_read_allowed = Some(
+                            *plain_get_read_gate_cache
+                                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+                        );
                         if runtime
                             .execute_plain_zrange_byscore_withscores_borrowed_into(
                                 packet.key,
@@ -11264,7 +11268,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                         {
@@ -12467,6 +12471,10 @@ fn process_buffered_frames(
                     // canonical syntax error. Zero-copy _into -> FastEncodedReply.
                     if packet.c.eq_ignore_ascii_case(b"WITHSCORES") {
                         let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                        let default_read_allowed = Some(
+                            *plain_get_read_gate_cache
+                                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+                        );
                         if runtime
                             .execute_plain_zrevrange_withscores_borrowed_into(
                                 packet.key,
@@ -12475,7 +12483,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                         {
@@ -12576,6 +12584,10 @@ fn process_buffered_frames(
                     // ZRANGEBYSCORE key min max WITHSCORES: a=min, b=max, c=token.
                     if packet.c.eq_ignore_ascii_case(b"WITHSCORES") {
                         let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                        let default_read_allowed = Some(
+                            *plain_get_read_gate_cache
+                                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+                        );
                         if runtime
                             .execute_plain_zrangebyscore_withscores_borrowed_into(
                                 packet.key,
@@ -12584,7 +12596,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                         {
@@ -12650,6 +12662,14 @@ fn process_buffered_frames(
                     // ZREVRANGEBYSCORE key max min WITHSCORES: a=max, b=min, c=token.
                     if packet.c.eq_ignore_ascii_case(b"WITHSCORES") {
                         let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                        let default_read_allowed = Some(
+                            *plain_get_read_gate_cache
+                                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+                        );
+                        let default_read_allowed = Some(
+                            *plain_get_read_gate_cache
+                                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+                        );
                         if runtime
                             .execute_plain_zrevrangebyscore_withscores_borrowed_into(
                                 packet.key,
@@ -12658,7 +12678,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                         {
@@ -12693,6 +12713,10 @@ fn process_buffered_frames(
                 ) {
                     // ZREVRANGEBYSCORE key max min LIMIT offset count: a=max, b=min,
                     // c=LIMIT, d=offset, e=count.
+                    let default_read_allowed = Some(
+                        *plain_get_read_gate_cache
+                            .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+                    );
                     if packet.c.eq_ignore_ascii_case(b"LIMIT")
                         && runtime
                             .execute_plain_zrevrangebyscore_limit_borrowed_into(
@@ -12703,7 +12727,7 @@ fn process_buffered_frames(
                                 packet.e,
                                 ts,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                     {
@@ -12726,6 +12750,10 @@ fn process_buffered_frames(
                     b"*4\r\n$16\r\n",
                     b"ZREVRANGEBYSCORE",
                 ) {
+                    let default_read_allowed = Some(
+                        *plain_get_read_gate_cache
+                            .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+                    );
                     if runtime
                         .execute_plain_zrevrangebyscore_borrowed_into(
                             packet.key,
@@ -12827,6 +12855,10 @@ fn process_buffered_frames(
                 ) {
                     // ZREVRANGEBYLEX key max min LIMIT offset count: a=max, b=min,
                     // c=LIMIT, d=offset, e=count.
+                    let default_read_allowed = Some(
+                        *plain_get_read_gate_cache
+                            .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+                    );
                     if packet.c.eq_ignore_ascii_case(b"LIMIT")
                         && runtime
                             .execute_plain_zrevrangebylex_limit_borrowed_into(
@@ -12837,7 +12869,7 @@ fn process_buffered_frames(
                                 packet.e,
                                 ts,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                     {
@@ -12857,6 +12889,10 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zrevrangebylex_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed = Some(
+                        *plain_get_read_gate_cache
+                            .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+                    );
                     if runtime
                         .execute_plain_zrevrangebylex_borrowed_into(
                             packet.key,
@@ -12889,6 +12925,10 @@ fn process_buffered_frames(
                 ) {
                     // ZRANGEBYLEX key min max LIMIT offset count: a=min, b=max,
                     // c=LIMIT, d=offset, e=count.
+                    let default_read_allowed = Some(
+                        *plain_get_read_gate_cache
+                            .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+                    );
                     if packet.c.eq_ignore_ascii_case(b"LIMIT")
                         && runtime
                             .execute_plain_zrangebylex_limit_borrowed_into(
@@ -12899,7 +12939,7 @@ fn process_buffered_frames(
                                 packet.e,
                                 ts,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                     {
@@ -18758,6 +18798,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Substr => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // (frankenredis-ozrro) As above. SUBSTR is upstream's GETRANGE alias with its
             // own name, so GETRANGE keeps its own route and is unaffected by this entry.
             if let Some(packet) = parse_borrowed_plain_substr_packet(unparsed, &parser_config)
@@ -18766,7 +18811,7 @@ fn try_dispatch_floor_classified_action(
                     packet.start,
                     packet.end,
                     ts,
-                    None,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
