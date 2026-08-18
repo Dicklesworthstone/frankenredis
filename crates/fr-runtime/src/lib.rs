@@ -16168,14 +16168,23 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_strlen_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    /// (frankenredis-getexgate) `default_read_allowed` is the CACHED read gate when the
+    /// caller holds one for this buffered pass, `None` to evaluate it. Flat 175.0 instr/op
+    /// when re-derived per packet.
+    fn can_execute_plain_strlen_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"STRLEN".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `STRLEN key`: mirrors
@@ -16184,8 +16193,13 @@ impl Runtime {
     /// WRONGTYPE error reply for a non-string key, exactly like the generic
     /// handler. Returns None (fall back) on any disabling state.
     /// (frankenredis-uz39v)
-    pub fn execute_plain_strlen_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
-        if !self.can_execute_plain_strlen_borrowed(key, now_ms) {
+    pub fn execute_plain_strlen_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_strlen_borrowed(key, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -18129,11 +18143,15 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-getexgate) `default_read_allowed` is the CACHED read gate when the
+    /// caller holds one for this buffered pass, `None` to evaluate it. Flat 175.0 instr/op
+    /// when re-derived per packet.
     fn can_execute_plain_sismember_borrowed(
         &mut self,
         key: &[u8],
         member: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"SISMEMBER".len()
@@ -18142,7 +18160,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `SISMEMBER key member`:
@@ -18155,8 +18174,9 @@ impl Runtime {
         key: &[u8],
         member: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_sismember_borrowed(key, member, now_ms) {
+        if !self.can_execute_plain_sismember_borrowed(key, member, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -29777,11 +29797,15 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-getexgate) `default_read_allowed` is the CACHED read gate when the
+    /// caller holds one for this buffered pass, `None` to evaluate it. Flat 175.0 instr/op
+    /// when re-derived per packet.
     fn can_execute_plain_hexists_borrowed(
         &mut self,
         key: &[u8],
         field: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"HEXISTS".len()
@@ -29790,7 +29814,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `HEXISTS key field`: mirrors
@@ -29803,8 +29828,9 @@ impl Runtime {
         key: &[u8],
         field: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_hexists_borrowed(key, field, now_ms) {
+        if !self.can_execute_plain_hexists_borrowed(key, field, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -29912,14 +29938,23 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_llen_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    /// (frankenredis-getexgate) `default_read_allowed` is the CACHED read gate when the
+    /// caller holds one for this buffered pass, `None` to evaluate it. Flat 175.0 instr/op
+    /// when re-derived per packet.
+    fn can_execute_plain_llen_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"LLEN".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `LLEN key`: mirrors
@@ -29928,8 +29963,13 @@ impl Runtime {
     /// WRONGTYPE error reply for a non-list key, exactly like the generic
     /// handler. Returns None (fall back) on any disabling state.
     /// (frankenredis-h8gbc)
-    pub fn execute_plain_llen_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
-        if !self.can_execute_plain_llen_borrowed(key, now_ms) {
+    pub fn execute_plain_llen_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_llen_borrowed(key, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -34306,14 +34346,23 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_scard_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    /// (frankenredis-getexgate) `default_read_allowed` is the CACHED read gate when the
+    /// caller holds one for this buffered pass, `None` to evaluate it. Flat 175.0 instr/op
+    /// when re-derived per packet.
+    fn can_execute_plain_scard_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"SCARD".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `SCARD key`: mirrors
@@ -34323,8 +34372,13 @@ impl Runtime {
     /// Returns the set cardinality, or a WRONGTYPE error reply for a non-set key,
     /// exactly like the generic handler. Returns None (fall back) on any
     /// disabling state. (frankenredis-h8gbc)
-    pub fn execute_plain_scard_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
-        if !self.can_execute_plain_scard_borrowed(key, now_ms) {
+    pub fn execute_plain_scard_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_scard_borrowed(key, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -51835,13 +51889,13 @@ mod tests {
         }
 
         let hit = fast
-            .execute_plain_strlen_borrowed(b"s", 2)
+            .execute_plain_strlen_borrowed(b"s", 2, None)
             .expect("default STRLEN should take borrowed fast path");
         assert_eq!(hit, generic.execute_frame(command(&[b"STRLEN", b"s"]), 2));
         assert_eq!(hit, RespFrame::Integer(5));
 
         let miss = fast
-            .execute_plain_strlen_borrowed(b"nokey", 3)
+            .execute_plain_strlen_borrowed(b"nokey", 3, None)
             .expect("missing STRLEN should take borrowed fast path");
         assert_eq!(
             miss,
@@ -51850,7 +51904,7 @@ mod tests {
         assert_eq!(miss, RespFrame::Integer(0));
 
         let wrongtype = fast
-            .execute_plain_strlen_borrowed(b"l", 4)
+            .execute_plain_strlen_borrowed(b"l", 4, None)
             .expect("wrong-type STRLEN should take borrowed fast path");
         assert_eq!(
             wrongtype,
@@ -51892,9 +51946,9 @@ mod tests {
     fn plain_strlen_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"s", b"hi"]), 1);
-        assert!(rt.execute_plain_strlen_borrowed(b"s", 2).is_some());
+        assert!(rt.execute_plain_strlen_borrowed(b"s", 2, None).is_some());
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
-        assert!(rt.execute_plain_strlen_borrowed(b"s", 4).is_none());
+        assert!(rt.execute_plain_strlen_borrowed(b"s", 4, None).is_none());
     }
 
     #[test]
@@ -51909,13 +51963,13 @@ mod tests {
         }
 
         let len = fast
-            .execute_plain_llen_borrowed(b"l", 2)
+            .execute_plain_llen_borrowed(b"l", 2, None)
             .expect("default LLEN should take borrowed fast path");
         assert_eq!(len, generic.execute_frame(command(&[b"LLEN", b"l"]), 2));
         assert_eq!(len, RespFrame::Integer(3));
 
         let missing = fast
-            .execute_plain_llen_borrowed(b"nokey", 3)
+            .execute_plain_llen_borrowed(b"nokey", 3, None)
             .expect("missing-key LLEN should take borrowed fast path");
         assert_eq!(
             missing,
@@ -51924,7 +51978,7 @@ mod tests {
         assert_eq!(missing, RespFrame::Integer(0));
 
         let wt = fast
-            .execute_plain_llen_borrowed(b"str", 4)
+            .execute_plain_llen_borrowed(b"str", 4, None)
             .expect("wrong-type LLEN should take borrowed fast path");
         assert_eq!(wt, generic.execute_frame(command(&[b"LLEN", b"str"]), 4));
         assert!(matches!(wt, RespFrame::Error(_)));
@@ -51963,9 +52017,9 @@ mod tests {
     fn plain_llen_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"RPUSH", b"l", b"a"]), 1);
-        assert!(rt.execute_plain_llen_borrowed(b"l", 2).is_some());
+        assert!(rt.execute_plain_llen_borrowed(b"l", 2, None).is_some());
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
-        assert!(rt.execute_plain_llen_borrowed(b"l", 4).is_none());
+        assert!(rt.execute_plain_llen_borrowed(b"l", 4, None).is_none());
     }
 
     #[test]
@@ -51980,13 +52034,13 @@ mod tests {
         }
 
         let card = fast
-            .execute_plain_scard_borrowed(b"s", 2)
+            .execute_plain_scard_borrowed(b"s", 2, None)
             .expect("default SCARD should take borrowed fast path");
         assert_eq!(card, generic.execute_frame(command(&[b"SCARD", b"s"]), 2));
         assert_eq!(card, RespFrame::Integer(3));
 
         let missing = fast
-            .execute_plain_scard_borrowed(b"nokey", 3)
+            .execute_plain_scard_borrowed(b"nokey", 3, None)
             .expect("missing-key SCARD should take borrowed fast path");
         assert_eq!(
             missing,
@@ -51995,7 +52049,7 @@ mod tests {
         assert_eq!(missing, RespFrame::Integer(0));
 
         let wt = fast
-            .execute_plain_scard_borrowed(b"str", 4)
+            .execute_plain_scard_borrowed(b"str", 4, None)
             .expect("wrong-type SCARD should take borrowed fast path");
         assert_eq!(wt, generic.execute_frame(command(&[b"SCARD", b"str"]), 4));
         assert!(matches!(wt, RespFrame::Error(_)));
@@ -52429,9 +52483,9 @@ mod tests {
     fn plain_scard_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SADD", b"s", b"a"]), 1);
-        assert!(rt.execute_plain_scard_borrowed(b"s", 2).is_some());
+        assert!(rt.execute_plain_scard_borrowed(b"s", 2, None).is_some());
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
-        assert!(rt.execute_plain_scard_borrowed(b"s", 4).is_none());
+        assert!(rt.execute_plain_scard_borrowed(b"s", 4, None).is_none());
     }
 
     #[test]
@@ -55331,7 +55385,7 @@ mod tests {
         }
 
         let yes = fast
-            .execute_plain_sismember_borrowed(b"s", b"a", 2)
+            .execute_plain_sismember_borrowed(b"s", b"a", 2, None)
             .expect("default SISMEMBER should take borrowed fast path");
         assert_eq!(
             yes,
@@ -55340,7 +55394,7 @@ mod tests {
         assert_eq!(yes, RespFrame::Integer(1));
 
         let no = fast
-            .execute_plain_sismember_borrowed(b"s", b"z", 3)
+            .execute_plain_sismember_borrowed(b"s", b"z", 3, None)
             .expect("non-member SISMEMBER should take borrowed fast path");
         assert_eq!(
             no,
@@ -55349,7 +55403,7 @@ mod tests {
         assert_eq!(no, RespFrame::Integer(0));
 
         let missing = fast
-            .execute_plain_sismember_borrowed(b"nokey", b"a", 4)
+            .execute_plain_sismember_borrowed(b"nokey", b"a", 4, None)
             .expect("missing-key SISMEMBER should take borrowed fast path");
         assert_eq!(
             missing,
@@ -55358,7 +55412,7 @@ mod tests {
         assert_eq!(missing, RespFrame::Integer(0));
 
         let wt = fast
-            .execute_plain_sismember_borrowed(b"str", b"a", 5)
+            .execute_plain_sismember_borrowed(b"str", b"a", 5, None)
             .expect("wrong-type SISMEMBER should take borrowed fast path");
         assert_eq!(
             wt,
@@ -55400,9 +55454,9 @@ mod tests {
     fn plain_sismember_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SADD", b"s", b"a"]), 1);
-        assert!(rt.execute_plain_sismember_borrowed(b"s", b"a", 2).is_some());
+        assert!(rt.execute_plain_sismember_borrowed(b"s", b"a", 2, None).is_some());
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
-        assert!(rt.execute_plain_sismember_borrowed(b"s", b"a", 4).is_none());
+        assert!(rt.execute_plain_sismember_borrowed(b"s", b"a", 4, None).is_none());
     }
 
     #[test]
@@ -55676,7 +55730,7 @@ mod tests {
         }
 
         let yes = fast
-            .execute_plain_hexists_borrowed(b"h", b"f", 2)
+            .execute_plain_hexists_borrowed(b"h", b"f", 2, None)
             .expect("default HEXISTS should take borrowed fast path");
         assert_eq!(
             yes,
@@ -55685,7 +55739,7 @@ mod tests {
         assert_eq!(yes, RespFrame::Integer(1));
 
         let no = fast
-            .execute_plain_hexists_borrowed(b"h", b"nope", 3)
+            .execute_plain_hexists_borrowed(b"h", b"nope", 3, None)
             .expect("missing-field HEXISTS should take borrowed fast path");
         assert_eq!(
             no,
@@ -55694,7 +55748,7 @@ mod tests {
         assert_eq!(no, RespFrame::Integer(0));
 
         let missing = fast
-            .execute_plain_hexists_borrowed(b"nokey", b"f", 4)
+            .execute_plain_hexists_borrowed(b"nokey", b"f", 4, None)
             .expect("missing-key HEXISTS should take borrowed fast path");
         assert_eq!(
             missing,
@@ -55703,7 +55757,7 @@ mod tests {
         assert_eq!(missing, RespFrame::Integer(0));
 
         let wt = fast
-            .execute_plain_hexists_borrowed(b"str", b"f", 5)
+            .execute_plain_hexists_borrowed(b"str", b"f", 5, None)
             .expect("wrong-type HEXISTS should take borrowed fast path");
         assert_eq!(
             wt,
@@ -55795,9 +55849,9 @@ mod tests {
     fn plain_hexists_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"HSET", b"h", b"f", b"v"]), 1);
-        assert!(rt.execute_plain_hexists_borrowed(b"h", b"f", 2).is_some());
+        assert!(rt.execute_plain_hexists_borrowed(b"h", b"f", 2, None).is_some());
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
-        assert!(rt.execute_plain_hexists_borrowed(b"h", b"f", 4).is_none());
+        assert!(rt.execute_plain_hexists_borrowed(b"h", b"f", 4, None).is_none());
     }
 
     #[test]

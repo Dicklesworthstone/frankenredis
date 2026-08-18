@@ -8464,7 +8464,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_hexists_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_hexists_borrowed(packet.key, packet.member, ts)
+                        runtime.execute_plain_hexists_borrowed(packet.key, packet.member, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8509,7 +8509,7 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_strlen_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_strlen_borrowed(packet.key, ts) {
+                    if let Some(response) = runtime.execute_plain_strlen_borrowed(packet.key, ts, None) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -8527,7 +8527,7 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_llen_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_llen_borrowed(packet.key, ts) {
+                    if let Some(response) = runtime.execute_plain_llen_borrowed(packet.key, ts, None) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -8545,7 +8545,7 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_scard_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_scard_borrowed(packet.key, ts) {
+                    if let Some(response) = runtime.execute_plain_scard_borrowed(packet.key, ts, None) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -9007,7 +9007,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_sismember_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_sismember_borrowed(packet.key, packet.member, ts)
+                        runtime.execute_plain_sismember_borrowed(packet.key, packet.member, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13546,7 +13546,21 @@ fn process_buffered_frames(
                 }
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response }) => {
                     processed_frames = processed_frames.saturating_add(1);
-                    plain_get_read_gate_cache = None;
+                    // (frankenredis-getexgate) The READ gate cache is deliberately NOT cleared
+                    // here, and the WRITE gate cache never was — that asymmetry was the whole
+                    // reason five read conversions failed while every write conversion worked.
+                    //
+                    // Serving a borrowed FastReply cannot change what the gate reads. The gate
+                    // is a function of session and server state (auth/ACL, selected db,
+                    // subscription, client pause, tracking, replication role), and EVERY command
+                    // that can move any of those goes through the GENERIC argv path, which
+                    // clears both caches at the `Parsed` arm below and again before
+                    // `process_argv_frame`. A route that reaches this arm is by construction a
+                    // borrowed fast path that touched none of them.
+                    //
+                    // MEASURED: with the clear in place, `llen` re-derived the gate 1.0000
+                    // times/op while `lindex` — identical in every way except that it returns
+                    // FastEncodedReply, whose arm never cleared the cache — held it at 0.0000.
                     output_hard_limit_cache = None;
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if !runtime.suppress_current_network_reply() {
@@ -14057,7 +14071,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((key, field)) = borrowed_plain_hexists_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_hexists_borrowed(key, field, ts)
+                                runtime.execute_plain_hexists_borrowed(key, field, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14122,7 +14136,7 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some(key) = borrowed_plain_llen_args(&borrowed_args)
-                            && let Some(response) = runtime.execute_plain_llen_borrowed(key, ts)
+                            && let Some(response) = runtime.execute_plain_llen_borrowed(key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14344,7 +14358,7 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some(key) = borrowed_plain_strlen_args(&borrowed_args)
-                            && let Some(response) = runtime.execute_plain_strlen_borrowed(key, ts)
+                            && let Some(response) = runtime.execute_plain_strlen_borrowed(key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14352,7 +14366,7 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some(key) = borrowed_plain_scard_args(&borrowed_args)
-                            && let Some(response) = runtime.execute_plain_scard_borrowed(key, ts)
+                            && let Some(response) = runtime.execute_plain_scard_borrowed(key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14398,7 +14412,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((key, member)) = borrowed_plain_sismember_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_sismember_borrowed(key, member, ts)
+                                runtime.execute_plain_sismember_borrowed(key, member, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -19521,9 +19535,14 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Hexists => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_hexists_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_hexists_borrowed(packet.key, packet.member, ts)
+                    runtime.execute_plain_hexists_borrowed(packet.key, packet.member, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22051,8 +22070,13 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Strlen => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_strlen_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_strlen_borrowed(packet.key, ts)
+                && let Some(response) = runtime.execute_plain_strlen_borrowed(packet.key, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22070,8 +22094,13 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Llen => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_llen_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_llen_borrowed(packet.key, ts)
+                && let Some(response) = runtime.execute_plain_llen_borrowed(packet.key, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22089,8 +22118,13 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Scard => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_scard_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_scard_borrowed(packet.key, ts)
+                && let Some(response) = runtime.execute_plain_scard_borrowed(packet.key, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22345,12 +22379,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Sismember => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // SISMEMBER mirrors ZCOUNT: the borrowed executor returns an integer
             // RespFrame (FastReply). Parser+executor already shipped; only the
             // dispatch-floor routing is new (frankenredis-xymiw).
             if let Some(packet) = parse_borrowed_plain_sismember_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_sismember_borrowed(packet.key, packet.member, ts)
+                    runtime.execute_plain_sismember_borrowed(packet.key, packet.member, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
