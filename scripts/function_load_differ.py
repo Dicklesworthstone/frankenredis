@@ -186,6 +186,17 @@ CASES = [
     ("single_non_table_arg",
      "redis.register_function('f')",
      "lone argument that is not a table"),
+    # (frankenredis-fnfdup, regression pin for 2ec539a02) The same name registered TWICE in one
+    # library. fr's SCANNING path always refused this and its unit test still passes, because that
+    # test calls store.function_load directly -- but 9hori moved FUNCTION LOAD onto the executed
+    # path, which had no per-library duplicate check, so this LOADED. Upstream refuses it in
+    # functions.c::functionLibCreateFunction. This row goes through FUNCTION LOAD, which is the
+    # whole point: it can see a change of which store API the command calls, and the unit test
+    # cannot.
+    ("duplicate_fn_name",
+     "redis.register_function('dupe', function(k,a) return 1 end)\n"
+     "redis.register_function('dupe', function(k,a) return 2 end)",
+     "one name registered twice in a library"),
     # ---- controls: both arms MUST already agree on these ----
     ("CONTROL_no_register",
      "local x = 1",
