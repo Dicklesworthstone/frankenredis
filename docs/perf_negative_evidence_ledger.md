@@ -44871,3 +44871,135 @@ miss A/B to confirm this -- it replicated to 0.15 points and the absolute level 
 unstable, so a third draw adds nothing. If the throughput figure does not move, the finding
 stands as a locality mechanism with no user-visible consequence on this shape, and that is worth
 recording rather than burying.
+
+## 2026-08-18 CrimsonHawk: SURFACE (COMPETITIVE) — FCALL is **55.3019x** Redis 7.2.4 on a 32-function library and EVALSHA is **4.5408x** on a 4 KB script, because fr's per-call cost scales with SCRIPT SIZE and Redis's does not (`frankenredis-kbyhy`, `frankenredis-sf510`)
+
+Claim class: COMPETITIVE
+Campaign output: yes
+
+Two beads I filed from source reading under a build hold, both explicitly unmeasured, both now
+measured. The dose-response they specified as their own gate came back emphatic — and it
+confirms the PREDICTION while correcting the MECHANISM I had guessed for one of them.
+
+### THE LADDER, REPLICATED, WORST BOUND QUOTED
+
+fr/Redis 7.2.4 instructions per op, two-point (N=1000, 2N=2000, startup AND seeding cancelled).
+ABOVE 1.0 means fr is BEHIND. Both replicates given; the WORST of each pair is quoted.
+
+  shape            r1          r2          WORST BOUND
+  fcall_lib1       3.5988x     -           3.5988x   (single draw)
+  fcall_lib8      11.0818x    11.3449x    11.3449x
+  fcall_lib32     53.7714x    55.3013x    55.3013x
+  evalsha_small    1.2345x     1.1946x     1.2345x
+  evalsha_large    4.5408x     4.5388x     4.5408x
+
+**REDIS IS FLAT AND fr IS NOT.** Going from a 1-function to a 32-function library, with the
+invoked body byte-identical:
+
+  redis   7,297.6 -> 7,742.8 instr/op     (+6.1 pct)
+  fr     26,262.4 -> 413,481.1 instr/op   (15.7x)
+
+Redis compiles the library once and calls the function. fr re-materialises the library on every
+call. The ratio is not a constant-factor gap; it is a different asymptotic behaviour, which is
+why one shape size would have hidden it entirely.
+
+### THE EVALSHA PAIR IS THE CLEAN EXPERIMENT
+
+`evalsha_large` differs from `evalsha_small` only by 4000 bytes of **Lua COMMENT**. The
+interpreter executes exactly the same thing — `return 1` — in both. So the 1.2345x -> 4.5408x
+rise cannot be execution work. It is per-byte overhead on a path that should be O(1) after the
+first compile, and it is the mechanism `frankenredis-sf510` predicted from source: EVALSHA
+`.to_vec()`s the whole script body and then hashes it to probe a cache keyed on source bytes,
+despite already holding the SHA it was called with.
+
+That is a case where the padding being inert is the whole point of the design — an
+execution-heavy payload would have confounded it.
+
+### THE MECHANISM I GUESSED FOR FCALL WAS ONLY PART OF IT
+
+`frankenredis-kbyhy` predicted the cost was the rebuild-and-hash of the library text. Frames on
+`fcall_lib32` say that is real but SECOND-ORDER:
+
+  19,024.6  mi_theap_malloc_aligned          }
+  18,717.0  mi_free                          }  ~53,000 instr/op in the ALLOCATOR
+   9,899.1  _mi_page_malloc_zero             }
+   5,223.0  mi_malloc_aligned                }
+   9,366.5  drop_glue Vec<(String, Rc<RefCell<LuaValue>>)>   }  ~23,000 instr/op
+   7,636.0  clone    Vec<Vec<(String, Rc<RefCell<LuaValue>>)>> }  the Lua GLOBALS/scope clone
+   6,048.0  SpecFromIterNested ... captured_locals            }
+   9,664.0  StrSearcher::new                 <- the text scan itself
+   8,130.0  Utf8Chunks::next                 <- from_utf8_lossy walking the source
+  10,539.6  __memcpy_avx_unaligned_erms
+
+So the dominant term is allocation and the per-call clone of Lua globals/scope — which is the
+mechanism my OWN earlier row already identified as the root of the EVAL gap
+(perf_negative_evidence_ledger.md:13594, "root = per-EVAL Lua-globals clone", 4.1x). The
+cache-key hash and the text scan are present and real, but they are the smaller half.
+
+**The priority caveat I wrote into sf510 was therefore correct, and it applies to kbyhy rather
+than to sf510.** I wrote: "If the per-EVAL globals clone really dominates, a copy-plus-hash is
+second-order and this bead should be closed." For FCALL it does dominate. For EVALSHA the
+comment-padding experiment isolates the copy-and-hash cleanly, so that bead's mechanism stands.
+
+### ONE NEW COUNTED FACT
+
+`compile_lua_chunk_cached` runs **2.0000 calls/op** on FCALL, and `from_utf8_lossy` likewise
+2.0000 calls/op. Two full-source hashes per invocation, not one. That was not predicted by
+either bead and is a straightforward duplicate to remove independently of any caching redesign.
+
+`transform_register_function` and `exec_block` both read 0.0000 calls/op — they are inlined, so
+their cost appears in the callers above rather than as frames of their own. Naming that matters
+because a reader grepping for them in the profile would wrongly conclude they never run.
+
+### COUNTED MECHANISM
+
+Two-point callgrind subtraction at N=1000 and 2N=2000 with startup and seeding cancelled, so
+the FUNCTION LOAD / SCRIPT LOAD seeding is NOT in these figures. Exact call counts:
+`compile_lua_chunk_cached` 2.0000 calls/op and `from_utf8_lossy` 2.0000 calls/op on
+`fcall_lib32`. Instruction counts per frame as tabulated above. Ratios replicated twice per
+shape with the worst bound quoted.
+
+The instrument carries its own null, measured in a single invocation of the same harness on one
+ELF and one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios (banked in `0bf781d57`). The
+smallest effect claimed here is the 1.2345x EVALSHA row, which is 23 pct — two orders of
+magnitude outside that interval.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           10e367dc8f1e2767, plain `--release` at HEAD `7860d231d`, no feature flags, built
+                locally with RCH_CARGO_WRAPPER_BYPASS=1, path taken from
+                `--message-format=json`, copied to a private path and sha256'd there.
+  bench_elf_sha256=10e367dc8f1e2767dae8b43f3004e07b0c41d593bb75207307f58b0511e2f5ee
+  incumbent     vendored redis 7.2.4, live arm started, seeded and measured in the SAME
+                INVOCATION as the fr arm — one harness process runs both servers side-by-side
+                per row, so numerator and denominator share one window and one host state.
+  harness       `scripts/shape_instr_per_op.py`, `scripts/frame_delta.py`,
+                `scripts/call_count_delta.py`. The five shapes and the list-seed support they
+                required landed in `7860d231d`.
+  host          thinkstation1, 64 cores observed, powersave governor. /data 132G free checked
+                immediately before the build and 131G after the runs — the volume swung to 362M
+                and back earlier tonight, so it was re-checked between arms.
+  PER-ARM loadavg / CPU MHz
+                build + first ladder   load 12.69 10.39 8.76
+                fr-vs-redis draws      load 8.26 9.58 8.60, CPU MHz mean 2086
+                replicates             load 8.61 9.32 8.57
+  admissibility Instruction counts are deterministic and load-immune; no timed row is claimed.
+
+### RETRY PREDICATE
+
+1. Both beads are CONFIRMED and neither should be closed. `frankenredis-sf510` (EVALSHA) has a
+   clean isolated mechanism and is the cheaper fix: key the compiled cache by SHA, or hold the
+   `Rc<CompiledChunk>` beside the bytes in `Store::script_cache`, removing a full copy and a
+   full hash per call.
+2. `frankenredis-kbyhy` (FCALL) must NOT be fixed by caching alone. The dominant term is the
+   per-call allocation and Lua globals/scope clone already named in ledger:13594. A cache-key
+   change would remove ~28,000 of ~413,000 instr/op at 32 functions and leave 53.4x looking like
+   50x. Reopen ledger:13594 as the primary lever for that path.
+3. Reject any FCALL fix whose measured effect on `fcall_lib32` is under 100,000 instr/op — that
+   is the floor below which the asymptote has not moved.
+4. Re-run the ladder, not a single size. `fcall_lib1` alone reads 3.5988x and would have been
+   filed as a modest gap; the same code reads 55.3x at 32 functions.
