@@ -19681,6 +19681,126 @@ impl Runtime {
     /// "ERR COUNT can't be negative" for BOTH unparseable integers and explicit
     /// negatives, so returning None hands both cases to generic, which owns the
     /// exact error text. Reproducing that text here would be a second copy to drift.
+    /// `LPOS key element MAXLEN n` -- bound the comparisons, return the FIRST match.
+    ///
+    /// (frankenredis-uu33c) MAXLEN was the one arity-5 LPOS form the floor arm did not serve. The
+    /// class claims every arity-5 LPOS, so a MAXLEN packet was CLAIMED and then declined by the
+    /// arm -- and a floor decline falls through to the GENERIC path, not back to the cascade, so
+    /// it skipped both the arm that would not serve it and the cascade arm that would.
+    ///
+    /// Semantically this is the RANK twin with the arguments swapped, not the COUNT twin: without
+    /// COUNT, upstream replies with a single position or nil, so the reply shape is
+    /// `positions.first()`, and `rank` stays at its default of 1 while `maxlen` carries the bound.
+    /// `lpos_full` already takes both, which is why no store change is needed.
+    pub fn execute_plain_lpos_maxlen_borrowed(
+        &mut self,
+        key: &[u8],
+        element: &[u8],
+        maxlen_arg: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
+        // (frankenredis-uu33c) Upstream t_list.c::lposCommand rejects a negative MAXLEN with
+        // "ERR MAXLEN can't be negative". Declining rather than replying keeps the exact wording
+        // in ONE place -- the generic path -- which is the same rule the RANK and COUNT twins
+        // follow for their own bad arguments.
+        let maxlen = parse_i64_arg(maxlen_arg).ok()?;
+        if maxlen < 0 {
+            return None;
+        }
+        let maxlen = usize::try_from(maxlen).ok()?;
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"LPOS".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || element.len() > self.policy.gate.max_bulk_len
+            || maxlen_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("lpos");
+        self.session.last_argv_len_sum =
+            b"LPOS".len() + key.len() + element.len() + b"MAXLEN".len() + maxlen_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .lpos_full(key, element, 1, None, maxlen, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = match result {
+            Ok(positions) => match positions.first() {
+                Some(&pos) => RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX)),
+                None => RespFrame::BulkString(None),
+            },
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_lpos_borrowed_metrics(
+            key,
+            element,
+            Some((b"MAXLEN", maxlen_arg)),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    /// (frankenredis-uu33c) Borrowed fast path for `LPOS key element COUNT n`.
+    ///
+    /// COUNT is NOT a variant of the RANK reply and must not be folded into it:
+    /// upstream `t_list.c::lposCommand` returns an ARRAY whenever COUNT is present —
+    /// including an EMPTY array for no matches, where the no-COUNT form returns a
+    /// nil bulk. `fr-command`'s generic path encodes exactly that at the
+    /// `count.is_some()` branch, and this mirrors it.
+    ///
+    /// Rank defaults to 1 (upstream's initialiser), maxlen to 0 (unbounded), which
+    /// is the same `lpos_full` call the generic path bottoms out in — so keyspace
+    /// hit/miss accounting is identical and no second scan strategy is introduced.
+    ///
+    /// Argument validation is a DECLINE, never an error reply, matching the RANK
+    /// executor above: upstream uses `getPositiveLongFromObjectOrReply` and emits
+    /// "ERR COUNT can't be negative" for BOTH unparseable integers and explicit
+    /// negatives, so returning None hands both cases to generic, which owns the
+    /// exact error text. Reproducing that text here would be a second copy to drift.
     pub fn execute_plain_lpos_count_borrowed(
         &mut self,
         key: &[u8],

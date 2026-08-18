@@ -20494,8 +20494,17 @@ fn try_dispatch_floor_classified_action(
                     runtime.execute_plain_lpos_rank_borrowed(packet.key, packet.a, packet.c, ts, default_read_allowed)
                 } else if packet.b.eq_ignore_ascii_case(b"COUNT") {
                     runtime.execute_plain_lpos_count_borrowed(packet.key, packet.a, packet.c, ts, default_read_allowed)
+                } else if packet.b.eq_ignore_ascii_case(b"MAXLEN") {
+                    // (frankenredis-uu33c) MAXLEN was the last arity-5 LPOS form this arm
+                    // claimed and did not serve, so it was dropped on GENERIC rather than
+                    // handed back to the cascade. Serving it here closes the one live
+                    // over-claim in this pair.
+                    runtime.execute_plain_lpos_maxlen_borrowed(packet.key, packet.a, packet.c, ts, default_read_allowed)
                 } else {
-                    // MAXLEN and any other option: still generic, still stranded.
+                    // Any FUTURE option keyword: still generic, still stranded, and still
+                    // explicit. The exhaustiveness note above applies unchanged -- an `else`
+                    // that meant RANK would run the new keyword AS RANK, a wrong answer
+                    // rather than a wrong route.
                     None
                 };
                 served.map(|response| (packet.consumed, response))
@@ -49657,12 +49666,12 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         let lpos_rows: [(&[u8], &[u8], bool); 3] = [
             (b"*5\r\n$4\r\nLPOS\r\n$1\r\nk\r\n$1\r\ne\r\n$4\r\nRANK\r\n$1\r\n1\r\n", b"RANK", true),
             (b"*5\r\n$4\r\nLPOS\r\n$1\r\nk\r\n$1\r\ne\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n", b"COUNT", true),
-            // MAXLEN is a real LPOS option the arm deliberately leaves on generic. It is
-            // CLAIMED and NOT SERVED, so it is the one live over-claim in this pair — recorded
-            // here as a known gap rather than asserted away. If the arm ever serves it, the
-            // `!serves` assertion below fails and this row must be updated: an allowance left in
-            // place after the gap closes is how a gate rots into permanent green.
-            (b"*5\r\n$4\r\nLPOS\r\n$1\r\nk\r\n$1\r\ne\r\n$6\r\nMAXLEN\r\n$1\r\n1\r\n", b"MAXLEN", false),
+            // MAXLEN WAS the one live over-claim in this pair: claimed by the class, declined
+            // by the arm, dropped on generic. The arm now serves it, so this row flipped to
+            // `true` in the SAME commit that widened the arm -- which is the discipline the row
+            // existed to enforce. An allowance left in place after the gap closes is how a gate
+            // rots into permanent green.
+            (b"*5\r\n$4\r\nLPOS\r\n$1\r\nk\r\n$1\r\ne\r\n$6\r\nMAXLEN\r\n$1\r\n1\r\n", b"MAXLEN", true),
         ];
 
         for (packet, keyword, arm_serves) in lpos_rows {
@@ -49688,8 +49697,9 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 "key_arg3 must land the option keyword in field b"
             );
 
-            let served =
-                parsed.b.eq_ignore_ascii_case(b"RANK") || parsed.b.eq_ignore_ascii_case(b"COUNT");
+            let served = parsed.b.eq_ignore_ascii_case(b"RANK")
+                || parsed.b.eq_ignore_ascii_case(b"COUNT")
+                || parsed.b.eq_ignore_ascii_case(b"MAXLEN");
             assert_eq!(
                 served,
                 arm_serves,
