@@ -2343,6 +2343,9 @@ fn install_shared_nothing_connections(
         runtime.track_connection_opened();
         let mut session = runtime.new_session();
         session.peer_addr = Some(peer_addr);
+        // (frankenredis-edwnn) Upstream reports the accepted socket's own local address,
+        // not a fixed loopback host.
+        session.local_addr = stream.local_addr().ok();
         #[cfg(unix)]
         {
             session.socket_fd = Some(stream.as_raw_fd());
@@ -5663,6 +5666,9 @@ fn accept_connections(
 
                 let mut session = runtime.new_session();
                 session.peer_addr = Some(peer_addr);
+                // (frankenredis-edwnn) Upstream reports the accepted socket's own local
+                // address, not a fixed loopback host.
+                session.local_addr = stream.local_addr().ok();
                 // (frankenredis-lxccd) Record the accepted socket's
                 // real file descriptor so CLIENT INFO / CLIENT LIST
                 // emit fd=<N> matching vendored Redis 7.2.4 instead

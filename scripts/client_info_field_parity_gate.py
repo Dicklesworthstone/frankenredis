@@ -73,10 +73,10 @@ DECLARED_LITERALS = {
 # `laddr` is a partial literal: fr substitutes the real PORT but hardcodes the host to
 # 127.0.0.1, where upstream reports getClientSockname(). Tracked separately because the
 # field is neither fully computed nor fully literal.
-PARTIAL_LITERALS = {
-    "laddr": ("getClientSockname(client)",
-              "the server is bound to, or reached on, a non-loopback local address"),
-}
+# (frankenredis-edwnn) `laddr` was a partial literal -- real port, hardcoded 127.0.0.1 host --
+# and is now rendered from the accepted socket's own local address, so it is deliberately NOT
+# declared here any more. Re-adding it would re-allow the hardcoded host this gate exists to catch.
+PARTIAL_LITERALS: dict[str, tuple[str, str]] = {}
 
 
 def upstream_fields():
@@ -141,6 +141,17 @@ def main():
         failures.append(
             "declared-hardcoded field(s) are now computed — good, but update "
             f"DECLARED_LITERALS so this gate keeps meaning something: {disappeared}")
+    # (frankenredis-edwnn) Same rule for PARTIAL_LITERALS. This check did not exist, so a partial
+    # that became fully computed kept being REPORTED as a live divergence and the gate still
+    # passed -- the gate reading less than it thinks, which is the defect this whole bead is about.
+    partial_fixed = sorted(
+        n for n in PARTIAL_LITERALS
+        if n in dict(fr_pairs) and n not in literal_now and n not in partial_now
+    )
+    if partial_fixed:
+        failures.append(
+            "declared-PARTIAL field(s) are now fully computed — good, but update "
+            f"PARTIAL_LITERALS so this gate keeps meaning something: {partial_fixed}")
 
     for name in sorted(literal_now & set(DECLARED_LITERALS)):
         upstream_src, condition = DECLARED_LITERALS[name]

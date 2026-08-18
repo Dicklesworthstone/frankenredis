@@ -5531,6 +5531,11 @@ pub struct ClientSession {
     client_reply: ClientReplyState,
     /// Client peer address (set on connection accept).
     pub peer_addr: Option<std::net::SocketAddr>,
+    /// (frankenredis-edwnn) The accepted socket's LOCAL address, upstream's
+    /// `getClientSockname(c)`. `None` for the non-TCP sessions (server-driven Lua, replica
+    /// handshake) that also report `fd=0`; CLIENT INFO falls back to the loopback rendering
+    /// for those, which is what fr emitted for every client before this field existed.
+    pub local_addr: Option<std::net::SocketAddr>,
     /// (frankenredis-lxccd) Per-client socket file descriptor, set by
     /// the TCP server immediately after accept() via AsRawFd. Used by
     /// CLIENT INFO / CLIENT LIST to emit the `fd=N` field matching
@@ -5578,6 +5583,7 @@ impl Clone for ClientSession {
             client_tracking: self.client_tracking.clone(),
             client_reply: self.client_reply.clone(),
             peer_addr: self.peer_addr,
+            local_addr: self.local_addr,
             socket_fd: self.socket_fd,
             qbuf_bytes: self.qbuf_bytes,
             qbuf_free_bytes: self.qbuf_free_bytes,
@@ -5685,6 +5691,7 @@ impl ClientSession {
         self.client_reply.skip_next = source.client_reply.skip_next;
         self.client_reply.suppress_current_response = source.client_reply.suppress_current_response;
         self.peer_addr = source.peer_addr;
+        self.local_addr = source.local_addr;
         self.socket_fd = source.socket_fd;
         self.connected_at_ms = source.connected_at_ms;
     }
@@ -5788,6 +5795,7 @@ impl ClientSession {
             && self.client_no_touch == source.client_no_touch
             && self.client_reply == source.client_reply
             && self.peer_addr == source.peer_addr
+            && self.local_addr == source.local_addr
             && self.socket_fd == source.socket_fd
             && self.connected_at_ms == source.connected_at_ms
     }
@@ -5887,6 +5895,7 @@ impl Default for ClientSession {
             client_tracking: ClientTrackingState::default(),
             client_reply: ClientReplyState::default(),
             peer_addr: None,
+            local_addr: None,
             socket_fd: None,
             qbuf_bytes: 0,
             qbuf_free_bytes: 0,
@@ -40095,10 +40104,18 @@ impl Runtime {
             // single LF). Earlier versions emitted CRLF here, leaving
             // a stray 0x0d byte in the bulk-string payload that broke
             // raw-byte parsers diffing against vendored.
-            "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem={} multi-mem={} rbs=16384 rbp=16384 obl={} oll=0 omem=0 tot-mem={} events={} cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
+            "id={} addr={} laddr={} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem={} multi-mem={} rbs=16384 rbp=16384 obl={} oll=0 omem=0 tot-mem={} events={} cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
             session.client_id,
             peer,
-            self.server.store.server_port,
+            // (frankenredis-edwnn) upstream getClientSockname(c). The port was already
+            // real here; the HOST was pinned to loopback, so a server bound to or reached
+            // on a non-loopback address reported the wrong local address to every client.
+            // The fallback is the exact string fr emitted before this field existed, so
+            // non-TCP sessions (fd=0) are unchanged.
+            match session.local_addr {
+                Some(addr) => addr.to_string(),
+                None => format!("127.0.0.1:{}", self.server.store.server_port),
+            },
             // (frankenredis-lxccd) Real socket fd when known; 0 for
             // non-TCP sessions (matches vendored behavior for the
             // server-driven Lua / replica handshake clients).
