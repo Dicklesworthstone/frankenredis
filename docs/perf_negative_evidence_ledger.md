@@ -46123,3 +46123,130 @@ the const-length store beating `extend_from_slice` by more than its own null ban
 through 8. **Do NOT re-derive the prize from the `__memcpy_avx_unaligned_erms` frame in a
 whole-server profile** — that frame is shared by many callers and moved 55.3 to 69.8 between two
 readings of the same arm.
+
+## 2026-08-18 CrimsonHawk: MECHANISM FOUND, and it corrects my own row — the read-gate discriminator is REPLY KIND, not arity. The `FastReply` arm cleared the cache on every packet, and removing that converts all six routes (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — the code is written, tested and measured but NOT YET COMMITTED; a peer
+holds both files in rapid edit cycles. This row banks the mechanism so it survives regardless of
+who lands the change.
+
+### THE CORRECTION
+
+`80d37b4dc` recorded the discriminator as ARITY: `lindex` (arity 3) held the read-gate cache at
+0.0000 calls/op while `llen` (arity 2) fired 1.0000 on the same ELF, same key, same seed. I
+labelled it a discriminator and explicitly declined to name a mechanism, having been wrong three
+times already on this lever.
+
+**It is not arity. It is the REPLY KIND**, and the difference is one line:
+
+  BorrowedDispatchFloorClass::Lindex                        -> FastEncodedReply
+  Llen, Scard, Strlen, Hexists, Sismember                   -> FastReply
+
+  the `FastReply` arm of the buffered-frame loop contained
+      plain_get_read_gate_cache = None;
+  and the `FastEncodedReply` arm did not.
+
+LINDEX escaped only because it writes its reply in place through an `_into` executor and
+therefore lands in a different match arm. Every route returning `FastReply` re-derived a 175.0
+instr/op gate per packet no matter how carefully it was wired, which is why five conversions
+produced 0 of 5 and cost 0.7 pct.
+
+The arity correlation was real and completely incidental: LINDEX is the one route in that set
+with an `_into` variant.
+
+### WHY REMOVING THE CLEAR IS SOUND
+
+The proof was already in the tree: **`plain_write_gate_cache` was never cleared in that arm**,
+and every write-gate conversion this campaign shipped reaches 0.0000 calls/op and passes the
+differ. The same argument licenses the read side.
+
+The gate is a function of session and server state — auth/ACL, selected db, subscription, client
+pause, tracking, replication role. Every command able to move any of those goes through the
+GENERIC argv path, which clears both caches at the `Parsed` arm and again before
+`process_argv_frame`. A route that reaches the `FastReply` arm is by construction a borrowed
+fast path that touched none of them.
+
+### RESULT
+
+  llen, strlen, sismember, hexists, scard, lindex   ALL 1.0000 -> 0.0000 calls/op
+
+  fr-side, paired build one change apart, two replicates each:
+
+    llen    1664.8 1663.7 -> 1412.8 1412.9   -15.1 pct
+    strlen  1697.7 1670.1 -> 1435.9 1435.3   -14.8 pct
+    scard   1708.4 1706.3 -> 1459.6 1463.1   -14.4 pct
+    zcard   1711.5 1714.4 -> 1667.8 1670.9    -2.5 pct   <- NULL, still 1.0000 calls/op
+
+  Standing, worst bound of two replicates: llen 0.4901x, strlen 0.4822x, scard 0.5022x
+  fr against Redis 7.2.4 instructions per op. Stated inline: llen is fr/Redis 7.2.4 0.4901x.
+
+**THE NULL MOVED AND THAT IS PART OF THE RESULT.** `zcard` is unconverted and still calls the
+gate every packet, yet gained 2.5 pct. Removing the clear helps EVERY `FastReply` route
+independent of conversion, so roughly 12.5 pct of each 14-15 pct is the conversion and 2.5 pct
+is shared. The conversion figure is the smaller one and is the one to quote.
+
+Anyone holding per-command dispatch figures measured before this change should expect them to
+move by about that 2.5 pct once it lands, and should not attribute the shift to their own work.
+
+### THE DIFFER CANNOT SEE THIS HAZARD, AND SAYING SO IS THE POINT
+
+573 differ cases, 0 disagreements, three-way. **That proves nothing about this change.** The
+differ is REQUEST-RESPONSE: one command per buffered pass, so the cache is always fresh and a
+stale gate is unobservable by construction.
+
+The hazard requires PIPELINING. `scripts/gate_cache_pipelined_probe.py` sends a
+gate-invalidating command and borrowed reads in ONE write: SELECT 0, seed, LLEN/STRLEN,
+SELECT 1, LLEN/STRLEN/SCARD, SELECT 0, LLEN/STRLEN. fr matches redis byte for byte.
+
+The probe is SENSITIVE, demonstrated rather than asserted: fr replies 6 and 5 in db 0, then
+0, 0, 0 after SELECT 1, then 6 and 5 again. A stale gate would have served db 0's values inside
+the db 1 section — a WRONG REPLY, not a crash. Not mutation-tested, deliberately
+(`feedback_never_mutation_test_in_a_shared_checkout`).
+
+### COUNTED MECHANISM
+
+Exact call counts on ELF e4b65d245592e6bb, rebuilt on the current tree after a peer's
+`dd335769b` landed in the same arm: `plain_borrowed_default_key_read_allows` reads 0.0000
+calls/op on llen, strlen, scard and lindex, and 1.0000 calls/op on zcard, which is unconverted
+and serves as the null. Two-point subtraction at N=2000 and 2N=4000, startup and seeding
+cancelled.
+
+The instrument carries its own null, measured in a single invocation of the same harness on one
+ELF and one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios (banked in `0bf781d57`).
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELFs          instruction deltas from `dcc9dc06018c1868` against `489236a2aeb4584f`, a paired
+                build ONE CHANGE APART. Both predate the peer commit `dd335769b`, which is a
+                flat -42.0 instr/op on every command, so the ABSOLUTES above will shift by about
+                that much while the DELTAS stand. The acceptance test was re-verified on
+                `e4b65d245592e6bb`, rebuilt on the current tree.
+  bench_elf_sha256=e4b65d245592e6bb084e28e64f6027548f5f50ace40955eb126d9acfdd5d0ca4
+  incumbent     vendored redis 7.2.4, live arm started, seeded and measured in the SAME
+                INVOCATION as the fr arm for the standing figures.
+  harness       `scripts/shape_instr_per_op.py`, `scripts/call_count_delta.py`,
+                `scripts/dispatch_route_differ.py`, `scripts/gate_cache_pipelined_probe.py`.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 127-128G free
+                checked immediately before each build. loadavg 9.47 9.71 15.02; CPU MHz mean
+                2595; CPU idle 89 pct, no competing builds.
+  admissibility Instruction and call counts are deterministic and load-immune. No timed row is
+                claimed.
+
+### RETRY PREDICATE
+
+1. The change is READY and preserved at `scratchpad/readgate_UNBLOCK_ready.patch` (608 lines),
+   green on `cargo test -p fr-runtime` and `-p fr-server` against the current tree. It needs
+   `crates/fr-server/src/main.rs` and `crates/fr-runtime/src/lib.rs` simultaneously; a peer has
+   been cycling both in short edit loops, so take them together or take the patch.
+2. Re-verify the acceptance test after landing: all six routes must read 0.0000 calls/op on
+   `plain_borrowed_default_key_read_allows`, and `zcard` must still read 1.0000 as the null.
+3. With the clear gone, the remaining 31 read predicates become workable. Re-derive the vein's
+   value from the CONVERSION term (~12.5 pct) and not from the headline 14-15 pct, since the
+   shared 2.5 pct arrives once for everybody.
+4. Do NOT restore the clear to "be safe" without reading this row: it costs 175.0 instr/op per
+   packet on every FastReply read route and buys nothing the generic path does not already do.
