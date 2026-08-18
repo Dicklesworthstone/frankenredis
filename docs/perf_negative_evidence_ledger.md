@@ -61766,3 +61766,180 @@ leads on both arms, comfortably, and the lead survives the cliff.
      of the operation". This row would have been unwritable without it.
   3. When levers 1 and 2 land, the RESTORE shape is the one whose VERDICT changes. The write path
      will get faster and will still be a lead — worth measuring, not worth prioritising.
+
+## SHIPPED (SELF-SPEEDUP) 27ddbd824 — LZF SLICE 7: 16-BIT EPOCH TAG, -1588 instr/op (-9.65 pct) on listpack; AND THE PAYLOAD SIGNATURE CAUGHT ME MEASURING TWO CHANGES AT ONCE
+
+Claim class: SELF-SPEEDUP. Campaign output: no. fr against fr, both arms in one binary. It serves the
+one COMPETITIVE gap running against fr (the LZF compressor, CERTIFIED 1.5139x in `6177c6ac2`) and
+does not re-price it. bench_elf_sha256=e5bd88996e923637fe1bca94a2e6f49a292c7ce8965934072595ba00695d9271
+
+The 8-bit epoch tag wrapped every 255 compressions and paid a 256 KiB `fill(0)` when it did. The tag
+was 8 bits only because the packed slot spends 24 on the position; DUMP payloads are far under
+64 KiB, where 16 bits of position suffice, leaving a tag that wraps every 65,535 calls.
+
+    payload                                      tag8      tag16    delta      pct
+    listpack (the shape DUMP feeds it)          16464      14876    -1588    -9.65
+    random   (incompressible)                  117905     110765    -7140    -6.06
+    runs     (match-heavy)                      11200       9897    -1303   -11.63
+
+Largest win this kernel has given up, and larger than slices 5 and 6 combined.
+
+### THE PREDICTED SIGNATURE WAS WRONG, AND THAT IS WHAT EXPOSED THE SECOND CHANGE
+
+`a41ab2697` predicted a FIXED per-call saving — "worth the SAME absolute amount on all three
+payloads" — and wrote down that if the win scaled with payload size the mechanism was not what the
+row claimed. It came out 1588 / 7140 / 1303. The prediction failed its own test, so the win needed
+taking apart before it could be believed.
+
+Isolating the memset frame directly, on the incompressible payload at 3000 reps:
+
+    memset      1223.4 ->    174.8 per op     -1048.7    14.7 pct of the win
+    everything else  117356.7 -> 111264.7     -6092.0    85.3 pct of the win
+
+The intended mechanism delivered **exactly** what was predicted: -1048.7 against a predicted -1044,
+and it IS payload-independent, as claimed. It is also only a seventh of the measured win.
+
+The other 85.3 pct is **2.03 instructions per input byte** — a per-probe saving I introduced in the
+same patch without noticing. The 8-bit path computes `(generation & 0xFF) << 24` on every get and
+every set; the new 16-bit path writes `generation << 16`. That is two redundant masks per position,
+removed as a side effect of writing a new table type rather than editing the old one.
+
+**A patch that changes two things measures two things, and the only reason I know which is which is
+that the row I wrote first committed to a falsifiable signature.** Without that prediction this would
+have been filed as "the memset lever, -9.65 pct", and the real mechanism — a mask in the hot probe —
+would have gone unrecorded and unexploited elsewhere.
+
+The mask is provably a no-op in both paths: the counters are `u8` and `u16` widened to `u32`, so the
+high bits are already clear. The compiler keeps it because it cannot see that provenance through the
+`u32` parameter. **It is still present in the 8-bit path**, which now serves only 64 KiB..16 MiB
+inputs — a separate, sized follow-up worth about 2 instr per input byte there.
+
+The A/A null, measured in a single invocation of the same harness on one ELF and one shape, has ratio median 1.0000 with a bootstrapped 95% median CI of [1.0000, 1.0000].
+
+Degenerate, as in slices 3 through 6: a pure compute kernel in a short-lived process has no cron, no
+epoll and no clock-dependent work, so all three draws of every arm returned bit-identical counts.
+Read it as "no observed noise on this kernel", not as unlimited precision. The bootstrap median-CI
+gate determined this verdict. CV is provenance only and never influenced it.
+
+### THE NEW HAZARD IS THE REPRESENTATION SWITCH, AND A SAME-SIZE CORPUS CANNOT REACH IT
+
+Tag width is invisible to the output by construction — between wraps either width identifies the
+generation uniquely, so every call sees a logically clean table and only the frequency of the
+PHYSICAL clear changes. Slice 5's XOR-tag argument carries over with the shift changed from 24 to 16
+and its precondition changed to match: a stale slot yields at least `1 << 16`, which exceeds `ip`
+because this layout is only selected when `in_len < 1 << 16`.
+
+What is genuinely new is that a slot written as `(gen8 << 24) | pos` is indistinguishable from one
+written as `(gen16 << 16) | pos`. Crossing 64 KiB with a warm table must therefore CLEAR, or the
+stale entries read as live and the output changes — a valid but different payload on the wire.
+`begin_call` clears on mode change, and `lzf_wide_epoch_tag_matches_narrow_arm_byte_for_byte`
+alternates across the boundary repeatedly against a warm table, which no same-size payload set can
+exercise. It also runs well past 255 compressions so the 8-bit counter actually wraps rather than
+being tested only in its first generation. 262 fr-persist tests pass.
+
+### RETRY PREDICATE
+
+  1. Re-price the certified 1.5139x when the gate returns FIT at BOTH brackets. Do not predict the
+     new figure from these deltas — the last two attempts to extrapolate a server-shape gain from
+     this micro-driver were wrong by a third (`970486bc4`) and by a factor of five in mechanism split
+     (this row).
+  2. The redundant `& 0xFF` in the 8-bit path is sized at ~2 instr per input byte and now applies
+     only to 64 KiB..16 MiB inputs. Worth doing, worth measuring separately, and NOT worth bundling
+     with anything else — this row is the argument for that.
+  3. Do not widen the tag further by stealing more position bits without re-deriving the XOR-tag
+     precondition. The whole soundness argument is `stale value >= 1 << TAGSHIFT > ip`, which holds
+     only while `in_len < 1 << TAGSHIFT`.
+  4. If a future payload class routinely crosses 64 KiB, re-measure: every crossing now costs a
+     256 KiB clear, and an alternating workload would pay it on every call instead of every 65,535.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: `publish` HAS NO DEFICIT — its syscall count is at PARITY (0.1454 vs 0.1450 per op), which refutes my own row's hypothesis, and the "shortfall" it was explaining was NORMALISED against a control I have since retired
+
+Claim class: SELF-SPEEDUP (measurement + correction).
+Campaign output: no — it retires a target rather than shipping one, and the target was mine.
+
+`50395` said: *"`publish`'s shortfall is NOT server CPU: it lives in syscalls, wakeups, or the
+reply path... Anyone opening a `publish` lever should measure SYSCALLS."* I measured them. **The
+hypothesis is refuted, and so is the premise it rested on.**
+
+### THE SYSCALL MEASUREMENT — PARITY
+
+`strace -f -c` on each server for its whole life, identical `redis-benchmark -n 5000 -c 8 -P 16
+PUBLISH ch hello`:
+
+  frankenredis                          redis 7.2.4
+    sendto      316   0.0632/op           write       328   0.0656/op
+    recvfrom    326   0.0652/op           read        344   0.0688/op
+    epoll_wait   60   0.0120/op           epoll_wait   53   0.0106/op
+    **IO TOTAL  727   0.1454/op**         **IO TOTAL  725   0.1450/op**
+
+**0.3 pct apart.** Both engines make about one I/O syscall per pipeline batch — ~0.145 per op at
+`-P16`, i.e. ~7 ops per syscall — and neither is doing more of them. Syscall COUNT is not the
+explanation. `50395` named the right instrument and the instrument says no.
+
+One structural difference the counts expose: **fr uses `sendto`/`recvfrom` where redis uses
+`write`/`read`** on the connected socket. Same number of calls, different call. That is a
+difference in KIND, not in count, and nothing here measures whether it is a difference in COST.
+
+### AND THE DEFICIT IT WAS EXPLAINING DOES NOT SURVIVE ITS OWN NORMALISER
+
+`50395`'s figures are **0.9558 and 0.9317 THROUGHPUT-NORMALISED**, "a 4-7 pct shortfall against
+the control". Normalised against `get_control`. Since writing that row I have established, and
+banked:
+
+  * `get_control` FAILED ITS OWN NULL at 1.0346 in a throughput draw, and is the only shape in
+    this campaign to have done so.
+  * On the instruction instrument it read **-13.3 instr/op against ITSELF**, and in another A/A
+    drew ratio **exactly 1.000000** while its A/B swung 60 instr/op across three draws.
+  * It is formally RETIRED as a normaliser: *"Stop treating `get_control` as a reliable
+    normaliser."*
+
+And `publish`'s **RAW** throughput, in my own `cascade` certification with its per-row nulls
+passing, is **1.1209x [1.1078, 1.1415] ADMISSIBLE — fr AHEAD by 12 pct.**
+
+A normalised figure below 1.0 means fr's advantage is SMALLER than the control's advantage. It
+does not mean fr is behind the incumbent. **That exact misreading has already caused one
+retraction in this campaign, and `50395` is where I made it again.**
+
+### FOUR AXES, NO DEFICIT ANYWHERE
+
+    raw throughput   **1.1209x**, worst bound 1.1078 — fr AHEAD, admissible, nulls passing
+    instructions     **0.4578x** — fr retires 2.2x FEWER
+    cycles            0.9980x — parity
+    syscalls          0.1454 vs 0.1450 per op — parity
+
+There is no axis on which `publish` is behind Redis 7.2.4. **The target is retired.**
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Syscall COUNTS are integers from a whole-process trace, so no A/A, no bootstrap interval and no
+quiet window apply to them and none is claimed; the startup syscalls appear identically in both
+arms because each server was traced for its entire life. The raw throughput figure is quoted FROM
+the cascade row that measured it with its own per-row nulls, not re-derived. The instruction
+figure is the worst of two FIT draws. CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           fr `114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f`
+  bench_elf_sha256=114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+  incumbent     Redis 7.2.4, vendored, same benchmark and pipeline depth in the same script run.
+  harness       `strace -f -c` per server; `redis-benchmark -n 5000 -c 8 -P 16 PUBLISH ch hello`.
+  host          /data 47G free, loadavg 5.59 5.54 5.74, MHz 1429; zero frankenredis builds. NO
+                local build — the ELF already existed and `strace` needs none.
+  instrument    `perf stat -p <pid> -- <cmd>` was tried FIRST and is invalid: `-p` monitors an
+                existing process while `--` launches one, and perf reports the combination as an
+                "event syntax error" rather than as a usage error, which cost two attempts.
+                `ptrace_scope=1` forbids attaching to an unrelated process but PERMITS tracing a
+                child, so `strace` spawning each server works where attaching would not.
+  disposition   TARGET RETIRED. No source file changed.
+
+### RETRY PREDICATE
+
+1. Do NOT open a `publish` lever. Four axes say there is nothing to fix, and the deficit that
+   motivated one was a normalisation artifact.
+2. The `sendto`/`recvfrom` vs `write`/`read` difference is real but UNPRICED. If anyone wants it,
+   the measurement is cycles-per-syscall for the two forms on a connected socket — not another
+   count, which is already at parity.
+3. **Before opening any lever on a normalised figure, check the raw ratio.** `publish` reads
+   0.9558 normalised and 1.1209 raw. The normaliser is retired; the raw number is the standing.
