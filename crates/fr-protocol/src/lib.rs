@@ -3148,8 +3148,9 @@ mod tests {
         assert_eq!(resp3, b"_\r\n");
     }
     use super::{
-        BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
-        RespParseError, bench_encode_bulk_string_slice_small, bench_encode_integer,
+        AuthedLimits, BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig,
+        RespFrame, RespParseError, UNAUTH_MAX_BULK_LEN, UNAUTH_MAX_MULTIBULK_LEN,
+        bench_encode_bulk_string_slice_small, bench_encode_integer,
         bench_encode_redis_double, bench_parse_bulk_slice, bench_parse_frame_len_line,
         bench_parse_multibulk_count, bench_push_len_header, decimal_u64_len, decimal_usize_len,
         encode_aggregate_header, encode_bulk_string_slice, encode_map_header, encode_redis_double,
