@@ -55,17 +55,19 @@ fn run_heavy(len: usize) -> Vec<u8> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 4 {
-        eprintln!("usage: lzf_literal_ab <batch|push> <listpack|random|runs> <reps>");
+        eprintln!("usage: lzf_literal_ab <batch|push|guard|noguard> <listpack|random|runs> <reps>");
         std::process::exit(2);
     }
-    let batch = match args[1].as_str() {
-        "batch" => true,
-        "push" => false,
-        other => {
-            eprintln!("unknown arm {other}");
-            std::process::exit(2);
-        }
-    };
+    // slice 2 arms: batch|push. slice 3 arms: guard|noguard (the per-literal-byte
+    // budget test, present or deleted). All four run the same driver so one binary
+    // can answer both questions.
+    let arm = args[1].as_str();
+    if !matches!(arm, "batch" | "push" | "guard" | "noguard") {
+        eprintln!("unknown arm {arm}");
+        std::process::exit(2);
+    }
+    let batch = arm == "batch";
+    let slice3 = matches!(arm, "guard" | "noguard");
     let payload = match args[2].as_str() {
         "listpack" => listpack_like(40),
         "random" => incompressible(3000),
@@ -82,6 +84,9 @@ fn main() {
     let a = fr_persist::bench_lzf_compress_literals::<false>(&payload, budget);
     let b = fr_persist::bench_lzf_compress_literals::<true>(&payload, budget);
     assert_eq!(a, b, "arms diverged; a speedup here would be meaningless");
+    let g = fr_persist::bench_lzf_compress_guard::<true>(&payload, budget);
+    let u = fr_persist::bench_lzf_compress_guard::<false>(&payload, budget);
+    assert_eq!(g, u, "guard arms diverged; a speedup here would be meaningless");
     println!(
         "arm={} payload={} len={} budget={budget} encoded={:?} reps={reps}",
         args[1],
@@ -92,7 +97,13 @@ fn main() {
 
     let mut sink = 0usize;
     for _ in 0..reps {
-        let out = if batch {
+        let out = if slice3 {
+            if arm == "guard" {
+                fr_persist::bench_lzf_compress_guard::<true>(black_box(&payload), black_box(budget))
+            } else {
+                fr_persist::bench_lzf_compress_guard::<false>(black_box(&payload), black_box(budget))
+            }
+        } else if batch {
             fr_persist::bench_lzf_compress_literals::<true>(black_box(&payload), black_box(budget))
         } else {
             fr_persist::bench_lzf_compress_literals::<false>(black_box(&payload), black_box(budget))

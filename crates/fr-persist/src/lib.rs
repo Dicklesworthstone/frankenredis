@@ -3273,7 +3273,7 @@ pub fn bench_lzf_compress_table<const HOIST: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, HOIST, true>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, HOIST, true, true>(input, out_budget, &mut scratch.borrow_mut())
     })
 }
 
@@ -3292,7 +3292,28 @@ pub fn bench_lzf_compress_literals<const BATCH: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, true, BATCH>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, true, BATCH, true>(input, out_budget, &mut scratch.borrow_mut())
+    })
+}
+
+/// Same-binary A/B hook for the per-literal-byte budget guard (slice 3).
+///
+/// `GUARD == true` is today's production path: an explicit `out.len() >= out_budget`
+/// test before every literal byte. `GUARD == false` deletes it and lets the terminal
+/// `out.len() > out_budget` check do the work it was already doing.
+///
+/// The two arms MUST return byte-identical output for every `(input, out_budget)` pair
+/// — the guard can only move a bail LATER, never remove one, because the length is
+/// monotonic. That equality is asserted by
+/// `lzf_budget_guard_removal_matches_guarded_arm_byte_for_byte` and re-asserted by the
+/// bench driver before it reports a number.
+#[doc(hidden)]
+pub fn bench_lzf_compress_guard<const GUARD: bool>(
+    input: &[u8],
+    out_budget: usize,
+) -> Option<Vec<u8>> {
+    LZF_SCRATCH.with(|scratch| {
+        lzf_compress_dispatch::<true, true, false, GUARD>(input, out_budget, &mut scratch.borrow_mut())
     })
 }
 
@@ -3578,7 +3599,20 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
     // actually runs on (+8.1%, 17,226.7 -> 18,614.7 instr/op under callgrind) and is
     // REJECTED as production; see the negative-evidence ledger. The batched arm is kept
     // reachable through `bench_lzf_compress_literals` so the rejection stays reproducible.
-    lzf_compress_dispatch::<SIMD, true, false>(input, out_budget, scratch)
+    //
+    // GUARD == false: no `out.len() >= out_budget` test before each literal byte. MEASURED
+    // -549 instr/op (-3.14 pct) on that same listpack shape, -5,098 (-4.13 pct) on
+    // incompressible input and -290 (-2.50 pct) on run-heavy input -- a win on every payload
+    // shape, and bit-identical across three draws. `out` is `Vec::with_capacity(out_budget)`,
+    // so the deleted test merely duplicated the capacity check inside `Vec::push`.
+    //
+    // It cost nothing to give up because the ONE production call site passes upstream's
+    // `budget = in_len - 4` (see `rdb_encode_string`), so the guard could only ever fire with
+    // about four input bytes left -- it never bought an early exit. That is why the
+    // incompressible payload, where a "bail later" arm should do strictly MORE work, got
+    // FASTER instead. A caller passing a budget far below the input length would lose that
+    // early exit; the loop is still bounded by the input length and still returns None.
+    lzf_compress_dispatch::<SIMD, true, false, false>(input, out_budget, scratch)
 }
 
 /// Choose the match-table representation ONCE per call and hand the compressor a
@@ -3590,7 +3624,7 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
 /// `LzfScratch::{get,set}` — and exists so one binary can measure both arms.
 /// Both arms read and write the same slots in the same order and therefore emit
 /// byte-identical compressed output.
-fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool, const BATCH: bool>(
+fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool, const BATCH: bool, const GUARD: bool>(
     input: &[u8],
     out_budget: usize,
     scratch: &mut LzfScratch,
@@ -3607,7 +3641,7 @@ fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool, const BATCH: bool>
     if HOIST {
         if scratch.use_packed {
             if let Ok(table) = <&mut [u32; LZF_HSIZE]>::try_from(scratch.packed.as_mut_slice()) {
-                return lzf_compress_core::<SIMD, BATCH, _>(
+                return lzf_compress_core::<SIMD, BATCH, GUARD, _>(
                     input,
                     out_budget,
                     &mut LzfPackedTable(table),
@@ -3617,7 +3651,7 @@ fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool, const BATCH: bool>
         } else if let Ok(table) =
             <&mut [LzfHashSlot; LZF_HSIZE]>::try_from(scratch.htab.as_mut_slice())
         {
-            return lzf_compress_core::<SIMD, BATCH, _>(
+            return lzf_compress_core::<SIMD, BATCH, GUARD, _>(
                 input,
                 out_budget,
                 &mut LzfWideTable(table),
@@ -3625,10 +3659,10 @@ fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool, const BATCH: bool>
             );
         }
     }
-    lzf_compress_core::<SIMD, BATCH, _>(input, out_budget, &mut LzfDynTable(scratch), generation)
+    lzf_compress_core::<SIMD, BATCH, GUARD, _>(input, out_budget, &mut LzfDynTable(scratch), generation)
 }
 
-fn lzf_compress_core<const SIMD: bool, const BATCH: bool, T: LzfHashTable>(
+fn lzf_compress_core<const SIMD: bool, const BATCH: bool, const GUARD: bool, T: LzfHashTable>(
     input: &[u8],
     out_budget: usize,
     table: &mut T,
@@ -3830,7 +3864,24 @@ fn lzf_compress_core<const SIMD: bool, const BATCH: bool, T: LzfHashTable>(
 
         if !emitted_match {
             // C: if (op >= out_end) return 0;  (before each literal byte)
-            if (if BATCH { out.len() + lit } else { out.len() }) >= out_budget {
+            //
+            // (frankenredis-qj6jn slice 3) GUARD == false DELETES this test. It is not a
+            // correctness guard and it is not the load-bearing one: `out` is
+            // `Vec::with_capacity(out_budget)`, so this compare duplicates the capacity test
+            // that `Vec::push` performs on the very next line -- two compares per literal byte
+            // where one already suffices.
+            //
+            // Removing it cannot change what the function RETURNS. The virtual length is
+            // monotonic, so any input that trips this test would also fail the terminal
+            // `out.len() > out_budget` check; the bail moves later, never away. A peer's sweep
+            // over ~1.6M (payload, budget) pairs found ZERO divergences for exactly this
+            // mutation, and the arms are asserted byte-identical by the equivalence test.
+            //
+            // What it does cost: on a FAILING compression the loop now runs to the end and the
+            // output may outgrow its capacity once. That path is bounded by the input length
+            // (at most one byte per position plus one header per 32) and is the path that was
+            // going to throw its work away regardless.
+            if GUARD && (if BATCH { out.len() + lit } else { out.len() }) >= out_budget {
                 return None;
             }
             if !BATCH {
@@ -7388,6 +7439,48 @@ mod tests {
                         super::lzf_decompress(&encoded, p.len()).as_deref(),
                         Some(p.as_slice()),
                         "batched output did not round-trip (len={}, budget={budget})",
+                        p.len()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lzf_budget_guard_removal_matches_guarded_arm_byte_for_byte() {
+        // Slice 3 deletes the `out.len() >= out_budget` test that ran before EVERY
+        // literal byte. The claim is that it can only move a bail later, never remove
+        // one, because the length is monotonic and the terminal check still fires.
+        //
+        // That claim lives or dies at the BAIL POINT, exactly as slice 2's did, so it
+        // gets the same instrument: every payload swept DENSELY across the whole
+        // interesting budget interval. A guard that has genuinely become redundant is
+        // wrong at NO budget; one that has not will disagree at the single budget where
+        // the early bail and the terminal check part company.
+        for p in lzf_equivalence_payloads() {
+            let hi = p.len() + 8;
+            for budget in 0..=hi {
+                let guarded = super::bench_lzf_compress_guard::<true>(&p, budget);
+                let unguarded = super::bench_lzf_compress_guard::<false>(&p, budget);
+                assert_eq!(
+                    guarded,
+                    unguarded,
+                    "budget-guard removal diverged (len={}, budget={budget})",
+                    p.len()
+                );
+                // Arm-vs-arm equality alone would be satisfied by two arms agreeing on
+                // the same wrong bytes, and it would NOT catch the failure this change
+                // actually risks: an output that overruns the budget it was given.
+                if let Some(encoded) = unguarded {
+                    assert!(
+                        encoded.len() <= budget,
+                        "unguarded arm overran its budget (len={}, budget={budget})",
+                        p.len()
+                    );
+                    assert_eq!(
+                        super::lzf_decompress(&encoded, p.len()).as_deref(),
+                        Some(p.as_slice()),
+                        "unguarded output did not round-trip (len={}, budget={budget})",
                         p.len()
                     );
                 }
