@@ -57649,3 +57649,70 @@ capacity at launch, zero frankenredis builds in flight, verified by process name
    move.
 3. Do NOT quote the normalised column from this run in either direction. The normaliser is wider
    than two of the rows it divides and BEHIND there means "less far ahead", not "behind".
+
+## 2026-08-18 CrimsonHawk: MEASURED — the fixed per-read cost is NOT a list problem: 90 pct of it is shared per-command plumbing, and three of its terms are COUNTABLY redundant (SET parser 3.00x, auth refresh 2.00x, clock diff 2.90x per LRANGE) (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir) and callgrind CALL COUNTS,
+differenced across READ COUNTS at a FIXED key count. CV was NOT used, as a gate or otherwise; none
+was computed. No timing verdict is claimed: the measurand is a retired-instruction COUNT. No code
+changed and NO BUILD was run — /data is at the 58G floor and another agent has held this project's
+build slot for a FIFTH consecutive window.
+
+Claim class: not applicable — nothing is kept and nothing is banked as campaign output.
+
+  fr arm `4eceae6c624c670fb4111eceae3068632e8b9223b0ef822440b5015f9c89fce5` (`68e1d4990`)
+
+### THE PREDICATE THIS ANSWERS, AND THE ANSWER IS "NOT YOURS"
+
+`935f9dcc8` decomposed the read into `5,171.9 + 92.81 * n` and named the FIXED term as the unworked
+one, since it decides every short-list read. Profiling it at n = 1 says it is not this bead's to
+work. The whole read is 5,234 instructions and no single term exceeds 10 pct of it:
+
+    per LRANGE(0,-1) on a ONE-element list, top terms
+      478.2  __memcpy_avx_unaligned_erms          148.1  Channel<WriterCompletion>::try_recv
+      418.5  frankenredis::main                   138.0  parse_borrowed_plain_set_bulk
+      248.0  handle_readable                      135.2  drain_writer_completions
+      214.0  process_buffered_frames              126.0  parse_borrowed_plain_lrange_packet
+      206.0  execute_plain_lrange_borrowed_into   115.9  __syscall_cancel
+      165.0  classify_borrowed_dispatch_floor     111.6  Timespec::sub_timespec
+      164.0  refresh_authentication_for_server    101.0  ListValue::for_each_borrowed
+
+  THE LIST-SPECIFIC SHARE IS ABOUT 10 PCT. `for_each_borrowed` 101 + `lrange_borrow_scan_impl` 95 +
+  `execute_plain_lrange_borrowed_into` 206 + `parse_borrowed_plain_lrange_packet` 126 = 528 of
+  5,234. The other 90 pct is connection, dispatch, authentication, timekeeping and writer
+  completion — shared by every command in the server, and `frankenredis-getexgate`'s vein, not this
+  one. This bead should NOT chase it, and `935f9dcc8`'s "next direction" is corrected accordingly.
+
+### THREE TERMS THAT ARE COUNTABLY REDUNDANT, HANDED OVER RATHER THAN TAKEN
+
+Counting CALLS rather than reading source, on the same shape:
+
+    parse_borrowed_plain_set_bulk                 3.00 calls per LRANGE   138.0 instr
+    <ClientSession>::refresh_authentication_...   2.00 calls per LRANGE   164.0 instr
+    <Timespec>::sub_timespec                      2.90 calls per LRANGE   111.6 instr
+    classify_borrowed_dispatch_floor_packet       1.00 calls per LRANGE   (correct)
+
+  A SET-shaped bulk parser runs THREE TIMES on a read that is not a SET. The authentication
+  refresh runs TWICE per command. The clock difference runs nearly THREE times. Together 413.6
+  instructions per read — 8 pct of fr's fixed cost — and each is a count, not an opinion about
+  what the code looks like.
+
+  These are being handed to the dispatch/read-gate owner rather than taken here: they sit in
+  `fr-server`/`fr-runtime`, a peer is actively editing both, and `feedback_split_the_call_site_not_the_function_body`
+  plus the reservation traffic of the last three windows are enough reason not to reach into a file
+  someone else is mid-change in.
+
+### RETRY PREDICATES
+
+  1. Do NOT open the fixed per-read cost under this bead. Reopen ONLY IF a profile shows a
+     LIST-SPECIFIC term above ~200 instructions per read in it; the four list terms today total 528
+     and the largest is 206.
+  2. The three counts above are the deliverable and they are reproducible in one command
+     (`n1_calls.py` in this session's scratchpad). Whoever takes them should verify the counts
+     first — `feedback_remeasure_a_beads_cell_before_believing_it` — because a call count taken
+     from a different binary is not this one.
+  3. `parse_borrowed_plain_set_bulk` at 3.00 calls per LRANGE is the one that looks most like a
+     mistake rather than a design: it is a parser for a different command family running three
+     times on every read. It may be the cascade trying shapes in order, in which case
+     `project_cascade_arm_order_is_a_lever` already covers the fix; confirm which before treating
+     it as a bug.
