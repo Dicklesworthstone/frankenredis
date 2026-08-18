@@ -7634,6 +7634,15 @@ impl Runtime {
     }
 
     /// Drain pending pub/sub messages for the current session's client.
+    /// Whether `drain_pending_pubsub` could return anything. ORs BOTH sources it drains --
+    /// the store's queue and the global outbox -- because guarding on only one would silently
+    /// drop shard pub/sub (`SMessage`) traffic.
+    #[must_use]
+    #[inline]
+    pub fn has_pending_pubsub(&self) -> bool {
+        self.server.store.has_pending_pubsub() || !self.server.pubsub_outbox.is_empty()
+    }
+
     pub fn drain_pending_pubsub(&mut self) -> Vec<fr_store::PubSubMessage> {
         // First drain any messages from the per-client Store (legacy path for
         // single-session tests), then drain from the global outbox.

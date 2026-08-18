@@ -34374,6 +34374,15 @@ impl Store {
         std::mem::take(&mut self.pubsub_pending)
     }
 
+    /// Whether a drain could yield anything, so callers can skip it without building a `Vec`.
+    /// The drain runs after EVERY command for EVERY client and is empty for any workload
+    /// without subscribers.
+    #[must_use]
+    #[inline]
+    pub fn has_pending_pubsub(&self) -> bool {
+        !self.pubsub_pending.is_empty()
+    }
+
     /// Queue a keyspace notification event for delivery via pub/sub.
     /// `event_type` is the notification class (NOTIFY_STRING, NOTIFY_LIST, etc.).
     /// `event` is the event name (e.g., "set", "del", "expire").
