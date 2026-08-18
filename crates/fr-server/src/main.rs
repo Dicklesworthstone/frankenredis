@@ -390,14 +390,12 @@ type TokenSet = HashSet<Token, foldhash::fast::RandomState>;
 /// NOTHING USES THIS YET. `ClientConnection.stream` still has its concrete type, so adoption is a
 /// separate, mechanical commit the compiler can check exhaustively.
 #[cfg(unix)]
-#[allow(dead_code)]
 enum ClientStream {
     Tcp(TcpStream),
     Unix(mio::net::UnixStream),
 }
 
 #[cfg(unix)]
-#[allow(dead_code)]
 impl ClientStream {
     /// `Shutdown` means the same thing on both socket families, so the three shutdown sites need
     /// no branching of their own.
@@ -788,7 +786,6 @@ impl ClientConnection {
     /// takes whenever handoff is disabled -- an already-exercised configuration rather than a new
     /// one.
     #[cfg(unix)]
-    #[allow(dead_code)]
     fn new_unix(stream: mio::net::UnixStream, session: ClientSession, now_ms: u64) -> Self {
         Self::from_client_stream(ClientStream::Unix(stream), None, session, now_ms)
     }
@@ -5088,6 +5085,35 @@ fn main() -> ExitCode {
             }
         };
 
+    // (frankenredis-w1djx) The Unix domain socket listener, if `unixsocket` is configured. Held
+    // SEPARATELY from `listeners` on purpose: `rebind_listeners` clears that vector on a
+    // `CONFIG SET bind`, which would silently close this socket and leave the file behind with
+    // nothing accepting on it.
+    //
+    // Upstream treats a failure to open it as fatal -- `unix.c` logs and `exit(1)` -- because a
+    // configured socket that silently does not exist is worse than a refusal to start. fr matches
+    // that rather than warning and continuing.
+    let unix_socket_path: Option<String> = runtime
+        .server
+        .configured_unix_socket()
+        .map(str::to_string);
+    let unix_listener = match unix_socket_path.as_deref() {
+        Some(path) => {
+            let perm = runtime.server.configured_unix_socket_perm();
+            match bind_and_register_unix(&poll, path, perm) {
+                Ok(listener) => listener,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        None => None,
+    };
+    if let Some(path) = unix_socket_path.as_deref() {
+        eprintln!("info: listening on unix socket {path}");
+    }
+
     eprintln!(
         "FrankenRedis v{} ready (mode={mode_str}, port={port}, command_execution_threads={})",
         env!("CARGO_PKG_VERSION"),
@@ -5244,6 +5270,25 @@ fn main() -> ExitCode {
             match event.token() {
                 // (frankenredis-jd75g) Tokens 0..listeners.len() are listening
                 // sockets; accept from the one that signalled readiness.
+                // (frankenredis-w1djx) The unix listener owns the LAST listener token, so this
+                // arm must precede the TCP range check -- `UNIX_LISTENER_TOKEN` is inside
+                // `0..MAX_LISTENERS` and a shrinking bind set could otherwise let the TCP arm
+                // claim it.
+                tok if tok.0 == UNIX_LISTENER_TOKEN => {
+                    if let (Some(listener), Some(path)) =
+                        (unix_listener.as_ref(), unix_socket_path.as_deref())
+                    {
+                        accept_unix_connections(
+                            listener,
+                            path,
+                            &mut poll,
+                            &mut clients,
+                            &mut client_id_to_token,
+                            &mut next_handle,
+                            &mut runtime,
+                        );
+                    }
+                }
                 listener_tok if listener_tok.0 < listeners.len() => {
                     accept_connections(
                         &listeners[listener_tok.0],
@@ -5654,6 +5699,16 @@ fn main() -> ExitCode {
                     save_ts,
                 );
             }
+            // (frankenredis-w1djx) Upstream removes the socket file on a graceful shutdown
+            // (`server.c`, closeListeningSockets): it logs at NOTICE, removes, and warns on
+            // failure. A file left behind is not merely untidy -- the next start would find it and
+            // have to remove it before binding.
+            if let Some(path) = unix_socket_path.as_deref() {
+                eprintln!("info: Removing the unix socket file.");
+                if let Err(e) = std::fs::remove_file(path) {
+                    eprintln!("warn: Error removing the unix socket file: {e}");
+                }
+            }
             eprintln!("info: shutdown requested, exiting gracefully");
             return ExitCode::SUCCESS;
         }
@@ -5702,7 +5757,6 @@ fn split_bind_spec(spec: &str) -> (Vec<String>, Vec<String>) {
 /// The listener is returned rather than pushed into the TCP listener vector on purpose -- see
 /// `UNIX_LISTENER_TOKEN` for why sharing that vector would let `CONFIG SET bind` close the socket.
 #[cfg(unix)]
-#[allow(dead_code)]
 fn bind_and_register_unix(
     poll: &Poll,
     path: &str,
@@ -5835,7 +5889,6 @@ fn rebind_listeners(
 /// every read, flush, writev and uring site. Landing the listener separately keeps that refactor
 /// honest: this function is inert until something calls it.
 #[cfg(unix)]
-#[allow(dead_code)]
 fn bind_unix_listener(path: &str, perm: u32) -> Result<mio::net::UnixListener, String> {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -5881,6 +5934,91 @@ fn admit_client(
     clients.insert(conn_handle, conn);
     client_id_to_token.insert(client_id, conn_handle);
     runtime.track_connection_opened();
+}
+
+/// Accept clients from the Unix domain socket listener.
+///
+/// (frankenredis-w1djx) The TCP twin's shape, minus the two steps that are TCP-only by type:
+/// `set_nodelay` has no unix counterpart, and the writer handoff clones a `StdTcpStream` for a
+/// background writer thread, so a unix client serves its writes on the reactor -- the same path a
+/// TCP client takes whenever handoff is disabled.
+///
+/// The tail is `admit_client`, shared with the TCP path, so the two families cannot drift in what
+/// they record about a client.
+#[cfg(unix)]
+fn accept_unix_connections(
+    listener: &mio::net::UnixListener,
+    path: &str,
+    poll: &mut Poll,
+    clients: &mut ClientMap,
+    client_id_to_token: &mut HashMap<u64, Token>,
+    next_handle: &mut usize,
+    runtime: &mut Runtime,
+) {
+    loop {
+        // Same maxclients gate and same reply as the TCP path: upstream's
+        // networking.c::acceptCommonHandler answers before closing so the client learns why.
+        if let Err(e) = validate_accept_path(clients.len(), runtime.server.max_clients, true) {
+            while let Ok((mut stream, _)) = listener.accept() {
+                eprintln!(
+                    "warn: rejecting new unix connection: {} ({})",
+                    e.reason_code(),
+                    clients.len()
+                );
+                let mut scratch = [0u8; 256];
+                while let Ok(n) = stream.read(&mut scratch) {
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let _ = stream.write_all(b"-ERR max number of clients reached\r\n");
+                let _ = stream.flush();
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                runtime.track_rejected_connection();
+                drop(stream);
+            }
+            break;
+        }
+
+        match listener.accept() {
+            Ok((mut stream, _addr)) => {
+                // The accepted unix address is not a `std::net::SocketAddr` and carries no useful
+                // per-client information -- every client on this listener shares the one path -- so
+                // it is dropped and `session.unix_path` records the path instead.
+                if *next_handle < MAX_LISTENERS || Token(*next_handle) == BACKGROUND_WAKE_TOKEN {
+                    *next_handle = MAX_LISTENERS;
+                }
+                let conn_handle = Token(*next_handle);
+                *next_handle = next_handle.wrapping_add(1);
+                if *next_handle < MAX_LISTENERS || Token(*next_handle) == BACKGROUND_WAKE_TOKEN {
+                    *next_handle = MAX_LISTENERS;
+                }
+
+                if let Err(e) =
+                    poll.registry()
+                        .register(&mut stream, conn_handle, Interest::READABLE)
+                {
+                    eprintln!("warn: failed to register unix client: {e}");
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    continue;
+                }
+
+                let mut session = runtime.new_session();
+                // peer_addr and local_addr stay None: a unix address is not a SocketAddr. CLIENT
+                // INFO renders `addr` and `laddr` from this path as `<path>:0`, upstream's form.
+                session.unix_path = Some(std::sync::Arc::from(path));
+                session.socket_fd = Some(stream.as_raw_fd());
+                let conn = ClientConnection::new_unix(stream, session, now_ms());
+                admit_client(conn, conn_handle, clients, client_id_to_token, runtime);
+            }
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
+            Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => {
+                eprintln!("warn: unix accept error: {e}");
+                break;
+            }
+        }
+    }
 }
 
 fn accept_connections(
