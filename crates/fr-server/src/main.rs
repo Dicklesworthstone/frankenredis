@@ -8275,11 +8275,14 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values1_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[packet.member],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8298,11 +8301,14 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values4_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[packet.v1, packet.v2, packet.v3, packet.v4],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8321,11 +8327,14 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values3_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[packet.f1, packet.f2, packet.f3],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8344,11 +8353,14 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values2_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[packet.start, packet.end],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9588,11 +9600,14 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values5_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[packet.v1, packet.v2, packet.v3, packet.v4, packet.v5],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9611,13 +9626,16 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values6_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
                             packet.v1, packet.v2, packet.v3, packet.v4, packet.v5, packet.v6,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9636,7 +9654,9 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values7_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
@@ -9644,6 +9664,7 @@ fn process_buffered_frames(
                             packet.v7,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9662,7 +9683,9 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values8_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
@@ -9670,6 +9693,7 @@ fn process_buffered_frames(
                             packet.v7, packet.v8,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13240,7 +13264,9 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values18_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
@@ -13249,6 +13275,7 @@ fn process_buffered_frames(
                             packet.v13, packet.v14, packet.v15, packet.v16, packet.v17, packet.v18,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13267,7 +13294,9 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values17_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
@@ -13276,6 +13305,7 @@ fn process_buffered_frames(
                             packet.v13, packet.v14, packet.v15, packet.v16, packet.v17,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13294,7 +13324,9 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values16_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
@@ -13303,6 +13335,7 @@ fn process_buffered_frames(
                             packet.v13, packet.v14, packet.v15, packet.v16,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13321,7 +13354,9 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values15_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
@@ -13330,6 +13365,7 @@ fn process_buffered_frames(
                             packet.v13, packet.v14, packet.v15,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13348,7 +13384,9 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values14_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
@@ -13357,6 +13395,7 @@ fn process_buffered_frames(
                             packet.v13, packet.v14,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13375,7 +13414,9 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values13_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
@@ -13384,6 +13425,7 @@ fn process_buffered_frames(
                             packet.v13,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13402,7 +13444,9 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values12_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
@@ -13410,6 +13454,7 @@ fn process_buffered_frames(
                             packet.v7, packet.v8, packet.v9, packet.v10, packet.v11, packet.v12,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13428,7 +13473,9 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values11_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
@@ -13436,6 +13483,7 @@ fn process_buffered_frames(
                             packet.v7, packet.v8, packet.v9, packet.v10, packet.v11,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13454,7 +13502,9 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values10_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
@@ -13462,6 +13512,7 @@ fn process_buffered_frames(
                             packet.v7, packet.v8, packet.v9, packet.v10,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13480,7 +13531,9 @@ fn process_buffered_frames(
                 } else if let Some((cmd, packet)) =
                     parse_borrowed_plain_keyed_values9_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                         cmd,
                         packet.key,
                         &[
@@ -13488,6 +13541,7 @@ fn process_buffered_frames(
                             packet.v7, packet.v8, packet.v9,
                         ],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
