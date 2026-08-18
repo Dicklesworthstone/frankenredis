@@ -31104,6 +31104,12 @@ mod tests {
     use std::net::TcpStream;
     use std::time::Instant;
 
+    // (frankenredis-yx1wa) The SORT full-key-access rows build a DispatchClientContext by hand;
+    // these three live in fr-store and were never imported here, so `cargo test -p fr-command`
+    // failed to COMPILE. `cargo build --release` does not build `#[cfg(test)]`, which is why the
+    // release loop stayed green over it.
+    use fr_store::{AclKeyPattern, DispatchAclPermissions, DispatchClientContext};
+
     use super::{
         cluster_invalid_setslot_action_error, encode_pubsub_message_for_protocol_into,
         posix_locale_to_bcp47, sort_alpha_compare,
