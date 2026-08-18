@@ -50925,3 +50925,70 @@ RETRY PREDICATE:
      both scale with element count; neither was measured at another size.
   3. Parity must be re-checked on any follow-up: `workload_shapes_probe.py` at 4 of 42 is the
      line this row promises not to cross.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: CORRECTION — half my volatile-key lever is not a parity gap: the incumbent reads the clock 2.01x PER COMMAND too. The EXPIRE-CADENCE half is confirmed and starker (redis 0.00-0.01/op against fr 1.01-2.02)
+
+WITHDRAWN from `cdbc69ebf`: the framing of a clock-cache lever as closing a gap with upstream,
+specifically "the clock cache is independent and the smaller and safer of the two at 116.6
+instr/op" read together with that row's citation of `updateCachedTime()`. The 116.6 instr/op is
+real and remains fr's cost; what is wrong is the implication that upstream avoids it.
+
+I measured fr's per-command call counts and verified upstream's EXPIRE cadence from source, then
+framed BOTH halves as parity gaps without measuring upstream's CLOCK rate. That was the gap in
+the row, and closing it changes the answer.
+
+  fr    bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  redis bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  Identical seeds and command (`GET kk`) as `cdbc69ebf`, two-point callgrind, loadavg 13.4-13.8.
+
+  per op                    fr plain   fr volatile   redis plain   redis volatile
+  clock reads                 1.01        3.02          2.01           2.01
+                          (clock_gettime)            (gettimeofday)
+  active expire cycle         1.01        2.02          0.00           0.01
+  key lookup                   --          --           1.00           1.00
+  instructions/op           1165.0      1463.1        3128.1         3338.8
+
+### The clock half: not a parity gap
+
+UPSTREAM CALLS `gettimeofday` 2.01 TIMES PER COMMAND. `call()` brackets every command with
+`elapsedStart`/`elapsedUs` for `commandstats`, exactly as fr's `CommandHistogramTracker` does --
+which is what the callers in fr's profile turn out to be, not the expire machinery. In the PLAIN
+arm fr reads the clock LESS than upstream, 1.01 against 2.01. Only in the volatile arm does fr
+exceed it, 3.02 against 2.01, and that single extra read is the whole clock-side asymmetry.
+
+`updateCachedTime()` maintains `server.mstime` for EXPIRY LOGIC; it is not what times commands. I
+cited it for the wrong purpose.
+
+A clock-cache change in fr would therefore be an fr-specific optimisation, not a parity fix, and
+it is constrained by the same thing that constrains upstream: per-command latency stats need a
+per-command clock. Anyone taking it must say what happens to `commandstats` resolution.
+
+### The expire half: confirmed, and the asymmetry is larger than I said
+
+  active expire cycle per op:   fr 1.01 (plain) / 2.02 (volatile)   redis 0.00 / 0.01
+
+Upstream runs it essentially NEVER per command -- consistent with the source cadence verified in
+`cdbc69ebf` (FAST in `beforeSleep`, SLOW in `serverCron` at 10 Hz). fr runs it once per command
+with no volatile key at all and twice per command with one. That is the real gap and it is worth
+the 105.5 instr/op the frame diff attributes to it.
+
+### And a fact that reframes the tax itself
+
+UPSTREAM PAYS A VOLATILE-KEY TAX TOO: +210.7 instr/op, 3128.1 -> 3338.8. It is smaller in
+relative terms, +6.74 pct against fr's +25.59 pct, but that ratio is flattered by fr's much lower
+baseline -- in ABSOLUTE instructions the two taxes are 210.7 and 298.1, far closer than the
+percentages suggest. The tax is not an fr defect; the CADENCE that pays it per command is.
+
+fr remains well ahead on this shape throughout: 1165.0 against 3128.1 plain and 1463.1 against
+3338.8 volatile, i.e. fr uses 37 pct and 44 pct of upstream's instructions. The tax erodes fr's
+instruction lead from 2.69x to 2.28x. Nothing here says fr is behind.
+
+RETRY PREDICATE: the volatile-key work is now ONE lever, not two -- the expire-cycle cadence.
+Do NOT open the clock cache expecting a parity gap; upstream reads the clock at a comparable rate
+and the entire asymmetry is one extra read in the volatile arm. The cadence lever SUCCEEDS only
+IF `run_active_expire_cycle` falls to at most 0.10 calls per op on both arms with `GET`'s
+volatile-arm instr/op falling by at least 90, measured two-point on these same seeds. It remains
+CORRECTNESS-SENSITIVE for the reason `cdbc69ebf` gave: expiry timing is observable through TTL,
+notifications and replica propagation, and `propagate_expired_key_deletions` runs 2.00 times per
+op here.
