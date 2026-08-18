@@ -587,19 +587,44 @@ fn encode_integer_reply<const FUSED: bool>(n: i64, out: &mut Vec<u8>) {
         //
         // Byte-identical to the general path by construction: same ':' prefix, same DIGIT_PAIRS
         // rendering, same "\r\n".
+        // (frankenredis-getexgate) The 0..10 arm is left EXACTLY as it was; the other two cases
+        // share ONE range test.
+        //
+        // A memcpy census found `ttl_nonvolatile` still paying memcpy at 1.000 calls/op here,
+        // because its reply is `:-1` and every fast arm was non-negative. TTL and PTTL answer -1
+        // for "exists, no expiry" and -2 for "no such key", which on a non-volatile keyspace is
+        // their whole reply vocabulary.
+        //
+        // TWO REJECTED SHAPES, BOTH MEASURED, BECAUSE THE ORDER HERE IS THE WHOLE DESIGN:
+        //   * a third separate `if (-9..0)` fixed TTL (-32.0) but taxed every value that falls
+        //     through all three tests: `pttl`, a large positive, went +7.1 on medians.
+        //   * hoisting one `(-9..100)` guard with the sign test inside removed that tax and cost
+        //     the COMMON case instead -- `llen` -5.6 and `del_missing` -4.8 on medians, because
+        //     a small non-negative reply then pays the outer test plus two inner ones.
+        // Small non-negative counts are the most frequent reply on every hot route here, so that
+        // second trade is backwards.
+        //
+        // This shape pays what HEAD already paid: `0..10` first and untouched (llen, del), then
+        // ONE more range test that covers both -9..0 and 10..100. A large value falls through
+        // exactly two range tests, the same as before the negative case existed, so nothing is
+        // taxed to buy TTL.
         if (0..10).contains(&n) {
             out.extend_from_slice(&[b':', b'0' + n as u8, b'\r', b'\n']);
             return;
         }
-        if (10..100).contains(&n) {
-            let pair = (n as usize) * 2;
-            out.extend_from_slice(&[
-                b':',
-                DIGIT_PAIRS[pair],
-                DIGIT_PAIRS[pair + 1],
-                b'\r',
-                b'\n',
-            ]);
+        if (-9..100).contains(&n) {
+            if n < 0 {
+                out.extend_from_slice(&[b':', b'-', b'0' + (-n) as u8, b'\r', b'\n']);
+            } else {
+                let pair = (n as usize) * 2;
+                out.extend_from_slice(&[
+                    b':',
+                    DIGIT_PAIRS[pair],
+                    DIGIT_PAIRS[pair + 1],
+                    b'\r',
+                    b'\n',
+                ]);
+            }
             return;
         }
         // Build ":<n>\r\n" right-aligned in one stack buffer and emit it with a SINGLE
