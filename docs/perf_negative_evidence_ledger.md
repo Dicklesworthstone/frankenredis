@@ -61693,3 +61693,76 @@ out-of-line site, by construction.
      to a frame. This row is dated evidence about one ELF.
   3. Still open and untouched: `decode_value_spans` (the arena lever) is unaffected by any of this
      and remains the largest single frame in list RESTORE.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the incumbent is FLAT on the write path too (+0.1 pct), so the digit penalty is entirely fr's; but fr LEADS this shape either way, so the cliff ERODES a lead here where it FLIPS the result on RESTORE (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: callgrind frame-level SELF cost, differenced across two key counts (10 vs 30) so
+per-invocation setup cancels, then differenced between two element patterns measured in ONE
+invocation per engine. CV was NOT used, as a gate or otherwise — no coefficient of variation
+appears in this row's decision path and none was computed. No timing verdict is claimed: the
+measurand is a retired-instruction COUNT. No code changed and NO BUILD was run; callgrind output
+went to a `TemporaryDirectory` and was reclaimed, so this row cost no disk.
+
+Claim class: MEASUREMENT, and the cross-engine ratios below are **SIZING, NOT CERTIFIED** — one
+draw per arm, no A/A null, and the two engines were measured in SEPARATE invocations rather than
+interleaved, so they carry the drift exposure a certified ratio is structured to remove. They are
+quoted because the margins are 17 and 40 pct, twenty to fifty times the 0.84 pct instrument floor,
+and because the row would be misleading WITHOUT them.
+
+  fr arm    `99e32657383c8a9ef60468534a02f92f6e7afe76a4f8c68424a2e803ffd1b81b` (`e32cc8b71`)
+  incumbent vendored redis 7.2.4, `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  host      loadavg 5.44-5.90, MHz 1429-4292 spread, no build running, /data 47G
+
+### THE INCUMBENT DOES NOT PAY IT, ON EITHER PATH
+
+    RPUSH(300)+LTRIM per key, letter-leading -> digit-leading
+
+      fr      190,488.8 -> 260,582.4     +70,093.6    +36.8 pct
+      redis   315,405.8 -> 315,605.1        +199.3     +0.1 pct   <- FLAT
+
+**No redis frame moved by as much as 300 instructions per key.** This matches the RESTORE control
+exactly, where redis held 64,307-64,668 across all six draws of both shapes. The digit-leading
+penalty is fr's alone on the write path as well as the restore path, so it is a real defect and not
+a cost inherent to the operation.
+
+That is worth stating because it was NOT obvious in advance: redis's listpack append also runs
+`lpStringToInt64` on every element, and it too must reject `000000000000042` for a redundant
+leading zero. It evidently does so without a measurable per-element cost.
+
+### AND YET fr LEADS THIS SHAPE IN BOTH ARMS
+
+    fr / redis, RPUSH(300)+LTRIM     letter-leading  0.6039x      digit-leading  0.8256x
+
+**fr is ahead by 40 pct on letter-leading data and still ahead by 17 pct on digit-leading data.**
+The cliff costs 22 points of that lead and does not consume it.
+
+This is the correction the previous two rows need, and it is the reason this one exists. The
+RESTORE row banked a certified **flip** — 0.9115x AHEAD to 1.5998x BEHIND — and the write-path row
+that followed reported "+36.8 pct, heavier in absolute terms than the RESTORE cliff" without
+checking where the two engines actually stood. Both statements are true, and read together they
+invite the conclusion that the write path is the worse problem. **It is not.** On the write path
+the same defect erodes a large lead; on RESTORE it reverses the result. The consequence of a defect
+is not its size.
+
+### WHAT IS AND IS NOT ESTABLISHED
+
+The +36.8 pct and +0.1 pct are same-engine, same-invocation, two-pattern differences and are as
+solid as the earlier frame numbers — the fr figure replicated bit-identically at the frame level
+across two runs.
+
+The 0.6039x and 0.8256x are cross-engine and are **sizing**. They are not to be quoted as campaign
+output, and no worst bound is claimed for them because a single draw has no bound to quote. What
+they establish is the SIGN and the rough magnitude, which is all this row's argument needs: fr
+leads on both arms, comfortably, and the lead survives the cliff.
+
+### RETRY PREDICATES
+
+  1. Certify the write-path pair properly — interleaved arms, three draws, A/A nulls, gate FIT at
+     both ends — before any of it is quoted as campaign output. Predicted worst bounds in the
+     region of 0.61x and 0.83x. If the digit-leading arm comes back ABOVE 1.0x the sizing here was
+     wrong by a factor the margins say is impossible, and this row's conclusion inverts.
+  2. Check the same letter/digit control on the incumbent for any FUTURE shape where fr shows a
+     content-dependent cost. It cost one run and it is what separates "our defect" from "the cost
+     of the operation". This row would have been unwritable without it.
+  3. When levers 1 and 2 land, the RESTORE shape is the one whose VERDICT changes. The write path
+     will get faster and will still be a lead — worth measuring, not worth prioritising.
