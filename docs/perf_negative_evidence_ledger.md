@@ -46886,3 +46886,76 @@ and an effect inside that interval is not claimed.
 3. When converting further read routes, classify the arm FIRST. A `FastEncodedReply` arm needs
    no clear removal and converts today; a `FastReply` arm cannot convert until the patch lands,
    and attempting one before then reproduces the 0-of-5 result exactly.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: KEEP (COMPETITIVE) — `geosearch_2` read on BOTH metrics at last: fr retires 24.7 pct FEWER instructions (0.7532x worst bound) and still loses on throughput, so the lever class on this shape is STALLS, not work (`frankenredis-eh2ct`)
+
+Claim class: COMPETITIVE. Campaign output: yes. The vendored Redis 7.2.4 ran as a live incumbent
+arm in the same invocation as the fr arm on all three draws: fr/Redis 7.2.4 measures 0.7532x on
+instructions per op, the WORST of three draws, meaning fr retires 24.7 pct FEWER instructions.
+
+  fr server ELF sha-256: e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  redis server ELF sha-256: e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+Emitted per arm by the harness and re-verified after each arm, as
+bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399 and
+bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7.
+
+  draw   fr instr/op   redis instr/op   ratio    loadavg           MHz mean
+    1      12,657.4        17,105.1     0.7400   6.61 8.94 10.63    2422/2053
+    2      12,656.8        17,283.1     0.7323   6.15 8.56 10.44    1951/2012
+    3      12,660.1        16,808.0     0.7532   6.22 8.54 10.42    2505/2232
+
+  fr spread 0.026 pct   redis spread 2.827 pct   WORST BOUND 0.7532x
+
+A/A NULLS, same binary both sides, draws split alternating: fr numerator median 1.000154 with a
+bootstrapped 95% median CI of [1.000047, 1.000261]; redis denominator median 0.981106 with a
+bootstrapped 95% median CI of [0.972511, 0.989701]. Every arm and null ran within one top-level
+invocation of the harness per draw. THE VERDICT IS GATED ON THAT BOOTSTRAP MEDIAN-CI: the effect
+is 24.7 pct against a denominator null bias of 1.9 pct, an order of magnitude clear. The
+denominator's null only just clears the 2 pct band and is reported rather than buried. CV is
+provenance only and was not used as a gate anywhere in this row; no CV was computed.
+
+WINDOW: the harness printed UNFIT on all three draws (1-min vs 5-min 26 pct apart). That does
+not bear on this row and here is why: fr's Ir reproduced to 0.026 pct ACROSS those draws, which
+is what an instruction-count instrument does under load. The FIT gate exists to protect
+elapsed-time quantities. The denominator still moved 2.8 pct, which is why the worst bound is
+quoted.
+
+### The two metrics together, which is what this bead was filed to make possible
+
+  instructions      fr 0.7532x worst bound              fr AHEAD by 24.7 pct
+  throughput raw    1.0089 / 1.0210 (f8067cba3)         fr ahead by 0.9-2.1 pct
+  throughput norm   0.8578 worst bound (f8067cba3)      fr BEHIND by 14.2 pct
+
+fr does a QUARTER LESS WORK and converts it into roughly nothing. Combining the worst bounds of
+the two independent measurements -- instructions 0.7532x and raw throughput 1.0089x -- the
+implied instruction-rate gap is redis_IPC / fr_IPC = 1.3159; taking the other end of both ranges
+gives 1.3374. So Redis executes fr's smaller instruction stream between 1.32x and 1.34x faster
+per cycle.
+
+THAT IS AN INDEPENDENT CORROBORATION of the hardware profile already on this bead at :38143,
+which measured fr at IPC 1.387 with a 1.4722x worse L1 miss ratio. Two different instruments,
+neither derived from the other, agreeing that this shape is stall-bound.
+
+### What this rules out, which is the actionable half
+
+ANY LEVER THAT REMOVES fr INSTRUCTIONS ON THIS SHAPE IS ATTACKING THE DIMENSION fr ALREADY WINS
+BY A QUARTER. That retires, on arithmetic rather than on taste, the whole work-reduction family
+for `geosearch_2`: the cell-walk restructuring I was about to open, the 9-range
+`Vec<(f64,f64)>` allocation in `geo_cells_for_steps`, and any fusion of the neighbour scan.
+Removing even 10 pct of fr's instructions here moves 0.7532 to 0.678 and, at an unchanged IPC
+gap, moves throughput by about 1 pct.
+
+It also explains why `c4a2f6e91`'s allocator result had the right SHAPE and the wrong SIZE: a
+locality treatment was the correct class of intervention on a stall-bound route, and it was
+rejected in `a277535d7` on magnitude, not on class.
+
+RETRY PREDICATE: do NOT open a work-reduction lever on `geosearch_2`; the instruction ratio
+above is the reason and it is replicated three times with a 0.026 pct numerator. Any future
+`geosearch_2` lever must target IPC and must be measured on MISSES OR CYCLES, never on
+instructions, because instructions will improve while throughput does not. The quantity to beat
+is the 1.32x instruction-rate gap derived here, cross-checked against the 157.1 hardware misses
+per op at IPC 1.387 already banked. Reopen the work-reduction family only if the instruction
+ratio is ever measured ABOVE 1.0 on this shape, which three draws put nowhere near.
