@@ -51878,3 +51878,35 @@ quote its output. **Do not size this vein from source again** — three source-d
 were wrong in the same direction, and the reason is now known and fixed. If a new read route is
 added without a shape, it is invisible to this census by construction, so add the shape with the
 route.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: CAVEAT CLOSED — the expire-cycle rate limit now passes `cargo test -p fr-runtime` AT its own commit: 633 passed, 0 failed
+
+`da47c18ca` landed the FAST-cycle rate limit with an explicit and uncomfortable caveat: the unit
+target did not compile at HEAD, so the suite evidence came from HEAD `acaf5f45d`, eight commits
+earlier, while only the release build, the notification differential and the replication
+differential had been run at the landing base. That row said, in as many words, "RE-RUN
+`cargo test -p fr-runtime` AGAINST THIS COMMIT the moment that target compiles; if it fails, this
+row is the thing to revert."
+
+It compiles, and it passes.
+
+  HEAD `0af86f625` -- getexgate's "repair the test build again: 20 more call sites left behind by
+  the read-gate threading batches, and release builds still hide every one"
+  `FAST_EXPIRE_CYCLE_MIN_INTERVAL_MS` present in HEAD's `crates/fr-runtime/src/lib.rs`
+  `cargo test -p fr-runtime` -> 633 passed, 0 failed, 2 ignored, across every sub-suite
+  loadavg 13.14 13.47 11.34, 0 cargo/rustc processes at launch
+
+So the verification boundary that row documented is now closed rather than merely disclosed. The
+change is verified by the suite AT the commit that contains it, not only at an earlier base, and
+the revert instruction is discharged rather than left standing.
+
+WORTH KEEPING FROM THE EPISODE, because it is a property of this repo and not of this change:
+that peer commit's own subject line says release builds HIDE these breakages. Both times the unit
+target broke under me, `cargo build --release` was clean and `cargo test` was not, which is
+exactly why a release build is not evidence that a change is safe to land. I landed once on that
+basis with the gap disclosed; the disclosure is what made this closure possible, and a row that
+had simply claimed "builds fine" would have had nothing to come back and check.
+
+No retry predicate: this closes a bookkeeping obligation rather than opening a surface. The
+lever's own reopen conditions are unchanged and live in `da47c18ca`.
