@@ -5143,6 +5143,20 @@ impl ServerState {
             .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
     }
 
+    /// (frankenredis-w1djx) `replica-ignore-maxmemory` / `slave-ignore-maxmemory`; default `yes`.
+    ///
+    /// Upstream's default is 1 and the reason is in its own comment: "By default replicas should
+    /// ignore maxmemory and just be masters exact copies." A replica that evicts on its own
+    /// diverges from its primary -- it drops keys the primary still holds and never told it to
+    /// drop -- so the safe default is the permissive-looking one.
+    #[must_use]
+    pub fn replica_ignore_maxmemory_enabled(&self) -> bool {
+        self.config_overrides
+            .get("replica-ignore-maxmemory")
+            .or_else(|| self.config_overrides.get("slave-ignore-maxmemory"))
+            .map_or(true, |value| value.eq_ignore_ascii_case("yes"))
+    }
+
     /// (frankenredis-w1djx) `repl-disable-tcp-nodelay`; upstream's default is `no`.
     ///
     /// Read live like the other replication knobs -- upstream marks it MODIFIABLE_CONFIG, so an
@@ -40045,6 +40059,24 @@ impl Runtime {
         packet_id: u64,
     ) -> Option<RespFrame> {
         if self.server.maxmemory_bytes == 0 {
+            self.server.last_eviction_loop = None;
+            return None;
+        }
+        // (frankenredis-w1djx) A REPLICA does not enforce maxmemory itself. Upstream's
+        // `isSafeToPerformEvictions` returns 0 when `server.masterhost && repl_slave_ignore_
+        // maxmemory`, which makes `performEvictions` answer EVICT_OK -- so a replica neither
+        // evicts NOR rejects writes for OOM, and `module.c` mirrors the same condition on the OOM
+        // check. fr accepted the directive and enforced maxmemory on replicas anyway, so a
+        // replica under memory pressure would drop keys its primary still holds and was never
+        // told to drop: silent divergence, visible only as a later missing key.
+        //
+        // Returning None here is exactly the maxmemory-disabled answer above, which is the
+        // behaviour upstream's EVICT_OK produces.
+        if matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Replica { .. }
+        ) && self.server.replica_ignore_maxmemory_enabled()
+        {
             self.server.last_eviction_loop = None;
             return None;
         }
