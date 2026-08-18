@@ -322,9 +322,22 @@ def audit_shape_sizes(min_elements=None):
     characterising the COMMAND. This flags the candidates; only SORT has been shown
     to invert, and the rest are UNTESTED rather than known-bad.
 
-    Deletion condition: remove this when every scaling command on the board carries a
-    second, larger-N point, since then the crossover is always visible and there is
-    nothing left to warn about.
+    Deletion condition, as originally written: remove this once every scaling command
+    carries a second, larger-N point, since then the crossover is always visible and
+    there is nothing left to warn about.
+
+    THAT CONDITION IS NOW MET, and the check is being PROMOTED rather than deleted.
+    Every flagged row has a larger-N twin in its own group, so there is indeed nothing
+    left to warn about -- but "nothing to warn about" is a property of the board TODAY,
+    not of the board forever. Deleting the check would remove the only thing standing
+    between a new single-point registration and a board that silently goes back to
+    quoting intercepts as command ratios, which is the state that made SORT "fr's worst
+    route" for weeks.
+
+    So it now RETURNS NONZERO when a scaling shape has no twin in its group, i.e. it is
+    a gate rather than a report. That satisfies the original intent -- "so a new
+    degenerate registration is visible immediately" -- with the strength the warning
+    form never had: visible now means FAILING, not printed among 26 other lines.
     """
     flagged = []
     total = 0
@@ -387,10 +400,20 @@ def audit_shape_sizes(min_elements=None):
           % (", ".join(sorted(paired)) if paired else "(none)"))
     print(
         "\nA flagged row is not wrong — it is an INTERCEPT row. Quote it as fixed\n"
-        "per-command cost, or register a larger-N sibling before quoting it as the\n"
-        "command's ratio. SORT is the one case measured both ways: 0.8118 at n=3\n"
-        "(inadmissible) versus 1.1097 at n=64 (admissible)."
+        "per-command cost, or read it against its larger-N twin before quoting it as\n"
+        "the command's ratio. Two commands are measured both ways and both invert:\n"
+        "SORT_RO 0.8118 at n=3 (inadmissible) versus 1.1097 at n=64, and GEOSEARCH\n"
+        "0.9162 against 1.0094 control-normalised — where the RAW ratios are above 1.0\n"
+        "at both sizes, so a raw reading shows no crossing at all."
     )
+    if unpaired:
+        print(
+            "\nFAIL: %d scaling shape(s) have no larger-N twin in their own group.\n"
+            "Register one, or move the row out of SIZE_SCALING_COMMANDS if the command\n"
+            "genuinely does not scale with its input." % len(unpaired)
+        )
+        return 1
+    print("\nPASS: every scaling shape carries a larger-N twin in its own group.")
     return 0
 
 def classify_row(ratio, ci_low, ci_high, null_redis, null_fr, null_bound=NULL_BOUND):
