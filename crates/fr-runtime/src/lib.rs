@@ -44,7 +44,8 @@ use fr_store::{
     AclKeyPattern, ClientReplyState, ClientTrackingState, CommandRecordKind, DispatchAclLogContext,
     DispatchAclPermissionReason, DispatchAclPermissions, EvictionLoopFailure, EvictionLoopResult,
     EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPolicy, PendingAclLogEvent,
-    SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, decode_db_key, encode_db_key, glob_match,
+    SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, StringBytes, decode_db_key, encode_db_key,
+    glob_match,
 };
 
 /// Re-exported so a cross-partition INFO aggregate can hold and merge per-command
@@ -9127,7 +9128,7 @@ impl Runtime {
         let result = self.server.store.get_string_bytes(key, now_ms);
         let failed = result.is_err();
         match result {
-            Ok(value) => encode_bulk_string_slice(value.as_deref(), false, out),
+            Ok(value) => encode_bulk_string_slice(value.as_ref().map(StringBytes::as_slice), false, out),
             Err(err) => CommandError::Store(err).to_resp().encode_into(out),
         }
         if let Some(started) = started {
@@ -10834,7 +10835,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "mset",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -11189,7 +11190,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("getdel", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("getdel", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -11325,7 +11326,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("decr", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("decr", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -11472,7 +11473,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("decrby", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("decrby", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -11617,7 +11618,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("append", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("append", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -11775,7 +11776,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("setrange", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("setrange", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -12398,7 +12399,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("hmset", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("hmset", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -12706,7 +12707,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("geoadd", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("geoadd", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -12835,7 +12836,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("xack", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("xack", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -12951,7 +12952,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("xdel", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("xdel", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -13080,7 +13081,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("xtrim", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("xtrim", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -13437,7 +13438,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("xadd", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("xadd", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -13601,7 +13602,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zincrby", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("zincrby", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -14545,7 +14546,7 @@ impl Runtime {
         match result {
             Ok(value) => {
                 if !suppress_reply {
-                    encode_bulk_string_slice(value.as_deref(), resp3, out);
+                    encode_bulk_string_slice(value.as_ref().map(StringBytes::as_slice), resp3, out);
                 }
             }
             Err(err) => {
@@ -14667,7 +14668,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "ping",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -14760,7 +14761,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "echo",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -15985,7 +15986,7 @@ impl Runtime {
             let value = self.server.store.get_string_bytes(key, now_ms);
             if !suppress_reply {
                 match value {
-                    Ok(v) => encode_bulk_string_slice(v.as_deref(), resp3, out),
+                    Ok(v) => encode_bulk_string_slice(v.as_ref().map(StringBytes::as_slice), resp3, out),
                     // MGET yields nil for a non-string (wrong-type) key, not an error.
                     Err(_) => encode_bulk_string_slice(None, resp3, out),
                 }
@@ -16028,7 +16029,7 @@ impl Runtime {
             // MGET never returns an error reply.
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "mget",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -16344,7 +16345,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("pexpiretime", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("pexpiretime", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -16578,7 +16579,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "dump",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -16787,7 +16788,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "randomkey",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -17155,7 +17156,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("substr", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("substr", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -17856,7 +17857,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zmscore", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("zmscore", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -18090,7 +18091,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("smismember", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("smismember", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -18338,7 +18339,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("hmget", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("hmget", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -18760,7 +18761,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "memory|usage",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -18911,7 +18912,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "object|encoding",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -19007,7 +19008,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "object|refcount",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -19529,7 +19530,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("lpos", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("lpos", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -19624,7 +19625,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "command|count",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -19720,7 +19721,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "dbsize",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -19822,7 +19823,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "watch",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -19915,7 +19916,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "unwatch",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -20109,7 +20110,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("bitpos", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("bitpos", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -20298,7 +20299,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("bitcount", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("bitcount", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -20735,7 +20736,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "persist",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -20851,7 +20852,7 @@ impl Runtime {
         if self.server.latency_tracking {
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(
+                .record_command_histogram_map_with_kind(
                     "setnx",
                     elapsed_us,
                     CommandRecordKind::Success,
@@ -21082,7 +21083,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("rpoplpush", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("rpoplpush", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -21338,7 +21339,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("lmove", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("lmove", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -21486,7 +21487,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("rename", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("rename", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -21848,7 +21849,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("hincrby", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("hincrby", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -21993,7 +21994,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("copy", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("copy", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -22161,7 +22162,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("incrbyfloat", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("incrbyfloat", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -22539,7 +22540,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("getex", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("getex", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -22753,7 +22754,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("getset", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("getset", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -22901,7 +22902,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("hsetnx", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("hsetnx", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -23073,7 +23074,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("linsert", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("linsert", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -23224,7 +23225,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("lrem", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("lrem", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -23535,7 +23536,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zrangebylex", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("zrangebylex", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -23924,7 +23925,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zrevrangebylex", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("zrevrangebylex", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -29160,7 +29161,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("renamenx", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("renamenx", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -29307,7 +29308,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("smove", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("smove", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -29475,7 +29476,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("setbit", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("setbit", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -29648,7 +29649,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("hincrbyfloat", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("hincrbyfloat", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -29806,7 +29807,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("ltrim", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("ltrim", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -29963,7 +29964,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("lset", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("lset", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -30960,7 +30961,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("geodist", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("geodist", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -31136,7 +31137,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zcount", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("zcount", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -31298,7 +31299,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zlexcount", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("zlexcount", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -32913,7 +32914,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("geopos", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("geopos", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -33146,7 +33147,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("bitfield", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("bitfield", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -36289,7 +36290,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zrange", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("zrange", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -36349,7 +36350,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("zrange", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("zrange", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -36552,7 +36553,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("incrby", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("incrby", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -36800,7 +36801,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("smembers", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("smembers", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -36858,7 +36859,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("sunion", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("sunion", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -36974,7 +36975,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("sdiff", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("sdiff", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -37030,7 +37031,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("sinter", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("sinter", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -37147,7 +37148,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("hgetall", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("hgetall", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -37207,7 +37208,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("lrange", elapsed_us, kind);
+                .record_command_histogram_map_with_kind("lrange", elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
