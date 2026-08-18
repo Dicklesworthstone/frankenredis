@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-"""subcommand_coverage_gate.py — static SUBCOMMAND coverage vs vendored redis 7.2.4.
+"""subcommand_coverage_gate.py — REDUNDANT. Use scripts/command_arity_gate.py instead.
+
+SUPERSEDED BEFORE IT WAS USEFUL, and this notice is the correction. `command_arity_gate.py`
+(9392e5d25) landed roughly twenty minutes before this file and is STRICTLY STRONGER on the same
+129 subcommands: it reads fr's declared `SUBCOMMAND_TABLE` rather than grepping for a literal, it
+reports entries present in the incumbent and absent from that table, AND it compares arity. Its
+current verdict is 242/242 top-level and 129/129 subcommands agreeing.
+
+I wrote this without checking whether the existing arity gate already covered subcommands. It did
+-- its `fr_subcommand_arities` half was wired from the start. Two checks were also considered for
+salvage and both come back empty: subcommands declared in the table but referenced nowhere else
+(0 of 129), and any coverage axis this has that the other lacks (none).
+
+Kept only because deleting a file needs explicit permission. Nothing should depend on it, and
+removing it is the right cleanup.
+
+--- original description, retained for the record ---
+
+Static SUBCOMMAND coverage vs vendored redis 7.2.4.
 
 The existing command-arity gate compares the 242 TOP-LEVEL commands. Redis 7.2.4 ships 392 command
 definitions, so 150 of them are subcommands of container commands (CLUSTER 28, SENTINEL 21,
@@ -69,6 +87,11 @@ def fr_source_upper():
 
 
 def main():
+    print(
+        "NOTE: this gate is REDUNDANT -- scripts/command_arity_gate.py checks the same 129\n"
+        "      subcommands against fr's declared SUBCOMMAND_TABLE and compares arity too.\n"
+        "      Run that instead; this remains only because deleting a file needs permission.\n"
+    )
     pairs = incumbent_subcommands()
     if not pairs:
         print("FAIL — parsed zero subcommands; the incumbent tree is missing or changed shape")
