@@ -51485,3 +51485,97 @@ numbers here and in `cdbc69ebf`. Reopen only IF `run_active_expire_cycle`'s BODY
 executing more than once per 2 ms, or if a workload shows expiry latency regressing -- the
 differentials above cover reaping, notification and replication but not tail latency of expiry
 under memory pressure, which nothing here measures.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — nine more read routes take the cached gate at **175.0 instr/op each**, and a **THIRD derivation form** turns up, which is most of why I kept underestimating this vein's size (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: **MGET, ZRANGEBYLEX** (plain and LIMIT forms), **ZREVRANGEBYLEX, SINTERCARD, ZINTERCARD,
+LPOS with RANK, LPOS with COUNT, ZRANK/ZREVRANK WITHSCORE, HRANDFIELD with count** now take the
+per-pass `read_gate_cache` instead of deriving `plain_borrowed_default_key_read_allows`
+themselves. Shipped in `7e8e4e4e3`. Ten floor arms; every non-floor call site passes `None`.
+
+**THE THIRD FORM IS THE FINDING.** Batches 1-3 met the gate as a predicate tail (form A) and as
+an inline `if !gate { return None; }` guard (form B). This batch met form C — the gate as the
+**last disjunct of the bounds check**:
+
+    if self.policy.gate.max_array_len < 5
+        || key.len() > self.policy.gate.max_bulk_len
+        || !self.plain_borrowed_default_key_read_allows(now_ms)
+    { return None; }
+
+Because `||` short-circuits and the gate is always the last disjunct, the bounds are already
+evaluated ahead of it, so lifting it into its own `if` after the bounds block is exactly
+equivalent — and it sidesteps a borrow-checker fight over capturing `self` in a closure
+mid-expression. **A converter that recognises only forms A and B reports a smaller population
+than exists**, which is a concrete mechanism behind the "vein is CLOSED" error I retracted in
+`521985c7d`. Three forms are now known; I am no longer confident that is all of them, and the
+census, not a source scan, remains the authority.
+
+| shape | gate calls/op | gate frame | whole-op worst bound | role |
+|---|---|---|---|---|
+| **mget_3** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +208.0 | beneficiary |
+| **zrangebylex** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +196.1 | beneficiary |
+| **zrevrangebylex_4** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +167.6 | beneficiary |
+| **sintercard_base** | **1.000 -> 0.001** | **175.0 -> ABSENT** | +178.9 | beneficiary |
+| **zintercard_2** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +189.0 | beneficiary |
+| **lpos_rank** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +134.1 | beneficiary |
+| **lpos_count_opt** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +92.3 | beneficiary |
+| **zrank_withscore** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +180.3 | beneficiary |
+| **hrandfield_count** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +60.1 | beneficiary |
+| zrangebyscore_plain | 1.000 -> 1.000 | **175.0 -> 175.0** | -42.9 | **EXACT null** |
+| llen | 0.000 -> 0.000 | ABSENT -> ABSENT | -43.6 | converted control |
+
+**Quoting the WORST bound: 175.0 instr/op on every one of the nine**, which is 7.8 pct of a
+HRANDFIELD-with-count (of 2247.9) down to 4.7 pct of a SINTERCARD (of 3733.2). These are the
+most expensive commands the vein has reached, so the percentages are the smallest so far while
+the absolute saving is unchanged.
+
+**`sintercard_base` reads 0.001, not 0.000, and that is what is recorded.** About 20 calls
+across 20,000 ops survive somewhere off the measured path. Every other converted route reaches
+a clean zero, and I would rather carry an unexplained 0.001 in the table than round it away.
+
+**WHOLE-OP IS UNUSABLE ON THIS BATCH, AND THE TABLE SHOWS IT RATHER THAN ASSERTING IT.** The
+untouched null moved **-42.9** and the already-converted control **-43.6** — both should be
+zero. Two real beneficiaries, `lpos_count_opt` (+92.3) and `hrandfield_count` (+60.1), sit
+inside that band. On the whole-op instrument alone this batch would be two-thirds unprovable;
+on the frame and the call count all nine separate cleanly, as exact integers.
+
+**ZBYSCORE WAS DELIBERATELY EXCLUDED AND BECAME THE NULL.** `can_execute_plain_zbyscore_borrowed`
+has **22 in-crate callers**, each an executor that would need the parameter and then its own
+`main.rs` sites; that cascade is a batch of its own and half-landing it would be worse than not
+starting. `zrangebyscore_plain` therefore serves as this row's null — a better null than one
+picked at random, because it is census-confirmed at 1.000 and is a route I explicitly declined
+to convert rather than one that merely happened to be untouched.
+
+CORRECTNESS: **107 commands byte-identical** between the arms in one pipelined pass. Beyond the
+usual stale-gate transitions (NO-TOUCH, SELECT to db3 and back, MULTI/EXEC, a volatile key,
+lowercase forms, WRONGTYPE, missing keys), this battery carries **14 malformed forms whose only
+job is to prove the form-C reordering is sound** — `LPOS ... RANK 0`, a negative `COUNT`,
+non-integer RANK/COUNT/numkeys, malformed lex bounds, `LIMIT -1`, and a numkeys that overruns
+the argument list. Every one must still decline to the generic path with its exact error reply,
+and every one does. HRANDFIELD-with-count is random and is exercised against a single-field hash
+where positive, negative and zero counts all have forced answers.
+
+BUILD PROVENANCE: paired build in a worktree pinned at `ecafeeca1`, built AFTER, BEFORE, AFTER
+again. The two AFTERs are bit-identical
+(`bench_elf_sha256=4b3845c439bacd6c5649e3fd2b16b68b8771b677d5e9c61517ce8ca07488c666`) and BEFORE distinct
+(`bench_elf_sha256=cba073d26ffa61a32b1171441091c451d5548510b36d6736e79611ea9ffb2507`). Host: /data 94G, loadavg
+7.97/9.02/9.38, CPU idle 89 pct.
+
+GATE AND ITS OWN NULL. Both arms were measured in one same-invocation interleaved run, two
+rounds, so drift falls on both alike. The A/A null and the A/B pairing are same-invocation. A/A
+null on the whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians:
+median 1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is
+that bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this
+row; no CV was computed. Host state is provenance, not a gate.
+
+RETRY PREDICATE: revisit a converted route only if it is observed calling
+`plain_borrowed_default_key_read_allows` above **0.000 calls/op** (`sintercard_base`'s reference
+is 0.001, not 0.000). **The vein is still open** — `zbyscore` and its 22 callers are the next
+named batch, and the collection `_into` family (SMEMBERS, SUNION, SDIFF, SINTER, HGETALL, LRANGE,
+the SCAN and XRANGE families) is untouched. Before claiming completion, run the census with
+`call_count_delta.py <dump> 20000 --callers plain_borrowed_default_key_read_allows` over a broad
+shape set and quote its output — and note that a source scan will UNDERCOUNT unless it knows all
+three derivation forms.
