@@ -2438,6 +2438,30 @@ def suggest_shapes(name: str, shapes=None) -> list[str]:
                                      n=5, cutoff=0.4)
 
 
+# (frankenredis-ozrro) Set by `--keep-dumps` or FR_KEEP_DUMPS=1. When false -- the default --
+# the callgrind dump directory is removed once its numbers have been extracted. See `_reap`.
+KEEP_DUMPS = [os.environ.get("FR_KEEP_DUMPS", "") not in ("", "0")]
+
+
+def _reap(workdir: str) -> None:
+    """Remove the dump directory, or explain how to keep it.
+
+    The path is still PRINTED either way: a run that kept its dump needs the path for the
+    follow-up tools, and a run that reaped it should say so rather than print a path that no
+    longer exists, which would look like the tools were broken.
+    """
+    if KEEP_DUMPS[0]:
+        print("  callgrind dumps: %s  (kept: --keep-dumps)" % workdir)
+        return
+    try:
+        shutil.rmtree(workdir)
+    except OSError as exc:  # pragma: no cover - reported, never fatal to a measured row
+        print("  callgrind dumps: %s  (COULD NOT REAP: %s)" % (workdir, exc))
+        return
+    print("  callgrind dumps: reaped. Pass --keep-dumps to keep them for frame_delta.py /"
+          " call_count_delta.py")
+
+
 def main() -> int:
     args = sys.argv[1:]
     if "--self-test" in args:
@@ -2445,6 +2469,14 @@ def main() -> int:
     if "--cache-sim" in args:
         CACHE_SIM[0] = True
         args = [a for a in args if a != "--cache-sim"]
+    # (frankenredis-ozrro) Implements the fix CrimsonHawk specified in `77323d341` after
+    # measuring 4,964 leaked dump dirs (~4.0 GB, 2,311 of them in one day). The dump is read
+    # seconds after it is written and then never again, so it is removed at the end of the run
+    # unless the caller says otherwise. `--keep-dumps` is what the frame_delta /
+    # call_count_delta follow-ups need, and is the reason the harness used to keep every dump.
+    if "--keep-dumps" in args:
+        KEEP_DUMPS[0] = True
+        args = [a for a in args if a != "--keep-dumps"]
     if "--selftest" in args:
         return selftest()
     if "--list" in args:
@@ -2455,7 +2487,7 @@ def main() -> int:
     positional = _positional_args(args)
     if len(positional) < 2:
         print("usage: shape_instr_per_op.py <fr_bin> <shape> [ops] [--fr-only] "
-              "[--locale=X]   (--list for shapes)", file=sys.stderr)
+              "[--locale=X] [--keep-dumps]   (--list for shapes)", file=sys.stderr)
         return 2
     if positional[1] not in SHAPES:
         # (frankenredis-gvm6z) A WRONG SHAPE NAME AND A WRONG ARGUMENT COUNT ARE
@@ -2529,7 +2561,7 @@ def main() -> int:
         label, frames = dispatch_mechanism(os.path.join(workdir, "cg.fr.2n.out"))
         print("  mechanism: %s  (generic frames seen: %s)"
               % (label, ", ".join(frames) if frames else "none"))
-        print("  callgrind dumps: %s" % workdir)
+        _reap(workdir)
         return 0
     rd_ipo, rd_lo, rd_hi = instr_per_op(REDIS, seeds, cmd, ops, workdir, "redis", locale)
     print("shape %s   N=%d 2N=%d" % (shape, ops, ops * 2))
@@ -2571,7 +2603,7 @@ def main() -> int:
             print("      %10.1f  %s" % (ir, fn[:66]))
         print("  compare: a front-classified route (EXISTS on a missing key) is 21.5%;"
               " 62-66% means the dispatch lever has something to bite on.")
-    print("  callgrind dumps: %s" % workdir)
+    _reap(workdir)
     return 0
 
 
