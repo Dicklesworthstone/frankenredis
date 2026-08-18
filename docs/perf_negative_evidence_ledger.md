@@ -53442,76 +53442,130 @@ collection `_into` family (`smembers_base`, `hgetall_base`, `lrange_base`, `sint
 (four shapes). Re-run the census after each batch rather than reasoning from source — and check
 the census entry, not the command name, before assuming a route is unconverted.
 
-## 2026-08-18 BrownIbis: CENSUS REFRESH — the read-gate vein goes **29 -> 23 shapes still paying**, the six that moved are exactly batch 5's beneficiaries, and a ratio certification was REFUSED by the gate at 92 pct idle (`frankenredis-getexgate`)
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the 2.4 pct integer-list regression `308db786f` shipped is REPAIRED by open-coding the decimal fold, and the shape lands 11.95 pct AHEAD of where it started (`frankenredis-qj6jn`)
 
-Claim class: SELF-SPEEDUP
-Campaign output: no
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), TWO-BINARY A/B with
+the A/A and the A/B in ONE INVOCATION and the candidate arm BRACKETED by control arms. CV was NOT
+used, as a gate or otherwise — no coefficient of variation appears in this row's decision path and
+none was computed. No timing verdict is claimed: the measurand is a retired-instruction COUNT.
 
-`d6f97f48e`'s retry predicate says to re-run the census after each batch rather than reason from
-source. This is that re-run, on `b5_after1.elf` (HEAD `9a937431c` plus batch 5, i.e. the shipped
-state of `e766788a8`), one draw per shape, calls/op to `plain_borrowed_default_key_read_allows`.
+THE SAME-INVOCATION A/A null median is 0.999920, bootstrap 95% CI [0.999136, 1.000638] over six
+draws, taken in the same invocation as the A/B it gates; the per-draw table is below. The
+bootstrap median-CI is the verdict gate and it excludes zero. On the STRING shape the same gate
+does NOT exclude zero, and that failure is reported below as this row's own finding rather than
+worked around.
 
-**23 still paying, 23 converted.** The previous census (`a1600b784`, on `b4_after1.elf`) read 29
-and 13. **29 - 6 = 23, and the six that moved are exactly batch 5's six measured beneficiaries** —
-`zrangebyscore_plain`, `zrangebyscore_l`, `zrange_rev`, `zrange_withscores`, `zcount_base`,
-`zscore_base` — all of which now appear in the converted list at 0.000. The arithmetic closes with
-no unexplained movement in either direction, which is the cheapest available check that a batch
-did what its row claimed and nothing else.
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
 
-**STILL PAYING — 23 shapes**, ordered by what 86.0 costs them (the gate is 86.0 since
-`2bdc560df`, not 175.0):
+### PROVENANCE
 
-| shape | instr/op | 86.0 as pct | shape | instr/op | 86.0 as pct |
-|---|---|---|---|---|---|
-| dbsize_base | 1194.4 | **7.2** | zmscore_2 | 2472.5 | 3.5 |
-| getbit_base | 1514.7 | 5.7 | keys_star | 2552.4 | 3.4 |
-| hstrlen_base | 1612.6 | 5.3 | xpending_empty | 2721.9 | 3.2 |
-| getrange_base | 1733.6 | 5.0 | scan_zero | 3688.5 | 2.3 |
-| smembers_base | 1851.4 | 4.6 | sinter_2 | 3961.0 | 2.2 |
-| substr | 1854.8 | 4.6 | scan_count | 3993.8 | 2.2 |
-| geohash_base | 2066.7 | 4.2 | geopos_base | 4179.9 | 2.1 |
-| hgetall_base | 2108.4 | 4.1 | scan_type | 4412.6 | 1.9 |
-| hmget_2 | 2145.6 | 4.0 | scan_match | 4459.5 | 1.9 |
-| smismember_2 | 2165.3 | 4.0 | xpending_populated | 4552.5 | 1.9 |
-| lrange_base | 2166.8 | 4.0 | pubsub_channels | 4953.1 | 1.7 |
-| | | | geodist_base | 6680.9 | **1.3** |
+  ELF           AFTER `ef158d668074e8c980694b9e47c2617b0a2cb4969982052aa9909aeab967f890`,
+                BEFORE `9932516a77e05de59df7d423e543c94c2a864a26d29812951afdfcff1cfeb902`.
+  bench_elf_sha256=ef158d668074e8c980694b9e47c2617b0a2cb4969982052aa9909aeab967f890
 
-**THE PERCENTAGES ARE HALF WHAT THEY WERE, AND THAT IS THIS VEIN EATING ITSELF.** `a1600b784`
-quoted 13.0 pct down to 2.6 pct against a 175.0 gate; the same shapes now read 7.2 down to 1.3
-against 86.0. Every further conversion is worth half what it was before `2bdc560df` halved the
-gate. That is not an argument against finishing — 7.2 pct of a DBSIZE is still the largest
-per-command win on the board — but it does mean the remaining 23 are worth roughly what 11 were
-worth this morning, and a lever that halves the gate again would be worth more than all of them.
+  Booted and hashed from `/proc/<pid>/exe`, the kernel's view of the RUNNING image, as in
+  `fce3dd6d3`, `308db786f` and `bd84d97d2`. The server ELF does not self-report a hash and no
+  claim is made that this is one. Both arms were rebuilt back-to-back specifically so they share
+  the peer WIP present at that moment. Since they were built, the only source change is
+  whitespace inside one expression and formatting inside the test module.
 
-NEXT, in the order the census argues for: the **collection `_into` family** (`smembers_base`
-4.6 pct, `hgetall_base` 4.1, `lrange_base` 4.0, `sinter_2` 2.2) is the largest coherent cluster;
-the **SCAN family** is four shapes at 1.9-2.3 pct; the **geo family** (`geohash_base`,
-`geopos_base`, `geodist_base`) is three at 1.3-4.2 pct. The cheap singletons — `dbsize_base`,
-`getbit_base`, `hstrlen_base`, `getrange_base` — carry the best percentages and have no cluster
-to wait for.
+### WHAT WENT WRONG, IN ONE SENTENCE
 
-**NO CERTIFICATION THIS TURN, AND THE REASON IS WORTH RECORDING.** The operator's no-certify hold
-was explicitly lifted and CPU idle was **92 pct**, so the brief said go. `certification_window.py
---for ratio` returned **UNFIT** anyway: six cargo/rustc processes were live and, under a shared
-uid, none can be attributed away — three of them were another session's `-p fr-server` build.
-This is the same lesson as `d22cf2d10`: **a lifted hold is permission, not a measurement, and the
-gate's verdict beats apparent quiet.** I also note that my own build-slot check (`pgrep -c
-rustc`) returned **0** while those three `-p fr-server` builds were running; the reliable form
-greps `ps -eo args=` for `-p <package>`.
+`308db786f` moved the integer half of `list_lp_entry_bytes` behind `#[inline(never)]` so the
+string path would stop paying for its stack frame — and that frame existed only because
+`list_lp_int` ended in a `str` parse, whose `FromStr` is an out-of-line call returning through an
+outparam. The split bought the string path its win by charging the integer path an extra call.
 
-GATE AND ITS OWN NULL. This row makes no A/B claim — single-draw call counts, which are exact
-integers — so there is no lever to gate. A/A null on the whole-process instrument, same ELF, four
-draws of GET, resampled ratio-of-medians: median 1.00000, bootstrap 95% median CI [0.99730,
-1.00244]. The verdict gate for any lever built on this must be that bootstrap median-CI, and CV
-is provenance only and was not used as a gate anywhere in this row; no CV was computed. Host:
-/data 88G, loadavg 12.94/14.29/11.93 falling, CPU idle 92 pct, mean 1999 MHz across 64 cores;
-three peer `-p fr-server` builds in flight throughout, which is why this turn measured an existing
-ELF, built nothing and certified nothing.
-`bench_elf_sha256=81630963a263180b4b6293e215070716dcc45d69bdf2873583b46205464a20d9`.
+### THE REPAIR — REMOVE THE REASON FOR THE FRAME, NOT THE FRAME
 
-RETRY PREDICATE: re-run this census after the next batch and check the same arithmetic — the
-count must fall by exactly the number of measured beneficiaries that batch claimed, and the
-shapes that moved must be exactly the ones named. A count that falls by more means something
-converted that the row did not claim; by less means a beneficiary did not take, which is what
-caught `zrange_withscores` in `d6f97f48e`. **Do not size this vein from source**, and check the
-census entry rather than the command name before assuming a route is unconverted.
+The fold is now open-coded: `checked_mul(10)` / `checked_add` over the digit bytes, with the
+magnitude accumulated in `u64` and negated afterwards so `-9223372036854775808` — whose magnitude
+is one MORE than `i64::MAX` — still parses and everything past the boundary still does not. No
+call, so no frame, so `#[inline(never)]` came off and both halves inline.
+
+The accepted language is unchanged: `list_lp_int_bytes_are_canonical` still decides canonicity
+before a digit is folded, so leading zeros, `+`, `-0`, the empty element and the 21-byte length
+cap are refused exactly where they were.
+
+  ORACLE: `list_lp_int_open_coded_fold_matches_the_std_parse_qj6jn` compares the fold against the
+  standard library parse — the thing it replaced, so independent by construction — at every width
+  boundary ±2, at `i64::MIN`/`i64::MAX` and past them, at the 20/21-byte length boundary, over the
+  non-canonical forms, and across every value in −1050..1050.
+
+### THE MEASUREMENT
+
+    ALL-INTEGER list, 300 elements, slope 10 vs 30 keys, measured against the PRE-`308db786f`
+    binary — i.e. against where this shape stood before any of this touched it.
+
+    draw   BEFORE_a     BEFORE_b     AFTER        cand-pct     null-pct
+      1    382,146.55   382,216.55   335,878.50   −12.1155     −0.0183
+      2    381,871.10   381,862.60   335,779.95   −12.0688     +0.0022
+      3    381,677.30   382,156.35   336,247.30   −11.9580     −0.1254
+      4    382,123.75   381,821.00   335,728.65   −12.1066     +0.0793
+      5    381,754.65   381,935.85   335,409.15   −12.1610     −0.0474
+      6    382,155.35   381,971.15   335,755.15   −12.1205     +0.0482
+
+    A/B median −12.1110 pct, bootstrap 95% CI [−12.1408, −12.0134], n=6 draws
+    WORST SINGLE DRAW −11.9580 pct  <- the figure this row claims
+    null median 0.999920 as a ratio BEFORE_a/BEFORE_b (within 2 pct of unity); the same six draws
+         as absolute percentages have median 0.0478 pct, CI [0.0103, 0.1023]. Effect is ~253x
+         the null.
+
+    Measured INCREMENTALLY against HEAD `bd84d97d2` on three draws, the same shape reads
+    −13.1993 / −13.3509 / −13.2755 pct with nulls +0.1372 / −0.1982 / +0.0488. The incremental
+    figure is larger than the cumulative one because part of it is repaying the regression.
+
+  So the regression is not merely repaid. The `str` parse was itself the expensive thing on this
+  shape, and removing it puts the integer list nearly 12 pct ahead of its pre-regression baseline.
+
+### AND A NULL ON THE STRING SHAPE, REPORTED AS A NULL
+
+    RPUSH+DUMP, string elements (the shape `308db786f` and `bd84d97d2` won on)
+    draw   BEFORE_a     BEFORE_b     AFTER        cand-pct    null-pct
+      1    215,869.60   215,544.85   215,427.75   −0.1296     +0.1507
+      2    215,553.45   216,090.10   215,164.30   −0.3046     −0.2483
+      3    215,551.55   216,095.00   215,404.50   −0.1940     −0.2515
+      4    215,482.55   215,740.95   215,232.55   −0.1759     −0.1198
+      5    215,778.65   215,753.95   215,069.10   −0.3231     +0.0114
+      6    215,761.40   213,376.65   215,826.30   +0.5860     +1.1176
+
+    A/B median −0.1850 pct, bootstrap 95% CI [−0.3139, +0.2282], n=6 draws
+    MEDIAN-CI GATE DOES NOT EXCLUDE ZERO. No effect is claimed on this shape.
+    null median 0.1995 pct absolute, CI [0.0656, 0.6846] — draw 6 ran at 76.1 pct idle with
+         loadavg 11.59 and its A/A alone is 1.12 pct, larger than anything in the candidate
+         column.
+
+  This is the CORRECT result, not a disappointing one: a string element never reaches the parse,
+  so removing the parse cannot help it. What matters is that removing it did not TAKE AWAY the
+  0.92-6.37 pct `308db786f` won there, and the straddling CI says it did not.
+
+  Per-arm host state on the integer run: 84-92 pct idle, loadavg 8.4-11.6, MHz mean 1822-2782
+  against a 1429-4292 spread; the string run's per-draw idle and loadavg are quoted with draw 6
+  above and are the least favourable of the two.
+
+### PARITY
+
+    BEFORE-vs-AFTER DUMP BYTES: 0 of 84 diverging
+    OBJECT ENCODING + DUMP LENGTH, int / negative / string lists: 0 of 105 diverging
+    workload sweep vs redis 7.2.4: 4 of 42 diverging, UNCHANGED
+    fr-store 940 / fr-persist 227, 0 failures; clippy clean; fmt diffs 7, unchanged baseline.
+
+  The 105-shape encoding probe is the one that matters here, because this change alters which
+  integers parse and therefore which elements are int-encoded. It drives INTEGER and
+  NEGATIVE-integer lists across fills −2/−1/4/128/300 and n 3..600 and compares OBJECT ENCODING
+  and payload length on both sides.
+
+### RETRY PREDICATES
+
+  1. The string shape is a genuine null for this lever, so do NOT quote −11.96 pct as a list
+     figure. It is an ALL-INTEGER figure. A mixed list lands between the two and nobody has
+     measured where; measure the mix before quoting a blended number.
+  2. `listpack_entry_encoded_len` in `fr-store/src/lib.rs` is the twin of `list_lp_entry_bytes`
+     and still ends in a `str` parse. It was left alone here deliberately — one lever, one commit
+     — and the same repair applies to it. Reopen when a DUMP-side attribution shows it running
+     per element on a shape that reaches it.
+  3. REUSABLE, and the general form of this row: an `#[inline(never)]` split pays the hot path by
+     charging the cold one an extra call. If the cold path is common in ANY workload, the split
+     is a trade and must be measured on both shapes before it lands. `308db786f` measured one
+     shape and predicted the other, and the prediction was wrong by a factor of five.

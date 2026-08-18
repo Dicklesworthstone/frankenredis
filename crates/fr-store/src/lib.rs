@@ -5330,6 +5330,16 @@ macro_rules! with_direct_histogram_fields {
             "sismember" => sismember,
             "hexists" => hexists,
             "lindex" => lindex,
+            "zcard" => zcard,
+            "hlen" => hlen,
+            "type" => type_cmd,
+            "zscore" => zscore,
+            "exists" => exists,
+            "ttl" => ttl,
+            "getbit" => getbit,
+            "hstrlen" => hstrlen,
+            "zrank" => zrank,
+            "getrange" => getrange,
         }
     };
 }
@@ -5364,6 +5374,19 @@ pub struct CommandHistogramTracker {
     sismember: Option<CommandHistogram>,
     hexists: Option<CommandHistogram>,
     lindex: Option<CommandHistogram>,
+    // (frankenredis-getexgate) The next tier of borrowed READS, each MEASURED paying the
+    // `HashMap<String>` hash+probe at 83-93 instr/op -- 4.6 pct of GETRANGE up to 7.0 pct of
+    // HLEN. Same bar as the block above: the record step is a real fraction of the hot path.
+    zcard: Option<CommandHistogram>,
+    hlen: Option<CommandHistogram>,
+    type_cmd: Option<CommandHistogram>,
+    zscore: Option<CommandHistogram>,
+    exists: Option<CommandHistogram>,
+    ttl: Option<CommandHistogram>,
+    getbit: Option<CommandHistogram>,
+    hstrlen: Option<CommandHistogram>,
+    zrank: Option<CommandHistogram>,
+    getrange: Option<CommandHistogram>,
     histograms: HashMap<String, CommandHistogram, foldhash::quality::RandomState>,
 }
 
