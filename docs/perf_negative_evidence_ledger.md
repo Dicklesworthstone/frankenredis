@@ -60514,3 +60514,114 @@ instead.
 3. Do NOT read this as closing the throughput straddle. Anyone tempted to shave instructions off
    the geo path to "fix" the 1.0x crossing should first establish that instructions are the
    binding constraint — this row is evidence that they are not.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the `7c45e08ad` derivation guard gives up on a whole chunk for any string that merely STARTS like a number: 2.74x to 6.40x on `from_restored_quicklist2_nodes`, with a clean dose-response, and the precise test it should use already exists in the file (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: callgrind frame-level SELF cost, differenced across two key counts (10 vs 30) so
+per-invocation setup cancels, normalised per RESTORE+DUMP key and per element, ONE binary, four
+element patterns. CV was NOT used, as a gate or otherwise — no coefficient of variation appears in
+this row's decision path and none was computed. No timing verdict is claimed: the measurand is a
+retired-instruction COUNT. No code changed and NO BUILD was run; callgrind output went to a
+`TemporaryDirectory` and was reclaimed, so this row cost no disk.
+
+Claim class: MEASUREMENT. Campaign output: no — no vs-incumbent ratio is banked. The deltas here
+are 2.7x to 6.4x on a frame, three orders above the 0.33-1.07 pct spread
+`feedback_a_key_count_slope_is_not_deterministic` prices for this instrument, and the control
+frames are bit-identical across arms, which is a stronger statement than the tolerance.
+
+  fr arm  `99e32657383c8a9ef60468534a02f92f6e7afe76a4f8c68424a2e803ffd1b81b` (`e32cc8b71`)
+  host    loadavg 5.84-6.72, MHz 1429-4292 spread, no build running
+
+### THE CLIFF, AND ITS DOSE-RESPONSE
+
+    ALL-STRING, 300 elements of 15 bytes, fill 128, SELF cost per RESTORE+DUMP key
+    <ListValue>::from_restored_quicklist2_nodes
+
+    pattern              leading digits   cost      per elem    vs control
+    vvvvvvvvvv%05d       0 (letter)        8,118     27.06        —
+    7f3a%011d            1                22,260     74.20      2.74x
+    20260818T%06d        8                36,960    123.20      4.55x
+    %015d               15                51,960    173.20      6.40x
+
+**The cost scales with how many leading digits the integer parse consumes before it fails.** That
+is the mechanism stated as a prediction and then met: `list_lp_entry_bytes` routes a digit-leading
+entry into `list_lp_entry_data_len_maybe_int`, which folds digits until a non-digit appears.
+`7f3a...` fails at byte 2, `20260818T...` at byte 9, `%015d` never fails on a character and runs
+the full width.
+
+Everything else in the profile is INVARIANT across all four patterns — `decode_value_spans`
+12,504.0 in every arm to the decimal, `crc64_pclmul` 8,076.0, memcpy 5,056-5,061. **One frame
+moves and it moves 6.4x.** That is what makes this readable without a gate.
+
+### WHAT THE GUARD PROTECTS AGAINST IS MUCH NARROWER THAN WHAT IT TESTS FOR
+
+`7c45e08ad` derives a chunk's `enc_total` as blob length minus frame, and gives that up for the
+EXACT per-entry walk when a `String` span could hold a canonical decimal. Its trigger, at
+`crates/fr-store/src/packed_set.rs:4148`, is **first byte is an ASCII digit or `-`**. One such
+entry disables derivation for the entire chunk.
+
+The condition that actually breaks the derivation is narrower: the string must BE a canonical
+decimal, because only then does fr re-encode it at a different width than the source stored it.
+None of `7f3a00000000042`, `20260818T000042` or `000000000000042` is a canonical decimal —
+the last one has a redundant leading zero — so for all three the derivation would have been
+**correct**, and the chunk re-walked for nothing.
+
+This is not a hidden defect and `7c45e08ad`'s row does not misrepresent it: it states plainly that
+a digit-leading string "still re-walks". What that row never measured is **how wide the trigger is
+in practice and what the fallback costs**. Stringified IDs, zero-padded keys, ISO timestamps,
+prices and order numbers all lead with a digit, and each one of them turns the whole chunk's
+derivation off.
+
+### THE SCOPE LIMIT THIS PUTS ON A BANKED NUMBER
+
+`7c45e08ad` banked **−37.83 pct worst bound on integer RESTORE** and it stands — integer-encoded
+spans are not `String` spans, so the guard never fires on them. But the win does **not** generalise
+to string lists as such. It reaches a string list only when EVERY element leads with a non-digit.
+A single digit-leading element anywhere in a chunk returns that chunk to the pre-lever walk. Any
+future reading of that −37.83 pct as "restore got faster" should carry this qualification.
+
+### THE PRECISE TEST ALREADY EXISTS, TWELVE LINES AWAY
+
+`list_lp_int_bytes_are_canonical` is already in the same file at `packed_set.rs:4468` — optional
+`-`, no `+`, no redundant leading zero, not `-0`, all digits — and `list_lp_int` already calls it
+FIRST, before the fold, at line 4440. The guard is the one place that reimplements the question as
+a one-byte approximation instead of asking it.
+
+CANDIDATE, SPECIFIED NOT BUILT: keep the first-byte pre-filter, which is free and correctly
+rejects the whole non-numeric population, and when it fires confirm with
+`list_lp_int_bytes_are_canonical` before surrendering the chunk. Safety is unchanged because the
+tightened condition is the exact one the derivation needs, and `dcd149230` already established the
+premise that makes it near-free in practice: **redis never string-encodes a canonical decimal, 0 of
+288 entries.** The existing `debug_assert_eq!` against the full walk stays as the oracle, so a
+wrong tightening fails loudly across the whole suite rather than silently reporting a bad
+`lp_bytes`.
+
+Predicted, as a falsifiable claim: all three digit-leading patterns collapse to about the control's
+8,118 plus a short canonicality scan — roughly 6.0x, 4.3x and 2.6x on that frame — while the
+letter-first and all-integer shapes do not move at all, the first because its pre-filter never
+fires and the second because its spans are not `String`. **Falsified if the letter-first control
+moves**, which would mean the pre-filter was not free after all.
+
+### RETRY PREDICATES
+
+  1. Build the tightened guard and measure the four patterns above. The control's invariance is
+     the null: `decode_value_spans` must stay 12,504.0 and the letter-first arm must stay 8,118.0.
+  2. Do NOT delete the guard. The canonical-decimal case is unreachable from a redis-produced or
+     fr-produced payload but a RESTORE payload can be crafted, and `frankenredis-c92f6`'s
+     invariant depends on `lp_bytes` being exact.
+  3. This cliff is INDEPENDENT of the arena lever in the row above. That one targets
+     `decode_value_spans` (41.68/elem, byte-independent, confirmed below); this one targets
+     `from_restored_quicklist2_nodes`. They do not overlap and can be built in either order.
+
+### CONFIRMED IN PASSING: `decode_value_spans` IS PURELY PER-ELEMENT
+
+The arena lever specified in the row above rests on the span build being per-element rather than
+per-byte. Holding element COUNT at 300 and varying element LENGTH 15 -> 60 bytes:
+
+    decode_value_spans   12,504.0  ->  12,504.0     IDENTICAL to the instruction
+    crc64_pclmul          8,076.0  ->  20,304.0     scales with bytes  (positive control)
+    memcpy                5,049.8  ->  78,825.6     scales with bytes  (positive control)
+
+The frame does not respond to element bytes AT ALL, which is what the source predicts — a `String`
+span borrows a `Range<u32>` into the payload and never touches it. The two controls confirm the
+probe varied what it was meant to vary. **The arena lever's premise holds.**
