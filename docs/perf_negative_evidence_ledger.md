@@ -48829,3 +48829,164 @@ median `get_control` of the last N runs and re-run `sizepairs`; the change SUCCE
 admissible rows' normalised intervals narrow while their points move by less than the 2.18 pct
 across-run control spread. Do NOT change the normaliser without that check -- a narrower
 interval obtained by moving the point is a different figure, not a better-measured one.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: RETRACTION — my "pool the control across runs" fix is REFUTED by my own data: the per-run control cancels 87 pct of run-to-run variation and a pooled divisor cancels NONE
+
+WITHDRAWN, from the `get_control` instrument row landed in `d7c67e802`: the recommendation
+"Pooling the control across runs -- using the running median of `get_control` rather than the
+current run's -- would cut the injected term without changing what normalisation means", and its
+retry predicate proposing to modify `balanced_square_ab` to do exactly that.
+
+It would change what normalisation means, and for the worse. Tested against the two admissible
+rounds=36 `geosearch_2` draws from `f8067cba3`, with the pooled control taken as the median of
+the six rounds=36 `get_control` points I measured this session (1.1268):
+
+  quantity                                   point spread across the two draws
+  RAW ratios (1.0089, 1.0210)                          1.20 pct
+  per-run-normalised, AS SHIPPED (0.8970, 0.8955)      0.16 pct
+  pooled-normalised, MY PROPOSAL (0.8954, 0.9061)      1.20 pct
+
+THE PER-RUN CONTROL CANCELS 87 PCT OF THE RUN-TO-RUN VARIATION. The pooled version cancels
+exactly none of it -- its spread is identical to raw, to two decimal places, because a CONSTANT
+divisor cannot cancel a per-run common mode by construction. My proposal would have traded the
+normaliser's entire benefit for a cosmetically tighter interval.
+
+### The distinction I collapsed, which is the reusable part
+
+A normaliser acts on two different quantities and can move them in OPPOSITE directions:
+
+  * THE INTERVAL. `get_control`'s within-run CI is 2.83-5.88 pct wide and wider than most rows
+    it divides, so it widens the normalised interval. The harness's own "normaliser WIDER than
+    the row -- it injects more variance than it removes" warning is about THIS, and it is
+    correct about this.
+  * THE POINT. `get_control`'s point tracks the conditions of the run it was measured in, so
+    dividing by it removes common-mode drift between runs. That is why my two draws' RAW points
+    differ by 1.20 pct and their NORMALISED points by 0.16 pct.
+
+I read the harness's interval warning, generalised it to "normalisation is doing harm here",
+and proposed removing the very mechanism that produced the 0.16 pct agreement I had published as
+evidence of quality two rows earlier. The 0.16 pct was the control working, not the shape being
+stable, and I quoted it without understanding which.
+
+### What still stands from `d7c67e802`
+
+The measurements, all of them. `get_control` IS wider than every row it normalises in both
+`sizepairs` and `zsetreads` -- 10.5 pct against rows of 5.3-9.4 pct in the zsetreads screen, and
+four separate instances in sizepairs. Its point IS more stable across runs (2.18 pct) than its
+within-run interval is wide (3.94 pct mean). Those numbers are unchanged; only the inference
+from them is withdrawn. And the practical guidance survives intact and is now better founded: a
+normalised WORST BOUND is conservative and quotable, a normalised POINT is quotable, and what
+remains unsafe is treating the interval width as if it measured the point's reliability.
+
+RETRY PREDICATE: do NOT pool, average or otherwise freeze `get_control` across runs -- this row
+measures that it destroys the cancellation the normaliser exists to provide. If the normalised
+INTERVAL is genuinely the binding constraint on some future row, the lever is to make
+`get_control` itself cheaper to measure precisely -- more rounds on the control arm specifically,
+so its within-run CI narrows while it still tracks the run -- and that change SUCCEEDS only IF
+the normalised point spread across repeated draws stays at or below the 0.16 pct the per-run
+control achieves today. Measure that spread before and after; an interval that narrows while the
+point spread grows is the failure this row records.
+
+## 2026-08-18 CrimsonHawk: REJECT — landing a gate twin's `fr-runtime` half ALONE is a measurable regression: the wrapper split costs +3.2 on HLEN and +7.9 on ZCARD even WITH `#[inline]`, so the two halves must land together (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — backed out, nothing ships, and no ratio against the incumbent is claimed.
+The finding is about SEQUENCING a conversion that is still expected to pay.
+
+### WHAT WAS TRIED, AND WHY THE HALVES WERE SPLIT
+
+`execute_plain_cardinality_borrowed` is the highest-leverage remaining gate conversion: ONE
+executor and ONE predicate serving FOUR commands (`PlainCardinalityCmd` = {Zcard, Hlen, Xlen,
+Pfcount}), with `hlen` and `zcard` both counted at 1.0000 gate calls/op.
+
+The conversion needs an `fr-runtime` twin AND a `main.rs` floor-arm change. A peer held
+`main.rs`, so only the `fr-runtime` half was attempted: add
+`can_execute_plain_cardinality_borrowed_with_default_read_gate` and
+`execute_plain_cardinality_borrowed_with_default_read_gate`, keeping the original two signatures
+as thin delegating wrappers. Both wrappers were marked `#[inline]` DELIBERATELY, because a peer
+had already measured an un-inlined wrapper of exactly this shape costing TTL ~24 instr/op.
+
+### IT IS NOT NEUTRAL, AND THE NULLS PROVE THE READING
+
+Paired build one change apart, two replicates each, `--fr-only`:
+
+  shape          before             after              delta
+  hlen           1641.4 1640.5      1643.9 1644.4      +3.2   WORSE
+  zcard          1672.6 1671.6      1681.2 1678.9      +7.9   WORSE
+  hget  (null)   1687.7 1687.2      1686.9 1688.2      +0.1
+  llen  (null)   1415.7 1415.2      1415.6 1415.3       0.0
+
+The two converted-executor shapes get WORSE while both untouched nulls are flat to 0.1 instr/op.
+The before-arm spreads are 0.9 (hlen) and 1.0 (zcard), so +3.2 and +7.9 are several times the
+arm's own repeatability, and the nulls rule out a whole-binary layout shift.
+
+**`#[inline]` reduced this cost but did not remove it.** The peer's un-inlined measurement was
+~24 instr/op; inlined, the residue is 3 to 8. So the guidance "mark the wrapper `#[inline]` and
+the split is free" is WRONG as stated, and this row is the correction: `#[inline]` makes the
+split cheap, not free.
+
+### WHAT THIS CHANGES — SEQUENCING, NOT THE LEVER
+
+The conversion is still expected to pay: converted routes have measured **175.0 to 215.3
+instr/op** saved, against a split cost of 3 to 8. The net is strongly positive and this row does
+NOT argue against doing it.
+
+It argues against doing it in TWO COMMITS. Landing the `fr-runtime` half first puts a real, if
+small, regression into `main` for however long the `main.rs` half is blocked — and this half was
+blocked on a file lease, which is a wait of unknown length. A "harmless preparatory refactor" is
+not harmless when it is measurable.
+
+**The reusable rule: a gate twin is not a refactor, it is half a lever. Land both halves in one
+commit, or land neither.** If the two files are held by different agents, wait or hand the whole
+change over; do not ship the half you can reach.
+
+### COUNTED MECHANISM
+
+The direction is explained by call counts, which is why this is a cost rather than noise: with
+the `main.rs` half absent, NOTHING calls the new `_with_default_read_gate` entry points, so
+`plain_borrowed_default_key_read_allows` still reads 1.0000 calls/op on `hlen` and `zcard` — the
+gate is derived exactly as before. The only change reaching the binary is the extra delegation
+layer, so the measured delta is the split's own cost with the benefit not yet connected.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The instrument carries its own null: A/A null median 1.000002, bootstrapped over 20,000
+resamples, 95 pct median CI [0.996069, 1.003947], six draws and 30 pairwise ratios, banked in
+`0bf781d57`. On a ~1650 instr/op shape that interval is about +/-6.5 instr/op, so `hlen`'s +3.2
+is INSIDE it and `zcard`'s +7.9 is marginally outside. That is precisely why the verdict rests on
+the two flat nulls and the sub-1.0 within-arm spreads rather than on the deltas alone, and why
+the row claims "measurable regression, do not ship the half" rather than a precise cost figure.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95 pct median CI quoted above.
+
+### PROVENANCE
+
+  ELF           AFTER `46c618a7327e9f322b0132e51caeaf5aad1f25824642055184b23794ac1d3246`,
+                BEFORE `9d207426a0b51c4ddc1bfb64e96c7b3b192a9209d7d62732d41e66e328b18f67`.
+                Built AFTER, BEFORE, AFTER again; the two AFTER ELFs are BIT-IDENTICAL and
+                BEFORE is distinct, so the tree held still across the pair.
+  bench_elf_sha256=46c618a7327e9f322b0132e51caeaf5aad1f25824642055184b23794ac1d3246
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py`, sha `1beb5dc8dd7eb8d1` recorded before AND
+                after the run (unchanged) because a peer was editing that file.
+  host          /data 103G free, checked immediately before the build. loadavg 13.24 11.10 11.32;
+                the fr-only Ir numerator is load-immune and the harness reported WINDOW: FIT for
+                fr-only on every arm. No competing frankenredis build: the two builds running on
+                the host were `fnp-python` and `frankenlibc-bench`, verified by process args.
+  disposition   BACKED OUT. `crates/fr-runtime/src/lib.rs` is byte-identical to HEAD.
+                `crates/fr-server/src/main.rs` was never touched; a peer holds it.
+
+### RETRY PREDICATE
+
+1. Redo this as ONE commit containing BOTH halves. Accept only if `hlen` AND `zcard` move
+   1.0000 -> 0.0000 gate calls/op while an unconverted route from the sweep in `d7c67e802`
+   stays at 1.0000 as the null, AND the instr/op delta is negative on both.
+2. If the combined change measures a saving smaller than about 20 instr/op, stop and re-check
+   that the floor arms actually call the twin — a saving that small is the signature of the
+   split cost being paid without the gate being skipped.
+3. Do NOT re-attempt the `fr-runtime` half alone "to make progress while blocked". That is the
+   experiment this row rejects, and the next attempt will reproduce +3.2 and +7.9.
+4. The same two-halves argument applies to every remaining route in the `d7c67e802` sweep, since
+   none of them has a twin yet. Budget each as a single atomic change across both files.
