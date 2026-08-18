@@ -61293,3 +61293,109 @@ measurement this closes out is `e2481acc4`'s, whose contract stands.
    signature AND its `&mut self`, which is a much larger change than the prize.
 3. If fix (2) is built, size the inline capacity from real member names, not from the census
    shape: `geosearch_64` uses 3-byte names (`M00`), which would flatter any inline threshold.
+
+## 2026-08-18 CrimsonHawk: MEASURED — the digit-leading cliff is NOT confined to RESTORE: RPUSH+LTRIM costs +36.8 pct on digit-leading elements where NO guard exists at all, and the canonicality test scans every byte before a two-comparison rejection that would have ended it (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: callgrind frame-level SELF cost, differenced across two key counts (10 vs 30) so
+per-invocation setup cancels, then differenced AGAIN between two element patterns measured in ONE
+invocation. ONE binary throughout. CV was NOT used, as a gate or otherwise — no coefficient of
+variation appears in this row's decision path and none was computed. No timing verdict is claimed:
+the measurand is a retired-instruction COUNT. No code changed and NO BUILD was run; callgrind
+output went to a `TemporaryDirectory` and was reclaimed, so this row cost no disk.
+
+Claim class: MEASUREMENT. Campaign output: no — no vs-incumbent ratio is banked here; the
+incumbent was not run for this shape and no claim is made about it.
+
+  fr arm  `99e32657383c8a9ef60468534a02f92f6e7afe76a4f8c68424a2e803ffd1b81b` (`e32cc8b71`)
+  host    loadavg 5.43-6.06, MHz 1429-4292 spread, no build running, /data 47G
+
+### THE GUARD IS LIST-ONLY, BUT THE COST UNDERNEATH IT IS NOT
+
+First the scope question, answered NEGATIVELY: the chunk-surrendering `derivable` pattern exists
+in exactly one place in the workspace, `crates/fr-store/src/packed_set.rs:4145`. Hashes, sets and
+zsets restore from listpacks too and have **no analogous derivation to surrender**. So the RESTORE
+cliff as such does not generalise to other types.
+
+What does generalise is the per-element cost the guard's fallback pays, because two OTHER sites
+walk every element through `list_lp_entry_bytes` with **no fast path at all**:
+
+    packed_set.rs:4814   on_remove_bulk        — LREM / LTRIM
+    packed_set.rs:4826   rebuild_growth_state  — load / RESTORE / internal bulk-build
+
+### RPUSH + LTRIM, LETTER-LEADING vs DIGIT-LEADING
+
+300 elements of 15 bytes, fill 128, one `LTRIM key 0 149` per key, per-key slope 10 vs 30:
+
+    TOTAL per key      letter 190,488.8  ->  digit 260,582.4      +70,093.6   (+36.8 pct)
+
+    frames, digit minus letter:
+      list_lp_entry_bytes            11,700.0 ->  66,600.0   +54,900  +183.00/elem   5.69x
+      <ChunkedList as From<VecDeque>>  8,838.0 ->  24,198.0   +15,360   +51.20/elem   2.74x
+      listed deltas sum to +70,260 of the +70,094 total
+
+**Two frames are the whole difference.** Replicated: the two frame deltas came back
+**bit-identical** (+54,900.0 and +15,360.0) across two independent runs of the diff, with totals
+0.4 pct apart — so the attribution is not a one-draw artifact.
+
+This is a heavier absolute penalty than the RESTORE cliff (+70,094 vs +43,910 instr/key) and it
+falls on the ORDINARY WRITE PATH. RESTORE at least has a guard with a fast path that letter-leading
+data reaches; `on_remove_bulk` has none to reach.
+
+### THE CANONICALITY TEST SCANS EVERY BYTE BEFORE THE CHECK THAT WOULD END IT
+
+`list_lp_entry_bytes` routes a digit-leading entry into `list_lp_entry_data_len_maybe_int` (:4553)
+-> `list_lp_int` (:4436) -> `list_lp_int_bytes_are_canonical` (:4468), which is the FIRST thing
+`list_lp_int` does. That function is ordered:
+
+    1.  digits.iter().all(u8::is_ascii_digit)      <- scans EVERY byte
+    2.  digits[0] == b'0' && digits.len() > 1      <- rejects in TWO comparisons
+
+For `000000000000042` step 1 scans all fifteen bytes and passes, and then step 2 rejects. **The
+scan was wasted work in its entirety**, and it is on the path taken by every element of a
+zero-padded list on both the RESTORE walk and the LTRIM walk.
+
+CANDIDATE, SPECIFIED NOT BUILT: swap the two blocks. Both are necessary conditions on an
+independent property of the same slice, so the order is free and no semantics change. Zero-padded
+numerics go from O(n) to O(1) in this test.
+
+**Its reach is narrower than the cliff, and the row says so rather than overselling it.**
+`all(is_ascii_digit)` SHORT-CIRCUITS, so `20260818T123456` already stops at the `T` (byte 9) and
+`7f3a...` at byte 2 — neither improves. The reorder helps the **leading-zero** family specifically,
+which is the family carrying the LARGEST measured penalty (183.00/elem here, 173.20/elem on
+RESTORE) and covers zero-padded IDs, fixed-width account and order numbers, and padded sequence
+keys.
+
+### THE LEVERS NOW STACK, AND THEY ARE INDEPENDENT
+
+  1. Tighten the RESTORE `derivable` guard to `list_lp_int_bytes_are_canonical` — kills the
+     chunk-surrender for ALL digit-leading shapes, RESTORE only. (`b83ee8ecc`, `0bb42f113`)
+  2. Reorder inside `list_lp_int_bytes_are_canonical` — cheapens the per-element test for the
+     leading-zero family on EVERY path that walks, including LTRIM/LREM where lever 1 cannot help.
+  3. The span arena — a different frame entirely (`decode_value_spans`).
+
+None of the three overlaps another. Lever 2 is the smallest change in the set and the only one
+that reaches the write path.
+
+### AN INSTRUMENT LESSON THAT NEARLY COST A WRONG ATTRIBUTION
+
+The first pass at this measurement reported the digit arm's top frames as `push_back_borrowed` and
+`pop_back` with `list_lp_entry_bytes` ABSENT — which would have been published as "the cost moved
+to the push path". It was **my own `tail -8`** cutting the header and the top three rows off a
+twelve-line output. The totals were right; the attribution shown was the bottom of the list.
+
+The diff-form instrument caught it because it prints frames ranked by DELTA rather than by
+absolute cost, so the frame that actually moved cannot be below the fold. **When a profile's
+attribution surprises you, check the pipeline that displayed it before believing the profile** —
+and prefer an instrument that ranks by the quantity in question.
+
+### RETRY PREDICATES
+
+  1. Build levers 1 and 2 together and re-measure BOTH shapes. Lever 2's own gate:
+     `list_lp_entry_bytes` on `%015d` must fall from 66,600 toward the letter-leading 11,700;
+     if it stays above ~40,000 the reorder is not where the scan cost is.
+  2. Re-measure `20260818T%06d` on the LTRIM shape too. It is NOT predicted to improve from lever
+     2, and confirming that it does not is the control that says the reorder did what it claims
+     rather than something broader.
+  3. `<ChunkedList as From<VecDeque>>` at +51.20/elem is UNEXPLAINED. It is 2.74x dearer on
+     digit-leading data and no hypothesis in this row accounts for it. Do not fold it into lever
+     2's expected win.
