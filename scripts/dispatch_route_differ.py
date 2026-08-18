@@ -1047,6 +1047,49 @@ CASES = [
     ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 1
     ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 0: exists, no REPLACE
 
+    # (frankenredis-getexgate) XREAD's floor class, added in 978e002d3. The route
+    # itself is not new -- the parser, the executor and a cascade arm wiring them
+    # together already existed and were reached by walking the cascade. The ONLY new
+    # thing is the classifier predicate, so that predicate is the only thing these
+    # rows need to pin, and it is minted on ARITY: `4 | 6`.
+    #
+    # That is the whole risk. TWO other XREAD forms are also array_len 6 -- multi-key
+    # `XREAD STREAMS k1 k2 0 0` and blocking `XREAD BLOCK 0 STREAMS k id` -- and both
+    # are claimed by the class and then declined by the parser, which requires COUNT
+    # at token 1. A corpus that lists only the COUNT form passes with the parser's
+    # discriminator deleted; these two rows are what makes that mutation fail.
+    ("XADD", "xr:one", "1-1", "f", "v"),
+    ("XADD", "xr:two", "2-2", "g", "w"),
+    ("XADD", "xr:many", "1-1", "a", "1"),
+    ("XADD", "xr:many", "2-2", "b", "2"),
+    ("XADD", "xr:many", "3-3", "c", "3"),
+    ("XADD", "xr:wide", "7-7", "f1", "v1", "f2", "v2", "f3", "v3"),
+    # The two claimed arities: *6 with COUNT, and the bare *4.
+    ("XREAD", "COUNT", "1", "STREAMS", "xr:one", "0"),
+    ("XREAD", "STREAMS", "xr:one", "0"),
+    # The *6 forms the class claims and the parser MUST decline.
+    ("XREAD", "STREAMS", "xr:one", "xr:two", "0", "0"),
+    ("XREAD", "BLOCK", "0", "STREAMS", "xr:one", "5-5"),
+    # COUNT must actually truncate: a route wired to an ignore-COUNT executor
+    # answers `COUNT 2` identically to `COUNT 5` and passes a single-entry corpus.
+    ("XREAD", "COUNT", "2", "STREAMS", "xr:many", "0"),
+    ("XREAD", "COUNT", "5", "STREAMS", "xr:many", "0"),
+    ("XREAD", "COUNT", "1", "STREAMS", "xr:wide", "0"),
+    # Empty results, which are the branch a nil-only route passes by accident.
+    ("XREAD", "STREAMS", "xr:one", "$"),
+    ("XREAD", "COUNT", "1", "STREAMS", "xr:one", "1-1"),
+    ("XREAD", "COUNT", "1", "STREAMS", "xr:absent", "0"),
+    # Refusals: the error text must be redis's, verbatim, through the new class.
+    ("XREAD", "COUNT", "1", "STREAMS", "rg:s", "0"),
+    ("XREAD", "COUNT", "x", "STREAMS", "xr:one", "0"),
+    ("XREAD", "COUNT", "-1", "STREAMS", "xr:one", "0"),
+    ("XREAD", "COUNT", "1", "STREAMS", "xr:one", "zz"),
+    ("XREAD", "STREAMS", "xr:one"),
+    ("XREAD", "COUNT", "1", "FOO", "xr:one", "0"),
+    # Case folding happens before the token table is consulted.
+    ("xread", "count", "1", "streams", "xr:one", "0"),
+    ("XrEaD", "CoUnT", "1", "StReAmS", "xr:one", "0"),
+
 ]
 
 def executing_image(conn):
