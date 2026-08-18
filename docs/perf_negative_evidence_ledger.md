@@ -49081,3 +49081,65 @@ RETRY PREDICATE:
   3. The sweep covers ONE shape (fill -1, seed 250). Re-run it at fill -2 and at a positive fill
      before believing the three-of-fourteen figure generalises; the bulk-RPUSH window that makes
      a retained prefix exist at all is fill-dependent.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: RETRACTION — my load-change rule for window selection does NOT generalise: a FALLING window (-21 pct) just produced 4 of 5 null-failures on `frontclass`, where the rule predicts certification
+
+WITHDRAWN as a general predictor: the load-change rule I published in `14091fc7b` as "load
+DIRECTION predicted admissibility 8 times out of 8", corrected in `a277535d7` to a MAGNITUDE
+threshold that "separates all nine runs perfectly" (<= +46 pct certified, >= +69 pct failed), and
+repeated as operational guidance to "start a run ONLY when loadavg is falling".
+
+THE COUNTEREXAMPLE, today, on a group the rule was never tested against:
+
+  `balanced_square_ab --shapes frontclass`, rounds=9, ops=50,000, -P16
+  loadavg 14.37 10.63 10.76 at launch -> 11.30 10.38 10.67 at finish: a 21 pct FALL
+  RESULT: 0 of 5 rows admissible, 4 null-failed
+    zintercard_2        nulls 0.9692/1.0207   NULL-FAILED
+    zintercard_limit    nulls 1.0070/0.9556   NULL-FAILED
+    xpending_empty      nulls 0.9907/1.0112   STRADDLES-1
+    xpending_populated  nulls 1.0053/1.0269   NULL-FAILED
+    get_control         nulls 1.0275/1.0178   NULL-FAILED
+
+A falling window is the regime the rule says always certifies. It certified nothing.
+
+### What the rule actually was, and why it looked so strong
+
+Every one of the nine runs behind it was `geosearch_2` or its `sizepairs` siblings, measured
+within a few hours, on one pair of binaries. Nine observations on ONE shape family, and I
+reported the resulting separation as though it described the harness. It describes that family
+in that session. `get_control` itself null-failed here at 1.0275/1.0178 while it was ADMISSIBLE
+in the `zsetreads` screen an hour earlier under similar load, which is the plainest statement
+that the binding variable is not loadavg.
+
+I compounded it by phrasing the rule as advice -- "start a run ONLY when loadavg is falling" --
+which converts an overfit observation into a instruction that would have someone skip usable
+windows and trust unusable ones.
+
+### What survives
+
+The negative half is weaker but not refuted: no run has yet certified while loadavg ROSE more
+than 46 pct, and five failed above +69 pct. Treat a sharply rising host as a reason to expect
+failure; do NOT treat a falling one as a reason to expect success. The asymmetry is what the
+evidence supports.
+
+And the operational conclusion is the one the harness already enforces: THE NULLS ARE THE GATE,
+and no loadavg proxy substitutes for them. Every failure above was caught by the harness's own
++/-0.02 null bound, which is what it is for. My rule was an attempt to predict that gate's
+verdict from outside; the gate does not need predicting, it needs running.
+
+### The screen result, reported as a screen
+
+All five `frontclass` raw ratios put fr AHEAD -- zintercard_2 1.2668, zintercard_limit 1.2519,
+xpending_populated 1.2345, get_control 1.1223, xpending_empty 1.0488 -- but NOTHING in this run
+is admissible and no normalised figure exists, so these are sighting shots, not standings.
+Combined with the `zsetreads` screen (all ten rows fr ahead, raw 1.19-1.33) and four shapes
+screened on instructions (fr ahead 0.1433x to 0.8758x), I have found NO new deficit today.
+
+RETRY PREDICATE: do not use the load-change rule to choose windows, in either direction, until
+someone has tested it on a shape group other than `sizepairs`; this row is the first such test
+and it failed. Re-run `frontclass` at rounds=36 in any window and take the harness's nulls as the
+answer. The still-open question this leaves is why `get_control` is admissible in one screen and
+null-failing in another an hour apart -- that, not loadavg, is what determines whether a group
+certifies, and it is worth a row of its own.
