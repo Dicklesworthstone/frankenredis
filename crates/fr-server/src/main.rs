@@ -6962,6 +6962,48 @@ fn process_buffered_frames(
                         &mut conn.write_buf,
                         &mut argv_scratch,
                     )
+                // (frankenredis-iqicb) GET AHEAD OF THE CLASSIFIER. GET is the only hot
+                // command the floor token table does not name, so the classifier walked its
+                // header, failed to name it and returned None on every GET -- ~120 instr/op,
+                // about 30 pct of GET's dispatch -- before the fourth arm served it. This is
+                // the same arm, moved: same condition, parser, executor and reply.
+                //
+                // The literal header guard is what keeps the reorder cheap for everyone else:
+                // `GET key` is always `*2\r\n$3\r\n` + name, so one 8-byte compare rejects
+                // every other arity and every other name length, and only arity-2 three-letter
+                // commands (TTL, DEL) go on to the three-byte name test.
+                } else if unparsed.get(..8) == Some(b"*2\r\n$3\r\n".as_slice())
+                    && unparsed
+                        .get(8..11)
+                        .is_some_and(|command| command.eq_ignore_ascii_case(b"GET"))
+                    && let Some(packet) = parse_borrowed_plain_get_packet(unparsed, &parser_config)
+                {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
+                    if runtime
+                        .execute_plain_get_borrowed_into_with_default_read_gate(
+                            packet.key,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                            default_read_allowed,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(action) = try_dispatch_floor_classified_action(
                     unparsed,
                     parser_config,
@@ -7017,35 +7059,6 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if borrowed_arity_is(unparsed, b'2')
-                    && let Some(packet) = parse_borrowed_plain_get_packet(unparsed, &parser_config)
-                {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    let default_read_allowed = *plain_get_read_gate_cache
-                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
-                    if runtime
-                        .execute_plain_get_borrowed_into_with_default_read_gate(
-                            packet.key,
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                            default_read_allowed,
                         )
                         .is_some()
                     {
