@@ -54294,3 +54294,100 @@ an effect inside that interval is not claimed.
    `object_encoding` via `Store::object_encoding` (1.000), `substr` via `RespFrame::encode_into`
    (2.000), `mget_3` via `integer_decimal_bytes` (3.000), `hmset_2` via
    `PackedStrMap::insert_borrowed` (4.000).
+
+## 2026-08-18 CrimsonHawk: SELF-SPEEDUP TARGET — reading an INTEGER-encoded string allocates a Vec and memcpys per value: 252.0 instr/op self plus 199.8 in memcpy on MGET, ~17 pct of the command, and the allocation-free replacement already exists (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — no code changed, no build was run (a peer build held the project's single
+slot), and no fr/Redis ratio is claimed. This sizes a target precisely enough to be executed
+without re-deriving it.
+
+### THE MEASUREMENT
+
+`mget_3` seeds `MSET a 1 b 2 c 3`, so all three values are INTEGER-encoded. Two-point differenced
+on one ELF, against a 2728.2 instr/op command:
+
+  frame                              instr/op    calls/op
+  fr_store::integer_decimal_bytes      252.0       3.0000
+  __memcpy_avx_unaligned_erms          199.8       3.0080
+  mi_theap_malloc_aligned               66.0       malloc 9.0390, free 3.0090
+
+That is roughly **17 pct of MGET** spent turning three stored integers into three heap-allocated
+decimal strings, one `Vec` and one `memcpy` per value.
+
+### THE MECHANISM
+
+`Value::string_bytes` returns a `Cow`, and its Integer arm is
+`Some(Cow::Owned(integer_decimal_bytes(*value)))`. `integer_decimal_bytes` allocates a `Vec` with
+capacity, then does `out.extend_from_slice(&scratch[start..])` — a RUNTIME-VARIABLE length, which
+rustc lowers to a `memcpy` CALL whose fixed preamble dwarfs a 1-to-19-byte payload. Three values,
+three allocations, three calls.
+
+The String arm is `Cow::Borrowed` and costs nothing, which is why `get_control` — seeded with
+`SET kk vvvvvvvvvvvvvvvv`, a STRING — does not show this at all. **The cost is specific to
+integer-encoded values, which is the representation Redis picks for counters, IDs and anything
+INCR touches.**
+
+### THE REPLACEMENT ALREADY EXISTS IN THIS FILE
+
+`integer_decimal_into(&mut [u8; 21], value) -> usize` sits directly below
+`integer_decimal_bytes` and is documented as "byte-identical to `integer_decimal_bytes` but
+WITHOUT the per-call `Vec`". It writes into a caller-owned stack buffer via `copy_from_slice` on a
+slice of known length. It was added for intset streaming and never applied to the string read
+path.
+
+So the work is to give the reply path a borrowing form — the caller supplies a `[u8; 21]` and gets
+a length — rather than to invent a mechanism.
+
+### WHAT IS AND IS NOT CLAIMED
+
+CLAIMED: the frame costs above, the call counts, and that the Integer arm of `string_bytes` is
+what produces them on `mget_3`.
+
+NOT CLAIMED: that a conversion recovers all 252.0 + 199.8. Some of the 252.0 is digit rendering
+that must happen either way; what the `_into` form removes is the allocation, the free, and the
+memcpy call, not the `write_u64_digits` work.
+
+NOT MEASURED: GET of an INTEGER value. `get_control` seeds a string, so no existing shape covers
+the single-key integer read, and the harness has no `get_integer` shape. That is the obvious first
+shape to add, and the prediction is that it shows 1.0000 calls/op of `integer_decimal_bytes` where
+`get_control` shows 0.0000.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timed quantity and no ratio are claimed. The figures are callgrind instruction counts
+differenced at N=2000 and 2N=4000 on a single ELF, so they carry no sampling error, and
+`get_control` acts as the negative control at 0.0000 calls/op on the same binary.
+
+For the instrument generally, measured in a single invocation of the same harness on one ELF and
+one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios, banked in `0bf781d57`.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           `4a16b4242e7c86ea774a7f973ecf0dfd6b66493292cd43527d15d764151273ec`, the AFTER
+                arm of the array-header pair, reused. NO BUILD was run for this row: a peer build
+                held the project's single slot.
+  bench_elf_sha256=4a16b4242e7c86ea774a7f973ecf0dfd6b66493292cd43527d15d764151273ec
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py`, `scripts/call_count_delta.py`,
+                `callgrind_annotate --auto=no`.
+  host          /data 76G free. loadavg 14.74 14.00 12.87; CPU idle measured at 82-84 pct across
+                three vmstat samples with iowait 0 — the brief reported 11 pct, and the load is
+                external `smartedgar` processes plus a peer's build, not this measurement.
+  disposition   NO CODE CHANGED.
+
+### RETRY PREDICATE
+
+1. Execute by giving the read path a borrowing form built on `integer_decimal_into`. Accept only
+   if `integer_decimal_bytes` goes 3.0000 -> 0.0000 calls/op on `mget_3` AND `memcpy` falls from
+   3.008 toward 0, with `get_control` (a STRING value) unmoved as the control.
+2. Add a `get_integer` shape first — `SET k 12345` then `GET k`. Without it the single-key integer
+   read is invisible, and it is the commonest form of this pattern.
+3. Expect less than the full 451.8. The digit rendering stays; only the allocation, the free and
+   the memcpy call go.
+4. `string_owned`, `into_string_owned` and `materialize_string` have the same Integer arm. They are
+   NOT on the MGET path and are not sized here; do not assume they carry the same weight.
