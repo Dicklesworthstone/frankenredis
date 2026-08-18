@@ -51791,3 +51791,90 @@ RETRY PREDICATE: this closes the FAST-cycle cadence and nothing else. The residu
 cost is the ~62 instr/op lazy check inside `get_string_bytes`, which is load-bearing and must NOT
 be removed. Reopen only IF the cycle BODY is measured executing more than once per 2 ms, or if
 expiry tail latency under memory pressure regresses -- nothing here measures that.
+
+## 2026-08-18 BrownIbis: INSTRUMENT + SIZING — the read-gate vein MEASURED at last: **29 shapes still pay 175.0 instr/op**, the three mis-sizings all trace to ONE cause (16 read families had no shape at all), and the mystery 0.001 residual is explained (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+**WHY THIS ROW EXISTS.** I have mis-sized this vein three times — once by taking a peer's
+measured sample as an enumeration (`d7c67e802`'s twelve routes), once by a survey window that
+ran off the end of a 9-line function, and once by a source scan that knew only two of the three
+derivation forms. `521985c7d` and `d89499274` retract those. This row replaces guessing with a
+census.
+
+**THE THREE MISTAKES SHARE ONE CAUSE, AND IT IS NOT CARELESSNESS.** Sixteen borrowed READ
+families had **no harness shape at all**: ZCOUNT, ZSCORE, HGETALL, SMEMBERS, LRANGE, GETRANGE,
+ZMSCORE, SMISMEMBER, HMGET, GETBIT, HSTRLEN, XRANGE, DBSIZE, GEODIST, GEOPOS, GEOHASH. A
+calls/op census could not see any of them, so a source scan was the only instrument available
+for most of the surface — and the source scan is precisely the one that undercounts. Shapes
+added in `007dba0c2`, each verified to return a successful reply rather than an error or an
+unintended nil (a mis-specified shape yields a perfectly reproducible number for the *error*
+path). `scripts/verify_census_shapes.py` is that check, kept.
+
+**MEASURED**, one draw per shape on `b4_after1.elf` (batch 4 applied), N=20,000, calls/op to
+`plain_borrowed_default_key_read_allows` — an exact integer, not an average:
+
+**STILL PAYING IT — 29 shapes**, worst first by what 175.0 costs them:
+
+| shape | instr/op | 175.0 as pct | shape | instr/op | 175.0 as pct |
+|---|---|---|---|---|---|
+| dbsize_base | 1343.8 | **13.0** | zmscore_2 | 2548.1 | 6.9 |
+| getbit_base | 1669.3 | 10.5 | zrange_withscores | 2704.5 | 6.5 |
+| hstrlen_base | 1775.0 | 9.9 | xpending_empty | 2869.9 | 6.1 |
+| zscore_base | 1791.4 | 9.8 | zrange_rev | 2965.8 | 5.9 |
+| getrange_base | 1854.4 | 9.4 | zrangebyscore_plain | 3319.5 | 5.3 |
+| substr | 1946.5 | 9.0 | zrangebyscore_l | 3450.7 | 5.1 |
+| smembers_base | 1963.7 | 8.9 | scan_zero | 3800.8 | 4.6 |
+| smismember_2 | 2175.9 | 8.0 | scan_count | 4042.7 | 4.3 |
+| geohash_base | 2181.4 | 8.0 | sinter_2 | 4081.5 | 4.3 |
+| hgetall_base | 2257.2 | 7.8 | geopos_base | 4293.9 | 4.1 |
+| hmget_2 | 2269.4 | 7.7 | scan_type | 4605.9 | 3.8 |
+| lrange_base | 2302.8 | 7.6 | scan_match | 4679.6 | 3.7 |
+| zcount_base | 2494.5 | 7.0 | xpending_populated | 4736.1 | 3.7 |
+| keys_star | 2524.3 | 6.9 | pubsub_channels | 5171.6 | 3.4 |
+| | | | geodist_base | 6757.5 | **2.6** |
+
+**CONVERTED OR NEVER REACHING IT — 13 shapes**: `get_control` (0.000, GET uses the twin form),
+`hget`, `llen`, `exists_4`, `xrange_base`, `zintercard_limit`, `sintercard_lim`, `bitcount_unit`,
+`bitpos_start`, `bitpos_range`, `bitpos_unit`, `client_info`, `command_docs_one`.
+
+**THE 0.001 RESIDUAL IS EXPLAINED, AND IT IS NOT AN ANOMALY.** `d89499274` recorded
+`sintercard_base` reading **0.001** rather than a clean zero after conversion and called it
+unexplained. Four more converted shapes read 0.001 here (`zrange_plain`, `zrange_4`,
+`bitcount_range`, `exists_8`) — and a fresh draw of `exists_8` reads **0.000**. It is
+**draw-dependent**, which is the signature of a per-PASS cost rather than a per-op one: the
+cached gate is filled once per event-loop pass by `get_or_insert_with`, so ~20 fills across
+20,000 pipelined ops is 0.001 calls/op, and a run that packs into fewer passes rounds to 0.000.
+**0.000-0.001 is the correct floor for a converted route**, not a leak, and the retry predicate
+in `d89499274` should be read as "above 0.001", not "above 0.000".
+
+**SIZING, STATED CAREFULLY.** 29 measured shapes × 175.0 is NOT a workload figure — the saving
+is 175.0 per command on those routes, and what that is worth depends entirely on the mix. What
+the census does establish: the vein is **larger than any of my three estimates**, the cheapest
+commands have the most to gain (13.0 pct of a DBSIZE against 2.6 pct of a GEODIST), and the
+SCAN family (four shapes, 3.7-4.6 pct) and the zrange/zrangebyscore family (four shapes,
+5.1-6.5 pct) are the largest coherent clusters left.
+
+NEXT BATCHES, in the order the census argues for: (1) the **zbyscore cascade** — 22 in-crate
+callers, covering `zrangebyscore_plain`, `zrangebyscore_l`, `zcount_base` and `zscore_base`;
+(2) the **collection `_into` family** — `smembers_base`, `hgetall_base`, `lrange_base`,
+`sinter_2`; (3) the **SCAN family**, four shapes and the highest per-shape cost among clusters.
+
+GATE AND ITS OWN NULL. This row makes no A/B claim, so there is no lever to gate — the numbers
+are single-draw call counts, which are exact integers, plus the whole-op figure the same
+invocation reports. The A/A null and the A/B pairing conventions are same-invocation as always.
+A/A null on the whole-process instrument, same ELF, four draws of GET, resampled
+ratio-of-medians: median 1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate
+for this row is that bootstrap median-CI, and CV is provenance only and was not used as a gate
+anywhere in this row; no CV was computed. Host: /data 90G, loadavg 7.92/8.91/9.26, CPU idle 92
+pct; a peer's `cargo build -p fr-server` was in flight throughout, which is why this turn
+measured on an existing ELF and built nothing.
+`bench_elf_sha256=4b3845c439bacd6c5649e3fd2b16b68b8771b677d5e9c61517ce8ca07488c666`.
+
+RETRY PREDICATE: re-run the census (`scripts/full_census` shape list, `call_count_delta.py
+<dump> 20000 --callers plain_borrowed_default_key_read_allows`) after every conversion batch and
+quote its output. **Do not size this vein from source again** — three source-derived estimates
+were wrong in the same direction, and the reason is now known and fixed. If a new read route is
+added without a shape, it is invisible to this census by construction, so add the shape with the
+route.
