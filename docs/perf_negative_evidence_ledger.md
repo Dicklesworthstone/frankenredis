@@ -44715,3 +44715,86 @@ RETRY PREDICATE:
      builds currently carry no check at all.
   3. Do NOT relax the debug assertions when the newtype lands; belt and braces cost nothing in
      release and the assertion is what would catch a bad `list_lp_entry_bytes` itself.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: SELF-SPEEDUP — the two duplicate listpack size functions DO agree, verified mechanically rather than by eye; nothing in the tree keeps them agreeing, and two levers now depend on that in release (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: source reading, compared programmatically. No build, no run — the fleet is
+under a build hold at /data 56G. No ratio claimed or withdrawn. CV was not used, as a gate or
+otherwise.
+
+Claim class: SELF-SPEEDUP. Campaign output: no.
+
+The previous row established that a wrong per-chunk `lp_bytes` moves quicklist node boundaries
+and therefore DUMP bytes, with only a `debug_assert` in the way. That hint is derived from
+`fr_store::list_lp_entry_bytes`. There is a second, independent implementation of the same rule
+one crate away — `fr_persist::listpack_entry_encoded_len` — and `9820fe75a` and `4c2ed3ecf`
+both rest on the two agreeing. I had asserted that agreement by reading them. Checked it
+properly.
+
+### THEY AGREE — ALL FOUR DECISION TABLES, COMPARED PROGRAMMATICALLY
+
+Extracting each function's brace-balanced body and pulling out its decision structure rather
+than eyeballing the text (the raw diff is dominated by fr-persist nesting its backlen helper
+inline where fr-store has it as a sibling function):
+
+    table                fr-store                                    fr-persist        match
+    int branch order     (0..=127), (-4096..=4095), i16::try_from,    identical          YES
+                         (-8388608..=8388607), i32::try_from
+    backlen bounds       127, 16383, 2097151, 268435455              identical          YES
+    string headers       64, 4096                                    identical          YES
+    returned sizes       {1,2,3,4,5,9} + {1,2,5} + {1,2,3,4,5}       same multiset      YES
+
+  The only textual difference is declaration ORDER, because fr-persist declares `backlen_len`
+  before the size chain and fr-store declares `list_lp_backlen_bytes` after it. Semantically
+  they are the same function written twice.
+
+### AND NOTHING KEEPS THEM THAT WAY
+
+    fr_persist::listpack_entry_encoded_len   is PRIVATE (`fn`, crates/fr-persist/src/lib.rs:2995)
+    fr_store::list_lp_entry_bytes            is PRIVATE (`fn`, packed_set.rs:4260)
+    tests pinning the two together           NONE — grep finds only COMMENTS, and they are mine
+
+So the invariant that two shipped levers depend on is currently held up by two comments I wrote
+this week. If either function is edited — a new listpack encoding, a changed width boundary,
+an upstream Redis change — the other silently disagrees, the chunk `lp_bytes` becomes wrong,
+node boundaries move, and DUMP diverges from the incumbent in RELEASE, where the assertions are
+compiled out.
+
+    THIS IS NOT HYPOTHETICAL DRIFT-IN-GENERAL. It is specific: the rule these encode is
+    upstream Redis's listpack entry layout, which is exactly the kind of thing a future parity
+    fix edits. A parity fix applied to one copy and not the other would be a silent
+    wrong-answer regression on a path that has no runtime check.
+
+### TWO WAYS TO FIX IT, AND THE TRADE
+
+  A. UNIFY. `fr-store` already depends on `fr-persist` (Cargo.toml:9) and already calls
+     `fr_persist::encode_listpack_strings_blob_with_capacity`. Expose the size function the
+     same way and delete fr-store's twin. Removes the invariant instead of guarding it.
+     RISK: `list_lp_entry_bytes` is called once per element on the reload path — 200 to 1000
+     times per key — so a cross-crate call that does not inline would cost more than the
+     levers that motivated this. It must be MEASURED, not assumed, and this bead has a
+     measured precedent for exactly that surprise (`fdb578bac`: a restructure changed inlining
+     and moved a control arm 27 instr/push).
+
+  B. PIN. Expose the fr-persist function `#[doc(hidden)] pub` — the convention this crate
+     already uses for `parse_listpack_integer_orig` and `bench_decode_value_spans` — and add
+     ONE fr-store test asserting the two agree over hardcoded inputs at every boundary the
+     tables above list: 0, 127, 128, ±4096, ±4095, i16/i24/i32/i64 extremes, non-canonical
+     decimals that must stay strings, and string lengths 63/64, 4095/4096. Cheap, and
+     non-tautological because the two implementations are genuinely independent.
+     Deletion condition: delete the test when one of the two functions is deleted.
+
+  I would take B first and only attempt A with a measurement, because B is free and A is a
+  hot-path change wearing the costume of a cleanup.
+
+RETRY PREDICATE:
+  1. Land B when the hold lifts — it is one `pub` and one test, gated by `cargo check`, the
+     fr-store suite, and nothing else. Do it BEFORE the `EntryBytes` newtype from the previous
+     row, because that newtype makes `list_lp_entry_bytes` the sole constructor and so makes
+     this invariant load-bearing for the type system too.
+  2. Attempt A ONLY IF B is in and a live measurement on the reload shape shows the cross-crate
+     call is inlined — i.e. `list_lp_entry_bytes` still shows one call per element and the
+     whole-op delta is inside its null. If it is not inlined, keep the twin and keep the test.
+  3. Do not "verify" this again by reading. The check above is a dozen lines of source
+     extraction and it is reproducible; a reading is not.
