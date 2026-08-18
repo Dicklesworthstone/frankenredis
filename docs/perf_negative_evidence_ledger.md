@@ -62961,3 +62961,86 @@ predicted and rch has silently returned stale or incomplete artifacts twice this
      filed as one.
   3. Stop dividing micro-driver deltas by server-measured denominators. If a row wants to state a
      fraction of the gap, the numerator has to come from the same shape as the denominator.
+
+## 2026-08-18 CrimsonHawk: RETRACTION — my "8.5x over-statement" correction was itself wrong (frame-only vs program-total), and the CERTIFIED 1.5139x EXCLUDES a cost only fr pays
+
+Claim class: SELF-SPEEDUP. Campaign output: no. No measurement was taken this turn: the build freeze
+holds (/data 34G, no cargo, no artifact writes), so this row is source reading and arithmetic only,
+and every derived number below is labelled as derived.
+
+`ea0fc207e` said slice 7 was worth only -187 instr/key on the server shape against -1588 on the
+micro-driver, called that an "8.5x over-statement", and retracted the earlier "~6.9 pct of the gap"
+claim. **That retraction was wrong, and the claim it retracted was roughly right.** The two numbers
+were never measuring the same thing.
+
+  * The micro-driver slope greps **PROGRAM TOTALS**. That includes `__memset_avx2_unaligned_erms`.
+  * `scripts/lzf_compressor_ratio.py` sums only frames whose name contains **`lzf_compress`**
+    (`lzf_total`, needle `["lzf_compress"]`). The memset is its own libc frame and matches nothing,
+    so **the memset was never in that number at all.**
+
+So -1588 is a program-total delta and -187 is a compressor-frame delta. I compared them and reported
+the difference as a mechanism mystery, then wrote a hypothesis about warm thread-local scratches to
+explain a gap that was an artefact of my own two metrics.
+
+**The hypothesis is also dead on source evidence, without needing a run.** `LZF_SCRATCH` is a
+`thread_local!` `RefCell` with a `const` initialiser (`crates/fr-persist/src/lib.rs:48`), so it lives
+for the thread and stays warm across every compression on it. The wrap-clear DOES happen in the
+server. It simply is not charged to the frame the ratio harness measures.
+
+### THE CONSEQUENCE IS ABOUT THE CERTIFIED NUMBER, NOT ABOUT SLICE 7
+
+Vendored `lzf_c.c` puts its table clear inside `#if INIT_HTAB`, and `lzfP.h` defines `INIT_HTAB 0`.
+**The memset is compiled out of the incumbent: redis never clears its match table.** fr does, because
+the epoch tag wraps.
+
+The certified **1.5139x** (`6177c6ac2`) therefore compares fr's compressor frame against redis's
+compressor frame while omitting a cost that **structurally only exists on fr's side**. The number is
+correct for what it measures and it is measured identically on both arms — but as a statement about
+work done per key it is optimistic in fr's favour.
+
+DERIVED, NOT MEASURED — the size of the omission, pre-slice-7. From the micro-driver profile a single
+256 KiB clear costs about 312,000 Ir (3,670,315 Ir over the ~11.8 wraps in 3000 compressions). The
+harness runs 4 and 8 reloads at 200 keys, so 800 and 1600 compressions, giving 3 and 6 wraps and a
+two-point difference of 3 clears over 800 keys:
+
+    3 x 312,000 / 800  ~=  1170 instr/key excluded from fr's side
+
+    fr frame 15196 + 1170 = 16366  ->  ratio vs 10037.5  ~=  1.63x, not 1.5139x
+
+**Every figure in that block is arithmetic across two shapes and must not be quoted as a
+measurement.** It is here to size the question, and this row has already been burned twice by
+treating exactly this kind of arithmetic as a result.
+
+### WHICH MEANS SLICE 7 IS WORTH MORE THAN EITHER PREVIOUS ROW SAID
+
+After slice 7 the wrap period goes from 255 calls to 65,535, so the excluded cost falls by ~256x and
+the frame-only ratio becomes close to honest. Slice 7 therefore removed ~1170 instr/key that no
+published number ever counted, on top of the ~187 that the frame metric did count.
+
+That also rehabilitates `a41ab2697`: it estimated the memset at ~6.9 pct of fr's side, and the derived
+figure here is ~7.7 pct. **The original estimate was closer to the truth than the correction that
+replaced it.** I over-corrected because the new number was smaller and I assumed the smaller number
+was the more honest one. Smaller is not the same as more conservative when the two numbers count
+different things.
+
+### WHAT SETTLES IT, AND WHY IT IS NOT SETTLED HERE
+
+One server-shape callgrind run with the memset frame read directly, on each arm, in one binary with a
+WIDETAG toggle. That is a build plus artifact writes, and both are frozen. Until then the certified
+1.5139x stands as the board figure with the caveat above attached to it, and no new ratio is claimed.
+
+### RETRY PREDICATE
+
+  1. First job in the next unfrozen window, replacing the one in `ea0fc207e`: read the **memset frame**
+     in a server-shape run on both arms. Do not infer it from PROGRAM TOTALS and do not infer it from
+     the compressor frame — those are the two metrics that produced this mess.
+  2. Then decide whether `lzf_compressor_ratio.py` should count fr's memset. It arguably should, since
+     redis structurally has none and a frame-only comparison hides a real asymmetry. Changing the
+     metric invalidates the 1.7600 -> 1.5139 history, so if it changes, re-derive the whole series or
+     keep both columns.
+  3. When quoting the LZF ratio to anyone, state the metric: "compressor frame, excluding fr's
+     epoch-wrap clear, which redis does not have". A ratio without its metric named is how this row
+     happened.
+  4. Standing: before calling two numbers inconsistent, check that they are the same measurement.
+     Both errors in this arc — the phantom mechanism gap and the over-correction — were one metric
+     mismatch wearing two different hats.
