@@ -63701,3 +63701,73 @@ at, not that no unguarded site exists anywhere.
 3. A census of all 145 Map sites would upgrade this from "the convention holds where sampled" to a
    closed set. It is cheap to script, and was not done here because both live leaks are already
    fixed and the row's verdict would not change.
+
+## 2026-08-18 CrimsonHawk: MEASURED — levers 1+2 BUILT and measured: the leading-zero shape falls 77 pct and the control is unmoved, but the TIMESTAMP shape REGRESSES 23 pct, which is the shape I predicted would not move (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: callgrind frame-level SELF cost, differenced across two key counts (10 vs 30) so
+per-invocation setup cancels, normalised per RESTORE+DUMP key and per element. TWO BINARIES, one
+pattern at a time. CV was NOT used, as a gate or otherwise — no coefficient of variation appears in
+this row's decision path and none was computed. No timing verdict is claimed: the measurand is a
+retired-instruction COUNT, which is why a loaded host does not invalidate it.
+
+Claim class: MEASUREMENT. Campaign output: no — no vs-incumbent ratio is banked here, and the
+regression below is a reason not to bank one yet.
+
+  BEFORE  `/tmp/fr_after_pf`, the `e32cc8b71` artifact, pre-lever
+  AFTER   `target/release/frankenredis` sha256 `3c80ba7ad9d4ce1c...`, built 18:34, carrying
+          levers 1 (`2904626f5`) and 2 (`15b146e10`) plus the fr-persist pre-filter (`ec6eacac7`)
+  host    loadavg 17.85-26.27 across the run, nine projects building; MHz not pinned. Ir is
+          load-immune, and the CONTROL below is what carries that claim rather than the assertion.
+
+### `<ListValue>::from_restored_quicklist2_nodes`, 300 elements of 15 bytes
+
+    pattern              leading digits   BEFORE     AFTER      change
+    vvvvvvvvvv%05d       0 (letter)        27.06      27.07     +0.04 pct   <- CONTROL, unmoved
+    %015d               15                173.20      40.07    -76.9 pct
+    7f3a%011d            1                 74.20      60.07    -19.0 pct
+    20260818T%06d        8                123.20     151.07    +22.6 pct    <- REGRESSION
+
+THE CONTROL IS THE LOAD ARGUMENT. A letter-leading list never reaches the new term — `&&`
+short-circuits before `as_bytes` — and it reads 27.06 -> 27.07, a 0.04 pct move across a run whose
+loadavg ranged 17.85 to 26.27. That is the evidence that these frame counts are not being shaped by
+the host, and it is why the +22.6 pct is a signal rather than noise.
+
+### THE REGRESSION IS ON THE SHAPE I SAID WOULD NOT MOVE
+
+`f8dd88cdb` predicted: "`20260818T%06d` and `7f3a%011d` should move LESS — their scans already
+short-circuited at bytes 9 and 2. If they move as much as `%015d`, the mechanism is not what this
+row says it is." One moved less and DOWN; the other moved UP by a fifth.
+
+THE LIKELY MECHANISM, stated as a hypothesis and NOT as a result: for a digit-leading string that
+is not a canonical integer, the tightened guard now leaves `derivable` TRUE, so the chunk total is
+taken from the blob length and the per-entry walk inside `from_restored_nodes` is SKIPPED. But
+`from_restored_quicklist2_nodes` re-derives growth state for a SINGLE-node payload — its own
+comment says "a single-node payload still re-derives" — so that walk may happen anyway downstream.
+If so the shape pays `as_bytes` plus an 8-digit `list_lp_int` per entry ON TOP of a walk it never
+avoided, which is strictly worse than firing the guard and walking once. That would also explain
+why `%015d` wins hugely (its parse rejects at byte 2, so the added cost is tiny) while
+`20260818T` loses (its parse runs eight digits before failing).
+
+UNVERIFIED. The next step is to instrument whether `rebuild_growth_state` runs on this path, not to
+adjust the guard on the strength of a plausible story.
+
+### WHAT THIS DOES AND DOES NOT LICENSE
+
+Levers 1+2 are NOT a clean win and must not be described as one. Two shapes improve, one regresses,
+and the regressing shape — an ISO-8601-prefixed key — is at least as realistic as the zero-padded
+one that improves. No vs-incumbent ratio is quoted here precisely because the shape mix would
+decide the answer and the mix is not yet understood.
+
+What IS established: the levers build, their correctness is pinned (`a845844ee` mutation-tests the
+guard in both profiles), and the control does not move.
+
+### RETRY PREDICATES
+
+  1. Determine whether `rebuild_growth_state` walks the entries again for a single-node restored
+     payload. If it does, the guard should skip its own parse when the caller will walk regardless
+     — the fix is in the caller's contract, not in the condition.
+  2. Re-measure all four patterns after any change, and keep the letter-leading control in every
+     run. It is the only reason the numbers above can be read on a host at loadavg 26.
+  3. Do NOT quote a digit-leading vs-incumbent ratio until the timestamp shape stops regressing.
+     `0bb42f113` certified 1.5998x on `%015d`; the corresponding AFTER number is not yet measured
+     against the incumbent, and quoting the frame win as if it were the ratio would overstate it.
