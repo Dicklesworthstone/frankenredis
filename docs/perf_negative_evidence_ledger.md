@@ -43068,3 +43068,97 @@ which clones both frames of every surviving pair into a second vector plus a
 `to_ascii_lowercase` per key; dedup in place instead. Revisit this ratio row only if that
 lands or if a FIT window ever becomes available, and re-measure rather than scaling this one:
 a quieter host moves the denominator, not the numerator.
+
+## 2026-08-18 CrimsonHawk: ADDENDUM to the read-gate REJECT — the floor cache is NOT broken. It persists at **0.0005 calls/op**, and the failure was my patcher wiring `None` into arms that also hoisted (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — narrows the diagnosis in the preceding REJECT row so the retry is not
+sent after the wrong thing.
+
+The REJECT row left the mechanism explicitly undetermined and said I would not guess it. I then
+counted it, and the answer clears the design and convicts my edit.
+
+### THE FLOOR CACHE PERSISTS — MEASURED, NOT ASSUMED
+
+Calls per op to `plain_borrowed_default_key_read_gate`, which is only ever reached through a
+`get_or_insert_with` closure, on the UNMODIFIED HEAD ELF `e02764982bfe8509`:
+
+  hget              0.0005   <- the cache WORKING: one evaluation per ~2000-op buffered pass
+  type              0.0000
+  get_control       0.0000
+  ttl_nonvolatile   0.0000   (read_allows 1.0000 — unconverted, calls the predicate directly)
+  pttl              0.0000   (read_allows 1.0000 — likewise)
+
+**0.0005 is the signature of a cache that amortises.** So the hypothesis in the preceding row —
+that `read_gate_cache` fails to persist on the floor path — is REFUTED. I am glad I marked it
+undetermined rather than publishing it as the cause; it would have sent the retry at a
+non-existent bug in someone else's code.
+
+Supporting counts on the failing build: `llen` reaches
+`try_dispatch_floor_classified_action` 1.0000 times/op, `process_argv_frame` 0.0000 and
+`parse_borrowed_multibulk_action` 0.0000. It is cleanly floor-dispatched on every packet and
+never falls through, so no invalidation site is involved either.
+
+### THE ACTUAL DEFECT IS IN MY PATCH
+
+Reading my own saved patch rather than the source: the cardinality arm emitted
+
+    runtime.execute_plain_cardinality_borrowed(cmd, key, ts, None)
+
+**while that same arm also hoisted the cached gate.** So SCARD paid twice — once in the hoist,
+once in the executor being told to evaluate the predicate itself. 1.000 + 1.000 = the 2.0000
+measured. That is not a design problem and not a cache problem; it is a mechanical error in the
+script that rewrote 26 call sites, which classified sites by LINE NUMBER against the floor
+boundary and got at least one arm's site on the wrong side of it.
+
+The six shapes stuck at 1.0000 are the same error in its other half — a hoist inserted into an
+arm whose executor call still says `None`, so the hoist is pure added cost and the executor
+keeps evaluating. That is consistent with every number in the REJECT row and requires no other
+mechanism.
+
+### WHAT THIS CHANGES FOR THE RETRY
+
+Item 2 of the preceding row's retry predicate — "diagnose why `read_gate_cache` does not persist
+before threading anything else" — is **DISCHARGED AND WITHDRAWN**. It persists. Nothing needs
+diagnosing there.
+
+What replaces it: **verify the wiring per arm, not per line number.** A line-number split
+against a function boundary is exactly the kind of static classification this campaign has now
+been burned by four times (cascade position, the arity regex, the 26-site drop-then-lookup scan,
+and now this). The check that catches it costs one command per shape:
+`call_count_delta.py --callers plain_borrowed_default_key_read_allows` must show NO executor
+after conversion, and `--callers plain_borrowed_default_key_read_gate` must show ~0.0005, not
+1.0000.
+
+### COUNTED MECHANISM
+
+Five shapes on the unmodified ELF and four counters on the modified one, two-point callgrind
+subtraction at N=2000 and 2N=4000. All values are exact: 0.0005, 0.0000, 1.0000, 2.0000. The
+0.0005 is 1 call per 2000 ops, i.e. one per buffered pass, which is the amortisation the design
+intends.
+
+CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELFs          `e02764982bfe8509` (unmodified HEAD `4a5f7913a`) and
+                `c5ea5aeb6e82159abbc3da21c5ae289e0668daeb84252fd6281d028aa538fa5c` (the failing
+                build). Both plain `--release`, no feature flags, RCH_CARGO_WRAPPER_BYPASS=1,
+                path from `--message-format=json`, copied to a private path and sha256'd there.
+  bench_elf_sha256=c5ea5aeb6e82159abbc3da21c5ae289e0668daeb84252fd6281d028aa538fa5c
+  incumbent     NOT RUN. fr-side counts only; no ratio against the incumbent is claimed.
+  harness       `scripts/call_count_delta.py` including `--callers`,
+                `scripts/shape_instr_per_op.py --fr-only`.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 120G free.
+  PER-ARM loadavg / CPU idle   load 15.46 15.74 14.23, CPU idle 84.7 pct from /proc/stat
+                deltas, iowait 3.5 pct.
+  admissibility Deterministic call counts, load-immune. No timed row is claimed.
+
+### RETRY PREDICATE
+
+1. The cache is fine. Re-wire the arms by NAME, not by line number, and re-run the two
+   `--callers` checks above before trusting any instruction delta.
+2. Convert LINDEX alone first — it already reached 0.0000 on the failed build, which means the
+   pattern works when the wiring is right — then widen one command at a time.
+3. `execute_plain_scard_borrowed` is a second executor reaching the cardinality predicate and
+   must be threaded too; the discriminant covers the predicate, not the executors.
