@@ -26732,7 +26732,9 @@ fn evalsha_cmd(
     let previous_read_only = store.script_read_only;
     let previous_allow_oom = store.script_allow_oom;
     store.script_read_only = read_only_script || no_writes;
-    store.script_allow_oom = allow_oom;
+    // (frankenredis-oo3aw) Derived the same way `no_writes` above is: this arm compiles the
+    // script itself, so there is no pre-computed flag to carry in.
+    store.script_allow_oom = script_shebang_has_allow_oom_flag(&script);
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
     {
