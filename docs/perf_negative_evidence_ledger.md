@@ -55695,3 +55695,69 @@ under test, by content and not by provenance, whenever the shared checkout is in
    bucket with one; otherwise there is nothing to remove.
 3. `get_control` moved 0.67 pct as a control in this run. Treat any single-draw effect under
    1 pct on this instrument as unmeasured, whatever a six-shape A/A envelope says.
+
+--------------------------------------------------------------------------------
+
+## VERIFIED — all 25 `hist_slot()` arms put their command in the right commandstats bucket, checked against Redis 7.2.4
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — a correctness verification of the enum seam, which reached `main` before
+its measurement existed and therefore before this check.
+
+The enum seam replaced `record(cmd.name_lower())` with `record_slot(cmd.hist_slot())` at six
+generic-dispatch sites covering 25 command variants. **A mis-mapped arm is invisible to the
+compiler and to every existing test**: it does not fail to build, it silently records the command
+into ANOTHER command's histogram. The generated unit guard covers the direct-field LIST, not the
+enum MAPPING, so nothing in the suite would have caught `Zrevrank => HistSlot::zrank`.
+
+Every one of the 25 driven exactly three times on both engines after `CONFIG RESETSTAT`,
+comparing the per-command `calls=` counter:
+
+    sadd lpush rpush pfadd hdel srem zrem lpushx rpushx        3/3 each
+    lpop rpop spop zpopmin zpopmax                             3/3 each
+    zcard hlen xlen pfcount                                    3/3 each
+    srandmember hrandfield zrandmember                         3/3 each
+    zrank zrevrank                                             3/3 each
+    object|idletime object|freq                                3/3 each
+    mismatches: 0
+
+A mis-map has TWO signatures and both were checked: the victim reads 0 where Redis reads 3, and
+some other bucket reads 6 where Redis reads 3. The per-command table catches the first. For the
+second, the FULL set of `cmdstat_*` keys was differenced between the engines and is **identical** —
+neither engine reports a command the other does not, so no bucket was inflated by a stray arm.
+
+The two subcommand buckets are worth naming: `object|idletime` and `object|freq` carry a `|` in
+the canonical name and are the only entries in the set that are not a bare command. They map
+through `HistSlot::Other("object|idletime")`, they report under the pipe-form key exactly as
+Redis does, and a `grep -F` was needed to match them.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timing, no ratio, no instruction count: this compares integer counters between two engines, so
+no A/A, no bootstrap interval and no quiet window apply and none is claimed. The control is
+structural — the three DIRECT-slot commands in the set (`sadd`, `lpush`, `rpush`, plus `zcard`,
+`hlen`, `zrank`) and the nineteen `Other` commands must ALL read 3, and a run where the direct
+ones passed while the `Other` ones did not would indict the `Other` arm specifically.
+
+### PROVENANCE
+
+  ELF           fr `005e283d26d8763f5cd87c9dbf327659f4e67679e1737453470f438cc001a110`
+  bench_elf_sha256=005e283d26d8763f5cd87c9dbf327659f4e67679e1737453470f438cc001a110
+  incumbent     vendored `legacy_redis_code/redis/src/redis-server` (Redis 7.2.4), same harness
+                invocation and identical command sequence, as the ORACLE — not a performance arm.
+  harness       `enum_slot_parity.sh`, three runs of each of 25 commands after `CONFIG RESETSTAT`.
+  host          /data 67G free. NO BUILD was started — a peer build held this project's slot for
+                the whole window; this reuses the ELF already built for the measurement row.
+  disposition   VERIFICATION ONLY. No source file changed.
+
+### RETRY PREDICATE
+
+1. This is a one-off harness and it should become a UNIT test, which needs a `HistSlot::name()`
+   in `fr-store` so the invariant can be stated directly: for every variant,
+   `hist_slot().name() == name_lower()`. That is the drift this row checks by hand and it is the
+   right permanent guard. NOT built — it needs a build slot to compile, and none was free.
+2. Re-run this whenever a variant is added to any `hist_slot()` arm, or when a command moves in
+   or out of `with_direct_histogram_fields!`. Both change the mapping and neither is caught by
+   the compiler.
+3. Diff the FULL `cmdstat_*` key set, not only the commands under test. A mis-map inflates a
+   bucket that may not be in your list.
