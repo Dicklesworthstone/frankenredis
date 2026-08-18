@@ -5129,6 +5129,43 @@ impl ServerState {
             .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
     }
 
+    /// (frankenredis-w1djx) The configured Unix domain socket path, or `None` when unset.
+    ///
+    /// fr-server needs this to create the listener at startup and to remove the socket file at
+    /// shutdown, and had no way to reach it: the directive arrives through `StartupConfig`'s
+    /// passthrough into `CONFIG SET`, lands in `config_overrides`, and every reader of that map was
+    /// private to this crate.
+    ///
+    /// An empty value means "no unix listener", matching upstream -- `server.c` guards the whole
+    /// listener on `server.unixsocket != NULL` and fr's config default for the key is the empty
+    /// string -- so it is normalised to `None` here rather than left for each caller to remember.
+    #[must_use]
+    pub fn configured_unix_socket(&self) -> Option<&str> {
+        self.config_overrides
+            .get("unixsocket")
+            .map(String::as_str)
+            .filter(|path| !path.is_empty())
+    }
+
+    /// (frankenredis-w1djx) `unixsocketperm`, parsed as OCTAL, or 0 when unset or unparseable.
+    ///
+    /// THE BASE IS NOT A DETAIL. Upstream declares this with `OCTAL_CONFIG` in `config.c`
+    /// (`createUIntConfig("unixsocketperm", NULL, IMMUTABLE_CONFIG, 0, 0777, ...)`), so a
+    /// configured `700` means `0o700` = 448, not 700. Parsing base 10 would hand `chmod` a number
+    /// that is both wrong and plausible-looking, and the mode would only be noticed by someone
+    /// inspecting the socket file.
+    ///
+    /// 0 is the right fallback rather than a permissive default: `anetListen` chmods only when the
+    /// value is non-zero (`if (sa->sa_family == AF_LOCAL && perm)`), so 0 leaves the mode to the
+    /// umask exactly as upstream does when the directive is absent.
+    #[must_use]
+    pub fn configured_unix_socket_perm(&self) -> u32 {
+        self.config_overrides
+            .get("unixsocketperm")
+            .and_then(|value| u32::from_str_radix(value.trim(), 8).ok())
+            .unwrap_or(0)
+    }
+
     #[must_use]
     pub fn last_active_expire_cycle_stats(&self) -> Option<ActiveExpireCycleStats> {
         self.last_active_expire_cycle
