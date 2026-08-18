@@ -300,6 +300,14 @@ SHAPES = {
     "hlen": (["HSET h f1 v1 f2 v2 f3 v3"], ["HLEN", "h"]),
     "scard": (["SADD st m1 m2 m3 m4 m5"], ["SCARD", "st"]),
     "zcard": (["ZADD z 1 a 2 b 3 c"], ["ZCARD", "z"]),
+    # (frankenredis-getexgate) The other two arms of the ONE cardinality executor. `d307615c4`
+    # converted ZCARD/HLEN/XLEN/PFCOUNT together but only the first two had shapes, so that
+    # row had to record XLEN and PFCOUNT as inference from a shared executor rather than as
+    # measurement. These close that gap. PFCOUNT only fast-paths a pure cache HIT, so the
+    # first op of a run recomputes and every op after it hits -- which is the steady state
+    # the two-point difference measures anyway.
+    "xlen": (["XADD stx 1-1 f v"], ["XLEN", "stx"]),
+    "pfcount": (["PFADD hllk a b c"], ["PFCOUNT", "hllk"]),
     "type": (["SET s abcdefghijklmnop"], ["TYPE", "s"]),
     # (frankenredis-iqicb) ZERO-DOSE BASELINES. `PING` takes no key and no argument, so it
     # never reaches `parse_borrowed_plain_set_bulk` and never touches the store: it is the

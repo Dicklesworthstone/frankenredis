@@ -50482,3 +50482,104 @@ already measured that ONE volatile key changes per-command costs engine-wide, wh
 seed creates by construction. A lever SUCCEEDS only IF the shape's cycles-vs-same-run-control
 falls at or below `get_control`'s own 1.0000 with the null shown. Do NOT chase `publish` on
 cycles, and do NOT quote `getbit` until it has a second draw.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — the read-gate vein is now CLOSED: nine more floor arms stop re-deriving the gate their own pass cached, **175.0 instr/op each on all eight measured arms**, against a null that reads the same integer on both arms (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: the transformation from `d307615c4`, applied to every remaining borrowed READ route
+that still paid the gate itself — **EXISTS, ZRANK, ZREVRANK, MEMORY USAGE, ZLEXCOUNT,
+ZRANDMEMBER, SRANDMEMBER, HRANDFIELD, LPOS**. Shipped in `f91c1e3e6`. Each predicate had the
+identical shape (a bounds block, then `plain_borrowed_default_key_read_allows(now_ms)` as the
+tail expression), so each takes `default_read_allowed: Option<bool>` and derives the gate only
+when the caller has nothing cached. The two floor helpers (`dispatch_floor_fast_exists_into`,
+`dispatch_floor_fast_lpos`) thread it through. Every non-floor call site passes `None`.
+
+**THE VERDICT IS ON THE FRAME AND THE CALL COUNT, AND THIS TIME WHOLE-OP IS DEMONSTRABLY
+INCAPABLE.** `substr`, the unconverted null, has a between-draw spread of **71.8 instr/op** on
+its own before-arm (2099.1 vs 2027.3). An instrument whose null wanders 72 cannot adjudicate a
+175 effect to better than a factor of two. The frame table has no such floor — every entry below
+is an exact integer that reproduced:
+
+| shape | gate calls/op | gate frame | whole-op worst bound | role |
+|---|---|---|---|---|
+| **exists_1** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +174.7 | beneficiary |
+| **zrank_base** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +206.1 | beneficiary |
+| **memory_usage** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +212.1 | beneficiary |
+| **zlexcount** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +180.7 | beneficiary |
+| **zrandmember_1** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +199.0 | beneficiary |
+| **srandmember_1** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +179.3 | beneficiary |
+| **hrandfield_base** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +203.9 | beneficiary |
+| **lpos_base** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +191.9 | beneficiary |
+| substr | 1.000 -> 1.000 | **175.0 -> 175.0** | +10.0 | **EXACT null** |
+| llen | 0.000 -> 0.000 | ABSENT -> ABSENT | -7.3 | converted control |
+
+(Whole-op sign convention: `min(before) - max(after)`, so POSITIVE is an improvement.)
+
+**Quoting the WORST bound: 175.0 instr/op on every one of the eight**, which is **11.3 pct of an
+EXISTS** (of 1544.6) down to **7.3 pct of a ZLEXCOUNT** (of 2412.7). The whole-op column runs
++174.7 to +212.1 and is quoted only as corroboration; the figure to cite is 175.0.
+
+The null is EXACT — `substr` is a read route deliberately left unconverted and reads **the same
+integer, 175.0, on both arms**. `llen` was converted two commits ago and reads zero on both,
+which is what makes ABSENT mean *removed* rather than *renamed or inlined elsewhere*.
+
+**SCOPE: ZREVRANK is converted by this edit and has no harness shape**, so 8 of the 9 arms are
+measurement and ZREVRANK is inference from sharing ZRANK's executor. That is the only inference
+in this row.
+
+**AND IT DISCHARGES THE INFERENCE IN `b6968821d`, WHICH IS THE PART I WOULD FLAG.** That row
+converted four cardinality arms and could measure only two, recording XLEN and PFCOUNT as
+inference "from a shared executor, not measurement". Adding the two missing shapes cost one
+edit, and both now read as measurement on the ELFs that row was built from:
+
+| shape | whole-op before -> after | calls/op | gate frame |
+|---|---|---|---|
+| **xlen** | 1626.2 -> 1376.5 | **1.000 -> 0.000** | **175.0 -> ABSENT** |
+| **pfcount** | 1946.9 -> 1737.1 | **1.000 -> 0.000** | **175.0 -> ABSENT** |
+
+So `b6968821d`'s claim is now **4 of 4 measured**, and the inference clause in it is withdrawn.
+The inference happened to be right — but it was cheap to check and should have been checked
+before it was published, not after.
+
+**THE VEIN IS NOW CLOSED.** `d7c67e802` listed twelve read routes still paying the gate. Two
+went in `d307615c4` (hlen, zcard), eight more here, and `substr` and `object_encoding` are the
+only ones left — `substr` is deliberately held back as this row's null, and `object_encoding`
+calls the gate **three** times rather than once, so it is a different shape of problem and not a
+tenth instance of this one.
+
+CORRECTNESS: **98 commands byte-identical** between the arms in ONE pipelined pass, which is the
+only regime in which the cached gate exists. Built around the single risk the lever creates, a
+stale cached `true` outliving state a fresh derivation would have refused: CLIENT NO-TOUCH on
+and off, SELECT to db3 and back, MULTI/EXEC, a volatile key, lowercase forms, WRONGTYPE, arity
+errors, absent members and elements, EXISTS at five arities plus duplicate keys, and the forms
+that must NOT fast-path — `ZRANK WITHSCORE`, a malformed lex bound, `MEMORY USAGE ... SAMPLES`,
+and the count forms of all three random commands. **The three random commands are exercised
+against single-element containers so their draw is deterministic** and a divergence would mean a
+behavioural difference rather than a different RNG draw.
+
+BUILD PROVENANCE: paired build in a worktree pinned at `80044f42c`, built AFTER, BEFORE, AFTER
+again. The two AFTERs are bit-identical
+(`bench_elf_sha256=2efdbf524d300bd36bab0f4b14da10a4c5e58cdd2b3e0e30f8a15c8d8ba5b1e9`), BEFORE is
+distinct
+(`bench_elf_sha256=113933835a21702c864bd4650a34f3d6b3e7a0e39dfbeb6e6dd2f1e10c98b4f7`). A pinned
+worktree was used because peers held uncommitted WIP in `fr-runtime` throughout. Host: /data
+98G, loadavg 12.31/11.00/10.61, CPU idle 89 pct.
+
+GATE AND ITS OWN NULL. Both arms were measured in one same-invocation interleaved run, two
+rounds, so drift falls on both alike. The A/A null and the A/B pairing are same-invocation. A/A
+null on the whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians:
+median 1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is
+that bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this
+row; no CV was computed. Host state is provenance, not a gate — the verdict rests on integers
+that reproduced exactly.
+
+RETRY PREDICATE: revisit only if any converted shape is observed calling
+`plain_borrowed_default_key_read_allows` at above **0.000 calls/op** (which would mean a reset
+point or a new caller reintroduced it), or if the gate's own cost falls below ~40 instr/op, at
+which point removing it stops being worth a parameter. Measure with
+`scripts/call_count_delta.py <dump> 20000 --callers plain_borrowed_default_key_read_allows`; the
+references are the eight beneficiaries at 0.000 and `substr` at 1.000. **Do not open a tenth
+instance of this lever** — `object_encoding` is the only unconverted route left with a shape and
+it calls the gate three times, so it needs its own analysis rather than this transformation.
