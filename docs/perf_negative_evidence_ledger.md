@@ -62032,3 +62032,78 @@ CV was not used, as a gate or otherwise.
 3. The event-loop-passes number in `e2481acc4` (fr 0.010-0.013 vs redis 0.008) is from the
    harness's own per-engine instrumentation, not from syscall counts, and is untouched by this
    row. It remains a lead and remains unconfirmed.
+
+## 2026-08-18 CrimsonHawk: CERTIFIED — the write-path pair banks as campaign output: RPUSH+LTRIM is 0.6077x on letter-leading and 0.8313x on digit-leading, fr AHEAD in both, so the cliff costs 22 points of lead and never flips it (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) with a LIVE redis
+7.2.4 arm, both sides in ONE INVOCATION and INTERLEAVED fr / redis / fr / redis per draw so each
+side is bracketed by the other. CV was NOT used, as a gate or otherwise — no coefficient of
+variation appears in this row's decision path and none was computed. No timing verdict is claimed:
+the measurand is a retired-instruction COUNT. No code changed and NO BUILD was run; callgrind
+output went to a `TemporaryDirectory` and was reclaimed, so this row cost no disk.
+
+Claim class: COMPETITIVE. Campaign output: YES. This closes retry predicate 1 of the row above,
+which required the pair to be certified before either number was quoted as campaign output.
+
+  gate      OPEN FIT / CLOSE FIT, computed by this invocation under runstamp 1787069602
+  ELAPSED   44.92 s for twenty-four callgrind points, certified on the FIRST firing
+  fr arm    `99e32657383c8a9ef60468534a02f92f6e7afe76a4f8c68424a2e803ffd1b81b` (`e32cc8b71`)
+  incumbent vendored redis 7.2.4, `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+
+### THE PAIR
+
+    RPUSH(300 elements, 15 bytes) + LTRIM key 0 149, fill 128, slope 5 vs 15 keys, interleaved
+
+    LETTER-LEADING   0.6066 / 0.6060 / 0.6077    WORST 0.6077x    <- fr AHEAD by 39 pct
+      fr    190,937.7 / 190,815.4 / 191,563.5      redis 315,225.5 / 314,681.7 / 315,344.1
+      idle 88.5-89.8 pct, loadavg 5.76-6.41, MHz mean 2366-3038 against a 1429-4292 spread
+
+    DIGIT-LEADING    0.8297 / 0.8293 / 0.8313    WORST 0.8313x    <- fr AHEAD by 17 pct
+      fr    262,257.8 / 261,740.4 / 261,807.4      redis 315,317.0 / 315,386.3 / 314,878.4
+      idle 88.9-92.9 pct, loadavg 6.27-6.54, MHz mean 2126-2621
+
+**QUOTED BOUNDS: 0.6077x letter-leading, 0.8313x digit-leading.**
+
+Every A/A null in the run is under 0.41 pct on both arms — the largest is fr's +0.400 pct on
+digit-leading draw 1. Per-shape spreads are 0.28 pct and 0.24 pct, both inside the 0.84 pct
+instrument floor, against margins of 39 and 17 pct.
+
+### THE PREDICTION WAS STATED FIRST AND IT WAS MET
+
+The row above predicted "worst bounds in the region of 0.61x and 0.83x" from a single uncertified
+draw, and named the falsifier: "if the digit-leading arm comes back ABOVE 1.0x the sizing here was
+wrong by a factor the margins say is impossible". The certified bounds are **0.6077x and 0.8313x**.
+
+Both certified numbers are slightly LESS favourable than the sizing they replace (0.6039x and
+0.8256x), which is the direction rigor is supposed to move a number. The sizing was sound and is
+now superseded; nothing that cited it needs revisiting beyond the label.
+
+### WHAT THIS SETTLES ABOUT PRIORITY
+
+Three shapes now carry certified vs-incumbent bounds on this bead:
+
+    RESTORE+DUMP, letter-leading strings   0.9115x   fr ahead
+    RESTORE+DUMP, digit-leading strings    1.5998x   fr BEHIND   <- the cliff FLIPS this
+    RPUSH+LTRIM,  letter-leading strings   0.6077x   fr ahead
+    RPUSH+LTRIM,  digit-leading strings    0.8313x   fr ahead    <- the cliff only ERODES this
+
+The same defect, from the same per-element parse, reverses one verdict and dents another. **RESTORE
+is where the lever changes what fr can claim; the write path is where it recovers instructions fr
+was already winning without.** Both are worth fixing and only one is worth fixing first.
+
+It also bounds the write-path lever's value honestly: the largest possible win there is 22 points
+of a lead fr already holds, and no reachable amount of it changes a competitive verdict.
+
+### RETRY PREDICATES
+
+  1. Re-certify all four bounds after levers 1 and 2 land. The digit-leading RESTORE bound is the
+     one whose SIGN should change; the other three should improve without changing sign. A
+     digit-leading RESTORE bound still above 1.0x after both levers means the guard tightening did
+     not reach the dominant cost and the arena lever is the remaining candidate.
+  2. The letter-leading write bound 0.6077x is the control for the whole lever set: it must NOT
+     move. Every lever in the set is gated on a digit-leading first byte, so a shift in the
+     letter-leading arm is evidence of an unintended change, not of a win.
+  3. The keys-5-vs-15 slope used here differs from the 10-vs-30 used for RESTORE. It was chosen
+     because RPUSH+LTRIM is roughly three times dearer per key and 10-vs-30 would have put the run
+     past the window. Do not compare absolute per-key totals across the two harnesses without
+     accounting for it; the RATIOS are unaffected, since both arms use the same slope.
