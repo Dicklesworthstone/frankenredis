@@ -54913,3 +54913,129 @@ has an oracle for. So:
   3. This row does NOT license deriving `lp_bytes` from the header unconditionally, and it does not
      overturn `c92f6`. It narrows that row's scope: the objection stands for hand-crafted payloads
      and is answered for redis-written ones. Anyone citing this row must carry the guard with it.
+
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the restore fold stops parsing back the decimal the decoder just rendered: one byte per entry replaces a 192-instruction classify-and-fold, −37.83 pct worst bound on integer RESTORE (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) and deterministic
+per-frame SELF costs, TWO-BINARY A/B with the A/A and the A/B in ONE INVOCATION and the candidate
+arm BRACKETED by control arms, on TWO shapes. CV was NOT used, as a gate or otherwise — no
+coefficient of variation appears in this row's decision path and none was computed. No timing
+verdict is claimed: the measurand is a retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 0.999517, bootstrap 95% CI [0.985131, 1.001406] on the
+integer shape and 0.995878, CI [0.974529, 0.999959] on the string shape, each taken in the same
+invocation as the A/B it gates. The bootstrap median-CI is the verdict gate and it excludes zero
+on both.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### PROVENANCE, AND A SUITE THIS ROW COULD NOT RUN
+
+  ELF           AFTER `f8aeeb90da10c6f32be7bf804264a244eaeae7fdbc80c4ca36d44505a56cb223`,
+                BEFORE `da3819651812e7794995d01f5219204645b242684b7497a001bafb99807901f3`.
+  bench_elf_sha256=f8aeeb90da10c6f32be7bf804264a244eaeae7fdbc80c4ca36d44505a56cb223
+
+  Booted and hashed from `/proc/<pid>/exe`. The server ELF does not self-report a hash and no
+  claim is made that this is one.
+
+  `cargo test -p fr-store` DID NOT RUN and is not claimed. A peer's uncommitted
+  `crates/fr-store/src/lib.rs` changes `get_string_bytes`' return shape and leaves two call sites
+  in `mod tests` on the old one (E0631 at 42758 and 42774), so the fr-store test build is red for
+  every agent in this tree while `cargo build --release` and `cargo check -p fr-store` stay green.
+  They have been told. What replaced the suite is below and is arguably stronger for this change —
+  but it is a substitution, not an equivalent, and the row says so rather than quoting a number it
+  did not obtain.
+
+### THE LEVER — WHAT `dcd149230` SPECIFIED, BUILT
+
+`b6a9c8d2a` measured `from_restored_quicklist2_nodes` at 192.00 instructions per element: the
+decoder renders a binary integer to decimal, and the fold then parses that decimal BACK inside
+`list_lp_entry_bytes` to pick the entry's width. `dcd149230` established the two facts that make
+the parse unnecessary — redis NEVER string-encodes a canonical decimal (0 of 288 entries), and fr
+picks the SAME integer widths as redis (0 of 42 single-element payloads diverging).
+
+So a chunk's `enc_total` is its BLOB LENGTH minus the listpack frame, unless a `String` span holds
+a canonical decimal — which requires a first byte that is a digit or `-`. One load and two
+compares per entry:
+
+    per entry:  raw_total += elem.len();  guard &= !(String span && first byte digit-or-'-')
+    per chunk:  guard holds  ->  enc_total += bytes.len() - LIST_LP_OVERHEAD
+                otherwise    ->  the EXACT existing per-entry walk, unchanged
+
+  `frankenredis-c92f6`'s invariant is PRESERVED, not assumed: a chunk holding a digit-leading
+  string still re-walks and still reports the same `lp_bytes`, `forced_quicklist` and
+  `OBJECT ENCODING`. `raw_total` still needs each element's own length, so the fold SHRANK rather
+  than disappeared — which is exactly what the frame count shows.
+
+    <ListValue>::from_restored_quicklist2_nodes   57,600.0 -> 6,321.0   (192.00 -> 21.07 /elem)
+
+  That frame moving is the gate `dcd149230` set for this build, and it is met by a factor of nine.
+
+### THE MEASUREMENT
+
+    ALL-INTEGER list, RESTORE+DUMP, 300 elements, slope 10 vs 30 keys, distinct keys
+    draw   BEFORE_a     BEFORE_b     AFTER       cand-pct    null-pct
+      1    135,810.40   135,536.70   83,454.90   −38.4885    +0.2019
+      2    135,665.25   135,864.60   83,321.45   −38.6281    −0.1467
+      3    135,393.10   135,657.25   83,381.40   −38.4753    −0.1947
+      4    136,065.50   135,957.80   83,719.95   −38.4465    +0.0792
+      5    135,657.20   135,589.35   83,301.90   −38.5785    +0.0500
+      6    132,259.05   136,039.80   83,404.95   −37.8268    −2.7791
+
+    A/B median −38.4819 pct, bootstrap 95% CI [−38.6033, −38.1367], n=6 draws
+    WORST SINGLE DRAW −37.8268 pct  <- the figure this row claims
+    null median 0.999517 as a ratio; the same six draws as absolute percentages have median
+         0.1707 pct, CI [0.0646, 1.4905].
+
+  The worst draw is draw 6, and draw 6 is also the only one with a bad null (−2.78 pct: its two
+  control arms disagree). Quoting it is therefore CONSERVATIVE — the five draws with clean nulls
+  all read between −38.45 and −38.63 pct. It is quoted anyway, per the replicated-standing
+  convention, because a row that discards its least favourable draw is choosing its own number.
+
+    ALL-STRING list, same shape
+      −4.8478 / −4.7861 / −3.2247 / −3.1060 / −3.3140 / −3.1209 pct
+      median −3.2693 pct, CI [−4.8170, −3.1134]; null median 0.995878, absolute median 0.4122 pct
+      WORST SINGLE DRAW −3.1060 pct
+
+  Strings benefit too — a `vvvv…` element is not digit-leading, so the guard holds and the chunk
+  derives. The effect is far smaller because a string entry's `list_lp_entry_bytes` was already
+  cheap: it rejects on the first byte. What was expensive, and is now gone, was the INTEGER fold.
+
+  Host: 88-91 pct idle, loadavg 10.3-10.4, MHz mean 1900-2500 against a 1429-4292 spread.
+
+### PARITY, AND THE FALLBACK EXERCISED END TO END
+
+    digit-leading / mixed / canonical pools, BEFORE vs AFTER:            0 of 75 diverging
+      the same 75 vs redis 7.2.4 on ENCODING + LLEN + LRANGE:            0 of 75 diverging
+    INTEGER round-trip (LRANGE after RESTORE + DUMP bytes) before/after: 0 of 30 diverging
+      and vs redis 7.2.4:                                                0 of 30 diverging
+    BEFORE-vs-AFTER DUMP BYTES, string shapes:                           0 of 84 diverging
+    workload sweep vs redis 7.2.4:                                       4 of 42, UNCHANGED
+    fr-persist 229, 0 failures; `clippy -p fr-store --lib` clean; fmt unchanged by this change.
+
+  THE FALLBACK IS REACHED BY ORDINARY PAYLOADS, which is why it could be tested at all: redis
+  string-encodes every NON-canonical decimal, and many are digit-leading — `"0123"`, `"007"`,
+  `"1.5"`, `"12a"`, `"-"`, a 23-digit number. The `fallback` pool is made only of those, so every
+  chunk in it refuses the derivation and takes the walk.
+
+  AND THE REFERENCE WALK RAN ON EVERY CHUNK. A `debug_assert_eq!` compares the derived total
+  against the full per-entry walk. Because the unit suite was unavailable, a DEBUG-PROFILE server
+  was built and driven through 100 RESTORE shapes — five element pools (canonical ints,
+  digit-leading non-canonical, plain strings, mixed, 200-byte) x five fills x four lengths — with
+  every LRANGE compared element by element. A disagreement aborts the process, so a completed run
+  with correct answers is the evidence.
+
+### RETRY PREDICATES
+
+  1. NOT PROVEN, and worth stating plainly: these tests show the fallback RUNS and stays correct.
+     They do NOT show it is NECESSARY, because that needs a payload where the derivation would be
+     WRONG — a string-encoded canonical decimal — and `dcd149230` showed redis never writes one.
+     Producing that payload means hand-assembling a listpack and its CRC64. Reopen ONLY to add
+     that fixture; do NOT delete the guard on the strength of "no test reaches the wrong answer".
+  2. Re-run `cargo test -p fr-store --lib` against this change as soon as the tree's test build is
+     green again. If anything fails there, this row is wrong and the frame count did not save it.
+  3. The remaining 21.07 instr/elem in that fold is `raw_total` plus the guard — a length read and
+     two compares. `raw_total` feeds `forced_quicklist`, which compares it against
+     `LIST_DEFAULT_BUDGET`; if a future lever wants it O(1) as well it must answer what
+     `forced_quicklist` should report for a chunk whose raw total was never summed.

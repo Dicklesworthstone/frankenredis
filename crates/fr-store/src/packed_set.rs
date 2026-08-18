@@ -4055,11 +4055,64 @@ impl ChunkedList {
                     flush_restore_plain_chunk(&mut out, &mut plain_chunk);
                     // The decoded spans are still hot here; summing now avoids a
                     // second traversal of `bytes` through the chunk iterator.
+                    //
+                    // (frankenredis-qj6jn) `enc_total`'s share for this chunk is the BLOB LENGTH
+                    // minus the listpack frame, whenever fr would encode every entry the way this
+                    // payload already has. `dcd149230` established both halves of that:
+                    //
+                    //   * redis NEVER string-encodes a canonical decimal — 288 entries at every
+                    //     integer width and both signs, plus the near-misses that must stay
+                    //     strings, gave 0 — so the only way the two rules can differ is a
+                    //     hand-crafted payload;
+                    //   * fr picks the SAME integer widths as redis, pinned single-element at
+                    //     every boundary including `i64::MIN`, 0 of 42 diverging.
+                    //
+                    // So an `Integer` span always agrees, and a `String` span disagrees only if
+                    // its bytes are a canonical decimal — which requires a FIRST BYTE that is a
+                    // digit or `-`. That is the same one-way implication `list_lp_entry_bytes`
+                    // already relies on. One load and two compares per entry replace a classify
+                    // and a fold that measured 192.00 instructions per element.
+                    //
+                    // `frankenredis-c92f6` refused deriving this total because a
+                    // non-canonically-encoded payload must keep yielding the SAME `lp_bytes`,
+                    // `forced_quicklist` and hence `OBJECT ENCODING` as the re-walk. That
+                    // invariant is PRESERVED, not assumed: any chunk holding a digit-leading
+                    // string falls back to the exact per-entry walk below.
+                    //
+                    // `raw_total` is unaffected — it needs each element's own length either way,
+                    // so this shrinks the fold rather than removing it.
+                    let mut derivable = true;
                     for span in &entries {
                         let elem = span.as_bytes(&bytes);
                         raw_total += elem.len() as u64;
-                        enc_total += list_lp_entry_bytes(elem);
+                        if derivable
+                            && matches!(span, ListpackValueSpan::String(_))
+                            && matches!(elem.first(), Some(b) if b.is_ascii_digit() || *b == b'-')
+                        {
+                            derivable = false;
+                        }
                     }
+                    let chunk_enc = if derivable {
+                        bytes.len() as u64 - LIST_LP_OVERHEAD
+                    } else {
+                        let mut walked = 0u64;
+                        for span in &entries {
+                            walked += list_lp_entry_bytes(span.as_bytes(&bytes));
+                        }
+                        walked
+                    };
+                    // The walk is the reference in EVERY build that has debug assertions, so a
+                    // payload that reaches the derivation and disagrees with it fails loudly in
+                    // the whole test suite rather than silently reporting a wrong `lp_bytes`.
+                    debug_assert_eq!(
+                        chunk_enc,
+                        entries
+                            .iter()
+                            .map(|span| list_lp_entry_bytes(span.as_bytes(&bytes)))
+                            .sum::<u64>(),
+                        "derived chunk total must equal the per-entry walk"
+                    );
+                    enc_total += chunk_enc;
                     out.len += entries.len();
                     out.chunks
                         .push_back(ListChunk::from_listpack(bytes, entries));
