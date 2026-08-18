@@ -59837,3 +59837,69 @@ is the CERTIFICATION of a standing reading, not a change to it.
      checked for hardcoded window or gate banners.
   4. Do NOT quote 0.9045x or 0.9040x from runs 1 and 2. They are the more favourable numbers and
      the less defensible ones; the certified run is the one with provenance.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: rch is NOT a usable escape from a local build freeze right now — worker unreachable AND every worker is a rustc MINOR VERSION behind local. The "fr_runtime unbuildable via rch" note is stale in the other direction
+
+Claim class: INSTRUMENT. No ratio is claimed.
+Campaign output: no — it saves the next agent under a build brake the same twenty minutes.
+
+Under a "no local builds, remote rch or existing artifacts only" brake I needed to verify a
+mechanical change at current HEAD before committing it. The ledger's standing note
+(`8768`, 2026-07-24) says the batch lever space "doesn't cross into fr_runtime (unbuildable via
+rch)". That note is three weeks old and rch has gained `cache`, `gc`, `sync`, `admit` and
+`diagnose` subcommands since, so I checked rather than believed it.
+
+### THE STALE NOTE IS WRONG IN ONE DIRECTION
+
+`rch diagnose -- cargo check -p fr-runtime --all-targets`:
+
+    Kind: CargoCheck   Confidence: 0.90 (>= threshold 0.85)
+    Decision: **WOULD INTERCEPT**
+
+fr-runtime compilation is no longer excluded from offload by classification. Anyone repeating
+"fr_runtime is unbuildable via rch" from that note is quoting a machine that changed.
+
+### BUT IT IS UNUSABLE TODAY, FOR TWO DIFFERENT REASONS
+
+    rch check  ->  **RCH not ready: Worker vmi1227854 is unreachable**
+
+    Rust version mismatch vs local rustc 1.100.0-nightly (8fa1c96cf 2026-08-17):
+      vmi1153651, hz2, vmi1227854, vmi1152480, hz1, vmi1149989, vmi1264463, vmi1293453,
+      vmi1156319  — **ALL NINE on 1.99.0-nightly**
+
+The second is the one that matters and it is not a transient outage. **Every worker is a minor
+version behind the local toolchain**, so a remote `cargo check` passing does not establish that
+the local compiler accepts the code, and a remote failure could be a toolchain artifact rather
+than a defect. For a verification whose whole purpose is "will this compile on the machine that
+ships it", a different rustc is not a substitute — it is a second hypothesis.
+
+### THE CONSEQUENCE I ACTED ON
+
+I did not commit. A mechanical change that regenerates cleanly and passed 944 + 635 tests at an
+EARLIER HEAD is not the same as verified at the HEAD it lands on; HEAD moved twice while the
+change was held behind a peer lease. Committing unverified source is how `main` went red earlier
+in this session, and a build brake is not a reason to lower that bar — it is a reason to wait.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement, no ratio, no A/A, no build. `rch check` and `rch diagnose` are preflight
+commands that perform no compilation, which is why they were safe to run under the brake.
+CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           NONE — nothing was built or run.
+  host          /data 48G free, 6G above the 42G brake; local rustc 1.100.0-nightly
+                (8fa1c96cf 2026-08-17); nine rch workers all on 1.99.0-nightly.
+  disposition   INSTRUMENT NOTE. No source file changed.
+
+### RETRY PREDICATE
+
+1. Before using rch as a freeze escape, run `rch check` AND compare its worker rustc against
+   local. A remote build on a different compiler verifies a different question.
+2. Do NOT repeat "fr_runtime is unbuildable via rch" from `8768`. Classification now intercepts
+   it; the blocker today is worker health and toolchain skew.
+3. If the workers are brought to the local toolchain, rch becomes a real escape for
+   verification-only work and this row should be re-checked rather than cited.
