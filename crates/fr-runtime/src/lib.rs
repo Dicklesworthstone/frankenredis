@@ -8117,20 +8117,36 @@ impl Runtime {
     }
 
     /// Returns true if a given client ID has any active pub/sub subscriptions.
+    /// (frankenredis-pubsub-empty-fast) O(1) global short-circuit: when no
+    /// client anywhere holds a channel/pattern/shard subscription, this
+    /// client cannot be a pub/sub client. Skips up to three per-client
+    /// HashMap hash+probes on the per-command hot path (profiled ~4-7% of
+    /// GET/SET CPU via effective_output_hard_limit) for the overwhelmingly
+    /// common no-subscriber workload. Byte-identical: every empty map yields
+    /// the same `false` through the slow path below.
+    ///
+    /// (frankenredis-getexgate) OUTLINED. That short-circuit IS the whole function on any
+    /// workload without subscribers, yet this was reached OUT OF LINE at 1.0000 calls/op via
+    /// `effective_output_hard_limit`, so every command paid a call and a return to be told three
+    /// maps are empty. Only the guard is inlined; the per-client probing stays behind an
+    /// `#[inline(never)]` boundary so its body is not duplicated at the 4 call sites. Same
+    /// mechanism as `propagate_expired_key_deletions` in `1ed5c75ef`.
+    #[inline]
     pub fn is_pubsub_client(&self, client_id: u64) -> bool {
-        // (frankenredis-pubsub-empty-fast) O(1) global short-circuit: when no
-        // client anywhere holds a channel/pattern/shard subscription, this
-        // client cannot be a pub/sub client. Skips up to three per-client
-        // HashMap hash+probes on the per-command hot path (profiled ~4-7% of
-        // GET/SET CPU via effective_output_hard_limit) for the overwhelmingly
-        // common no-subscriber workload. Byte-identical: every empty map yields
-        // the same `false` through the slow path below.
         if self.server.pubsub_client_channels.is_empty()
             && self.server.pubsub_client_patterns.is_empty()
             && self.server.pubsub_client_shard_channels.is_empty()
         {
             return false;
         }
+        self.is_pubsub_client_subscribed(client_id)
+    }
+
+    /// (frankenredis-getexgate) The per-client probing half, reached only when SOME client
+    /// somewhere holds a subscription. `#[inline(never)]` is load-bearing: it is what keeps the
+    /// inlined guard cheap.
+    #[inline(never)]
+    fn is_pubsub_client_subscribed(&self, client_id: u64) -> bool {
         self.pubsub_sub_count(client_id) > 0
             || self
                 .server
