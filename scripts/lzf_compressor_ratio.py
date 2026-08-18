@@ -22,9 +22,15 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
-S = os.path.dirname(os.path.abspath(__file__))
+# Dumps go to a TEMP DIR, never next to this script. The first version derived the
+# output path from __file__, which was harmless while this lived in a scratchpad and
+# started littering the repo with untracked callgrind dumps the moment it was committed
+# to scripts/ -- in a shared checkout, where someone else's broad `git add` would have
+# swept them into a commit.
+S = tempfile.mkdtemp(prefix="lzf_ratio_")
 KEYS = 200
 FIELDS = 40
 
