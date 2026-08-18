@@ -3243,6 +3243,22 @@ pub struct LuaState<'a> {
     /// (frankenredis-9hori) Full specs, not just names: flags and description are only
     /// recoverable from the runtime value.
     registered_functions: Vec<RegisterFunctionSpec>,
+    /// (frankenredis-9hori) The CALLBACKS those registrations named, paired with the name, in
+    /// call order. This is fr's analogue of what upstream keeps: `function_lua.c` does
+    /// `luaL_ref(lua, LUA_REGISTRYINDEX)` on the callback and stores the resulting integer in
+    /// `functionInfo.function`, so FCALL looks a name up in a dict and calls the stored ref and
+    /// **consults no source text at all**.
+    ///
+    /// fr instead REWRITES the library source at call time, turning
+    /// `redis.register_function('n', function() ... end)` into a named global `function n(...)`
+    /// and then calling that global. The rewrite is why literals are required, and it is the
+    /// same assumption that makes a local-named library unloadable: `transform_register_function`
+    /// (`fr-command/src/lib.rs`) has to SEE the name and the `function` keyword in the text.
+    ///
+    /// Keeping the callback value is what makes name-based invocation possible without the
+    /// rewrite. Cloning a `LuaValue::Function` preserves `identity`, so a stored clone is equal
+    /// to and calls the same function as the original.
+    registered_callbacks: Vec<(Vec<u8>, LuaValue)>,
     globals_locked: bool,
     /// (frankenredis-vr8rg) RESP version the script's `redis.call` /
     /// `redis.pcall` use to materialize replies, toggled by `redis.setresp`.
@@ -4247,6 +4263,42 @@ fn lua_value_is_callable(v: &LuaValue) -> bool {
     matches!(v, LuaValue::Function(_) | LuaValue::RustFunction(_))
 }
 
+/// Extract the name and callback a `redis.register_function` call names.
+///
+/// (frankenredis-9hori) Companion to `parse_register_function_args`, which returns METADATA only
+/// (name, flags, description) and drops the callback on the floor. Upstream keeps the callback:
+/// `function_lua.c` refs it into the Lua registry and stores the ref in `functionInfo.function`,
+/// which is why FCALL there needs no access to the library source.
+///
+/// MUST STAY IN LOCKSTEP with the parser's notion of WHICH ARGUMENT is the callback:
+///
+///   positional  `redis.register_function('name', cb)`   -> args[1]
+///   table       `redis.register_function{ callback = cb, ... }` -> key `callback`
+///
+/// It deliberately does NOT re-validate. It is only called after the parser has returned `Ok`,
+/// so the shape is already known good and a `None` here means the two disagree about the shape
+/// -- a bug in this pairing, not a malformed user library. Returning `Option` rather than
+/// panicking keeps that disagreement from taking the server down.
+fn register_function_callback(args: &[LuaValue]) -> Option<(Vec<u8>, LuaValue)> {
+    if let [LuaValue::Table(t)] = args {
+        let LuaValue::Str(name) = t.get(&LuaValue::Str(b"function_name".to_vec())) else {
+            return None;
+        };
+        let callback = t.get(&LuaValue::Str(b"callback".to_vec()));
+        if !lua_value_is_callable(&callback) {
+            return None;
+        }
+        return Some((name, callback));
+    }
+    let [LuaValue::Str(name), callback] = args else {
+        return None;
+    };
+    if !lua_value_is_callable(callback) {
+        return None;
+    }
+    Some((name.clone(), callback.clone()))
+}
+
 /// Parse the arguments of `redis.register_function`, which upstream accepts in TWO shapes:
 ///
 ///   redis.register_function('name', callback)
@@ -4462,6 +4514,22 @@ impl<'a> LuaState<'a> {
         &self.registered_functions
     }
 
+    /// The callbacks those registrations named, paired with the name, in call order.
+    ///
+    /// (frankenredis-9hori) Same order and same length as `registered_function_specs`: both are
+    /// pushed together by the one `redis.register_function` builtin, so index i of one describes
+    /// index i of the other. Kept as two vectors rather than one so `RegisterFunctionSpec` stays
+    /// comparable with `PartialEq` -- a callback is not meaningfully equatable, and the spec type
+    /// is asserted on directly by roughly ten tests.
+    // (frankenredis-9hori) Unused until the FCALL path stops rewriting source and starts
+    // invoking by name. Explicitly allowed rather than left to warn, because a `-D warnings`
+    // build would otherwise fail on an accessor whose only defect is that its caller has not
+    // landed yet. REMOVE THIS ALLOW when the invocation half wires it up.
+    #[allow(dead_code)]
+    pub(crate) fn registered_function_callbacks(&self) -> &[(Vec<u8>, LuaValue)] {
+        &self.registered_callbacks
+    }
+
     fn new_with_cloned_globals_for_bench(store: &'a mut Store, now_ms: u64) -> Self {
         let globals = LuaGlobals::from_flat_map(lua_base_globals_template().as_ref().clone());
         Self::with_globals(store, now_ms, globals)
@@ -4484,6 +4552,7 @@ impl<'a> LuaState<'a> {
             globals,
             globals_locked: false,
             registered_functions: Vec::new(),
+            registered_callbacks: Vec::new(),
             resp_version: 2,
             call_depth: 0,
             lua_frame_kinds: Vec::new(),
@@ -8025,7 +8094,16 @@ impl<'a> LuaState<'a> {
             "redis.register_function" => {
                 let spec = parse_register_function_args(args)
                     .map_err(|e| format!("register_function: malformed arguments ({e:?})"))?;
+                // (frankenredis-9hori) Keep the callback too. `parse_register_function_args`
+                // has ALREADY validated the argument shape and callability by this point, so
+                // this is pure extraction and cannot accept anything the parser rejected --
+                // which is what keeps the duplication down to "which slot holds the callback"
+                // rather than a second copy of the error ladder.
+                let callback = register_function_callback(args);
                 self.registered_functions.push(spec);
+                if let Some(callback) = callback {
+                    self.registered_callbacks.push(callback);
+                }
                 Ok(vec![LuaValue::Nil])
             }
             "redis.call" => self.redis_call(args, false).map(|value| vec![value]),
