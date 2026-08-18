@@ -44556,7 +44556,20 @@ metrics, since it now carries a registered instruction shape and a certified thr
 
 SOURCE-DERIVED, NOT MEASURED. Written under a build hold; no ratio, delta or verdict is
 claimed. This exists because the largest un-eliminated hypothesis on `geosearch_2` turns out to
-need NO code — only a cargo feature and one extra build — and nobody appears to have noticed.
+need NO code — only a cargo feature and one extra build.
+
+CORRECTING MY OWN FIRST DRAFT, which said "and nobody appears to have noticed". That is too
+strong and does not credit the prior work. The allocator WAS evaluated: `frankenredis-be8t.5`
+("Evaluate jemalloc/mimalloc as global allocator for fr-server") and `frankenredis-i4yux`
+("Enable mimalloc/jemalloc by default in fr-server release build") are both closed, and
+`frankenredis-2sn90` records that "frankenredis already ran the allocator campaign". Read them
+before repeating any of it. What they did NOT do is the question this row asks. `be8t.5` is
+dated from an April flamegraph showing ~11 pct of CPU in the GLIBC allocator, its candidates
+were glibc-versus-specialized, it carries zero comments, no per-shape figures and no mention of
+geo at all, and it closed as "Completed evaluation. Allocators are wired up correctly." The
+outcome was a WIRING plus a geomean default. The open question is per-SHAPE, on one shape that
+is measured behind with a miss-locality deficit — which a geomean is precisely the statistic
+that hides.
 
 ### The experiment is already built
 
