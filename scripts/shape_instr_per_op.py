@@ -78,6 +78,21 @@ CACHE_SIM = [False]
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REDIS = os.path.join(ROOT, "legacy_redis_code/redis/src/redis-server")
 
+
+# (frankenredis-sf510) EVALSHA shape bodies and their SHA1s. The sha is computed at import so
+# the shape's argv can be a literal, which is what the harness requires; it is the sha1 of the
+# exact bytes handed to SCRIPT LOAD, so a mismatch would surface immediately as NOSCRIPT rather
+# than as a quiet mismeasurement.
+_EVALSHA_BODY_SMALL = "return 1"
+# Padding is a Lua COMMENT: it grows the bytes the cache key spans without adding any work for
+# the interpreter to do, which is exactly the variable under test.
+_EVALSHA_BODY_LARGE = "return 1 --" + ("x" * 4000)
+
+
+def _sha1_hex(body):
+    import hashlib
+    return hashlib.sha1(body.encode()).hexdigest()
+
 SHAPES = {
     "sinterstore_3src": (
         ["SADD sa m1 m2 m3 m4 m5", "SADD sb m3 m4 m5 m6 m7", "SADD sc m4 m5 m6 m7 m8"],
@@ -469,6 +484,52 @@ SHAPES = {
     # an executor, and the subcommand discriminant means the same both-variants trap the
     # arity-6 work paid for: FUNCTION at arity 4 is not only LOAD.
     "function_load": ([], ["FUNCTION", "LOAD", "REPLACE", "#!lua name=fnperf\nredis.register_function('fnperf_f', function(keys, args) return 1 end)\n"]),
+
+    # (frankenredis-kbyhy / frankenredis-sf510) THE SCRIPTING CACHE-KEY SHAPES.
+    #
+    # Both beads were filed from SOURCE READING under a build hold and are UNMEASURED. These
+    # shapes are the gate they specified, and they exist so the first person with a build can
+    # settle both in one run instead of re-deriving the plan.
+    #
+    # THE PREDICTION UNDER TEST, and why one size cannot test it: the compiled-chunk cache
+    # (lua_eval.rs LUA_COMPILED_CHUNK_CACHE) is keyed on SOURCE BYTES, so every caller must
+    # MATERIALISE and HASH the full text before it can discover the chunk is already compiled.
+    # If that is real, instr/op rises with LIBRARY / SCRIPT SIZE while the invoked function is
+    # byte-identical. A single size measures an intercept and calls it the command --
+    # frankenredis-eh2ct found 21 of 39 size-sensitive rows doing exactly that, and one of them
+    # INVERTED when measured at a second size. Hence a ladder, not a point.
+    #
+    # FLAT ACROSS THE LADDER = NO LEVER. Close both beads in that case; do not go looking for a
+    # smaller effect.
+    #
+    # The invoked body is identical in every rung. Only the SURROUNDING library grows, which is
+    # the whole point: the useful work is constant and only the text the cache key spans changes.
+    "fcall_lib1": (
+        [["FUNCTION", "LOAD", "REPLACE", "#!lua name=fcl1\n"
+          + "redis.register_function('fcl1_f0', function(keys, args) return 1 end)\n"]],
+        ["FCALL", "fcl1_f0", "0"]),
+    "fcall_lib8": (
+        [["FUNCTION", "LOAD", "REPLACE", "#!lua name=fcl8\n"
+          + "".join("redis.register_function('fcl8_f%d', function(keys, args) return 1 end)\n" % i
+                    for i in range(8))]],
+        ["FCALL", "fcl8_f0", "0"]),
+    "fcall_lib32": (
+        [["FUNCTION", "LOAD", "REPLACE", "#!lua name=fcl32\n"
+          + "".join("redis.register_function('fcl32_f%d', function(keys, args) return 1 end)\n" % i
+                    for i in range(32))]],
+        ["FCALL", "fcl32_f0", "0"]),
+
+    # EVALSHA: the SHA is computed here rather than captured at runtime, because the shape's
+    # argv must be a literal. sha1 of the exact bytes SCRIPT LOAD is given.
+    # The body returns 1 in every rung; only the trailing comment padding grows, so the script
+    # the cache key spans differs while the executed work does not.
+    "evalsha_small": (
+        [["SCRIPT", "LOAD", _EVALSHA_BODY_SMALL]],
+        ["EVALSHA", _sha1_hex(_EVALSHA_BODY_SMALL), "0"]),
+    "evalsha_large": (
+        [["SCRIPT", "LOAD", _EVALSHA_BODY_LARGE]],
+        ["EVALSHA", _sha1_hex(_EVALSHA_BODY_LARGE), "0"]),
+
 
     # (frankenredis-ozrro) The arity-4 SCAN option forms, front-classified in b631dd1f9.
     # Each is ONE option: the two-option forms keep the generic route by design, so a
@@ -1667,7 +1728,13 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
         # seed whose reply arrives in two segments used to leave the tail in the
         # socket, where the burst loop then counted it as burst progress.
         for seed in seeds:
-            sock.sendall(resp(*seed.split()))
+            # (frankenredis-sf510) A seed may be a LIST of already-separated arguments as well
+            # as a whitespace-splittable string. Splitting is fine for `SET k v` and impossible
+            # for anything whose argument legitimately CONTAINS spaces -- a Lua body handed to
+            # SCRIPT LOAD or FUNCTION LOAD is one argument with spaces and newlines in it, and
+            # `.split()` would shatter it into a wrong-arity command that fails at seed time.
+            # Strings keep their existing behaviour exactly, so no registered shape changes.
+            sock.sendall(resp(*(seed if isinstance(seed, (list, tuple)) else seed.split())))
             seed_counter = ReplyCounter()
             while seed_counter.complete < 1:
                 chunk = sock.recv(1 << 20)
