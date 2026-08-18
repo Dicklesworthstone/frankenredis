@@ -44400,3 +44400,83 @@ throughput figure, so it can be read on both metrics on ONE shape -- the compari
 pairs were built to make possible, which nobody has taken. Expect the throughput side to be the
 harder half: `balanced_square_ab.py:743` records `xrange_2` as NEVER CERTIFIED in two attempts,
 straddling 1 and then null-failing, so a small-N throughput row on this family is not a given.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: source map — the double length computation `4c2ed3ecf` removed from the loader's tail is STILL PRESENT on all four LIVE push paths; and a caution, from my own banked numbers, that these rows' endpoints do NOT chain (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: source reading and arithmetic over numbers already banked in this ledger. No
+build, no run, no new measurement — the fleet is under a build hold at /data 56G. CV was not
+used, as a gate or otherwise.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — this row banks no ratio. It specifies a
+lever and withdraws an inference nobody had drawn yet but which the row order invites.
+
+### THE REDUNDANCY IS NOT FIXED, IT IS FIXED IN ONE PLACE
+
+`4c2ed3ecf` removed a double computation of `list_lp_entry_bytes` from `bulk_from_back`'s tail
+loop and measured it at EXACTLY 27.00 instructions per tail element on two sizes. That loop is
+one of five production call sites with the identical shape. The other four are untouched:
+
+    site (crates/fr-store/src/packed_set.rs)     computes it in    then recomputes it in
+    ListValue::push_back              :4720      add_entry_bytes   push_back_with_fill -> owned
+    ListValue::push_front             :4729      add_entry_bytes   push_front_with_fill -> owned
+    ListValue::push_back_borrowed     :4746      add_entry_bytes   push_back_with_fill -> owned
+    ListValue::push_front_borrowed_impl:4756     add_entry_bytes   push_front_with_fill -> owned
+    ChunkedList::push_back            :3718      (internal helper, hardcoded fill -2, unsized)
+
+Every one of them opens with `self.add_entry_bytes(elem)`, which is exactly
+`self.lp_bytes += list_lp_entry_bytes(elem)`, and every one then reaches
+`ListChunk::push_back_owned` / `push_front_owned`, whose first line recomputes the same value
+for the CHUNK's total. `push_back_owned_sized` exists after `4c2ed3ecf`; nothing routes to it
+except the loader tail, and there is no `push_front_owned_sized` at all.
+
+    THESE ARE THE LIVE COMMAND PATHS — RPUSH and LPUSH — not the loader. That is the whole
+    interest: the loader was the easy half.
+
+### WHAT THIS DOES AND DOES NOT LICENCE
+
+The 27.00 figure is the size of the redundancy in the same arithmetic in the same functions, so
+it is a reasonable EXPECTATION for the four remaining sites. It is not a prediction I am
+entitled to bank, and this bead has already been burned twice for exactly that move:
+`02052d7f4` measured a lever against a reload workload its own predicate had ruled out, and
+`df9a4da1d` found the live-path answer differed in sign from the reload one. A reload figure
+does not transfer to a live path.
+
+  So: specified, not claimed. `push_slope.py` is the right instrument (live RPUSH), with the
+  window caveat its correction row established — compare only within a fixed window.
+
+  AND THE FRONT PATHS NEED MORE CARE THAN THE BACK ONES. `push_front_with_fill` explicitly
+  zeroes `rpush_conversion_prefix_len`, which is a DUMP-visible node-boundary claim, so a
+  sized twin there is not the mechanical mirror of the back one and owes its own
+  node-blob equivalence test.
+
+### A CAUTION I CAN DEMONSTRATE FROM NUMBERS ALREADY IN THIS LEDGER
+
+Three consecutive rows on this route report before/after pairs at n=1000:
+
+    a7668ed11    3.5423x -> 3.3862x
+    9820fe75a    3.3979x -> 3.3688x
+    4c2ed3ecf    3.4119x -> 3.2337x
+
+    THE ENDPOINTS DO NOT CHAIN, AND NOBODY SHOULD MULTIPLY THEM. `9820fe75a` left the route at
+    3.3688x; `4c2ed3ecf` opens at 3.4119x on the SAME source. In instr/key that is 980,500
+    against 994,021 — 1.4 pct apart for code that is identical.
+
+  The reason is already in this ledger and is not drift: each row's ORIG is the CONTROL ARM OF
+  A DIFFERENT ELF, and `fdb578bac` measured a control arm shifting when the candidate is added
+  to the same binary. The incumbent denominator is NOT the culprit — redis measured 291,237.9,
+  291,342.0 and 290,749.1 across those runs, inside 0.2 pct.
+
+    So each pair is sound as a DIFFERENCE and none of them is a waypoint on a common scale.
+    The route's standing is whatever the latest pair's CAND says (3.2337x at n=1000, 2.6263x
+    at n=200), not a product of three ratios. Anyone assembling a campaign total from this
+    bead's rows would overstate it.
+
+RETRY PREDICATE:
+  1. Take the four live push sites ONLY with a live-push measurement, in a fixed stated window,
+     and require the Packed regime to be no worse than its null — the same admission condition
+     `df9a4da1d` set and failed. Do the BACK pair first; do the FRONT pair only with a
+     node-blob equivalence test covering `rpush_conversion_prefix_len`.
+  2. Reopen the chaining question ONLY IF someone builds a single ELF carrying all the toggles,
+     so every arm shares one control. That is the only way these rows become commensurable, and
+     it is worth one build when the hold lifts.
