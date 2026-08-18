@@ -4465,8 +4465,8 @@ const fn list_node_exceeds_limit(fill: i64, new_sz: u64, new_count: u64) -> bool
 ///
 /// The accumulator runs NEGATIVE so `i64::MIN` fits: building the magnitude positively cannot
 /// represent 2^63, which is why the previous form needed a `u64` and a post-hoc negate.
-/// `list_lp_int_bytes_are_canonical` is retained — a test still pins it directly — but is no
-/// longer on this path.
+/// `list_lp_int_bytes_are_canonical` is now `#[cfg(test)]`: a test still pins its acceptance,
+/// but it is no longer on any production path.
 #[inline]
 fn list_lp_int(entry: &[u8]) -> Option<i64> {
     if entry.is_empty() || entry.len() >= 21 {
@@ -4497,6 +4497,12 @@ fn list_lp_int(entry: &[u8]) -> Option<i64> {
 /// True iff `entry` is the canonical base-10 text of an integer: optional '-',
 /// no '+', no redundant leading zero, and not "-0". Range is still enforced by
 /// the parse in `list_lp_int`.
+// (frankenredis-qj6jn) TEST-ONLY since `15b146e10` ported the single-pass fold: that removed
+// this function's last production caller, and the only remaining one is the test at the
+// bottom of this file that pins its acceptance directly. `#[cfg(test)]` rather than
+// `#[allow(dead_code)]` because it IS dead in a release build, and the release build saying
+// so is the correct signal -- the first build after the freeze reported exactly this.
+#[cfg(test)]
 fn list_lp_int_bytes_are_canonical(entry: &[u8]) -> bool {
     let digits = match entry.first() {
         Some(b'-') => &entry[1..],
