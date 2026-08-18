@@ -62723,3 +62723,94 @@ applies and none is claimed. CV was not used, as a gate or otherwise.
    next step, and it must be run with `--keep-dumps` to be useful — blocked by the freeze.
 3. When quoting a figure from a doc comment, check whether it is labelled as MOTIVATION for the
    change it sits next to. I read the numbers and not the label.
+
+## 2026-08-18 CrimsonHawk: COUNTED — the arena lever's cost is 28 call sites, not "many"; the design that avoids all 28 instead moves three `bytes.len()` reads that govern quicklist NODE boundaries, so the larger mechanical diff is the SAFER one (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: source reading and exact counts from the working tree. **No measurement of any kind
+was taken this turn** — /data stood at 34G against a 42G brake under a hard build freeze; no cargo,
+no callgrind, no artifact write, and the source tree was not modified. CV was NOT used and no timing
+verdict is claimed. Counts below are exact greps over `crates/**/*.rs` excluding `benches/` and
+`tests/`; every performance figure is a CITATION of an earlier row.
+
+Claim class: not applicable. Campaign output: no.
+
+### THE COUNT I OWED
+
+`project_span_arena_lever_specified` and the row that introduced it both said the arena lever is
+"not free" because `as_bytes` "has many call sites", and neither counted them. **It is 28**, in five
+files:
+
+    crates/fr-store/src/packed_set.rs     11
+    crates/fr-persist/src/listpack.rs      9
+    crates/fr-store/src/lib.rs             5
+    crates/fr-runtime/src/lib.rs           2
+    crates/fr-persist/src/lib.rs           1
+
+(Counted as `.as_bytes(` WITH an argument, which distinguishes the span form from the 735 argument
+less `str::as_bytes()` calls in the same tree. Total matches for the bare pattern are 763.)
+
+28 mechanical signature updates is a large batch and a tractable one. "Many" was doing work that
+the number does not support, and the estimate should never have been published without it.
+
+### THE DESIGN THAT AVOIDS ALL 28 — AND WHAT IT COSTS INSTEAD
+
+The arena does not have to be a second buffer. A chunk already holds
+`ListChunk::Listpack { bytes: Arc<Vec<u8>>, entries: Arc<Vec<ListpackValueSpan>> }`, and the
+rendered decimals could be APPENDED to that same `bytes` past the listpack terminator. Then both
+span variants are `Range<u32>` into ONE buffer and **`as_bytes(&self, listpack: &[u8])` keeps its
+exact present signature — zero call-site changes, all 28 untouched.**
+
+The cost moves rather than disappearing. Three sites read `bytes.len()` as the listpack's byte
+total, and all three would over-report once the buffer carries appended decimals:
+
+    packed_set.rs:4156   bytes.len() - LIST_LP_OVERHEAD    the derivation itself
+    packed_set.rs:3536   quicklist_packed_node_accepts_local(entries.len(), bytes.len(), ...)
+    packed_set.rs:5531   list_node_exceeds_limit(fill, bytes_len, entries_len)
+
+The first is the derivation levers 1 and 2 already touch. **The other two are size-ADMISSION checks
+that decide where a quicklist node ends** — and `bulk_from_back`'s own comment states the stakes:
+*"chunk boundaries are quicklist NODE boundaries in the DUMP, so substituting it would change bytes
+on the wire."* An over-reported node size makes both checks refuse packing earlier than redis does,
+which moves node boundaries, which changes DUMP output.
+
+### THE RECOMMENDATION, AND IT IS THE LARGER DIFF
+
+**Take the separate-arena design and pay the 28 call sites.** Not because it is less work — it is
+plainly more — but because the two designs fail differently:
+
+  * 28 signature updates fail LOUDLY and at COMPILE TIME. A missed site does not build.
+  * three `bytes.len()` reads fail SILENTLY and on the WIRE. A missed one still compiles, still
+    passes any test that does not compare DUMP bytes against redis at a node boundary, and emits a
+    payload that differs from the incumbent's.
+
+This bead has already spent effort on DUMP parity and carries
+`list_bulk_back_matches_incremental_push_qj6jn` as a pin precisely because this class of divergence
+is hard to see. Breadth that the compiler checks beats depth that it does not.
+
+A header-derived length is available if the append design is taken anyway — `parse_header` already
+returns `(total_bytes, num_elements)` in `fr-persist/src/listpack.rs` — but it costs a header parse
+at each of the three sites, on paths that today do an `Arc` deref and a `len()`.
+
+### WHAT IS STILL NOT ESTABLISHED ABOUT THIS LEVER
+
+Its WIN remains unmeasured and derived. The chain is: `decode_value_spans` is 70.68/elem and the
+largest single frame in list RESTORE (`5b5484229`); it is purely per-element, identical to the
+instruction at element lengths 15 and 60 (`b83ee8ecc`); and the enum's own size assertion states
+"decode_value_spans pays ~1 instruction per byte of it per listpack entry", with `frankenredis-33832`
+having banked a win by removing 8 bytes. **Shrinking `<= 32` to 8 therefore has a PLAUSIBLE ~24
+instr/elem, not a measured one**, and the falsifier is unchanged: if all-string does not move, the
+per-byte law does not apply to the array write and the whole premise is wrong.
+
+Nothing in this row changes that estimate. What it changes is the cost side, which was a word and
+is now a number.
+
+### RETRY PREDICATES
+
+  1. When the freeze lifts, the build order is lever 2, then lever 1, then this. This lever is the
+     largest diff and the only one of the three whose WIN is still unmeasured — it should not go
+     first.
+  2. If the append design is taken against this recommendation, the acceptance test is a DUMP
+     byte-comparison against redis 7.2.4 on a list that straddles a node boundary, not a unit test
+     on `lp_bytes`. The failure mode is a moved boundary, and only the wire shows it.
+  3. Re-count the 28 before starting. This is a shared tree and the number is a snapshot of one
+     working copy on one day.
