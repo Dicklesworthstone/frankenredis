@@ -5129,6 +5129,40 @@ impl ServerState {
             .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
     }
 
+    /// (frankenredis-w1djx) Upstream's `isReadyToShutdown`: may the server exit without losing
+    /// data a replica has not yet acknowledged?
+    ///
+    /// `server.c` returns true immediately when there are no replicas, then requires every
+    /// replica's `repl_ack_off` to equal `master_repl_offset`. `all` over an empty iterator is
+    /// true, so the no-replica case falls out rather than needing its own arm -- but it is the
+    /// case that matters most, because getting it wrong would make every standalone shutdown wait
+    /// out the full timeout.
+    ///
+    /// Reads the replica map directly rather than through `replica_ack_offsets`, which is
+    /// `#[cfg(any(test, feature = "bench-reference"))]` and does not exist in a release build.
+    #[must_use]
+    pub fn is_ready_to_shutdown(&self) -> bool {
+        let target = self.replication_ack_state.primary_offset;
+        self.replication_runtime_state
+            .replicas
+            .values()
+            .all(|replica| replica.ack_offset == target)
+    }
+
+    /// (frankenredis-w1djx) `shutdown-timeout` in seconds; 10 when unset, matching upstream's
+    /// default and fr's own config table.
+    ///
+    /// 0 is meaningful and must survive: upstream skips the grace period entirely when the value
+    /// is 0 (`!(flags & SHUTDOWN_NOW) && server.shutdown_timeout != 0 && ...`), so an operator can
+    /// turn the wait off. Falling back to 10 on a PARSE FAILURE rather than to 0 keeps a
+    /// malformed value from silently disabling the protection.
+    #[must_use]
+    pub fn configured_shutdown_timeout_secs(&self) -> u64 {
+        self.config_overrides
+            .get("shutdown-timeout")
+            .map_or(10, |value| value.trim().parse::<u64>().unwrap_or(10))
+    }
+
     /// (frankenredis-w1djx) The configured Unix domain socket path, or `None` when unset.
     ///
     /// fr-server needs this to create the listener at startup and to remove the socket file at
