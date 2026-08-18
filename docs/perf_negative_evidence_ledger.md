@@ -54604,3 +54604,216 @@ and an effect inside that interval is not claimed.
    should be divided by three before it is trusted, or re-taken against `__rust_alloc`.
 3. When adding a detector that matches by substring, print the matched symbol names once and read
    them. Both times this has bitten me the fix was visible in one line of output.
+
+--------------------------------------------------------------------------------
+
+## KEEP (SELF-SPEEDUP) — 68 literal call sites skip the direct-field match entirely: `lrange` **-4.63 pct**, `substr` **-2.12 pct** worst bound, and `substr` goes from PAYING +20.3 instr/op to gaining 42
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — instruction-level self-speedup, no vs-incumbent ratio is claimed.
+
+This EXECUTES the predicate I registered when shipping the ten direct histogram fields:
+*"Re-open as a COMMAND-ID dispatch, not a longer name match. Success predicate: the fall-through
+tax returns to 0.0 within the A/A interval AND the winners keep their 90+ instr/op."* Both halves
+are met, and the fall-through side overshoots: the tax does not return to zero, it inverts.
+
+### THE CHANGE
+
+A call site passing a string LITERAL already knows at compile time whether its command has a
+direct histogram field. It should not pay a 25-arm runtime `match` to rediscover that. So:
+
+     68 sites  literal, command has NO direct field  -> `record_map_with_kind`, straight to the
+               map, match skipped entirely
+     29 sites  literal, command HAS a direct field   -> unchanged, they need the match
+     14 sites  RUNTIME name (`cmd.name_lower()`, `canonical`, `cmd_lower`) -> unchanged; these
+               can still carry a direct-field name and must be matched at runtime
+
+The `debug_assert` interlock in `record_map_with_kind` rejects any direct-field name reaching the
+map path — that would record the command under the same name its field uses and make `all()`
+emit it twice, which is the duplicate `INFO commandstats` row `092150b5d` fixed. The predicate it
+calls is generated from `with_direct_histogram_fields!`, so it tightens automatically when the
+set grows.
+
+### THE MEASUREMENT — THREE DRAWS, WORST BOUND QUOTED
+
+Paired build from HEAD `6f1341a61`, back to back, one build at a time, distinct SHA-256.
+
+  shape          draws (instr/op)              worst bound
+  lrange_base    -109.9, -116.9, -114.9        **-4.63 pct**
+  substr          -42.2,  -43.6,  -40.8        **-2.12 pct**
+  hmget_2         -71.6,  -35.3,  -42.5        -1.60 pct   MARGINAL
+
+`substr` is the registered fall-through control from the row that shipped the ten fields, where
+it PAID +20.3 instr/op. It now GAINS ~42. **The win is removing the whole match, not merely the
+increment the last batch added** — which also means every literal-named shape still on the
+canonical path is likely carrying about the same 40.
+
+### WHAT IS NOT CLAIMED, AND WHY THE NULL IS THE REASON
+
+Same-invocation A/A on the BEFORE binary, six shapes: **median 0.999763, bootstrap 95% median CI
+[0.992349, 1.002524]**, 20,000 resamples. Widest single deviation **1.410 pct**.
+
+CV was not used, as a gate or otherwise; the bootstrap median-CI above is the gate for this
+verdict, and an effect inside that interval is not claimed. No throughput ratio and no
+incumbent comparison is made by this row, so no quiet window is required.
+
+That envelope is set almost entirely by ONE point: `get_control` moved **-13.3 instr/op against
+itself**, -1.41 pct, on a 943 instr/op shape. It is the cheapest shape measured and the most
+sensitive to per-pass cache fill, and this is the second time this session it has been the widest
+A/A point. Sizing an effect on this instrument without it in the A/A sample would understate the
+null by roughly 3x.
+
+Against that conservative envelope these are inside the null and are claimed in NEITHER
+direction:
+
+    smembers_base -0.62   hgetall_base -0.68   geohash_base +0.22
+    get_control   -0.03   zcard        +0.20
+
+`geohash_base` reads as a small regression and is NOT reported as one. `get_control` and `zcard`
+are direct-field commands that keep the canonical path; their flatness is the designed control
+and it holds.
+
+`hmget_2` clears the envelope by only 1.13x and its draws span -1.60 to -3.19 pct. It is quoted
+at its WORST bound and flagged marginal rather than averaged into a prettier number.
+
+### TESTS AND THE INTERLOCK
+
+`cargo test -p fr-store --lib` 940 passed, `-p fr-runtime --lib` 633 passed, 0 failed.
+`cargo check --all-targets -p fr-store -p fr-runtime -p fr-server` clean. **The `debug_assert`
+never fired**, so no direct-field command reaches the map path on any tested route.
+
+### PROVENANCE
+
+  ELF           before `bb1546dc8b29c25781113c77f050a53d02b00391e6cd429ac96ce1a9b4c6f866`,
+                after  `8b0cc26a6fa26c64982b023cb0318b4fd7455d98ef5d835d7aa8f6f45df5ce7c`
+  bench_elf_sha256=8b0cc26a6fa26c64982b023cb0318b4fd7455d98ef5d835d7aa8f6f45df5ce7c
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`.
+  host          /data 77G falling to 75G, checked immediately before each build. Per-arm loadavg
+                9.49 14.77 14.35 at 1429 MHz through 11.92 13.23 13.79 at 3433 MHz. Instructions
+                by two-point subtraction, so load and MHz do not enter.
+  pair          Both ELFs from the SAME HEAD `6f1341a61`, built back to back, one at a time,
+                exit-checked, DISTINCT SHA-256, the BEFORE tree verified to contain ZERO
+                `record_command_histogram_map_with_kind` sites before its build.
+  disposition   fr-store half SHIPPED in `baa8e9d9e`. Caller half HELD behind an exclusive
+                reservation on `crates/fr-runtime/src/lib.rs` held by BrownIbis to 11:12:31Z; the
+                pre-commit guard refused it and the guard was NOT overridden. Diff preserved as
+                `RECOVERY_CrimsonHawk_map_call_sites.patch` and blob
+                `ff4353ef897866e555312ef015ad4c87a3b1b4df`.
+
+### RETRY PREDICATE
+
+1. RE-OPEN THIS SURFACE IF: `substr` on the shipped ELF measures above **1900.0 instr/op**, or
+   `lrange_base` above **2300.0 instr/op**, on `shape_instr_per_op.py` at 2000 ops. Those are the
+   AFTER draws (1878.7-1879.3 and 2260.5-2262.8) plus the 1.410 pct A/A envelope; a reading above
+   them means the match has crept back onto these routes and the conversion has regressed.
+2. RE-OPEN AS A DEFECT IF: any command appears TWICE in `INFO commandstats`, or
+   `is_direct_histogram_name` returns true for a name reaching `record_map_with_kind`. Either
+   means a literal site was converted whose command has a direct field.
+3. The remaining 14 RUNTIME-name sites are the next target, and they are the ones the enum seam
+   was scoped for — `cmd.name_lower()` stringifies a discriminant so a string match can turn it
+   back into a field selector. That is still open and still worth ~40 instr/op per site.
+4. Do NOT convert a literal site without checking its command against
+   `is_direct_histogram_name`. The failure mode is a duplicated `INFO commandstats` row, not a
+   wrong number, and only the `debug_assert` catches it.
+5. Include `get_control` in every A/A sample on this instrument. Twice now it has set the
+   envelope, and an A/A without it reads about 3x too tight.
+
+## 2026-08-18 CrimsonHawk: REJECT — taking FOUR decimal digits per step does not halve the divisions the way two-at-a-time did; it regroups the SAME six multiplies and reads +0.37 pct on the clean draws (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), deterministic
+per-frame SELF costs, and a static multiply count from the disassembly of both arms, plus a
+TWO-BINARY A/B with the A/A and the A/B in ONE INVOCATION and the candidate arm BRACKETED by
+control arms. CV was NOT used, as a gate or otherwise — no coefficient of variation appears in
+this row's decision path and none was computed. No timing verdict is claimed: the measurand is a
+retired-instruction COUNT. The candidate is REVERTED; `write_u64_digits` is unchanged on main.
+
+Claim class: not applicable — nothing is kept.
+
+### THE PREMISE, AND WHY IT LOOKED SOUND
+
+`b6a9c8d2a`'s retry predicate named `write_u64_digits` as the next target: 17,126.0 instr/key,
+57.09 per element on a 300-integer list RESTORE, identical across the two levers before it and
+more than half of what remained on that path. The function already renders TWO digits per step via
+a `DIGIT_PAIRS` table, and `frankenredis-itoa2`'s own comment says that "halves the loop count and
+the compiler-lowered divide-by-constant operations" against a digit-at-a-time loop. Four at a time
+is the obvious continuation of that argument.
+
+The candidate added a `while val >= 10_000` loop AHEAD of the existing `while val >= 100` one,
+splitting each 4-digit remainder into two `DIGIT_PAIRS` lookups. Ordering was chosen so a value
+below 100 — the universal RESP case, every bulk-length header — pays exactly ONE extra compare and
+nothing else.
+
+### WHAT THE ARITHMETIC ACTUALLY DOES, COUNTED
+
+The intuition is wrong, and the count says so exactly. A divide-by-constant lowers to a
+multiply-high plus a multiply-and-subtract for the remainder, so each STEP costs two multiplies
+per divisor it uses:
+
+    7-digit value, OLD   3 x (val/100, val%100)                         = 6 multiplies
+    7-digit value, NEW   1 x (val/10000, val%10000, rem/100, rem%100)
+                       + 1 x (val/100, val%100)                          = 6 multiplies
+
+  Taking four digits at a time does NOT remove a division — it moves it. The bigger divisor saves
+  one pair, and splitting the four-digit remainder into two printable pairs spends exactly that
+  pair back. What is left to save is only the loop's compare-and-branch.
+
+  The disassembly agrees and is the independent check: multiply instructions inside the function
+  went 16 -> 18, i.e. the candidate carries MORE arithmetic, not less, because it now contains
+  both loops.
+
+### THE MEASUREMENT
+
+    frame, per RESTORE+DUMP key, 300 integer elements, fill 128
+      fr_protocol::write_u64_digits   17,126.0 -> 16,835.0   −291.0   (57.09 -> 56.12 /elem)
+
+  −0.97 instructions per element: the loop overhead and nothing else, which is what the multiply
+  count predicts.
+
+    whole-op A/B, ALL-INTEGER list, RESTORE+DUMP, slope 10 vs 30 keys
+    draw   BEFORE_a     BEFORE_b     AFTER        cand-pct    null-pct
+      1    133,013.75   135,426.95   136,259.50   +1.5193     −1.7819
+      2    136,060.55   135,633.00   136,404.70   +0.4107     +0.3152
+      3    135,956.70   135,945.45   135,980.05   +0.0213     +0.0083
+      4    135,803.40   135,795.50   136,306.05   +0.3731     +0.0058
+
+  Draw 1's control arms disagree by 1.78 pct, so that draw gates nothing and its +1.52 pct is not
+  read. The two draws with clean nulls (3 and 4, A/A 0.008 and 0.006 pct) read +0.0213 and
+  +0.3731 pct — a small LOSS, on the shape the change was aimed at. Against a −291 instr/key frame
+  saving that is the extra branch and the second loop body costing more than the regrouping
+  returns.
+
+  REVERTED. A change that adds a code path to a function on the universal RESP reply path has to
+  earn its place, and 0.97 instructions per element on one shape — with the whole-op reading
+  going the wrong way — does not.
+
+### WHAT THIS SAYS ABOUT THE ROW IT CAME FROM
+
+`frankenredis-itoa2`'s claim is correct AND does not generalise, and the difference is worth
+stating because the wording invites the extrapolation I made. Going from ONE digit to TWO removes
+a division per digit pair, because a single-digit step needs `%10` and `/10` for ONE character.
+Going from TWO to FOUR removes nothing, because the four-digit remainder is not printable without
+being split again. The saving in the original lever came from the table lookup, not from the
+divisor size, and the table already covers the largest unit that can be emitted without a further
+split.
+
+  REUSABLE: before widening a "do N at a time" lever to 2N, count the divide-by-constant
+  operations on both sides for a representative width. If the count is equal, the only thing left
+  on the table is loop overhead, and that is rarely worth a second code path.
+
+### RETRY PREDICATES
+
+  1. Do NOT retry four-at-a-time, or eight, on this function. Reopen ONLY IF a candidate removes
+     multiplies rather than regrouping them — a table-free reciprocal scheme, or a rendering that
+     avoids decimal entirely — and shows the disassembly's multiply count FALLING below 16 for
+     the same function.
+  2. The bench named by the previous row, `fr-persist/benches/int_render_itoa2.rs`, was NOT used
+     here: it measures `to_string` against itoa2, a different pair, and it is a wall-clock
+     instrument. The callgrind frame count above is load-immune and directly comparable across
+     arms, and it is what the verdict rests on. If a future candidate wants that bench, it needs
+     a new arm added to it first.
+  3. `write_u64_digits` remains 57.09 instructions per element and is still the largest tractable
+     term on the integer decode path. The bigger prize is upstream of it and is recorded on
+     `b6a9c8d2a`: the decoder renders a binary integer to decimal and the restore fold parses that
+     decimal back, a full round trip per element, blocked by `frankenredis-33832` and
+     `frankenredis-c92f6`.
