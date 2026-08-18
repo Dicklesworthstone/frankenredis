@@ -55504,3 +55504,89 @@ and an effect inside that interval is not claimed.
    mimalloc's nested frames and inflates by 3x (`556350ff6`).
 4. Do NOT treat `hmset_2`'s four `PackedStrMap::insert_borrowed` copies or a bulk payload copy as
    this defect. They move bytes that genuinely have to move.
+
+## 2026-08-18 CrimsonHawk: SIZING — fr is AHEAD of redis 7.2.4 on string list RESTORE (0.9277x) and 2.1998x behind on integer lists, and the whole integer premium is one thing: the eager decimal render (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) with a LIVE redis
+7.2.4 arm, both sides in ONE INVOCATION and INTERLEAVED fr / redis / fr / redis per draw so each
+side is bracketed by the other. CV was NOT used, as a gate or otherwise — no coefficient of
+variation appears in this row's decision path and none was computed. No timing verdict is claimed:
+the measurand is a retired-instruction COUNT. No code changed and NO BUILD was run — the fr arm is
+an artifact already on disk.
+
+**THIS IS SIZING, NOT A CERTIFIED RATIO, AND MUST NOT BE BANKED AS CAMPAIGN OUTPUT.**
+`scripts/certification_window.py --for ratio` returned UNFIT for the whole window: two cargo/rustc
+processes from other projects were running under the shared uid, and loadavg was non-stationary
+(1min 13.91 vs 5min 10.99, 27 pct apart against a 15 pct limit). The per-arm host state is printed
+with every draw below, and each arm's own A/A is printed beside its ratio, so the reading can be
+judged rather than trusted.
+
+Claim class: not applicable — nothing is kept and no ratio is banked.
+
+  ELF (fr arm)  `736a21212e1e8e8db75ad2df...` — the release artifact built at `36a66d696` plus the
+  revert of the rejected span-push lever, i.e. the code now on main for `fr-persist` and
+  `fr-store`. Peers have since moved `fr-runtime`, `fr-protocol` and `fr-store/src/lib.rs`; those
+  are NOT in this ELF, which is another reason this is sizing.
+  incumbent     `legacy_redis_code/redis/src/redis-server`, vendored 7.2.4.
+
+### THE QUESTION
+
+`project_list_restore_gap_architectural` recorded fr 3.29x behind on list RESTORE. Seven levers
+have landed on that path since — `5d6f53a43`, `9bf8ee80d`, `fce3dd6d3`, `308db786f`, `bd84d97d2`,
+`2a4617295`, `6f1341a61`, `b6a9c8d2a`, `7c45e08ad`, `36a66d696`. Nobody had re-measured, and the
+number matters whether it moved or not.
+
+### WHAT IT READS NOW
+
+    RESTORE+DUMP, 300 elements, fill 128, slope 10 vs 30 keys, distinct keys
+
+    shape           fr/key     redis/key    fr/redis    fr/elem   redis/elem   delta/elem
+    all-string      60,026.3    64,706.8    0.9277x     200.09      215.69       −15.60
+    50/50 mixed     66,867.1    49,662.1    1.3531x     222.89      165.54       +57.35
+    all-integer     75,645.9    34,387.2    2.1998x     252.15      114.62      +137.53
+
+    mixed, three draws: 1.3531 / 1.3411 / 1.3446 — WORST 1.3531x quoted.
+    per-draw A/A: fr −0.059 / +0.388 / −0.021 pct, redis +0.848 / −0.508 / −0.367 pct.
+    int and str are ONE draw each; their A/A is fr +0.112 / −0.015 pct, redis +1.174 / +0.700 pct.
+    88.1-90.6 pct idle, loadavg 8.53-9.26, MHz mean 2068-2241 against a 1429-4292 spread.
+
+  FR IS AHEAD ON THE STRING SHAPE. That is new. It is one draw and the window was UNFIT, so it is
+  a reading to re-take, not a result to bank — but 0.9277x with both arms' A/A under 0.7 pct is not
+  a coin flip, and it is the first time this path has crossed.
+
+### THE WHOLE INTEGER PREMIUM IS THE RENDER, AND THE ARITHMETIC IS EXACT
+
+The two sides move in OPPOSITE directions when the elements become integers:
+
+    fr    string 200.09 -> integer 252.15   =  +52.07 instr/elem   (fr pays MORE)
+    redis string 215.69 -> integer 114.62   = −101.07 instr/elem   (redis pays LESS)
+
+  Redis gets cheaper because an integer entry is shorter to copy and it never leaves the listpack.
+  fr gets DEARER, and `write_u64_digits` alone is **57.09 instructions per element** — measured as
+  its own callgrind frame on this exact shape, unchanged across four levers. fr's entire integer
+  premium over its own string shape is 52.07. The render accounts for all of it and then some.
+
+  This is the cost of `ListpackValueSpan` being byte-oriented: an integer entry is rendered to its
+  canonical decimal at DECODE time because `as_bytes` returns a borrowed slice and there is nowhere
+  else for those bytes to live. `frankenredis-33832` removed the cached `i64` from that span for
+  good reasons — 8 bytes on every span including the string spans that are the whole of a typical
+  hash — and this row does not overturn it. It prices it.
+
+  AND IT DOES NOT CLOSE THE GAP ON ITS OWN, which is the part a hopeful reading would skip.
+  Deleting the render entirely would take fr's integer shape to 195.06 instr/elem and the ratio to
+  **1.7018x**, still behind. Whoever takes this must plan for the remaining 80 instructions per
+  element as well, not just the render.
+
+### RETRY PREDICATES
+
+  1. RE-TAKE THE STRING RATIO IN A FIT WINDOW before anyone repeats "fr leads on list RESTORE".
+     The gate must return FIT for `--for ratio`, and the row must carry three draws, not one.
+     Until then the 0.9277x is sizing and should be cited as such.
+  2. The integer render is now PRICED, not merely suspected: 57.09 instructions per element out of
+     a 137.53 per-element gap. Reopen `frankenredis-33832` ONLY with a design that avoids growing
+     the STRING spans — that was its objection, and it still holds. A borrowed-or-rendered
+     representation, or a list-specific decoder like `decode_zset_spans_and_scores` (which exists
+     precisely because rendering was 13.1 pct of a zset RESTORE), are the two shapes that could
+     answer it.
+  3. Do NOT quote 3.29x as the current gap. It is superseded on every composition measured here,
+     and on the string shape the sign has changed.
