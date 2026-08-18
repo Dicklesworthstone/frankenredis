@@ -45976,3 +45976,79 @@ on `get`/`ping` and 35.0 on `ttl`/`sadd`. **If anyone needs to prove the store h
 load-bearing, do NOT reuse this probe**: build a case that leaves something queued in
 `Store::pubsub_pending` at the moment the helper runs, which the five paths above evidently do
 not, or accept the OR as insurance as this row does.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: KEEP (COMPETITIVE) — `geosearch_2` REPLICATES as BEHIND: two admissible draws agree to 0.15 pct, worst bound 0.8578 control-normalised, and the size-pair INVERSION does NOT reproduce (`frankenredis-eh2ct`)
+
+Claim class: COMPETITIVE. Campaign output: yes. The vendored Redis 7.2.4 ran as a live incumbent
+arm in the same invocation as the fr arm on every draw: fr/Redis 7.2.4 measures 0.8578x
+control-normalised on `geosearch_2`, quoting the WORST bound of two admissible draws rather than
+the mean or the point.
+
+  fr server ELF sha-256: e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  redis server ELF sha-256: e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+Emitted per arm and re-verified by the harness, as
+bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399 and
+bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7. The fr ELF
+was pinned at run time with `--expect-elf`, which aborts on mismatch. `balanced_square_ab.py
+--shapes sizepairs`, ABBAABBA, rounds=36, ops=50,000, -P16, null bound +/-0.02.
+
+### The two admissible draws
+
+  DRAW  loadavg before -> after      MHz mean b/a   normalised   worst    nulls
+    1   13.81 25.93 23.25 -> 12.07     2761/3353      0.8969     0.8796   1.0029/0.9972
+    3   15.19 25.56 25.50 ->  9.45     ~/2399         0.8956     0.8578   1.0022/1.0141
+
+  raw ratios: draw 1  1.0089 [1.0004, 1.0219]      draw 3  1.0210 [1.0060, 1.0342]
+  get_control: draw 1 1.1248 [1.1034, 1.1373]      draw 3  1.1401 [1.1120, 1.1728]
+
+Point estimates 0.8969 and 0.8956 agree to 0.15 pct. WORST BOUND ACROSS BOTH DRAWS: 0.8578,
+i.e. fr is 14.2 pct BEHIND the incumbent on this shape.
+
+A/A NULL from the harness's own null arms, which are same-binary ratios whose true value is
+exactly 1.0000, four of them across the two admissible draws: median 1.002550, bootstrapped 95%
+median CI [0.997200, 1.014100]. Every arm and every null was taken within one top-level
+invocation of the harness per draw. THE VERDICT IS GATED ON THAT BOOTSTRAP MEDIAN-CI plus the
+harness's own +/-0.02 null bound, which all six rows across the two draws satisfied. CV is
+provenance only and was not used as a gate anywhere in this row; no CV was computed.
+
+### This SUPERSEDES nothing and CORROBORATES the standing figure's sign
+
+The standing figure is 0.9162 control-normalised (`balanced_square_ab.py:746`). This row does
+not contradict it: both put fr BEHIND, and 0.8578 is further behind. The direction is what the
+standing GEOSEARCH warning is about and it is now replicated on a second instrument setting by
+a different agent.
+
+### THE SIZE-PAIR INVERSION DOES NOT REPRODUCE, and that is a correction
+
+`balanced_square_ab.py:747` records `geosearch_64  1.1240 raw ADMISSIBLE, 1.0094 normalised --
+fr AHEAD. An inversion.` In four attempts here `geosearch_64` was ADMISSIBLE RAW every time
+(1.1042 / 1.1290 / 1.1081 / 1.1042) but its NORMALISED figure STRADDLED 1 in both admissible
+draws -- 0.9851 [0.9647, 1.0131] and 0.9685 [0.9338, 1.0007]. Straddling admits both directions,
+so fr AHEAD on `geosearch_64` may NOT be claimed from these runs. The pair reads as: small-N
+certified BEHIND, large-N UNDETERMINED. That is weaker than an inversion and should not be
+quoted as one.
+
+### The caveat that rides on every normalised figure in this group
+
+The harness flagged the normaliser as WIDER than the row it normalises in BOTH admissible draws
+-- 3.0 vs 2.1 pct on draw 1, 5.3 vs 2.8 pct on draw 3 -- printing "it injects more variance than
+it removes". So 0.8578's interval is dominated by `get_control`, not by `geosearch_2`. The
+worst-bound convention is what makes the figure quotable anyway, and it is why the worst bound
+moved 0.8796 -> 0.8578 between two draws whose POINTS moved only 0.15 pct.
+
+METHOD NOTE worth more than this row: across four attempts the predictor of admissibility was
+the DIRECTION of load during the run, not its level at launch. Draws 1 and 3 both DECAYED
+(25.93->12.07, 25.56->9.45) and both certified; the draw that ROSE (17.38->33.77) null-failed,
+as did the rounds=9/200k run that rose 10.01->56.91. Launch non-stationarity of 42-45 pct did
+NOT prevent certification. Judge a window by whether load is falling, and confirm from the
+harness's own before/after pair.
+
+RETRY PREDICATE: `geosearch_2` is now a replicated standing at 0.8578 worst bound and does not
+need re-measuring unless the geo path, the reply construction or `get_control` itself changes.
+Do NOT quote 0.8969 or 0.8956 as the standing -- the convention is the worst bound. Do NOT use
+rounds=9 or ops=200,000, both measured worse here. The open work this exposes is `get_control`
+as this group's normaliser: a normaliser wider than every row it divides needs its own row, and
+until it has one every `sizepairs` normalised figure inherits an interval it did not earn.
