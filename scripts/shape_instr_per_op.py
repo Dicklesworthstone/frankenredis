@@ -758,6 +758,12 @@ SHAPES = {
     ),
     "geopos_base": (["GEOADD gpb 13.361389 38.115556 P1"], ["GEOPOS", "gpb", "P1"]),
     "geohash_base": (["GEOADD ghb 13.361389 38.115556 P1"], ["GEOHASH", "ghb", "P1"]),
+    # GEOHASH with TWO members. The single-member form has a floor arm and was converted in
+    # `4e1695b85`; the multi-member form has NO floor class at all, so it can only be reached
+    # through the cascade. That makes it the shape batch 8 said it lacked -- one that actually
+    # exercises a cascade supply instead of being intercepted by an already-converted floor arm.
+    "geohash_2": (["GEOADD gh2 13.361389 38.115556 P1 15.087269 37.502669 P2"],
+                  ["GEOHASH", "gh2", "P1", "P2"]),
     # (frankenredis-getexgate) SECOND WAVE of census shapes. a1600b784 added 16 for read
     # families that had none; a fresh source scan across all THREE gate-derivation forms found
     # eleven more commands still deriving the read gate with no shape at all, so the census

@@ -9,6 +9,7 @@ or an unintended nil is visible before the shape is used for a census or a verdi
 import ast
 import re
 import socket
+import os
 import subprocess
 import sys
 import tempfile
@@ -48,7 +49,8 @@ def enc(parts):
 
 
 d = tempfile.mkdtemp(prefix="shapeverify_", dir="/data/tmp")
-p = subprocess.Popen([f"{S}/bins/b6b_after1.elf", "--port", "7471", "--dir", d, "--save", ""],
+SERVER = os.environ.get("FR_VERIFY_SERVER", f"{S}/bins/b6b_after1.elf")
+p = subprocess.Popen([SERVER, "--port", "7471", "--dir", d, "--save", ""],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:
     for _ in range(200):

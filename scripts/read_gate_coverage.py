@@ -97,64 +97,96 @@ def shape_commands(path: Path):
 
 
 def threaded_but_never_supplied(server_path: Path, runtime_path: Path):
-    """Routes that TAKE `default_read_allowed` but whose every call site passes a literal None.
+    """Routes that TAKE `default_read_allowed` but that NO chain of callers ever supplies.
 
     A source scan counts such a route as converted -- the parameter is there -- while the census
-    shows it still paying, because nothing ever supplies a real value. UNWATCH is the proof case:
-    `de407ba56` threaded the parameter through `execute_plain_unwatch_borrowed_into`, and the
-    route stayed at 1.000 calls/op and an 86.0 frame because it has NO floor class, so no
-    per-pass cache exists in any caller's scope to hand it.
+    shows it still paying, because nothing ever hands it a real value.
 
-    This is the same failure the whole vein keeps repeating in a new place: the scan measures a
-    PROXY (a parameter exists) rather than the THING (a cached value reaches the predicate).
+    THIS CHECK USED TO ASK ONLY ABOUT A ROUTE'S OWN fr-server CALL SITES, AND THAT WAS ONE LEVEL
+    TOO SHALLOW. `execute_plain_scan_opts_borrowed` was called with a real value -- by three
+    fr-runtime wrappers that were themselves starved -- and it has NO fr-server call sites at all,
+    so the old loop's `if sites and ...` guard skipped it in silence while SCAN COUNT/MATCH/TYPE
+    kept measuring 1.000 calls/op and an 86.0 frame. `3378adc24` fixed those three by hand; this
+    makes the detector find the next one on its own.
+
+    The question is reachability, not adjacency: a cached value reaches a route iff SOME chain of
+    callers carries it. Seed with routes an fr-server site supplies directly, propagate along
+    in-crate edges where a caller forwards its own parameter to a callee, and report what is left.
+
+    Grouping by base name is kept from the adjacency version and still matters: `hmget`'s RespFrame
+    variant is None-only and that is CORRECT, because the floor arm uses the `_into` twin, which is
+    supplied. Without the grouping this reports 23 routes; with it, 3. Reporting the 23 would be
+    the same proxy-for-thing error the transitive fix exists to remove.
     """
     rt = runtime_path.read_text(errors="replace")
     sv = server_path.read_text(errors="replace")
     takers = set(re.findall(r"    (?:pub )?fn (\w+)\(\n(?:[^)]*?)default_read_allowed: Option<bool>",
                             rt))
-    stranded = []
-    for fn in sorted(takers):
-        sites = []
-        for m in re.finditer(r"(?<![\w])" + re.escape(fn) + r"\(", sv):
+
+    def call_args(text, fn):
+        out = []
+        for m in re.finditer(r"(?<![\w])" + re.escape(fn) + r"\(", text):
             op = m.end() - 1
             d, j = 0, op
-            while j < len(sv):
-                if sv[j] == "(":
+            while j < len(text):
+                if text[j] == "(":
                     d += 1
-                elif sv[j] == ")":
+                elif text[j] == ")":
                     d -= 1
                     if d == 0:
                         break
                 j += 1
-            sites.append(sv[op:j + 1])
-        if sites and all("default_read_allowed" not in c for c in sites):
-            stranded.append((fn, len(sites)))
+            out.append((op, text[op:j + 1]))
+        return out
 
-    # A route is only STRANDED if NO VARIANT of it ever receives a cached value. `hmget`'s
-    # RespFrame variant is None-only and that is correct -- the floor arm uses
-    # `execute_plain_hmget_borrowed_into`, which does get the cache. Reporting the RespFrame
-    # variant alone would be the same proxy-for-thing error this whole check exists to catch,
-    # so group by base name and keep a route only when every variant is starved.
+    # fn extents over fr-runtime, so an in-crate call site can be attributed to its caller
+    bounds = []
+    for m in re.finditer(r"\n    (?:pub )?fn (\w+)\(", rt):
+        bs = rt.find("{", m.end())
+        d, k = 0, bs
+        while k < len(rt):
+            if rt[k] == "{":
+                d += 1
+            elif rt[k] == "}":
+                d -= 1
+                if d == 0:
+                    break
+            k += 1
+        bounds.append((m.start(), k, m.group(1)))
+
+    def enclosing(pos):
+        best = None
+        for a, b, n in bounds:
+            if a <= pos <= b and (best is None or (b - a) < best[0]):
+                best = (b - a, n)
+        return best[1] if best else None
+
+    seeds = {fn for fn in takers
+             if any("default_read_allowed" in args or "read_gate_cache" in args
+                    for _, args in call_args(sv, fn))}
+
+    edges: dict = {}
+    for fn in takers:
+        for pos, args in call_args(rt, fn):
+            if "default_read_allowed" not in args:
+                continue
+            caller = enclosing(pos)
+            if caller and caller != fn:
+                edges.setdefault(caller, set()).add(fn)
+
+    reached, frontier = set(seeds), list(seeds)
+    while frontier:
+        for nxt in edges.get(frontier.pop(), ()):
+            if nxt not in reached:
+                reached.add(nxt)
+                frontier.append(nxt)
+
     def base(name):
         return re.sub(r"_into$", "", name)
 
-    supplied_bases = set()
-    for fn in takers:
-        for m in re.finditer(r"(?<![\w])" + re.escape(fn) + r"\(", sv):
-            op = m.end() - 1
-            d, j = 0, op
-            while j < len(sv):
-                if sv[j] == "(":
-                    d += 1
-                elif sv[j] == ")":
-                    d -= 1
-                    if d == 0:
-                        break
-                j += 1
-            if "default_read_allowed" in sv[op:j + 1]:
-                supplied_bases.add(base(fn))
-                break
-    return [(fn, n) for fn, n in stranded if base(fn) not in supplied_bases]
+    reached_bases = {base(n) for n in reached}
+    return [(fn, len(call_args(sv, fn)))
+            for fn in sorted(takers - reached) if base(fn) not in reached_bases]
 
 
 def command_of(fn: str) -> str:
@@ -170,6 +202,9 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--runtime", default="crates/fr-runtime/src/lib.rs")
     ap.add_argument("--shapes", default="scripts/shape_instr_per_op.py")
+    # Derived from --shapes originally, which silently read the PRIMARY tree's main.rs when
+    # pointed at a worktree -- the check then reported the wrong tree's state with no warning.
+    ap.add_argument("--server", default="crates/fr-server/src/main.rs")
     ap.add_argument("--dump-unclassified", action="store_true",
                     help="print gate occurrences the form classifier could not place -- a "
                          "non-empty list means a FOURTH derivation form exists and every "
@@ -228,8 +263,7 @@ def main() -> int:
               "shape measures the error path\n    just as reproducibly as a correct one measures "
               "the command.")
 
-    stranded = threaded_but_never_supplied(Path(args.shapes).parent.parent /
-                                          "crates/fr-server/src/main.rs", Path(args.runtime))
+    stranded = threaded_but_never_supplied(Path(args.server), Path(args.runtime))
     if stranded:
         print(f"\n*** THREADED BUT NEVER SUPPLIED ({len(stranded)}) -- NO variant of these routes ever "
               f"receives a\n    cached value, so a source scan counts them CONVERTED while they still "

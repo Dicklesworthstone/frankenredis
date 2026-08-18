@@ -10637,6 +10637,11 @@ fn process_buffered_frames(
                     b"GEOHASH",
                 ) {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    let default_read_allowed = Some(
+                        *plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }),
+                    );
                     // GEOHASH key member (single member): encode directly into
                     // the write buffer; multi-member stays on the owned frame
                     // path below.
@@ -10647,7 +10652,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -10667,9 +10672,19 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_geohash_packet(unparsed, &parser_config)
                 {
+                    let default_read_allowed = Some(
+                        *plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }),
+                    );
                     // GEOHASH key member member [member ...] (multi-member).
                     if let Some(response) =
-                        runtime.execute_plain_geohash_borrowed(packet.key, &packet.members, ts, None)
+                        runtime.execute_plain_geohash_borrowed(
+                            packet.key,
+                            &packet.members,
+                            ts,
+                            default_read_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12672,10 +12687,6 @@ fn process_buffered_frames(
                             *plain_get_read_gate_cache
                                 .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
                         );
-                        let default_read_allowed = Some(
-                            *plain_get_read_gate_cache
-                                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
-                        );
                         if runtime
                             .execute_plain_zrevrangebyscore_withscores_borrowed_into(
                                 packet.key,
@@ -12767,7 +12778,7 @@ fn process_buffered_frames(
                             packet.b,
                             ts,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12906,7 +12917,7 @@ fn process_buffered_frames(
                             packet.min,
                             ts,
                             &mut conn.write_buf,
-                            None,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
