@@ -4602,14 +4602,35 @@ impl ServerState {
         cycle_kind: ActiveExpireCycleKind,
     ) -> ActiveExpireCycleStats {
         if !self.store.active_expire_enabled {
-            let stats = ActiveExpireCycleStats {
-                plan: plan_active_expire_cycle(
+            // (frankenredis-getexgate) CONST-FOLDED, and it really is a constant. On BOTH
+            // early-return paths the planner is called with `pending_expirable_keys = 0` and
+            // `db_count = 1`, and under those two arguments its result does not depend on the
+            // cursor or the budget at all: `sample_limit = 0.min(limit) = 0`, and `db_count == 1`
+            // takes the `(0, 0)` branch for the db indices. So this was an out-of-line call on
+            // EVERY command to recompute a fixed value.
+            //
+            // The `debug_assert_eq!` keeps the real planner as a LIVE ORACLE in test and debug
+            // builds: if its logic ever changes, this literal fails loudly instead of silently
+            // drifting out of agreement with it.
+            let plan = ActiveExpireCyclePlan {
+                kind: cycle_kind,
+                sample_limit: 0,
+                start_db_index: 0,
+                next_db_index: 0,
+            };
+            debug_assert_eq!(
+                plan,
+                plan_active_expire_cycle(
                     cycle_kind,
                     0,
                     self.active_expire_db_cursor,
                     1,
                     self.active_expire_budget,
                 ),
+                "const-folded no-op expire plan must equal the planner's own result"
+            );
+            let stats = ActiveExpireCycleStats {
+                plan,
                 sampled_keys: 0,
                 evicted_keys: 0,
             };
@@ -4624,14 +4645,35 @@ impl ServerState {
         // db's expires dict is empty. count_expiring_keys() is an O(1) maintained
         // counter. Behavior-identical: 0 sampled, 0 evicted, no propagation/events.
         if self.store.count_expiring_keys() == 0 {
-            let stats = ActiveExpireCycleStats {
-                plan: plan_active_expire_cycle(
+            // (frankenredis-getexgate) CONST-FOLDED, and it really is a constant. On BOTH
+            // early-return paths the planner is called with `pending_expirable_keys = 0` and
+            // `db_count = 1`, and under those two arguments its result does not depend on the
+            // cursor or the budget at all: `sample_limit = 0.min(limit) = 0`, and `db_count == 1`
+            // takes the `(0, 0)` branch for the db indices. So this was an out-of-line call on
+            // EVERY command to recompute a fixed value.
+            //
+            // The `debug_assert_eq!` keeps the real planner as a LIVE ORACLE in test and debug
+            // builds: if its logic ever changes, this literal fails loudly instead of silently
+            // drifting out of agreement with it.
+            let plan = ActiveExpireCyclePlan {
+                kind: cycle_kind,
+                sample_limit: 0,
+                start_db_index: 0,
+                next_db_index: 0,
+            };
+            debug_assert_eq!(
+                plan,
+                plan_active_expire_cycle(
                     cycle_kind,
                     0,
                     self.active_expire_db_cursor,
                     1,
                     self.active_expire_budget,
                 ),
+                "const-folded no-op expire plan must equal the planner's own result"
+            );
+            let stats = ActiveExpireCycleStats {
+                plan,
                 sampled_keys: 0,
                 evicted_keys: 0,
             };
