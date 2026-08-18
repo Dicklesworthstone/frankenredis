@@ -51746,3 +51746,48 @@ RETRY PREDICATE:
      number to establish first, and it may need `#[inline(never)]` on one pass to become visible.
   3. Do NOT flag a large frame as waste on the grounds that its name sounds like orchestration.
      This row exists because I did that; the callee list answered it in one probe.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the FAST expire-cycle rate limit is LANDED: plain `GET` -26.08 pct, volatile-keyspace `GET` -37.10 pct, conservative bounds (`frankenredis-eh2ct`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no. fr-against-fr instruction counts with NO live
+Redis arm, so this is maintenance and I am not converting it into a campaign ratio.
+
+  measured   bench_elf_sha256=e2424dcf1a2a1602c92e3ab75af024d8a6427c8d69635f6998a8e82beb2843ef
+  landed     server ELF sha-256: 5ec2f29ad07000a7cb59f853ddcd209383d3927833b4d1d7454a972f8b02c086
+
+The full evidence is in `ff92ccbd3` and is not repeated: the gap against `expire.c:181`, the 148
+per-command call sites, the two-point draws, and the A/A null with median 1.001550 and a
+bootstrapped 95% median CI of [0.989153, 1.008216] against effects of 26.08 and 37.10 pct. Each
+arm and its null were taken within one top-level invocation of the harness per draw. THE
+VERDICT IS GATED ON THAT BOOTSTRAP MEDIAN-CI. CV is provenance only and was never a gate here.
+
+### Exactly where each check was run, because the boundary is not clean
+
+  at HEAD `acaf5f45d`   cargo test -p fr-runtime, 633 passed 0 failed, every sub-suite
+  at HEAD `be2f1f08e`   cargo build --release -p fr-server, clean
+  at HEAD `be2f1f08e`   keyspace notifications: stock 100 | patched 100 | incumbent 100
+  at HEAD `be2f1f08e`   replica propagation: master dbsize 1, replica dbsize 1, both builds
+  at HEAD `be2f1f08e`   cargo test -p fr-runtime DOES NOT COMPILE, and not because of this change
+
+THE UNIT TARGET IS BROKEN AT HEAD AND IT IS NOT MINE. 20 `E0061` arity errors on
+`execute_plain_*_borrowed` methods, from the in-flight read-gate threading. PROVEN pre-existing
+rather than asserted: I reverse-patched my own hunks out, rebuilt, and got the identical 20
+errors on pristine HEAD; zero of them name `FAST_EXPIRE_CYCLE_MIN_INTERVAL_MS` or
+`last_fast_expire_cycle_ms`. This is the SECOND time that target has broken under me --
+`57b289ba1` repaired the first instance.
+
+WHY I LANDED ANYWAY, stated so it can be disagreed with. The suite passed on this exact patch
+eight commits earlier; the production build compiles at HEAD; and the two risks I named three
+times -- keyspace notifications and replica propagation of ACTIVELY expired keys -- are covered
+by differentials re-run against a binary built from CURRENT HEAD, not from the older base. Both
+probes never read the expiring keys, so they exercise active reaping rather than lazy expiry.
+Holding a validated change indefinitely because a neighbouring target keeps breaking is not
+caution, it is just delay. RE-RUN `cargo test -p fr-runtime` AGAINST THIS COMMIT the moment that
+target compiles; if it fails, this row is the thing to revert and I would rather that happen than
+have the caveat buried.
+
+RETRY PREDICATE: this closes the FAST-cycle cadence and nothing else. The residual volatile-key
+cost is the ~62 instr/op lazy check inside `get_string_bytes`, which is load-bearing and must NOT
+be removed. Reopen only IF the cycle BODY is measured executing more than once per 2 ms, or if
+expiry tail latency under memory pressure regresses -- nothing here measures that.

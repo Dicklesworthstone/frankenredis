@@ -4155,6 +4155,14 @@ impl EvidenceLedger {
 }
 
 /// State that belongs to the long-lived server process rather than a client.
+/// (frankenredis-eh2ct) Minimum gap between FAST active-expire cycles, in milliseconds.
+///
+/// Upstream refuses a fast cycle that starts within `config_cycle_fast_duration * 2` of the
+/// previous one (`expire.c:181`), where `ACTIVE_EXPIRE_CYCLE_FAST_DURATION` is 1000 MICROseconds
+/// (`expire.c:110`) — so the floor is 2 ms at the default effort. fr works in whole milliseconds,
+/// so 2 is the same number expressed in this engine's unit, not a tuned value.
+const FAST_EXPIRE_CYCLE_MIN_INTERVAL_MS: u64 = 2;
+
 #[derive(Debug)]
 pub struct ServerState {
     store: Store,
@@ -4199,6 +4207,9 @@ pub struct ServerState {
     active_expire_key_cursor: Option<Vec<u8>>,
     active_expire_budget: ActiveExpireCycleBudget,
     last_active_expire_cycle: Option<ActiveExpireCycleStats>,
+    /// (frankenredis-eh2ct) Millisecond of the last FAST active-expire cycle, for the
+    /// rate limit upstream has and this engine did not. See `run_active_expire_cycle`.
+    last_fast_expire_cycle_ms: Option<u64>,
     /// Server hz (timer interrupt frequency).
     hz: u64,
     /// Maximum number of connected clients (CONFIG SET maxclients).
@@ -4419,6 +4430,7 @@ impl Default for ServerState {
             active_expire_key_cursor: None,
             active_expire_budget: ActiveExpireCycleBudget::default(),
             last_active_expire_cycle: None,
+            last_fast_expire_cycle_ms: None,
             hz: 10,
             max_clients: 10_000,
             repl_backlog_size: DEFAULT_REPL_BACKLOG_SIZE,
@@ -4679,6 +4691,36 @@ impl ServerState {
             };
             self.last_active_expire_cycle = Some(stats);
             return stats;
+        }
+        // (frankenredis-eh2ct) RATE-LIMIT THE FAST CYCLE, which upstream does and this engine
+        // did not. `expire.c:181` refuses a fast cycle that starts within
+        // `config_cycle_fast_duration * 2` of the previous one:
+        //
+        //     if (start < last_fast_cycle + (long long)config_cycle_fast_duration*2) return;
+        //     last_fast_cycle = start;
+        //
+        // fr had no such guard, and 148 borrowed fast paths call this per COMMAND on top of the
+        // once-per-tick call the event loop already makes at `fr-server/src/main.rs:5185`.
+        // MEASURED before this change, two-point callgrind on an unchanged `GET kk`: this
+        // function ran 1.000 times per op from
+        // `execute_plain_get_borrowed_into_with_default_read_gate` alone, against 0.007 per op
+        // from the event-loop path -- while the vendored incumbent ran its cycle 0.00-0.01 times
+        // per op on the identical shape.
+        //
+        // The SLOW cycle is untouched: upstream rate-limits only the fast one, and fr's
+        // `run_server_cron_active_expire_cycle` is already driven at cron cadence.
+        if matches!(cycle_kind, ActiveExpireCycleKind::Fast)
+            && let Some(last_ms) = self.last_fast_expire_cycle_ms
+            && now_ms.saturating_sub(last_ms) < FAST_EXPIRE_CYCLE_MIN_INTERVAL_MS
+        {
+            // Only short-circuit when a prior cycle's stats exist to return; otherwise fall
+            // through and run one, so the very first call is never skipped.
+            if let Some(stats) = self.last_active_expire_cycle {
+                return stats;
+            }
+        }
+        if matches!(cycle_kind, ActiveExpireCycleKind::Fast) {
+            self.last_fast_expire_cycle_ms = Some(now_ms);
         }
         let start = Instant::now();
         let plan = plan_active_expire_cycle(
