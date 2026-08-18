@@ -58073,3 +58073,81 @@ fuzz test. Host: loadavg 6.15/6.85/8.28, CPU MHz 3438, built remotely via rch.
   4. The 1.66x-vs-redis compressor ratio is UNMEASURED since slice 1. Re-measure it only when
      `certification_window.py --for ratio` returns FIT; three slices have shipped against it and
      nobody has re-priced the gap.
+
+## 2026-08-18 CrimsonHawk: MEASURED — my own promotion hypothesis is REFUTED for fr (504.7 vs 503.6 per element with promotion prevented) and CONFIRMED for redis (−14.1 pct), so part of the write lead I quoted was redis paying for quicklist conversion (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir) with a LIVE redis 7.2.4 arm, both
+arms in ONE invocation alternating per size, two draws per size, differenced across KEY COUNTS. CV
+was NOT used, as a gate or otherwise; none was computed. No timing verdict is claimed: the
+measurand is a retired-instruction COUNT. No code changed and NO BUILD was run — this project's
+build slot has been held for an EIGHTH consecutive window, and `acquire_build_slot` is disabled in
+this deployment, so there is no way to queue for it.
+
+**SIZING, NOT CERTIFIED.** `--for ratio` cannot return FIT while any cargo runs under the shared uid.
+
+Claim class: not applicable — nothing is kept.
+
+  fr arm `4eceae6c624c670fb4111eceae3068632e8b9223b0ef822440b5015f9c89fce5` (`68e1d4990`)
+
+### THE TEST `49d772548` SPECIFIED, RUN
+
+That row found fr's per-element RPUSH cost RISING with list size (313.5 between n = 1 and 16, then
+503.6 between 16 and 300) while redis's fell, and offered a hypothesis it was careful to label as
+one: fr's rise is the listpack-to-quicklist promotion at 128 entries. The cheap test it named was
+to re-run at `list-max-listpack-size` far above 300, so no promotion occurs on either engine.
+
+    cost of ONE bulk RPUSH of n x 15-byte elements
+       n      fr @128     fr @1024    redis @128   redis @1024
+       1      6,648.5      6,504.4       8,234.0       8,247.9
+      16     11,351.2     10,809.3      25,546.8      25,974.5
+     300    154,381.0    154,132.2     306,742.6     263,396.1
+
+    per-element 16 -> 300      fr  503.6 -> 504.7        redis  990.1 -> 836.0
+    total at n = 300           fr  −0.2 pct              redis  −14.1 pct
+
+    85.7-88.7 pct idle, loadavg 6.08-6.29 throughout.
+
+### THE HYPOTHESIS WAS MINE AND IT IS WRONG FOR fr
+
+fr's per-element cost between 16 and 300 is 504.7 with promotion prevented against 503.6 with it
+allowed — a 0.2 pct difference, inside anything this instrument can resolve. **Promotion is not why
+fr's per-element write cost rises.** Whatever causes it survives a fill of 1024, where a
+300-element list never leaves the packed representation, so the cause is inside that path and is
+still unidentified.
+
+### AND IT IS RIGHT FOR REDIS, WHICH QUALIFIES A NUMBER I PUBLISHED
+
+Redis at n = 300 costs 263,396 when it stays a listpack against 306,743 when it converts — **14.1
+pct of redis's write cost at that size is the quicklist conversion itself.** So the ratio I quoted
+one row ago moves:
+
+    fr/redis at n = 300, WORST of two draws:   0.5037x at fill 128   ->   0.5865x at fill 1024
+
+  PART OF THE WRITE LEAD I PUBLISHED WAS REDIS PAYING FOR A CONVERSION, NOT fr BEING BETTER. The
+  0.5037x figure is correct for the DEFAULT fill, which is the configuration a real server runs, so
+  it is not withdrawn — but it is a property of the default threshold as much as of fr, and
+  `49d772548` does not say so. This row is that qualification.
+
+### A NOISE FIGURE THAT TURNED OUT TO BE A SIGNAL
+
+`49d772548` flagged fr's n = 16 draws as differing by 9.57 pct — "an order of magnitude past what
+this instrument should do" — and quoted the worst rather than dropping the point. At fill 1024 the
+same two draws differ by **0.18 pct**.
+
+  So it was not the instrument. Something about a 16-element bulk RPUSH is bimodal AT FILL 128 and
+  is not at 1024, even though 16 is far below both thresholds and no promotion happens either way.
+  `PACKED_MAX_ENTRIES` is 128 and the configured fill is 128 in that arm; a boundary interaction
+  between the packed representation's own cap and the configured one is the obvious suspect and is
+  NOT tested here. Keeping the noisy point rather than dropping it is what made this visible.
+
+### RETRY PREDICATES
+
+  1. fr's rising per-element write cost is now an OPEN question with its first hypothesis
+     eliminated. Reopen with a profile of the packed-path RPUSH at n = 16 versus n = 300 at fill
+     1024, where promotion is excluded by construction; the term that grows is the answer.
+  2. The n = 16 bimodality at fill 128 is worth ten minutes before it is worth a lever: run four
+     draws at fill 128 and four at 127 and 129. If it tracks fill == PACKED_MAX_ENTRIES exactly, it
+     is a boundary interaction and belongs to whoever owns that cap.
+  3. Any future vs-incumbent WRITE ratio on this bead must state its fill. The same measurement
+     reads 0.5037x at 128 and 0.5865x at 1024 — a 16 pct swing in the headline from a config knob,
+     which is larger than most levers this bead has landed.
