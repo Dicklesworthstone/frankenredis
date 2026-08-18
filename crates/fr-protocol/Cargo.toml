@@ -101,3 +101,7 @@ required-features = ["bench-reference"]
 [[bench]]
 name = "encode_bulk_small_len"
 harness = false
+
+[[bench]]
+name = "encode_bulk_payload_small"
+harness = false

@@ -277,8 +277,38 @@ pub fn bench_encode_bulk_string<const FUSED: bool>(bytes: &[u8], out: &mut Vec<u
 /// This is byte-identical to `RespFrame::BulkString(...).encode_into*` while
 /// letting hot reply paths skip materializing an owned `Vec<u8>` just to hand
 /// it to the frame encoder.
+/// Emit exactly `N` payload bytes plus CRLF as one const-length store, so no `memcpy` CALL is
+/// made. `M` must be `N + 2`. Total by construction: a length mismatch falls back rather than
+/// panicking. (frankenredis-iqicb)
+#[inline(always)]
+fn encode_small_payload<const N: usize, const M: usize>(bytes: &[u8], out: &mut Vec<u8>) {
+    match <[u8; N]>::try_from(bytes) {
+        Ok(payload) => {
+            let mut framed = [0u8; M];
+            framed[..N].copy_from_slice(&payload);
+            framed[N] = b'\r';
+            framed[N + 1] = b'\n';
+            out.extend_from_slice(&framed);
+        }
+        Err(_) => {
+            out.extend_from_slice(bytes);
+            out.extend_from_slice(b"\r\n");
+        }
+    }
+}
+
+/// Same-binary A/B hook for the small-PAYLOAD store, mirroring
+/// `bench_encode_bulk_string_slice_small` for the header. (frankenredis-iqicb)
+pub fn bench_encode_bulk_payload_small<const SMALL_PAYLOAD: bool>(
+    value: Option<&[u8]>,
+    resp3: bool,
+    out: &mut Vec<u8>,
+) {
+    encode_bulk_string_slice_impl::<true, SMALL_PAYLOAD>(value, resp3, out);
+}
+
 pub fn encode_bulk_string_slice(value: Option<&[u8]>, resp3: bool, out: &mut Vec<u8>) {
-    encode_bulk_string_slice_impl::<true>(value, resp3, out);
+    encode_bulk_string_slice_impl::<true, true>(value, resp3, out);
 }
 
 /// (frankenredis-vlis9) `SMALL_FAST = true` emits the `$<len>\r\n` header for `len < 100` as a
@@ -288,7 +318,7 @@ pub fn encode_bulk_string_slice(value: Option<&[u8]>, resp3: bool, out: &mut Vec
 /// always one or two digits. `SMALL_FAST = false` is the exact prior shape, kept for the
 /// same-binary A/B in `benches/encode_bulk_small_len.rs`.
 #[inline]
-fn encode_bulk_string_slice_impl<const SMALL_FAST: bool>(
+fn encode_bulk_string_slice_impl<const SMALL_FAST: bool, const SMALL_PAYLOAD: bool>(
     value: Option<&[u8]>,
     resp3: bool,
     out: &mut Vec<u8>,
@@ -311,8 +341,21 @@ fn encode_bulk_string_slice_impl<const SMALL_FAST: bool>(
                 out.reserve(1 + decimal_usize_len(len) + 2 + len + 2);
                 push_len_header::<true>(out, b'$', len as u64);
             }
-            out.extend_from_slice(bytes);
-            out.extend_from_slice(b"\r\n");
+            if SMALL_PAYLOAD && len <= 8 {
+                match len {
+                    1 => encode_small_payload::<1, 3>(bytes, out),
+                    2 => encode_small_payload::<2, 4>(bytes, out),
+                    3 => encode_small_payload::<3, 5>(bytes, out),
+                    4 => encode_small_payload::<4, 6>(bytes, out),
+                    5 => encode_small_payload::<5, 7>(bytes, out),
+                    6 => encode_small_payload::<6, 8>(bytes, out),
+                    7 => encode_small_payload::<7, 9>(bytes, out),
+                    _ => encode_small_payload::<8, 10>(bytes, out),
+                }
+            } else {
+                out.extend_from_slice(bytes);
+                out.extend_from_slice(b"\r\n");
+            }
         }
         None if resp3 => out.extend_from_slice(b"_\r\n"),
         None => out.extend_from_slice(b"$-1\r\n"),
@@ -328,7 +371,7 @@ pub fn bench_encode_bulk_string_slice_small<const SMALL_FAST: bool>(
     resp3: bool,
     out: &mut Vec<u8>,
 ) {
-    encode_bulk_string_slice_impl::<SMALL_FAST>(value, resp3, out);
+    encode_bulk_string_slice_impl::<SMALL_FAST, true>(value, resp3, out);
 }
 
 /// Write a RESP aggregate header for an array (`*N\r\n`) or, when `resp3_set`,
