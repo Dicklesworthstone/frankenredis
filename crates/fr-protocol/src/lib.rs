@@ -1778,6 +1778,33 @@ pub enum BorrowedCommandArgsKind {
     Arguments,
 }
 
+/// Upstream's pre-AUTH multibulk count cap (networking.c::processMultibulkBuffer,
+/// `ll > 10 && authRequired(c)`). (frankenredis-2ubu0)
+pub const UNAUTH_MAX_MULTIBULK_LEN: usize = 10;
+
+/// Upstream's pre-AUTH bulk length cap (`ll > 16384 && authRequired(c)`).
+pub const UNAUTH_MAX_BULK_LEN: usize = 16384;
+
+/// The limits that would apply to a connection once it has authenticated.
+///
+/// Present in [`ParserConfig::pre_auth`] ONLY while a connection has not
+/// authenticated and `max_bulk_len` / `max_array_len` have ALREADY been lowered
+/// to the pre-auth caps above. It exists so the parser can pick upstream's
+/// wording without a second comparison in the steady state: the hot path still
+/// runs exactly one length check, and this is read only after that check has
+/// already decided to reject.
+///
+/// It carries the authenticated limits rather than a bare "unauthenticated"
+/// flag because upstream checks the ordinary limit FIRST -- a count over
+/// INT_MAX is "invalid multibulk length" even for an unauthenticated client,
+/// and only a WELL-FORMED but oversized one gets the unauthenticated wording.
+/// Distinguishing those needs the limit the pre-auth cap replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthedLimits {
+    pub max_bulk_len: usize,
+    pub max_array_len: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParserConfig {
     pub max_bulk_len: usize,
@@ -1797,6 +1824,12 @@ pub struct ParserConfig {
     /// peeled before parsing the next real frame, blob-error → Error.
     /// (br-frankenredis-ozcx)
     pub allow_resp3: bool,
+    /// Set ONLY for a connection that has not authenticated on a server where
+    /// auth is required, in which case `max_bulk_len` and `max_array_len` above
+    /// are already the pre-auth caps. `None` -- the default, and every existing
+    /// construction site -- means no pre-auth capping and no behaviour change.
+    /// (frankenredis-2ubu0)
+    pub pre_auth: Option<AuthedLimits>,
 }
 
 impl Default for ParserConfig {
@@ -1806,6 +1839,7 @@ impl Default for ParserConfig {
             max_array_len: 1024 * 1024,      // 1M elements
             max_recursion_depth: 128,
             allow_resp3: false,
+            pre_auth: None,
         }
     }
 }
@@ -1846,6 +1880,16 @@ pub enum RespParseError {
     /// the line cap before its terminator. Upstream replies "Protocol error:
     /// too big bulk count string". (frankenredis-linetoolong-wording)
     TooBigBulkCount,
+    /// A well-formed bulk length over [`UNAUTH_MAX_BULK_LEN`] arrived on a
+    /// connection that has not authenticated. Upstream networking.c replies
+    /// "Protocol error: unauthenticated bulk length" and closes the connection.
+    /// Distinct from [`Self::BulkLengthTooLarge`] because upstream applies the
+    /// ordinary limit first: a length over `proto_max_bulk_len` is "invalid"
+    /// even before AUTH. (frankenredis-2ubu0)
+    UnauthenticatedBulkLength,
+    /// The multibulk-count twin of [`Self::UnauthenticatedBulkLength`], for a
+    /// count over [`UNAUTH_MAX_MULTIBULK_LEN`]. (frankenredis-2ubu0)
+    UnauthenticatedMultibulkLength,
 }
 
 impl Display for RespParseError {
@@ -1873,7 +1917,47 @@ impl Display for RespParseError {
             Self::UnbalancedInlineQuotes => write!(f, "unbalanced quotes in request"),
             Self::TooBigMbulkCount => write!(f, "too big mbulk count string"),
             Self::TooBigBulkCount => write!(f, "too big bulk count string"),
+            // (frankenredis-2ubu0) These two do NOT collapse into the "invalid
+            // ..." wording above: upstream words the pre-auth refusal
+            // differently precisely so an operator can tell a client that is
+            // talking too big from one that has not authenticated yet.
+            Self::UnauthenticatedBulkLength => write!(f, "unauthenticated bulk length"),
+            Self::UnauthenticatedMultibulkLength => {
+                write!(f, "unauthenticated multibulk length")
+            }
         }
+    }
+}
+
+/// Pick the wording for a bulk length the parser has ALREADY decided to reject.
+///
+/// (frankenredis-2ubu0) Called only from the failing branch, so the steady state
+/// pays nothing: the single `data_len > config.max_bulk_len` comparison is
+/// unchanged, and this runs after it has already returned true. That is the
+/// whole reason the pre-auth cap is imposed by LOWERING `max_bulk_len` rather
+/// than by adding a second comparison at each of the nine length checks -- a
+/// three-argument command passes four of them per command, and this campaign
+/// counts instructions per operation.
+#[cold]
+#[inline(never)]
+fn bulk_length_error(data_len: usize, config: &ParserConfig) -> RespParseError {
+    match config.pre_auth {
+        Some(authed) if data_len <= authed.max_bulk_len => {
+            RespParseError::UnauthenticatedBulkLength
+        }
+        _ => RespParseError::BulkLengthTooLarge,
+    }
+}
+
+/// The multibulk-count twin of [`bulk_length_error`].
+#[cold]
+#[inline(never)]
+fn multibulk_length_error(count: usize, config: &ParserConfig) -> RespParseError {
+    match config.pre_auth {
+        Some(authed) if count <= authed.max_array_len => {
+            RespParseError::UnauthenticatedMultibulkLength
+        }
+        _ => RespParseError::MultibulkLengthTooLarge,
     }
 }
 
@@ -2003,7 +2087,7 @@ pub fn parse_command_frame(
     }
     let count = usize::try_from(len).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     if count > config.max_array_len {
-        return Err(RespParseError::MultibulkLengthTooLarge);
+        return Err(multibulk_length_error(count, config));
     }
     let mut items = Vec::with_capacity(count.min(1024));
     for _ in 0..count {
@@ -2168,7 +2252,7 @@ fn parse_command_args_borrowed_into_inner<'a>(
     }
     let count = usize::try_from(len).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     if count > config.max_array_len {
-        return Err(RespParseError::MultibulkLengthTooLarge);
+        return Err(multibulk_length_error(count, config));
     }
     let reserve = count.min(1024);
     if args.capacity() < reserve {
@@ -2353,7 +2437,7 @@ fn parse_resp3_map(
         .checked_mul(2)
         .ok_or(RespParseError::MultibulkLengthTooLarge)?;
     if pair_count > config.max_array_len {
-        return Err(RespParseError::MultibulkLengthTooLarge);
+        return Err(multibulk_length_error(pair_count, config));
     }
     let mut items = Vec::with_capacity(pair_count.min(1024));
     for _ in 0..pair_count {
@@ -2406,7 +2490,7 @@ fn parse_resp3_verbatim(
     }
     let data_len = usize::try_from(len).map_err(|_| RespParseError::InvalidBulkLength)?;
     if data_len > config.max_bulk_len {
-        return Err(RespParseError::BulkLengthTooLarge);
+        return Err(bulk_length_error(data_len, config));
     }
     let end = consumed
         .checked_add(data_len)
@@ -2439,7 +2523,7 @@ fn parse_resp3_blob_error(
     }
     let data_len = usize::try_from(len).map_err(|_| RespParseError::InvalidBulkLength)?;
     if data_len > config.max_bulk_len {
-        return Err(RespParseError::BulkLengthTooLarge);
+        return Err(bulk_length_error(data_len, config));
     }
     let end = consumed
         .checked_add(data_len)
@@ -2529,7 +2613,7 @@ fn parse_bulk(
     }
     let data_len = usize::try_from(len).map_err(|_| RespParseError::InvalidBulkLength)?;
     if data_len > config.max_bulk_len {
-        return Err(RespParseError::BulkLengthTooLarge);
+        return Err(bulk_length_error(data_len, config));
     }
     let end = consumed
         .checked_add(data_len)
@@ -2596,7 +2680,7 @@ fn parse_bulk_slice_impl<'a, const FAST: bool>(
                     let consumed = i + 2;
                     let data_len = val as usize;
                     if data_len > config.max_bulk_len {
-                        return Err(RespParseError::BulkLengthTooLarge);
+                        return Err(bulk_length_error(data_len, config));
                     }
                     let end = consumed
                         .checked_add(data_len)
@@ -2625,7 +2709,7 @@ fn parse_bulk_slice_impl<'a, const FAST: bool>(
     }
     let data_len = usize::try_from(len).map_err(|_| RespParseError::InvalidBulkLength)?;
     if data_len > config.max_bulk_len {
-        return Err(RespParseError::BulkLengthTooLarge);
+        return Err(bulk_length_error(data_len, config));
     }
     let end = consumed
         .checked_add(data_len)
@@ -2667,7 +2751,7 @@ fn parse_array(
     }
     let count = usize::try_from(len).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     if count > config.max_array_len {
-        return Err(RespParseError::MultibulkLengthTooLarge);
+        return Err(multibulk_length_error(count, config));
     }
     let mut items = Vec::with_capacity(count.min(1024));
     for _ in 0..count {
