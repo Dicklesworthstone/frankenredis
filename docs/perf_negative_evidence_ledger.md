@@ -48166,3 +48166,111 @@ lever only IF such an attribution names a structure holding more than about 20 p
 excess; below that a lever cannot move 2.3006x. And judge any candidate on the THROUGHPUT
 harness against 0.8578 or on cache-misses, never on cycles or instructions, which `03b4afefd`
 showed are respectively unresolvable and already won.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: PARITY FIX — a bulk RPUSH whose RAW argv bytes fit the budget must leave ONE quicklist node; fr re-split on ENCODED size, and the fixture that should have caught it was asserting fr's own model (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: differential behaviour against a live vendored redis 7.2.4 in the same probe
+invocation, plus the upstream source that explains it. No timing verdict is claimed, no
+instruction counts are quoted, and CV was NOT used, as a gate or otherwise. This row banks no
+vs-incumbent ratio. Campaign output: no.
+
+`37e7b724b` fixed `rdbcompression` and its own retry predicate said the ten-byte residue at
+`list-max-listpack-size -1` was a separate defect that compression had been MASKING, to be
+chased by diffing raw bytes rather than lengths. Done, and the first differing byte was offset
+one: THE NODE COUNT. fr wrote 2 quicklist nodes where redis wrote 1.
+
+### THE RULE, FROM UPSTREAM RATHER THAN INFERRED
+
+`t_list.c::listTypeTryConversionRaw` runs the growth check BEFORE the elements are added:
+
+    quicklistNodeExceedsLimit(fill, lpBytes(o->ptr) + add_bytes, lpLength + add_length)
+
+`add_bytes` is the RAW argv total. If that does not fire, no conversion happens: the object stays
+a listpack for the whole command, and `rdbSaveObject` emits a listpack-encoded list as a SINGLE
+quicklist node — which can exceed the budget. Only when it DOES fire does upstream convert first
+(`quicklistAppendListpack` keeps the pre-command listpack whole) and then split the new elements
+by budget.
+
+fr promotes its own representation on ENTRY COUNT (`PACKED_MAX_ENTRIES`), so a batch in the
+window `raw < budget < encoded` arrived already chunked and re-split on ENCODED size.
+
+    fill -1 (4,096-byte budget), 15-byte elements, one-shot bulk RPUSH
+    n      fr nodes   redis nodes   fr bytes   redis bytes
+    240       1           1          4,102       4,102     agree (below the window)
+    250       2           1          4,282       4,272     DIVERGED
+    256       2           1          4,384       4,374     DIVERGED
+    260       2           1          4,452       4,442     DIVERGED
+    280       2           2          4,792       4,792     agree (raw over budget)
+    500       3           3          8,542       8,542     agree
+
+  The window closes at n = 273 (4,096 / 15), exactly where the raw probe starts firing. The
+  ELEMENT-AT-A-TIME path agreed at every size before and after the fix, because it never gets
+  the command-level reprieve — which is the control that says the fix is aimed at the right path.
+
+    AFTER: every cell of that table agrees, in BOTH push shapes.
+
+### THE FIXTURE THAT SHOULD HAVE CAUGHT THIS WAS ASSERTING fr's MODEL
+
+The change broke `dump_quicklist2_uses_redis_size_estimate_for_node_boundaries`, which pinned
+`node_count == 2` for `RPUSH l <8,174 bytes> b` at the default fill -2. Its name claims a redis
+size estimate. So I asked redis:
+
+    RPUSH l <8174> b, fill -2      redis: 1 node, OBJECT ENCODING listpack, DUMP 8,206 bytes
+                                   fr (fixed): 1 node, listpack, 8,206 bytes -- byte identical
+
+  8,175 raw + 7 is under the 8,192 budget, so the probe never fires and the object never
+  converts. The fixture was encoding fr's own splitting model and was the only thing standing
+  between fr and a measured parity bug. Corrected to 1 node, with the measurement and the
+  upstream citation in the doc comment. `feedback_conformance_fixture_can_be_wrong` has a row
+  about this shape of failure; this is another instance, and the tell was that a test named for
+  the incumbent had never been compared against it.
+
+### A REGRESSION TEST I WROTE AND THREW AWAY
+
+My first attempt built a `ListValue` by hand and called `note_rpush_command_grow` directly. It
+FAILED at n = 280 claiming one node where the live server produced two, and it assumed
+`empty_listpack_bytes()` was 11 when it is 7. The unit reproduction was not the store path and
+was not worth debugging into agreement — a test that disagrees with the live server is a worse
+oracle than the server. Replaced with a `Store`-level test driving the real `rpush` and
+`dump_key`, which reproduces the probe exactly and pins BOTH edges of the window plus the
+element-at-a-time control, so a later change cannot "fix" the middle by collapsing everything
+into one node.
+
+### STILL OPEN, AND NOW UNMASKED IN ITS TURN
+
+With this fixed, the fill -1 case WITH five LINSERT appends still diverges (2,089 vs 2,078). The
+zero-append control that refuted my LINSERT hypothesis in `37e7b724b` was correct about the
+symptom then visible; the RPUSH bug was masking a genuine LINSERT-path defect underneath. That
+is the third layer of the same onion and is left for its own row.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = 82e35972dcae6823c1f231af4698eb733852216a547cfdc02025a7e8ee75b478
+                is the FIXED build the probes ran against;
+                `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1, build log checked
+                for BOTH `^error` and rch refusals: 0 of each. `df` run immediately before the
+                build; /data 119-124G throughout, never near the 42G floor.
+  probes        scratchpad `byte_diff_probe.py` (first differing offset), `nodecount_probe.py`
+                (node count vs n, bulk AND element-at-a-time), `big_elem_probe.py` (the disputed
+                8,174-byte shape), plus `linsert_fill_probe.py` from the previous row.
+  incumbent     vendored redis 7.2.4, `legacy_redis_code/redis/src/redis-server`, booted per
+                probe on a free port with its own temp dir; every comparison is fr and redis in
+                the SAME probe invocation. RDB type constants read from
+                `legacy_redis_code/redis/src/rdb.h` rather than recalled — an earlier throwaway
+                probe in this session had `18` labelled `LIST_LISTPACK` from memory, which is
+                wrong (it is `RDB_TYPE_LIST_QUICKLIST_2`); no conclusion depended on the label,
+                but the check is why the node-count reading is trustworthy.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 18:06,
+                loadavg 6.63/8.80/10.12 at the start. Recorded for completeness only: this row's
+                evidence is byte equality, which is immune to load.
+
+RETRY PREDICATE:
+  1. The LINSERT-append divergence at fill -1 is the next layer. Drive it with
+     `nodecount_probe.py` extended to do LINSERT AFTER <last>, with `rdbcompression no`, and
+     compare NODE COUNTS -- the length alone misled me twice in this bead.
+  2. Do NOT re-derive the bulk-RPUSH rule from behaviour. It is in
+     `t_list.c::listTypeTryConversionRaw` and the raw-vs-encoded distinction is the whole thing.
+  3. When a test named for the incumbent fails after a parity fix, ASK THE INCUMBENT before
+     assuming the fix is wrong. Here the fixture was wrong and the fix was right; the cost of
+     checking was one probe.

@@ -4476,6 +4476,27 @@ impl ListValue {
             {
                 Arc::make_mut(list).rpush_conversion_prefix_len = prefix_len;
             }
+            return;
+        }
+
+        // (frankenredis-qj6jn) THE OTHER HALF OF THE SAME RULE, and the one fr was missing.
+        //
+        // Upstream decides at COMMAND time on the RAW batch bytes. When that probe says the
+        // batch fits, the object stays a listpack for the whole command and is converted
+        // AFTERWARDS from the finished listpack — which yields exactly ONE quicklist node, even
+        // though that node can exceed the budget. Only when the raw probe fires up front does
+        // upstream convert first and then split by budget, which is the branch above.
+        //
+        // fr promotes its own representation on ENTRY COUNT (`PACKED_MAX_ENTRIES`), so a batch
+        // in that window arrives here already a Deque and re-splits on ENCODED size. Measured
+        // against vendored redis 7.2.4 at `list-max-listpack-size -1` with 15-byte elements:
+        // n = 250/256/260 gave redis ONE node and fr TWO. The window is exactly where
+        // `raw < budget < encoded`; below it neither splits, above it both do.
+        if !self.forced_quicklist
+            && let ListRepr::Deque(list) = &mut self.repr
+        {
+            let whole = list.len();
+            Arc::make_mut(list).rpush_conversion_prefix_len = whole;
         }
     }
 

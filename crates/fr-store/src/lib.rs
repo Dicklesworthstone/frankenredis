@@ -74731,6 +74731,89 @@ mod tests {
         );
     }
 
+    /// (frankenredis-qj6jn) A BULK RPUSH whose RAW argv bytes fit the budget leaves ONE
+    /// quicklist node, even when the ENCODED listpack exceeds it.
+    ///
+    /// Upstream `t_list.c::listTypeTryConversionRaw` runs
+    /// `quicklistNodeExceedsLimit(fill, lpBytes(o) + add_bytes, ...)` over the RAW argv bytes
+    /// BEFORE the push. If it does not fire, the object stays a listpack for the whole command
+    /// and `rdbSaveObject` emits it as a single node. Only when it fires does upstream convert
+    /// first and split by budget.
+    ///
+    /// fr promotes its own representation on ENTRY COUNT, so a batch in the window
+    /// `raw < budget < encoded` arrived already chunked and re-split on encoded size. Measured
+    /// against vendored redis 7.2.4 at `list-max-listpack-size -1` with 15-byte elements:
+    /// n = 250/256/260 gave redis ONE node and fr TWO, while n = 280 (raw over budget) and the
+    /// element-at-a-time path already agreed.
+    ///
+    /// BOTH EDGES ARE PINNED so a future change cannot "fix" the middle by collapsing
+    /// everything into one node.
+    #[test]
+    fn bulk_rpush_under_raw_budget_keeps_one_node_qj6jn() {
+        fn node_count(store: &mut Store, key: &[u8]) -> usize {
+            let payload = store.dump_key(key, 100).unwrap();
+            assert_eq!(payload[0], RDB_TYPE_LIST_QUICKLIST_2);
+            decode_length(&payload, 1).unwrap().0
+        }
+        // 15 raw bytes each, matching the differential probe.
+        let elem = |i: usize| format!("vvvvvvvvvv{i:05}").into_bytes();
+
+        for n in [250usize, 256, 260] {
+            let mut store = Store::new();
+            store.list_max_listpack_size = -1; // 4096-byte budget
+            let items: Vec<Vec<u8>> = (0..n).map(elem).collect();
+            assert!(
+                (n * 15) < 4096,
+                "{n}: precondition -- raw must be UNDER the budget"
+            );
+            store.rpush(b"l", &items, 100).unwrap();
+            assert_eq!(
+                node_count(&mut store, b"l"),
+                1,
+                "{n}: raw under budget -> upstream never converts -> ONE node"
+            );
+        }
+
+        for n in [280usize, 400] {
+            let mut store = Store::new();
+            store.list_max_listpack_size = -1;
+            let items: Vec<Vec<u8>> = (0..n).map(elem).collect();
+            assert!(
+                (n * 15) > 4096,
+                "{n}: precondition -- raw must EXCEED the budget"
+            );
+            store.rpush(b"l", &items, 100).unwrap();
+            assert!(
+                node_count(&mut store, b"l") > 1,
+                "{n}: raw over budget must still SPLIT -- the fix must not collapse everything"
+            );
+        }
+
+        // Element-at-a-time is untouched: no command-level reprieve, so it splits by budget.
+        for n in [250usize, 256, 260] {
+            let mut store = Store::new();
+            store.list_max_listpack_size = -1;
+            for i in 0..n {
+                store.rpush(b"l", &[elem(i)], 100).unwrap();
+            }
+            assert!(
+                node_count(&mut store, b"l") > 1,
+                "{n}: element-at-a-time RPUSH must keep splitting by budget"
+            );
+        }
+    }
+
+    /// (frankenredis-qj6jn) CORRECTED from `node_count == 2`. This asserted fr's MODEL, not
+    /// redis's behaviour, and it was the only thing standing between fr and a measured parity
+    /// bug. Asked vendored redis 7.2.4 directly: `RPUSH l <8174 bytes> b` at the default
+    /// `list-max-listpack-size -2` yields ONE node, `OBJECT ENCODING listpack`, and a 8,206-byte
+    /// DUMP -- which fr now reproduces byte for byte.
+    ///
+    /// Upstream's reason is in `t_list.c::listTypeTryConversionRaw`: the growth check is
+    /// `quicklistNodeExceedsLimit(fill, lpBytes(o) + add_bytes, ...)` over the RAW argv bytes,
+    /// so 8,175 + 7 stays under the 8,192 budget, no conversion happens, the object remains a
+    /// listpack, and `rdbSaveObject` emits a listpack-encoded list as a single quicklist node.
+    /// The split this test used to expect only happens when that raw probe FIRES.
     #[test]
     fn dump_quicklist2_uses_redis_size_estimate_for_node_boundaries() {
         let mut store = Store::new();
@@ -74745,21 +74828,21 @@ mod tests {
         let mut cursor = 1;
         let (node_count, consumed) = decode_length(&payload, cursor).unwrap();
         cursor += consumed;
-        assert_eq!(node_count, 2);
+        assert_eq!(
+            node_count, 1,
+            "redis 7.2.4 keeps this as ONE node: the raw-bytes growth probe never fires"
+        );
 
         let (container, consumed) = decode_length(&payload, cursor).unwrap();
         cursor += consumed;
         assert_eq!(container, 2);
         let (listpack, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
         cursor += consumed;
-        assert_eq!(decode_listpack_strings(&listpack).unwrap(), vec![first]);
-
-        let (container, consumed) = decode_length(&payload, cursor).unwrap();
-        cursor += consumed;
-        assert_eq!(container, 2);
-        let (listpack, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
-        cursor += consumed;
-        assert_eq!(decode_listpack_strings(&listpack).unwrap(), vec![second]);
+        assert_eq!(
+            decode_listpack_strings(&listpack).unwrap(),
+            vec![first, second],
+            "both elements live in the single node"
+        );
         assert_eq!(cursor, data_end);
 
         let mut restored = Store::new();
