@@ -8,7 +8,13 @@ error — or a read of an undeclared global — fails the load before anything r
 
 Both arms run in ONE invocation against two live servers. Usage:
     function_load_differ.py <redis_port> <fr_port>
-Exit 0 = arms agree on every row, 1 = at least one divergence.
+Exit 0 = arms agree on every row, 1 = at least one divergence, 2 = a CONTROL row diverged,
+which means the harness is not measuring what it claims and no row from it may be quoted.
+
+(frankenredis-9hori) A second phase drives the whole LIFE CYCLE -- load, fcall, DEBUG RELOAD,
+fcall, FUNCTION DUMP/RESTORE, fcall -- because loading is not using: a library whose function
+name is computed at runtime can load perfectly and still be uncallable, lost by the next
+restart, or unable to come back from its own dump. Those were seams 4, 2 and 3 of this bead.
 """
 import socket
 import sys
@@ -139,6 +145,92 @@ CASES = [
 ]
 
 
+# (frankenredis-9hori) ROUND-TRIP CASES for seams 2, 3 and 4.
+#
+# Loading is not using. A library whose function name is computed at runtime can LOAD and still
+# be uncallable (seam 4), lost by the next restart (seam 2), or refuse to come back from its own
+# DUMP (seam 3). Each case below registers a function under a name this harness KNOWS, then
+# drives the whole life cycle and compares the sequence against the incumbent.
+#
+# `%s` in the body is the function name, so a dynamic case computes at runtime exactly the name
+# the harness will later call.
+ROUND_TRIP_CASES = [
+    ("rt_name_local",
+     "local n = '%s'\nredis.register_function(n, function(k,a) return 41 end)",
+     "name from a local"),
+    ("rt_name_concat",
+     "local n = '%s' .. ''\nredis.register_function(n, function(k,a) return 41 end)",
+     "name computed at load time"),
+    ("rt_callback_local",
+     "local cb = function(k,a) return 41 end\nredis.register_function('%s', cb)",
+     "callback from a local"),
+    ("rt_CONTROL_literal",
+     "redis.register_function('%s', function(k,a) return 41 end)",
+     "CONTROL: everything literal"),
+]
+
+
+def round_trip(conn, lib, fname, body):
+    """Load, call, survive a reload, and survive its own DUMP/RESTORE.
+
+    Returns a list of (step, classified reply). Each engine round-trips ITS OWN dump: the payload
+    bytes are an implementation detail and may legitimately differ between engines, while the
+    OUTCOME -- that the function still answers 41 afterwards -- is the parity claim.
+    """
+    out = []
+    conn.cmd("FUNCTION", "FLUSH")
+    src = (SHEBANG % lib) + (body % fname)
+    out.append(("load", classify(conn.cmd("FUNCTION", "LOAD", "REPLACE", src))))
+    out.append(("fcall", classify(conn.cmd("FCALL", fname, "0"))))
+
+    # seam 2: the registration must survive a reload. DEBUG RELOAD round-trips the dataset
+    # through RDB in-process, which is the same path a restart takes.
+    out.append(("reload", classify(conn.cmd("DEBUG", "RELOAD"))))
+    out.append(("fcall_after_reload", classify(conn.cmd("FCALL", fname, "0"))))
+
+    # seam 3: the library must come back from its own FUNCTION DUMP.
+    dumped = conn.cmd("FUNCTION", "DUMP")
+    if not isinstance(dumped, bytes) or dumped.startswith(b"ERRREPLY:"):
+        out.append(("dump", classify(dumped)))
+        out.append(("restore", "SKIPPED: dump failed"))
+        out.append(("fcall_after_restore", "SKIPPED: dump failed"))
+        return out
+    out.append(("dump", "OK %d bytes" % len(dumped)))
+    conn.cmd("FUNCTION", "FLUSH")
+    out.append(("restore", classify(conn.cmd("FUNCTION", "RESTORE", dumped))))
+    out.append(("fcall_after_restore", classify(conn.cmd("FCALL", fname, "0"))))
+    return out
+
+
+def run_round_trips(redis, fr):
+    """Returns (divergences, control_failures). Any divergence here is a FAILURE.
+
+    There are deliberately no EXPECTED_DIVERGENCES for these rows. The three seams they cover
+    were all fixed in the same session as this harness, so an allowance would be an excuse
+    written before the first run rather than a tracked gap.
+    """
+    print()
+    print("ROUND TRIP: load -> fcall -> reload -> fcall -> dump/restore -> fcall")
+    print(f"{'case':<20} {'step':<20} {'fr':<30} {'redis 7.2.4'}")
+    print("-" * 100)
+    divergences = 0
+    control_failures = 0
+    for i, (name, body, _desc) in enumerate(ROUND_TRIP_CASES):
+        lib, fname = f"rtlib{i}", f"rtfn{i}"
+        r_steps = round_trip(redis, lib, fname, body)
+        f_steps = round_trip(fr, lib, fname, body)
+        for (step, r_reply), (_, f_reply) in zip(r_steps, f_steps):
+            agree = (r_reply.split(":")[0] == f_reply.split(":")[0]) and (
+                r_reply.startswith("ERR") == f_reply.startswith("ERR"))
+            mark = "" if agree else "   <-- DIVERGES"
+            if not agree:
+                divergences += 1
+                if name.startswith("rt_CONTROL"):
+                    control_failures += 1
+            print(f"{name:<20} {step:<20} {f_reply[:29]:<30} {r_reply[:29]}{mark}")
+    return divergences, control_failures
+
+
 def classify(reply):
     if reply is None:
         return "nil"
@@ -208,6 +300,21 @@ def main():
     if unexpected:
         print("FAIL: %d UNEXPECTED divergence(s): %s" % (len(unexpected), ", ".join(unexpected)))
         return 1
+    rt_div, rt_control = run_round_trips(redis, fr)
+    print()
+    if rt_control:
+        print(f"HARNESS INVALID: {rt_control} round-trip CONTROL step(s) diverged — a library "
+              f"with everything literal must survive load, reload and restore on both engines. "
+              f"Fix the harness before trusting any round-trip row.")
+        return 2
+    if rt_div:
+        print(f"FAIL: {rt_div} round-trip divergence(s). These cover 9hori seams 2 (reload), "
+              f"3 (FUNCTION RESTORE) and 4 (FCALL) — a library that LOADS is not the same as one "
+              f"that survives and can be called.")
+        return 1
+    print("PASS: round trips agree — dynamic registrations load, call, survive a reload, "
+          "and come back from their own dump.")
+
     if divergences:
         print("PASS: every divergence is a KNOWN, tracked gap. A new one fails this gate.")
     else:
