@@ -44,7 +44,9 @@ use fr_store::{
     AclKeyPattern, ClientReplyState, ClientTrackingState, CommandRecordKind, DispatchAclLogContext,
     DispatchAclPermissionReason, DispatchAclPermissions, EvictionLoopFailure, EvictionLoopResult,
     EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPolicy, PendingAclLogEvent,
-    SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, decode_db_key, encode_db_key, glob_match,
+    HistSlot, SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, StringBytes, decode_db_key,
+    encode_db_key,
+    glob_match,
 };
 
 /// Re-exported so a cross-partition INFO aggregate can hold and merge per-command
@@ -534,6 +536,26 @@ impl PlainKeyedValuesCmd {
 
     /// Lowercase name used for `last_command_name` and the per-command latency
     /// histogram bucket — matching what the generic dispatch records.
+    /// Histogram bucket, chosen from the DISCRIMINANT.
+    ///
+    /// (frankenredis-getexgate) The alternative is `name_lower()` plus the recorder's
+    /// 25-arm string match -- a discriminant stringified so a string match can turn it
+    /// back into a discriminant. Removing that match from the literal call sites
+    /// MEASURED -42.2 instr/op on `substr`; this removes it from the enum sites.
+    fn hist_slot(self) -> HistSlot {
+        match self {
+            PlainKeyedValuesCmd::Sadd => HistSlot::sadd,
+            PlainKeyedValuesCmd::Lpush => HistSlot::lpush,
+            PlainKeyedValuesCmd::Rpush => HistSlot::rpush,
+            PlainKeyedValuesCmd::Pfadd => HistSlot::Other("pfadd"),
+            PlainKeyedValuesCmd::Hdel => HistSlot::Other("hdel"),
+            PlainKeyedValuesCmd::Srem => HistSlot::Other("srem"),
+            PlainKeyedValuesCmd::Zrem => HistSlot::Other("zrem"),
+            PlainKeyedValuesCmd::Lpushx => HistSlot::Other("lpushx"),
+            PlainKeyedValuesCmd::Rpushx => HistSlot::Other("rpushx"),
+        }
+    }
+
     fn name_lower(self) -> &'static str {
         match self {
             PlainKeyedValuesCmd::Sadd => "sadd",
@@ -581,6 +603,22 @@ impl PlainKeyedPopCmd {
             PlainKeyedPopCmd::Spop => "SPOP",
             PlainKeyedPopCmd::Zpopmin => "ZPOPMIN",
             PlainKeyedPopCmd::Zpopmax => "ZPOPMAX",
+        }
+    }
+
+    /// Histogram bucket, chosen from the DISCRIMINANT.
+    ///
+    /// (frankenredis-getexgate) The alternative is `name_lower()` plus the recorder's
+    /// 25-arm string match -- a discriminant stringified so a string match can turn it
+    /// back into a discriminant. Removing that match from the literal call sites
+    /// MEASURED -42.2 instr/op on `substr`; this removes it from the enum sites.
+    fn hist_slot(self) -> HistSlot {
+        match self {
+            PlainKeyedPopCmd::Lpop => HistSlot::Other("lpop"),
+            PlainKeyedPopCmd::Rpop => HistSlot::Other("rpop"),
+            PlainKeyedPopCmd::Spop => HistSlot::Other("spop"),
+            PlainKeyedPopCmd::Zpopmin => HistSlot::Other("zpopmin"),
+            PlainKeyedPopCmd::Zpopmax => HistSlot::Other("zpopmax"),
         }
     }
 
@@ -633,6 +671,21 @@ impl PlainCardinalityCmd {
             PlainCardinalityCmd::Hlen => "HLEN",
             PlainCardinalityCmd::Xlen => "XLEN",
             PlainCardinalityCmd::Pfcount => "PFCOUNT",
+        }
+    }
+
+    /// Histogram bucket, chosen from the DISCRIMINANT.
+    ///
+    /// (frankenredis-getexgate) The alternative is `name_lower()` plus the recorder's
+    /// 25-arm string match -- a discriminant stringified so a string match can turn it
+    /// back into a discriminant. Removing that match from the literal call sites
+    /// MEASURED -42.2 instr/op on `substr`; this removes it from the enum sites.
+    fn hist_slot(self) -> HistSlot {
+        match self {
+            PlainCardinalityCmd::Zcard => HistSlot::zcard,
+            PlainCardinalityCmd::Hlen => HistSlot::hlen,
+            PlainCardinalityCmd::Xlen => HistSlot::Other("xlen"),
+            PlainCardinalityCmd::Pfcount => HistSlot::Other("pfcount"),
         }
     }
 
@@ -732,6 +785,20 @@ impl PlainRandMemberCmd {
         }
     }
 
+    /// Histogram bucket, chosen from the DISCRIMINANT.
+    ///
+    /// (frankenredis-getexgate) The alternative is `name_lower()` plus the recorder's
+    /// 25-arm string match -- a discriminant stringified so a string match can turn it
+    /// back into a discriminant. Removing that match from the literal call sites
+    /// MEASURED -42.2 instr/op on `substr`; this removes it from the enum sites.
+    fn hist_slot(self) -> HistSlot {
+        match self {
+            PlainRandMemberCmd::Srandmember => HistSlot::Other("srandmember"),
+            PlainRandMemberCmd::Hrandfield => HistSlot::Other("hrandfield"),
+            PlainRandMemberCmd::Zrandmember => HistSlot::Other("zrandmember"),
+        }
+    }
+
     fn name_lower(self) -> &'static str {
         match self {
             PlainRandMemberCmd::Srandmember => "srandmember",
@@ -810,6 +877,19 @@ impl PlainRankCmd {
         match self {
             PlainRankCmd::Zrank => "ZRANK",
             PlainRankCmd::Zrevrank => "ZREVRANK",
+        }
+    }
+
+    /// Histogram bucket, chosen from the DISCRIMINANT.
+    ///
+    /// (frankenredis-getexgate) The alternative is `name_lower()` plus the recorder's
+    /// 25-arm string match -- a discriminant stringified so a string match can turn it
+    /// back into a discriminant. Removing that match from the literal call sites
+    /// MEASURED -42.2 instr/op on `substr`; this removes it from the enum sites.
+    fn hist_slot(self) -> HistSlot {
+        match self {
+            PlainRankCmd::Zrank => HistSlot::zrank,
+            PlainRankCmd::Zrevrank => HistSlot::Other("zrevrank"),
         }
     }
 
@@ -996,6 +1076,19 @@ impl PlainObjectStatCmd {
         match self {
             PlainObjectStatCmd::Idletime => b"IDLETIME",
             PlainObjectStatCmd::Freq => b"FREQ",
+        }
+    }
+
+    /// Histogram bucket, chosen from the DISCRIMINANT.
+    ///
+    /// (frankenredis-getexgate) The alternative is `name_lower()` plus the recorder's
+    /// 25-arm string match -- a discriminant stringified so a string match can turn it
+    /// back into a discriminant. Removing that match from the literal call sites
+    /// MEASURED -42.2 instr/op on `substr`; this removes it from the enum sites.
+    fn hist_slot(self) -> HistSlot {
+        match self {
+            PlainObjectStatCmd::Idletime => HistSlot::Other("object|idletime"),
+            PlainObjectStatCmd::Freq => HistSlot::Other("object|freq"),
         }
     }
 
@@ -9127,7 +9220,7 @@ impl Runtime {
         let result = self.server.store.get_string_bytes(key, now_ms);
         let failed = result.is_err();
         match result {
-            Ok(value) => encode_bulk_string_slice(value.as_deref(), false, out),
+            Ok(value) => encode_bulk_string_slice(value.as_ref().map(StringBytes::as_slice), false, out),
             Err(err) => CommandError::Store(err).to_resp().encode_into(out),
         }
         if let Some(started) = started {
@@ -12033,7 +12126,7 @@ impl Runtime {
             // UTF-8 validation, and hitting the lpush/rpush/sadd direct fields.
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(cmd.hist_slot(), elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -14471,7 +14564,7 @@ impl Runtime {
             // UTF-8 validation, and hitting the lpush/rpush/sadd direct fields.
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(cmd.hist_slot(), elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -14545,7 +14638,7 @@ impl Runtime {
         match result {
             Ok(value) => {
                 if !suppress_reply {
-                    encode_bulk_string_slice(value.as_deref(), resp3, out);
+                    encode_bulk_string_slice(value.as_ref().map(StringBytes::as_slice), resp3, out);
                 }
             }
             Err(err) => {
@@ -15985,7 +16078,7 @@ impl Runtime {
             let value = self.server.store.get_string_bytes(key, now_ms);
             if !suppress_reply {
                 match value {
-                    Ok(v) => encode_bulk_string_slice(v.as_deref(), resp3, out),
+                    Ok(v) => encode_bulk_string_slice(v.as_ref().map(StringBytes::as_slice), resp3, out),
                     // MGET yields nil for a non-string (wrong-type) key, not an error.
                     Err(_) => encode_bulk_string_slice(None, resp3, out),
                 }
@@ -19171,7 +19264,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(cmd.hist_slot(), elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -33481,7 +33574,7 @@ impl Runtime {
             // UTF-8 validation, and hitting the lpush/rpush/sadd direct fields.
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(cmd.hist_slot(), elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -34526,7 +34619,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(cmd.hist_slot(), elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -34678,7 +34771,7 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind);
+                .record_command_histogram_slot_with_kind(cmd.hist_slot(), elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {

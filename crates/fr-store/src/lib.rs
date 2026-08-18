@@ -4339,6 +4339,23 @@ impl PartialEq for SmallStr {
 impl Eq for SmallStr {}
 
 impl Value {
+    /// (frankenredis-getexgate) The allocation-free form of [`string_bytes`], for callers that
+    /// only copy the bytes into a reply buffer. The String arm borrows exactly as before; the
+    /// Integer arm renders into the returned value via `integer_decimal_into` instead of
+    /// allocating a `Vec`. Byte-identical output: `integer_decimal_into` is documented as
+    /// byte-identical to `integer_decimal_bytes`.
+    fn string_bytes_inline(&self) -> Option<StringBytes<'_>> {
+        match self {
+            Self::String(bytes) => Some(StringBytes::Borrowed(bytes.as_slice())),
+            Self::Integer(value) => {
+                let mut buf = [0u8; 21];
+                let len = integer_decimal_into(&mut buf, *value);
+                Some(StringBytes::Inline(buf, len as u8))
+            }
+            _ => None,
+        }
+    }
+
     fn string_bytes(&self) -> Option<Cow<'_, [u8]>> {
         match self {
             Self::String(bytes) => Some(Cow::Borrowed(bytes.as_slice())),
@@ -4512,6 +4529,40 @@ fn i64_text_len(value: i64) -> usize {
     // (CrimsonHawk) Digit count via `ilog10` (comparison/leading-zeros based, no divisions) instead of
     // the divide-by-10 loop: for n >= 1 the decimal digit count is `floor(log10(n)) + 1`. Byte-identical.
     usize::from(value.is_negative()) + value.unsigned_abs().ilog10() as usize + 1
+}
+
+/// (frankenredis-getexgate) A string value's bytes WITHOUT a heap allocation for the integer
+/// case. `Value::string_bytes` returns `Cow`, whose Integer arm is
+/// `Cow::Owned(integer_decimal_bytes(..))` -- one `Vec` allocation plus one variable-length
+/// `extend_from_slice`, which rustc lowers to a `memcpy` CALL, for a value that is at most 20
+/// digits and is copied straight into the reply buffer and dropped.
+///
+/// MEASURED on the read path: `get_integer` (SET k 12345) costs 1112.8 instr/op against
+/// `get_control`'s 936.0 for a STRING of the same key -- +176.8, 18.9 pct -- with
+/// `integer_decimal_bytes` at 1.0000 calls/op and one allocation, where the string arm has
+/// neither. On `mget_3` it is 252.0 instr/op self plus 199.8 in memcpy, three allocations.
+///
+/// `Inline` carries the digits by value in a fixed 21-byte buffer (up to 19 digits, a sign, and
+/// slack), so the integer case moves a small struct on the stack instead of touching the
+/// allocator. 21 bytes is the same bound `integer_decimal_into` already documents.
+pub enum StringBytes<'a> {
+    Borrowed(&'a [u8]),
+    Inline([u8; 21], u8),
+}
+
+impl StringBytes<'_> {
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Inline(buf, len) => &buf[..*len as usize],
+        }
+    }
+
+    #[inline]
+    pub fn into_owned(self) -> Vec<u8> {
+        self.as_slice().to_vec()
+    }
 }
 
 fn integer_decimal_bytes(value: i64) -> Vec<u8> {
@@ -5344,6 +5395,33 @@ macro_rules! with_direct_histogram_fields {
     };
 }
 
+/// Which histogram bucket a command records into, chosen WITHOUT building or matching a name.
+///
+/// (frankenredis-getexgate) The generic dispatch sites already hold a command enum and call
+/// `record_command_histogram_canonical_with_kind(cmd.name_lower(), ..)`. `name_lower()` is a
+/// match from discriminant to `&'static str`, and the recorder then runs a 25-arm match on that
+/// string to recover which field to use: **a discriminant is stringified so a string match can
+/// turn it back into a discriminant.** Both matches are loss. Removing the second one from the
+/// literal call sites MEASURED -42.2 instr/op on `substr`; this removes it from the enum sites.
+///
+/// `Other` carries a `&'static str` rather than allocating, so a command with no direct field
+/// still reaches the map by name — with the direct-field match skipped.
+///
+/// Generated from `with_direct_histogram_fields!`, so a command added to that list gains a slot
+/// automatically and the `record_slot_with_kind` match below stops compiling until it is handled.
+macro_rules! declare_hist_slots {
+    ($($name:literal => $field:ident),* $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[allow(non_camel_case_types)]
+        pub enum HistSlot {
+            $($field,)*
+            /// A command with no direct field; recorded into the map under this name.
+            Other(&'static str),
+        }
+    };
+}
+with_direct_histogram_fields!(declare_hist_slots);
+
 /// Tracks per-command latency histograms.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandHistogramTracker {
@@ -5566,6 +5644,29 @@ impl CommandHistogramTracker {
         }
         with_direct_histogram_fields!(name_match)
     }
+    /// Record against a slot chosen by the CALLER from a command enum — no name is built, no
+    /// name is matched. See `HistSlot` for the measured reason.
+    pub fn record_slot_with_kind(
+        &mut self,
+        slot: HistSlot,
+        latency_us: u64,
+        kind: CommandRecordKind,
+    ) {
+        macro_rules! slot_match {
+            ($($name:literal => $field:ident),* $(,)?) => {
+                match slot {
+                    $(HistSlot::$field => {
+                        self.$field
+                            .get_or_insert_with(CommandHistogram::default)
+                            .record_with_kind(latency_us, kind);
+                    })*
+                    HistSlot::Other(name) => self.record_map_with_kind(name, latency_us, kind),
+                }
+            };
+        }
+        with_direct_histogram_fields!(slot_match);
+    }
+
     /// Bench-only reference arm: record a canonical command straight through the
     /// `HashMap<String>` path (the pre-direct-field behaviour), bypassing the
     /// `get`/`set`/…/`hset`/`zadd`/`incr` direct fields. Mirrors the fallback in
@@ -7529,6 +7630,18 @@ impl Store {
             .record_map_with_kind(canonical_lower, latency_us, kind);
     }
 
+    /// Record against a `HistSlot` the caller derived from a command enum, building no name and
+    /// matching none. See `HistSlot`.
+    pub fn record_command_histogram_slot_with_kind(
+        &mut self,
+        slot: HistSlot,
+        latency_us: u64,
+        kind: CommandRecordKind,
+    ) {
+        self.command_histograms
+            .record_slot_with_kind(slot, latency_us, kind);
+    }
+
     /// Get histogram data for a specific command.
     #[must_use]
     pub fn get_command_histogram(&self, command: &str) -> Option<&CommandHistogram> {
@@ -8206,7 +8319,7 @@ impl Store {
     /// Returns `Err(WrongType)` if the key holds a non-string value.
     pub fn get(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         self.get_string_bytes(key, now_ms)
-            .map(|value| value.map(std::borrow::Cow::into_owned))
+            .map(|value| value.map(crate::StringBytes::into_owned))
     }
 
     /// (frankenredis-dryll) The value of `key` as a SORT numeric weight, WITHOUT
@@ -8293,7 +8406,7 @@ impl Store {
         &mut self,
         key: &[u8],
         now_ms: u64,
-    ) -> Result<Option<Cow<'_, [u8]>>, StoreError> {
+    ) -> Result<Option<StringBytes<'_>>, StoreError> {
         // (frankenredis-get-single-lookup) When the DB holds NO key with a TTL
         // and LFU eviction sampling is off (the default LRU config), a GET can
         // never lazily expire its key and consumes no RNG, so the
@@ -8318,7 +8431,7 @@ impl Store {
                     entry.touch_access(now_ms, false, lfu_decay, lfu_log_factor, 0);
                     let value = entry
                         .value
-                        .string_bytes()
+                        .string_bytes_inline()
                         .expect("string-like value exposes bytes");
                     Ok(Some(value))
                 }
@@ -8357,7 +8470,7 @@ impl Store {
                     entry.touch_access(now_ms, false, lfu_decay, lfu_log_factor, 0);
                     let value = entry
                         .value
-                        .string_bytes()
+                        .string_bytes_inline()
                         .expect("string-like value exposes bytes");
                     Ok(Some(value))
                 }
@@ -8382,7 +8495,7 @@ impl Store {
         &mut self,
         key: &[u8],
         now_ms: u64,
-    ) -> Result<Option<Cow<'_, [u8]>>, StoreError> {
+    ) -> Result<Option<StringBytes<'_>>, StoreError> {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
@@ -8402,7 +8515,7 @@ impl Store {
                     entry.touch_access(now_ms, true, lfu_decay, lfu_log_factor, rand_sample);
                     let value = entry
                         .value
-                        .string_bytes()
+                        .string_bytes_inline()
                         .expect("string-like value exposes bytes");
                     Ok(Some(value))
                 }
@@ -8424,7 +8537,7 @@ impl Store {
                     entry.touch_access(now_ms, true, lfu_decay, lfu_log_factor, rand_sample);
                     let value = entry
                         .value
-                        .string_bytes()
+                        .string_bytes_inline()
                         .expect("string-like value exposes bytes");
                     Ok(Some(value))
                 }
@@ -8438,7 +8551,7 @@ impl Store {
         &mut self,
         key: &[u8],
         now_ms: u64,
-    ) -> Result<Option<Cow<'_, [u8]>>, StoreError> {
+    ) -> Result<Option<StringBytes<'_>>, StoreError> {
         self.get_string_bytes_lfu_impl::<true>(key, now_ms)
     }
 
@@ -8447,7 +8560,7 @@ impl Store {
         &mut self,
         key: &[u8],
         now_ms: u64,
-    ) -> Result<Option<Cow<'_, [u8]>>, StoreError> {
+    ) -> Result<Option<StringBytes<'_>>, StoreError> {
         self.get_string_bytes_lfu_impl::<false>(key, now_ms)
     }
 
@@ -42704,7 +42817,7 @@ mod tests {
 
         let copied = store
             .get_string_bytes(b"k", 200)
-            .map(|value| value.map(std::borrow::Cow::into_owned))
+            .map(|value| value.map(crate::StringBytes::into_owned))
             .expect("borrowed get succeeds");
         assert_eq!(copied, Some(b"v".to_vec()));
         assert_eq!(store.stat_keyspace_hits, 1);
@@ -42720,7 +42833,7 @@ mod tests {
 
         let missing = store
             .get_string_bytes(b"missing", 300)
-            .map(|value| value.map(std::borrow::Cow::into_owned))
+            .map(|value| value.map(crate::StringBytes::into_owned))
             .expect("missing borrowed get succeeds");
         assert_eq!(missing, None);
         assert_eq!(store.stat_keyspace_misses, 1);
