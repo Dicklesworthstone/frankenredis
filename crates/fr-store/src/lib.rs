@@ -6980,9 +6980,7 @@ fn emit_list_range<'a>(
     sink: &mut impl FnMut(SmembersScanEvent<'a>),
 ) {
     if s == 0 && e + 1 == l.len() {
-        for m in l.iter() {
-            sink(SmembersScanEvent::Member(m));
-        }
+        l.for_each_borrowed(|m| sink(SmembersScanEvent::Member(m)));
     } else {
         for m in l.iter_from(s).take(e - s + 1) {
             sink(SmembersScanEvent::Member(m));

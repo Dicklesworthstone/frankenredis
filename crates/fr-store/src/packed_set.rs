@@ -5274,6 +5274,56 @@ impl ListValue {
         list
     }
 
+    /// Visit every element in order, dispatching on the CHUNK KIND once per chunk instead of once
+    /// per element.
+    ///
+    /// (frankenredis-qj6jn) `iter()` is the right shape for a caller that needs an `Iterator`, but
+    /// a full read does not. The disassembly of `emit_list_range`'s loop keeps a five-field
+    /// iterator state on the stack and, per element, reloads the discriminant, re-tests it through
+    /// a four-way dispatch, and reloads three more fields — about ten instructions of state
+    /// shuffling before any element is produced, to re-answer a question (WHICH KIND OF CHUNK IS
+    /// THIS) whose answer cannot change inside a chunk. Measured at 42.51 instructions per element
+    /// on `LRANGE 0 -1` over a 300-element restored list.
+    ///
+    /// Hoisting the match to the chunk loop leaves each inner loop walking one concrete container.
+    /// ORDER IS IDENTICAL to `iter()` by construction: the same chunk order, the same
+    /// `front_biased` reversal, and the same `as_bytes` for a retained span.
+    pub(crate) fn for_each_borrowed<'a>(&'a self, mut f: impl FnMut(&'a [u8])) {
+        match &self.repr {
+            ListRepr::Packed(p) => {
+                for elem in p.iter() {
+                    f(elem);
+                }
+            }
+            ListRepr::Deque(d) => {
+                for chunk in &d.chunks {
+                    match chunk {
+                        ListChunk::Owned {
+                            elems,
+                            front_biased,
+                            ..
+                        } => {
+                            if *front_biased {
+                                for elem in elems.iter().rev() {
+                                    f(elem);
+                                }
+                            } else {
+                                for elem in elems.iter() {
+                                    f(elem);
+                                }
+                            }
+                        }
+                        ListChunk::Listpack { bytes, entries } => {
+                            for span in entries.iter() {
+                                f(span.as_bytes(bytes));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn retained_listpack_chunks(&self) -> Option<Vec<RetainedListpackChunk<'_>>> {
         let ListRepr::Deque(list) = &self.repr else {
             return None;
@@ -6321,6 +6371,54 @@ impl CompactFieldMap {
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-qj6jn) `for_each_borrowed` hoists the chunk-kind match out of the per-element
+    /// loop. It must yield EXACTLY what `iter()` yields, in the same order, for every
+    /// representation the list can be in — Packed, a Deque of retained listpack chunks, a Deque of
+    /// owned chunks, and the `front_biased` owned chunk whose physical order is REVERSED.
+    ///
+    /// The reversal is the reason this test builds its lists by pushing at both ends rather than
+    /// only at the back: an implementation that forgot `front_biased` would pass a back-built
+    /// corpus and return a list's head-inserted region backwards.
+    #[test]
+    fn for_each_borrowed_matches_iter_for_every_repr_qj6jn() {
+        let mut shapes: Vec<(&str, super::ListValue)> = Vec::new();
+
+        let mut empty = super::ListValue::default();
+        shapes.push(("empty", std::mem::take(&mut empty)));
+
+        for len in [1usize, 7, 127, 128, 129, 300, 600] {
+            let mut back = super::ListValue::default();
+            for i in 0..len {
+                back.push_back(format!("b{i:04}").into_bytes());
+            }
+            shapes.push(("back", back));
+
+            let mut front = super::ListValue::default();
+            for i in 0..len {
+                front.push_front(format!("f{i:04}").into_bytes());
+            }
+            shapes.push(("front", front));
+
+            let mut both = super::ListValue::default();
+            for i in 0..len {
+                if i % 2 == 0 {
+                    both.push_back(format!("x{i:04}").into_bytes());
+                } else {
+                    both.push_front(format!("y{i:04}").into_bytes());
+                }
+            }
+            shapes.push(("both", both));
+        }
+
+        for (name, list) in &shapes {
+            let want: Vec<Vec<u8>> = list.iter().map(<[u8]>::to_vec).collect();
+            let mut got: Vec<Vec<u8>> = Vec::new();
+            list.for_each_borrowed(|m| got.push(m.to_vec()));
+            assert_eq!(got, want, "{name} list of {} diverged", list.len());
+            assert_eq!(got.len(), list.len(), "{name}: wrong count");
+        }
+    }
 
     /// (frankenredis-qj6jn) `list_lp_int` folds its own decimal now instead of going through
     /// `i64`'s `FromStr`. The reference here IS the standard library parse, which is the thing
