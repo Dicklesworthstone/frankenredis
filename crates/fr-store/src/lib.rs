@@ -34358,6 +34358,27 @@ impl Store {
         }
         functions.sort_by(|a, b| b.name.cmp(&a.name));
 
+        // (frankenredis-9hori) Everything from here is independent of HOW the registrations
+        // were obtained, so it is shared with `function_load_with_registrations`.
+        self.finish_function_load(lib_name, engine, code, functions)
+    }
+
+    /// Validate and insert a library whose registrations are already resolved.
+    ///
+    /// (frankenredis-9hori) Split out of `function_load` so the two sources of truth for a
+    /// library's registrations -- the source-text scan and the specs collected by actually
+    /// EXECUTING the body -- share one validation and insertion path. The checks below are
+    /// upstream's and belong to the library, not to the extraction method: rejecting a library
+    /// that registers nothing, and rejecting one that re-registers a function name another
+    /// library already owns.
+    fn finish_function_load(
+        &mut self,
+        lib_name: String,
+        engine: String,
+        code: &[u8],
+        functions: Vec<FunctionEntry>,
+    ) -> Result<String, StoreError> {
+
         // Upstream functions.c::functionsRegisterEngineLib rejects
         // libraries that don't register at least one function with
         // 'ERR No functions registered'. fr previously accepted
@@ -34411,6 +34432,78 @@ impl Store {
         self.function_libraries.insert(lib_name.clone(), library);
         self.dirty = self.dirty.saturating_add(1);
         Ok(lib_name)
+    }
+
+    /// Load a library using registrations resolved by EXECUTING the body, not by scanning it.
+    ///
+    /// (frankenredis-9hori) `function_load` derives a library's registrations by text-scanning
+    /// the source for `register_function(...)` and requires string and function LITERALS in the
+    /// argument positions. A name or callback held in a local is invisible to it, so fr FALSELY
+    /// REJECTS libraries that Redis 7.2.4 loads -- measured against live 7.2.4:
+    ///
+    ///     local n = 'dyn'; register_function(n, fn)          fr: ERR ... must be string
+    ///     local n = 'a'..'b'; register_function(n, fn)       fr: ERR ... must be string
+    ///     local cb = function() end; register_function('f', cb)  fr: ERR ... must be fn
+    ///
+    /// all three of which redis accepts. The direction matters: a false REJECTION means a
+    /// migration or mixed fleet silently loses libraries rather than gaining them.
+    ///
+    /// The evaluator already knows the answer. `lua_eval::function_load_execute` runs the body
+    /// and returns the specs the real `redis.register_function` builtin collected, including
+    /// flags and description read off the RUNTIME table. This entry point exists so those specs
+    /// can be handed to the store instead of being discarded and re-derived from the text.
+    ///
+    /// WHY THE STORE CANNOT SIMPLY EXECUTE: `fr-store` cannot depend on `fr-command`, so the
+    /// evaluation has to happen in a layer above and be passed down. That is the whole reason
+    /// this is a second entry point rather than a fix inside the existing one.
+    ///
+    /// ORDER IS OBSERVABLE AND THE TWO PATHS DISAGREE. This one preserves the order the specs
+    /// arrive in, which is the order `redis.register_function` was called -- upstream's order,
+    /// and what FUNCTION LIST should report. The scanning path instead sorts by name DESCENDING
+    /// (`functions.sort_by(|a, b| b.name.cmp(&a.name))`). That difference becomes visible on
+    /// FUNCTION LIST and FUNCTION DUMP the moment a caller is switched over, so it is called out
+    /// here rather than quietly reconciled: changing the scanning path's order is a separate
+    /// parity decision with its own differ run.
+    pub fn function_load_with_registrations(
+        &mut self,
+        code: &[u8],
+        replace: bool,
+        registrations: &[FunctionEntry],
+    ) -> Result<String, StoreError> {
+        // Header parsing is byte-oriented and lossy for the same reason as in `function_load`:
+        // upstream compiles from BYTES, so a non-UTF8 library must surface a name-validation or
+        // compile error and never WRONGTYPE. (frankenredis-7qmmr)
+        let code_owned = String::from_utf8_lossy(code);
+        let code_str: &str = &code_owned;
+        let (lib_name, engine) = Self::extract_lib_metadata(code_str)?;
+
+        if !replace && self.function_libraries.contains_key(&lib_name) {
+            return Err(StoreError::GenericError(format!(
+                "ERR Library '{lib_name}' already exists"
+            )));
+        }
+
+        // The name charset gate is upstream's `functionsVerifyName` and applies to a name
+        // however it was obtained -- a name computed at runtime is still subject to it. Same
+        // wording and same `Error registering functions: ` prefix as the scanning path, which is
+        // what keeps the two distinguishable from the bare-header path on the wire.
+        // (frankenredis-fnreg)
+        for entry in registrations {
+            if entry.name.is_empty()
+                || !entry
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                return Err(StoreError::GenericError(
+                    "ERR Error registering functions: ERR Library names can only contain \
+                     letters, numbers, or underscores(_) and must be at least one character long"
+                        .to_string(),
+                ));
+            }
+        }
+
+        self.finish_function_load(lib_name, engine, code, registrations.to_vec())
     }
 
     /// Delete a function library by name.

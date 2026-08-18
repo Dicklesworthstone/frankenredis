@@ -4179,13 +4179,46 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
 
 /// What a `redis.register_function` call names. (frankenredis-o500d)
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RegisterFunctionSpec {
-    pub(crate) name: Vec<u8>,
+pub struct RegisterFunctionSpec {
+    /// Registered function name, as BYTES: Lua strings are bytes, and a name computed at
+    /// runtime is exactly the case a source-text scan cannot see. (frankenredis-9hori)
+    pub name: Vec<u8>,
     /// (frankenredis-9hori) Flags from the table form's `flags = {...}`, in declaration
     /// order. Empty for the positional form, which upstream gives no flags either.
-    pub(crate) flags: Vec<Vec<u8>>,
+    pub flags: Vec<Vec<u8>>,
     /// Table form's `description`, if present.
-    pub(crate) description: Option<Vec<u8>>,
+    pub description: Option<Vec<u8>>,
+}
+
+impl RegisterFunctionSpec {
+    /// Convert a runtime-collected registration into the store's record shape.
+    ///
+    /// (frankenredis-9hori) The store cannot depend on `fr-command`, so the two types cannot be
+    /// unified; this is the one place the translation lives, so the five reload call sites in
+    /// `fr-runtime` and the FUNCTION LOAD path in `fr-command` cannot drift apart in how they
+    /// spell it.
+    ///
+    /// Names, flags and descriptions are collected as BYTES because Lua strings are bytes, while
+    /// the store holds `String`. Decoding is lossy for the same reason `function_load` parses its
+    /// header lossily: upstream compiles from bytes, so a non-UTF8 name must reach the name
+    /// CHARSET check and be rejected there with upstream's wording, rather than failing earlier
+    /// as a decode error of a different category. The charset gate only admits
+    /// `[A-Za-z0-9_]`, so any byte a lossy decode would have mangled is refused anyway --
+    /// the lossy step can never widen what is accepted. (frankenredis-7qmmr)
+    pub fn to_function_entry(&self) -> fr_store::FunctionEntry {
+        fr_store::FunctionEntry {
+            name: String::from_utf8_lossy(&self.name).into_owned(),
+            description: self
+                .description
+                .as_ref()
+                .map(|d| String::from_utf8_lossy(d).into_owned()),
+            flags: self
+                .flags
+                .iter()
+                .map(|f| String::from_utf8_lossy(f).into_owned())
+                .collect(),
+        }
+    }
 }
 
 /// Why a `redis.register_function` call was refused.
@@ -4309,7 +4342,7 @@ pub(crate) fn parse_register_function_args(
 /// The shebang is blanked (not stripped) by `lua_execution_source` so reported line numbers
 /// match the file the user sent. Callback bodies are NOT run here: a function literal is only
 /// defined at load time, which is exactly why the static scan skips their contents too.
-pub(crate) fn function_load_execute(
+pub fn function_load_execute(
     store: &mut Store,
     now_ms: u64,
     code: &[u8],
