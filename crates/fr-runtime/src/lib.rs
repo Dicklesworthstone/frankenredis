@@ -40267,6 +40267,23 @@ impl Runtime {
         // DEL/EXPIRE under OOM = divergent from redis 7.2.4 AND a recovery trap.
         // EXEC/scripts: their queued/inner denyoom commands are OOM-checked
         // individually. (frankenredis-oomdenyoom)
+        //
+        // (frankenredis-multi-queue-oom-1153w) THAT IS TRUE AT EXEC TIME AND HIDES A QUEUE-TIME
+        // GAP, so read it narrowly. `handle_exec_command` does call this gate once per queued
+        // command, but `execute_frame_internal` answers `+QUEUED` BEFORE it ever reaches here, so
+        // nothing is checked when the command is QUEUED. Upstream checks there, and its rule is
+        // wider than this one: processCommand sets `reject_cmd_on_oom = 1` for ANY command queued
+        // inside MULTI except EXEC/DISCARD/QUIT/RESET (server.c:3989-4006), because queuing itself
+        // consumes unbounded memory -- so a queued DEL is refused upstream although DEL is not
+        // denyoom. The refusal also taints the transaction, so upstream's EXEC then answers
+        // EXECABORT and applies NOTHING, where fr applies the rest of the transaction and reports
+        // the OOM as one element of the array.
+        //
+        // Do NOT close that by hoisting this call above the `+QUEUED` return: this gate refuses
+        // only denyoom commands and produces a per-command error, which is neither of the two
+        // behaviours upstream has there. The bead carries the shape and the one open question
+        // (what supplies the OOM verdict at queue time, given `over_maxmemory_live` is written by
+        // this function and so is one command stale there).
         if !argv
             .first()
             .is_some_and(|cmd| fr_command::command_is_denyoom(cmd))
