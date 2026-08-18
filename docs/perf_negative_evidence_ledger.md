@@ -45621,3 +45621,66 @@ and an effect inside that interval is not claimed.
    before writing the fix, not after.
 4. `frankenredis-sf510` is DONE and is not a template for this. Its cost was the cache key; this
    one's is not.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: NOT CERTIFIED — rounds=36 produced the FIRST fully-admissible `geosearch_2` run in four attempts (normalised 0.8969, worst 0.8796, BEHIND) and then FAILED to replicate at identical config (`frankenredis-eh2ct`)
+
+NO STANDING IS CLAIMED AND 0.8796 IS NOT CERTIFIED. One admissible draw and one null-failure at
+an IDENTICAL configuration is a flaky gate, and a flaky gate is not a passed gate. This row
+exists to record that the pre-registered fix WORKS AT LEAST SOMETIMES, to bank the one
+admissible reading as a data point, and to stop the next reader treating it as a standing.
+
+  fr ELF  bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  incumbent e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7 (7.2.4, jemalloc)
+
+`balanced_square_ab.py --shapes sizepairs`, ABBAABBA, rounds=36, ops=50,000, -P16, null +/-0.02.
+Same total sample as the rounds=9 / 200,000 run, four times the interleaving, exactly as
+`8a4a9811b` predicted.
+
+  DRAW  loadavg before -> after    MHz mean b/a   geosearch_2 nulls    verdict
+    1   13.81 25.93 23.25 -> 12.07   2761/3353     1.0029 / 0.9972     ADMISSIBLE, 3 of 3 rows
+    2   13.38 17.38 20.18 -> 33.77   ~/3374        1.0035 / 0.9796     NULL-FAILED
+
+### The pre-registered fix does work, and that is the finding
+
+`8a4a9811b` predicted that rounds and ops are separable -- total ops set the CI, ROUNDS set how
+finely drift is interleaved -- and that rounds=36 at 50,000 ops would carry the identical CI
+with four times the interleaving. Draw 1 is the first run in FOUR attempts on this shape where
+every row certified: 3 of 3 admissible, 0 null-failed, with `geosearch_2`'s nulls at 1.0029 and
+0.9972. It achieved that in a window that was 45 pct NON-STATIONARY at launch (1-min 14.95
+against 5-min 26.97), which is the adversarial case, and it is why the run was taken.
+
+The four attempts on this shape now read: 50k/9r STRADDLES-1; 200k/9r NULL-FAILED; 50k/36r
+ADMISSIBLE; 50k/36r NULL-FAILED. Interleaving is the parameter that moved the outcome.
+
+### The one admissible reading, offered as a data point and not a standing
+
+  geosearch_2   raw 1.0089 [1.0004, 1.0219]   normalised 0.8969   worst 0.8796   BEHIND
+  geosearch_64  raw 1.1081 [1.0971, 1.1179]   normalised 0.9851   worst 0.9647   STRADDLES-1
+  get_control   raw 1.1248 [1.1034, 1.1373]
+
+Quoting the WORST bound per the convention: 0.8796. That is DIRECTIONALLY CONSISTENT with the
+standing 0.9162 control-normalised figure -- both put fr BEHIND on this shape -- and further
+behind than it. Corroborating the SIGN of the standing figure is the useful part; the magnitude
+is one draw and is not offered as a replacement.
+
+### Why draw 2 failed, and it is a different failure from the last one
+
+Draw 2's nulls are 1.0035 and 0.9796 -- they DISAGREE, unlike the 200k run's 0.9737/0.9740 pair
+which agreed to 0.0003 and diagnosed monotonic drift. Here one null is clean and the fr arm's is
+2 pct off, in a window whose loadavg went 13.38 -> 33.77, a 2.5x swing DURING the run. So finer
+interleaving cancels a steady drift but not a 2.5x step change, which is the honest limit of the
+fix rather than a refutation of it.
+
+RETRY PREDICATE: rounds=36 is now the configuration to use -- do NOT go back to rounds=9, and do
+NOT raise ops, both of which are already measured worse here. What is still owed is REPLICATION:
+two consecutive admissible draws at rounds=36 whose worst bounds agree, in windows where the
+harness's own before/after loadavg differ by less than about 50 pct. Only then may a normalised
+figure for `geosearch_2` be quoted as a standing, and it must be the worst bound. If two more
+attempts fail to replicate, the conclusion is that this shape cannot be certified on a shared
+host at all and the family should be certified on `geosearch_64` -- which has now been ADMISSIBLE
+raw in all four attempts, at 1.1042 / 1.1290 / 1.1081 / 1.1107, and is the stable member of the
+pair. Note also that the harness flagged the normaliser as WIDER than the row in both admissible
+draws (3.0 vs 2.1 pct, 3.1 vs 1.3 pct); `get_control` as this group's normaliser still needs its
+own row.
