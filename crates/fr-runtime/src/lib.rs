@@ -40339,7 +40339,7 @@ impl Runtime {
             // single LF). Earlier versions emitted CRLF here, leaving
             // a stray 0x0d byte in the bulk-string payload that broke
             // raw-byte parsers diffing against vendored.
-            "id={} addr={} laddr={} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem={} multi-mem={} rbs=16384 rbp=16384 obl={} oll=0 omem=0 tot-mem={} events={} cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
+            "id={} addr={} laddr={} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem={} multi-mem={} rbs=16384 rbp=16384 obl={} oll={} omem={} tot-mem={} events={} cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
             session.client_id,
             peer,
             // (frankenredis-edwnn) upstream getClientSockname(c). The port was already
@@ -40368,7 +40368,32 @@ impl Runtime {
             session.qbuf_free_bytes,
             argv_mem,
             multi_mem,
-            session.output_buffer_bytes,
+            // (frankenredis-edwnn) obl / oll / omem, all three derived from the one
+            // quantity fr actually has: `session.output_buffer_bytes`, which is
+            // `conn.pending_output_bytes()` -- pending UNDRAINED write bytes.
+            //
+            // Upstream splits that same quantity across a STATIC buffer and a spill list:
+            // `obl` is `c->bufpos` (bytes in the static buffer, so it cannot exceed it),
+            // `oll` counts the spill blocks, and `omem` is their memory -- documented in
+            // networking.c as "should not include client->buf since we want to see 0 for
+            // static clients". fr models the static buffer at 16384, the same
+            // PROTO_REPLY_CHUNK_BYTES (server.h:177) that `rbs` is pinned to.
+            //
+            // obl was previously the FULL pending count, which both exceeded upstream's
+            // buffer-bounded field and would double-count the spill once `omem` reports it.
+            session.output_buffer_bytes.min(16384),
+            // oll: block count for the spill, at upstream's chunk size. This is the one
+            // MODELLED value here -- fr's output is a single growable buffer with no node
+            // list, so the count is what upstream WOULD hold, not a structure fr has.
+            session
+                .output_buffer_bytes
+                .saturating_sub(16384)
+                .div_ceil(16384),
+            // omem: the spill bytes themselves. No per-node overhead is added, unlike
+            // upstream's `reply_bytes + (sizeof(listNode)+sizeof(clientReplyBlock))*nodes`,
+            // because fr allocates no such nodes -- inventing that overhead would report
+            // memory the process does not use. 0 for a static client, matching upstream.
+            session.output_buffer_bytes.saturating_sub(16384),
             // (frankenredis-tepuj) Approximate upstream's c->tot_mem
             // accounting: per-client struct overhead (~432B baseline) +
             // the live read/write buffers + the 16384B reply-chunk
