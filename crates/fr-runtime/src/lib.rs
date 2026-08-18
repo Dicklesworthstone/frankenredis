@@ -49868,7 +49868,23 @@ fn protocol_error_to_resp(error: RespParseError) -> RespFrame {
         RespParseError::RecursionLimitExceeded => {
             RespFrame::Error("ERR Protocol error: recursion depth limit exceeded".to_string())
         }
-        _ => RespFrame::Error("ERR Protocol error: unknown parse error".to_string()),
+        // (frankenredis-2ubu0) EVERY OTHER VARIANT RENDERS ITSELF. This arm used to answer a
+        // fixed "unknown parse error", which swallowed EIGHT of the eighteen `RespParseError`
+        // variants -- including `UnauthenticatedBulkLength` / `UnauthenticatedMultibulkLength`,
+        // whose whole purpose is to carry upstream's pre-AUTH wording, and six others whose
+        // `Display` is upstream's text verbatim ("too big inline request", "unbalanced quotes in
+        // request", both "too big ... count string", "expected '$', got 'X'").
+        //
+        // `fr-server::handle_parse_error` has always rendered these correctly by formatting the
+        // error directly, so the two renderers of the same error disagreed -- the same shape as
+        // frankenredis-fnukn's envelope and frankenredis-mzkxl's "exceeds limit". Deferring to
+        // `Display` here also means a variant added later renders its own text instead of
+        // silently degrading, which is how these eight accumulated unnoticed.
+        //
+        // The explicit arms above are left alone: four of them deliberately word things
+        // differently from `Display`, so collapsing the whole function would move three messages
+        // at once. That reconciliation is its own decision.
+        other => RespFrame::Error(format!("ERR Protocol error: {other}")),
     }
 }
 
