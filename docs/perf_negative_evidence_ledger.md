@@ -46670,3 +46670,117 @@ is larger. Reopen the allocator question only on a shape whose profile shows mis
 DOUBLE-DIGIT percentage of the op, which `geosearch_2` at ~63 misses against ~13,200
 instructions is not. The mimalloc standing of 0.8578 worst bound (`f8067cba3`) is untouched by
 this row and remains the certified figure for `geosearch_2`.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: REJECT (UNRESOLVED) — the same reorder that fixed LPUSH does nothing measurable on RPUSH, and a frame that shrinks by 2 came with a whole-program delta of +1.03; plus a CORRECTION withdrawing `14091fc7b`'s vs-redis figures as SIZING (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), TWO-BINARY A/B
+with tree stability proven. CV was NOT used, as a gate or otherwise. No timing verdict is
+claimed. REVERTED — `crates/fr-store/src/packed_set.rs` is byte-identical to HEAD.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — this row banks no vs-incumbent ratio, and its
+second half WITHDRAWS one.
+
+`14091fc7b`'s retry predicate #2 asked for exactly this: `push_back` still accumulates into
+`lp_bytes` BEFORE `maybe_promote`, the front path was moved after it, and the same reorder might
+be free on the back too. Reopened, measured in both regimes, and refused.
+
+### BOTH REGIMES STRADDLE ZERO, AND THE SWING IS TEN TIMES THE EFFECT
+
+    regime                 A/A null      BEFORE      AFTER       delta
+    Deque  (seed 200)      1.001622    2,082.07   2,080.94     −1.13 instr  (−0.05 pct)
+                           0.999836    2,071.70   2,084.58    +12.88 instr  (+0.62 pct)
+    Packed (3,000 keys)    0.998572    2,132.27   2,133.31     +1.03 instr  (+0.05 pct)
+                           0.999537    2,132.84   2,123.21     −9.63 instr  (−0.45 pct)
+
+  Both regimes change SIGN between draws, and the draw-to-draw swing is 14.01 and 10.66
+  instructions against a frame effect of one to two. The tightest null in the set (0.016 pct)
+  belongs to the +12.88 pct draw, so this is not a case of one loose reading to discard — the
+  instrument was at its most resolved precisely where it disagreed with draw 1.
+
+### THE DECISIVE DATUM IS A FRAME THAT SHRANK WHILE THE PROGRAM GREW
+
+    frame `push_back`      Deque   112.96 -> 111.96  (−1)   in BOTH draws
+                           Packed   29.00 ->  27.00  (−2)   in BOTH draws
+
+  The frame is exact and reproducible: the function really is one to two instructions smaller,
+  in both regimes, every time. And in Packed draw 1 that −2 frame came with a whole-program
+  delta of **+1.03**. The instructions did not vanish; they moved out of `push_back` into an
+  inlined caller, which the per-function view cannot see and the whole-program view cannot
+  resolve.
+
+    THAT IS THE REASON THIS IS A REJECT AND NOT A KEEP-ON-FRAME-EVIDENCE. A smaller function
+    with identical semantics LOOKS like a free win, and the frame table endorses it. It is not
+    one. `feedback_quote_the_frame_not_the_process_total` says a whole-process total is the
+    wrong numerator; the converse holds too, and this row is the counter-example: a FRAME is
+    not a program either, and when the two disagree neither one gets to decide alone.
+
+  Contrast the front lever this reorder came from, which shipped: there the frame moved by 3,
+  the whole-program effect reproduced in two draws per regime, and the control regime's
+  straddle was confirmed rather than assumed. Same edit, different function, different verdict —
+  and the difference is visible in the data rather than argued from it.
+
+### CORRECTION — `14091fc7b`'s vs-redis FIGURES ARE SIZING, NOT CERTIFIED
+
+`scripts/certification_window.py` has existed in this repo since 15:56 today and I did not run
+it before publishing that row. It refuses a ratio OUTRIGHT when any cargo/rustc process is
+running, because those share the `ubuntu` uid and none can be attributed away. Peer builds were
+running in this session — seven at one point — so the front row's draws cannot be assumed clean.
+
+MY OWN DATA CONFIRMS THE GATE'S PREMISE INDEPENDENTLY, on a command family it was not built
+from. Across five draws of the IDENTICAL Deque LPUSH shape, same harness, same session:
+
+    fr, `f6f69201` AFTER arm      2,069.17   2,069.33            0.008 pct apart
+    redis 7.2.4, same shape       4,323.61 ... 4,597.58          6.34 pct apart
+
+  The numerator is stable to eight thousandths of a percent while the denominator moves six per
+  cent. The implied standing therefore spans 0.4501x to 0.4786x, and every bit of that band is
+  the denominator. So:
+
+    WITHDRAWN: "0.4868x -> 0.4786x" as a CERTIFIED standing figure for LPUSH.
+    STANDS:    the −1.66 pct worst-bound DELTA, which is fr-vs-fr. The gate rates `fr-only`
+               FIT under exactly the conditions that make `ratio` unfit, and it was FIT when
+               checked during this session's measurements.
+
+  Nothing published overstated: the front row quoted 0.4786x, which is the CONSERVATIVE end of
+  that band, and it recorded per-arm idle, loadavg and MHz throughout. What it did not do is
+  count peer cargo processes, and that is the check that was available and skipped.
+
+### PROVENANCE
+
+  ELFs          BEFORE bench_elf_sha256 = 005febec9a04ce5c08560a8dcc36a9885b1865d5690124e1a25e6cf5a8660ad0
+                AFTER  bench_elf_sha256 = c095ccd084e28b2ac67df3c1fd4be74161e534834f76f8051643a7730e5e3887
+                `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1. Every build log
+                checked for BOTH `^error` and rch refusals: 0 of each, three builds. `df` run
+                immediately before each; /data held at 127G.
+  stability     BEFORE, AFTER, BEFORE again: 005febec == 005febec bit-identical.
+  preflight     `check-candidate push_back` returned BLOCKED on 25 rows. All twelve shown are
+                clone-vs-move, batch-push helpers, arena tails or RDB-load; NONE measures the
+                ORDERING of the `lp_bytes` accumulate against `maybe_promote`, a quantity that
+                did not exist as a question until `14091fc7b` earlier today. Recorded here
+                because the tool is explicit that a block means someone has been here, not that
+                they measured this lever.
+  harness       scratchpad `push_slope.py` + `pair_slope.py`, 2,000 vs 6,000 single-element
+                RPUSH commands differenced, one fresh working directory per point, all four arms
+                of a draw in ONE process.
+  incumbent     vendored redis 7.2.4, verified sha=d2c8a4b9 == vendored source HEAD. Its arm ran
+                live in every draw; its figures here are SIZING for the reason given above.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor.
+  PER-ARM idle/loadavg/MHz   Idle from a `/proc/stat` delta at every arm boundary. Deque draw 1
+                84.5-88.2 pct, loadavg 8.94/9.31/11.16, MHz 2121-3031. Packed draw 1 89.2-89.4
+                pct, loadavg 7.82/8.98/10.97, MHz 2134-2323. Deque draw 2 83.8-89.1 pct,
+                loadavg 7.55->7.70, MHz 2085-2462. Packed draw 2 81.9 pct, loadavg RISING to
+                16.95/10.83/11.44, MHz 2239 — that last arm is the least settled of the four and
+                is the −9.63 draw, which is one more reason not to read a win out of it.
+  gates         `cargo test -p fr-store --lib qj6jn` passed 4/4 with the reorder in place, so
+                the refusal is on measurement and not on correctness.
+
+RETRY PREDICATE:
+  1. Do NOT re-run this as a whole-program slope. The effect is one to two instructions and the
+     instrument swings ten. It needs a different instrument — a per-call-site attribution that
+     can follow the instructions into the inlined caller — or it needs to stay closed.
+  2. `ChunkedList::push_back` (hardcoded fill −2) remains the last unsized caller and is a
+     SEPARATE question from this one; attribute its call rate before touching it.
+  3. Run `certification_window.py --for ratio` before publishing ANY vs-incumbent figure, and
+     `--for fr-only` for a candidate-vs-control delta. The two gates disagree by design and the
+     cheap mistake is to use the loose verdict for the strict claim.
