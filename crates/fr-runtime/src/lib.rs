@@ -49637,7 +49637,7 @@ mod tests {
             seed(&mut generic);
 
             let tail: Vec<&[u8]> = shape[1..].to_vec();
-            let got = fast.execute_plain_zintercard_borrowed(&tail, 100);
+            let got = fast.execute_plain_zintercard_borrowed(&tail, 100, None);
             let want = generic.execute_frame(command(shape), 100);
 
             if let Some(reply) = got {
@@ -51439,7 +51439,7 @@ mod tests {
         ];
         for (ts, (key, el, rank)) in (2..).zip(cases) {
             let f = direct
-                .execute_plain_lpos_rank_borrowed(key, el, rank, ts)
+                .execute_plain_lpos_rank_borrowed(key, el, rank, ts, None)
                 .expect("lpos RANK fast path should engage");
             let g = generic.execute_frame(command(&[b"LPOS", key, el, b"RANK", rank]), ts);
             assert_eq!(f, g, "key={key:?} el={el:?} rank={rank:?}");
@@ -51450,7 +51450,7 @@ mod tests {
         for (ts, rank) in (100u64..).zip(defer) {
             assert!(
                 direct
-                    .execute_plain_lpos_rank_borrowed(b"l", b"b", rank, ts)
+                    .execute_plain_lpos_rank_borrowed(b"l", b"b", rank, ts, None)
                     .is_none(),
                 "lpos RANK must defer rank={rank:?}"
             );
@@ -51501,7 +51501,7 @@ mod tests {
         ];
         for (ts, (key, el, count)) in (2..).zip(cases) {
             let f = direct
-                .execute_plain_lpos_count_borrowed(key, el, count, ts)
+                .execute_plain_lpos_count_borrowed(key, el, count, ts, None)
                 .expect("lpos COUNT fast path should engage");
             let g = generic.execute_frame(command(&[b"LPOS", key, el, b"COUNT", count]), ts);
             assert_eq!(f, g, "key={key:?} el={el:?} count={count:?}");
@@ -51514,7 +51514,7 @@ mod tests {
         for (ts, count) in (100u64..).zip(defer) {
             assert!(
                 direct
-                    .execute_plain_lpos_count_borrowed(b"l", b"b", count, ts)
+                    .execute_plain_lpos_count_borrowed(b"l", b"b", count, ts, None)
                     .is_none(),
                 "lpos COUNT must defer count={count:?}"
             );
@@ -51964,7 +51964,7 @@ mod tests {
         let keys: [&[u8]; 4] = [b"a", b"missing", b"b", b"l"];
         let mut out = Vec::new();
         assert_eq!(
-            fast.execute_plain_mget_borrowed_into(&keys, 2, false, &mut out),
+            fast.execute_plain_mget_borrowed_into(&keys, 2, false, &mut out, None),
             Some(()),
             "default MGET should take borrowed fast path"
         );
@@ -51986,7 +51986,7 @@ mod tests {
         // single-key MGET also fast-pathed
         let mut one_out = Vec::new();
         assert_eq!(
-            fast.execute_plain_mget_borrowed_into(&[b"a"], 3, false, &mut one_out),
+            fast.execute_plain_mget_borrowed_into(&[b"a"], 3, false, &mut one_out, None),
             Some(()),
             "single-key MGET should take borrowed fast path"
         );
@@ -52030,13 +52030,13 @@ mod tests {
         let keys: [&[u8]; 1] = [b"a"];
         let mut out = Vec::new();
         assert!(
-            rt.execute_plain_mget_borrowed_into(&keys, 2, false, &mut out)
+            rt.execute_plain_mget_borrowed_into(&keys, 2, false, &mut out, None)
                 .is_some()
         );
         rt.execute_frame(command(&[b"MULTI"]), 3);
         out.clear();
         assert!(
-            rt.execute_plain_mget_borrowed_into(&keys, 4, false, &mut out)
+            rt.execute_plain_mget_borrowed_into(&keys, 4, false, &mut out, None)
                 .is_none()
         );
     }
@@ -53749,7 +53749,7 @@ mod tests {
         ]) {
             let mut out = Vec::new();
             direct
-                .execute_plain_zrangebylex_borrowed_into(key, min, max, ts, &mut out)
+                .execute_plain_zrangebylex_borrowed_into(key, min, max, ts, &mut out, None)
                 .expect("ZRANGEBYLEX _into");
             assert_eq!(
                 out,
@@ -53769,7 +53769,7 @@ mod tests {
         ]) {
             let mut out = Vec::new();
             direct
-                .execute_plain_zrevrangebylex_borrowed_into(key, max, min, ts, &mut out)
+                .execute_plain_zrevrangebylex_borrowed_into(key, max, min, ts, &mut out, None)
                 .expect("ZREVRANGEBYLEX _into");
             assert_eq!(
                 out,
@@ -53781,7 +53781,7 @@ mod tests {
         // Malformed lex bound (no [/(/-/+ prefix) defers to generic.
         assert!(
             direct
-                .execute_plain_zrangebylex_borrowed_into(b"z", b"bad", b"+", 90, &mut Vec::new())
+                .execute_plain_zrangebylex_borrowed_into(b"z", b"bad", b"+", 90, &mut Vec::new(), None)
                 .is_none()
         );
         assert_eq!(
@@ -54077,7 +54077,7 @@ mod tests {
             let mut out = Vec::new();
             direct
                 .execute_plain_zrangebylex_limit_borrowed_into(
-                    key, min, max, off, cnt, ts, &mut out,
+                    key, min, max, off, cnt, ts, &mut out, None,
                 )
                 .expect("ZRANGEBYLEX LIMIT _into");
             assert_eq!(
@@ -54155,7 +54155,8 @@ mod tests {
                     b"-1",
                     b"5",
                     90,
-                    &mut Vec::new()
+                    &mut Vec::new(),
+                    None
                 )
                 .is_none()
         );
@@ -55746,7 +55747,7 @@ mod tests {
         ];
         for tail in ok_tails {
             let f = direct
-                .execute_plain_sintercard_borrowed(tail, ts)
+                .execute_plain_sintercard_borrowed(tail, ts, None)
                 .expect("sintercard fast path");
             let g_argv: Vec<&[u8]> = std::iter::once(b"SINTERCARD".as_slice())
                 .chain(tail.iter().copied())
@@ -55758,12 +55759,12 @@ mod tests {
         // defer cases: malformed/negative LIMIT, numkeys mismatch, bad numkeys
         assert!(
             direct
-                .execute_plain_sintercard_borrowed(&[b"2", b"a", b"b", b"LIMIT", b"-1"], ts)
+                .execute_plain_sintercard_borrowed(&[b"2", b"a", b"b", b"LIMIT", b"-1"], ts, None)
                 .is_none()
         );
         assert!(
             direct
-                .execute_plain_sintercard_borrowed(&[b"2", b"a", b"b", b"LIMIT", b"x"], ts)
+                .execute_plain_sintercard_borrowed(&[b"2", b"a", b"b", b"LIMIT", b"x"], ts, None)
                 .is_none()
         );
         assert!(
@@ -55771,17 +55772,18 @@ mod tests {
                 .execute_plain_sintercard_borrowed(
                     &[b"2", b"a", b"b", b"LIMIT", b"1", b"LIMIT", b"2"],
                     ts,
+                    None,
                 )
                 .is_none()
         );
         assert!(
             direct
-                .execute_plain_sintercard_borrowed(&[b"3", b"a", b"b"], ts)
+                .execute_plain_sintercard_borrowed(&[b"3", b"a", b"b"], ts, None)
                 .is_none()
         );
         assert!(
             direct
-                .execute_plain_sintercard_borrowed(&[b"0", b"a"], ts)
+                .execute_plain_sintercard_borrowed(&[b"0", b"a"], ts, None)
                 .is_none()
         );
         assert_eq!(
