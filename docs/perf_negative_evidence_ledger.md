@@ -53230,6 +53230,128 @@ commands. Ir is immune to load; a slope between two points of different DURATION
      row is about laziness, not about the cost of the eager walk itself, so the walk is still
      open ground.
 
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the listpack backlen writer carried four cold arms in line with the one-byte form every element uses; splitting them out is −1.40 pct worst bound, and the same run found a +2.4 pct REGRESSION I shipped yesterday (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) and deterministic
+per-frame SELF costs, TWO-BINARY A/B with the A/A and the A/B in ONE INVOCATION and the candidate
+arm BRACKETED by control arms. CV was NOT used, as a gate or otherwise — no coefficient of
+variation appears in this row's decision path and none was computed. No timing verdict is claimed:
+the measurand is a retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 0.999709, bootstrap 95% CI [0.999047, 1.000290] over six
+draws, taken in the same invocation as the A/B it gates; the per-draw table is below. The
+bootstrap median-CI is the verdict gate and it excludes zero.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### PROVENANCE
+
+  ELF           AFTER `353231a9010efc1039ba3a5ff29fb4e15949c97d58e66bf90ee2cdca69cda8a9`,
+                BEFORE `c759b478485fc78da6c516d28245b26f0c2143fb8daf2532b121487af75bf1e0`.
+  bench_elf_sha256=353231a9010efc1039ba3a5ff29fb4e15949c97d58e66bf90ee2cdca69cda8a9
+
+  As in `fce3dd6d3` and `308db786f`: the server ELF does not print its own SHA-256, so each arm was
+  BOOTED and hashed from `/proc/<pid>/exe`, the kernel's view of the RUNNING image. Not a
+  self-report, and not claimed as one. Both arms were built two minutes apart with the same peer
+  WIP present, so it cancels; a later rebuild produced a different ELF because a peer's tree moved,
+  and that later ELF is NOT either arm.
+
+### THE LEVER — THE SAME SPLIT AS `308db786f`, AT A SECOND SITE
+
+Every listpack entry written on the DUMP path ends in `encode_listpack_backlen`, a five-arm chain
+whose first arm is `buf.push(len as u8)`. `len` is the entry's ENCODED size, so the four
+multi-byte arms need an element of 127 bytes or more — a normal list element never reaches them.
+Callgrind charged the fused form 6,900.0 instr/key, 23.00 per element, on the RPUSH+DUMP shape.
+
+The four cold arms are the bulk of the function's code and sat in line with the hot one. Moving
+them behind a call the hot path never makes leaves a compare and a push, and lets the wrapper
+inline into `encode_listpack_string_entry`. The moved code is VERBATIM.
+
+    AFTER: the `encode_listpack_backlen` frame is gone from the profile entirely.
+
+  ORACLE: `encode_listpack_backlen_split_matches_the_fused_reference_qj6jn` writes the fused chain
+  out by hand rather than calling it, and compares at 0, 127, 16,383, 2,097,151, 268,435,455,
+  2^30 and 65,535, each ±1 and ±2, plus every length 0..299. The boundaries matter more than usual
+  because the original chain does NOT use one comparator throughout — `len <= 127` then
+  `len < 16_383` — so a tidy-up to a uniform `<=` would silently move the 16,382/16,383 boundary.
+
+### THE MEASUREMENT
+
+    RPUSH+DUMP (fill 128, nelem 300, slope 10 vs 30 keys)
+    draw   BEFORE_a     BEFORE_b     AFTER        cand-pct    null-pct
+      1    219,271.20   219,261.90   215,623.05   −1.6617     +0.0042
+      2    219,159.35   219,377.20   215,658.90   −1.6461     −0.0993
+      3    219,281.70   219,418.75   215,573.20   −1.7219     −0.0625
+      4    219,162.30   219,077.00   215,743.25   −1.5409     +0.0389
+      5    219,045.70   219,245.60   216,066.60   −1.4050     −0.0912
+      6    219,094.10   219,052.35   215,641.00   −1.5667     +0.0191
+
+    A/B median −1.6064 pct, bootstrap 95% CI [−1.6918, −1.4730], n=6 draws
+    WORST SINGLE DRAW −1.4050 pct  <- the figure this row claims
+    null median 0.999709 as a ratio (within 2 pct of unity); the same six draws as absolute
+         percentages have median 0.0507 pct, CI [0.0117, 0.0952]. Effect is ~28x the null.
+    83.1-88.7 pct idle, loadavg 8.45-9.28, MHz mean 2073-2470 against a 1429-4292 spread.
+
+    Deterministic frame total, same shape: 219,435.0 -> 216,217.6, −3,217.4 (−1.466 pct).
+
+### THE TWO CONTROLS THIS LEVER COULD HAVE FAILED
+
+    ALL-INTEGER list (300 elements, entries encode to 1..9 data bytes — hot arm only)
+      −1.0044 / −0.9267 / −0.9838 pct, nulls −0.0174 / +0.0635 / +0.0162.  A WIN.
+
+    ALL-BIG list (200-byte elements, entries exceed 127 bytes — the COLD arm is the one that runs)
+      +0.4315 / −0.5946 / +0.1247 pct, nulls −0.6123 / +0.0082 / −0.0052.  STRADDLES ZERO and
+      sits inside its own null. This is the shape where an extra call could only cost, and no
+      cost is measurable at three draws.
+
+  The big-element control is the one that mattered: it is the only shape where this change adds
+  work rather than removing it, and it is reported here because it is the shape a reader would
+  otherwise have to ask about.
+
+### THE SAME HARNESS, TURNED ON YESTERDAY'S LEVER
+
+`308db786f` (yesterday, the `list_lp_entry_bytes` split) predicted that an
+all-integer list takes the preserved slow path plus one extra branch, so expect "a small LOSS",
+and recorded that nobody had measured it. Measured now, on the same harness, `fr_head_restore` vs
+`fr_split_lp`:
+
+    ALL-INTEGER list   +2.3746 / +2.4581 / +2.7757 pct   nulls +0.0803 / +0.0919 / +0.6870
+
+  That is a LOSS of about 2.4 pct, not a small one, and it is bigger than the +0.92 pct that lever
+  wins on the string RPUSH shape (though smaller than its 6.37 pct on RESTORE). The mechanism is
+  visible: an integer element now pays the inlined wrapper's branch AND a call into the
+  `#[inline(never)]` helper AND that helper's frame, where before it paid ONE call into a fused
+  function. Roughly 30 instructions per element, which is the size of an extra call plus frame.
+
+  THIS IS A LIVE REGRESSION ON MAIN, not a caveat. It is recorded here rather than folded quietly
+  into a retry predicate because the number contradicts the word "small" in my own row, and lists
+  of numeric IDs are not an exotic shape. The fix is the next lever: the outlined helper exists
+  only because `list_lp_int` ends in `str::from_utf8(..).parse::<i64>()`, whose outparam is what
+  forces the frame. Computing the value with an open-coded digit fold would let the whole thing
+  inline and leave neither shape paying for a call.
+
+### PARITY
+
+    BEFORE-vs-AFTER DUMP BYTES: 0 of 84 diverging
+    workload sweep vs redis 7.2.4: 4 of 42 diverging, UNCHANGED
+    fr-store 938 / fr-persist 227, 0 failures; clippy clean; fmt diffs 7, unchanged baseline.
+
+### RETRY PREDICATES
+
+  1. FIX THE INTEGER REGRESSION ABOVE FIRST. Nothing else on this route should land before it.
+     The target is to keep the string win while returning the integer shape to parity or better;
+     the measurement that decides it is the three-draw all-integer control in this row, which
+     must come back at or above zero against `fr_head_restore`.
+  2. `encode_listpack_string_entry` absorbed the inlined backlen and now reads 15,900 instr/key
+     (53.00/elem) where it read 12,300. That is bookkeeping, not new work — the shape total fell
+     — but it means the frame is now the largest DUMP-side term and the next attribution on this
+     route must not read its growth as a regression.
+  3. Do NOT apply this split a third time on the strength of two successes. Both winners were
+     small functions whose cold half forced a stack frame on the hot half. A function without
+     that property is a different case, and the big-element control above is the kind of shape
+     that would expose the difference.
+
 ## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — the zbyscore cascade takes the cached gate: **26 executors, 86.0 -> ABSENT on all six measured shapes**, against a null that reads the same integer on both arms — and the A/B caught a seventh route I had missed (`frankenredis-getexgate`)
 
 Claim class: SELF-SPEEDUP
