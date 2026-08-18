@@ -6197,6 +6197,51 @@ fn accept_connections(
                     *next_handle = MAX_LISTENERS;
                 }
 
+                // (frankenredis-w1djx) PROTECTED MODE, which fr accepted as config and never
+                // enforced. Upstream refuses non-loopback connections when protected mode is on
+                // and the default user has no password (networking.c: `server.protected_mode &&
+                // DefaultUser->flags & USER_FLAG_NOPASS`, then `connIsLocal(conn) != 1`). fr
+                // defaulted the directive to `yes`, exactly as upstream does, and accepted every
+                // remote connection anyway -- so an operator relying on redis's default safety got
+                // an open server.
+                //
+                // Both halves are read LIVE, not captured at startup: the remedy in the message
+                // below is a runtime `CONFIG SET protected-mode no`, and a password can be set
+                // after boot too.
+                if runtime.server.protected_mode_enabled()
+                    && runtime.server.default_user_is_nopass()
+                    && !peer_addr.ip().is_loopback()
+                {
+                    // Upstream's wording, verbatim, because operators search for it and because
+                    // it is the only place the four remedies are enumerated.
+                    let err = concat!(
+                        "-DENIED Redis is running in protected mode because protected ",
+                        "mode is enabled and no password is set for the default user. ",
+                        "In this mode connections are only accepted from the loopback interface. ",
+                        "If you want to connect from external computers to Redis you ",
+                        "may adopt one of the following solutions: ",
+                        "1) Just disable protected mode sending the command ",
+                        "'CONFIG SET protected-mode no' from the loopback interface ",
+                        "by connecting to Redis from the same host the server is ",
+                        "running, however MAKE SURE Redis is not publicly accessible ",
+                        "from internet if you do so. Use CONFIG REWRITE to make this ",
+                        "change permanent. ",
+                        "2) Alternatively you can just disable the protected mode by ",
+                        "editing the Redis configuration file, and setting the protected ",
+                        "mode option to 'no', and then restarting the server. ",
+                        "3) If you started the server manually just for testing, restart ",
+                        "it with the '--protected-mode no' option. ",
+                        "4) Set up an authentication password for the default user. ",
+                        "NOTE: You only need to do one of the above things in order for ",
+                        "the server to start accepting connections from the outside.\r\n"
+                    );
+                    let _ = stream.write_all(err.as_bytes());
+                    let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    runtime.track_rejected_connection();
+                    continue;
+                }
+
                 if let Err(e) = stream.set_nodelay(true) {
                     eprintln!("warn: failed to set TCP_NODELAY: {e}");
                 }

@@ -4457,6 +4457,18 @@ pub struct ServerState {
     pub shutdown_requested: bool,
     /// If true, skip the final SAVE on shutdown.
     pub shutdown_nosave: bool,
+    /// (frankenredis-w1djx) SHUTDOWN NOW: skip the replica grace period.
+    ///
+    /// fr parsed this flag and threw it away. Upstream honours it -- `prepareForShutdown` waits
+    /// only when `!(flags & SHUTDOWN_NOW)` -- and NOSAVE deliberately does NOT imply it: not
+    /// saving an RDB is unrelated to whether replicas have caught up.
+    pub shutdown_now: bool,
+    /// (frankenredis-w1djx) Deadline of the replica grace period, when one is running.
+    ///
+    /// `Some` exactly while upstream's `isShutdownInitiated()` would be true, which is what makes
+    /// `SHUTDOWN ABORT` and the INFO countdown meaningful: both describe a window that did not
+    /// previously exist, because fr exited on the next event-loop turn.
+    pub shutdown_deadline_ms: Option<u64>,
     /// Command time budget in ms (CONFIG SET busy-reply-threshold / lua-time-limit).
     command_time_budget_ms: u64,
     /// Whether command latency histograms should be recorded for INFO latencystats.
@@ -4651,6 +4663,8 @@ impl Default for ServerState {
             proto_max_bulk_len: 536_870_912,        // Redis 7.2 default (512 MiB)
             shutdown_requested: false,
             shutdown_nosave: false,
+            shutdown_now: false,
+            shutdown_deadline_ms: None,
             command_time_budget_ms: 5000,
             last_save_time_sec: 0,
             latency_tracking: true,
@@ -5127,6 +5141,30 @@ impl ServerState {
             .config_overrides
             .get("aof-disable-auto-gc")
             .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
+    }
+
+    /// (frankenredis-w1djx) Is protected mode in force? Upstream's default is `yes`.
+    ///
+    /// Read LIVE from the config rather than captured at startup, and that is load-bearing: the
+    /// remedy upstream prints in its own rejection message is `CONFIG SET protected-mode no` from
+    /// the loopback interface. A value snapshotted at boot would make that instruction a lie.
+    #[must_use]
+    pub fn protected_mode_enabled(&self) -> bool {
+        self.config_overrides
+            .get("protected-mode")
+            .map_or(true, |value| value.eq_ignore_ascii_case("yes"))
+    }
+
+    /// (frankenredis-w1djx) Upstream's `DefaultUser->flags & USER_FLAG_NOPASS`.
+    ///
+    /// `auth_required` already encodes exactly this: its own comment records that a fresh
+    /// connection auto-authenticates iff the DEFAULT user is nopass, and that adding other
+    /// password-protected users must not change that. So the protected-mode gate can be phrased
+    /// against it directly instead of re-deriving "is there a password" and risking a second,
+    /// subtly different answer.
+    #[must_use]
+    pub fn default_user_is_nopass(&self) -> bool {
+        !self.auth_state.auth_required()
     }
 
     /// (frankenredis-w1djx) Upstream's `isReadyToShutdown`: may the server exit without losing
@@ -46191,8 +46229,13 @@ impl Runtime {
         }
         if abort {
             if self.server.shutdown_requested {
+                // (frankenredis-w1djx) Upstream's cancelShutdown clears the pause too. Without
+                // the deadline reset the grace period would keep running and the server would
+                // still exit at its expiry, having answered OK to the abort.
                 self.server.shutdown_requested = false;
                 self.server.shutdown_nosave = false;
+                self.server.shutdown_now = false;
+                self.server.shutdown_deadline_ms = None;
                 return RespFrame::SimpleString("OK".to_string());
             }
             return RespFrame::Error("ERR No shutdown in progress.".to_string());
@@ -46200,6 +46243,7 @@ impl Runtime {
         // Signal the server event loop to initiate graceful shutdown
         self.server.shutdown_requested = true;
         self.server.shutdown_nosave = flags & 0b0001 != 0;
+        self.server.shutdown_now = flags & 0b0100 != 0;
         RespFrame::SimpleString("OK".to_string())
     }
 
