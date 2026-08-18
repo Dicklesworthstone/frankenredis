@@ -5686,6 +5686,42 @@ fn main() -> ExitCode {
 
         // Check for graceful shutdown request
         if runtime.server.shutdown_requested {
+            // (frankenredis-w1djx) THE REPLICA GRACE PERIOD, which `shutdown-timeout` has been
+            // configuring for nothing. Upstream's `prepareForShutdown` does not exit while a
+            // replica is behind: unless SHUTDOWN NOW was given and the timeout is non-zero, it
+            // records a deadline and lets `serverCron` finish the shutdown as soon as every
+            // replica has acknowledged the current offset, or the deadline passes.
+            //
+            // fr exited on the next event-loop turn regardless, so writes a replica had not yet
+            // acknowledged were simply lost. It also made `SHUTDOWN ABORT` almost unreachable --
+            // there was no window to abort.
+            //
+            // The deadline is a HARD bound: the `now >= deadline` arm runs before the readiness
+            // test, so a wrong readiness answer can delay shutdown by at most `shutdown-timeout`
+            // and can never prevent it.
+            let now = now_ms();
+            if !runtime.server.shutdown_now {
+                let timeout_secs = runtime.server.configured_shutdown_timeout_secs();
+                match runtime.server.shutdown_deadline_ms {
+                    None if timeout_secs != 0 && !runtime.server.is_ready_to_shutdown() => {
+                        let deadline = now.saturating_add(timeout_secs.saturating_mul(1000));
+                        runtime.server.shutdown_deadline_ms = Some(deadline);
+                        eprintln!(
+                            "info: waiting up to {timeout_secs}s for replicas to catch up before shutting down"
+                        );
+                        continue;
+                    }
+                    Some(deadline) if now < deadline && !runtime.server.is_ready_to_shutdown() => {
+                        continue;
+                    }
+                    Some(deadline) if now >= deadline => {
+                        eprintln!(
+                            "warn: shutdown grace period expired with replicas still behind"
+                        );
+                    }
+                    _ => {}
+                }
+            }
             if !runtime.server.shutdown_nosave {
                 // Attempt a final SAVE before exiting
                 let save_ts = std::time::SystemTime::now()
