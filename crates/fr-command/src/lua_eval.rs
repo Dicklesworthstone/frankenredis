@@ -13175,7 +13175,16 @@ fn lua_to_resp_at_depth(val: &LuaValue, resp3: bool, depth: u32) -> RespFrame {
         // Upstream replies an error and pops rather than aborting, so a
         // pathological reply costs the client its reply and nothing else. A
         // Rust stack overflow would abort the whole process instead.
-        return RespFrame::Error("reached lua stack limit".to_string());
+        // (frankenredis-5h2lu) "ERR " IS PART OF THE WIRE BYTES, and it is fr's job to write it.
+        // Upstream calls `addReplyErrorFormat(c, "reached lua stack limit")`, which reaches
+        // `addReplyErrorLength` -- and that prepends `-ERR ` whenever the message does not already
+        // start with `-` (networking.c:485-490). So 7.2.4 puts `-ERR reached lua stack limit` on
+        // the wire, not `-reached lua stack limit`. Without the prefix a client reading the error
+        // CODE sees `reached`, and fr's own `error_has_resp_code_prefix` would not recognise this
+        // as a coded error either. This is the same rule that makes fr spell out
+        // "ERR BY option of SORT denied ..." while sort.c passes the bare phrase; the one error
+        // that legitimately omits it is `shared.oomerr`, whose literal already begins with `-`.
+        return RespFrame::Error("ERR reached lua stack limit".to_string());
     }
     match val {
         LuaValue::Nil => RespFrame::BulkString(None),
@@ -22223,7 +22232,7 @@ end
                 }
 
                 assert!(
-                    matches!(cur, RespFrame::Error(m) if m.as_str() == "reached lua stack limit"),
+                    matches!(cur, RespFrame::Error(m) if m.as_str() == "ERR reached lua stack limit"),
                     "expected upstream's error at the ceiling, got {cur:?} after {levels} levels"
                 );
                 assert_eq!(
