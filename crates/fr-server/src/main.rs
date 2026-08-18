@@ -36762,26 +36762,23 @@ fn check_subscription_mode_gate(argv: &[Vec<u8>], _in_sub_mode: bool) -> Option<
     // frankenredis-gcll9). The runtime helper does the same in
     // fr-runtime::pubsub_blocked_command_name; the TCP-server gate
     // mirrors that logic here.
-    const CONTAINERS: &[&[u8]] = &[
-        b"acl",
-        b"client",
-        b"cluster",
-        b"command",
-        b"config",
-        b"debug",
-        b"function",
-        b"latency",
-        b"memory",
-        b"module",
-        b"object",
-        b"pubsub",
-        b"script",
-        b"slowlog",
-        b"xgroup",
-        b"xinfo",
-    ];
+    // (frankenredis-sentinel-acl-parent-fvjjb) This was a SECOND hand-written container list,
+    // and it had drifted from the one the runtime twin uses in both directions:
+    //
+    //   * `sentinel` was absent, so once 52418489e gave SENTINEL its 21 subcommands and
+    //     cf3a46132 taught the predicate about them, this gate rendered `'sentinel'` where
+    //     fr-runtime's `pubsub_blocked_command_name` -- which routes through
+    //     `canonical_command_fullname` -- rendered `'sentinel|masters'`. Two renderers of the
+    //     SAME upstream message disagreeing, in a comment that claims to mirror the other.
+    //   * `debug` was present, but DEBUG is not a container upstream: there are no debug-*.json
+    //     files and debug.json declares no container, so `c->cmd->fullname` is plain `debug`.
+    //     This gate answered `'debug|jmap'` for a name upstream reports as `'debug'`.
+    //
+    // Deriving from `command_has_subcommands_bytes` -- already `pub`, already the single source
+    // of truth for whether a name is namespaced, and already what the runtime path consults --
+    // fixes both and removes the drift by construction rather than by keeping two lists equal.
     let cmd_lower = String::from_utf8_lossy(cmd).to_ascii_lowercase();
-    let cmd_str = if CONTAINERS.contains(&cmd_lower.as_bytes())
+    let cmd_str = if fr_command::command_has_subcommands_bytes(cmd)
         && let Some(sub) = argv.get(1)
     {
         format!(
@@ -54114,6 +54111,52 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
     // bypass, so a PAUSE ALL is only liftable by its own deadline. fr must defer
     // the in-pause UNPAUSE (leave it buffered, send no reply, stay paused), not
     // execute it early.
+    #[test]
+    fn subscribe_mode_rejection_names_containers_like_upstream_fullname_fvjjb() {
+        // (frankenredis-sentinel-acl-parent-fvjjb) Upstream formats this rejection with
+        // `c->cmd->fullname`, which is `parent|sub` for a container and the bare name otherwise.
+        // fr had two lists deciding that -- this gate's and the runtime's -- and they disagreed.
+        let err = |argv: &[&[u8]]| -> String {
+            let owned: Vec<Vec<u8>> = argv.iter().map(|a| a.to_vec()).collect();
+            match check_subscription_mode_gate(&owned, true) {
+                Some(RespFrame::Error(msg)) => msg,
+                other => panic!("expected a rejection, got {other:?}"),
+            }
+        };
+
+        // The row that regressed: SENTINEL became a container in 52418489e.
+        assert!(
+            err(&[b"SENTINEL", b"MASTERS"]).contains("'sentinel|masters'"),
+            "{}",
+            err(&[b"SENTINEL", b"MASTERS"])
+        );
+        // DEBUG is NOT a container upstream -- no debug-*.json, no container in debug.json --
+        // so its fullname is the bare name even though it takes a sub-token.
+        assert!(
+            err(&[b"DEBUG", b"JMAP"]).contains("'debug'")
+                && !err(&[b"DEBUG", b"JMAP"]).contains("'debug|"),
+            "{}",
+            err(&[b"DEBUG", b"JMAP"])
+        );
+        // An ordinary container, and a plain command, both unchanged.
+        assert!(err(&[b"CONFIG", b"GET", b"maxmemory"]).contains("'config|get'"));
+        assert!(err(&[b"GET", b"k"]).contains("'get'"));
+        // A container with no sub-token keeps the bare name rather than inventing a separator.
+        assert!(err(&[b"CONFIG"]).contains("'config'"));
+
+        // The nine upstream permits are still permitted, so this cannot pass by rejecting less.
+        for allowed in [
+            &b"PING"[..], b"SUBSCRIBE", b"UNSUBSCRIBE", b"PSUBSCRIBE", b"PUNSUBSCRIBE",
+            b"SSUBSCRIBE", b"SUNSUBSCRIBE", b"QUIT", b"RESET",
+        ] {
+            assert!(
+                check_subscription_mode_gate(&[allowed.to_vec()], true).is_none(),
+                "{} must be allowed in subscribe context",
+                String::from_utf8_lossy(allowed)
+            );
+        }
+    }
+
     #[test]
     fn client_unpause_is_deferred_under_pause_all() {
         use crate::ClientConnection;
