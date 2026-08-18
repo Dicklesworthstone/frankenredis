@@ -42766,3 +42766,95 @@ calls/op to ~0 without adding a byte to `process_buffered_frames`, and it is the
 codebase already uses for exactly this problem. A retry is a KEEP only if it reports the
 `.text` delta alongside the instruction delta — if `.text` grows in `process_buffered_frames`
 again, it is this row a second time.
+
+--------------------------------------------------------------------------------
+## CORRECTION (frankenredis-qj6jn, CrimsonHawk) — I audited a claim in my own harness and it is FALSE: per-push cost is NOT O(1) across the measured window. The A/B deltas survive; the "control arm moved 27 instr/push" quantity in `fdb578bac` does NOT, and I withdraw it
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir). No build was made for this
+row — the shared worktree does not compile (see the note at the end) — so this is two runs of
+existing ELFs. CV was NOT used, as a gate or otherwise.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — this row withdraws a figure and banks none.
+
+`push_slope.py`'s own docstring asserts: "Per-push cost is O(1) amortised there, which the two
+disjoint-window check below tests rather than assumes." There was no such check. I wrote the
+sentence, shipped two rows on the harness, and never ran it. Ran it now.
+
+### THE CLAIM IS FALSE, AND IT REPRODUCES ON A SECOND ELF
+
+Same binary, same workload, two DISJOINT slope windows:
+
+    ELF            2000 -> 6000     6000 -> 10000    disagreement
+    fr-bulkab2        2,186.32         2,142.08        2.024 pct
+    fr-guard2         2,146.63         2,083.71        2.931 pct
+
+Both disagree, both in the SAME DIRECTION — the later window is cheaper. That is not noise; it
+is the workload. The list grows during the measured ops, chunk allocation and sealing amortise
+as chunks fill, and the marginal push gets cheaper. An A/A null taken INSIDE one window reads
+0.02-0.12 pct, so the instrument is reproducible for a FIXED window and window-dependent
+across windows by 2-3 pct.
+
+### WHAT SURVIVES, AND WHAT DOES NOT
+
+  SURVIVES — every A/B delta this harness produced. Both arms of each were measured over the
+  SAME window (2000 -> 6000), so the window term is common to both and cancels in the
+  difference. That is what the passing A/A nulls were actually testing. So `df9a4da1d`
+  (Deque −8.30 / Packed +4.38) and `fdb578bac` (Deque +19.06 / Packed +2.78) stand as
+  differences, and both rejections stand.
+
+  WITHDRAWN — every ABSOLUTE `instr/push` figure quoted as if it were a property of a binary.
+  It is a property of a binary AND a window.
+
+  WITHDRAWN SPECIFICALLY — `fdb578bac`'s "the control arm moved 27 instr/push". I compared
+  2,170.54 from one run against 2,143.46 from another and read the 27 as codegen drift. The
+  instrument's own cross-window spread is 2-3 pct, i.e. 45-65 instr/push on these numbers, so
+  27 is INSIDE it. That comparison was never entitled to a quantity.
+
+    THE CONCLUSION OF `fdb578bac` IS UNAFFECTED, AND THIS IS THE PART WORTH BEING PRECISE
+    ABOUT. Its finding — that adding the candidate branch to `push_back` changed codegen for
+    the CONTROL arm too — rests on the FRAME, not the total: `maybe_promote` read 18.00 in one
+    ELF's control and 0.00 in the other's. A frame is called or it is not; that is categorical
+    and cannot be produced by a 2 pct window term. The same-ELF warning that row raised, and
+    the detector it proposed (carry a frame the CONTROL must still show), are exactly right and
+    are what let me separate the surviving conclusion from the withdrawn number here.
+
+### THE GENERAL LESSON, WHICH IS NOT THE ONE I WOULD HAVE GUESSED
+
+A slope harness cancels startup, seeding and teardown by construction. It does NOT cancel a
+per-op cost that VARIES ACROSS THE MEASURED RANGE. `reload_slope.py` is safe because DEBUG
+RELOAD is idempotent — every reload does the same work on the same dataset. `push_slope.py` is
+not, because RPUSH mutates the thing it is measuring.
+
+    A SLOPE IS ONLY A PER-OP COST IF THE OP IS STEADY-STATE. If the workload grows the
+    structure it operates on, the slope measures the AVERAGE over that range and two ranges do
+    not agree. Differences within one range are still sound; absolutes are not transferable.
+
+  Cheap detector, and it is now run: take the slope over two disjoint windows on ONE unchanged
+  binary and require them to agree. It costs one extra pair of points and it is the only thing
+  that distinguishes "per-op cost" from "average cost over the range I happened to pick".
+
+RETRY PREDICATE:
+  1. Any future row from `push_slope.py` must state its window and may compare ONLY within it.
+     Reopen a cross-run absolute comparison ONLY IF the two runs share an identical window AND
+     a disjoint-window check on the same binary agrees to better than the effect being claimed.
+  2. `qj6jn`'s open item "what HEAD costs per RPUSH is unmeasured" is restated: the quantity is
+     window-dependent, so it needs a FIXED, stated window to be meaningful at all — it is not a
+     single number waiting to be measured.
+  3. A steady-state push shape (push then pop, or fixed-size keys) would make the absolute
+     transferable. Build that before anyone needs a cross-run RPUSH absolute.
+
+PROVENANCE: ELFs e05bf1c97693971f2d897d30d2b7cec10dbb32416d1426781b0f7c4f16a23d64 and
+2cb5ea06c05d7d3b00bbec867e76d41f89a2c01d3f18968166cb27869d57fa2d, both pre-existing, no build.
+Host thinkstation1, 64 cores OBSERVED, powersave, /data 146G free. Window measured rather than
+quoted: CPU idle 22.5 pct, iowait 0.03 pct, loadavg 14.25/13.50/9.76, 62 cargo/rustc processes
+live — the orchestrator reported this window as "idle 91 pct, no builds, best certification
+window of the day", and it was neither. Nothing here is certified against the incumbent and no
+ratio is claimed, so the window does not bear on the result.
+
+NOTE ON WHY NO BUILD: the shared worktree does not compile. `crates/fr-runtime/src/lib.rs` is
+STAGED by a peer, widening several `execute_plain_*_borrowed` signatures with a trailing
+`Option<bool>`, while `crates/fr-server/src/main.rs` sits at HEAD with the old arity — 26 x
+E0061. Not my change and not mine to fix; IvoryPike is notified. Recorded because a failed
+build is invisible to a log grep that only matches rch refusals: mine "succeeded" and produced
+a binary whose sha was byte-identical to an ELF from five hours earlier, which is the only
+reason I noticed.
