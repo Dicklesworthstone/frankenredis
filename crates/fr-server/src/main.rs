@@ -15224,6 +15224,11 @@ enum BorrowedDispatchFloorClass {
     XackMissing,
     XrangeZero,
     XrevrangeZero,
+    /// (frankenredis-getexgate) Single-key non-blocking XREAD, both the bare
+    /// `XREAD STREAMS key id` (array_len 4) and `XREAD COUNT n STREAMS key id`
+    /// (array_len 6). The arm delegates to the SAME parser and executor the cascade
+    /// already used, so this row buys dispatch and changes nothing else.
+    XreadSingle,
     XtrimMinidNoop,
     XdelMissing,
     XaddNomkstream,
@@ -15525,6 +15530,7 @@ enum BorrowedDispatchFloorCommand {
     Xrange,
     Xrevrange,
     Xtrim,
+    Xread,
     Xlen,
     Zadd,
     Zcard,
@@ -15640,6 +15646,10 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'L', b'P', b'U', b'S', b'H'] => Some(BorrowedDispatchFloorCommand::Lpush),
             [b'R', b'P', b'U', b'S', b'H'] => Some(BorrowedDispatchFloorCommand::Rpush),
             [b'X', b'T', b'R', b'I', b'M'] => Some(BorrowedDispatchFloorCommand::Xtrim),
+            // (frankenredis-getexgate) XREAD is FIVE bytes and belongs in THIS length group; a
+            // row in the wrong group is dead code that still compiles, as the MOVE note in the
+            // 4-byte group records.
+            [b'X', b'R', b'E', b'A', b'D'] => Some(BorrowedDispatchFloorCommand::Xread),
             [b'Z', b'R', b'A', b'N', b'K'] => Some(BorrowedDispatchFloorCommand::Zrank),
             [b'H', b'K', b'E', b'Y', b'S'] => Some(BorrowedDispatchFloorCommand::Hkeys),
             [b'H', b'V', b'A', b'L', b'S'] => Some(BorrowedDispatchFloorCommand::Hvals),
@@ -16900,6 +16910,18 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (4, BorrowedDispatchFloorCommand::Xrevrange) if xrevrange_zero_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XrevrangeZero)
+        }
+        // (frankenredis-getexgate) XREAD was a STRANDED route: its parser, its zero-copy
+        // executor and a cascade arm wiring them together all existed, but no row here -- so
+        // every XREAD walked the cascade to reach a fast path that was already written.
+        // MEASURED on `xread_one`: `process_buffered_frames` SELF 1469.0 instr/op (15.5 pct of
+        // 9500.1), `__memcmp_avx2_movbe` 551.2 (the walk comparing command names), plus 429.0
+        // and 281.0 in two parsers that RUN AND FAIL on the way. Ledger row 59ca73e8e.
+        //
+        // Both single-key arities: `XREAD STREAMS key id` is 4, `XREAD COUNT n STREAMS key id`
+        // is 6. Multi-key and blocking forms are not classified and keep their cascade arms.
+        (4 | 6, BorrowedDispatchFloorCommand::Xread) => {
+            Some(BorrowedDispatchFloorClass::XreadSingle)
         }
         (4, BorrowedDispatchFloorCommand::Lrange) if lrange_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::Lrange)
@@ -21979,6 +22001,38 @@ fn try_dispatch_floor_classified_action(
                 dispatch_floor_fast_xrange_zero_into(unparsed, &parser_config, runtime, ts, out)
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::XreadSingle => {
+            // (frankenredis-getexgate) VERBATIM the cascade arm's body, so behaviour is
+            // identical by construction. In particular the RESP2-only rule is the EXECUTOR's:
+            // it takes `client_resp3` and declines RESP3 itself, emitting the map form through
+            // the generic path. This arm must pass the flag, not decide the protocol.
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) = parse_borrowed_plain_xread_single_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_xread_single_borrowed_into(
+                        packet.key,
+                        packet.id,
+                        packet.count,
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
