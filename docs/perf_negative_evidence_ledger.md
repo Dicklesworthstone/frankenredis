@@ -62573,3 +62573,88 @@ dependence.
      `list_lp_int_bytes_are_canonical` for `list_lp_int`. Both are reasonable-looking edits that
      this row rules out — the first reintroduces a removed cost on EVERY element including
      letter-leading ones, the second surrenders chunks that did not need surrendering.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 BrownIbis: the write-gate vein SIZED — **64 routes open, 37 immediately convertible**, and my own retraction's "80" was wrong in the other direction because a converted route keeps the gate call as a fallback (`frankenredis-ozrro`)
+
+Claim class: SOURCE ANALYSIS, plus a correction to the row I published one turn ago and a tool.
+Campaign output: no — it turns a reopened vein into a work estimate, under a build freeze.
+
+### CORRECTING MY OWN CORRECTION
+
+`740196d77` retracted "the vein is CLOSED" (which rested on a twelve-shape census read as a
+population) and put the open count at **80 executors deriving the gate inline**. That number is
+also wrong, in the opposite direction.
+
+**A converted route keeps the gate call.** The conversion pattern is
+
+    default_write_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
+
+so the call survives as the fallback for callers that pass `None` — which is the whole point of
+the design. Grepping for the call therefore counts converted routes as open. The first run of the
+new tool listed `execute_plain_del_borrowed`, `execute_plain_unlink_borrowed` and
+`can_execute_plain_lrem_borrowed` as deriving, and I had converted all three myself in
+`bc05733bf` and `643df0862`. That is what exposed it.
+
+Excluding routes that take the parameter:
+
+    gate calls in routes that do NOT take the parameter    **64**
+    routes taking it (converted; call remains as fallback)   51
+
+So the sequence on this one number reads: "closed" (12-shape sample), then 80 (raw grep counting
+fallbacks), now **64**. Two errors in opposite directions, both from measuring a proxy —
+first shapes-that-exist, then calls-that-exist — instead of the thing.
+
+### THE WORK ESTIMATE, WHICH IS THE POINT
+
+64 open routes is a population, not a plan. A route converts only if some CALLER holds a per-pass
+cache to hand it — that is what the last three levers on this pattern turned on
+(`9069c9eb0` UNWATCH, `bc05733bf` DEL/UNLINK, `643df0862` LREM), and in every case the cache
+already existed and only the last hop was missing. `scripts/write_gate_coverage.py` classifies
+each route by whether any fr-server caller sits in a function holding a cache:
+
+    CONVERTIBLE      **37**   an fr-server caller's enclosing fn holds a write-gate cache
+    NO-CACHE           6      every fr-server caller is somewhere with no cache in scope
+    NO-SERVER-CALL    21      reached only from inside fr-runtime
+
+    fr-server fns holding a cache: cached_plain_write_gate, dispatch_floor_fast_del,
+    getex_write_gate_cache_enabled, process_buffered_frames, try_dispatch_floor_classified_action
+
+**37 routes are one supply away**, each worth ~98 instr/op against commands in the 1,000-3,000
+instr/op range, i.e. 3-10 pct of their own command. Examples the tool names:
+`execute_plain_bitop_borrowed`, `execute_plain_geoadd_borrowed`, both reached from
+`process_buffered_frames` and `try_dispatch_floor_classified_action`.
+
+The **6 NO-CACHE** are the `parse_borrowed_multibulk_action` fallback path, where `None` is
+correct and no lever exists — the same conclusion reached by hand for UNWATCH's second call site.
+
+The **21 NO-SERVER-CALL** are the interesting remainder: reached only from inside fr-runtime, so
+the question is one level deeper. That is exactly the shape that hid `execute_plain_scan_opts_
+borrowed` from the read-gate detector until `3378adc24` — the route was called with a real value
+by wrappers that were themselves starved. They are NOT ruled out; they are unclassified.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement, no ratio, no A/A, no build, no dumps — build freeze in force at /data 34G. The
+tool's verdicts were spot-checked against three routes whose answer I know because I converted
+them (correctly excluded) and two it calls CONVERTIBLE (`execute_plain_bitop_borrowed` confirmed
+by hand to lack the parameter and derive inline). CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  source        `main` at `f8dd88cdb`.
+  host          /data 34G, 99 pct used, BELOW the 42G brake; build freeze. loadavg 6.50 / 9.62 /
+                9.92, recorded although an exact source count does not depend on it.
+  disposition   ANALYSIS + TOOL. `scripts/write_gate_coverage.py` added; no engine source changed.
+
+### RETRY PREDICATE
+
+1. Quote **64 open / 37 convertible**, not 80 and not "closed". If a future count disagrees,
+   check first whether it is counting fallback calls in converted routes.
+2. The 37 are the queue. Take them in batches with a fall-through control, and re-run the tool
+   after each batch — the count should fall by exactly the batch size, which is a cheap check
+   that the conversion actually landed.
+3. The 21 NO-SERVER-CALL routes need the transitive step: follow in-crate callers to see whether
+   a cache can reach them through a wrapper chain. Until someone does that, they are unclassified
+   and must not be quoted as either open or closed.
