@@ -20,9 +20,12 @@ So this bounds the convertible subset, from source only, with no build:
   CONVERTIBLE   an fr-server caller's enclosing function holds a write-gate cache
   VIA-WRAPPER   no fr-server caller, but an in-runtime caller takes the parameter or is itself
                 reachable, so the cache can arrive one hop further in
-  FLOOR-HELPER  the fr-server caller is a floor helper that does not hold a cache but is itself
-                called from one that does -- one helper signature away, the dispatch_floor_fast_del
-                fix
+  FLOOR-HELPER  every fr-server caller is a `dispatch_floor_*` helper that does not hold a cache
+                but is itself called from `try_dispatch_floor_classified_action`, which does --
+                one helper signature away, the `dispatch_floor_fast_del` fix from `bc05733bf`.
+                Keyed on the caller's ROLE (its name), because graph reachability is vacuous
+                here: almost every fr-server fn is reachable from a cache holder, including the
+                generic fallback, so "could receive one" classifies everything as convertible
   FALLBACK-PATH the only fr-server callers are the generic fallback (parse_borrowed_multibulk_
                 action) or the sharded worker, where passing None may well be correct
   UNREACHABLE   no fr-server caller and no in-runtime caller that could forward a value
@@ -186,7 +189,7 @@ def main() -> int:
             verdicts[fn] = ("CONVERTIBLE", sv_callers & cache_fns)
         elif fn in reachable:
             verdicts[fn] = ("VIA-WRAPPER", rt_callers[fn] & reachable)
-        elif sv_callers and (sv_callers & cache_reachable_sv):
+        elif sv_callers and all(c.startswith("dispatch_floor_") for c in sv_callers):
             # Caller is a floor helper that does not hold a cache but IS called from one that
             # does -- precisely where `dispatch_floor_fast_del` sat before `bc05733bf` threaded
             # it. One helper signature, then the supply. Not blocked.

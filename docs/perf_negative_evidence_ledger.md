@@ -63538,3 +63538,89 @@ this row, not a commit stream.
      their titles.
   4. The remaining 26 ready beads were NOT audited. This pass examined three. Do not read it as a
      clean queue.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 BrownIbis: the write-gate vein FULLY CLASSIFIED — **60 of 64 open routes are convertible**, the 21 I called unclassified are reachable one hop in, and only 4 are the generic fallback where `None` is right (`frankenredis-ozrro`)
+
+Claim class: SOURCE ANALYSIS completing `ffc09091c`'s retry predicate. No measurement, no build.
+Campaign output: no — it finishes turning a reopened vein into a queue.
+
+### THE ANSWER
+
+`ffc09091c` left 21 routes explicitly unclassified with the instruction that they "must not be
+quoted as either open or closed" until someone followed their in-runtime callers. Doing that:
+
+    CONVERTIBLE     **36**   an fr-server caller's enclosing fn HOLDS a write-gate cache
+    VIA-WRAPPER     **21**   no fr-server caller, but an in-runtime caller can forward one
+    FLOOR-HELPER      **3**   caller is a `dispatch_floor_*` helper that does not hold a cache
+                             but is itself called from one that does
+    FALLBACK-PATH     **4**   only reachable via the generic fallback, where `None` may be right
+                             ------
+                             64
+
+**60 of 64 are convertible**, at three levels of plumbing depth. The 21 are not blocked; they
+are one in-runtime hop in, which is the `execute_plain_scan_opts_borrowed` shape that hid from
+the read-gate detector until `3378adc24`.
+
+The 3 FLOOR-HELPER routes — `xack_missing`, `xdel_missing`, `xtrim_minid_noop` — sit exactly
+where `dispatch_floor_fast_del` sat before `bc05733bf` threaded a cache into it from
+`try_dispatch_floor_classified_action`. One helper signature each, then the supply. That is a
+lever I have already built once and can be copied.
+
+The 4 FALLBACK-PATH routes are `hset`, `mset_ok`, `set_ok` and `keyed_values_write`, reachable
+only through `parse_borrowed_multibulk_action` (and, for `set_ok`, `run_sharded_set_get_worker`).
+`None` there is the same conclusion reached by hand for UNWATCH's second call site.
+
+### THREE WRONG ANSWERS ON THE WAY, ALL FROM MEASURING A PROXY
+
+This number has now been wrong four times, and the pattern is identical each time — something
+easy to count standing in for the thing:
+
+  1. **"closed"** — twelve-shape census read as a population.
+  2. **80** — grepped the gate call, which a CONVERTED route keeps as its `unwrap_or_else`
+     fallback, so converted routes counted as open. Corrected to 64.
+  3. **VIA-WRAPPER 0 / UNREACHABLE 21** — the first transitive pass followed only callers that
+     were themselves derivers. `can_execute_plain_append_borrowed`'s sole caller,
+     `execute_plain_append_borrowed`, neither derives nor takes the parameter, and IS called from
+     two cache-holding functions. Reachability is a property of the whole call graph.
+  4. **FLOOR-HELPER 6 / FALLBACK-PATH 0** — propagating cache-reachability through fr-server
+     callers made **64 of the fr-server functions** "able to receive a cache", including
+     `parse_borrowed_multibulk_action`. A classifier that calls everything convertible has
+     stopped classifying. The split is keyed on the caller's ROLE instead — a
+     `dispatch_floor_*` name — which is the distinction I had already verified by hand.
+
+Each wrong answer was caught by checking the tool against a route whose answer I already knew:
+the three I converted myself (`del`, `unlink`, `lrem`) for (2), `append` for (3), and the three
+`x*` helpers for (4). **A detector that cannot reproduce a case you have already solved by hand
+is not evidence about the cases you have not.**
+
+### WHAT THIS IS WORTH
+
+At 98.0 instr/op against commands in the 1,000-3,000 instr/op range, each converted route returns
+3-10 pct of its own command, less the 8-16 instr/op that threading a parameter through dispatch
+costs. The 36 CONVERTIBLE are one-line supplies; the 21 VIA-WRAPPER need one signature threaded
+first; the 3 FLOOR-HELPER need one helper signature each.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement, no ratio, no A/A, no build, no dumps — build freeze in force at /data 32-34G.
+Counts are exact greps and a fixed-point over the call graph. Verdicts were checked against seven
+routes whose answers were known independently. CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  source        `main` at `069850fa2`.
+  host          /data 34G, 99 pct used, below the 42G brake; build freeze. loadavg 5.80 / 6.01 /
+                6.36, recorded although exact source counts do not depend on it.
+  disposition   ANALYSIS. `scripts/write_gate_coverage.py` extended; no engine source changed.
+
+### RETRY PREDICATE
+
+1. Quote **64 open, 60 convertible (36 + 21 + 3), 4 fallback-path**. If a future count disagrees,
+   check in this order: is it counting converted routes' fallback calls; is it following the
+   whole call graph or only derivers; is its reachability rule vacuous.
+2. Take the 36 first — they are one-line supplies and need no signature change, so a batch of
+   them is the cheapest possible use of the first build window after the freeze.
+3. Re-run the tool after each batch. The CONVERTIBLE count must fall by exactly the batch size;
+   anything else means a supply did not land where it was thought to.
