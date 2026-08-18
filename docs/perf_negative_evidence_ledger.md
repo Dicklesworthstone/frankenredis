@@ -43438,3 +43438,121 @@ override lookups that can only miss, 233 glob calls that all return true, and a 
 doubles from zero -- so take those from that row, not this one, and do not re-attack the clone
 loop, which is gone. Revisit this row only if `CONFIG GET *` allocs/op rises above ~583 or if
 the per-pair constant is measured above 2.95.
+
+## 2026-08-18 CrimsonHawk: REJECT (SELF-SPEEDUP) — the name-enumeration applied RETROACTIVELY to my shipped write-gate work finds NO missed executor, and the 50 DIRECT gate callers are REFUSED as a batch — and it produces the real worklist: 23 unthreaded predicates plus 50 executors that call the write gate DIRECTLY (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — no code ships here. Source enumeration only; the host was under an
+external build and both a build and any measurement were explicitly declined.
+
+Yesterday's SCARD failure came from assuming a predicate's coverage instead of enumerating it.
+Having made that enumeration mandatory, the first thing to do with it is point it at my OWN
+SHIPPED WORK, because if I made that mistake once I could have made it three times.
+
+### THE INTEGRITY CHECK ON MY EARLIER CONVERSIONS
+
+For every predicate this campaign converted to take a cached write answer, ask: how many
+executors call it, and did every one of them get the parameter?
+
+  15 converted write predicates. Three are worth printing:
+
+  can_execute_plain_getex_borrowed                         4 executors, ALL have the parameter
+  can_execute_plain_set_borrowed_with_default_write_gate   3 executors, ALL have the parameter
+  can_execute_plain_set_borrowed                           1 executor without it:
+                                                           execute_plain_set_owned_or_return
+
+**The GETEX family is the one that matters and it is correct.** Four executors reach that
+predicate and all four were threaded — the exact multi-executor case SCARD failed. I did that
+one right without knowing it was a hazard, which is luck rather than method, and it is worth
+recording that the method now confirms it rather than leaving it assumed.
+
+`execute_plain_set_owned_or_return` is NOT a defect: it is an OWNED path, not a borrowed
+fast-path arm, so it legitimately calls the uncached predicate and must keep doing so. That is
+the same rule the write-side work has followed throughout — `None` means "evaluate", and any
+caller that is not the borrowed batch passes it.
+
+So: **no missed executor in anything I shipped.** The failure was confined to the read-side
+attempt, which never landed.
+
+### THE WORKLIST, BY NAME RATHER THAN BY STATIC PATTERN
+
+Every executor reaching `plain_borrowed_default_key_write_allows`, classified by how:
+
+  50  call the write gate DIRECTLY, with no predicate in between
+      (bitop, del, expire_kind, geoadd, hmset_ok, hset, keyed_pop, keyed_values_write, ...)
+  42  reach it through a predicate, of which
+      19  predicates ALREADY take a cached answer  (this campaign's work plus ozrro's)
+      23  predicates do NOT
+
+The 23 are the next batches and they are named, not inferred: bitfield_set, copy, getset,
+hincrby, hincrbyfloat, hsetnx, linsert, lmove, list_pop_count, and thirteen more.
+
+Two structural notes that change how they should be batched:
+
+  * `execute_plain_getset_borrowed` and `execute_plain_getset_borrowed_into` share ONE
+    predicate. That is the multi-executor shape again, and it is the shape that produced the
+    only regression so far. Thread both or neither.
+  * `execute_plain_list_pop_count_borrowed` reaches `can_execute_plain_key_arg1_write_borrowed`
+    — a SHARED predicate serving several commands, so one edit moves all of them. That is the
+    high-leverage kind, and also the kind whose coverage must be enumerated rather than
+    assumed, exactly as `PlainCardinalityCmd` was not enumerated and cost a regression.
+
+**The 50 direct callers are a DIFFERENT problem and should not be batched with the 23.** They
+have no predicate to thread; converting them means either giving each an `Option<bool>`
+parameter of its own or introducing a predicate. Neither has been costed, and nothing here
+claims they are worth doing.
+
+### COUNTED MECHANISM
+
+A source enumeration over `crates/fr-runtime/src/lib.rs` at HEAD `9a82da1a4`: resolve every
+`fn` body, then for each `execute_plain_*` ask whether it reaches
+`plain_borrowed_default_key_write_allows` directly or through a `can_execute_plain_*_borrowed`,
+and whether that predicate already accepts `default_write_allowed`. Counts are exact function
+counts, not estimates: 50 / 42 / 19 / 23 / 15.
+
+The source enumeration is corroborated by an EXACT CALL COUNT already measured on this
+family and banked in `552062a92`: every converted write route reads 0.0000 calls/op on
+`plain_borrowed_default_key_write_allows` while every unconverted one reads 1.0000 calls/op,
+with no intermediate value on any shape. That is the runtime evidence that the conversions this
+row audits are in fact complete; the enumeration explains WHY, and the call count is what
+proves it. `getex_exat` reads 0.0000 calls/op, which is the four-executor family in question.
+
+No NEW instruction count, ratio or timing was taken for this row.
+
+The instrument those cited counts came from carries its own null, measured in a single
+invocation of the same harness on one ELF and one shape: A/A null median 1.000002, bootstrapped
+over 20,000 resamples, 95% median CI [0.996069, 1.003947], from six draws and 30 pairwise
+ratios (banked in `0bf781d57`). It is quoted here because this row leans on that instrument's
+call counts, not because any new timing was performed — and call counts are deterministic
+integers, so the null bounds the instruction arm rather than the counts.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+CV was not used, as a gate or otherwise. No A/A null applies because no measurement is claimed.
+
+### PROVENANCE
+
+  source        `crates/fr-runtime/src/lib.rs` at HEAD `9a82da1a4`, read only. NO ELF WAS BUILT
+                for this row. The call counts it cites as its counted mechanism were measured
+                earlier on `fr_head2`, re-verified by sha256sum at the time of writing:
+  bench_elf_sha256=c13d2f7f6a349a8212c4173b8d327af07e23ac55f9887a4fe8f49caff9caa42a
+  incumbent     NOT RUN.
+  host          thinkstation1, /data 88G free and falling ~1.3 G/min (measured: 89G -> 88G over
+                45 s, against a 42G floor, so roughly 35 minutes of headroom at that rate).
+                loadavg 24.47 42.17 35.32; CPU idle 85.0 pct with 0.1 pct iowait in a 10 s
+                /proc/stat delta. An external `fastmcp_rust` build was reported running.
+                A BUILD WAS EXPLICITLY NOT STARTED and no measurement was taken.
+  admissibility No ratio, instruction count or timed row is claimed, so host state does not
+                bear on this row's validity.
+
+### RETRY PREDICATE
+
+1. Next write batch: take from the 23 NAMED predicates, not from a static scan. Verify each
+   with `call_count_delta.py --callers plain_borrowed_default_key_write_allows` before and
+   after — 1.0000 then 0.0000.
+2. GETSET must be threaded as a PAIR (two executors, one predicate). `list_pop_count` reaches a
+   SHARED predicate whose full command coverage must be enumerated before it is touched.
+3. Do NOT fold the 50 direct callers into a predicate batch. They are a separate design
+   question and are uncosted.
+4. The read-side attempt remains open at seven predicates (`9a82da1a4`), LINDEX first.
