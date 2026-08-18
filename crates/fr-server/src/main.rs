@@ -22159,6 +22159,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::ScanOpt => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // (frankenredis-ozrro) The executor validates the option keyword and the COUNT
             // range, declining wherever the generic is more permissive so those packets
             // reach the error the generic would have produced.
@@ -22168,6 +22173,7 @@ fn try_dispatch_floor_classified_action(
                     packet.keyword,
                     packet.value,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -22209,6 +22215,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::ScanOpt2 => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // (frankenredis-ozrro) Both options go through the SAME helper the arity-4 arm
             // uses, applied in order, so duplicates are last-wins exactly as the generic's
             // option loop does. A bad keyword in either position declines to generic.
@@ -22220,6 +22231,7 @@ fn try_dispatch_floor_classified_action(
                     packet.keyword2,
                     packet.value2,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -22238,6 +22250,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::ScanOpt3 => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // (frankenredis-ozrro) All three option pairs go through the same shared
             // executor the arity-4 and arity-6 arms use, applied in order, so duplicates
             // are last-wins as the generic's option loop makes them.
@@ -22251,6 +22268,7 @@ fn try_dispatch_floor_classified_action(
                     packet.keyword3,
                     packet.value3,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {

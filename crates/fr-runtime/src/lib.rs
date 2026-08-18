@@ -26720,6 +26720,7 @@ impl Runtime {
         keyword3: &[u8],
         value3: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         self.execute_plain_scan_opts_borrowed(
             cursor_arg,
@@ -26729,9 +26730,7 @@ impl Runtime {
                 (keyword3, value3),
             ],
             8,
-            now_ms,
-            None,
-        )
+            now_ms, default_read_allowed)
     }
 
     /// (frankenredis-ozrro) Borrowed READ fast path for the TWO-option SCAN forms at
@@ -26749,14 +26748,13 @@ impl Runtime {
         keyword2: &[u8],
         value2: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         self.execute_plain_scan_opts_borrowed(
             cursor_arg,
             &[(keyword1, value1), (keyword2, value2)],
             6,
-            now_ms,
-            None,
-        )
+            now_ms, default_read_allowed)
     }
 
     /// (frankenredis-ozrro) Borrowed READ fast path for the arity-4 SCAN option forms:
@@ -26777,8 +26775,9 @@ impl Runtime {
         keyword: &[u8],
         value: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        self.execute_plain_scan_opts_borrowed(cursor_arg, &[(keyword, value)], 4, now_ms, None)
+        self.execute_plain_scan_opts_borrowed(cursor_arg, &[(keyword, value)], 4, now_ms, default_read_allowed)
     }
 
     /// (frankenredis-ozrro) Borrowed WRITE fast path for the base `SPOP key` form.
@@ -78162,7 +78161,7 @@ user bob reset off nopass +@all
                 seed(&mut generic);
 
                 let fast_reply = fast
-                    .execute_plain_scan_opt_borrowed(cursor, kw, val, 20)
+                    .execute_plain_scan_opt_borrowed(cursor, kw, val, 20, None)
                     .unwrap_or_else(|| panic!("SCAN {cursor:?} {kw:?} {val:?} must be served"));
                 let generic_reply =
                     generic.execute_frame(command(&[b"SCAN", cursor, kw, val]), 20);
@@ -78197,14 +78196,14 @@ user bob reset off nopass +@all
             (b"", b"x", "empty keyword"),
         ] {
             assert!(
-                rt.execute_plain_scan_opt_borrowed(b"0", kw, val, 20).is_none(),
+                rt.execute_plain_scan_opt_borrowed(b"0", kw, val, 20, None).is_none(),
                 "SCAN 0 {kw:?} {val:?} must fall through: {why}"
             );
         }
 
         // A non-canonical CURSOR must decline regardless of a valid option.
         assert!(
-            rt.execute_plain_scan_opt_borrowed(b"007", b"COUNT", b"10", 20)
+            rt.execute_plain_scan_opt_borrowed(b"007", b"COUNT", b"10", 20, None)
                 .is_none(),
             "non-canonical cursor must fall through even with a good option"
         );
@@ -78355,7 +78354,7 @@ user bob reset off nopass +@all
                 seed(&mut generic);
 
                 let fast_reply = fast
-                    .execute_plain_scan_opt2_borrowed(cursor, k1, v1, k2, v2, 20)
+                    .execute_plain_scan_opt2_borrowed(cursor, k1, v1, k2, v2, 20, None)
                     .unwrap_or_else(|| {
                         panic!("SCAN {cursor:?} {k1:?} {v1:?} {k2:?} {v2:?} must be served")
                     });
@@ -78387,7 +78386,7 @@ user bob reset off nopass +@all
             (b"MATCH", b"k*", b"NOVALUES", b"x"),
         ] {
             assert!(
-                rt.execute_plain_scan_opt2_borrowed(b"0", k1, v1, k2, v2, 20)
+                rt.execute_plain_scan_opt2_borrowed(b"0", k1, v1, k2, v2, 20, None)
                     .is_none(),
                 "SCAN 0 {k1:?} {v1:?} {k2:?} {v2:?} must fall through to the generic"
             );
@@ -78400,8 +78399,8 @@ user bob reset off nopass +@all
         seed(&mut a4);
         seed(&mut a6);
         assert_eq!(
-            a4.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20),
-            a6.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20),
+            a4.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20, None),
+            a6.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20, None),
             "a repeated identical option must equal the single-option result"
         );
     }
@@ -78437,7 +78436,7 @@ user bob reset off nopass +@all
                 seed(&mut fast);
                 seed(&mut generic);
                 let fast_reply = fast
-                    .execute_plain_scan_opt3_borrowed(cursor, k1, v1, k2, v2, k3, v3, 20)
+                    .execute_plain_scan_opt3_borrowed(cursor, k1, v1, k2, v2, k3, v3, 20, None)
                     .unwrap_or_else(|| panic!("SCAN {cursor:?} {k1:?}.. must be served"));
                 let generic_reply = generic
                     .execute_frame(command(&[b"SCAN", cursor, k1, v1, k2, v2, k3, v3]), 20);
@@ -78465,7 +78464,7 @@ user bob reset off nopass +@all
             (b"MATCH", b"k*", b"COUNT", b"9223372036854775808", b"TYPE", b"string"),
         ] {
             assert!(
-                rt.execute_plain_scan_opt3_borrowed(b"0", k1, v1, k2, v2, k3, v3, 20)
+                rt.execute_plain_scan_opt3_borrowed(b"0", k1, v1, k2, v2, k3, v3, 20, None)
                     .is_none(),
                 "a bad option in any position must fall through"
             );
@@ -78479,10 +78478,11 @@ user bob reset off nopass +@all
         seed(&mut a);
         seed(&mut b);
         seed(&mut c);
-        let one = a.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20);
-        let two = b.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20);
+        let one = a.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20, None);
+        let two = b.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20, None);
         let three = c.execute_plain_scan_opt3_borrowed(
             b"0", b"COUNT", b"100", b"COUNT", b"100", b"COUNT", b"100", 20,
+            None,
         );
         assert!(one.is_some(), "the one-option form must be served");
         assert_eq!(one, two, "arity-4 and arity-6 wrappers must agree");
