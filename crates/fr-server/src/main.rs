@@ -6729,6 +6729,12 @@ fn process_buffered_frames(
     let mut argv_scratch: Vec<Vec<u8>> = Vec::new();
     let mut plain_get_read_gate_cache: Option<bool> = None;
     let mut plain_write_gate_cache: Option<bool> = None;
+    // Hoisted out of the per-frame path: rebuilt from three policy fields on every
+    // frame otherwise, and it lives in fr-runtime, so with no LTO on `release` it is a
+    // real cross-crate call at 1.000 calls/op on every command. Only a generic or owned
+    // command can move it, so it is recomputed at exactly the points the read gate,
+    // output limit and write gate caches are dropped.
+    let mut batch_parser_config = runtime.parser_config();
     // Per-batch memo of this client's output hard limit. effective_output_hard_limit
     // does is_replica + is_pubsub_client lookups + a config read; the value can only
     // change when the client's class changes (SUBSCRIBE / REPLCONF / CONFIG), all of
@@ -6788,6 +6794,7 @@ fn process_buffered_frames(
             plain_get_read_gate_cache = None;
             output_hard_limit_cache = None;
             plain_write_gate_cache = None;
+                    batch_parser_config = runtime.parser_config();
             match runtime.execute_plain_set_owned_or_return(cmd.key, cmd.value, ts) {
                 Ok(response) => {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
@@ -6880,6 +6887,7 @@ fn process_buffered_frames(
                         plain_get_read_gate_cache = None;
                         output_hard_limit_cache = None;
                         plain_write_gate_cache = None;
+                    batch_parser_config = runtime.parser_config();
                         let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
                         let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                         encode_client_reply(&response, client_resp3, &mut conn.write_buf);
@@ -6891,6 +6899,7 @@ fn process_buffered_frames(
                     plain_get_read_gate_cache = None;
                     output_hard_limit_cache = None;
                     plain_write_gate_cache = None;
+                    batch_parser_config = runtime.parser_config();
                     match process_argv_frame(
                         token,
                         &argv,
@@ -6941,7 +6950,7 @@ fn process_buffered_frames(
         if matches!(first_byte, b'*') {
             let borrowed_parse_result = {
                 let unparsed = &conn.read_buf[consumed_total..];
-                let parser_config = runtime.parser_config();
+                let parser_config = batch_parser_config;
                 // (frankenredis-4m3i4) Measurement control only; compiles to a
                 // `const false` and vanishes in production builds.
                 if borrowed_cascade_bypass_enabled() {
@@ -13570,6 +13579,7 @@ fn process_buffered_frames(
                     plain_get_read_gate_cache = None;
                     output_hard_limit_cache = None;
                     plain_write_gate_cache = None;
+                    batch_parser_config = runtime.parser_config();
                     match process_argv_frame(
                         token,
                         argv,
@@ -13635,6 +13645,7 @@ fn process_buffered_frames(
                     plain_get_read_gate_cache = None;
                     output_hard_limit_cache = None;
                     plain_write_gate_cache = None;
+                    batch_parser_config = runtime.parser_config();
                     let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     encode_client_reply(&response, client_resp3, &mut conn.write_buf);
@@ -13646,6 +13657,7 @@ fn process_buffered_frames(
                 plain_get_read_gate_cache = None;
                 output_hard_limit_cache = None;
                 plain_write_gate_cache = None;
+                    batch_parser_config = runtime.parser_config();
                 match process_argv_frame(
                     token,
                     &argv,
