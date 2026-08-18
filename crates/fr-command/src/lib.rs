@@ -19341,6 +19341,57 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("script|help", 2, "loading stale", 0, 0, 0),
     ("script|load", 3, "noscript stale", 0, 0, 0),
     ("script|kill", 2, "noscript allow_busy", 0, 0, 0),
+    // SENTINEL's 21 subcommands. Upstream registers these in
+    // commands.def::SENTINEL_Subcommands and, like the parent row, only when the
+    // server runs in --sentinel mode: populateCommandTable skips a
+    // CMD_ONLY_SENTINEL entry outside sentinel mode, which is why vendored 7.2.4
+    // answers COMMAND COUNT with 241 rather than 242 in standalone. fr already
+    // hid the PARENT for that reason (frankenredis-bx2i8) but never carried the
+    // subcommands at all, so in SENTINEL MODE -- where upstream lists all 21 --
+    // fr reported a sentinel row with an EMPTY nested subcommands array, and
+    // COMMAND INFO sentinel|masters answered nil for a subcommand it implements.
+    //
+    // These are not aspirational rows: fr-sentinel serves every one of them
+    // (crates/fr-sentinel/src/commands.rs, dispatched from CommandId::Sentinel),
+    // so unlike the `unixsocket` case this advertises nothing it cannot do.
+    // Arity and flags are copied verbatim from
+    // legacy_redis_code/redis/src/commands/sentinel-*.json. Upstream's SENTINEL
+    // and ONLY_SENTINEL flags are not rendered here for the same reason the
+    // parent row is a bare "admin": fr's flag string carries only the RESP-
+    // visible set, and ONLY_SENTINEL is expressed by the visibility gate below.
+    //
+    // ORDER IS UNVERIFIED, and is the one thing here that is not upstream-exact.
+    // Every other parent in this table is in upstream's subcommand-DICT order,
+    // which is a hash order, not commands.def's array order -- fr's acl rows run
+    // genpass, getuser, save, ... where commands.def is alphabetical. That order
+    // was recovered by sweeping a live vendored server, which a sentinel-only
+    // table needs a vendored redis-sentinel to reproduce and which the build
+    // freeze rules out. These are therefore in commands.def declaration order as
+    // a placeholder. To fix: run vendored redis-sentinel and
+    // `redis-cli -p <port> COMMAND INFO sentinel`, then reorder to match.
+    // Nothing in fr reads the order; it matters only to a client that parses the
+    // nested subcommands array positionally.
+    ("sentinel|ckquorum", 3, "admin", 0, 0, 0),
+    ("sentinel|config", -4, "admin", 0, 0, 0),
+    ("sentinel|debug", -2, "admin", 0, 0, 0),
+    ("sentinel|failover", 3, "admin", 0, 0, 0),
+    ("sentinel|flushconfig", 2, "admin", 0, 0, 0),
+    ("sentinel|get-master-addr-by-name", 3, "admin", 0, 0, 0),
+    ("sentinel|help", 2, "loading stale", 0, 0, 0),
+    ("sentinel|info-cache", -3, "admin", 0, 0, 0),
+    ("sentinel|is-master-down-by-addr", 6, "admin", 0, 0, 0),
+    ("sentinel|master", 3, "admin", 0, 0, 0),
+    ("sentinel|masters", 2, "admin", 0, 0, 0),
+    ("sentinel|monitor", 6, "admin", 0, 0, 0),
+    ("sentinel|myid", 2, "admin", 0, 0, 0),
+    ("sentinel|pending-scripts", 2, "admin", 0, 0, 0),
+    ("sentinel|remove", 3, "admin", 0, 0, 0),
+    ("sentinel|replicas", 3, "admin", 0, 0, 0),
+    ("sentinel|reset", 3, "admin", 0, 0, 0),
+    ("sentinel|sentinels", 3, "admin", 0, 0, 0),
+    ("sentinel|set", -5, "admin", 0, 0, 0),
+    ("sentinel|simulate-failure", -3, "admin", 0, 0, 0),
+    ("sentinel|slaves", 3, "admin", 0, 0, 0),
     ("slowlog|len", 2, "admin loading stale", 0, 0, 0),
     ("slowlog|help", 2, "loading stale", 0, 0, 0),
     ("slowlog|reset", 2, "admin loading stale", 0, 0, 0),
@@ -20416,6 +20467,37 @@ fn command_table_row_is_visible(name: &str, store: &Store) -> bool {
     true
 }
 
+/// Return whether a [`SUBCOMMAND_TABLE`] row should be visible to introspection.
+///
+/// A `parent|sub` row is visible exactly when its PARENT is. That is derived
+/// rather than restated -- the obvious spelling here is a second
+/// `name.starts_with("sentinel|")` test, and the reason not to write it is that
+/// it can drift: the two rules would then have to be edited together every time
+/// a command becomes mode-gated, and nothing would fail if only one were.
+/// Deriving it means a parent hidden for ANY future reason takes its
+/// subcommands with it.
+///
+/// This exists because the hiding is what makes the sentinel rows safe to
+/// carry. Upstream does not register CMD_ONLY_SENTINEL commands outside
+/// sentinel mode, so listing `sentinel|masters` in a standalone COMMAND LIST
+/// would be the same lie the parent row told before frankenredis-bx2i8 -- one
+/// level down, and past the test that caught it the first time.
+fn subcommand_table_row_is_visible(name: &str, store: &Store) -> bool {
+    match name.split_once('|') {
+        Some((parent, _)) => command_table_row_is_visible(parent, store),
+        None => true,
+    }
+}
+
+/// The [`SUBCOMMAND_TABLE`] rows introspection may report, in table order.
+fn visible_subcommand_rows(
+    store: &Store,
+) -> impl Iterator<Item = &'static CommandMetadataRow> + '_ {
+    SUBCOMMAND_TABLE
+        .iter()
+        .filter(move |&&(name, ..)| subcommand_table_row_is_visible(name, store))
+}
+
 type CommandMetadataRow = (&'static str, i64, &'static str, i64, i64, i64);
 
 #[cfg(feature = "bench-reference")]
@@ -20436,7 +20518,7 @@ fn command_info_requested_row_scan(cmd_name: &str, store: &Store) -> Option<Comm
     COMMAND_TABLE
         .iter()
         .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-        .chain(SUBCOMMAND_TABLE.iter())
+        .chain(visible_subcommand_rows(store))
         .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
         .copied()
 }
@@ -20451,8 +20533,7 @@ fn command_info_requested_row_indexed(cmd_name: &str, store: &Store) -> Option<C
             return Some(row);
         }
     }
-    SUBCOMMAND_TABLE
-        .iter()
+    visible_subcommand_rows(store)
         .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
         .copied()
 }
@@ -20483,7 +20564,7 @@ fn command_docs_requested_row_scan(cmd_name: &str, store: &Store) -> Option<Comm
     COMMAND_TABLE
         .iter()
         .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-        .chain(SUBCOMMAND_TABLE.iter())
+        .chain(visible_subcommand_rows(store))
         .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
         .copied()
 }
@@ -20498,8 +20579,7 @@ fn command_docs_requested_row_indexed(cmd_name: &str, store: &Store) -> Option<C
             return Some(row);
         }
     }
-    SUBCOMMAND_TABLE
-        .iter()
+    visible_subcommand_rows(store)
         .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
         .copied()
 }
@@ -20619,7 +20699,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 let names: Vec<RespFrame> = COMMAND_TABLE
                     .iter()
                     .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-                    .chain(SUBCOMMAND_TABLE.iter())
+                    .chain(visible_subcommand_rows(store))
                     .filter(|&&(name, ..)| fr_store::glob_match(&pattern_lc, name.as_bytes()))
                     .map(|&(name, ..)| RespFrame::BulkString(Some(name.as_bytes().to_vec())))
                     .collect();
@@ -20633,7 +20713,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
         let names: Vec<RespFrame> = COMMAND_TABLE
             .iter()
             .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-            .chain(SUBCOMMAND_TABLE.iter())
+            .chain(visible_subcommand_rows(store))
             .map(|&(name, ..)| RespFrame::BulkString(Some(name.as_bytes().to_vec())))
             .collect();
         Ok(RespFrame::Array(Some(names)))
@@ -31067,7 +31147,7 @@ mod tests {
         };
         assert_eq!(
             super::SUBCOMMAND_TABLE.len(),
-            129,
+            150,
             "entry count changed — re-derive it before trusting any row that quotes it; a \
              line-anchored regex undercounts this table at 110 because 19 entries are not \
              at a line start"
@@ -82315,6 +82395,110 @@ mod tests {
         );
     }
 
+    /// The sentinel subcommands must appear exactly when their parent does.
+    ///
+    /// Upstream's populateCommandTable skips CMD_ONLY_SENTINEL rows outside
+    /// sentinel mode, so a standalone vendored 7.2.4 has no `sentinel` entry and
+    /// no `sentinel|*` entries; a redis-sentinel has all 22. fr hid the parent
+    /// under frankenredis-bx2i8 and, until these rows landed, simply had no
+    /// subcommands to hide -- which made sentinel mode wrong in the quiet
+    /// direction: COMMAND INFO sentinel returned a row whose nested subcommands
+    /// array was EMPTY, and COMMAND INFO sentinel|masters returned nil for a
+    /// subcommand fr-sentinel actually serves.
+    ///
+    /// Both directions are asserted because each fails on its own. Carrying the
+    /// rows without the gate leaks them into standalone; the gate without the
+    /// rows leaves sentinel mode empty. The standalone half is the one no other
+    /// test would catch: `command_list_includes_namespaced_subcommands_per_upstream`
+    /// counts rows against the table itself, so it stays green when the table
+    /// and the reply are wrong together.
+    #[test]
+    fn sentinel_subcommands_follow_the_parent_row() {
+        let sentinel_rows = SUBCOMMAND_TABLE
+            .iter()
+            .filter(|&&(n, ..)| n.starts_with("sentinel|"))
+            .count();
+        assert_eq!(
+            sentinel_rows, 21,
+            "vendored commands.def declares 21 SENTINEL subcommands"
+        );
+
+        for sentinel_mode in [false, true] {
+            let mut store = Store::new();
+            store.sentinel_mode = sentinel_mode;
+
+            let list = dispatch_argv(&[b"COMMAND".to_vec(), b"LIST".to_vec()], &mut store, 0)
+                .expect("command list");
+            let RespFrame::Array(Some(items)) = list else {
+                panic!("expected Array, got {list:?}");
+            };
+            let listed = items
+                .iter()
+                .filter(|f| {
+                    matches!(f, RespFrame::BulkString(Some(b)) if b.starts_with(b"sentinel|"))
+                })
+                .count();
+            assert_eq!(
+                listed,
+                if sentinel_mode { 21 } else { 0 },
+                "sentinel_mode={sentinel_mode}: COMMAND LIST must advertise the sentinel \
+                 subcommands exactly when it advertises their parent"
+            );
+
+            // A FILTERBY PATTERN walk is a separate code path over the same
+            // table, and an unfiltered one would leak the rows here alone.
+            let filtered = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"LIST".to_vec(),
+                    b"FILTERBY".to_vec(),
+                    b"PATTERN".to_vec(),
+                    b"sentinel|*".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("command list filterby");
+            let RespFrame::Array(Some(items)) = filtered else {
+                panic!("expected Array, got {filtered:?}");
+            };
+            assert_eq!(
+                items.len(),
+                if sentinel_mode { 21 } else { 0 },
+                "sentinel_mode={sentinel_mode}: FILTERBY PATTERN must honour the same gate"
+            );
+
+            // And an explicit lookup, which resolves through the index rather
+            // than a walk.
+            let info = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    b"sentinel|masters".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("command info sentinel|masters");
+            let RespFrame::Array(Some(items)) = info else {
+                panic!("expected Array, got {info:?}");
+            };
+            if sentinel_mode {
+                let RespFrame::Array(Some(row)) = &items[0] else {
+                    panic!("sentinel mode must return a row, got {:?}", items[0]);
+                };
+                assert_eq!(row[0], RespFrame::BulkString(Some(b"sentinel|masters".to_vec())));
+                assert_eq!(row[1], RespFrame::Integer(2), "arity from sentinel-masters.json");
+            } else {
+                assert_eq!(
+                    items[0],
+                    RespFrame::BulkString(None),
+                    "standalone COMMAND INFO must not resolve a sentinel subcommand"
+                );
+            }
+        }
+    }
+
     #[test]
     fn command_list_includes_namespaced_subcommands_per_upstream() {
         // (frankenredis-99to6) Upstream server.c::commandCommand walks
@@ -82339,10 +82523,17 @@ mod tests {
             })
             .collect();
         let namespaced = names.iter().filter(|n| n.contains('|')).count();
+        // One row per VISIBLE entry. `Store::new()` is standalone, so the 21
+        // sentinel|* rows are gated out here exactly as upstream leaves them
+        // unregistered -- see sentinel_subcommands_follow_the_parent_row below,
+        // which pins both sides of that gate.
+        let visible = SUBCOMMAND_TABLE
+            .iter()
+            .filter(|&&(n, ..)| !n.starts_with("sentinel|"))
+            .count();
         assert_eq!(
-            namespaced,
-            SUBCOMMAND_TABLE.len(),
-            "COMMAND LIST must emit one parent|sub row per SUBCOMMAND_TABLE entry"
+            namespaced, visible,
+            "COMMAND LIST must emit one parent|sub row per visible SUBCOMMAND_TABLE entry"
         );
         // Spot-check a representative row from each container to catch
         // future drift in the table.
