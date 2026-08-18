@@ -41,6 +41,7 @@ Runs with no server, no build, no network and no disk writes.
 """
 import os
 import re
+import textwrap
 import subprocess
 import sys
 
@@ -50,6 +51,38 @@ UPSTREAM = os.path.join(ROOT, "legacy_redis_code", "redis", "src", "server.c")
 # Every upstream INFO field fr does not render, with the upstream GUARD that decides when
 # it appears and what a verifier must do to reach it. Grouped, because the groups have
 # very different reachability and therefore very different severity.
+# (frankenredis-w1djx) WHY EACH GUARD IS UNREACHABLE, not merely unreached.
+#
+# "reachable when: X" reads like a to-do -- implement X and the field appears. For every guard
+# still in this baseline that is FALSE, and reading it as a to-do has now cost two separate
+# investigations. Each remaining guard names a STATE FR NEVER OBSERVABLY OCCUPIES, because of a
+# design choice fr made deliberately elsewhere. Rendering the field is not the work; changing
+# that design is, and none of it is a small edit.
+STRUCTURAL_REASONS = {
+    "replica, sync in progress":
+        "fr's replica sync is SYNCHRONOUS. `read_replication_snapshot_from_stream` "
+        "(fr-server/src/main.rs) blocks in a read loop until the whole snapshot has arrived, and "
+        "`drive_replica_sync` is called from the event loop, so fr is never simultaneously "
+        "mid-transfer and able to answer INFO. Upstream reads the RDB incrementally across event "
+        "loop turns, which is the only reason its byte counters are observable. Emitting these "
+        "five means restructuring the transfer into an incremental state machine -- a change to "
+        "fr's I/O behaviour, not to its reporting.",
+    "loading":
+        "fr has no loading state at all: `loading:0` is a hardcoded literal and there is no "
+        "equivalent of upstream's `server.loading`. The dataset load is blocking, so a client "
+        "cannot poll INFO during it -- which also makes the hardcoded 0 observably correct. "
+        "These six become meaningful only if loading becomes concurrent with serving.",
+    "shutdown in progress":
+        "fr accepts `shutdown-timeout` (default 10, matching upstream) and does not implement "
+        "the pause it configures: there is no equivalent of `isShutdownInitiated()`, so SHUTDOWN "
+        "does not wait for replicas and no window exists in which to report a countdown. The "
+        "config is decorative today; the field is a symptom of that, not a separate gap.",
+    "unixsocket configured":
+        "decided ABSENT deliberately -- see the bead. The listener half landed in 8cff0e126 with "
+        "accept deliberately not wired, so reporting the socket would advertise an endpoint that "
+        "does not accept.",
+}
+
 DECLARED_ABSENT = {
     # IMPLEMENTED 2026-08-17 in 29048d447 and removed from this baseline, which is the
     # deletion condition this gate was written with. The six AOF sizing fields
@@ -150,6 +183,13 @@ def main():
         print(f"  reachable when: {guard}")
         for f in sorted(by_guard[guard]):
             print(f"      {f}")
+        reason = STRUCTURAL_REASONS.get(guard)
+        if reason:
+            print(textwrap.fill(reason, width=96, initial_indent="      why: ",
+                                subsequent_indent="           "))
+        else:
+            print("      why: NO STRUCTURAL REASON RECORDED — add one to STRUCTURAL_REASONS "
+                  "or this guard reads as a to-do")
     if verbose:
         print(f"\nfr renders {len(present)} distinct `name:` literals under crates/")
 
