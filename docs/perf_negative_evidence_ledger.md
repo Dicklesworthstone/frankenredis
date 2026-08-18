@@ -61499,3 +61499,112 @@ otherwise.
 3. When comparing instruction ratios across draws on ANY shape, check the redis denominator for
    monotonic drift. It moved 8.07 pct here while fr moved 0.08 pct, and a ratio built on a
    drifting denominator improves for the wrong reason.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 BrownIbis: `geosearch_64` on HARDWARE counters — fr burns **14-17 pct FEWER CYCLES per op**, the IPC band NARROWS to 1.14-1.18x at this size, and the registered success criterion for this bead is therefore ALREADY MET (`frankenredis-ozrro`)
+
+Claim class: MEASUREMENT answering two questions handed over by CrimsonHawk. No lever ships.
+Campaign output: yes — it removes server CPU as the explanation for the throughput straddle.
+
+### THE TWO QUESTIONS I WAS ASKED
+
+CrimsonHawk mailed both, explicitly declining to take them: does `geosearch_64` show the same
+**D1-read-miss** signature as `geosearch_2`, or does the larger result set shift it toward
+capacity misses; and does the **1.32-1.79x IPC band** hold at that size. `47970` registers the
+success criterion for any lever on this bead: **fr's cycles per op must fall**, since instruction
+count is already far better and moving it further buys nothing.
+
+### THE NUMBERS
+
+`perf stat` attached to the SERVER pid only, benchmark defining the window, 50,000 ops, `-c 1
+-P 16`. BOTH ENGINE ORDERS run, because `47912` records a systematic ORDER bias on `cycles` and
+an 18.26 pct bias on the cache-miss counter — a single order banks that bias as a result.
+
+    metric                  A fr      A redis   A f/r      B fr      B redis   B f/r
+    instructions/op      96969.6     132857.1  0.7299   96923.5     132998.8  0.7288
+    cycles/op            41038.3      47771.5  0.8591   39794.2      47719.2  0.8339
+    L1 loads/op          32570.2      36429.6  0.8941   32572.2      36496.8  0.8925
+    L1 load misses/op      629.3        343.7  1.8310     615.4        345.7  1.7802
+    branch misses/op       100.3         97.5  1.0284      98.1         96.5  1.0171
+
+    IPC              fr 2.3629  redis 2.7811  redis/fr 1.1770   (A)
+                     fr 2.4356  redis 2.7871  redis/fr 1.1443   (B)
+    L1 read miss RATE fr 1.932 pct  redis 0.943 pct  fr/redis 2.0480   (A)
+                      fr 1.889 pct  redis 0.947 pct  fr/redis 1.9946   (B)
+
+Quoting the WORST bound of the two orders throughout: instructions **0.7299x**, cycles
+**0.8591x**, IPC gap **1.1770x**, L1 read miss rate **2.0480x**.
+
+### ANSWER 1: SAME SIGNATURE, ATTENUATED — NOT CAPACITY MISSES
+
+The mechanism is unchanged: **L1 data READ misses**, with branch misses at parity (1.0284x worst,
+i.e. nothing there). The miss RATE ratio is 2.05x worst against `47084`'s 2.70x on
+`geosearch_2` — the same signature, smaller.
+
+Nothing suggests a shift to capacity misses at this size. The simulated run in `e2481acc4`
+already showed `DLmr` at essentially zero on both engines for this shape — the working set still
+fits the last level — and the hardware L1 numbers agree that the cost lives at L1.
+
+### ANSWER 2: THE BAND DOES NOT HOLD. IT NARROWS TO 1.14-1.18x
+
+Against the 1.32-1.79x band `50071` records across the shapes where fr is behind, this shape
+reads **1.1443x-1.1770x**. The IPC deficit is real and it is roughly HALF the band at the
+bottom end.
+
+### THE CONSEQUENCE, WHICH IS THE POINT OF THE ROW
+
+**fr's cycles per op are 0.8591x redis's, worst bound.** fr burns 14 to 17 pct FEWER cycles for
+the identical query. On `geosearch_2`, `47563` measured the opposite — fr burning **4 pct MORE**
+cycles (1.0393x) on 21 pct fewer instructions, because the IPC gap there was large enough to eat
+the instruction advantage. At 64 members the IPC gap narrows to 1.14-1.18x and the 27 pct
+instruction advantage survives into cycles with room to spare.
+
+So `47970`'s success criterion for a lever on this bead — *fr's cycles per op must fall* — is
+**already met at this size, without a lever**. There is nothing left to win on server CPU for
+`geosearch_64`: fr does less work AND takes fewer cycles.
+
+**And the throughput ratio still straddles 1.0.** Fewer instructions, fewer cycles, and no
+throughput advantage means the straddle is not server CPU at all. That matches
+`f47304306`'s finding on PUBLISH from the other direction — 2.2x fewer instructions and a
+throughput shortfall — and generalises it: on this shape the server is not the constraint.
+
+One measured lead for wherever the constraint actually is: `e2481acc4` recorded **event-loop
+passes per op at fr 0.010-0.013 against redis 0.008**, i.e. fr making 1.29-1.65x MORE passes.
+Under `-P 16` that is a syscall/wakeup difference, not a CPU one. I am NOT claiming it explains
+the straddle — it is one measured asymmetry pointing away from the command path, and it is where
+I would look next.
+
+### WHAT THIS DOES TO MY OWN QUEUED LEVER
+
+`9069c9eb0` left `Vec::with_capacity` on the GEOSEARCH accumulator queued as the one unblocked
+fix. It is still a real reduction in instructions and allocations, and it should still be taken
+on the instruction axis — but it must NOT be sold as closing the throughput straddle. On this
+evidence it cannot: the straddle survives fr already being ahead on both instructions and cycles.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Both engine orders run as the control for counter order bias, and they agree to 3.0 pct on
+cycles and 2.7 pct on IPC. Per-arm loadavg recorded at each arm (5.61-5.72 / 5.77-5.79 /
+5.86-5.87, flat across all four) with CPU MHz 1429 on three arms and 2400 on the fourth,
+disclosed rather than hidden: cycles/op and IPC are frequency-independent, and the two orders
+agree despite the difference. Both engines verified to return 64 members before timing, so
+neither arm is measuring an error path — `redis-benchmark` counts an error reply as a completed
+request. CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           fr `4b2dd580cfaa158c...` at `643df0862`; vendored redis 7.2.4.
+  host          /data 47G, 5G above the brake. No build — `perf stat` and `redis-benchmark`
+                only, no callgrind, no dumps, no disk written.
+  disposition   MEASUREMENT. No source file changed.
+
+### RETRY PREDICATE
+
+1. Do not re-derive the mechanism. It is L1 read misses, confirmed on hardware at two sizes now
+   (2.70x at 2 members, 2.05x at 64).
+2. Anyone proposing a locality lever for `geosearch_64` must first say what it is FOR. Cycles per
+   op are already 0.86x. `47970`'s criterion cannot motivate a lever that is already satisfied.
+3. The next measurement on this bead is not in the command path. Count syscalls (or event-loop
+   passes) per op for both engines under `-P 16` and see whether the 1.29-1.65x asymmetry
+   reproduces and scales.
