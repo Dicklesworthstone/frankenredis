@@ -54817,3 +54817,99 @@ split.
      `b6a9c8d2a`: the decoder renders a binary integer to decimal and the restore fold parses that
      decimal back, a full round trip per element, blocked by `frankenredis-33832` and
      `frankenredis-c92f6`.
+
+## 2026-08-18 CrimsonHawk: MEASURED — `frankenredis-c92f6`'s objection is answerable: redis NEVER string-encodes a canonical decimal, so the disagreement it protects against is detectable in ONE BYTE per entry, not a 192-instruction fold (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: protocol-level observation against the LIVE vendored incumbent (redis 7.2.4), plus
+a listpack walker written here rather than borrowed from the code under test. No A/B and no timing:
+nothing was changed. CV was NOT used, as a gate or otherwise — no coefficient of variation appears
+in this row's decision path and none was computed. No code shipped; a build slot was held by
+another pane for this whole window, and this row exists so the next one is a single build.
+
+Claim class: not applicable — nothing is kept and no ratio is banked.
+
+### THE BLOCKED LEVER, RESTATED
+
+`b6a9c8d2a` recorded the largest term left on the integer RESTORE path and why nobody may take it:
+`from_restored_quicklist2_nodes` costs 57,600.0 instr/key, **192.00 per element**, because the
+decoder renders a binary integer to decimal and the restore fold then PARSES THAT DECIMAL BACK,
+inside `list_lp_entry_bytes`, to pick the entry's width. A round trip, per element.
+
+Two doors, both bolted by earlier rows:
+
+  * `frankenredis-33832` — carry the `i64` on the span. Refused: 8 bytes on EVERY span, including
+    the string spans that are the whole of a typical hash RESTORE, to serve one consumer.
+  * `frankenredis-c92f6` — derive the chunk total from the listpack header. Refused because "a
+    non-canonically-encoded payload must keep yielding the same `lp_bytes` / `forced_quicklist` —
+    and hence the same `OBJECT ENCODING` — as the re-walk did".
+
+That second refusal is load-bearing ONLY if such a payload can reach the decoder. Nobody had asked.
+
+### ASKING THE INCUMBENT
+
+A listpack entry is int-encoded or string-encoded, and fr's size rule differs from redis's bytes
+only where the two make different choices. fr int-encodes exactly the CANONICAL decimals. So the
+question is precise: does redis ever STRING-encode a canonical decimal?
+
+Driven at redis 7.2.4 with elements at every listpack integer width and both signs, plus the
+near-misses that must stay strings — leading zeros, `+`, leading/trailing space, `-0`, `007`,
+`1.5`, `1e3` — across fills −2, −1 and 128, and with each DUMP's per-node listpack walked entry by
+entry and classified by its ENCODING BYTE:
+
+    redis 7.2.4 listpack entries:  90 int-encoded,  198 string-encoded
+    STRING-ENCODED CANONICAL DECIMALS:  0
+
+  The walker is written in the probe, from the format, not called out of `fr-persist` — so this is
+  an observation about redis, not a restatement of fr's own decoder.
+
+  A string-encoded canonical decimal therefore cannot come from a payload redis wrote. It can only
+  come from a hand-crafted one, which is exactly the case `c92f6` is right to protect — and which
+  a cheap test can catch rather than a full fold.
+
+### AND THE OTHER HALF: FR PICKS THE SAME WIDTHS
+
+The derivation is only exact if fr's size predictor agrees with the bytes redis actually wrote.
+The chain has two links and both are now pinned:
+
+  * predictor -> fr's encoder: `listpack_entry_encoded_len_matches_real_encoder`, in-tree already.
+  * fr's encoder -> redis: measured here. SINGLE-element lists at every width boundary and both
+    signs, including `i64::MIN` and `549755813887`, so a one-byte width disagreement shows as a
+    one-byte payload difference and cannot hide inside node framing.
+
+    single-element integer DUMP, fr vs redis 7.2.4:  0 of 42 diverging
+
+### WHAT THIS MAKES POSSIBLE, SPECIFIED NOT BUILT
+
+For a retained `ListChunk::Listpack`, `enc_total` is `bytes.len()` — O(1), no walk — PROVIDED no
+`ListpackValueSpan::String` in the chunk holds a canonical decimal. And that condition does not
+need the canonicity test: an element whose FIRST BYTE is neither an ASCII digit nor `-` cannot be
+canonical decimal, which is the same one-way implication `308db786f` already relies on and already
+has an oracle for. So:
+
+    per entry:   one load, two compares          (vs. the current classify-and-fold)
+    per chunk:   if every String span passed, enc_total = bytes.len()
+                 otherwise, the EXACT existing per-entry walk for that chunk, unchanged
+
+  `c92f6`'s invariant is preserved rather than assumed: a non-canonical payload still takes the
+  re-walk and still reports the same `lp_bytes`, the same `forced_quicklist` and the same
+  `OBJECT ENCODING`. `Integer` spans need no test at all — redis int-encoded them and, by the two
+  links above, fr assigns the same width — but the fallback must still cover them if a future
+  width table ever diverges, so the check is per CHUNK, not per span.
+
+  Note `raw_total` still needs `elem.len()` per entry. That is a field read, not a classification,
+  so the fold does not disappear — it shrinks.
+
+### RETRY PREDICATES
+
+  1. BUILD IT NEXT, as one lever, and gate it on the shape this row was written from:
+     `from_restored_quicklist2_nodes` must fall from 192.00 instr per element, and the ALL-INTEGER
+     RESTORE+DUMP A/B must clear its own same-invocation null. If the frame does not move, the
+     derivation is not being taken and the guard is misplaced — do NOT report the whole-op number
+     in that case.
+  2. The fallback path needs a test that REACHES it, not just a payload that passes. Hand-craft a
+     listpack that string-encodes `"123"`, RESTORE it, and assert `OBJECT ENCODING` and `LLEN`
+     match what the re-walk gives today. A lever whose slow path is never executed by any test is
+     the `feedback_mutation_test_every_defensive_guard` trap.
+  3. This row does NOT license deriving `lp_bytes` from the header unconditionally, and it does not
+     overturn `c92f6`. It narrows that row's scope: the objection stands for hand-crafted payloads
+     and is answered for redis-written ones. Anyone citing this row must carry the guard with it.
