@@ -12555,173 +12555,188 @@ fn lua_set_match(pat: &[u8], pi: usize, ch: u8) -> bool {
 /// Returns the end position (exclusive) of the match on success.
 fn lua_pat_match(
     s: &[u8],
-    si: usize,
+    mut si: usize,
     pat: &[u8],
-    pi: usize,
+    mut pi: usize,
     captures: &mut Vec<LuaCapture>,
     depth: usize,
 ) -> Option<usize> {
     if depth > 200 {
         return None; // prevent stack overflow
     }
-    if pi >= pat.len() {
-        return Some(si);
-    }
+    // Upstream expresses the tail positions below as `goto init` rather
+    // than recursion (lstrlib.c:366, "using goto's to optimize tail
+    // recursion"), so a literal pattern costs it NO stack. fr recursed at
+    // every one of them, which made `depth` grow once per matched BYTE and
+    // silently turned a pattern longer than the limit into a non-match.
+    loop {
+        if pi >= pat.len() {
+            return Some(si);
+        }
 
-    // Handle captures: (
-    if pat[pi] == b'(' {
-        if pi + 1 < pat.len() && pat[pi + 1] == b')' {
-            // Position capture
+        // Handle captures: (
+        if pat[pi] == b'(' {
+            if pi + 1 < pat.len() && pat[pi + 1] == b')' {
+                // Position capture
+                let cap_idx = captures.len();
+                captures.push(LuaCapture::Position(si));
+                if let Some(end) = lua_pat_match(s, si, pat, pi + 2, captures, depth + 1) {
+                    return Some(end);
+                }
+                captures.truncate(cap_idx);
+                return None;
+            }
+            // Start substring capture
             let cap_idx = captures.len();
-            captures.push(LuaCapture::Position(si));
-            if let Some(end) = lua_pat_match(s, si, pat, pi + 2, captures, depth + 1) {
+            captures.push(LuaCapture::Substring(si, None)); // open capture
+            if let Some(end) = lua_pat_match(s, si, pat, pi + 1, captures, depth + 1) {
                 return Some(end);
             }
             captures.truncate(cap_idx);
             return None;
         }
-        // Start substring capture
-        let cap_idx = captures.len();
-        captures.push(LuaCapture::Substring(si, None)); // open capture
-        if let Some(end) = lua_pat_match(s, si, pat, pi + 1, captures, depth + 1) {
-            return Some(end);
-        }
-        captures.truncate(cap_idx);
-        return None;
-    }
 
-    // Handle capture close: )
-    if pat[pi] == b')' {
-        // Find the last open capture and close it
-        for i in (0..captures.len()).rev() {
-            if let LuaCapture::Substring(start, None) = captures[i] {
-                captures[i] = LuaCapture::Substring(start, Some(si));
-                if let Some(end) = lua_pat_match(s, si, pat, pi + 1, captures, depth + 1) {
-                    return Some(end);
+        // Handle capture close: )
+        if pat[pi] == b')' {
+            // Find the last open capture and close it
+            for i in (0..captures.len()).rev() {
+                if let LuaCapture::Substring(start, None) = captures[i] {
+                    captures[i] = LuaCapture::Substring(start, Some(si));
+                    if let Some(end) = lua_pat_match(s, si, pat, pi + 1, captures, depth + 1) {
+                        return Some(end);
+                    }
+                    captures[i] = LuaCapture::Substring(start, None); // restore
+                    return None;
                 }
-                captures[i] = LuaCapture::Substring(start, None); // restore
+            }
+            return None; // unmatched close paren
+        }
+
+        // Handle $ anchor at end of pattern
+        if pat[pi] == b'$' && pi + 1 == pat.len() {
+            return if si == s.len() { Some(si) } else { None };
+        }
+
+        // (frankenredis-53u08) Handle %N back-references (N = 1..9):
+        // upstream lstrlib.c::match_capture compares the N-th captured
+        // substring's bytes against s starting at si. The capture must
+        // already be closed (Substring(start, Some(end)) or Position).
+        // fr previously fell through to lua_single_match → lua_class_match
+        // which treated '%1' as the literal char '1'.
+        if pi + 1 < pat.len() && pat[pi] == b'%' && (b'1'..=b'9').contains(&pat[pi + 1]) {
+            let cap_idx = (pat[pi + 1] - b'0') as usize - 1;
+            // Out-of-range or unclosed → no match (upstream raises
+            // "invalid capture index" at compile-ish time, but for the
+            // common case we just fail the match here).
+            let cap_bytes: Vec<u8> = match captures.get(cap_idx) {
+                Some(LuaCapture::Substring(start, Some(end))) => s[*start..*end].to_vec(),
+                Some(LuaCapture::Position(pos)) => format!("{}", pos + 1).into_bytes(),
+                _ => return None,
+            };
+            let end = si + cap_bytes.len();
+            if end > s.len() || &s[si..end] != cap_bytes.as_slice() {
                 return None;
             }
+            si = end;
+            pi += 2;
+            continue;
         }
-        return None; // unmatched close paren
-    }
 
-    // Handle $ anchor at end of pattern
-    if pat[pi] == b'$' && pi + 1 == pat.len() {
-        return if si == s.len() { Some(si) } else { None };
-    }
-
-    // (frankenredis-53u08) Handle %N back-references (N = 1..9):
-    // upstream lstrlib.c::match_capture compares the N-th captured
-    // substring's bytes against s starting at si. The capture must
-    // already be closed (Substring(start, Some(end)) or Position).
-    // fr previously fell through to lua_single_match → lua_class_match
-    // which treated '%1' as the literal char '1'.
-    if pi + 1 < pat.len() && pat[pi] == b'%' && (b'1'..=b'9').contains(&pat[pi + 1]) {
-        let cap_idx = (pat[pi + 1] - b'0') as usize - 1;
-        // Out-of-range or unclosed → no match (upstream raises
-        // "invalid capture index" at compile-ish time, but for the
-        // common case we just fail the match here).
-        let cap_bytes: Vec<u8> = match captures.get(cap_idx) {
-            Some(LuaCapture::Substring(start, Some(end))) => s[*start..*end].to_vec(),
-            Some(LuaCapture::Position(pos)) => format!("{}", pos + 1).into_bytes(),
-            _ => return None,
-        };
-        let end = si + cap_bytes.len();
-        if end > s.len() || &s[si..end] != cap_bytes.as_slice() {
+        // (frankenredis-3zxc1) Handle %f[set] frontier matcher — a zero-width
+        // assertion that matches the empty string at a position where the
+        // previous byte does NOT match [set] but the current byte DOES.
+        // Mirrors lstrlib.c::do_match's L_ESC + 'f' branch. The pre-loop
+        // validator (lua_pattern_validate) guarantees pat[pi+2] == '['.
+        if pi + 2 < pat.len() && pat[pi] == b'%' && pat[pi + 1] == b'f' && pat[pi + 2] == b'[' {
+            let set_len = lua_pattern_element_len(pat, pi + 2);
+            // Upstream treats s[-1] as '\0' at the start of the string, and
+            // s[len] as '\0' off the end (matching the C convention).
+            let prev = if si == 0 { 0u8 } else { s[si - 1] };
+            let cur = if si < s.len() { s[si] } else { 0u8 };
+            if !lua_set_match(pat, pi + 2, prev) && lua_set_match(pat, pi + 2, cur) {
+                pi = pi + 2 + set_len;
+                continue;
+            }
             return None;
         }
-        return lua_pat_match(s, end, pat, pi + 2, captures, depth + 1);
-    }
 
-    // (frankenredis-3zxc1) Handle %f[set] frontier matcher — a zero-width
-    // assertion that matches the empty string at a position where the
-    // previous byte does NOT match [set] but the current byte DOES.
-    // Mirrors lstrlib.c::do_match's L_ESC + 'f' branch. The pre-loop
-    // validator (lua_pattern_validate) guarantees pat[pi+2] == '['.
-    if pi + 2 < pat.len() && pat[pi] == b'%' && pat[pi + 1] == b'f' && pat[pi + 2] == b'[' {
-        let set_len = lua_pattern_element_len(pat, pi + 2);
-        // Upstream treats s[-1] as '\0' at the start of the string, and
-        // s[len] as '\0' off the end (matching the C convention).
-        let prev = if si == 0 { 0u8 } else { s[si - 1] };
-        let cur = if si < s.len() { s[si] } else { 0u8 };
-        if !lua_set_match(pat, pi + 2, prev) && lua_set_match(pat, pi + 2, cur) {
-            return lua_pat_match(s, si, pat, pi + 2 + set_len, captures, depth + 1);
-        }
-        return None;
-    }
-
-    // (frankenredis-skwin) Handle %bxy balanced match. Starting at the
-    // current string position, advance through paired open/close chars
-    // tracking nesting depth; on success continue matching with the
-    // string position past the close char and the pattern past the
-    // 4-byte %bxy element. Mirrors lstrlib.c::matchbalance.
-    if pi + 3 < pat.len() && pat[pi] == b'%' && pat[pi + 1] == b'b' {
-        let open_ch = pat[pi + 2];
-        let close_ch = pat[pi + 3];
-        if si >= s.len() || s[si] != open_ch {
-            return None;
-        }
-        let mut depth_b: i32 = 1;
-        let mut j = si + 1;
-        while j < s.len() {
-            // For the degenerate case where open == close (e.g. %bxx),
-            // every match closes the outermost bracket.
-            if s[j] == close_ch {
-                depth_b -= 1;
-                if depth_b == 0 {
-                    return lua_pat_match(s, j + 1, pat, pi + 4, captures, depth + 1);
-                }
-            } else if s[j] == open_ch {
-                depth_b += 1;
-            }
-            j += 1;
-        }
-        return None;
-    }
-
-    let elem_len = lua_pattern_element_len(pat, pi);
-    let after_elem = pi + elem_len;
-
-    // Check for quantifier after element
-    if after_elem < pat.len() {
-        match pat[after_elem] {
-            b'*' => {
-                // Greedy 0+
-                return lua_pat_greedy(s, si, pat, pi, after_elem + 1, captures, depth);
-            }
-            b'+' => {
-                // Greedy 1+
-                if si < s.len() && lua_single_match(pat, pi, s[si]) {
-                    return lua_pat_greedy(s, si + 1, pat, pi, after_elem + 1, captures, depth);
-                }
+        // (frankenredis-skwin) Handle %bxy balanced match. Starting at the
+        // current string position, advance through paired open/close chars
+        // tracking nesting depth; on success continue matching with the
+        // string position past the close char and the pattern past the
+        // 4-byte %bxy element. Mirrors lstrlib.c::matchbalance.
+        if pi + 3 < pat.len() && pat[pi] == b'%' && pat[pi + 1] == b'b' {
+            let open_ch = pat[pi + 2];
+            let close_ch = pat[pi + 3];
+            if si >= s.len() || s[si] != open_ch {
                 return None;
             }
-            b'-' => {
-                // Lazy 0+
-                return lua_pat_lazy(s, si, pat, pi, after_elem + 1, captures, depth);
-            }
-            b'?' => {
-                // Optional
-                if si < s.len()
-                    && lua_single_match(pat, pi, s[si])
-                    && let Some(end) =
-                        lua_pat_match(s, si + 1, pat, after_elem + 1, captures, depth + 1)
-                {
-                    return Some(end);
+            let mut depth_b: i32 = 1;
+            let mut j = si + 1;
+            while j < s.len() {
+                // For the degenerate case where open == close (e.g. %bxx),
+                // every match closes the outermost bracket.
+                if s[j] == close_ch {
+                    depth_b -= 1;
+                    if depth_b == 0 {
+                        si = j + 1;
+                        pi += 4;
+                        continue;
+                    }
+                } else if s[j] == open_ch {
+                    depth_b += 1;
                 }
-                return lua_pat_match(s, si, pat, after_elem + 1, captures, depth + 1);
+                j += 1;
             }
-            _ => {}
+            return None;
         }
-    }
 
-    // No quantifier: match single element
-    if si < s.len() && lua_single_match(pat, pi, s[si]) {
-        return lua_pat_match(s, si + 1, pat, after_elem, captures, depth + 1);
-    }
+        let elem_len = lua_pattern_element_len(pat, pi);
+        let after_elem = pi + elem_len;
 
-    None
+        // Check for quantifier after element
+        if after_elem < pat.len() {
+            match pat[after_elem] {
+                b'*' => {
+                    // Greedy 0+
+                    return lua_pat_greedy(s, si, pat, pi, after_elem + 1, captures, depth);
+                }
+                b'+' => {
+                    // Greedy 1+
+                    if si < s.len() && lua_single_match(pat, pi, s[si]) {
+                        return lua_pat_greedy(s, si + 1, pat, pi, after_elem + 1, captures, depth);
+                    }
+                    return None;
+                }
+                b'-' => {
+                    // Lazy 0+
+                    return lua_pat_lazy(s, si, pat, pi, after_elem + 1, captures, depth);
+                }
+                b'?' => {
+                    // Optional
+                    if si < s.len()
+                        && lua_single_match(pat, pi, s[si])
+                        && let Some(end) =
+                            lua_pat_match(s, si + 1, pat, after_elem + 1, captures, depth + 1)
+                    {
+                        return Some(end);
+                    }
+                    pi = after_elem + 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        // No quantifier: match single element
+        if si < s.len() && lua_single_match(pat, pi, s[si]) {
+            si += 1;
+            pi = after_elem;
+            continue;
+        }
+
+        return None;
+    }
 }
 
 /// Greedy quantifier: match as many as possible, then backtrack.
@@ -22252,6 +22267,55 @@ end
             matches!(cur, RespFrame::Array(Some(items)) if items.is_empty()),
             "the innermost value is the empty table the loop started from, got {cur:?}"
         );
+    }
+
+    /// `lua_pat_match` recursed at every position where upstream's `match` does
+    /// `goto init` (lstrlib.c:366, "using goto's to optimize tail recursion"),
+    /// so `depth` grew once per matched BYTE. Past its guard the matcher
+    /// returned None — a silent NON-MATCH, not an error — for patterns Redis
+    /// matches without difficulty. A literal pattern costs upstream no stack at
+    /// all, so the length at which fr gave up was an artefact with no
+    /// counterpart in the incumbent.
+    #[test]
+    fn lua_pattern_literal_advance_does_not_consume_match_depth() {
+        let mut store = Store::new();
+
+        // Well past the old depth guard, and entirely free of magic characters,
+        // so the pattern is a plain literal on both sides.
+        for n in [250usize, 1000] {
+            let script = format!("local s = string.rep('a', {n}) return string.match(s, s) == s");
+            let frame = eval_script(script.as_bytes(), &[], &[], &mut store, 0)
+                .unwrap_or_else(|e| panic!("literal pattern of {n} bytes errored: {e:?}"));
+            assert_eq!(
+                frame,
+                RespFrame::Integer(1),
+                "a {n}-byte literal pattern must match; nil here is the depth guard \
+                 firing on pattern LENGTH, which upstream never does"
+            );
+        }
+
+        // Same shape through find(), which reaches the matcher by another route.
+        let frame = eval_script(
+            b"local s = string.rep('ab', 200) return string.find(s, s)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("find over a 400-byte literal pattern");
+        assert_eq!(frame, RespFrame::Integer(1), "find must locate it at offset 1");
+
+        // The guard must still REFUSE rather than recurse without limit: this
+        // one backtracks genuinely, and upstream's own matcher has no bound at
+        // all, so fr answering at all is the conservative direction.
+        let frame = eval_script(
+            b"return string.match(string.rep('a', 40), '^' .. string.rep('(a)', 40) .. '$') == nil",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert!(frame.is_ok(), "a backtracking pattern must not abort the process");
     }
 
     #[test]
