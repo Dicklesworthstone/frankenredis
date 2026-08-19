@@ -21711,6 +21711,14 @@ end
         store.over_maxmemory_live = true;
         store.script_read_only = true;
         store.script_allow_oom = true;
+        // MEASURED, and this row asserted something unreachable until the build slot freed: the
+        // read-only refusal is `script_nesting_level >= 1 && script_read_only && writes(argv)`
+        // (lib.rs:2475). `eval_script` is the interpreter entry and does NOT bump the nesting
+        // level -- the command layer does, at the `script_nesting_level += 1` beside the flags
+        // this row sets by hand. Setting two of the three inputs and not the third made the write
+        // SUCCEED, so the row failed on `expect_err` with SimpleString("OK") rather than on the
+        // assertion it exists to make.
+        store.script_nesting_level = 1;
         let err = eval_script(b"return redis.call('set','k','v')", &[], &[], &mut store, 0)
             .expect_err("a no-writes script must still be refused");
         assert!(
