@@ -2432,6 +2432,29 @@ pub fn dispatch_argv(
     let Some(raw_cmd) = argv.first() else {
         return Err(CommandError::InvalidCommandFrame);
     };
+    // (frankenredis-noscriptcentral-asoup) CENTRAL noscript gate, from the flag.
+    //
+    // fr enforced CMD_NOSCRIPT per command, in ~80 hand-placed guards, and the ones it could
+    // not place were the commands fr-command does not handle at all: MULTI, EXEC, DISCARD,
+    // WATCH, UNWATCH, AUTH, HELLO, SYNC and the ACL/EVAL_RO family live in the runtime or
+    // nowhere, so a script calling them fell through to "unknown command". That is worse than
+    // wrong wording -- it tells a script author the command does not exist, when it exists and
+    // is merely forbidden here.
+    //
+    // Upstream applies it once, from the flag, in script.c::scriptCall:529. The existing
+    // per-command guards stay: they are unreachable now for the commands this covers, but
+    // several encode subcommand-level nuance and none of them is wrong.
+    //
+    // ORDER matches script.c:524-530 -- arity is verified BEFORE noscript, so a scripted
+    // `MULTI x` still reports wrong-arity rather than the noscript error. Checking arity here
+    // rather than relying on position is what preserves that, since this runs ahead of the
+    // table arity check below.
+    if store.script_nesting_level >= 1
+        && check_full_command_arity(argv).is_ok()
+        && command_is_noscript(argv)
+    {
+        return Err(script_noscript_command_error());
+    }
     // Upstream commands.def declares client|reply with CMD_NOSCRIPT
     // (line 1551), so processCommand fires the noscript reply before
     // the handler-level mode validation. fr previously parsed the
@@ -19526,6 +19549,31 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
 /// `reject_cmd_on_oom = c->cmd->flags & CMD_DENYOOM`). Writes that DON'T allocate
 /// (DEL/UNLINK/EXPIRE/LPOP/HDEL/SREM/...) are NOT denyoom and stay ALLOWED over
 /// maxmemory so a user can free memory to recover. (frankenredis-oomdenyoom)
+/// Whether the resolved command carries upstream's `CMD_NOSCRIPT` flag.
+///
+/// (frankenredis-noscriptcentral-asoup) Same shape and same reason as
+/// [`command_is_stale`]: fr's `noscript` flags match vendored 7.2.4 on all 92 entries, zero
+/// missing and zero extra, so the table already answers this. Resolves the fullname because the
+/// flag is per SUBCOMMAND -- `client|reply` is noscript while `client|getname` is not.
+///
+/// Unknown names return FALSE here, the opposite of [`command_is_stale`], and deliberately:
+/// upstream reaches its noscript check only after `lookupCommand` succeeded, so an unknown
+/// command must fall through to the unknown-command error rather than be reported as
+/// "not allowed from script".
+#[must_use]
+pub fn command_is_noscript(argv: &[Vec<u8>]) -> bool {
+    let Some(parent) = argv.first() else {
+        return false;
+    };
+    if command_has_subcommands_bytes(parent) && argv.len() >= 2 {
+        let fullname = canonical_command_fullname(argv);
+        return subcommand_table_index(fullname.as_bytes())
+            .is_some_and(|index| SUBCOMMAND_TABLE[index].2.split(' ').any(|f| f == "noscript"));
+    }
+    command_table_index(parent)
+        .is_some_and(|index| COMMAND_TABLE[index].2.split(' ').any(|f| f == "noscript"))
+}
+
 /// Whether the resolved command carries upstream's `CMD_STALE` flag.
 ///
 /// (frankenredis-stalelist-hto86) This is what upstream's stale-replica gate asks --
