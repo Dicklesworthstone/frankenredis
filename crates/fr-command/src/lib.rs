@@ -14123,8 +14123,9 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     }
     let func_name = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
 
-    // Validate function name contains only safe identifier characters to prevent
-    // Lua code injection when constructing the wrapper script.
+    // Upstream rejects a registration whose name is not `[A-Za-z0-9_]+`
+    // (functions.c::functionsVerifyName), so no such function can exist to call and
+    // "Function not found" is the answer for any name outside that set.
     if func_name.is_empty()
         || !func_name
             .bytes()
@@ -14133,18 +14134,16 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         return Ok(RespFrame::Error("ERR Function not found".to_string()));
     }
 
-    // Look up the function by name
+    // Look up the function by name, and probe the library-callback cache with a slice BORROWED
+    // from the store's own record.
     //
-    // (frankenredis-kbyhy) `lib.code.clone()` below is the LAST O(library size) copy on this
-    // path, and it is still here on purpose. It exists because `store` is borrowed mutably
-    // further down -- `function_call_execute(store, .., &script, ..)` needs the source while
-    // holding that borrow -- so the rewriting path pays a copy that only the executing fallback
-    // actually requires. Removing it means computing the wrapper inside this match and cloning
-    // the code only when `target_func_line` is None, which is a borrow restructure, not a
-    // rename, and it is not worth landing blind: this commit is unbuilt under the /data freeze
-    // and the probe fix above already removes two copies of this same size per call. Sized, not
-    // guessed -- one library copy per FCALL, independent of how much work the function does.
-    let (script, has_no_writes, has_allow_oom) = match store.function_get(func_name) {
+    // (frankenredis-kbyhy) THE BORROWED PROBE IS THE POINT. This used to be `lib.code.clone()`
+    // unconditionally -- a full copy of the library on every FCALL -- because `store` is borrowed
+    // mutably further down and the executing path needed the source while holding that borrow.
+    // The cache lookup needs no `Store` at all, so it can run inside this match against the
+    // borrowed bytes; the copy is then paid only on a MISS, where the source is genuinely about
+    // to be executed. On the hit path FCALL now copies nothing that scales with the library.
+    let (library, has_no_writes, has_allow_oom) = match store.function_get(func_name) {
         Some((lib, func)) => {
             let no_writes = func
                 .flags
@@ -14156,7 +14155,13 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                 .flags
                 .iter()
                 .any(|f| f.eq_ignore_ascii_case("allow-oom"));
-            (lib.code.clone(), no_writes, allow_oom)
+            // `Ok` = already executed and retained; `Err` = the source to execute once. A Result
+            // rather than two Options so "cached AND a source" and "neither" are not
+            // representable.
+            match lua_eval::fcall_cached_library_callbacks(&lib.code) {
+                Some(callbacks) => (Ok(callbacks), no_writes, allow_oom),
+                None => (Err(lib.code.clone()), no_writes, allow_oom),
+            }
         }
         None => {
             return Ok(RespFrame::Error("ERR Function not found".to_string()));
@@ -14170,22 +14175,6 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // not an integer' wording. parse_eval_args returns InvalidInteger
     // for that case; remap it to FCALL's specific wording.
     let (_numkeys, keys, args) = parse_eval_args(argv).map_err(fcall_map_eval_arg_error)?;
-
-    // Transform the library code for execution:
-    // 1. Strip the #!lua name=... header line (not valid Lua) but
-    //    preserve its line position with a blank line so reported line
-    //    numbers still align with the library source.
-    // 2. Convert redis.register_function('name', func) calls into
-    //    named function definitions so they can be called directly.
-    // (frankenredis-tos1j) Track the source line of the matching
-    // register_function call so FCALL errors can report
-    // user_function:<line> with the same line vendored would (the line
-    // of the function definition inside the library code).
-    // (frankenredis-kbyhy) The transform is now CACHED. It used to run on every FCALL:
-    // `from_utf8_lossy` over the whole library, a `lines()` walk, a `String` per line, and the
-    // `register_function` scan -- all O(library size) per invocation, for a result that depends
-    // only on (library source, function name) and therefore cannot change between calls.
-    let (wrapper_script, target_func_line) = fcall_wrapper_script(func_name, &script);
 
     let keys_vec: Vec<Vec<u8>> = keys.to_vec();
     let args_vec: Vec<Vec<u8>> = args.to_vec();
@@ -14212,168 +14201,49 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         return Ok(refusal);
     }
     store.script_nesting_level += 1;
-    // (frankenredis-9hori) `target_func_line` is Some exactly when the SCAN above produced a
-    // `local function <func_name>(` line for the function being called. Both transform forms --
-    // positional and table -- emit that same prefix, so None means the scan could not express
-    // this function as text: the name or the callback was held in a local, computed, or
-    // otherwise not a literal. That is the case fr rejects today and Redis 7.2.4 accepts.
+    // (frankenredis-kbyhy) EVERY FCALL now goes through the executing path, and the library body
+    // it executes runs ONCE PER LIBRARY rather than once per call. The old default was a source
+    // REWRITE: the library text was scanned for `register_function('name', function...)`, turned
+    // into `local function name(...)`, and the whole resulting wrapper -- every function the
+    // library defines -- was handed to `eval_script` on every FCALL, so calling one trivial
+    // function out of a 32-function library cost 25.3x what Redis 7.2.4 charges for the same call
+    // (certified worst bound, one FIT window, four supporting SIZING draws).
     //
-    // FALLING BACK ONLY THERE IS WHAT MAKES THIS SAFE TO LAND WITHOUT A DIFFER RUN. Every
-    // library the scan can express keeps the identical code path, the identical wrapper script
-    // and the identical `on @user_function:<N>` wording, which was matched to vendored 7.0+
-    // deliberately (frankenredis-tos1j) and is pinned by tests. The executing path serves only
-    // inputs that are hard errors right now, so there is no behaviour to regress -- a dynamic
-    // library currently cannot even be registered, and if it could, the wrapper would call a
-    // name that was never defined.
-    //
-    // The line number for a failure on this path comes from the interpreter's `current_line`
-    // rather than from a scanned definition line, because there is no scanned line to use. It
-    // is reported through the same formatter so the shape of the error is unchanged.
-    let result = if target_func_line.is_none() {
-        match lua_eval::function_call_execute(
-            store,
-            now_ms,
-            &script,
-            func_name.as_bytes(),
-            keys_vec,
-            args_vec,
-        ) {
-            Ok(frame) => Ok(frame),
-            Err((line, e)) => Ok(RespFrame::Error(format_fcall_runtime_error(
-                &e,
-                func_name,
-                line as usize,
-            ))),
-        }
-    } else {
-        match lua_eval::eval_script(
-            wrapper_script.as_bytes(),
-            &keys_vec,
-            &args_vec,
-            store,
-            now_ms,
-        ) {
-            Ok(frame) => Ok(frame),
-            Err(e) => Ok(RespFrame::Error(format_fcall_runtime_error(
-                &e,
-                func_name,
-                target_func_line.unwrap_or(2),
-            ))),
-        }
+    // THREE MEASURED PARITY DIVERGENCES CLOSE WITH IT, all confirmed live against vendored 7.2.4
+    // in one probe run before the change was written:
+    //   * ERROR LINE. `local helper = function(x) return x .. nil end` on library line 3, called
+    //     from a function DEFINED on line 5: 7.2.4 answers `user_function:3:`, the rewriting path
+    //     answered `user_function:5:` -- it reported the definition line because that is the only
+    //     line the scan knows. The executing path takes the interpreter's `current_line` against
+    //     the library source itself, which is the failing line.
+    //   * LIBRARY STATE. `local n = 0` with a function doing `n = n + 1 return n`: 7.2.4 answers
+    //     1, 2, 3 across three FCALLs because the body ran once at FUNCTION LOAD. Re-executing
+    //     the body per call answered 1, 1, 1.
+    //   * KEYS/ARGV. The wrapper bound them as GLOBALS; upstream passes them as the callback's
+    //     two arguments and exposes no such globals inside a function.
+    let result = match library
+        .or_else(|source| lua_eval::function_call_load_callbacks(store, now_ms, &source))
+        .and_then(|callbacks| {
+            lua_eval::function_call_registered(
+                store,
+                now_ms,
+                &callbacks,
+                func_name.as_bytes(),
+                keys_vec,
+                args_vec,
+            )
+        }) {
+        Ok(frame) => Ok(frame),
+        Err((line, e)) => Ok(RespFrame::Error(format_fcall_runtime_error(
+            &e,
+            func_name,
+            line as usize,
+        ))),
     };
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
     store.script_allow_oom = previous_allow_oom;
     result
-}
-
-thread_local! {
-    /// (frankenredis-kbyhy) Transformed FCALL wrappers: library bytes -> function name -> wrapper.
-    ///
-    /// KEYED ON THE FULL SOURCE BYTES, not a hash and not the library NAME. The transform's
-    /// output depends only on those two inputs, so keying on them makes invalidation automatic:
-    /// FUNCTION LOAD REPLACE, FUNCTION DELETE, FUNCTION FLUSH, a reload and a replica resync all
-    /// change the bytes, which changes the key, so a stale wrapper is unreachable rather than
-    /// merely unlikely. A hash would be smaller and would run the WRONG library body on a
-    /// collision -- not a trade worth making for a cache.
-    ///
-    /// NESTED RATHER THAN A `(String, Vec<u8>)` TUPLE KEY, and that is the whole point of the
-    /// shape. A tuple key cannot be BORROWED: probing it required
-    /// `(func_name.to_string(), script.to_vec())`, so every cache HIT allocated a fresh copy of
-    /// the entire library just to ask whether that library had already been transformed -- the
-    /// exact O(library size) per-call cost this cache exists to remove. Nested, the outer probe
-    /// is `get(script)` (`Vec<u8>: Borrow<[u8]>`) and the inner is `get(func_name)`
-    /// (`String: Borrow<str>`); neither allocates, and the library is hashed once.
-    ///
-    /// The wrapper is an `Rc<str>` for the same reason: the value is as large as the library, so
-    /// handing it back by clone put a SECOND full-size copy on the hit path. A refcount bump
-    /// cannot, and the wrapper is immutable once built.
-    ///
-    /// Thread-local rather than a field on `Store`, because `fr-store` is not this crate's to
-    /// change and the cache is a pure memo of a pure function: two threads computing it
-    /// independently get the same answer.
-    static FCALL_WRAPPER_CACHE: std::cell::RefCell<
-        std::collections::HashMap<
-            Vec<u8>,
-            std::collections::HashMap<String, (std::rc::Rc<str>, Option<usize>)>,
-        >,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-/// Number of distinct (function, library) wrappers held before the cache is dropped wholesale.
-///
-/// (frankenredis-kbyhy) A bound is required because the key contains library BYTES: a client
-/// looping `FUNCTION LOAD REPLACE` with changing source would otherwise grow this without limit.
-/// Clearing everything is deliberate over evicting one entry -- there is no recency information
-/// here worth maintaining, and the miss that follows costs exactly what every call cost before
-/// this cache existed.
-///
-/// COUNTED ACROSS THE NESTING, not as the outer map's length, so the bound means the same thing
-/// it did under the flat tuple key: at most this many wrappers are retained in total. Bounding
-/// only the outer map would leave a single many-function library free to hold an unbounded number
-/// of wrappers, each one as large as that library. The sum runs on the MISS path only, where the
-/// transform it guards already dominates it, and it walks at most this many maps.
-const FCALL_WRAPPER_CACHE_MAX: usize = 64;
-
-/// Build (or reuse) the Lua wrapper FCALL executes for `func_name` in `script`.
-///
-/// Returns the wrapper source and the source line of the matching `register_function` call, which
-/// FCALL reports as `user_function:<line>` on a runtime error (frankenredis-tos1j). `None` means
-/// the scan could not express the function as text -- a name or callback held in a local -- which
-/// is what makes the caller fall back to executing the body instead (frankenredis-9hori).
-fn fcall_wrapper_script(func_name: &str, script: &[u8]) -> (std::rc::Rc<str>, Option<usize>) {
-    if let Some(hit) = FCALL_WRAPPER_CACHE.with(|c| {
-        c.borrow()
-            .get(script)
-            .and_then(|per_function| per_function.get(func_name))
-            .cloned()
-    }) {
-        return hit;
-    }
-
-    let code_str = String::from_utf8_lossy(script);
-    let mut lua_lines = Vec::new();
-    let mut target_func_line: Option<usize> = None;
-    for (idx, line) in code_str.lines().enumerate() {
-        let line_no = idx + 1;
-        let trimmed = line.trim();
-        if trimmed.starts_with("#!") {
-            lua_lines.push(String::new());
-            continue;
-        }
-        if trimmed.contains("register_function") {
-            if let Some(transformed) = transform_register_function(trimmed) {
-                if let Some(name) = transformed
-                    .strip_prefix("local function ")
-                    .and_then(|s| s.find('(').map(|i| &s[..i]))
-                    && name == func_name
-                    && target_func_line.is_none()
-                {
-                    target_func_line = Some(line_no);
-                }
-                lua_lines.push(transformed);
-            } else {
-                lua_lines.push(String::new());
-            }
-            continue;
-        }
-        lua_lines.push(line.to_string());
-    }
-    lua_lines.push(format!("return {func_name}(KEYS, ARGV)"));
-    let wrapper_script: std::rc::Rc<str> = std::rc::Rc::from(lua_lines.join("\n"));
-
-    FCALL_WRAPPER_CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        let retained: usize = cache.values().map(|per_function| per_function.len()).sum();
-        if retained >= FCALL_WRAPPER_CACHE_MAX {
-            cache.clear();
-        }
-        cache.entry(script.to_vec()).or_default().insert(
-            func_name.to_string(),
-            (std::rc::Rc::clone(&wrapper_script), target_func_line),
-        );
-    });
-    (wrapper_script, target_func_line)
 }
 
 /// Reformat an eval_script error to match vendored Redis 7.0+ FCALL
@@ -14397,197 +14267,6 @@ fn format_fcall_runtime_error(err: &str, func_name: &str, func_line: usize) -> S
         body.to_string()
     };
     format!("ERR {body} script: {func_name}, on @user_function:{func_line}.")
-}
-
-/// Transform `redis.register_function('name', function(k,a) body end)` into
-/// `function name(k,a) body end` so it can be called by name in our Lua evaluator.
-fn transform_register_function(line: &str) -> Option<String> {
-    // Match: redis.register_function('name', function(...))    (positional)
-    //   or:  redis.register_function("name", function(...))    (positional)
-    //   or:  redis.register_function{function_name='name', callback=function(...) ...}  (table)
-    let after = line
-        .find("register_function")
-        .map(|i| &line[i + "register_function".len()..])?;
-    let after = after.trim_start();
-    if let Some(rest) = after.strip_prefix('{') {
-        return transform_register_function_table_form(rest);
-    }
-    let after = after.strip_prefix('(')?;
-    let after = after.trim_start();
-    // Extract function name from 'name' or "name"
-    let (name, rest) = if let Some(stripped) = after.strip_prefix('\'') {
-        let end = stripped.find('\'')?;
-        (&stripped[..end], &stripped[end + 1..])
-    } else {
-        let stripped = after.strip_prefix('"')?;
-        let end = stripped.find('"')?;
-        (&stripped[..end], &stripped[end + 1..])
-    };
-    // Skip comma and whitespace to find 'function'
-    let rest = rest.trim_start().strip_prefix(',')?;
-    let rest = rest.trim_start();
-    // Rest should be: function(params) body end)
-    // Strip trailing ')' from the register_function call
-    let rest = rest.strip_prefix("function")?;
-    let rest = rest.trim_end();
-    let rest = rest.strip_suffix(')')?;
-    // (frankenredis-j02x9) Use `local function` to keep the function out
-    // of the locked globals table — fr's strict-globals enforcement now
-    // blocks bare `function name() ...` writes during script execution.
-    Some(format!("local function {name}{rest}"))
-}
-
-/// Transform a table-form `register_function{...}` call into a
-/// named-function definition for the wrapper script.
-/// Handles `{function_name='name', callback=function(params) body end, ...}`
-/// in any field order. (frankenredis-fntblxform)
-fn transform_register_function_table_form(body: &str) -> Option<String> {
-    // Locate the closing `}` of the table at brace_depth==0,
-    // skipping nested strings and braces.
-    let bytes = body.as_bytes();
-    let mut i = 0;
-    let mut depth: i32 = 1;
-    let mut name: Option<String> = None;
-    let mut params: Option<&str> = None;
-    let mut fn_body: Option<&str> = None;
-    while i < bytes.len() && depth > 0 {
-        let b = bytes[i];
-        if b == b'\'' || b == b'"' {
-            let q = b;
-            i += 1;
-            while i < bytes.len() && bytes[i] != q {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 1;
-                }
-                i += 1;
-            }
-            if i < bytes.len() {
-                i += 1;
-            }
-            continue;
-        }
-        if b == b'{' {
-            depth += 1;
-            i += 1;
-            continue;
-        }
-        if b == b'}' {
-            depth -= 1;
-            i += 1;
-            continue;
-        }
-        let left_ok =
-            i == 0 || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
-        if depth == 1 && left_ok && matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'_') {
-            let start = i;
-            while i < bytes.len()
-                && matches!(bytes[i], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_')
-            {
-                i += 1;
-            }
-            let ident = &body[start..i];
-            let mut j = i;
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == b'=' {
-                let after_eq = body[j + 1..].trim_start();
-                if ident == "function_name" {
-                    let qbytes = after_eq.as_bytes();
-                    if let Some(&q) = qbytes.first()
-                        && (q == b'\'' || q == b'"')
-                        && let Some(end) = after_eq[1..].find(q as char)
-                    {
-                        name = Some(after_eq[1..1 + end].to_string());
-                    }
-                } else if ident == "callback"
-                    && let Some(rest) = after_eq.strip_prefix("function")
-                {
-                    // rest = (params) body end[, ...]
-                    let rest = rest.trim_start();
-                    if rest.starts_with('(') {
-                        // Find matching ')'
-                        let pbytes = rest.as_bytes();
-                        let mut k = 1;
-                        let mut pdepth: i32 = 1;
-                        while k < pbytes.len() && pdepth > 0 {
-                            match pbytes[k] {
-                                b'(' => pdepth += 1,
-                                b')' => pdepth -= 1,
-                                _ => {}
-                            }
-                            k += 1;
-                        }
-                        params = Some(&rest[..k]);
-                        // body extends from k to the matching `end` token
-                        // closing the function. Coarse keyword-block depth
-                        // counter (matches the helper in fr-store).
-                        let after_params = &rest[k..];
-                        let abytes = after_params.as_bytes();
-                        let mut m = 0;
-                        let mut bdepth: i32 = 1;
-                        while m < abytes.len() && bdepth > 0 {
-                            let bb = abytes[m];
-                            if bb == b'\'' || bb == b'"' {
-                                let q = bb;
-                                m += 1;
-                                while m < abytes.len() && abytes[m] != q {
-                                    if abytes[m] == b'\\' && m + 1 < abytes.len() {
-                                        m += 1;
-                                    }
-                                    m += 1;
-                                }
-                                if m < abytes.len() {
-                                    m += 1;
-                                }
-                                continue;
-                            }
-                            let lok = m == 0
-                                || !matches!(
-                                    abytes[m - 1],
-                                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'
-                                );
-                            if lok && matches!(bb, b'A'..=b'Z' | b'a'..=b'z' | b'_') {
-                                let s = m;
-                                while m < abytes.len()
-                                    && matches!(
-                                        abytes[m],
-                                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'
-                                    )
-                                {
-                                    m += 1;
-                                }
-                                let id = &after_params[s..m];
-                                match id {
-                                    "function" | "if" | "while" | "for" | "do" => bdepth += 1,
-                                    "end" => bdepth -= 1,
-                                    _ => {}
-                                }
-                                continue;
-                            }
-                            m += 1;
-                        }
-                        fn_body = Some(&after_params[..m]);
-                        i = j
-                            + 1
-                            + (after_eq.as_ptr() as usize - body[j + 1..].as_ptr() as usize)
-                            + (rest.as_ptr() as usize - after_eq.as_ptr() as usize)
-                            + k
-                            + m;
-                        continue;
-                    }
-                }
-            }
-            continue;
-        }
-        i += 1;
-    }
-    let name = name?;
-    let params = params?;
-    let body = fn_body?;
-    // (frankenredis-j02x9) Use `local function` to keep the function out
-    // of the locked globals table.
-    Some(format!("local function {name}{params}{body}"))
 }
 
 // ── SSUBSCRIBE / SUNSUBSCRIBE / SPUBLISH (shard Pub/Sub) ───────────
@@ -17155,6 +16834,14 @@ fn lcs(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         .map_err(map_type_err)?
         .unwrap_or_default();
 
+    // (census of t_string.c error literals) Placed HERE, right after both strings are read and
+    // before any option parsing or DP sizing, because that is where upstream puts it --
+    // t_string.c:791, ahead of the transient-memory check at :812. Order is the point: putting
+    // it after would answer the memory error for an input the incumbent answers this one for.
+    if lcs_string_too_long(a.len(), b.len()) {
+        return Err(CommandError::Custom("ERR String too long for LCS".to_string()));
+    }
+
     let mut len_only = false;
     let mut idx_mode = false;
     let mut min_match_len: usize = 0;
@@ -17593,6 +17280,28 @@ fn build_lcs_dp_full(a: &[u8], b: &[u8]) -> LcsDp {
         }
     }
     LcsDp::Full { dp, cols }
+}
+
+/// Upstream `lcsCommand`'s length guard (t_string.c:791):
+///
+///     if (sdslen(a) >= UINT32_MAX-1 || sdslen(b) >= UINT32_MAX-1)
+///         addReplyError(c, "String too long for LCS");
+///
+/// An OVERFLOW guard there -- the DP matrix is indexed with 32-bit arithmetic -- which fr, using
+/// `usize`, cannot trip the same way. Ported anyway because without it the two engines answer
+/// DIFFERENT errors for the same input: upstream tests LENGTH first, while fr fell through to
+/// its transient-memory guard and said "Insufficient memory, transient memory for LCS exceeds
+/// proto-max-bulk-len". Both refuse; only one matches the incumbent.
+///
+/// REACHABLE ONLY WITH A RAISED CAP, which is the honest bound: a 4 GiB string needs
+/// `proto-max-bulk-len` above 4 GiB, the 512 MiB default refusing it long before. Upstream keeps
+/// the guard for the same reason -- that cap is MODIFIABLE_CONFIG up to LONG_MAX.
+///
+/// A predicate on LENGTHS rather than on the slices, so it can be tested: the inputs that trip
+/// it are two 4 GiB strings, which no unit test can allocate.
+fn lcs_string_too_long(len_a: usize, len_b: usize) -> bool {
+    const LCS_MAX_STRING_LEN: usize = (u32::MAX - 1) as usize;
+    len_a >= LCS_MAX_STRING_LEN || len_b >= LCS_MAX_STRING_LEN
 }
 
 fn compute_lcs(a: &[u8], b: &[u8]) -> Result<Vec<u8>, CommandError> {
@@ -52509,6 +52218,21 @@ mod tests {
     }
 
     #[test]
+    fn lcs_string_too_long_matches_upstream_threshold_and_precedes_the_memory_guard() {
+        // Upstream t_string.c:791 refuses at `sdslen >= UINT32_MAX-1`, BEFORE it sizes the DP
+        // matrix. The inputs that trip it are two 4 GiB strings, which no unit test can
+        // allocate -- so the predicate is tested on LENGTHS, which is why it takes them.
+        const LIMIT: usize = (u32::MAX - 1) as usize;
+        assert!(!super::lcs_string_too_long(LIMIT - 1, LIMIT - 1), "just under is allowed");
+        assert!(super::lcs_string_too_long(LIMIT, 1), "at the limit is refused, either side");
+        assert!(super::lcs_string_too_long(1, LIMIT), "and the other side too");
+        assert!(!super::lcs_string_too_long(0, 0), "empty is not too long");
+        // `>=`, not `>`: upstream's comparison is inclusive and an off-by-one here would admit
+        // exactly the length its overflow guard exists to exclude.
+        assert!(super::lcs_string_too_long(LIMIT, LIMIT));
+    }
+
+    #[test]
     fn lcs_oversize_emits_upstream_proto_max_bulk_len_wording() {
         // (frankenredis-ruc5t) Upstream t_string.c:812 emits
         // 'Insufficient memory, transient memory for LCS exceeds
@@ -75696,56 +75420,180 @@ mod tests {
         );
     }
 
-    /// A literal library must keep taking the REWRITING path, not the executing fallback.
+    /// A repeat FCALL must SERVE the library's callbacks, not re-execute the library body.
     ///
-    /// (frankenredis-9hori) The fallback is gated on `target_func_line.is_none()`, which is true
-    /// exactly when the scan could not express the function. This row is the other side of that
-    /// gate: an ordinary literal library must still resolve through the scan, so the fallback
-    /// cannot quietly become the path everything takes. If it ever does, the `on @user_function:<N>`
-    /// wording matched to vendored 7.0+ under `frankenredis-tos1j` changes with it.
+    /// (frankenredis-kbyhy) `Rc::ptr_eq` is the assertion with teeth and it is the only one that
+    /// can be: the callbacks a re-executed body registers are behaviourally identical to the
+    /// retained ones, so any test comparing what the function RETURNS keeps passing with the
+    /// cache deleted outright. Pointer identity is what separates "served" from "rebuilt and
+    /// happened to match", and being served is the whole claim -- it is what makes the per-call
+    /// cost independent of how many functions the library defines.
     #[test]
-    fn fcall_literal_library_still_resolves_through_the_scan_9hori() {
-        let (_wrapper, line) = super::fcall_wrapper_script(
-            "litecho",
-            b"#!lua name=litlib\nredis.register_function('litecho', function(keys, args) return args[1] end)",
-        );
+    fn fcall_serves_a_repeat_call_from_the_retained_library_kbyhy() {
+        let src: &[u8] = b"#!lua name=kbyhylib\nredis.register_function('kbyhyecho', function(keys, args) return args[1] end)";
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"FUNCTION".to_vec(), b"LOAD".to_vec(), src.to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
         assert!(
-            line.is_some(),
-            "a literal register_function must still yield a scanned definition line; None here \
-             would send every literal library down the executing fallback"
+            super::lua_eval::fcall_cached_library_callbacks(src).is_none(),
+            "FUNCTION LOAD must not populate the FCALL cache -- it is FCALL's memo, and a load \
+             that filled it would make the identity assertion below vacuous"
+        );
+
+        for _ in 0..2 {
+            let out = dispatch_argv(
+                &[
+                    b"FCALL".to_vec(),
+                    b"kbyhyecho".to_vec(),
+                    b"0".to_vec(),
+                    b"hi".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(out, RespFrame::BulkString(Some(b"hi".to_vec())));
+        }
+
+        let after_first = super::lua_eval::fcall_cached_library_callbacks(src)
+            .expect("the first FCALL must retain the executed library");
+        let after_second = super::lua_eval::fcall_cached_library_callbacks(src)
+            .expect("the retained library must still be there");
+        assert!(
+            std::rc::Rc::ptr_eq(&after_first, &after_second),
+            "the second FCALL re-executed the library body instead of serving the retained one"
         );
     }
 
-    /// A repeated FCALL must REUSE the transformed wrapper rather than rebuild it.
+    /// A library's top-level locals must SURVIVE across FCALLs, as they do in Redis 7.2.4.
     ///
-    /// (frankenredis-kbyhy) `Rc::ptr_eq` is the assertion with teeth here, and the text
-    /// comparison beside it is deliberately NOT the test. The transform is deterministic, so a
-    /// rebuilt wrapper is byte-identical to a cached one: `assert_eq!` on the text would keep
-    /// passing if the cache were deleted outright. Only pointer identity separates "served from
-    /// the cache" from "recomputed and happened to match", and being served is the whole claim.
-    ///
-    /// It also pins the property the nested key exists for. The probe is now
-    /// `get(script).and_then(|m| m.get(func_name))` against borrowed slices; if anyone restores a
-    /// tuple key, the borrowed probe stops compiling and the allocating one comes back with it.
+    /// (frankenredis-kbyhy) MEASURED live against vendored 7.2.4 before this was written:
+    /// `local n = 0` with `n = n + 1 return n` answers 1, 2, 3 across three FCALLs there, because
+    /// the body runs once at FUNCTION LOAD and the closure keeps the upvalue. fr re-executed the
+    /// body per call and answered 1, 1, 1. This is the parity half of the caching lever, and it
+    /// is the negative case a naive "just memoise the transform" fix fails: memoising TEXT still
+    /// re-runs the body.
     #[test]
-    fn fcall_wrapper_cache_serves_a_repeat_call_from_the_same_allocation_kbyhy() {
-        let src: &[u8] = b"#!lua name=kbyhylib\nredis.register_function('kbyhyecho', function(keys, args) return args[1] end)";
+    fn library_upvalues_persist_across_fcalls_kbyhy() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=kbyhystate\nlocal n = 0\nredis.register_function('kbyhybump', function(keys, args) n = n + 1 return n end)".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
 
-        let (first, first_line) = super::fcall_wrapper_script("kbyhyecho", src);
-        let (second, second_line) = super::fcall_wrapper_script("kbyhyecho", src);
-
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(
+                dispatch_argv(
+                    &[b"FCALL".to_vec(), b"kbyhybump".to_vec(), b"0".to_vec()],
+                    &mut store,
+                    0,
+                )
+                .unwrap(),
+            );
+        }
         assert_eq!(
-            first_line, second_line,
-            "the scanned definition line must not move between calls"
+            seen,
+            vec![
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+                RespFrame::Integer(3)
+            ],
+            "a library upvalue was reset between calls; 7.2.4 answers 1, 2, 3"
         );
-        assert_eq!(
-            &*first, &*second,
-            "the wrapper text must not change between calls"
+    }
+
+    /// A runtime error must report the line that FAILED, not the line the function was DEFINED on.
+    ///
+    /// (frankenredis-kbyhy) MEASURED live against vendored 7.2.4: a helper defined on library
+    /// line 3 that concatenates nil, called from a function registered on line 5, answers
+    /// `ERR user_function:3: attempt to concatenate a nil value script: kbyhyboom, on
+    /// @user_function:3.`. The old rewriting path could only report the SCANNED definition line,
+    /// so it said 5 in both positions. The two lines differ on purpose here: a fixture whose
+    /// function is one line long cannot tell the two rules apart, which is why the existing
+    /// wording test did not catch this.
+    #[test]
+    fn fcall_runtime_error_reports_the_failing_line_not_the_definition_line_kbyhy() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=kbyhyline\nlocal helper = function(x)\n  return x .. nil\nend\nredis.register_function('kbyhyboom', function(keys, args)\n  return helper(1)\nend)".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        let out = dispatch_argv(
+            &[b"FCALL".to_vec(), b"kbyhyboom".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::Error(msg) = out else {
+            panic!("expected an error frame, got {out:?}");
+        };
+        assert!(
+            msg.starts_with("ERR user_function:3:"),
+            "the failing line is library line 3 (the helper), not 5 (the registration): {msg}"
         );
         assert!(
-            std::rc::Rc::ptr_eq(&first, &second),
-            "the second call rebuilt the wrapper instead of serving it from the cache"
+            msg.ends_with("on @user_function:3."),
+            "the trailing @user_function must carry the same line: {msg}"
         );
+    }
+
+    /// A CACHED callback must still run inside the locked sandbox.
+    ///
+    /// (frankenredis-kbyhy) This is the one way retaining the callbacks could turn a perf lever
+    /// into a hole. `execute_compiled` sets `globals_locked` as its first act, so on the old
+    /// re-execute-per-call path every FCALL was sandboxed as a SIDE EFFECT of running the body.
+    /// A cache HIT runs no body. The second iteration below is the discriminating one: it is the
+    /// first call that reaches the function without having executed anything.
+    #[test]
+    fn a_cached_callback_still_runs_under_a_locked_sandbox_kbyhy() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=kbyhysandbox\nredis.register_function('kbyhywrite', function(keys, args) kbyhy_leak = 1 return 1 end)".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        for attempt in 0..2 {
+            let out = dispatch_argv(
+                &[b"FCALL".to_vec(), b"kbyhywrite".to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            match out {
+                RespFrame::Error(msg) => assert!(
+                    msg.contains("global") || msg.contains("readonly"),
+                    "attempt {attempt}: expected a sandbox refusal, got {msg}"
+                ),
+                other => panic!(
+                    "attempt {attempt}: a global write escaped the sandbox and returned {other:?}"
+                ),
+            }
+        }
     }
 
     #[test]

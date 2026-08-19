@@ -185,38 +185,70 @@ impl LuaGcScope {
     }
 }
 
+/// Current registry high-water mark. (frankenredis-kbyhy)
+fn lua_gc_registry_len() -> usize {
+    LUA_GC_REGISTRY.with(|reg| reg.borrow().len())
+}
+
+/// Break every cycle registered in `[0..mark)` and REMOVE those handles.
+///
+/// (frankenredis-kbyhy) The FCALL library-callback cache retains executed library closures across
+/// calls, so their registry handles sit BELOW every later `LuaGcScope` mark and are never swept by
+/// the ordinary eval-end path -- which is the point, since sweeping them would gut a live library.
+/// When that cache is cleared the same handles become garbage, and a self- or mutually-recursive
+/// library function is an `Rc` cycle by construction, so dropping the map alone leaks it. This is
+/// the eviction sweep: a PREFIX range, drained rather than truncated, because the library being
+/// installed is registered above `mark` and must survive its own eviction pass.
+///
+/// Callers must hold no live `LuaState`: like the eval-end sweep, this CLEARS still-live objects.
+fn lua_gc_sweep_and_drain_prefix(mark: usize) {
+    LUA_GC_REGISTRY.with(|reg| {
+        let mut reg = reg.borrow_mut();
+        let mark = mark.min(reg.len());
+        lua_gc_break_cycles(reg[..mark].iter());
+        reg.drain(..mark);
+    });
+}
+
+/// Clear each still-live registered object, severing the back-edge that keeps its cycle alive.
+/// Shared by the eval-end sweep and the FCALL library-cache eviction sweep so the two cannot
+/// disagree about what "breaking a cycle" means. (frankenredis-kbyhy)
+fn lua_gc_break_cycles<'h>(handles: impl Iterator<Item = &'h LuaGcHandle>) {
+    for handle in handles {
+        match handle {
+            LuaGcHandle::Table(weak) => {
+                if let Some(inner) = weak.upgrade() {
+                    // try_borrow_mut is defensive: post-teardown nothing
+                    // should hold a live borrow, and a contended borrow
+                    // must never panic during cleanup.
+                    if let Ok(mut inner) = inner.try_borrow_mut() {
+                        // Bump site 1 of 5 (see LUA_TABLE_FIELD_EPOCH):
+                        // clearing string_hash invalidates cached reads.
+                        bump_lua_field_epoch();
+                        inner.array.clear();
+                        inner.string_hash.clear();
+                        inner.other_hash.clear();
+                        inner.other_keys.clear();
+                        inner.metatable = None;
+                    }
+                }
+            }
+            LuaGcHandle::Cell(weak) => {
+                if let Some(cell) = weak.upgrade()
+                    && let Ok(mut slot) = cell.try_borrow_mut()
+                {
+                    *slot = LuaValue::Nil;
+                }
+            }
+        }
+    }
+}
+
 impl Drop for LuaGcScope {
     fn drop(&mut self) {
         LUA_GC_REGISTRY.with(|reg| {
             let mut reg = reg.borrow_mut();
-            for handle in reg.iter().skip(self.mark) {
-                match handle {
-                    LuaGcHandle::Table(weak) => {
-                        if let Some(inner) = weak.upgrade() {
-                            // try_borrow_mut is defensive: post-teardown nothing
-                            // should hold a live borrow, and a contended borrow
-                            // must never panic during cleanup.
-                            if let Ok(mut inner) = inner.try_borrow_mut() {
-                                // Bump site 1 of 5 (see LUA_TABLE_FIELD_EPOCH):
-                                // clearing string_hash invalidates cached reads.
-                                bump_lua_field_epoch();
-                                inner.array.clear();
-                                inner.string_hash.clear();
-                                inner.other_hash.clear();
-                                inner.other_keys.clear();
-                                inner.metatable = None;
-                            }
-                        }
-                    }
-                    LuaGcHandle::Cell(weak) => {
-                        if let Some(cell) = weak.upgrade()
-                            && let Ok(mut slot) = cell.try_borrow_mut()
-                        {
-                            *slot = LuaValue::Nil;
-                        }
-                    }
-                }
-            }
+            lua_gc_break_cycles(reg.iter().skip(self.mark));
             reg.truncate(self.mark);
         });
     }
@@ -4945,57 +4977,141 @@ fn lua_array_table(values: Vec<Vec<u8>>) -> LuaValue {
     LuaValue::Table(table)
 }
 
-/// Execute a library body and invoke one of its registered functions BY NAME.
+/// The callbacks one library body registered, paired with their names in `register_function`
+/// call order. (frankenredis-kbyhy)
+pub(crate) type RegisteredCallbacks = Vec<(Vec<u8>, LuaValue)>;
+
+thread_local! {
+    /// (frankenredis-kbyhy) Library source bytes -> the callbacks that library's body registered.
+    ///
+    /// THIS IS THE UPSTREAM SHAPE, not a memo bolted onto fr's. `function_lua.c` runs a library
+    /// body ONCE at FUNCTION LOAD and refs each callback into the Lua registry
+    /// (`luaL_ref(lua, LUA_REGISTRYINDEX)`); FCALL looks the name up and calls the stored ref, so
+    /// upstream's per-call cost is independent of how many functions the library defines. fr
+    /// re-ran the whole body on every FCALL -- re-creating every closure before the one being
+    /// called ever ran -- which is why fr's instr/op rose 13.6x across a 32x library while redis
+    /// stayed flat within its own noise.
+    ///
+    /// KEYED ON THE FULL SOURCE BYTES, for the reason the wrapper cache was: it makes
+    /// invalidation automatic rather than enumerated. FUNCTION LOAD REPLACE, FUNCTION DELETE,
+    /// FUNCTION FLUSH, an RDB reload and a replica resync all change the bytes the store hands
+    /// back, so a stale entry is unreachable rather than merely unlikely. A hash key would be
+    /// smaller and would run the WRONG library on a collision.
+    ///
+    /// THE VALUE IS AN `Rc`, and that is load-bearing rather than tidy: a `LuaValue::Function`
+    /// holds a `Box<LuaFunc>`, so cloning one deep-copies params + body + captured environment.
+    /// Handing the vector back by clone would reintroduce per-call work proportional to the
+    /// library -- the exact cost this cache exists to remove. A refcount bump cannot.
+    ///
+    /// Thread-local rather than a `Store` field because the values are `Rc`-based and not `Send`,
+    /// and because it is a pure function of the source bytes: two threads that build it
+    /// independently get equivalent answers.
+    static FCALL_LIBRARY_CALLBACKS: std::cell::RefCell<
+        std::collections::HashMap<Vec<u8>, Rc<RegisteredCallbacks>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Retained libraries. Bounded because the key is client-controlled: a client that loads many
+/// libraries must not grow this without limit.
+const FCALL_LIBRARY_CALLBACK_CACHE_MAX: usize = 64;
+
+/// Probe the library-callback cache without touching `Store`.
 ///
-/// (frankenredis-9hori) This is the FCALL path that does not read the library source. Today
-/// `fcall_cmd` rewrites the source -- `transform_register_function` turns
-/// `redis.register_function('n', function() ... end)` into a named global `function n(...)` and
-/// then calls that global -- which requires the name and the `function` keyword to be visible as
-/// LITERALS in the text. A library that names either through a local is unloadable AND, if it
-/// were loaded, uncallable. Both surfaces have the same cause.
+/// (frankenredis-kbyhy) Split out from the load so `fcall_cmd` can probe with a slice BORROWED
+/// from the store's own library record. That is what removes the last O(library size) copy on the
+/// hit path: the previous shape cloned `lib.code` unconditionally because `store` is borrowed
+/// mutably further down, so every FCALL paid a full copy of the library to reach a cache that
+/// existed to avoid exactly that.
+pub(crate) fn fcall_cached_library_callbacks(code: &[u8]) -> Option<Rc<RegisteredCallbacks>> {
+    FCALL_LIBRARY_CALLBACKS.with(|cache| cache.borrow().get(code).cloned())
+}
+
+/// Execute a library body once and retain the callbacks it registered.
 ///
-/// Upstream has no such coupling: `function_lua.c` refs the callback into the Lua registry
-/// (`luaL_ref(lua, LUA_REGISTRYINDEX)`) and stores the ref in `functionInfo.function`, so FCALL
-/// looks the name up and calls the stored ref. This function is fr's equivalent: run the body so
-/// the real `redis.register_function` builtin collects the callbacks, then call the one asked for.
-///
-/// Returns a `RespFrame` rather than raw values so both FCALL paths share one conversion.
-///
-/// The body is re-executed per call, which is what fr already does today (it re-transforms the
-/// whole library on every FCALL) and is NOT a regression -- but it is also not upstream's
-/// behaviour, which compiles once at load. That cost is tracked separately as
-/// `frankenredis-kbyhy`; this change removes the text scan, not the re-execution.
-pub fn function_call_execute(
+/// (frankenredis-kbyhy) On overflow the whole cache is cleared AND the cycle registry range that
+/// predates this load is swept. Dropping the map alone is not enough: a library whose functions
+/// are mutually or self-recursive is an `Rc` cycle by construction (`qqq17`), so a bare `clear()`
+/// would leak every evicted library -- an unbounded leak driven by a client that keeps loading
+/// libraries, which is the same DoS shape `qqq17` was filed for. The sweep runs over
+/// `[0..mark_before_this_load)` specifically, so the library being installed -- whose allocations
+/// are already registered above that mark -- is not gutted by its own eviction pass.
+pub(crate) fn function_call_load_callbacks(
     store: &mut Store,
     now_ms: u64,
     code: &[u8],
-    function_name: &[u8],
-    keys: Vec<Vec<u8>>,
-    args: Vec<Vec<u8>>,
-) -> Result<RespFrame, (u32, String)> {
+) -> Result<Rc<RegisteredCallbacks>, (u32, String)> {
+    if let Some(hit) = fcall_cached_library_callbacks(code) {
+        return Ok(hit);
+    }
+    let mark = lua_gc_registry_len();
     let source = lua_execution_source(code);
     let mut state = LuaState::new_for_function_load(store, now_ms);
     if let Err(err) = state.execute(source.as_ref()) {
         return Err((state.current_line, err));
     }
+    let callbacks = Rc::new(state.take_registered_function_callbacks());
+    drop(state);
 
-    // Cloned out of the state before the call, so the immutable borrow of `state` ends before
-    // `call_registered_function` takes it mutably. Cloning a `LuaValue::Function` preserves
-    // `identity`, so this calls the same function the library registered.
-    let found = state
-        .registered_function_callbacks()
+    FCALL_LIBRARY_CALLBACKS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= FCALL_LIBRARY_CALLBACK_CACHE_MAX {
+            cache.clear();
+            lua_gc_sweep_and_drain_prefix(mark);
+        }
+        cache.insert(code.to_vec(), Rc::clone(&callbacks));
+    });
+    Ok(callbacks)
+}
+
+/// Invoke one already-registered callback by name.
+///
+/// (frankenredis-9hori) This is the FCALL path that reads no library source. Upstream has no
+/// coupling between a function's NAME and the text that registered it: `function_lua.c` stores a
+/// registry ref and FCALL calls it. fr's old path instead rewrote the source --
+/// `transform_register_function` turned `redis.register_function('n', function() ... end)` into a
+/// named `function n(...)` and called that -- which required the name and the `function` keyword
+/// to be visible as LITERALS, so a library naming either through a local was uncallable.
+///
+/// Returns a `RespFrame` rather than raw values so the reply conversion has one home.
+pub(crate) fn function_call_registered(
+    store: &mut Store,
+    now_ms: u64,
+    callbacks: &RegisteredCallbacks,
+    function_name: &[u8],
+    keys: Vec<Vec<u8>>,
+    args: Vec<Vec<u8>>,
+) -> Result<RespFrame, (u32, String)> {
+    let Some((_, callback)) = callbacks
         .iter()
         .find(|(name, _)| name.as_slice() == function_name)
-        .map(|(_, callback)| callback.clone());
-
-    let Some(callback) = found else {
+    else {
         // Upstream functions.c:630 replies "Function not found"; fr's FCALL surface already
-        // spells it with the ERR prefix (fr-command/src/lib.rs:13872).
+        // spells it with the ERR prefix.
         return Err((0, "ERR Function not found".to_string()));
     };
 
+    // (frankenredis-kbyhy) `LuaState::new`, NOT `new_for_function_load`, and this is worth
+    // 12,181 instr/op -- MEASURED, and measured as a REGRESSION first. The load constructor
+    // builds its globals with `lua_function_load_globals`, which CLONES the whole base globals
+    // template so it can override `redis` with one carrying `register_function`. `LuaState::new`
+    // shares the template instead (`from_shared_base`) and clones nothing. Routing every FCALL
+    // through the executing path made that clone per-CALL rather than per-load, and the first
+    // dose-response draw showed it: lib32 fell 190,876.9 -> 39,246.0 while lib1 ROSE
+    // 21,145.3 -> 33,326.0. The slope was gone and a fixed cost had replaced it.
+    //
+    // It is also the CORRECT sandbox: `register_function` is a load-time builtin, and upstream
+    // does not expose it to a running function either.
+    let mut state = LuaState::new(store, now_ms);
+    // (frankenredis-kbyhy) THE SANDBOX LOCK IS NOT INHERITED FROM THE LOAD, and forgetting it is
+    // the one way this cache could turn a perf lever into a hole. `execute_compiled` sets
+    // `globals_locked` as its first act, so on the old re-execute-per-call path every FCALL was
+    // locked as a side effect of running the body. A cache HIT never runs a body, so the calling
+    // state starts unlocked and a function writing a global would silently succeed where the
+    // sandbox must raise. Pinned by `a_cached_callback_still_runs_under_a_locked_sandbox_kbyhy`.
+    state.lock_globals_for_registered_call();
+
     let mut call_args = [lua_array_table(keys), lua_array_table(args)];
-    let called = state.call_registered_function(&callback, &mut call_args);
+    let called = state.call_registered_function(callback, &mut call_args);
     match called {
         // A Lua function returns a LIST; upstream takes the first value and treats an empty
         // return as nil. Converted with the same call `eval_compiled_script` uses, so this path
@@ -5159,15 +5275,31 @@ impl<'a> LuaState<'a> {
         self.call_function(callback, args, &mut env, &mut varargs)
     }
 
-    /// The callbacks those registrations named, paired with the name, in call order.
+    /// Move the registered callbacks out of this state, paired with their names in call order.
     ///
     /// (frankenredis-9hori) Same order and same length as `registered_function_specs`: both are
     /// pushed together by the one `redis.register_function` builtin, so index i of one describes
     /// index i of the other. Kept as two vectors rather than one so `RegisterFunctionSpec` stays
     /// comparable with `PartialEq` -- a callback is not meaningfully equatable, and the spec type
     /// is asserted on directly by roughly ten tests.
-    pub(crate) fn registered_function_callbacks(&self) -> &[(Vec<u8>, LuaValue)] {
-        &self.registered_callbacks
+    ///
+    /// (frankenredis-kbyhy) TAKEN rather than borrowed: a `LuaValue::Function` holds a
+    /// `Box<LuaFunc>`, so copying one out deep-copies params, body and captured environment. The
+    /// state is dropped straight after the library load, so the vector can simply move.
+    pub(crate) fn take_registered_function_callbacks(&mut self) -> RegisteredCallbacks {
+        std::mem::take(&mut self.registered_callbacks)
+    }
+
+    /// Lock the sandbox for a call that executes no chunk of its own.
+    ///
+    /// (frankenredis-kbyhy) `execute_compiled` sets `globals_locked` as its first act, so any path
+    /// that runs a body gets the sandbox for free. Calling a CACHED library callback runs no body,
+    /// so the lock has to be taken explicitly or the function would be free to write globals that
+    /// upstream's `luaSetTableProtectionRecursively` refuses. Only the flag is needed: the
+    /// standard-library tables in these globals come from the shared base template, which is
+    /// marked read-only once at build time.
+    pub(crate) fn lock_globals_for_registered_call(&mut self) {
+        self.globals_locked = true;
     }
 
     fn new_with_cloned_globals_for_bench(store: &'a mut Store, now_ms: u64) -> Self {
