@@ -31855,7 +31855,27 @@ impl Store {
     /// of a DB drops from O(n^2/count) to O(n) total. Returns
     /// `(next_cursor, up-to-count keys)`; `next_cursor == 0` exactly when no
     /// further matches remain (byte-identical paging to the old index slice).
-    pub fn scan_in_db(
+    /// SCAN one batch, handing each matched LOGICAL key to `visit` instead of
+    /// collecting it.
+    ///
+    /// (frankenredis-hwcm1) The owning form below allocates once per returned key
+    /// and once more for the Vec that holds them, and those were the last
+    /// allocations left on this shape after ad0b142f7 removed the reply tree:
+    /// measured 3.0 `__rust_alloc` per op, down from 8.0, with the remainder
+    /// being exactly this. A caller that is writing the keys straight into a
+    /// connection buffer never needs them owned.
+    ///
+    /// The signature is what forces the copies, not the walk: `scan_in_db`
+    /// returns `Vec<Vec<u8>>` out of a `&mut self` that reaps expiries first and
+    /// pushes the resume cache last, so it cannot hand back borrows into
+    /// `ordered_keys`. Splitting the walk out lets the borrow live only for the
+    /// duration of the callback, which is where it is actually used.
+    ///
+    /// `last_key` stays owned deliberately: it is read AFTER the loop, when the
+    /// resume cache is pushed under `&mut self`, so keeping a borrow of
+    /// `ordered_keys` alive for it would conflict. It costs one copy, and only
+    /// when the batch fills.
+    pub fn scan_in_db_visit<F: FnMut(&[u8])>(
         &mut self,
         db: usize,
         cursor: u64,
@@ -31863,7 +31883,8 @@ impl Store {
         type_filter: Option<&[u8]>,
         count: usize,
         now_ms: u64,
-    ) -> (u64, Vec<Vec<u8>>) {
+        mut visit: F,
+    ) -> u64 {
         // Reap due volatile keys — identical eviction set to keys_in_db /
         // keys_matching_in_db (drop_if_expired is a no-op on non-volatile keys).
         self.expire_volatile_keys_in_db(db, now_ms);
@@ -31969,7 +31990,10 @@ impl Store {
         // `__rust_alloc` 12,003 -> 16,003 over 4,000 ops with total Ir unchanged
         // (35,815,172 -> 35,791,601, -0.07%), so the upfront allocation cost as
         // much as the growth it avoided. Growing from empty is correct here.
-        let mut result: Vec<Vec<u8>> = Vec::new();
+        // (frankenredis-hwcm1) A COUNTER, not a Vec. The comment above about not
+        // pre-sizing to `batch` still applies to the owning wrapper, which does
+        // grow a Vec; what is gone here is the Vec itself.
+        let mut produced = 0usize;
         let mut last_key: Option<Vec<u8>> = None;
         let mut has_more = false;
         for physical in self.ordered_keys.range::<[u8], _>((lo_bound, hi_bound)) {
@@ -32007,8 +32031,9 @@ impl Store {
                 to_skip -= 1;
                 continue;
             }
-            if result.len() < batch {
-                result.push(logical.to_vec());
+            if produced < batch {
+                visit(logical);
+                produced += 1;
                 // (frankenredis-hwcm1) Copy the resume key ONCE, when the batch
                 // fills -- not on every push. `last_key` is read in exactly one
                 // place: the `next_cursor != 0` block below, which is reachable
@@ -32023,7 +32048,7 @@ impl Store {
                 // what the resume contract in the comment above requires.
                 // COUNT 10 over a 5-key db goes from 5 allocations to 0, and a
                 // full batch from `batch` to 1.
-                if result.len() == batch {
+                if produced == batch {
                     last_key = Some(physical.to_vec());
                 }
                 continue;
@@ -32048,6 +32073,35 @@ impl Store {
                 self.db_scan_cache.remove(0);
             }
         }
+        next_cursor
+    }
+
+    /// SCAN one batch, returning the matched logical keys owned.
+    ///
+    /// (frankenredis-hwcm1) A thin wrapper over `scan_in_db_visit` so there is
+    /// ONE walk to be correct about. Every existing caller keeps its exact
+    /// behaviour -- the resume contract, the deletion-safety guarantee and the
+    /// batch accounting all live in the visitor now, and this only decides to
+    /// own what it is handed.
+    pub fn scan_in_db(
+        &mut self,
+        db: usize,
+        cursor: u64,
+        pattern: Option<&[u8]>,
+        type_filter: Option<&[u8]>,
+        count: usize,
+        now_ms: u64,
+    ) -> (u64, Vec<Vec<u8>>) {
+        let mut result: Vec<Vec<u8>> = Vec::new();
+        let next_cursor = self.scan_in_db_visit(
+            db,
+            cursor,
+            pattern,
+            type_filter,
+            count,
+            now_ms,
+            |logical| result.push(logical.to_vec()),
+        );
         (next_cursor, result)
     }
 

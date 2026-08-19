@@ -27477,15 +27477,39 @@ impl Runtime {
             self.plain_read_borrowed_preamble("scan", b"SCAN".len() + cursor_arg.len(), now_ms);
         let suppress_reply = self.suppress_current_network_reply();
         let st = self.chained_command_start();
-        let (next_cursor, keys) = self.server.store.scan_in_db(
-            self.session.selected_db,
-            cursor,
-            None,
-            None,
-            10,
-            now_ms,
-        );
+        // (frankenredis-hwcm1) The keys are encoded as the walk finds them and are
+        // never owned. `scan_in_db` returns `Vec<Vec<u8>>`, which cost one
+        // allocation per returned key plus one for the Vec -- the whole of what
+        // was left on this shape once ad0b142f7 removed the reply tree.
+        //
+        // The reply is `[cursor, [keys...]]`, so the cursor and the array header
+        // both precede the keys, and NEITHER is known before the walk ends: the
+        // cursor is its result and the header needs the count. Rather than buffer
+        // the keys somewhere (which is the allocation being removed), they go
+        // straight into `out`, the prefix is appended AFTER them, and one
+        // `rotate_left` swings it in front. `rotate_left(keys_len)` moves the
+        // first `keys_len` bytes to the end, turning [keys][prefix] into
+        // [prefix][keys]; it is in place, so the reply still costs no allocation
+        // of its own.
+        //
+        // `db` is read out before the call on purpose: the receiver
+        // `self.server.store` is borrowed at the call, and reading
+        // `self.session.selected_db` in the argument list would be a second
+        // borrow of `self` while that one is live.
+        let db = self.session.selected_db;
+        let keys_start = out.len();
+        let mut count = 0usize;
+        let next_cursor =
+            self.server
+                .store
+                .scan_in_db_visit(db, cursor, None, None, 10, now_ms, |logical| {
+                    count += 1;
+                    if !suppress_reply {
+                        fr_protocol::encode_bulk_string_slice(Some(logical), resp3, out);
+                    }
+                });
         if !suppress_reply {
+            let keys_len = out.len() - keys_start;
             out.extend_from_slice(b"*2\r\n");
             let mut cursor_buf = [0u8; 20];
             let mut n = next_cursor;
@@ -27499,10 +27523,8 @@ impl Runtime {
                 }
             }
             fr_protocol::encode_bulk_string_slice(Some(&cursor_buf[i..]), resp3, out);
-            fr_protocol::encode_aggregate_header(keys.len(), false, out);
-            for key in &keys {
-                fr_protocol::encode_bulk_string_slice(Some(key), resp3, out);
-            }
+            fr_protocol::encode_aggregate_header(count, false, out);
+            out[keys_start..].rotate_left(keys_len);
         }
         let elapsed_us = self.finish_chained_command(st);
         self.record_plain_zremrange_borrowed_metrics(
