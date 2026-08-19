@@ -57,7 +57,7 @@ PUBLIC_DOCS = [
     (Path("README.md"), 100),
     (Path("docs/perf_domination_scorecard.md"), 60),
     (Path("docs/RELEASE_READINESS_SCORECARD.md"), 60),
-    (Path("FEATURE_PARITY.md"), 30),
+    (Path("docs/planning/FEATURE_PARITY.md"), 30),
     (Path("CHANGELOG.md"), 20),
 ]
 

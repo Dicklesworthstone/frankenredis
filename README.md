@@ -1344,7 +1344,7 @@ FrankenRedis emits the same observability surface Redis operators are used to, p
 
 ### Threat-event ledger
 
-In hardened mode, every `ThreatEvent` (see Implementation deep-dives → Threat-event ledger format) is appended to a deterministic JSON-lines ledger. The schema is defined in `TEST_LOG_SCHEMA_V1.md` (`STRUCTURED_LOG_SCHEMA_VERSION = fr_testlog_v1`). Each line carries the timestamp, the threat class, a SHA256 digest of the offending input, the decision action, and a one-line reason; enough to reconstruct what hardened mode did without rerunning the workload.
+In hardened mode, every `ThreatEvent` (see Implementation deep-dives → Threat-event ledger format) is appended to a deterministic JSON-lines ledger. The schema is defined in `docs/planning/TEST_LOG_SCHEMA_V1.md` (`STRUCTURED_LOG_SCHEMA_VERSION = fr_testlog_v1`). Each line carries the timestamp, the threat class, a SHA256 digest of the offending input, the decision action, and a one-line reason; enough to reconstruct what hardened mode did without rerunning the workload.
 
 ---
 
@@ -1537,7 +1537,7 @@ The lazy `Store::state_digest` + ACL category short-circuit rounds in `artifacts
 
 ## Threat model summary
 
-FrankenRedis defends against five concrete attacker postures. The full matrix is in [`SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md`](SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md); the abbreviated form:
+FrankenRedis defends against five concrete attacker postures. The full matrix is in [`docs/planning/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md`](docs/planning/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md); the abbreviated form:
 
 | Attacker | What they try | What FrankenRedis does |
 |---|---|---|
@@ -1835,13 +1835,8 @@ Organized by date-bounded development phases (Phase 1–11) from foundation thro
 frankenredis/
 ├── AGENTS.md                                    # multi-agent build doctrine
 ├── CHANGELOG.md                                 # 11 phases, 2,389 commits across 79 days
-├── COMPREHENSIVE_SPEC_FOR_FRANKENREDIS_V1.md    # design spec
-├── FEATURE_PARITY.md                            # per-feature parity matrix
-├── PLAN_TO_PORT_REDIS_TO_RUST.md                # porting plan
-├── SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md   # threat model
-├── SENTINEL_SPEC.md                             # sentinel design extract
-├── TEST_LOG_SCHEMA_V1.md                        # structured test log contract
 ├── README.md                                    # (this file)
+├── docs/planning/                               # design spec, porting plan, parity + threat matrices
 │
 ├── Cargo.toml                                   # workspace root
 ├── rust-toolchain.toml                          # nightly pin
@@ -1901,11 +1896,10 @@ rch exec -- cargo bench
 
 - [`AGENTS.md`](AGENTS.md) — multi-agent build/coordination conventions
 - [`CHANGELOG.md`](CHANGELOG.md) — date-bounded phase history
-- [`FEATURE_PARITY.md`](FEATURE_PARITY.md) — per-feature parity matrix
-- [`COMPREHENSIVE_SPEC_FOR_FRANKENREDIS_V1.md`](COMPREHENSIVE_SPEC_FOR_FRANKENREDIS_V1.md) — design spec
-- [`SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md`](SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md) — threat-class matrix
-- [`SENTINEL_SPEC.md`](SENTINEL_SPEC.md) — Sentinel design extract
-- [`TEST_LOG_SCHEMA_V1.md`](TEST_LOG_SCHEMA_V1.md) — structured test log contract
+- [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) — per-feature parity matrix
+- [`docs/planning/COMPREHENSIVE_SPEC_FOR_FRANKENREDIS_V1.md`](docs/planning/COMPREHENSIVE_SPEC_FOR_FRANKENREDIS_V1.md) — design spec
+- [`docs/planning/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md`](docs/planning/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md) — threat-class matrix
+- [`docs/planning/TEST_LOG_SCHEMA_V1.md`](docs/planning/TEST_LOG_SCHEMA_V1.md) — structured test log contract
 - [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — threat model
 - [`artifacts/optimization/phase2-final/DELTA_REPORT.md`](artifacts/optimization/phase2-final/DELTA_REPORT.md) — current performance delta
 - [`artifacts/optimization/throughput-gap/ISOMORPHISM_PROOF_LAZY_DIGEST.md`](artifacts/optimization/throughput-gap/ISOMORPHISM_PROOF_LAZY_DIGEST.md) — throughput-recovery proof

@@ -9,4 +9,4 @@ for each packet family `FR-P2C-001..009`.
 Also contains deterministic live-oracle diff golden logs for the
 `live_redis_diff::*` and `live_redis_protocol_diff::*` paths.
 
-See `TEST_LOG_SCHEMA_V1.md` for schema and replay rules.
+See `docs/planning/TEST_LOG_SCHEMA_V1.md` for schema and replay rules.

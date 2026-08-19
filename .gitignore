@@ -156,6 +156,11 @@ ubs_*.jsonl
 
 # Persisted Redis RDB dumps from scratch sessions
 /dump.rdb
+/dump.rdb.*
+
+# Accidental skill-loop scratch (force-added historically)
+.skill-loop-progress.md
+.skill-loop-progress-*.md
 
 # Root-level agent scratch output (covers chk, diff, status, cargo output, etc.)
 /*.txt
@@ -165,13 +170,10 @@ ubs_*.jsonl
 /*.py
 /*.md
 !README.md
-!FEATURE_PARITY.md
-!PARITY-COVERAGE.md
 !CHANGELOG.md
 !AGENTS.md
 !CONTRIBUTING.md
 !LICENSE*
-!UPGRADE_LOG.md
 
 # Beads recovery artifacts
 .beads_recovery/
