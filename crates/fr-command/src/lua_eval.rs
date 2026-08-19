@@ -1071,12 +1071,55 @@ fn lua_arg_got_label(value: Option<&LuaValue>) -> &'static str {
 /// messages they assemble themselves, but it is NOT used in the
 /// rendered output — vendored's luaL_argerror always uses lua_getinfo
 /// "n.name" which is None for pcall-invoked C closures.
+thread_local! {
+    /// Whether the builtin currently executing was reached by COLON syntax.
+    ///
+    /// (frankenredis-argerr-method-index-q0hl5) A thread-local rather than a parameter because the
+    /// argument checkers that need it -- `lua_check_number` and its siblings -- are free functions
+    /// receiving only `inv_name`, and threading a second argument to them would touch 20 signatures
+    /// and 103 call sites for one wording rule. ONE source read by both formatters is also what
+    /// stops them drifting, which is precisely how this defect arose.
+    static CURRENT_CALL_IS_METHOD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Set the colon-call flag, returning the previous value so the caller can restore it.
+fn set_call_is_method(value: bool) -> bool {
+    CURRENT_CALL_IS_METHOD.with(|c| c.replace(value))
+}
+
+fn call_is_method() -> bool {
+    CURRENT_CALL_IS_METHOD.with(std::cell::Cell::get)
+}
+
+/// Upstream `lauxlib.c::luaL_argerror`, including the half that is easy to miss.
+///
+/// (frankenredis-argerr-method-index-q0hl5) `idx` arrives as upstream's `narg`: 1-based and
+/// INCLUDING the synthetic self of a colon call, because every caller passes `idx + 1`. Upstream
+/// then decrements for a method frame so self is not counted, and only if that reaches zero does it
+/// emit the bad-self wording. fr had the zero case and NOT the decrement, so a colon call reported
+/// one argument too many.
+///
+/// MEASURED live against 7.2.4: `('x'):rep('a')` gave "bad argument #2 to 'rep'" against the
+/// incumbent's "#1", the same for `:sub`, while the PLAIN `string.rep('x','a')` already agreed on
+/// both engines -- which is what localised the defect to the method path rather than to the
+/// argument checker.
 fn lua_format_argerror(
     inv_name: Option<&str>,
     _fallback_name: &str,
     idx: usize,
     reason: &str,
 ) -> String {
+    let (idx, is_bad_self) = if call_is_method() {
+        (idx.saturating_sub(1), idx == 1)
+    } else {
+        (idx, false)
+    };
+    if is_bad_self {
+        return match inv_name {
+            Some(name) => format!("user_script:1: calling '{name}' on bad self ({reason})"),
+            None => format!("calling '?' on bad self ({reason})"),
+        };
+    }
     match inv_name {
         Some(name) => format!("user_script:1: bad argument #{idx} to '{name}' ({reason})"),
         None => format!("bad argument #{idx} to '?' ({reason})"),
@@ -8222,16 +8265,16 @@ impl<'a> LuaState<'a> {
         // instead of the standard bad-argument template. Match upstream
         // when both: invocation came via colon-call AND the failing arg
         // is the synthetic self (arg #1).
-        if arg_idx == 1
-            && self.current_invocation_is_method
-            && let Some(name) = &self.current_invocation_name
-        {
-            return format!("user_script:1: calling '{name}' on bad self ({reason})");
-        }
-        match &self.current_invocation_name {
-            Some(name) => format!("user_script:1: bad argument #{arg_idx} to '{name}' ({reason})"),
-            None => format!("bad argument #{arg_idx} to '?' ({reason})"),
-        }
+        // (frankenredis-argerr-method-index-q0hl5) Delegates rather than restating the rule. This
+        // carried its own copy that handled the bad-self case but not the decrement, while the free
+        // formatter handled neither -- two implementations, incomplete in different ways. One
+        // function owns it now.
+        lua_format_argerror(
+            self.current_invocation_name.as_deref(),
+            _fallback_name,
+            arg_idx,
+            reason,
+        )
     }
 
     /// Bare syntactic name for an AST call site, used by C-builtin
@@ -8285,9 +8328,11 @@ impl<'a> LuaState<'a> {
                 &mut self.current_invocation_is_method,
                 method_override.is_some(),
             );
+            let prev_tl_method = set_call_is_method(method_override.is_some());
             let result = self.call_function(func, args, env, varargs);
             self.current_invocation_name = prev;
             self.current_invocation_is_method = prev_method;
+            set_call_is_method(prev_tl_method);
             return result;
         }
         // (frankenredis-2c7hj) Tables with a callable __call metamethod
@@ -8302,9 +8347,11 @@ impl<'a> LuaState<'a> {
                 &mut self.current_invocation_is_method,
                 method_override.is_some(),
             );
+            let prev_tl_method = set_call_is_method(method_override.is_some());
             let result = self.call_function(func, args, env, varargs);
             self.current_invocation_name = prev;
             self.current_invocation_is_method = prev_method;
+            set_call_is_method(prev_tl_method);
             return result;
         }
         let label = match method_override {
@@ -9309,9 +9356,11 @@ impl<'a> LuaState<'a> {
                 // C-builtin errors raised inside use '?' as the name.
                 let prev_inv = self.current_invocation_name.take();
                 let prev_method = std::mem::replace(&mut self.current_invocation_is_method, false);
+                let prev_tl_method = set_call_is_method(false);
                 let result = self.call_function(&func, &mut call_args_vec, env, &mut Vec::new());
                 self.current_invocation_name = prev_inv;
                 self.current_invocation_is_method = prev_method;
+                set_call_is_method(prev_tl_method);
                 match result {
                     Ok(vals) => {
                         // Drop any stale typed-error stash; the protected
@@ -9370,9 +9419,11 @@ impl<'a> LuaState<'a> {
                 // (frankenredis-557p3) Same AST-context clear as pcall.
                 let prev_inv = self.current_invocation_name.take();
                 let prev_method = std::mem::replace(&mut self.current_invocation_is_method, false);
+                let prev_tl_method = set_call_is_method(false);
                 let result = self.call_function(&func, &mut call_args_vec, env, &mut Vec::new());
                 self.current_invocation_name = prev_inv;
                 self.current_invocation_is_method = prev_method;
+                set_call_is_method(prev_tl_method);
                 match result {
                     Ok(vals) => {
                         self.pending_error_value = None;
