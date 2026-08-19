@@ -3242,7 +3242,27 @@ fn resolve_lua_local_slots(stmts: &mut Block) {
 /// The WORDING is fixed independently of the bound, because it needed no measurement: fr answered
 /// "script exceeded maximum call depth", which appears nowhere in Redis. While fr still refuses
 /// earlier than the incumbent, it now refuses with the incumbent's own message.
-const MAX_CALL_DEPTH: usize = 128;
+/// Maximum nested Lua function calls before the interpreter refuses with "stack overflow".
+///
+/// (frankenredis-lua-call-depth-ug22x) MEASURED, not guessed, and the number that matters is the
+/// FRAME COST rather than this depth. With the bound removed entirely, a release fr on an 8 MiB
+/// worker thread (`WORKER_THREAD_STACK_SIZE`, c63b56ef1) survives a self-recursion of 1200 and
+/// ABORTS at 1500 -- so a Lua call costs roughly 6.2 KB of Rust stack, and fr's own hard ceiling is
+/// about 1350. At 512 the walk occupies 3.03 MB, 37.9 pct of the thread, matching the margin
+/// `LUA_REPLY_MAX_DEPTH` uses and leaving the dispatch frames beneath it their room.
+///
+/// THE OLD VALUE WAS 128, which refused scripts fr could run perfectly well: it sat at 10 pct of
+/// the depth the process actually survives. Measured against vendored 7.2.4 with
+/// `scripts/lua_depth_survival_differential.py recurse`, redis ran the same recursion to at least
+/// 16000 and refused by 18000, so fr was refusing replies -- a FALSE REJECTION -- from 128 up.
+///
+/// A RESIDUAL GAP REMAINS AND IS NOT HIDDEN: upstream's ceiling is ~17000 and fr's is ~1350, so
+/// scripts recursing between 513 and ~16000 still work on Redis and fail here. That is not
+/// closable by moving this constant -- at 6.2 KB per call, upstream's depth would need 100 MB of
+/// stack. Closing it means making the interpreter's call path cheaper or trampolining it, which is
+/// its own piece of work and is recorded on the bead. Raising this number past ~1350 would convert
+/// a refusal into a process abort, which is strictly worse.
+const MAX_CALL_DEPTH: usize = 512;
 const MAX_ITERATIONS: u64 = 1_000_000;
 const LUA_EXACT_INTEGER_LIMIT: i128 = 1_i128 << 53;
 const LUA_YIELD_SENTINEL: &str = "__frankenredis_lua_coroutine_yield__";
@@ -21770,9 +21790,17 @@ end
         let mut store = Store::new();
 
         // CONTROL, and it is the half that catches an over-eager fix: a recursion comfortably
-        // inside the bound must still RUN. 101 nested calls against a bound of 128.
+        // inside the bound must still RUN. DERIVED from MAX_CALL_DEPTH rather than written as a
+        // literal -- this said `f(100)` against a bound of 128, and its partner said `f(500)`
+        // against the same 128, so raising the bound to the measured 512 left the "past the
+        // bound" half asserting a refusal that could no longer happen. Both ends now move with
+        // the constant, which is what makes this a bound test rather than a depth-500 test.
+        let inside = format!(
+            "local function f(n) if n == 0 then return 0 end return f(n-1) end return f({})",
+            super::MAX_CALL_DEPTH / 4
+        );
         let ok = eval_script(
-            b"local function f(n) if n == 0 then return 0 end return f(n-1) end return f(100)",
+            inside.as_bytes(),
             &[],
             &[],
             &mut store,
@@ -21781,8 +21809,12 @@ end
         .expect("a recursion inside the bound must still run");
         assert_eq!(ok, RespFrame::Integer(0));
 
+        let past = format!(
+            "local function f(n) if n == 0 then return 0 end return f(n-1) end return f({})",
+            super::MAX_CALL_DEPTH + 100
+        );
         let err = eval_script(
-            b"local function f(n) if n == 0 then return 0 end return f(n-1) end return f(500)",
+            past.as_bytes(),
             &[],
             &[],
             &mut store,
