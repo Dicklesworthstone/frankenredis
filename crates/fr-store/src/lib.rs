@@ -14017,6 +14017,24 @@ impl Store {
                 .get_mut(key.as_slice())
                 .map(|slot| std::mem::replace(slot, entry)),
         };
+        // (frankenredis-keymiss-oqhbi sibling) Upstream fires `new` from dbAddInternal
+        // (db.c:206), AFTER the key enters the dict and ONLY on creation -- the
+        // update_if_existing path returns above it, so an overwrite fires nothing. fr accepted
+        // the `n` flag, rendered it back from CONFIG GET, and emitted nothing: a subscriber to
+        // __keyevent@0__:new waited forever. Found by keyspace_event_coverage_gate.py, which the
+        // 44-event hand census could not see because "new" collides with unrelated literals.
+        //
+        // Placed here rather than at the call sites because this is the ONLY creation route into
+        // `entries` -- there is no `entry()`/`or_insert` path -- and `is_new_key` is already
+        // computed above for `canonical_key` and `is_ttl_rearm`, so the condition is the existing
+        // one rather than a second opinion about what "new" means.
+        if is_new_key {
+            let (event_db, logical_key) = match decode_db_key(&key) {
+                Some((decoded_db, logical)) => (decoded_db, logical),
+                None => (db, key.as_slice()),
+            };
+            self.notify_keyspace_event(NOTIFY_NEW, "new", logical_key, event_db);
+        }
         match new_expiry {
             Some(deadline) => {
                 // (cc_fr) get_mut-first: a re-arm (key already in expiry_deadlines) updates the
@@ -31922,9 +31940,19 @@ impl Store {
         let lit = pattern.map(glob_literal_prefix).filter(|l| !l.is_empty());
         let is_star = pattern.is_none() || pattern == Some(b"*".as_slice());
         let db_prefix = encode_db_key(db, b"");
-        let lower: Vec<u8> = match lit {
-            Some(l) => encode_db_key(db, l),
-            None => db_prefix.clone(),
+        // (frankenredis-hwcm1) BORROWED where it can be. On db 0 keys are stored
+        // unprefixed, so `encode_db_key(0, l)` is `l.to_vec()` -- a copy of a slice
+        // that already exists and outlives this walk, since `l` points into the
+        // caller's MATCH pattern. Callgrind attributed one of the two remaining
+        // allocations on scan_match to exactly this call, the other to
+        // `prefix_range_end` below (which genuinely builds a new byte string).
+        //
+        // The `None` arm borrows `db_prefix` rather than cloning it. That clone was
+        // free on db 0, where `db_prefix` is empty, but not on any other db.
+        let lower: Cow<'_, [u8]> = match lit {
+            Some(l) if db == 0 => Cow::Borrowed(l),
+            Some(l) => Cow::Owned(encode_db_key(db, l)),
+            None => Cow::Borrowed(db_prefix.as_slice()),
         };
         let upper: Option<Vec<u8>> = match lit {
             // (frankenredis-hwcm1) Reuse `lower` instead of encoding the SAME
@@ -31936,7 +31964,7 @@ impl Store {
             // Callgrind counted the duplication rather than my inferring it:
             // `encode_db_key` ran 8,000 times over 4,000 SCANs, exactly 2 per op,
             // on a shape whose reply is a cursor plus one key.
-            Some(_) => prefix_range_end(&lower),
+            Some(_) => prefix_range_end(lower.as_ref()),
             None if db == 0 => None,
             None => prefix_range_end(&db_prefix),
         };
@@ -31970,7 +31998,7 @@ impl Store {
 
         let lo_bound = match &resume_key {
             Some(k) => std::ops::Bound::Excluded(k.as_slice()),
-            None => std::ops::Bound::Included(lower.as_slice()),
+            None => std::ops::Bound::Included(lower.as_ref()),
         };
         let hi_bound = match &upper {
             Some(e) => std::ops::Bound::Excluded(e.as_slice()),

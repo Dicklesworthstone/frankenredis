@@ -36,20 +36,11 @@ FR_SOURCES = os.path.join(REPO, "crates", "*", "src", "*.rs")
 # Events upstream fires that fr deliberately does not, each with the reason. Empty today, and it
 # should stay that way: an entry here is a divergence, not a shrug. A name listed that fr DOES
 # emit fails the gate, so the list cannot go stale silently.
-ACCEPTED_ABSENT = {
-    "new": (
-        "OPEN DEFECT, not a deliberate divergence. Upstream fires it from db.c:206, "
-        "`notifyKeyspaceEvent(NOTIFY_NEW,\"new\",key,db->id)` in dbAdd, i.e. on every key "
-        "creation. fr models the FLAG completely -- NOTIFY_NEW is defined (fr-store:131), 'n' "
-        "parses to it (:166), and keyspace_events_to_string renders it (:225) -- and has NO "
-        "emit site: every other NOTIFY_NEW reference is the constant, the parser, the renderer "
-        "or a test. So `CONFIG SET notify-keyspace-events Kn` is accepted, reads back verbatim, "
-        "and a subscriber to __keyevent@0__:new receives nothing, forever. Exactly the defect "
-        "frankenredis-keymiss-oqhbi describes, in a second place its 44-event hand census "
-        "missed -- 'new' is a common literal, so a name search finds it in unrelated code. "
-        "Remove this entry when the emit site lands; the gate fails if it is left stale."
-    ),
-}
+ACCEPTED_ABSENT = {}
+# `new` lived here until its emit site landed (fr-store, the single creation route into
+# `entries`). The entry was removed in the same commit that implemented it, because this gate
+# FAILS on a stale entry -- that is the whole point of the second check, and it is the first
+# time it has been exercised.
 
 
 def upstream_event_names():
