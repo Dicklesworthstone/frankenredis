@@ -64599,3 +64599,65 @@ numbers quoted are xvq1a's, with its nulls reproduced above so the quotation car
    timed cells, with BOTH instruments in one invocation. Anything less compares across sessions.
 3. Quote 0.521151 as the worst bound if this shape needs a number today; it is the worse of the
    two authenticated runs, per the replicated-standing convention.
+
+## 2026-08-19 CrimsonHawk: SIZING, THREE DRAWS — the Lua-matcher deficit reproduces: 0.6425/0.6503/0.6442 raw at 256 bytes, and the harness itself says the control-normalised view is WORSE here (`frankenredis-25uop`)
+
+EVIDENCE CLASS: `balanced_square_ab.py`, square ABBAABBA, 21 rounds, 50,000 ops/slot, -P16, live
+Redis 7.2.4 in the SAME invocation, three consecutive draws. CV was NOT used. No build: the release
+ELF already carried the changes and the build slot was held by other panes throughout.
+
+  fr        `target/release/frankenredis`, sha256 `b4729412aa36357e...` (predates `04aa04016`)
+  incumbent vendored redis 7.2.4, sha256 `e837dbb2556cff6b...`
+
+**Claim class: SIZING, NOT CERTIFIED — and replication does not rescue it.** The window gate was
+run at BOTH ends and returned UNFIT at both: 1 cargo/rustc plus a 19 pct non-stationary loadavg at
+open, and NINE cargo/rustc at close. Three draws make the EFFECT reproducible; they do not make the
+WINDOW fit, and those are different claims. No number here may be quoted as a bound.
+
+### THE THREE DRAWS, per-arm figures inline
+
+    draw  loadavg              MHz mean   luapat_16          luapat_256         get_control
+    1     36.90 30.88 22.12    3056       0.7325 ADM         0.6425 ADM         1.1420 NULL-FAILED
+    2     24.36 28.27 22.34    3274       0.7343 ADM         0.6503 ADM         1.1434 NULL-FAILED
+    3     15.80 23.06 21.19    3036       0.7504 ADM         0.6442 ADM         1.1554 ADM
+
+Ratio is fr ops/s over redis ops/s, so below 1.0 means fr is BEHIND. Both pattern rows were
+ADMISSIBLE in all three draws — an improvement on the single draw recorded above, where
+`luapat_16` null-failed.
+
+    luapat_16     0.7325 - 0.7504   (spread 2.4 pct)
+    luapat_256    0.6425 - 0.6503   (spread 1.2 pct)
+
+The direction recorded earlier holds in every draw: fr falls further behind as the pattern
+lengthens. The 16-to-256 gap is 0.0900 / 0.0840 / 0.1062 — same sign, same magnitude, three times.
+
+### THE NORMALISED VIEW IS WORSE HERE, AND THE HARNESS SAYS SO
+
+Draw 3 is the only one whose control was admissible, so it is the only one that can be normalised at
+all. It produces 0.6494 and 0.5576 — and the harness flags both:
+
+    normaliser WIDER than the row (5.4 vs 3.3 pct): it injects more variance than it removes
+    normaliser WIDER than the row (5.4 vs 4.4 pct): it injects more variance than it removes
+
+So on this shape the RAW ratio is the better estimator and the control-normalised figure is the
+noisier one. That is the opposite of the usual reading, and it is worth stating plainly because the
+GEOSEARCH row above turns on normalisation being the MORE informative view. Which view is better is
+a property of the measured pair, not a rule: compare the two CIs before choosing.
+
+### WHAT REPLICATION DID AND DID NOT BUY
+
+  BOUGHT: `luapat_16` is now admissible in 3/3 draws, so the two-term split in `25uop`'s comment
+    (EVAL fixed cost vs per-matched-byte cost) rests on measured endpoints rather than on one
+    null-failed row. The per-byte term is the 16-to-256 delta and it reproduces.
+  NOT BOUGHT: certification. The gate refused at both ends of the run. Quoting 0.6425 as a bound
+    would be the error `feedback_a_harness_banner_is_not_provenance` records — a number is not
+    certified because the procedure around it looked rigorous.
+
+### RETRY PREDICATES
+
+  1. The blocker is other panes' builds, not the measurement. Every attempt across four turns found
+     cargo/rustc running under the shared uid. A certified bound needs a window with zero, which on
+     this host has to be waited for rather than hoped for.
+  2. When it comes: three draws, gate at both ends, and quote the WORST of the three per row.
+  3. Do NOT quote the normalised figures from draw 3 without the harness's own warning attached.
+     They are wider than the raw rows they are meant to clean up.
