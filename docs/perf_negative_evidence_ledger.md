@@ -66587,3 +66587,71 @@ which point sweeping the historical rows becomes worth the effort it is not wort
   1. New certification rows must carry the closing verdict and the full self-reported ELF SHA.
   2. Do not sweep the 20 historical rows; fix each when it is next edited.
   3. Do not read this row as a perf verdict. It measures nothing.
+
+## 2026-08-19 TanMarsh: REJECTED (SELF-SPEEDUP) — routing FCALL's call through `LuaState::new_for_function_load` is a per-CALL globals CLONE: lib1 21,145.3 -> 33,326.0 instr/op, **+57.6 pct SLOWER**, and only the dose-response exposed it (frankenredis-kbyhy)
+
+### THE LEVER, AND WHY IT LOOKED RIGHT
+
+`frankenredis-kbyhy`'s fix routes every FCALL through `lua_eval`'s executing path so the library
+body is run once per library instead of once per call. The executing path already existed, for
+dynamically-registering libraries, and it built its interpreter with
+`LuaState::new_for_function_load` — the constructor that path had always used. Reusing it was the
+obvious, minimal move: no new constructor, no new sandbox to reason about.
+
+### THE MEASURED LOSS
+
+Same shape ladder, both engines live in one invocation against vendored 7.2.4:
+
+      shape          fr before      fr after (this lever)     verdict
+      fcall_lib1     21,145.3       33,326.0                  +57.6 pct SLOWER
+      fcall_lib32   190,876.9       39,246.0                  -79.4 pct faster
+
+fcall_lib1 WINDOW: FIT for ratio (4.5044x), fcall_lib32 WINDOW: FIT for ratio (5.0655x), builds 0.
+
+### WHY
+
+`new_for_function_load` builds its globals with `lua_function_load_globals`, which does
+`lua_base_globals_template().as_ref().clone()` — a full clone of the base globals map — so it can
+override `redis` with a table carrying `register_function`. That is a per-LOAD cost, and it was
+correct while the path served only load-shaped work. Making it the path EVERY FCALL takes turned it
+into a per-CALL cost. `LuaState::new` uses `LuaGlobals::from_shared_base` and clones nothing.
+
+Replacing the constructor is worth **12,181 instr/op at lib1** and it is also the CORRECT sandbox:
+`register_function` is a load-time builtin, and upstream does not expose it to a running function
+either. Shipped that way in `90bebce02`.
+
+### THE METHOD POINT, WHICH IS THE REUSABLE PART
+
+**A single rung would have banked this as a 5x win.** The lib32 row alone reads
+190,876.9 -> 39,246.0, an unambiguous success, and nothing in it hints that a fixed cost had just
+replaced a proportional one. Only the LADDER shows the shape: the slope was gone AND the intercept
+had risen. This is the same failure mode `frankenredis-eh2ct` found in 21 of 39 size-sensitive
+rows — a one-point shape measures an intercept and calls it the command.
+
+Corollary for anyone replacing a specialised path with a general one: price the SPECIALISED path's
+own setup before you make it the general one. A constructor that is cheap once per load is not
+automatically cheap once per call, and the profile will not flag it, because it was never on the
+hot path before you put it there.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Instrument is callgrind Ir, which is deterministic and immune to load and MHz; both arms ran in the
+same window with builds 0. A/A null on the fr arm across two independent invocations of the shipped
+binary: 1.0075 (lib1), 1.0001 (lib8), 1.0004 (lib32) — that null is the only dispersion figure
+this row rests on, alongside the raw draw list itself.
+
+### PROVENANCE
+
+      shapes        `fcall_lib1` / `fcall_lib8` / `fcall_lib32` in scripts/shape_instr_per_op.py
+      incumbent     legacy_redis_code/redis/src/redis-server, 7.2.4, harness-verified
+                    sha=d2c8a4b9 == vendored source HEAD, clean
+      host          loadavg 18-21 / 19-20 / 19-20, runq 10-19, /data 219G, builds 0 on the FIT rows
+      disposition   REVERTED before landing. The shipped path uses `LuaState::new`.
+
+### RETRY PREDICATE
+
+Do not reintroduce `new_for_function_load` on the CALL path. It is the right constructor for
+executing a library BODY (it must expose `register_function`) and the wrong one for invoking a
+callback. If a future change needs load-shaped globals per call, measure `fcall_lib1` — the rung
+where library size is not a factor — before and after, because that is the only rung this cost
+shows up in cleanly.
