@@ -3423,6 +3423,14 @@ fn resolve_lua_local_slots(stmts: &mut Block) {
 /// recursive helper deeper than 767 frames still fails against fr with an error it never sees on
 /// Redis. This raise takes the gap from ~125x to ~21x; closing it needs either a much cheaper
 /// frame or a heap-allocated interpreter stack, and neither is this change.
+/// (frankenredis-lua-tail-calls-ps0le) THIS BOUND NO LONGER APPLIES TO A CALL IN TAIL POSITION.
+/// Lua 5.1 makes `return f(...)` reuse the caller's frame, so upstream charges a tail call
+/// NOTHING -- a tail-recursive loop is unbounded there at any depth. fr charged every call
+/// regardless of position and refused at 513 where the incumbent returned at 600, 5000 and 50000
+/// alike; no value of this constant could have fixed that, because the two engines differed in
+/// GROWTH RATE, not in the constant. `call_function` now trampolines a tail call instead of
+/// nesting, so what this bound still governs is NON-tail recursion, which is where the residual
+/// gap described above lives.
 const MAX_CALL_DEPTH: usize = 768;
 const MAX_ITERATIONS: u64 = 1_000_000;
 const LUA_EXACT_INTEGER_LIMIT: i128 = 1_i128 << 53;
@@ -3458,7 +3466,30 @@ pub fn lua_strip_raw_error_marker(error: &str) -> (String, bool) {
 enum ControlFlow {
     None,
     Return(Vec<LuaValue>),
+    /// (frankenredis-lua-tail-calls-ps0le) `return f(...)` where `f` resolves to a Lua closure:
+    /// the callee and its evaluated arguments, NOT yet invoked.
+    ///
+    /// Lua 5.1 specifies PROPER TAIL CALLS -- section 2.5.8 of the reference manual, and
+    /// `luaD_precall`'s `PCRTAILCALL` arm in the vendored interpreter: a call in tail position
+    /// REUSES the caller's frame rather than nesting, so a tail-recursive loop runs in constant
+    /// stack and is unbounded. It is a language guarantee, not an optimisation. fr charged every
+    /// call against `MAX_CALL_DEPTH` regardless of position, so it refused at 513 where the
+    /// incumbent returns at 600, 5000 and 50000 alike -- and NO value of `MAX_CALL_DEPTH` fixes
+    /// that, because the two engines differ in growth rate, not in the constant.
+    ///
+    /// Propagating the call OUT of the body instead of performing it is what makes the frame
+    /// reusable: `call_function` receives this, rebinds its locals and LOOPS. Nothing recurses,
+    /// so neither `call_depth` nor the native stack grows.
+    TailCall(Box<TailCall>),
     Break,
+}
+
+/// A tail call in flight: resolved callee, evaluated arguments.
+/// Boxed so `ControlFlow` stays the size of its `Vec` arm. (frankenredis-lua-tail-calls-ps0le)
+#[derive(Debug)]
+struct TailCall {
+    callee: LuaValue,
+    args: Vec<LuaValue>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5531,7 +5562,17 @@ impl<'a> LuaState<'a> {
         self.lua_frame_kinds.pop();
         match outcome {
             Ok(ControlFlow::Return(vals)) => Ok(vals.into_iter().next().unwrap_or(LuaValue::Nil)),
-            Ok(_) => Ok(LuaValue::Nil),
+            // (frankenredis-lua-tail-calls-ps0le) The CHUNK is a Lua frame but it is not entered
+            // through `call_function`, so it has no trampoline of its own: a top-level
+            // `return f(...)` is settled here. Written as an explicit arm rather than folded into
+            // the catch-all below BECAUSE the catch-all would have answered `nil` -- a new
+            // ControlFlow variant reaching a `_ =>` is silently wrong, not a compile error, and
+            // this is the one site in the file where that could have happened unnoticed.
+            Ok(ControlFlow::TailCall(tail)) => {
+                let vals = self.settle_tail_call(*tail, &mut env, &mut varargs)?;
+                Ok(vals.into_iter().next().unwrap_or(LuaValue::Nil))
+            }
+            Ok(ControlFlow::None | ControlFlow::Break) => Ok(LuaValue::Nil),
             // (frankenredis-cxmsu) An uncaught `error({...})` /
             // `error(true)` / `error(nil)` escapes through the
             // sentinel string. Convert to a sensible reply string at
@@ -5723,6 +5764,10 @@ impl<'a> LuaState<'a> {
             match cf {
                 ControlFlow::Break => break,
                 ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
+                // (frankenredis-lua-tail-calls-ps0le) A tail call propagates exactly like a
+                // return: it IS a return whose value is not computed yet, and only the Lua frame
+                // that owns the body may reuse itself for it.
+                ControlFlow::TailCall(tc) => return Ok(ControlFlow::TailCall(tc)),
                 ControlFlow::None => {}
             }
         }
@@ -6098,6 +6143,10 @@ impl<'a> LuaState<'a> {
             match self.exec_block(body, env, varargs)? {
                 ControlFlow::Break => break,
                 ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
+                // (frankenredis-lua-tail-calls-ps0le) A tail call propagates exactly like a
+                // return: it IS a return whose value is not computed yet, and only the Lua frame
+                // that owns the body may reuse itself for it.
+                ControlFlow::TailCall(tc) => return Ok(ControlFlow::TailCall(tc)),
                 ControlFlow::None => {}
             }
         }
@@ -6130,6 +6179,11 @@ impl<'a> LuaState<'a> {
                 ControlFlow::Return(v) => {
                     env.pop_scope();
                     return Ok(ControlFlow::Return(v));
+                }
+                // (frankenredis-lua-tail-calls-ps0le) Same scope discipline as the return arm.
+                ControlFlow::TailCall(tc) => {
+                    env.pop_scope();
+                    return Ok(ControlFlow::TailCall(tc));
                 }
                 ControlFlow::None => {}
             }
@@ -6296,6 +6350,11 @@ impl<'a> LuaState<'a> {
                         env.pop_scope();
                         return Ok(ControlFlow::Return(v));
                     }
+                    // (frankenredis-lua-tail-calls-ps0le) Same scope discipline as the return arm.
+                    ControlFlow::TailCall(tc) => {
+                        env.pop_scope();
+                        return Ok(ControlFlow::TailCall(tc));
+                    }
                     ControlFlow::None => {}
                 }
                 i += st;
@@ -6328,6 +6387,34 @@ impl<'a> LuaState<'a> {
                         env,
                         varargs,
                     );
+                }
+                // (frankenredis-lua-tail-calls-ps0le) TAIL POSITION. Lua 5.1 makes `return f(...)`
+                // reuse the caller's frame, so the recursion is unbounded; fr nested a frame for
+                // it and refused at 513 where the incumbent runs to any depth.
+                //
+                // THE GUARD IS `exprs.len() == 1`, and it is upstream's rule, not a conservative
+                // approximation: only a single call expression is in tail position. `return f(), 1`
+                // and `return 1, f()` both need the caller's frame to assemble the value list, and
+                // Lua does not treat either as a tail call.
+                //
+                // ONLY A LUA CLOSURE IS TRAMPOLINED. A builtin, a `__call` table or a
+                // non-callable keeps the ordinary path verbatim -- those arms carry the callee-AST
+                // error wording (`attempt to call field 'f'`), the invocation-name stash that
+                // builtin argument errors read, and the table-mutation write-back for
+                // `table.insert`/`sort`/`remove`/`rawset`. Rerouting them would risk all of that
+                // to buy nothing: a builtin does not grow the Lua frame stack.
+                if let [Expr::Call(func_expr, call_args)] = exprs.as_slice() {
+                    let func = self.eval_expr(func_expr, env, varargs)?;
+                    let arg_vals = self.eval_call_args(call_args, env, varargs)?;
+                    if matches!(func, LuaValue::Function(_)) {
+                        return Ok(ControlFlow::TailCall(Box::new(TailCall {
+                            callee: func,
+                            args: arg_vals,
+                        })));
+                    }
+                    return Ok(ControlFlow::Return(self.invoke_call_expr(
+                        func_expr, &func, arg_vals, call_args, env, varargs,
+                    )?));
                 }
                 let vals = self.eval_expr_list(exprs, env, varargs)?;
                 Ok(ControlFlow::Return(vals))
@@ -7462,52 +7549,9 @@ impl<'a> LuaState<'a> {
             Expr::Field(table_expr, field) => self.eval_field_expr(table_expr, field, env, varargs),
             Expr::Call(func_expr, args) => {
                 let func = self.eval_expr(func_expr, env, varargs)?;
-                let mut arg_vals = self.eval_call_args(args, env, varargs)?;
-                // (frankenredis-md71j) Plumb the callee AST node so a
-                // non-callable target reports "local 'x'" / "field 'f'" /
-                // "upvalue 'y'" / "global 'g'" context.
-                let results = self.call_function_with_callee(
-                    func_expr,
-                    &func,
-                    &mut arg_vals,
-                    env,
-                    varargs,
-                    None,
-                )?;
-                // Write back table mutations (table.sort/insert/remove mutate args[0] in-place).
-                // The inner `if` has a side-effect (set_existing_local) so must not be collapsed.
-                #[allow(clippy::collapsible_if, clippy::collapsible_match)]
-                if let LuaValue::RustFunction(ref name) = func
-                    && matches!(
-                        name.as_ref(),
-                        "table.sort" | "table.insert" | "table.remove" | "rawset"
-                    )
-                {
-                    match args.first() {
-                        Some(Expr::LocalName(var_name, local)) => {
-                            if !env.set_existing_local_slot(*local, arg_vals[0].clone())
-                                && !env.set_existing_local(var_name, arg_vals[0].clone())
-                            {
-                                self.globals
-                                    .insert(var_name.to_string(), arg_vals[0].clone());
-                            }
-                        }
-                        Some(Expr::Name(var_name)) => {
-                            match env.set_existing_local(var_name, arg_vals[0].clone()) {
-                                true => {}
-                                false => {
-                                    self.globals
-                                        .insert(var_name.to_string(), arg_vals[0].clone());
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                // (frankenredis-a0wt5) Hand the buffer back on the normal exit.
-                // An error unwinding past here just drops it and the pool
-                // refills, so no error path has to be threaded.
-                self.give_arg_buffer(arg_vals);
+                let arg_vals = self.eval_call_args(args, env, varargs)?;
+                let results =
+                    self.invoke_call_expr(func_expr, &func, arg_vals, args, env, varargs)?;
                 Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
             }
             Expr::IntrinsicCall(intrinsic, fallback, args) => {
@@ -7898,6 +7942,84 @@ impl<'a> LuaState<'a> {
         }
     }
 
+    /// Perform a call whose callee value and arguments are already evaluated.
+    ///
+    /// (frankenredis-lua-tail-calls-ps0le) Extracted from `eval_expr`'s `Expr::Call` arm so the
+    /// TAIL-POSITION path in `Stmt::Return` can reach the identical behaviour for a callee that
+    /// is NOT a Lua closure. Everything below the argument evaluation lives here -- the callee-AST
+    /// error wording, the invocation-name stash, the table-mutation write-back and the argument
+    /// buffer return -- so the two call sites cannot drift. Returns ALL results; `eval_expr`
+    /// truncates to the first, a tail-position return does not.
+    /// Perform a tail call that reached a boundary owning no reusable Lua frame.
+    ///
+    /// (frankenredis-lua-tail-calls-ps0le) `call_function` trampolines a tail call by REUSING the
+    /// frame it already holds. Two boundaries have no such frame to give: the top-level chunk, and
+    /// a coroutine body resumed from a continuation. Those settle the call the ordinary way -- one
+    /// frame, which is exactly what the pre-existing code spent there anyway, since before this
+    /// change the call had already been performed inside the body. Nothing regresses: the callee
+    /// itself still trampolines its own tail calls inside `call_function`.
+    fn settle_tail_call(
+        &mut self,
+        tail: TailCall,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<Vec<LuaValue>, String> {
+        let TailCall { callee, mut args } = tail;
+        self.call_function(&callee, &mut args, env, varargs)
+    }
+
+    fn invoke_call_expr(
+        &mut self,
+        func_expr: &Expr,
+        func: &LuaValue,
+        mut arg_vals: Vec<LuaValue>,
+        args: &[Expr],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<Vec<LuaValue>, String> {
+        // (frankenredis-md71j) Plumb the callee AST node so a
+        // non-callable target reports "local 'x'" / "field 'f'" /
+        // "upvalue 'y'" / "global 'g'" context.
+        let results =
+            self.call_function_with_callee(func_expr, func, &mut arg_vals, env, varargs, None)?;
+
+        // Write back table mutations (table.sort/insert/remove mutate args[0] in-place).
+        // The inner `if` has a side-effect (set_existing_local) so must not be collapsed.
+        #[allow(clippy::collapsible_if, clippy::collapsible_match)]
+        if let LuaValue::RustFunction(name) = func
+            && matches!(
+                name.as_ref(),
+                "table.sort" | "table.insert" | "table.remove" | "rawset"
+            )
+        {
+            match args.first() {
+                Some(Expr::LocalName(var_name, local)) => {
+                    if !env.set_existing_local_slot(*local, arg_vals[0].clone())
+                        && !env.set_existing_local(var_name, arg_vals[0].clone())
+                    {
+                        self.globals
+                            .insert(var_name.to_string(), arg_vals[0].clone());
+                    }
+                }
+                Some(Expr::Name(var_name)) => {
+                    match env.set_existing_local(var_name, arg_vals[0].clone()) {
+                        true => {}
+                        false => {
+                            self.globals
+                                .insert(var_name.to_string(), arg_vals[0].clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // (frankenredis-a0wt5) Hand the buffer back on the normal exit.
+        // An error unwinding past here just drops it and the pool
+        // refills, so no error path has to be threaded.
+        self.give_arg_buffer(arg_vals);
+        Ok(results)
+    }
+
     fn eval_call_args(
         &mut self,
         args: &[Expr],
@@ -8068,6 +8190,12 @@ impl<'a> LuaState<'a> {
             match self.exec_stmt(stmt, env, varargs) {
                 Ok(ControlFlow::None) => {}
                 Ok(ControlFlow::Return(vals)) => return Ok(CoroutineRun::Complete(vals)),
+                // (frankenredis-lua-tail-calls-ps0le) A coroutine body has no caller frame here to
+                // reuse, so the tail call is settled and its values complete the coroutine.
+                Ok(ControlFlow::TailCall(tc)) => {
+                    let vals = self.settle_tail_call(*tc, env, varargs)?;
+                    return Ok(CoroutineRun::Complete(vals));
+                }
                 Ok(ControlFlow::Break) => return Ok(CoroutineRun::Complete(vec![LuaValue::Nil])),
                 Err(err) if is_lua_yield_signal(&err) && self.pending_yield.is_some() => {
                     // (frankenredis-sjuu1) Real coroutine.yield always
@@ -8115,6 +8243,12 @@ impl<'a> LuaState<'a> {
                 }
                 Ok(ControlFlow::Return(vals)) => {
                     env.pop_scope();
+                    return Ok(CoroutineRun::Complete(vals));
+                }
+                // (frankenredis-lua-tail-calls-ps0le) Same scope discipline as the return arm.
+                Ok(ControlFlow::TailCall(tc)) => {
+                    env.pop_scope();
+                    let vals = self.settle_tail_call(*tc, env, varargs)?;
                     return Ok(CoroutineRun::Complete(vals));
                 }
                 Err(err) if is_lua_yield_signal(&err) && self.pending_yield.is_some() => {
@@ -8298,6 +8432,11 @@ impl<'a> LuaState<'a> {
                 };
                 match cf {
                     ControlFlow::Return(vals) => Ok(CoroutineRun::Complete(vals)),
+                    // (frankenredis-lua-tail-calls-ps0le) Settled here; see `settle_tail_call`.
+                    ControlFlow::TailCall(tc) => {
+                        let vals = self.settle_tail_call(*tc, env, varargs)?;
+                        Ok(CoroutineRun::Complete(vals))
+                    }
                     ControlFlow::Break => Ok(CoroutineRun::Complete(vec![LuaValue::Nil])),
                     ControlFlow::None => {
                         self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
@@ -8310,6 +8449,11 @@ impl<'a> LuaState<'a> {
                 if cond_val.is_truthy() {
                     match self.exec_block(&body, env, varargs)? {
                         ControlFlow::Return(vals) => return Ok(CoroutineRun::Complete(vals)),
+                        // (frankenredis-lua-tail-calls-ps0le) Settled here; see `settle_tail_call`.
+                        ControlFlow::TailCall(tc) => {
+                            let vals = self.settle_tail_call(*tc, env, varargs)?;
+                            return Ok(CoroutineRun::Complete(vals));
+                        }
                         // `break` inside the body exits the loop; fall through
                         // to the outer statements after the while.
                         ControlFlow::Break => {}
@@ -8322,6 +8466,11 @@ impl<'a> LuaState<'a> {
                             // once the condition finally reads falsy.
                             match self.exec_stmt(&Stmt::While(cond, body), env, varargs) {
                                 Ok(ControlFlow::Return(vals)) => {
+                                    return Ok(CoroutineRun::Complete(vals));
+                                }
+                                // (frankenredis-lua-tail-calls-ps0le) See `settle_tail_call`.
+                                Ok(ControlFlow::TailCall(tc)) => {
+                                    let vals = self.settle_tail_call(*tc, env, varargs)?;
                                     return Ok(CoroutineRun::Complete(vals));
                                 }
                                 Ok(ControlFlow::Break | ControlFlow::None) => {}
@@ -8358,6 +8507,11 @@ impl<'a> LuaState<'a> {
                 // outer_pc so post-loop statements run once it finally reads true.
                 match self.exec_stmt(&Stmt::Repeat(body, cond), env, varargs) {
                     Ok(ControlFlow::Return(vals)) => Ok(CoroutineRun::Complete(vals)),
+                    // (frankenredis-lua-tail-calls-ps0le) See `settle_tail_call`.
+                    Ok(ControlFlow::TailCall(tc)) => {
+                        let vals = self.settle_tail_call(*tc, env, varargs)?;
+                        Ok(CoroutineRun::Complete(vals))
+                    }
                     Ok(ControlFlow::Break | ControlFlow::None) => {
                         self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
                     }
@@ -8390,6 +8544,11 @@ impl<'a> LuaState<'a> {
                 )?;
                 match self.run_generic_for_from_iter_vals(&names, iter_vals, &body, env, varargs)? {
                     ControlFlow::Return(vals) => Ok(CoroutineRun::Complete(vals)),
+                    // (frankenredis-lua-tail-calls-ps0le) See `settle_tail_call`.
+                    ControlFlow::TailCall(tc) => {
+                        let vals = self.settle_tail_call(*tc, env, varargs)?;
+                        Ok(CoroutineRun::Complete(vals))
+                    }
                     ControlFlow::Break | ControlFlow::None => {
                         self.exec_coroutine_stmts(outer_stmts, outer_pc, env, varargs)
                     }
@@ -9034,41 +9193,73 @@ impl<'a> LuaState<'a> {
                     _ => Ok(Vec::new()),
                 }
             }
-            LuaValue::Function(lua_func) => {
-                let (mut new_env, mut func_varargs) =
-                    Self::prepare_lua_function_env(lua_func, args);
-                // (frankenredis-ycaog) Functions carrying a source_label
-                // (loaded via loadstring/load) push their chunk label so
-                // any inner function definitions inherit it and runtime
-                // errors get rewritten to that prefix on the way out.
-                let prev_label = if lua_func.source_label.is_some() {
-                    std::mem::replace(
-                        &mut self.current_source_label,
-                        lua_func.source_label.clone(),
-                    )
-                } else {
-                    self.current_source_label.clone()
-                };
-                let result = self.exec_stmts(&lua_func.body, &mut new_env, &mut func_varargs);
-                if lua_func.source_label.is_some() {
-                    self.current_source_label = prev_label;
-                }
-                match result {
-                    Ok(ControlFlow::Return(vals)) => Ok(vals),
-                    Ok(_) => Ok(vec![LuaValue::Nil]),
-                    Err(e) => {
-                        if let Some(label) = lua_func.source_label.as_deref() {
-                            // Rewrite the standard "user_script:" prefix
-                            // (the only error prefix fr emits) to the
-                            // chunk label. Errors that already carry a
-                            // chunk label or that don't have any prefix
-                            // pass through unchanged.
-                            if let Some(rest) = e.strip_prefix("user_script:") {
-                                return Err(format!("{label}:{rest}"));
-                            }
-                        }
-                        Err(e)
+            // (frankenredis-lua-tail-calls-ps0le) THE TRAMPOLINE. A `return f(...)` in the body
+            // arrives as `ControlFlow::TailCall` instead of having been performed, and this loop
+            // REBINDS the callee and re-runs, reusing the frame `call_function` already holds.
+            // That is Lua 5.1's proper-tail-call guarantee (reference manual 2.5.8, and
+            // `luaD_precall`'s PCRTAILCALL arm): neither `call_depth` nor the native stack grows,
+            // so a tail-recursive loop is unbounded here exactly as it is on the incumbent.
+            //
+            // NEITHER COUNTER IS TOUCHED IN THE LOOP, and that is the entire fix. `call_depth`
+            // was incremented once on entry and stays; the `lua_frame_kinds` entry pushed on
+            // entry is reused, which is correct because a tail callee is a Lua closure and pushes
+            // the same `true`. `self.iterations` still advances per statement, so a runaway tail
+            // loop is bounded by MAX_ITERATIONS rather than by stack -- an error, never an abort.
+            //
+            // `tail_owner` holds the successor closure ONLY while trampolining, so an ordinary
+            // call still borrows the caller's `LuaValue` and clones nothing. Cloning here would
+            // deep-copy params + body + captured env per level (see 6270a1ca7) and would hand the
+            // saving straight back.
+            LuaValue::Function(entry_func) => {
+                let mut tail_owner: Option<LuaValue> = None;
+                let mut tail_args: Vec<LuaValue> = Vec::new();
+                let mut first = true;
+                loop {
+                    let lua_func: &LuaFunc = match tail_owner.as_ref() {
+                        Some(LuaValue::Function(f)) => f,
+                        _ => entry_func,
+                    };
+                    let call_args: &[LuaValue] = if first { args } else { &tail_args };
+                    let (mut new_env, mut func_varargs) =
+                        Self::prepare_lua_function_env(lua_func, call_args);
+                    // (frankenredis-ycaog) Functions carrying a source_label
+                    // (loaded via loadstring/load) push their chunk label so
+                    // any inner function definitions inherit it and runtime
+                    // errors get rewritten to that prefix on the way out.
+                    let label = lua_func.source_label.clone();
+                    let prev_label = if label.is_some() {
+                        std::mem::replace(&mut self.current_source_label, label.clone())
+                    } else {
+                        self.current_source_label.clone()
+                    };
+                    let result = self.exec_stmts(&lua_func.body, &mut new_env, &mut func_varargs);
+                    if label.is_some() {
+                        self.current_source_label = prev_label;
                     }
+                    first = false;
+                    break match result {
+                        Ok(ControlFlow::Return(vals)) => Ok(vals),
+                        Ok(ControlFlow::TailCall(tail)) => {
+                            let TailCall { callee, args } = *tail;
+                            tail_owner = Some(callee);
+                            tail_args = args;
+                            continue;
+                        }
+                        Ok(ControlFlow::None | ControlFlow::Break) => Ok(vec![LuaValue::Nil]),
+                        Err(e) => {
+                            if let Some(label) = label.as_deref() {
+                                // Rewrite the standard "user_script:" prefix
+                                // (the only error prefix fr emits) to the
+                                // chunk label. Errors that already carry a
+                                // chunk label or that don't have any prefix
+                                // pass through unchanged.
+                                if let Some(rest) = e.strip_prefix("user_script:") {
+                                    return Err(format!("{label}:{rest}"));
+                                }
+                            }
+                            Err(e)
+                        }
+                    };
                 }
             }
             // (frankenredis-8w2ag) Prepend the standard
@@ -16898,6 +17089,196 @@ pub fn compile_check(script: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
 
+    /// A tail-recursive loop must run at a depth `MAX_CALL_DEPTH` could never reach.
+    ///
+    /// (frankenredis-lua-tail-calls-ps0le) MEASURED live against vendored 7.2.4 before this was
+    /// written: `return f(n-1)` answers 0 at N=600, 5000 and 50000 there, and fr refused at 513.
+    /// 20000 is chosen because it is above upstream's own NON-tail ceiling (~16000-18000), so a
+    /// passing run cannot be explained by "fr just has a bigger constant now" -- only by the frame
+    /// being reused.
+    #[test]
+    fn tail_recursion_runs_far_past_max_call_depth_ps0le() {
+        let mut store = Store::new();
+        let out = eval_script(
+            b"local function f(n) if n == 0 then return 0 end return f(n-1) end return f(20000)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("a tail-recursive loop must not hit the call-depth bound");
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    /// Mutual tail recursion must trampoline too -- the frame is reused by whoever is CALLED, not
+    /// by the function that happens to be recursing into itself.
+    /// (frankenredis-lua-tail-calls-ps0le)
+    #[test]
+    fn mutual_tail_recursion_runs_past_max_call_depth_ps0le() {
+        let mut store = Store::new();
+        let out = eval_script(
+            b"local a, b \
+              a = function(n) if n == 0 then return 'a' end return b(n-1) end \
+              b = function(n) if n == 0 then return 'b' end return a(n-1) end \
+              return a(9999)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("mutual tail recursion must not hit the call-depth bound");
+        assert_eq!(out, RespFrame::BulkString(Some(b"b".to_vec())));
+    }
+
+    /// NON-tail recursion must STILL be bounded, and this is the discriminating negative case.
+    ///
+    /// (frankenredis-lua-tail-calls-ps0le) `return 1 + f(n-1)` needs the caller's frame to add to
+    /// the result, so Lua does not treat it as a tail call and it must keep costing a frame here.
+    /// A fix that merely stopped charging `call_depth` for every `return f(...)`-shaped call would
+    /// pass the test above and FAIL this one by recursing natively until the process aborts --
+    /// strictly worse than the refusal it replaced.
+    ///
+    /// IT RUNS ON AN 8 MiB THREAD ON PURPOSE, and that is a fact about the product, not a test
+    /// convenience. `MAX_CALL_DEPTH` is 768 frames at a measured 4352 B each = 3.34 MB, sized
+    /// against the 8 MiB reactor threads `c63b56ef1` configures. Rust's default test thread gets
+    /// 2 MiB, so on the harness's own thread the native stack dies BEFORE the guard can fire and
+    /// the whole test binary aborts with SIGABRT -- which is exactly what happened the first time
+    /// this test ran. Asserting the refusal therefore requires a thread the size production uses;
+    /// on a smaller one this test would be measuring the harness, not the engine.
+    #[test]
+    fn non_tail_recursion_is_still_refused_at_the_bound_ps0le() {
+        let probe = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut store = Store::new();
+                eval_script(
+                    b"local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f(20000)",
+                    &[],
+                    &[],
+                    &mut store,
+                    0,
+                )
+                .expect_err("non-tail recursion must be refused, never abort the process")
+            })
+            .expect("spawn the 8 MiB probe thread");
+        let err = probe
+            .join()
+            .expect("the guard must fire before the stack does");
+        assert!(
+            err.contains("stack overflow"),
+            "expected upstream's stack-overflow wording, got {err}"
+        );
+    }
+
+    /// `return f(), 1` is NOT a tail call and must keep behaving like an ordinary return list.
+    ///
+    /// (frankenredis-lua-tail-calls-ps0le) Lua puts only a SINGLE call expression in tail
+    /// position; anything else needs the caller's frame to assemble the value list. The guard is
+    /// `exprs.len() == 1`, and this pins it from the other side: a trampoline widened to a
+    /// multi-expression return would drop the trailing values.
+    #[test]
+    fn a_multi_value_return_is_not_a_tail_call_ps0le() {
+        let mut store = Store::new();
+        let out = eval_script(
+            b"local function f() return 7 end return {f(), 1}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("a multi-expression return still returns every value");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::Integer(7), RespFrame::Integer(1)]))
+        );
+    }
+
+    /// A tail-position call to a BUILTIN keeps the ordinary path, including its side effects.
+    ///
+    /// (frankenredis-lua-tail-calls-ps0le) Only a Lua closure is trampolined. The builtin arm was
+    /// extracted into `invoke_call_expr` so both call sites share one body, and the write-back for
+    /// `table.insert`/`sort`/`remove`/`rawset` lives inside it -- had the extraction dropped that,
+    /// `t` would still be empty here.
+    #[test]
+    fn a_tail_position_builtin_call_keeps_its_side_effect_ps0le() {
+        let mut store = Store::new();
+        let out = eval_script(
+            b"local t = {} local function g() return table.insert(t, 'x') end g() return #t",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("table.insert from tail position still mutates the table");
+        assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    /// A tail-position call to a NON-CALLABLE keeps its callee-AST error wording.
+    /// (frankenredis-lua-tail-calls-ps0le)
+    #[test]
+    fn a_tail_position_call_to_a_nil_field_keeps_its_wording_ps0le() {
+        let mut store = Store::new();
+        let err = eval_script(
+            b"local t = {} local function g() return t.missing() end return g()",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("calling a nil field must still raise");
+        assert!(
+            err.contains("attempt to call") && err.contains("missing"),
+            "the callee-AST context must survive the tail-position path, got {err}"
+        );
+    }
+
+    /// A tail call returns EVERY value, not just the first.
+    ///
+    /// (frankenredis-lua-tail-calls-ps0le) `eval_expr` truncates a call to one value; a return in
+    /// tail position must not, which is why `invoke_call_expr` hands back the whole list and the
+    /// trampoline forwards it untouched.
+    #[test]
+    fn a_tail_call_propagates_every_return_value_ps0le() {
+        let mut store = Store::new();
+        let out = eval_script(
+            b"local function inner() return 1, 2, 3 end \
+              local function outer() return inner() end \
+              return {outer()}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("a tail call forwards the callee's full value list");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+                RespFrame::Integer(3),
+            ]))
+        );
+    }
+
+    /// A tail call at CHUNK level has no caller frame to reuse and must still be performed.
+    ///
+    /// (frankenredis-lua-tail-calls-ps0le) The chunk is not entered through `call_function`, so
+    /// its `ControlFlow` consumer had a wildcard arm that answered nil. A new variant reaching a
+    /// wildcard is silently wrong rather than a compile error, and this is the row that catches it.
+    #[test]
+    fn a_chunk_level_tail_call_is_still_performed_ps0le() {
+        let mut store = Store::new();
+        let out = eval_script(
+            b"local function f() return 42 end return f()",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("a top-level `return f()` must call f");
+        assert_eq!(out, RespFrame::Integer(42));
+    }
+
     /// Two libraries the bounded-sample hasher CANNOT tell apart must still be kept apart.
     ///
     /// (frankenredis-kbyhy) `LibraryKeyHasher` reads at most 56 bytes of a key, so a collision is
@@ -23168,8 +23549,17 @@ end
         // against the same 128, so raising the bound to the measured 512 left the "past the
         // bound" half asserting a refusal that could no longer happen. Both ends now move with
         // the constant, which is what makes this a bound test rather than a depth-500 test.
+        // (frankenredis-lua-tail-calls-ps0le) BOTH PROBES ARE NON-TAIL NOW -- `return 1 + f(n-1)`,
+        // not `return f(n-1)` -- and the change is a correction, not an accommodation. This test
+        // asserted that `return f(n-1)` past the bound is REFUSED. That shape is a TAIL CALL, and
+        // Lua 5.1 gives tail calls a reused frame, so 7.2.4 answers 0 for it at 600, 5000 and
+        // 50000 alike (measured live on that bead). The assertion was therefore pinning fr's
+        // DIVERGENCE from the incumbent as if it were the contract, and it went green for exactly
+        // as long as fr had the bug. `MAX_CALL_DEPTH` governs non-tail recursion; both halves now
+        // probe what it governs. This is the second time on this project that a test has encoded
+        // an assumption a later fix invalidated without touching a line the test names.
         let inside = format!(
-            "local function f(n) if n == 0 then return 0 end return f(n-1) end return f({})",
+            "local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f({})",
             super::MAX_CALL_DEPTH / 4
         );
         let ok = eval_script(
@@ -23180,10 +23570,14 @@ end
             0,
         )
         .expect("a recursion inside the bound must still run");
-        assert_eq!(ok, RespFrame::Integer(0));
+        assert_eq!(
+            ok,
+            RespFrame::Integer((super::MAX_CALL_DEPTH / 4) as i64),
+            "the non-tail control sums 1 per level, so it returns the depth it was given"
+        );
 
         let past = format!(
-            "local function f(n) if n == 0 then return 0 end return f(n-1) end return f({})",
+            "local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f({})",
             super::MAX_CALL_DEPTH + 100
         );
         let err = eval_script(
