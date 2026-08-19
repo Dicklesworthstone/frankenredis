@@ -158,6 +158,35 @@ def fr_code_text():
     return re.sub(r"\\\n\s*", "", text)
 
 
+def composed_error_prefixes(fr):
+    """Prefixes fr PROVES it composes into an error reply, e.g. "Protocol error".
+
+    fr does not always spell a message as one literal. Its RESP parse errors are an enum whose
+    `Display` writes the TAIL -- `write!(f, "too big inline request")` -- and the caller builds the
+    reply as `RespFrame::Error(format!("ERR Protocol error: {err}"))`. The string the client
+    receives is upstream's exactly; the string in the source is two halves that never touch. A
+    census searching for the whole literal reports all five of fr's protocol errors ABSENT, which
+    is the expensive direction: it bills a turn to re-implement what already ships.
+
+    DERIVED, NOT LISTED, and that is the point -- a hand-written prefix list is an exemption, and
+    an exemption is what this census exists to avoid. A prefix counts only when fr contains a
+    format string that composes it INTO AN ERROR REPLY. Matching every `format!` instead would
+    admit ~250 candidates, nearly all of them test-assertion messages ("wrong wording", "got"), and
+    a bad prefix produces a false PRESENCE -- strictly worse than the false absence it fixes,
+    because nothing downstream ever re-checks a literal this file calls present.
+    """
+    pat = re.compile(
+        r'(?:RespFrame::Error|CommandError::Custom)\s*\(\s*format!\(\s*'
+        r'"([^"\\]{1,80}?): \{[a-z_][a-z0-9_]*\}"'
+    )
+    out = set()
+    for m in pat.finditer(fr):
+        prefix = re.sub(r"^[A-Z]+ ", "", m.group(1))  # fr names its RESP code; upstream does not
+        if len(prefix) >= 5:
+            out.add(prefix)
+    return out
+
+
 def self_test():
     """Pin the matcher against the two ways this census has actually lied.
 
@@ -211,8 +240,35 @@ def self_test():
         "and the code-prefix form must still work on the joined text"
     )
 
+    # 6. COMPOSED MESSAGES. fr's RESP parse errors are `Display` tails assembled under an
+    #    `ERR Protocol error: ` prefix, so the full upstream literal is in no single fr string.
+    #    All five of fr's protocol errors read as ABSENT before this -- shipped code, reported
+    #    missing.
+    composed_fr = (
+        '            RespFrame::Error(format!("ERR Protocol error: {err}"));\n'
+        '            Self::InlineRequestTooBig => write!(f, "too big inline request"),\n'
+    )
+    prefixes = composed_error_prefixes(composed_fr)
+    assert "Protocol error" in prefixes, prefixes
+    assert "ERR Protocol error" not in prefixes, "fr's RESP code must be stripped from the prefix"
+    full = "Protocol error: too big inline request"
+    assert ('"' + full) not in composed_fr, "precondition: the whole literal is NOT in the source"
+    tail = full[len("Protocol error: "):]
+    assert ('"' + tail) in composed_fr, "but the tail is, and that is what makes it present"
+
+    #    THE NEGATIVE HALF, which is the half that matters: a prefix fr composes must NOT make
+    #    every message under it present. A tail fr does not contain stays absent.
+    absent_tail = "some wording fr has never implemented"
+    assert ('"' + absent_tail) not in composed_fr, "an unimplemented tail must not be found"
+
+    #    And the prefix set must stay narrow: a bare `format!` -- as in a test assertion -- is not
+    #    evidence that fr composes anything into a REPLY.
+    assert composed_error_prefixes('panic!("wrong wording: {got}")') == set(), (
+        "only error-reply constructions may contribute a prefix"
+    )
+
     print("PASS error_literal_census self-test: substring masking, code prefixes, comment "
-          "stripping, C concatenation, Rust line continuations")
+          "stripping, C concatenation, Rust line continuations, composed prefixes")
     return 0
 
 
@@ -229,6 +285,8 @@ def main():
         print("FAIL — read only %d chars of fr code. Same wiring failure, other side." % len(fr))
         return 1
 
+    composed = composed_error_prefixes(fr)
+
     def present(lit):
         """Anchored on the OPENING QUOTE, which is what makes this exact.
 
@@ -242,7 +300,20 @@ def main():
         # addReplyError -- "ERR ", but also "NOPERM ", "WRONGTYPE ", "NOSCRIPT " and friends.
         # Allowing any leading uppercase code keeps this from reporting a message absent purely
         # because fr names its code explicitly.
-        return re.search(r'"[A-Z]+ ' + re.escape(lit), fr) is not None
+        if re.search(r'"[A-Z]+ ' + re.escape(lit), fr) is not None:
+            return True
+        # COMPOSED MESSAGES. fr may build the reply as a prefix plus a tail that lives in a
+        # `Display` impl, so the whole literal appears nowhere in the source even though the
+        # client receives it verbatim. Only prefixes fr demonstrably composes into an error reply
+        # are considered -- see `composed_error_prefixes` -- and the tail must still be long
+        # enough to attribute on its own, so this cannot rescue a short generic fragment.
+        for prefix in composed:
+            head = prefix + ": "
+            if lit.startswith(head):
+                tail = lit[len(head):]
+                if len(tail) >= MIN_LEN and ('"' + tail) in fr:
+                    return True
+        return False
 
     missing = sorted(l for l in upstream if not present(l) and l not in ACCEPTED_ABSENT)
     stale = sorted(l for l in ACCEPTED_ABSENT if present(l))
