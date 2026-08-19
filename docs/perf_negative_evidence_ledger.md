@@ -64784,3 +64784,84 @@ taken per arm. Until that runs, quote 2.92x with the words "upper bound" attache
      change touched the fixed term and is not the lever it claims to be.
   3. The wall-clock ratio still needs a FIT window. This row does not substitute for it — it
      explains it.
+
+## 2026-08-19 CrimsonHawk: CORRECTION to the row above — Redis was never running its pattern matcher. fr lacks upstream's automatic PLAIN-SEARCH path, so fr's cost scales at ~106 instr/byte while Redis's is FLAT (frankenredis-25uop)
+
+EVIDENCE CLASS: callgrind Ir, fr and a LIVE vendored Redis 7.2.4 in the same invocation, slope
+method, 2000 ops, plus the two subtraction rungs this row's predecessor said were owed. The harness
+printed "WINDOW: UNFIT for ratio" on every rung (13-15 cargo/rustc, 15min loadavg above 30) and
+"this run is SIZING, not certified". SIZING it is.
+
+  per-arm  fr    loadavg 41.52/36.19/31.85 then 38.39/35.69/31.74; CPU MHz mean 2814 -> 3567
+           redis loadavg 41.52/36.19/31.85 then 38.39/35.69/31.74; CPU MHz mean 2862 -> 3190
+
+### WHAT THE SUBTRACTION RUNGS SHOWED, AND WHY THEY OVERTURN THE PREVIOUS ROW
+
+    rung             fr instr/op    redis instr/op    fr/redis
+    luapat_rep16        16,964.2         13,199.4      1.2853x
+    luapat_rep256       23,809.1         24,573.3      0.9689x
+
+Subtracting the rep rung from its matching luapat rung isolates what string.find itself costs:
+
+    find cost        fr          redis
+    at  16 bytes     5,740.4     4,402.1
+    at 256 bytes    31,219.2     4,097.5
+
+**Redis's find cost does not grow with the pattern at all** — 4,402 at 16 bytes against 4,097 at
+256, flat within cross-run variation. fr's grows by 25,478.8 over the same 240 bytes, i.e. ~106
+instructions per byte.
+
+A flat cost is not a matcher. The previous row read Redis's 46.1 slope as "instructions per matched
+byte" and that reading is WRONG: essentially all of that 46.1 was string.rep, not matching.
+
+### THE CAUSE, IN UPSTREAM'S SOURCE
+
+lstrlib.c:502-505, str_find_aux:
+
+    if (find && (lua_toboolean(L, 4) ||        /* explicit request? */
+        strpbrk(p, SPECIALS) == NULL)) {       /* or no special characters? */
+      /* do a plain search */
+      const char *s2 = lmemfind(s+init, l1-init, p, l2);
+
+SPECIALS is "^$*+?.([%-". A pattern with none of those bytes NEVER reaches the matcher — upstream
+does a memchr-driven plain search instead. My luapat shapes use an all-'a' pattern, so Redis has
+been doing lmemfind on every one of them.
+
+fr implements only the FIRST half of that disjunction (lua_eval.rs, string.find):
+
+    let plain = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
+
+so fr takes the plain path only when the caller passes the explicit 4th argument, and runs the full
+pattern matcher for every special-free pattern that does not.
+
+### WHAT THIS MEANS FOR THE LEVER
+
+The cascade-to-match lever recorded on 25uop targets the matcher's per-element dispatch. On THIS
+shape that is the wrong target, because upstream does not execute its matcher here at all — no
+amount of dispatch tuning reaches a memchr. The lever that matches the measurement is upstream's
+own disjunction:
+
+  * take the plain path when the pattern contains no SPECIALS, not only when plain=true was passed;
+  * and make the plain path a memchr-style search. fr's current plain branch is
+    s[init..].windows(n).position(|w| w == pattern), an O(n*m) naive scan, where lmemfind uses
+    memchr to find candidate starts. So even the explicit-plain path is slower than upstream's.
+
+That is a parity gap as well as a perf one: same answers, but fr does asymptotically more work for
+the commonest kind of find.
+
+### WHAT IS NOT SETTLED
+
+  * The subtraction crosses RUNS (luapat and luapat_rep were measured minutes apart under different
+    load), so the small redis differences — 4,402 against 4,097 — are not resolvable and I read them
+    as flat rather than as a decline. What IS far above that noise is fr's 25,478.8 growth.
+  * fr's string.rep is CHEAPER than Redis's at 256 bytes (0.9689x). That is worth knowing before
+    anyone attributes the whole luapat gap to Lua-side overhead.
+  * Everything here is SIZING. The gate refused every rung.
+
+### RETRY PREDICATES
+
+  1. Re-run luapat and luapat_rep back to back in ONE window so the subtraction stops crossing runs.
+  2. Add a shape whose pattern DOES contain a special (e.g. 'a+') — that is the shape which actually
+     exercises both matchers, and it is the only one on which the cascade lever can be measured.
+  3. Implement the SPECIALS disjunction before the cascade. It is smaller, it is upstream's own
+     control flow, and on special-free patterns it removes the work rather than tuning it.
