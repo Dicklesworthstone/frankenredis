@@ -65682,3 +65682,79 @@ unchanged at end, mean CPU MHz 3981 -> 3104, iowait 0 pct by vmstat at both ends
    ninety seconds.
 3. Do not treat a quiet READING as a quiet WINDOW. The host was genuinely quiet when measured and
    contended by the time the first point finished; only the null caught it.
+
+---
+
+## CORRECTION — my own prediction's model was wrong: fr switches representation at the SAME 128 boundary Redis does, so both costs jump at 129 (frankenredis-i41sx, frankenredis-pf1vw)
+
+Two rows above I qualified the certified `0.557334x` as a boundary measurement and predicted that
+at 129 members "the ratio should move sharply toward fr, and may cross". The prediction's
+DIRECTION survives; the MODEL it rested on does not, and the model is what the next reader would
+have used to interpret the sweep.
+
+### WHAT I CLAIMED
+
+That Redis jumps at the threshold while fr is smooth: "fr's `zset_from_listpack_spans` decodes
+every element ... There is no verbatim-keep path", so fr pays the same per element either side of
+128 and only Redis's cost changes.
+
+### WHAT THE SOURCE SAYS
+
+`SortedSet::from_unique_borrowed_pairs_with_limits` (fr-store/src/lib.rs:1641) branches on exactly
+the same threshold:
+
+      if pairs.len() <= max_listpack_entries && every member fits max_listpack_value {
+          SortedSetInner::Packed(PackedZSet::...)          <- <=128
+      } else {
+          SortedSetInner::Full(FullSortedSet::from_unique_pairs(owned_pairs))   <- >=129
+      }
+
+and the `Full` arm materialises OWNED pairs -- `member.to_vec()` per element -- where the packed
+arm borrows. So fr has a boundary at 128 too, and crossing it costs fr an allocation and a copy
+per member that it did not pay below.
+
+### WHAT THAT CHANGES
+
+Both engines jump at 129, so the sweep measures a difference of JUMPS, not a jump against a flat
+line:
+
+      Redis   <=128 validate-and-adopt, ~0 per element  ->  >=129 skiplist + dict per element
+      fr      <=128 packed, borrowed members            ->  >=129 Full, owned members (to_vec)
+
+Redis's jump is from approximately nothing to a per-element insert into two structures, which is
+the larger of the two -- fr is already paying per element below the line. So the ratio should
+still move toward fr at 129. But "may cross 1.0" was reasoned from fr being FLAT there, and it is
+not: fr gets more expensive at 129 as well. The crossing claim is withdrawn; the direction is
+kept, with a smaller expected magnitude.
+
+### WHY THIS MATTERS MORE THAN THE NUMBER
+
+Anyone running the sweep with my published model would have read a modest improvement at 129 as
+DISAPPOINTING -- "it barely moved, so the convert-vs-keep mechanism must be wrong" -- and might
+have redirected pf1vw on that basis. With the corrected model a modest improvement is the
+EXPECTED result, and it is a null result about fr's own threshold rather than evidence against
+the mechanism.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement; the host was at runq 99 with CPU idle 2 pct and no timed run was started. This
+row is a reading of one function and the enum it returns, and it corrects a prediction rather than
+producing a number.
+
+### PROVENANCE
+
+      source        main at b0b52e14f, reading fr-store/src/lib.rs:1641-1670 and :732-735,
+                    against rdb.c:2407-2425 already quoted two rows above.
+      host          loadavg 87.30 / 50.53 / 45.95, runq 99, CPU idle 2 pct, /data 238G.
+      disposition   CORRECTION to my own ANALYSIS row. No engine source changed.
+
+### RETRY PREDICATE
+
+1. Run the sweep at 64 / 128 / 129 as planned, but read it against the corrected model: BOTH
+   engines change regime at 129, so expect a moderate move toward fr, not a crossing.
+2. The interesting extra point is 129 vs a LARGE size (say 1000), where both engines are well
+   past their thresholds and the comparison is packed-vs-skiplist with no regime change in
+   between. That isolates the per-element costs from the boundary effects entirely, and it is the
+   shape pf1vw actually needs.
+3. Do not quote the boundary number as the RESTORE ratio. It is the worst point for fr in the
+   range, and now demonstrably so on both sides of the line.
