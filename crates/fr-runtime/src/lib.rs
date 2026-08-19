@@ -48672,41 +48672,38 @@ replica_announced:1\r\n",
         for argv in &queued {
             if let Some(permission_error) = self.acl_permission_error(argv, None) {
                 let command_name = String::from_utf8_lossy(&argv[0]).into_owned();
-                // Command-level denial uses the username + canonical lowercase
-                // fullname, matching upstream. (frankenredis-1ktss)
-                let acl_denied_user =
-                    String::from_utf8_lossy(self.session.current_user_name()).into_owned();
-                let acl_command_fullname = fr_command::acl_command_selectors_for_argv(argv)
-                    .into_iter()
-                    .next()
-                    .unwrap_or_else(|| command_name.to_ascii_lowercase());
-                let (log_reason, object, reply) = match permission_error {
+                // Upstream multi.c::execCommand does NOT reuse the dispatch-time
+                // NOPERM wording on this path, and the difference IS the message: a
+                // command denied at EXEC was ALLOWED when it was queued, so the
+                // client is told the rules moved underneath the transaction rather
+                // than that it never had the right. The trailing cause is quoted
+                // verbatim from upstream's four-way switch (multi.c:176-190).
+                //
+                // frankenredis-1ktss fixed the DISPATCH-gate wording and named the
+                // dispatch gates as its sites; applying it here as well was an
+                // over-application, because this gate has its own upstream message.
+                let (log_reason, object, acl_reason) = match permission_error {
                     AclCommandPermissionError::Command => (
                         "command",
                         command_name.to_ascii_uppercase(),
-                        RespFrame::Error(format!(
-                            "NOPERM User {acl_denied_user} has no permissions to run the '{acl_command_fullname}' command"
-                        )),
+                        "no permission to execute the command or subcommand",
                     ),
-                    AclCommandPermissionError::Key(key) => {
-                        let key_name = String::from_utf8_lossy(&key).into_owned();
-                        (
-                            "key",
-                            key_name,
-                            RespFrame::Error("NOPERM No permissions to access a key".to_string()),
-                        )
-                    }
-                    AclCommandPermissionError::Channel(channel) => {
-                        let channel_name = String::from_utf8_lossy(&channel).into_owned();
-                        (
-                            "channel",
-                            channel_name,
-                            RespFrame::Error(
-                                "NOPERM No permissions to access a channel".to_string(),
-                            ),
-                        )
-                    }
+                    AclCommandPermissionError::Key(key) => (
+                        "key",
+                        String::from_utf8_lossy(&key).into_owned(),
+                        "no permission to touch the specified keys",
+                    ),
+                    AclCommandPermissionError::Channel(channel) => (
+                        "channel",
+                        String::from_utf8_lossy(&channel).into_owned(),
+                        "no permission to access one of the channels used as arguments",
+                    ),
                 };
+                let reply = RespFrame::Error(format!(
+                    "NOPERM ACLs rules changed between the moment the transaction was \
+                     accumulated and the EXEC call. This command is no longer allowed for \
+                     the following reason: {acl_reason}"
+                ));
                 self.record_acl_log_event(
                     log_reason,
                     object,
@@ -76425,10 +76422,18 @@ mod tests {
         let RespFrame::Array(Some(exec_results)) = rt.execute_frame(command(&[b"EXEC"]), 5) else {
             unreachable!("expected EXEC array reply");
         };
+        // INCR was permitted when it queued and revoked before EXEC -- which is
+        // exactly the case upstream's dedicated message describes (multi.c:176-190).
+        // The dispatch-gate wording ("User <name> has no permissions to run ...")
+        // belongs to a command that was never allowed, and saying it here would tell
+        // the client the wrong story about what happened.
         assert_eq!(
             exec_results[0],
             RespFrame::Error(
-                "NOPERM User antirez has no permissions to run the 'incr' command".to_string()
+                "NOPERM ACLs rules changed between the moment the transaction was \
+                 accumulated and the EXEC call. This command is no longer allowed for \
+                 the following reason: no permission to execute the command or subcommand"
+                    .to_string()
             )
         );
         assert_eq!(
