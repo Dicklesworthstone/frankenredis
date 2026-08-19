@@ -37979,6 +37979,11 @@ impl Runtime {
                 self.server.replication_runtime_state.role,
                 ReplicationRoleState::Replica { .. }
             );
+        // (frankenredis-oo3aw follow-up) Same reason, same place: a script's inner writes bypass
+        // `reject_due_to_replica_write_quorum`, so the verdict is published for the script-prepare
+        // gate to read. Computed into a local first because the predicate borrows `self`.
+        let quorum_ok = self.replica_write_quorum_ok(now_ms);
+        self.server.store.good_replicas_ok = quorum_ok;
         // (frankenredis-dpu2y) The full-arity verdict from the SAME table pass that resolves
         // the name, handed to `execute_frame_internal` as a parameter rather than recomputed
         // there. Resolving the `parent|sub` key twice per generic dispatch measured +16.0
@@ -38153,21 +38158,30 @@ impl Runtime {
         if !self.command_requires_replica_write_quorum(argv, special_command) {
             return None;
         }
+        if self.replica_write_quorum_ok(now_ms) {
+            return None;
+        }
+        Some(RespFrame::Error(fr_store::NOREPLICAS_ERROR.to_string()))
+    }
+
+    /// The argv-independent half of [`Self::reject_due_to_replica_write_quorum`], i.e. upstream's
+    /// `checkGoodReplicasStatus()` (replication.c). Split out so the script-prepare gate can ask
+    /// the SAME question without also asking "is this argv a write command" -- upstream asks it
+    /// the same way, once per script rather than once per inner call.
+    ///
+    /// Returns `true` when there is no reason to refuse: not a master, the feature disabled, or
+    /// the quorum satisfied.
+    fn replica_write_quorum_ok(&self, now_ms: u64) -> bool {
         if !matches!(
             self.server.replication_runtime_state.role,
             ReplicationRoleState::Master
         ) {
-            return None;
+            return true;
         }
         if self.server.min_replicas_to_write == 0 || self.server.min_replicas_max_lag == 0 {
-            return None;
+            return true;
         }
-        if self.good_replica_write_count(now_ms) >= self.server.min_replicas_to_write {
-            return None;
-        }
-        Some(RespFrame::Error(
-            "NOREPLICAS Not enough good replicas to write.".to_string(),
-        ))
+        self.good_replica_write_count(now_ms) >= self.server.min_replicas_to_write
     }
 
     fn command_subject_to_disk_write_denial(

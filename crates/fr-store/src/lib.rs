@@ -6207,6 +6207,11 @@ struct DumpPayloadCache {
     payload: Vec<u8>,
 }
 
+/// Upstream `shared.noreplicaserr` (server.c:1871). Owned here because BOTH the runtime's
+/// command gate and the command layer's script-prepare gate answer with it, and this repo has
+/// already paid for one error rendered in two places drifting three ways.
+pub const NOREPLICAS_ERROR: &str = "NOREPLICAS Not enough good replicas to write.";
+
 #[derive(Debug)]
 pub struct Store {
     /// The keyspace dict. Uses `foldhash` (a fast, HashDoS-resistant, pure-
@@ -6481,6 +6486,14 @@ pub struct Store {
     /// rejected with -READONLY. Cleared while applying the primary's stream.
     /// (frankenredis-replro)
     pub is_read_only_replica: bool,
+    /// (frankenredis-oo3aw follow-up) Does the write quorum from `min-replicas-to-write` /
+    /// `min-replicas-max-lag` currently hold? Published by the runtime once per dispatch, for the
+    /// same reason `is_read_only_replica` is: a write issued from INSIDE a script reaches
+    /// `dispatch_argv` directly and never passes the runtime's own gate, so without this a script
+    /// could write while the quorum is unsatisfied and silently break the guarantee the operator
+    /// configured. `true` is the safe default -- it means "no reason to refuse" -- so a Store
+    /// built outside a runtime behaves exactly as it did before.
+    pub good_replicas_ok: bool,
     /// 1-based source line of the most recent Lua script runtime error, set by
     /// `eval_script` when it returns an Err so the command layer can stamp the
     /// real line into the `script: <sha>, on @user_script:N.` envelope suffix
@@ -6931,6 +6944,7 @@ impl Default for Store {
             script_read_only: false,
             script_allow_oom: false,
             is_read_only_replica: false,
+            good_replicas_ok: true,
             lua_error_line: 1,
             script_propagation_mode: SCRIPT_PROPAGATE_ALL,
             script_propagation_records: Vec::new(),

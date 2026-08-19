@@ -14182,6 +14182,7 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // path has nothing to unwind.
     let prepare_refusal = script_prepare_readonly_replica_refusal(store, has_no_writes)
         .or_else(|| script_prepare_ro_command_refusal(is_ro, has_no_writes))
+        .or_else(|| script_prepare_replica_quorum_refusal(store, has_no_writes))
         .or_else(|| script_prepare_oom_refusal(store, store.script_allow_oom));
     if let Some(refusal) = prepare_refusal {
         store.script_read_only = previous_read_only;
@@ -26961,6 +26962,12 @@ fn eval_cmd(
                     script_shebang_has_no_writes_flag(script),
                 )
             })
+            .or_else(|| {
+                script_prepare_replica_quorum_refusal(
+                    store,
+                    script_shebang_has_no_writes_flag(script),
+                )
+            })
             .or_else(|| script_prepare_oom_refusal(store, store.script_allow_oom))
     } else {
         None
@@ -27084,6 +27091,7 @@ fn evalsha_cmd(
     {
         script_prepare_readonly_replica_refusal(store, no_writes)
             .or_else(|| script_prepare_ro_command_refusal(read_only_script, no_writes))
+            .or_else(|| script_prepare_replica_quorum_refusal(store, no_writes))
             .or_else(|| script_prepare_oom_refusal(store, allow_oom))
     } else {
         None
@@ -27285,6 +27293,28 @@ fn script_shebang_line_has_flag(line: &[u8], wanted: &str) -> bool {
 /// until a client trips both conditions at once: on a read-only replica, upstream answers
 /// READONLY and fr answered this. Now it sits where upstream puts it -- after the replica check,
 /// before the OOM one -- and covers all three commands.
+/// Upstream `scriptPrepareForRun`'s write-quorum check (script.c:184-188):
+///
+///     /* Don't accept write commands if there are not enough good slaves and
+///      * user configured the min-slaves-to-write option. */
+///     if (!checkGoodReplicasStatus()) {
+///         addReplyErrorObject(caller, shared.noreplicaserr);
+///
+/// fr enforced the quorum for ordinary commands in the runtime's pre-dispatch chain, but a
+/// script's inner `redis.call` reaches `dispatch_argv` directly and never passes through it. So a
+/// script could write while `min-replicas-to-write` was unsatisfied -- silently defeating the
+/// durability guarantee the operator configured, which is the whole point of the setting.
+///
+/// The verdict is computed ONCE per dispatch by the runtime and published on the store, rather
+/// than recomputed per inner call: upstream asks it once per script too, and the answer depends
+/// on replica lag rather than on the command.
+fn script_prepare_replica_quorum_refusal(store: &Store, no_writes: bool) -> Option<RespFrame> {
+    if !no_writes && !store.good_replicas_ok {
+        return Some(RespFrame::Error(fr_store::NOREPLICAS_ERROR.to_string()));
+    }
+    None
+}
+
 fn script_prepare_ro_command_refusal(ro: bool, no_writes: bool) -> Option<RespFrame> {
     if ro && !no_writes {
         return Some(RespFrame::Error(
@@ -41721,6 +41751,83 @@ mod tests {
             xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"0"]),
             250
         );
+    }
+
+    #[test]
+    fn scripts_respect_the_replica_write_quorum_and_lose_to_the_ro_check() {
+        // Upstream scriptPrepareForRun, script.c:184-188:
+        //
+        //     /* Don't accept write commands if there are not enough good slaves and
+        //      * user configured the min-slaves-to-write option. */
+        //     if (!checkGoodReplicasStatus()) { addReplyErrorObject(caller, shared.noreplicaserr);
+        //
+        // fr enforced this for ordinary commands in the runtime's pre-dispatch chain, but a
+        // script's inner redis.call reaches dispatch_argv directly and never passes it. So a
+        // script could write while min-replicas-to-write was unsatisfied, defeating the exact
+        // guarantee the setting exists to provide.
+        fn run_script(store: &mut Store, body: &[u8]) -> RespFrame {
+            dispatch_argv(&[b"EVAL".to_vec(), body.to_vec(), b"0".to_vec()], store, 0)
+                .unwrap_or_else(|e| e.to_resp())
+        }
+
+        // Quorum unsatisfied: a write-flagged script is refused before it runs.
+        let mut store = Store::new();
+        store.good_replicas_ok = false;
+        match &run_script(&mut store, b"#!lua\nredis.call('set','q_k','v') return 1") {
+            RespFrame::Error(msg) => assert!(
+                msg.contains("NOREPLICAS Not enough good replicas to write"),
+                "expected the quorum refusal, got {msg}"
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(
+            dispatch_argv(&[b"EXISTS".to_vec(), b"q_k".to_vec()], &mut store, 0).expect("EXISTS"),
+            RespFrame::Integer(0),
+            "the body must not have executed"
+        );
+
+        // `no-writes` exempts, because upstream's check sits inside the !NO_WRITES block.
+        let mut store = Store::new();
+        store.good_replicas_ok = false;
+        assert_eq!(
+            run_script(&mut store, b"#!lua flags=no-writes\nreturn 1"),
+            RespFrame::Integer(1),
+            "a no-writes script does not need the write quorum"
+        );
+
+        // The default is permissive: a Store built outside a runtime must behave as before.
+        let mut store = Store::new();
+        assert!(store.good_replicas_ok, "the safe default is `no reason to refuse`");
+        assert_eq!(
+            run_script(&mut store, b"#!lua\nredis.call('set','ok_k','v') return 1"),
+            RespFrame::Integer(1),
+            "a satisfied quorum must not refuse anything"
+        );
+
+        // ORDER: upstream runs the _ro check at :178 and this one at :185, so a write-flagged
+        // script sent through EVAL_RO while the quorum is ALSO unsatisfied must read the _ro
+        // error. Both are correct in isolation; only tripping both distinguishes the orders.
+        let mut store = Store::new();
+        store.good_replicas_ok = false;
+        let out = dispatch_argv(
+            &[b"EVAL_RO".to_vec(), b"#!lua\nreturn 1".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
+        match &out {
+            RespFrame::Error(msg) => {
+                assert!(
+                    msg.contains("*_ro command"),
+                    "the _ro check must be answered FIRST, got {msg}"
+                );
+                assert!(
+                    !msg.contains("NOREPLICAS"),
+                    "the quorum refusal must not win this race: {msg}"
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     #[test]
