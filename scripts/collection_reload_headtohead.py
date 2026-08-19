@@ -104,6 +104,12 @@ def opt(flag, default):
 
 
 SELF_TEST = "--self-test" in sys.argv
+# (frankenredis-i41sx) 24 on a 64-way box: high enough that an ordinarily busy host still
+# measures, low enough that a neighbouring project's benchmark trips it. Deliberately not
+# derived from CPU count -- the number that matters is how many runnable threads are
+# competing with THREE pinned servers, not how wide the machine is.
+CONTENDED_RUNQ = int(opt("--contended-runq", "24"))
+ALLOW_CONTENDED = "--allow-contended" in sys.argv
 RS = 17812 if SELF_TEST else (int(sys.argv[1]) if len(sys.argv) > 1 else 17812)
 FR = 17811 if SELF_TEST else (int(sys.argv[2]) if len(sys.argv) > 2 else 17811)
 TRIALS = int(opt("--trials", "9"))
@@ -271,6 +277,34 @@ def running_image_sha(c):
     return digest.hexdigest()
 
 
+def host_snapshot():
+    """(loadavg1, running_procs, iowait_pct) — the three numbers that decide whether a
+    measurement window is real.
+
+    `running` is field 4 of /proc/loadavg's `R/T` pair, i.e. the instantaneous run queue.
+    It is used rather than loadavg because loadavg LAGS: it stays high for minutes after a
+    neighbour finishes and stays low for a minute after one starts, which is exactly the
+    window in which a measurement gets silently corrupted.
+    """
+    with open("/proc/loadavg") as fh:
+        parts = fh.read().split()
+    load1 = float(parts[0])
+    running = int(parts[3].split("/")[0])
+    iowait = 0.0
+    try:
+        with open("/proc/stat") as fh:
+            for line in fh:
+                if line.startswith("cpu "):
+                    f = [float(x) for x in line.split()[1:]]
+                    total = sum(f)
+                    if total > 0:
+                        iowait = 100.0 * f[4] / total
+                    break
+    except OSError:
+        pass
+    return load1, running, iowait
+
+
 def bootstrap_median_ci(samples, seed=0, resamples=4096):
     """Deterministic percentile bootstrap CI for a sample median."""
     if len(samples) < 3:
@@ -358,6 +392,22 @@ def run_drift_curve(arm, redis, trials):
 
 def run_competitive_restore(fr_a, fr_b, redis):
     """One-invocation RESTORE A/A+A/B measurement with within-round rotation."""
+    # (frankenredis-i41sx) CONTENTION PREFLIGHT, and the POST-check that matters more.
+    #
+    # A window was lost measuring exactly this: the host read runq 5 / idle 88 when checked
+    # by hand, and a neighbouring project started a ~43-core benchmark ninety seconds later.
+    # Only the A/A null caught it, and it could not say WHY it failed -- that took a
+    # separate `ps`, after the window was already gone.
+    #
+    # So the run records the run queue at BOTH ends. A quiet reading is not a quiet window,
+    # and the number that exposes the difference is the delta, not either endpoint.
+    load_before, runq_before, iowait_before = host_snapshot()
+    if runq_before > CONTENDED_RUNQ and not ALLOW_CONTENDED:
+        print("  PREFLIGHT REFUSED: run queue %d exceeds %d — the host is already contended."
+              % (runq_before, CONTENDED_RUNQ))
+        print("  Nothing measured. Re-run in a quiet window, or pass --allow-contended to "
+              "record a deliberately unusable row.")
+        return None
     keys = [k for k in redis.cmd("KEYS", "*")]
     payloads = [(k, redis.cmd("DUMP", k)) for k in keys]
     if any(payload is None for _, payload in payloads):
@@ -468,8 +518,26 @@ def run_competitive_restore(fr_a, fr_b, redis):
     # So a lone invocation can no longer print an acceptance. It records its null and says
     # what is still needed; `--confirm N` repeats the whole sampling N times in ONE
     # invocation and only accepts when EVERY null lands in band, via `competitive_verdict`.
+    load_after, runq_after, iowait_after = host_snapshot()
+    print("  host   runq %d -> %d, loadavg %.2f -> %.2f, iowait %.2f -> %.2f pct"
+          % (runq_before, runq_after, load_before, load_after, iowait_before, iowait_after))
+    contended = runq_after > CONTENDED_RUNQ or runq_before > CONTENDED_RUNQ
+    if contended:
+        # Stated ABOVE the verdict on purpose: a reader who sees only the null has to go
+        # find out why it moved, and by then the window is gone.
+        print("  CONTENTION: the run queue crossed %d during this invocation. Any null "
+              "outside band is explained by this before it is explained by the engines."
+              % CONTENDED_RUNQ)
+
     nulls = aa_history + [aa]
     accepted, why = competitive_verdict(nulls)
+    if accepted and contended:
+        # A pass under contention is the dangerous case: the gate is satisfied and the
+        # number is still an artifact. Downgrade it rather than print an acceptance.
+        print("  VERDICT: HOLD — nulls landed in band BUT the host was contended "
+              "(runq %d -> %d). A pass measured against a moving neighbour is not a pass."
+              % (runq_before, runq_after))
+        return
     if accepted:
         print("  VERDICT: COMPETITIVE ROW — %s; record A/B with its CI" % why)
     elif len(nulls) < 2:
@@ -499,6 +567,19 @@ def self_test():
     ok, _ = competitive_verdict([0.9799, 1.0])
     assert not ok, "just outside the low edge must fail"
     print("  competitive_verdict: reproducibility guard OK")
+
+    # (frankenredis-i41sx) host_snapshot is what the contention guard decides on, so it is
+    # covered here rather than trusted. It reads /proc, so the assertions are about SHAPE and
+    # range -- the values themselves are whatever the host is doing right now.
+    load1, running, iowait = host_snapshot()
+    assert load1 >= 0.0, "loadavg cannot be negative"
+    assert running >= 1, "at least this process is runnable, so running >= 1"
+    assert 0.0 <= iowait <= 100.0, "iowait is a percentage: %r" % iowait
+    # The guard compares `running` against a threshold, so an int is load-bearing: a float
+    # would still compare, and would silently make `--contended-runq` a fuzzy boundary.
+    assert isinstance(running, int), "running must be an int for the threshold comparison"
+    print("  host_snapshot: runq %d, loadavg %.2f, iowait %.2f pct — shape OK"
+          % (running, load1, iowait))
 
     assert len(ARM_ORDERS) == 6
     for arm in ("fr_a", "fr_b", "redis"):
