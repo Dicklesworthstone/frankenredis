@@ -38312,6 +38312,33 @@ impl Runtime {
         None
     }
 
+    /// Upstream's `rejectCommand` and `rejectCommandSds` (server.c:3700, :3712) both open with
+    /// `flagTransaction(c)`, and that function is
+    ///
+    ///     void flagTransaction(client *c) {
+    ///         if (c->flags & CLIENT_MULTI) c->flags |= CLIENT_DIRTY_EXEC;
+    ///     }
+    ///
+    /// so EVERY rejection inside `processCommand` taints an open transaction, and the later EXEC
+    /// answers `-EXECABORT Transaction discarded because of previous errors.` rather than running.
+    ///
+    /// (frankenredis-multitaint-8kq2r) fr tainted only in the four checks that live INSIDE its
+    /// MULTI-queuing branch -- unknown command, arity, NO_MULTI, and the queue-time OOM. The
+    /// gates that run BEFORE that branch returned their error and left the transaction clean, so
+    /// `MULTI` / rejected-write / `EXEC` answered an EMPTY ARRAY where Redis answers EXECABORT.
+    /// A client that tests for EXECABORT to detect a failed transaction reads fr's empty array as
+    /// "succeeded, no results".
+    ///
+    /// Takes the reply through rather than being called for its effect, so a rejection site
+    /// cannot taint and then forget to return, or return without tainting.
+    fn reject_and_flag_transaction(&mut self, reply: RespFrame) -> RespFrame {
+        if self.session.transaction_state.in_transaction {
+            self.session.transaction_state.exec_abort = true;
+        }
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        reply
+    }
+
     fn reject_due_to_disk_write_error(
         &mut self,
         argv: &[Vec<u8>],
@@ -38765,25 +38792,21 @@ impl Runtime {
             && let Some(reply) =
                 self.reject_due_to_disk_write_error(argv, special_command, now_ms, packet_id)
         {
-            self.apply_existing_client_reply_suppression_to_undispatched_reply();
-            return reply;
+            return self.reject_and_flag_transaction(reply);
         }
         if command_arity_ok
             && let Some(reply) =
                 self.reject_due_to_replica_write_quorum(argv, special_command, now_ms)
         {
-            self.apply_existing_client_reply_suppression_to_undispatched_reply();
-            return reply;
+            return self.reject_and_flag_transaction(reply);
         }
 
         if let Some(reply) = self.reject_stale_replica_read_request(argv) {
-            self.apply_existing_client_reply_suppression_to_undispatched_reply();
-            return reply;
+            return self.reject_and_flag_transaction(reply);
         }
 
         if command_arity_ok && let Some(reply) = self.reject_write_on_readonly_replica(argv) {
-            self.apply_existing_client_reply_suppression_to_undispatched_reply();
-            return reply;
+            return self.reject_and_flag_transaction(reply);
         }
 
         // When inside MULTI, queue commands that can be deferred to EXEC.
@@ -67276,6 +67299,58 @@ mod tests {
     }
 
     #[test]
+    fn multi_queued_write_on_a_readonly_replica_is_refused() {
+        // Upstream processCommand runs its rejection gates BEFORE the MULTI queuing branch --
+        // the read-only-replica check is at server.c:3995 and `queueMultiCommand` at :4155 --
+        // so a write queued on a read-only replica is refused AT QUEUE TIME with -READONLY and
+        // the transaction is flagged dirty, making EXEC answer EXECABORT.
+        //
+        // fr queues first and gates later, and the gates it runs at EXEC look at argv = ["EXEC"]:
+        // `command_requires_replica_write_quorum` special-cases Exec and walks the queue (so the
+        // quorum and MISCONF gates DO see the queued writes), but
+        // `reject_write_on_readonly_replica` takes only argv and EXEC is not a write command.
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1);
+
+        // A direct write is refused, which is what makes the queued case a hole rather than a
+        // configuration that simply permits writes.
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"direct", b"v"]), 2),
+            RespFrame::Error("READONLY You can't write against a read only replica.".to_string()),
+            "a direct write on a read-only replica must be refused"
+        );
+
+        rt.execute_frame(command(&[b"MULTI"]), 3);
+        let queued = rt.execute_frame(command(&[b"SET", b"queued", b"v"]), 4);
+        let exec = rt.execute_frame(command(&[b"EXEC"]), 5);
+
+        // fr already refused at QUEUE time, matching upstream's gate-before-queue order
+        // (server.c:3995 vs :4155). That half was never broken.
+        assert_eq!(
+            queued,
+            RespFrame::Error("READONLY You can't write against a read only replica.".to_string()),
+            "the queue-time refusal is the half fr already had"
+        );
+        // ...and the transaction must be TAINTED by it. Upstream's rejectCommand calls
+        // flagTransaction first, so EXEC answers EXECABORT. fr answered an empty array, which a
+        // client testing for EXECABORT reads as "succeeded, no results".
+        assert_eq!(
+            exec,
+            RespFrame::Error(
+                "EXECABORT Transaction discarded because of previous errors.".to_string()
+            ),
+            "a queue-time rejection must taint the transaction"
+        );
+        // The write must not have happened, whichever way it is refused.
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXISTS", b"queued"]), 6),
+            RespFrame::Integer(0),
+            "a write queued on a read-only replica must not be applied by EXEC \
+             (queued reply was {queued:?}, exec reply was {exec:?})"
+        );
+    }
+
+    #[test]
     fn replication_fullresync_reregisters_function_libraries_on_replica() {
         // (frankenredis-t1yxa) A replica that full-syncs from a master with
         // FUNCTION libraries must re-register them — the master's snapshot
@@ -68727,7 +68802,15 @@ mod tests {
     }
 
     #[test]
-    fn min_replicas_rejects_multi_writes_without_tainting_exec() {
+    fn min_replicas_rejects_multi_writes_and_taints_exec() {
+        // (frankenredis-multitaint-8kq2r) This row asserted `EXEC -> []` and was NAMED for it --
+        // "without_tainting_exec" -- but it was pinning fr's behaviour, not the incumbent's, and
+        // carried no upstream citation. The quorum failure is raised by
+        // `rejectCommand(c, shared.noreplicaserr)` (server.c:4051), and `rejectCommand` opens
+        // with `flagTransaction(c)` (:3700-3701), which sets CLIENT_DIRTY_EXEC on an open MULTI.
+        // So 7.2.4 answers EXECABORT here. The name is corrected along with the assertion,
+        // because a test named for the wrong behaviour is how the next reader gets recruited to
+        // defend it.
         let mut rt = Runtime::default_strict();
 
         assert_eq!(
@@ -68747,7 +68830,9 @@ mod tests {
         );
         assert_eq!(
             rt.execute_frame(command(&[b"EXEC"]), 3_000),
-            RespFrame::Array(Some(vec![]))
+            RespFrame::Error(
+                "EXECABORT Transaction discarded because of previous errors.".to_string()
+            )
         );
     }
 
