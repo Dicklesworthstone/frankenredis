@@ -65615,3 +65615,70 @@ depend on it.
    and its i64::MIN row is the trap gvm6z names.
 3. Only then measure, and measure a shape at each end -- a name list and an id list. A single
    mixed shape would average away the exact effect this row found.
+
+---
+
+## HOLD — the 64-member sweep point failed its null because frankenpandas was benchmarking at the same moment, and the fleet slot that would have prevented it is DISABLED (frankenredis-i41sx, frankenredis-gvm6z)
+
+The brief called this "the quietest window in many ticks" and it was, at the moment I checked:
+runq 5, CPU idle 88, loadavg 14.44 falling, iowait 0, no local build. I verified that myself with
+vmstat before starting rather than taking it from the brief.
+
+### THE SLOT TOOL IS NOT AVAILABLE
+
+The standing instruction is to `acquire_build_slot` before a timed run. It refuses:
+
+      Build slots are disabled. Enable WORKTREES_ENABLED to use this tool.
+
+That is the third refusal across this session. The mechanism the fleet-wide
+one-measurement-at-a-time rule depends on is therefore not enforceable by the agents told to use
+it, and the only substitute available is to eyeball `ps` for another project's benchmark before
+starting -- which I did, and which is a RACE, not a lock.
+
+### WHAT HAPPENED
+
+First sweep point, zsets=300 members=64, fresh arms on the established 8-11 / 12-15 / 16-19
+pinning, ELF 0db24b71a3f66d70 on both fr arms:
+
+      A/A null   1.063920, 0.973413, 1.081804      3 of 3 outside 0.98..1.02   HOLD
+      A/B        redis/fr 0.570758 -- NOT authenticated, do not quote
+
+Loadavg went 12.70 -> 29.46 across the run. The cause was not mine:
+
+      python3   3242 pct   benches/vs_pandas_harness.py --category linalg --workloads df_dot
+      fp-bench  1067 pct   frankenpandas/target/release-perf/fp-bench --workload df_dot
+
+frankenpandas started a ~43-core benchmark inside my window. The gate did its job and refused the
+number; the one-process drift null at 0.807606 shows how far within-process variance had moved.
+
+### WHAT I DID ABOUT IT
+
+Stopped after the first point and shut my three arms down rather than continuing to the 128 and
+129 points. Continuing would have produced two more HOLDs AND kept ~4 cores of my own load on top
+of frankenpandas's measurement, corrupting THEIR ratios in exchange for nothing. One-at-a-time
+cuts both ways; the reciprocal obligation is to stop, not just to start politely.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The gate is the harness's two-process A/A with `--confirm 3`. It FAILED, so nothing here is a
+result. Per-arm host state recorded at both ends: loadavg 29.46 / 29.51 / 46.28 at start and
+unchanged at end, mean CPU MHz 3981 -> 3104, iowait 0 pct by vmstat at both ends.
+
+### PROVENANCE
+
+      source        main at e5e841a0f.
+      fr ELF        0db24b71a3f66d70, release, env -u CARGO_TARGET_DIR; both arms self-reported
+                    the same sha.
+      redis ELF     e837dbb2556cff6b, vendored 7.2.4.
+      job           zsets=300 members=64, trials=15, pinning 8-11 / 12-15 / 16-19.
+      disposition   HOLD. No engine source changed.
+
+### RETRY PREDICATE
+
+1. The sweep still owes its three points (64 / 128 / 129). 128 is already certified at
+   0.557334x from a clean window; the other two are outstanding.
+2. Before the next attempt, either the slot tool needs enabling or the rule needs a different
+   enforcement -- checking `ps` for a foreign benchmark is a race that this row lost by about
+   ninety seconds.
+3. Do not treat a quiet READING as a quiet WINDOW. The host was genuinely quiet when measured and
+   contended by the time the first point finished; only the null caught it.
