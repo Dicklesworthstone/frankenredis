@@ -66108,3 +66108,84 @@ earlier.
 3. Consider raising the harness's contention limit question separately: the guard is calibrated to
    catch a neighbouring BENCHMARK, and what defeated these runs was ordinary background load well
    under that bar.
+
+## 2026-08-19 CrimsonHawk: REJECTED (SELF-SPEEDUP) — the matcher's six-test special-form cascade is NOT a measurable share of the per-byte cost: three A/B pairs give -1.7 pct, +0.9 pct, -0.1 pct, the sign flips, and my own hypothesis is refuted (frankenredis-25uop)
+
+EVIDENCE CLASS: callgrind Ir, TWO fr binaries built from one tree differing only in the guard,
+measured against a live vendored Redis 7.2.4, three A/B pairs on the shape the lever targets. CV
+was NOT used. The lever was built, tested and swept before being measured; it is being withdrawn on
+the measurement, not on a doubt.
+
+Claim class: SELF-SPEEDUP — the A/B is fr against fr, one call site apart. The vs-incumbent column
+is carried only so the two arms are read on the same scale; no competitive claim is made or moved
+by this row. Campaign output: no.
+
+  fr WITHOUT the guard  sha256 614cd7645f38471f8d103dad57baf639781a58d32e03a1fab5979307cf5787c4
+  fr WITH the guard     sha256 2d57de78c53531966b869aa81a264c67ec4a2096d57bbd35ddb43c022064e9ae
+  incumbent             vendored redis 7.2.4
+
+Both ELFs were built from the same tree minutes apart, differing only in the guarded call site.
+
+### THE LEVER, AND WHY IT LOOKED PROMISING
+
+`lua_pat_match` tested six special forms in sequence — `(`, `)`, `$`, `%N`, `%f`, `%b` — before
+reaching the element path, each with its own bounds checks and `pat[pi+1]` loads. A LITERAL byte,
+the overwhelmingly common case, failed all six. Upstream reaches the same place with one `switch`
+dispatch (lstrlib.c::match). `frankenredis-25uop` recorded fr at 38.66 instructions per matched byte
+against Redis's 9.73 — a 4.53x gap — and named this cascade as the mechanism.
+
+The change wrapped all six behind one four-way disjunction on `pat[pi]`, leaving every arm body
+byte-identical. Soundness was established by enumeration: all six arms key on `(`, `)`, `$` or `%`,
+so nothing else can reach them.
+
+### IT IS CORRECT, AND IT DOES NOTHING
+
+    cargo test -p fr-command --lib     1275 passed, 0 failed
+    differential sweep, 12 cases       0 divergent rows
+
+    A/B on luapatsp_256   no guard   with guard    delta
+      round 1              1.2407      1.2198      -1.7 pct
+      round 2 pair 1       1.2293      1.2398      +0.9 pct
+      round 2 pair 2       1.2351      1.2338      -0.1 pct
+
+**The sign flips.** Mean is about -0.3 pct against a cross-run spread near 2 pct. A single pair
+would have read as a 1.7 pct win and been shipped; replication is what turned it into a null.
+
+### THE HYPOTHESIS IS REFUTED, AND THAT IS THE USEFUL PART
+
+The 4.53x per-byte gap on the matcher shape is REAL — `4bfce7cc1` measured it within one window —
+but the cascade is not where it lives. Six predictable, well-predicted branches cost almost nothing
+next to the ~38 instructions per byte fr actually spends. Whatever the gap is, it is in the element
+path: `lua_pattern_element_len`, `lua_single_match`, the quantifier detection, or the bounds
+checking around them.
+
+So `25uop`'s description should be corrected: the eight `cmp $0x25` I found in the dispatch prefix
+are real and they are wasted, but they are not the cost. Naming a visible inefficiency and assuming
+it is the expensive one is the error here, and the disassembly evidence supported the first half of
+that while saying nothing about the second.
+
+### WHAT WAS DONE WITH THE CODE
+
+Reverted. Not kept as a tidy-up: it adds a guard and an indentation level for no measured benefit,
+and this ledger's convention is that an unmeasured or non-paying lever does not ship. The two
+binaries and the tree were restored to HEAD afterwards, and the shipping ELF rebuilt so nobody
+measures a binary that is not HEAD.
+
+A REAL HAZARD ON THE WAY OUT, worth recording: my "before" snapshot of `lua_eval.rs` was taken at
+the start of this work, and peers COMMITTED to that file while the A/B ran. Restoring the snapshot
+would have silently reverted their landed work — `git diff` showed 173 insertions against HEAD,
+including an `LuaGcScope` Drop impl I had never touched. The file was restored from HEAD instead of
+from the snapshot. **A file snapshot is only a safe undo for as long as nobody else commits.**
+
+### RETRY PREDICATES
+
+Retry predicate: reopen the dispatch shape ONLY IF a fresh per-call profile shows the special-form
+cascade exceeding 5 pct of `lua_pat_match` self-time, or IF an A/B over at least three pairs shows a
+consistent-sign delta larger than 2 pct on `luapatsp_256`. Neither holds today: the measured deltas
+were -1.7 pct, +0.9 pct and -0.1 pct, which changes sign and so cannot clear either bar.
+
+  1. Do not re-attempt the dispatch shape on the current evidence. It is measured and it is a null.
+  2. The per-byte gap is worth chasing in the ELEMENT path. Price `lua_pattern_element_len` and
+     `lua_single_match` per call before proposing anything.
+  3. Any future single-A/B result on this host needs at least three pairs before it is believed.
+     This one changed sign between pairs one and two.
