@@ -38939,32 +38939,6 @@ impl Runtime {
             return reply;
         }
 
-        // (frankenredis-monitorexec-pfcz4) Upstream server.c:6278 -- the first thing
-        // monitorCommand does -- refuses a CLIENT_DENY_BLOCKING client. MONITOR is the only
-        // member of that five-guard family that actually reaches it here: the three subscribe
-        // variants carry an explicit `&& !(c->flags & CLIENT_MULTI)` backward-compat exemption
-        // (pubsub.c 536/568/707) and SHUTDOWN is NO_MULTI so it never survives queueing, but
-        // MONITOR is neither -- it can be queued in a transaction and must be refused when EXEC
-        // runs it.
-        //
-        // Pre-dispatch, not at the `enable_monitor()` site further down, even though that is
-        // where MONITOR is recognised: the commandstats success/failure classification runs
-        // BETWEEN the two, so rewriting the reply afterwards would record a failed call as a
-        // success. Returning here matches the maxmemory guard above, which is the established
-        // shape for a rejection that never reaches the command.
-        //
-        // `executing_exec` is the same condition the SSUBSCRIBE guard uses -- fr's model of
-        // CLIENT_DENY_BLOCKING -- so the two cannot disagree about what the flag means.
-        if self.session.transaction_state.executing_exec
-            && argv
-                .first()
-                .is_some_and(|cmd| cmd.eq_ignore_ascii_case(b"MONITOR"))
-        {
-            self.apply_existing_client_reply_suppression_to_undispatched_reply();
-            return RespFrame::Error(
-                "ERR MONITOR isn't allowed for DENY BLOCKING client".to_string(),
-            );
-        }
 
         // Command paths run a fast active-expire cycle to keep short-lived keys
         // from lingering between server ticks.
@@ -41097,6 +41071,25 @@ impl Runtime {
         let Some(command) = argv.first() else {
             return Err(CommandError::InvalidCommandFrame);
         };
+        // (frankenredis-monitorexec-pfcz4) Upstream server.c:6278 -- the first thing
+        // monitorCommand does -- refuses a CLIENT_DENY_BLOCKING client. MONITOR is the only
+        // member of that five-guard family that reaches the check: the three subscribe variants
+        // carry an explicit `&& !(c->flags & CLIENT_MULTI)` exemption (pubsub.c 536/568/707) and
+        // SHUTDOWN is NO_MULTI so it never survives queueing, but MONITOR is neither.
+        //
+        // It lives HERE, and not in execute_frame_internal where it was first written, because
+        // EXEC does not go through that function: its queued-command loop calls
+        // execute_db_scoped_command directly, so a guard placed upstream of it never ran for the
+        // only case it exists to catch. This is the join point both paths share. The test proves
+        // it by asserting monitor_clients stays EMPTY, which is what failed before.
+        //
+        // `executing_exec` is the same condition the SSUBSCRIBE guard uses -- fr's model of
+        // CLIENT_DENY_BLOCKING -- so the two cannot disagree about what the flag means.
+        if self.session.transaction_state.executing_exec && eq_ascii_token(command, b"MONITOR") {
+            return Ok(RespFrame::Error(
+                "ERR MONITOR isn't allowed for DENY BLOCKING client".to_string(),
+            ));
+        }
         if eq_ascii_token(command, b"KEYS") {
             return self.handle_db_keys_command(argv, now_ms);
         }
@@ -47394,18 +47387,11 @@ impl Runtime {
             info.extend_from_slice(&bytes);
         }
 
-        if info.is_empty() {
-            return Ok(RespFrame::BulkString(Some(Vec::new())));
-        }
-
-        // (frankenredis-b83fj) Each per-section emitter in
-        // fr-command::info_command_str appends a trailing "\r\n" as
-        // its inter-section separator. Concatenating N sections
-        // therefore leaves an extra "\r\n" after the last section's
-        // content. Upstream INFO emits the separator BETWEEN sections
-        // only — never after the last — so trim a single trailing
-        // "\r\n" pair (i.e. the final empty-line separator) before
-        // returning the bulk reply.
+        // (frankenredis-w1djx) Appended BEFORE the empty-reply check below, not after: `INFO
+        // debug` names no ordinary section, so `info` is still empty at this point and the early
+        // return fired before this block was ever reached -- the section only ever appeared when
+        // some OTHER section had already been emitted. Caught by its own test on the first run
+        // after the build throttle lifted.
         // (frankenredis-w1djx) `# Debug`, which fr did not render at all -- its absence is why
         // fr's section list is shorter than upstream's.
         //
@@ -47435,6 +47421,18 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
             );
             info.extend_from_slice(debug_section.as_bytes());
         }
+        if info.is_empty() {
+            return Ok(RespFrame::BulkString(Some(Vec::new())));
+        }
+
+        // (frankenredis-b83fj) Each per-section emitter in
+        // fr-command::info_command_str appends a trailing "\r\n" as
+        // its inter-section separator. Concatenating N sections
+        // therefore leaves an extra "\r\n" after the last section's
+        // content. Upstream INFO emits the separator BETWEEN sections
+        // only — never after the last — so trim a single trailing
+        // "\r\n" pair (i.e. the final empty-line separator) before
+        // returning the bulk reply.
 
         if info.ends_with(b"\r\n\r\n") {
             info.truncate(info.len() - 2);
