@@ -11901,6 +11901,14 @@ impl Store {
         }
         // Offset guard per WRITE op (mirrors bitfield_set/bitfield_incrby; the command layer already
         // validated offsets, but the store guard is load-bearing for the top few addressable ones).
+        //
+        // (frankenredis-obeyclient-strlen-qxdyn) da583a15a filed the `is_write()` restriction as an
+        // adjacent defect, on the grounds that upstream calls getBitOffsetFromArgument for EVERY op
+        // including GET (bitops.c:1080). WITHDRAWN after checking the caller instead of the shape:
+        // `bitfield_cmd` and `bitfield_ro_cmd` both run `bitfield_parse_offset` over every
+        // subcommand, GET included, before any of this runs. So no client can reach a GET whose
+        // offset this guard would have to reject, and the write-only shape is a backstop that
+        // happens to be narrower than the check it backs -- not a divergence. Do not "fix" it.
         for op in ops {
             // (frankenredis-obeyclient-strlen-qxdyn) An OBEYED client is exempt from the CAP only.
             // Upstream puts both halves in one helper: getBitOffsetFromArgument is
