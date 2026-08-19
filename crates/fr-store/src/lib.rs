@@ -7723,13 +7723,23 @@ impl Store {
             self.record_keyspace_miss(key);
             return None;
         }
+        // (frankenredis-keymiss-oqhbi build debt) See `keymiss_notify_enabled`. With `m` off --
+        // the default -- this short-circuits on a field read and the probe below is still the
+        // single one this helper exists to be. With `m` on it costs one extra `contains_key` per
+        // read, which is the price of firing a notification the operator asked for.
+        if self.keymiss_notify_enabled() && !self.entries.contains_key(key) {
+            self.record_keyspace_miss(key);
+            return None;
+        }
         match self.entries.get_mut(key) {
             Some(entry) => {
                 self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                 Some(entry)
             }
             None => {
-                self.record_keyspace_miss(key);
+                // Only reachable with `m` off: the branch above already answered the miss when
+                // it is on, so the counter is bumped exactly once either way.
+                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 None
             }
         }
@@ -7744,6 +7754,19 @@ impl Store {
     /// the same condition, and funnelling them through one place is what keeps them that way.
     /// Before this, `m` was accepted by the config parser, round-tripped through CONFIG GET, and
     /// notified nothing.
+    /// Is upstream's `keymiss` notification armed? (frankenredis-keymiss-oqhbi build debt)
+    ///
+    /// The single-probe read fast paths cannot call `record_keyspace_miss` from the miss arm of a
+    /// `match self.entries.get_mut(key)` whose other arm RETURNS a borrow of `self.entries`: the
+    /// borrow is live for the whole function, so a `&mut *self` method call in the sibling arm is
+    /// a second mutable borrow (NLL problem case #3, still rejected on stable). Bumping the
+    /// counter inline is fine -- `stat_keyspace_misses` is a DISJOINT field, which is exactly why
+    /// the hit arm may bump `stat_keyspace_hits` in place -- but the NOTIFICATION is a whole-self
+    /// call. So the fast paths detect the miss up front when, and only when, this returns true.
+    fn keymiss_notify_enabled(&self) -> bool {
+        self.notify_keyspace_events & NOTIFY_KEY_MISS != 0
+    }
+
     fn record_keyspace_miss(&mut self, key: &[u8]) {
         self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
         if self.notify_keyspace_events & NOTIFY_KEY_MISS == 0 {
@@ -8626,6 +8649,11 @@ impl Store {
         if self.count_expiring_keys() == 0 && !self.lfu_tracking_enabled() {
             let lfu_decay = self.lfu_decay_time;
             let lfu_log_factor = self.lfu_log_factor;
+            // (frankenredis-keymiss-oqhbi build debt) See `keymiss_notify_enabled`.
+            if self.keymiss_notify_enabled() && !self.entries.contains_key(key) {
+                self.record_keyspace_miss(key);
+                return Ok(None);
+            }
             return match self.entries.get_mut(key) {
                 Some(entry) => {
                     self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
@@ -8640,7 +8668,8 @@ impl Store {
                     Ok(Some(value))
                 }
                 None => {
-                    self.record_keyspace_miss(key);
+                    // Only reachable with `m` off; see the branch above.
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                     Ok(None)
                 }
             };
@@ -8665,6 +8694,11 @@ impl Store {
                 self.record_keyspace_miss(key);
                 return Ok(None);
             }
+            // (frankenredis-keymiss-oqhbi build debt) See `keymiss_notify_enabled`.
+            if self.keymiss_notify_enabled() && !self.entries.contains_key(key) {
+                self.record_keyspace_miss(key);
+                return Ok(None);
+            }
             return match self.entries.get_mut(key) {
                 Some(entry) => {
                     self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
@@ -8679,7 +8713,8 @@ impl Store {
                     Ok(Some(value))
                 }
                 None => {
-                    self.record_keyspace_miss(key);
+                    // Only reachable with `m` off; see the branch above.
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                     Ok(None)
                 }
             };
@@ -8709,6 +8744,11 @@ impl Store {
                 self.record_keyspace_miss(key);
                 return Ok(None);
             }
+            // (frankenredis-keymiss-oqhbi build debt) See `keymiss_notify_enabled`.
+            if self.keymiss_notify_enabled() && !self.entries.contains_key(key) {
+                self.record_keyspace_miss(key);
+                return Ok(None);
+            }
             match self.entries.get_mut(key) {
                 Some(entry) => {
                     self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
@@ -8724,7 +8764,8 @@ impl Store {
                     Ok(Some(value))
                 }
                 None => {
-                    self.record_keyspace_miss(key);
+                    // Only reachable with `m` off; see the branch above.
+                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                     Ok(None)
                 }
             }
