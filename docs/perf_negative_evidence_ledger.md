@@ -66268,3 +66268,66 @@ compared.
   2. Do not quote a normalised GEOSEARCH figure from this run, and do not compare a normalised
      figure across dates: `get_control` itself moves, so normalising rebases the scale each time.
   3. Read "thin margins" as `geosearch_2` only.
+
+## 2026-08-19 CrimsonHawk: CORRECTION to the row above — the 0.6918 GEOSEARCH figure and my 1.1461 are the SAME finding on two axes, not a discrepancy. Both say fr is ahead, and I created a conflict by comparing an instruction ratio against a throughput ratio
+
+EVIDENCE CLASS: reading the ledger's own prior rows. No new measurement. This corrects the framing
+of the row immediately above, which is otherwise unchanged and still stands on its numbers.
+
+### THE ERROR
+
+That row said "I DO NOT REPRODUCE THE 0.7786 / 0.6918 FIGURES" and offered two explanations —
+different binaries, or an inverted convention — while noting neither fully reconciled them. The
+actual explanation is simpler and was already in this file:
+
+    line 60418  BrownIbis, 2026-08-18: `geosearch_64` on the INSTRUCTION axis --
+                worst bound 0.6887x over three FIT draws, spread 0.09 pct.
+                "retires 31 pct FEWER instructions"
+
+`0.6918` is an **instructions-per-op ratio**, where fr/redis BELOW 1.0 means fr does LESS work. My
+`1.1461` is a **throughput ratio**, where fr/redis ABOVE 1.0 means fr serves MORE ops per second.
+Both mean fr is ahead. They are the same conclusion measured two ways, and 0.6887 sits within
+noise of the 0.6918 quoted to me.
+
+So there is no discrepancy to reconcile, no binary difference to blame, and nothing for anyone to
+re-run.
+
+### WHY I MADE IT, BECAUSE THE SHAPE OF THE MISTAKE IS THE POINT
+
+I flagged the direction convention in the very same row — "RATIO IS fr ops/s OVER redis ops/s, so
+above 1.0 means fr is FASTER, the opposite convention to the instruction-count rows elsewhere in
+this ledger, and the source of more than one misreading including one of my own". I wrote that
+warning and then walked straight into the thing it warns about, because I assumed two figures
+labelled `geosearch_64` were measuring the same quantity.
+
+**A shape name is not a measurand.** `geosearch_64` has at least four numbers attached to it in this
+ledger — throughput ratio, instruction ratio, cycles per op, L1 misses per element — and three of
+them point the "wrong" way relative to the others by construction. Any GEOSEARCH figure quoted
+without its AXIS is unreadable, exactly as the earlier row established that any figure quoted
+without its SHAPE and its raw-vs-normalised status is unreadable.
+
+### WHAT SURVIVES FROM THE ROW ABOVE
+
+Unaffected, because they never depended on the comparison:
+
+  * `geosearch_64` throughput 1.1172 / 1.1348 / 1.1461, admissible 3 of 3, worst bound **1.1172**,
+    fr ahead — SIZING, since the gate went UNFIT at close.
+  * `geosearch_2` straddles 1.0 in two draws of three, so "thin margins" describes the n=2
+    intercept row and not GEOSEARCH generally. This remains the substantive correction to the
+    standing premise.
+  * the normalised column is unusable on this pair and must not be compared across dates.
+
+One thing is now BETTER supported than that row claimed: BrownIbis's instruction row notes the
+throughput ratio "has straddled 1.0 for six replicates". Mine does not straddle — 3 of 3 admissible
+above 1.11. If that holds up in a FIT-at-both-ends window it is a real movement on the throughput
+axis since 2026-08-18, not a measurement difference.
+
+### RETRY PREDICATES
+
+Retry predicate: reopen ONLY IF a GEOSEARCH figure is quoted anywhere without naming its axis, in
+which case correct the citation rather than re-measuring; and re-certify the throughput straddle
+question ONLY IF a window holds FIT at both ends long enough for three draws, since that is the one
+claim above that a SIZING run cannot settle.
+
+  1. Quote GEOSEARCH as "1.1172x throughput" or "0.6887x instructions", never as a bare ratio.
+  2. Do not re-run anything on account of the apparent conflict. There was none.
