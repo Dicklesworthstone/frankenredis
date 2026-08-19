@@ -13214,16 +13214,38 @@ fn resp_to_lua(frame: &RespFrame, resp3: bool) -> LuaValue {
 /// luaconf.h:446), which puts upstream's effective ceiling on the order of two
 /// thousand nested levels.
 ///
-/// fr has no Lua C stack to interrogate, so the honest analogue is a fixed
-/// depth. 2000 is chosen to satisfy both constraints at once: it is the same
-/// order as upstream's ceiling, and at the measured 416 bytes per level of
-/// `lua_to_resp_at_depth` it occupies 832 KB — under 40 pct of the 2 MiB stack
-/// a spawned reactor thread gets, leaving the frames below the walk their room.
+/// THAT INFERENCE WAS WRONG, AND THE LIVE INCUMBENT SETTLED IT. "4 slots per
+/// level" does not divide the ceiling by four: `lua_checkstack(lua, 4)` asks for
+/// four FREE slots, it does not retain four per level. Measured against vendored
+/// 7.2.4 with `scripts/lua_depth_survival_differential.py reply`, both engines
+/// side by side on the same script:
+///
+///     depth   2000    4000    7000    7990    8000
+///     redis   OK      OK      OK      OK      refuses (~7995 delivered)
+///     fr      OK      refused refused refused refused      <- at the old 2000
+///
+/// So upstream's real ceiling is ~7995 levels, essentially `LUAI_MAXCSTACK`, and
+/// the old bound refused everything from 2001 up — replies Redis returns. That is
+/// a FALSE REJECTION, the worse direction: a client that works against Redis
+/// breaks against fr, and the reply it gets is a nested error rather than data.
+///
+/// 8000 is the constant upstream is actually bounded by. Upstream's exact turnover
+/// drifts a handful of levels with the reply SHAPE — it asks for four free slots
+/// and how many are already in use depends on whether the level is an array, a map
+/// or a status — so matching the constant and the order is right and chasing the
+/// last five levels is not.
+///
+/// STACK BUDGET, restated because it moved: at the measured 416 bytes per level of
+/// `lua_to_resp_at_depth`, 8000 levels is 3.33 MB. That is 41 pct of the 8 MiB a
+/// spawned reactor thread now gets (`WORKER_THREAD_STACK_SIZE`, c63b56ef1) —
+/// against the 2 MiB those threads used to get, 8000 levels would have been 163 pct
+/// and the bound would have been unsurvivable. The two changes are load-bearing for
+/// each other: this depth is only safe because the stacks were sized first.
 ///
 /// This bound is NOT reachable by bounding the parser: the structure is built
 /// at RUNTIME, so `local t = {} for i = 1, 300000 do t = {t} end return t` is a
 /// flat, tiny chunk that no syntax-level counter sees.
-const LUA_REPLY_MAX_DEPTH: u32 = 2000;
+const LUA_REPLY_MAX_DEPTH: u32 = 8000;
 
 pub fn lua_to_resp(val: &LuaValue, resp3: bool) -> RespFrame {
     lua_to_resp_at_depth(val, resp3, 0)
@@ -22368,8 +22390,18 @@ end
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let mut store = Store::new();
+                // DERIVED, not hardcoded. This read `for i = 1, 3000` while the assertion below
+                // derives its expected index from LUA_REPLY_MAX_DEPTH, so raising the ceiling to
+                // upstream's real one (8000) left the test building a structure INSIDE the limit
+                // and asserting a refusal that could no longer happen. Building
+                // `LUA_REPLY_MAX_DEPTH + 1` keeps the two ends of the test tied to the same
+                // constant, which is what makes it a bound test rather than a depth-3000 test.
+                let script = format!(
+                    "local t = {{}} for i = 1, {} do t = {{t}} end return t",
+                    LUA_REPLY_MAX_DEPTH + 1
+                );
                 let frame = eval_script(
-                    b"local t = {} for i = 1, 3000 do t = {t} end return t",
+                    script.as_bytes(),
                     &[],
                     &[],
                     &mut store,

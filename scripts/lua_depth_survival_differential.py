@@ -63,16 +63,33 @@ def call(port, *args, timeout=20.0):
         s = socket.create_connection(("127.0.0.1", port), timeout)
         s.settimeout(timeout)
         s.sendall(resp(*args))
+        # (frankenredis-thread-stack-size-1tlyh) READ THE WHOLE REPLY, not the first line. The
+        # reply-walk refusal is substituted AT THE ELEMENT'S POSITION -- upstream appends the error
+        # where the nesting ran out and pops just that element -- so on a deep table it arrives
+        # thousands of levels inside a nested array, behind a wall of `*1\r\n`. A reader that stops
+        # at the first CRLF calls that "OK" and silently turns an unproven row into a passing one.
         buf = b""
-        while not buf.endswith(b"\r\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                return (False, "CONNECTION CLOSED (server died or dropped it)")
-            buf += chunk
-            if len(buf) > 4_000_000:
-                break
+        s.settimeout(timeout)
+        try:
+            while len(buf) < 8_000_000:
+                chunk = s.recv(1 << 16)
+                if not chunk:
+                    break
+                buf += chunk
+                if buf.startswith(b"-") and buf.endswith(b"\r\n"):
+                    break          # a top-level error IS one line
+                s.settimeout(1.0)  # drain the rest quickly once flowing
+        except socket.timeout:
+            pass
         s.close()
-        return (True, buf[:120].decode(errors="replace").replace("\r\n", " ").strip())
+        if not buf:
+            return (False, "CONNECTION CLOSED (server died or dropped it)")
+        depth_seen = buf.count(b"*1\r\n")
+        if b"reached lua stack limit" in buf:
+            return (True, "NESTED ERR reached lua stack limit at depth ~%d" % depth_seen)
+        if buf.startswith(b"-"):
+            return (True, "ERR " + buf[1:90].decode(errors="replace").replace("\r\n", " ").strip())
+        return (True, "OK, nesting delivered ~%d" % depth_seen)
     except (OSError, socket.timeout) as e:
         return (False, f"NO REPLY ({type(e).__name__})")
 
@@ -116,18 +133,22 @@ def main():
         tmpl = WALKS[walk]
         n_slots = tmpl.count("%d")
         print("walk: %s" % walk)
-        for depth in (100, 900, 999, 1000, 1001, 2000):
+        # (frankenredis-thread-stack-size-1tlyh) Depths are overridable because the four walks
+        # have DIFFERENT limits: encode/decode turn over at 1000, the reply walk at 2000, and
+        # cmsgpack degrades at 16. A ladder that stops at 2000 exercises the reply walk without
+        # ever reaching its bound, which is exactly the gap this argument closes.
+        depths = ([int(x) for x in sys.argv[2].split(",")] if len(sys.argv) > 2
+                  else [100, 900, 999, 1000, 1001, 2000])
+        for depth in depths:
             la = loadavg()
             body = tmpl % ((depth,) * n_slots)
             f_ok, f_txt = call(FR_PORT, "EVAL", body, "0")
             r_ok, r_txt = call(REDIS_PORT, "EVAL", body, "0")
             def brief(ok, txt):
-                if not ok:
-                    return txt
-                if txt.startswith("-"):
-                    return "ERR: " + txt[1:70]
-                return "OK reply (%d chars shown)" % len(txt)
-            print("%-8d %-46s %-46s   load %s" % (depth, brief(f_ok, f_txt), brief(r_ok, r_txt), la))
+                # `call` already classifies; print its verdict rather than re-summarising it by
+                # length, which is how a divergence hid behind two equal-looking "OK reply" cells.
+                return txt if ok else txt
+            print("%-8d %-52s %-52s   load %s" % (depth, brief(f_ok, f_txt), brief(r_ok, r_txt), la))
             if not f_ok:
                 print("         fr still alive after this row? %s" % alive(FR_PORT))
             if not r_ok:
