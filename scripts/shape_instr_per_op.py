@@ -608,6 +608,21 @@ SHAPES = {
     # subject's allocation. Matcher-only per-byte cost is therefore
     #   ((luapat_256 - luapat_16) - (luapat_rep256 - luapat_rep16)) / 240
     # Without these, the luapat slope is an UPPER BOUND and must be quoted as one.
+    # (frankenredis-25uop) The pattern here CONTAINS a special ('+'), which is what
+    # makes it the only luapat family that reaches both engines' matchers.
+    # lstrlib.c:502 routes a pattern with no SPECIALS ("^$*+?.([%-") to a
+    # memchr-driven plain search instead, so the luapat_* rungs above compare fr's
+    # matcher against Redis's lmemfind and cannot size a matcher lever.
+    #
+    # Work scales with the SUBJECT: 'a+' sends max_expand across all N bytes. The
+    # luapat_rep* rungs are the matching control -- identical subject
+    # construction, no find -- so the same subtraction applies.
+    "luapatsp_16": (
+        [],
+        ["EVAL", "local s = string.rep('a', 16) return (string.find(s, 'a+'))", "0"]),
+    "luapatsp_256": (
+        [],
+        ["EVAL", "local s = string.rep('a', 256) return (string.find(s, 'a+'))", "0"]),
     "luapat_rep16": (
         [],
         ["EVAL", "local s = string.rep('a', 16) return #s", "0"]),

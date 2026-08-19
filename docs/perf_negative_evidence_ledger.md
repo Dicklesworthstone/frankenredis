@@ -64865,3 +64865,70 @@ the commonest kind of find.
      exercises both matchers, and it is the only one on which the cascade lever can be measured.
   3. Implement the SPECIALS disjunction before the cascade. It is smaller, it is upstream's own
      control flow, and on special-free patterns it removes the work rather than tuning it.
+
+## 2026-08-19 CrimsonHawk: SIZING — the first honest matcher-vs-matcher row: fr's Lua matcher costs 38.75 instructions per matched byte against Redis's 8.55, a 4.53x term that is only ~21-37 pct of the op (frankenredis-25uop)
+
+EVIDENCE CLASS: callgrind Ir, fr and a LIVE vendored Redis 7.2.4 in the same invocation, slope
+method, 2000 ops. The harness printed "WINDOW: UNFIT for ratio" on both rungs (11 and 9 cargo/rustc
+running) and "this run is SIZING, not certified". No build: our project's slot was in flight.
+
+  per-arm  fr    loadavg 31.61/28.79/29.60 then 35.73/29.69/29.89; CPU MHz mean 3626 -> 3646
+           redis loadavg 35.73/29.69/29.89 (both windows);         CPU MHz mean 3684 -> 3707
+
+### WHY A NEW SHAPE WAS NEEDED
+
+The row above establishes that a pattern with no SPECIALS never reaches Redis's matcher —
+lstrlib.c:502 routes it to a memchr-driven plain search. So every luapat_* rung compared fr's
+matcher against Redis's lmemfind, and none of them could size a MATCHER lever.
+
+luapatsp_16 / luapatsp_256 fix that: the pattern is 'a+', which contains a SPECIAL, so both engines
+run their matcher. Work scales with the SUBJECT because '+' sends max_expand across all N bytes.
+Both engines were probed directly at both sizes before the run and agree (1).
+
+### THE MATCHER, ISOLATED
+
+Subtracting the luapat_rep rungs (identical subject construction, no find) from the luapatsp rungs:
+
+    rung             fr instr/op    redis instr/op    fr/redis
+    luapatsp_16         21,839.8         17,522.3      1.2464x
+    luapatsp_256        37,985.1         30,947.6      1.2274x
+
+    matcher cost      fr          redis
+    at  16 bytes      4,875.6      4,322.9
+    at 256 bytes     14,176.0      6,374.3
+    per matched byte     38.75         8.55     ->  4.53x
+
+Redis at 8.55 instructions per byte is the tight loop upstream's shape predicts: a switch to
+default, singlematch, and s++ inside max_expand. fr pays 4.53x that for the same byte.
+
+### THE TWO GAPS ARE DIFFERENT PROBLEMS, AND ONLY NOW SEPARABLE
+
+    pattern kind          who matches            fr/redis whole-op    lever
+    no SPECIALS           redis: memchr          1.9230x              add upstream's disjunction
+    (string.find(s,"ab"))  fr:    full matcher                         (missing fast path)
+    contains a SPECIAL    both: matcher          1.2274x              the cascade rewrite
+    (string.find(s,"a+"))                                              (dispatch efficiency)
+
+The plain-search gap is the larger one AND the cheaper fix: it removes the work rather than tuning
+it, and it is upstream's own control flow. The cascade lever is real but bounded — 4.53x on a term
+that is 21 pct of Redis's op and 37 pct of fr's, so closing it entirely moves luapatsp_256 from
+1.2274x to about 1.02x, and moves the special-FREE shape not at all.
+
+### WHAT IS NOT SETTLED
+
+  * SIZING. The gate refused both rungs. Nothing here is a bound.
+  * The subtraction crosses runs — luapat_rep was measured in an earlier window — so the 16-byte
+    endpoints carry cross-run noise. The 256-byte separation (14,176.0 against 6,374.3) is far
+    above it; the per-byte figures inherit it and should be re-derived from a single window.
+  * The plain-path lever must be scoped to find. Upstream's condition is `find && (explicit || no
+    specials)`: str_find_aux(L,1) is string.find, str_find_aux(L,0) is string.match, so match NEVER
+    takes the plain path even on a special-free pattern. A port that shares the fast path between
+    them would silently change match's semantics.
+
+### RETRY PREDICATES
+
+  1. Re-run all six rungs in ONE window so no subtraction crosses runs.
+  2. Land the SPECIALS disjunction first and re-measure luapat_256 — it should fall toward Redis's
+     flat find cost. luapatsp_256 must NOT move; if it does, the change escaped its scope.
+  3. Only then judge the cascade, against luapatsp. Its ceiling is ~1.02x on that shape, not parity
+     on all of them.
