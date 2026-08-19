@@ -14186,7 +14186,9 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // it always carries flags -- so unlike EVAL there is no shebang gate here: the prepare-time
     // refusal applies to every FCALL. Checked BEFORE the nesting level is raised, so the refusal
     // path has nothing to unwind.
-    if let Some(refusal) = script_prepare_oom_refusal(store, store.script_allow_oom) {
+    let prepare_refusal = script_prepare_readonly_replica_refusal(store, has_no_writes)
+        .or_else(|| script_prepare_oom_refusal(store, store.script_allow_oom));
+    if let Some(refusal) = prepare_refusal {
         store.script_read_only = previous_read_only;
         store.script_allow_oom = previous_allow_oom;
         return Ok(refusal);
@@ -26953,9 +26955,16 @@ fn eval_cmd(
     store.script_allow_oom = script_shebang_is_oom_exempt(script);
     // (frankenredis-obeyclient-strlen-qxdyn follow-up) Shebang scripts only: a body with no `#!`
     // is upstream's EVAL_COMPAT_MODE and never reaches this check.
-    if script.starts_with(b"#!")
-        && let Some(refusal) = script_prepare_oom_refusal(store, store.script_allow_oom)
-    {
+    // Resolved into a local BEFORE the `if let`: the two helpers borrow `store` immutably and
+    // the arms below assign to it, and an `if let` keeps its scrutinee temporaries alive for the
+    // whole body. Binding here ends the borrow at this statement instead.
+    let prepare_refusal = if script.starts_with(b"#!") {
+        script_prepare_readonly_replica_refusal(store, script_shebang_has_no_writes_flag(script))
+            .or_else(|| script_prepare_oom_refusal(store, store.script_allow_oom))
+    } else {
+        None
+    };
+    if let Some(refusal) = prepare_refusal {
         store.script_read_only = previous_read_only;
         store.script_allow_oom = previous_allow_oom;
         return Ok(refusal);
@@ -27066,11 +27075,18 @@ fn evalsha_cmd(
     // gated the same way: only a body carrying a `#!` shebang leaves EVAL_COMPAT_MODE. The body
     // is re-borrowed rather than materialised, exactly as `allow_oom` above is, so the
     // fast-path HIT still never copies or hashes it.
-    if store
+    // Same shape as EVAL: resolved into a local so the immutable borrows end here rather than
+    // spanning the body that restores `store`.
+    let prepare_refusal = if store
         .script_get(sha1)
         .is_some_and(|body| body.starts_with(b"#!"))
-        && let Some(refusal) = script_prepare_oom_refusal(store, allow_oom)
     {
+        script_prepare_readonly_replica_refusal(store, no_writes)
+            .or_else(|| script_prepare_oom_refusal(store, allow_oom))
+    } else {
+        None
+    };
+    if let Some(refusal) = prepare_refusal {
         store.script_read_only = previous_read_only;
         store.script_allow_oom = previous_allow_oom;
         return Ok(refusal);
@@ -27231,6 +27247,37 @@ fn script_shebang_line_has_flag(line: &[u8], wanted: &str) -> bool {
 ///
 /// `client_allow_oom` is the caller's CLIENT_ALLOW_OOM flag, which fr does not model; it is false
 /// for every client fr can construct, so it is folded out rather than faked.
+/// Upstream `scriptPrepareForRun`'s read-only-replica refusal (script.c:158-161):
+///
+///     if (server.masterhost && server.repl_slave_ro && !obey_client) {
+///         addReplyError(caller, "-READONLY Can not run script with write flag on readonly replica");
+///
+/// fr already refuses an inner write from a script on a read-only replica (the `replro` gate in
+/// `dispatch_argv`), but that fires MID-SCRIPT and answers "READONLY You can't write against a
+/// read only replica." -- the message a plain client write gets. Upstream refuses the whole
+/// script UP FRONT with a different string naming the write FLAG, so a client parsing the reply
+/// can tell the two engines apart, and on fr the script has already run whatever preceded its
+/// first write.
+///
+/// ORDER IS PART OF THE PORT: upstream runs this at :158 and the OOM refusal at :193, both inside
+/// the same `!(script_flags & SCRIPT_FLAG_NO_WRITES)` / `!EVAL_COMPAT_MODE` nesting. A script that
+/// is BOTH on a read-only replica and over maxmemory must read this one. Getting that backwards
+/// is invisible to any test that arranges only one of the two conditions -- which is exactly how
+/// oo3aw row 5 went wrong.
+///
+/// `!store.must_obey_client` carries upstream's `!obey_client` in full. `is_read_only_replica` is
+/// published cleared for `applying_master_stream` but NOT for AOF replay, so relying on it alone
+/// would inherit that gap here; this spells the AOF half out rather than assuming the flag covers
+/// it.
+fn script_prepare_readonly_replica_refusal(store: &Store, no_writes: bool) -> Option<RespFrame> {
+    if !no_writes && store.is_read_only_replica && !store.must_obey_client {
+        return Some(RespFrame::Error(
+            "READONLY Can not run script with write flag on readonly replica".to_string(),
+        ));
+    }
+    None
+}
+
 fn script_prepare_oom_refusal(store: &Store, oom_exempt: bool) -> Option<RespFrame> {
     if !oom_exempt && store.maxmemory_bytes_live != 0 && store.over_maxmemory_live {
         // Upstream passes a literal already carrying '-OOM', which addReplyError leaves alone;
@@ -41649,6 +41696,101 @@ mod tests {
             xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"0"]),
             250
         );
+    }
+
+    #[test]
+    fn readonly_replica_refuses_a_write_flagged_script_at_prepare_time_and_beats_the_oom_gate() {
+        // Upstream scriptPrepareForRun, script.c:158-161:
+        //
+        //     if (server.masterhost && server.repl_slave_ro && !obey_client) {
+        //         addReplyError(caller,
+        //             "-READONLY Can not run script with write flag on readonly replica");
+        //
+        // fr already refuses an inner write from a script on a read-only replica, but that
+        // fires MID-SCRIPT and answers "READONLY You can't write against a read only replica.",
+        // the message a plain client write gets. Upstream refuses the whole script up front and
+        // names the write FLAG instead.
+        fn run_script(store: &mut Store, body: &[u8]) -> RespFrame {
+            dispatch_argv(&[b"EVAL".to_vec(), body.to_vec(), b"0".to_vec()], store, 0)
+                .unwrap_or_else(|e| e.to_resp())
+        }
+        fn replica() -> Store {
+            let mut store = Store::new();
+            store.is_read_only_replica = true;
+            store
+        }
+        const WRITER: &[u8] = b"#!lua\nredis.call('set','ro_k','v') return 1";
+
+        // Refused before a line runs, with upstream's flag-naming wording.
+        let mut store = replica();
+        match &run_script(&mut store, WRITER) {
+            RespFrame::Error(msg) => assert!(
+                msg.contains("Can not run script with write flag on readonly replica"),
+                "expected the PREPARE refusal, got {msg}"
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(
+            dispatch_argv(&[b"EXISTS".to_vec(), b"ro_k".to_vec()], &mut store, 0).expect("EXISTS"),
+            RespFrame::Integer(0),
+            "the script body must not have executed"
+        );
+
+        // THE ORDER ROW, and the only one that fails if the two prepare gates are swapped:
+        // upstream runs the read-only check at :158 and the OOM check at :193, so a script that
+        // trips BOTH must read the read-only one. Each gate is individually correct either way,
+        // which is why no single-condition row can catch this -- the same trap as oo3aw row 5.
+        let mut store = replica();
+        store.maxmemory_bytes_live = 1;
+        store.over_maxmemory_live = true;
+        match &run_script(&mut store, WRITER) {
+            RespFrame::Error(msg) => {
+                assert!(
+                    msg.contains("Can not run script with write flag on readonly replica"),
+                    "read-only must be answered BEFORE OOM, got {msg}"
+                );
+                assert!(
+                    !msg.contains("allow-oom flag is not set"),
+                    "the OOM refusal must not win this race: {msg}"
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // `no-writes` exempts: upstream's check sits inside `if (!(script_flags & NO_WRITES))`.
+        let mut store = replica();
+        let out = run_script(
+            &mut store,
+            b"#!lua flags=no-writes\nreturn 1",
+        );
+        assert_eq!(out, RespFrame::Integer(1), "a no-writes script must still run on a replica");
+
+        // An OBEYED source is exempt -- upstream spells it `!obey_client`, covering both the
+        // master link and AOF replay.
+        let mut store = replica();
+        store.must_obey_client = true;
+        let out = run_script(&mut store, WRITER);
+        assert!(
+            !matches!(&out, RespFrame::Error(msg) if msg.contains("write flag on readonly replica")),
+            "an obeyed source must not read the prepare refusal, got {out:?}"
+        );
+
+        // LEGACY body: EVAL_COMPAT_MODE, so no prepare refusal. It still cannot write -- it
+        // reaches the existing inner gate and reads THAT message instead.
+        let mut store = replica();
+        match &run_script(&mut store, b"return redis.call('set','legacy_ro_k','v')") {
+            RespFrame::Error(msg) => {
+                assert!(
+                    !msg.contains("Can not run script with write flag"),
+                    "a legacy body must not read the prepare refusal, got {msg}"
+                );
+                assert!(
+                    msg.contains("read only replica"),
+                    "a legacy body must still be refused by the inner gate, got {msg}"
+                );
+            }
+            other => panic!("expected the inner refusal, got {other:?}"),
+        }
     }
 
     #[test]
