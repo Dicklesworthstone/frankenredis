@@ -21758,6 +21758,16 @@ end
         //
         // Nothing else pinned the old string -- three emission sites, no test, no fixture -- which
         // is exactly why it survived: an invented error nobody asserts on reads as correct forever.
+        // The 64 MiB thread is a TEST-PROFILE accommodation, the same one
+        // `lua_reply_walk_bounds_nesting_like_upstream_luareplytoredisreply` already carries: this
+        // workspace defines no [profile.test], so tests run at opt-level 0 where the evaluator's
+        // frames are far fatter than in the shipping binary. MEASURED here rather than assumed --
+        // without it this test aborts the whole test binary with a real stack overflow before the
+        // depth guard can fire, which is how it first ran. That is a statement about opt-level 0
+        // on a 2 MiB test thread, NOT about production, where workers get 8 MiB (c63b56ef1).
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
         let mut store = Store::new();
 
         // CONTROL, and it is the half that catches an over-eager fix: a recursion comfortably
@@ -21788,6 +21798,10 @@ end
             !err.contains("maximum call depth"),
             "the invented string must be gone: {err}"
         );
+            })
+            .expect("spawn a test thread with headroom")
+            .join()
+            .expect("the depth guard must fire instead of overflowing the stack");
     }
 
     #[test]
