@@ -60,11 +60,32 @@ def loadavg():
         return " ".join(f.read().split()[:3])
 
 
-def iowait_and_mhz():
+def _cpu_snapshot():
     with open("/proc/stat") as f:
         parts = f.readline().split()
-    total = sum(int(x) for x in parts[1:])
-    iowait = int(parts[5]) / total * 100 if total else 0.0
+    fields = [int(x) for x in parts[1:]]
+    return sum(fields), fields[4]  # (total jiffies, iowait jiffies)
+
+
+def iowait_and_mhz(window_s: float = 1.0):
+    """Windowed iowait, plus mean CPU MHz.
+
+    CORRECTED: this read `iowait / total` from a SINGLE /proc/stat sample, which is the
+    average SINCE BOOT and not the measurement's conditions. On a host three days up, one
+    sampling window is ~0.0009% of the accumulated jiffies, so the value cannot move: every
+    row this helper produced recorded 0.93-0.95% no matter what the machine was doing. It
+    read 0.95% cumulative at an instant when the true windowed figure was 0.35% and when the
+    fleet reported the host disk-bound at 32%.
+
+    A rate has to be differenced. Two samples `window_s` apart give the iowait share of the
+    jiffies that actually elapsed during the window, which is the number a measurement row is
+    claiming when it prints one.
+    """
+    total_a, io_a = _cpu_snapshot()
+    time.sleep(window_s)
+    total_b, io_b = _cpu_snapshot()
+    d_total = total_b - total_a
+    iowait = (io_b - io_a) / d_total * 100 if d_total else 0.0
     try:
         with open("/proc/cpuinfo") as f:
             v = [float(l.split(":")[1]) for l in f if l.startswith("cpu MHz")]
