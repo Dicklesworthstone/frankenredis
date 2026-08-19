@@ -1062,15 +1062,6 @@ fn lua_arg_got_label(value: Option<&LuaValue>) -> &'static str {
 // missing-arg and the wrong-type cases go through the same "bad argument #N
 // to '<fname>' (number expected, got <got>)" template, with the user_script:N
 // source-location prefix that Lua's luaL_argerror auto-prepends.
-/// (frankenredis-i18ug) Format a bad-arg error using the AST-callsite
-/// invocation name when available (Some → prefix + name) or the indirect
-/// '?' form (None → no prefix, '?' for name). Mirrors the rule used by
-/// LuaState::format_builtin_argerror, expressed as a free helper so the
-/// check_* fns can stay context-light. The `_fallback_name` parameter is
-/// retained for callers that want a meaningful internal name in error
-/// messages they assemble themselves, but it is NOT used in the
-/// rendered output — vendored's luaL_argerror always uses lua_getinfo
-/// "n.name" which is None for pcall-invoked C closures.
 thread_local! {
     /// Whether the builtin currently executing was reached by COLON syntax.
     ///
@@ -1092,6 +1083,17 @@ fn call_is_method() -> bool {
 }
 
 /// Upstream `lauxlib.c::luaL_argerror`, including the half that is easy to miss.
+///
+/// (frankenredis-i18ug) Format a bad-arg error using the AST-callsite
+/// invocation name when available (Some → prefix + name) or the indirect
+/// '?' form (None → no prefix, '?' for name). Mirrors the rule used by
+/// LuaState::format_builtin_argerror, expressed as a free helper so the
+/// check_* fns can stay context-light. The `_fallback_name` parameter is
+/// retained for callers that want a meaningful internal name in error
+/// messages they assemble themselves, but it is NOT used in the
+/// rendered output — vendored's luaL_argerror always uses lua_getinfo
+/// "n.name" which is None for pcall-invoked C closures.
+///
 ///
 /// (frankenredis-argerr-method-index-q0hl5) `idx` arrives as upstream's `narg`: 1-based and
 /// INCLUDING the synthetic self of a colon call, because every caller passes `idx + 1`. Upstream
@@ -3995,6 +3997,47 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// The one string metatable, shared by every string on this thread.
+    ///
+    /// (frankenredis-string-metatable-zx80v) Upstream builds this once in `createmetatable`
+    /// (lstrlib.c) against the server's single `lua_State`, so it OUTLIVES an individual EVAL --
+    /// MEASURED: a field written to `getmetatable('')` in one EVAL on 7.2.4 is still there in the
+    /// next, and replacing `__index` breaks string methods server-wide until restart. Living beside
+    /// the globals template gives it exactly that lifetime, because the template is a thread-local
+    /// reused across evals for the same reason.
+    static LUA_STRING_METATABLE: RefCell<Option<LuaTable>> = const { RefCell::new(None) };
+}
+
+/// Upstream's string metatable: `{ __index = <the string table> }`, and MUTABLE.
+///
+/// (frankenredis-string-metatable-zx80v) Two properties that look incidental and are both MEASURED
+/// parity requirements against 7.2.4:
+///
+///   * `__index` holds the very table bound to the global `string`, not a copy, so
+///     `getmetatable('').__index == string` is true.
+///   * the metatable is NOT marked read-only even though the string table it points at IS.
+///     `luaSetTableProtectionRecursively` reaches the library tables and never reaches this one, so
+///     7.2.4 refuses `getmetatable('').__index.trim = f` with "Attempt to modify a readonly table"
+///     while ACCEPTING `getmetatable('').__index = {...}` outright. Marking it read-only here would
+///     look safer and would diverge.
+fn lua_string_metatable() -> LuaTable {
+    LUA_STRING_METATABLE.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        cell.get_or_insert_with(|| {
+            let mt = LuaTable::new_shared_template();
+            if let Some(LuaValue::Table(string_table)) = lua_base_globals_template().get("string") {
+                mt.set(
+                    LuaValue::Str(b"__index".to_vec()),
+                    LuaValue::Table(string_table.clone()),
+                );
+            }
+            mt
+        })
+        .clone()
+    })
+}
+
 fn lua_base_globals_template() -> Rc<LuaMap<String, LuaValue>> {
     LUA_BASE_GLOBALS_TEMPLATE.with(|template| {
         let mut template = template.borrow_mut();
@@ -6336,7 +6379,18 @@ impl<'a> LuaState<'a> {
                 let key = LuaValue::Str(field.as_bytes().to_vec());
                 self.table_set_by_expr(parent_expr, parent, key, table, env, varargs)
             }
-            _ => Err("invalid assignment target".to_string()),
+            // (frankenredis-string-metatable-zx80v) A base expression that yields a TEMPORARY --
+            // `f().x = 1`, `f()['x'] = 1`, `t:g().x = 1` -- has no storage location to write back
+            // to, and needs none: `table_set_by_expr` only reaches here with a `LuaValue::Table`,
+            // and it has ALREADY applied the mutation through `table_assign_with_newindex` on the
+            // shared `Rc`. Write-back is bookkeeping for named slots, not the mutation itself.
+            //
+            // Refusing here was worse than a plain rejection, because the refusal came AFTER the
+            // mutation landed: `getmetatable('').fresh = 1` raised "invalid assignment target" and
+            // the field was set anyway, so the script saw an error and the world saw the write.
+            // MEASURED against 7.2.4, which accepts all three forms (Lua 5.1 grammar: a `var` may
+            // be `prefixexp '.' Name`, and a `functioncall` is a `prefixexp`).
+            _ => Ok(()),
         }
     }
 
@@ -8099,11 +8153,25 @@ impl<'a> LuaState<'a> {
             .unwrap_or_else(|| self.default_global_env_table())
     }
 
+    /// Resolve `("x").field` the way upstream does: through the string metatable's `__index`.
+    ///
+    /// (frankenredis-string-metatable-zx80v) This used to read the GLOBAL named `string` directly,
+    /// which gave the right answer for every unmodified script and made two upstream behaviours
+    /// unreachable: `getmetatable('').__index = {zap=f}` must make `('x'):zap()` work AND must break
+    /// `('x'):rep(2)` with "attempt to call", because after the swap the string table is simply not
+    /// on the lookup path any more. MEASURED on 7.2.4, both directions.
+    ///
+    /// Residual, deliberately not built: upstream would CALL an `__index` that is a function. Doing
+    /// that here needs `&mut self` and a call frame at all five call sites; no known script relies
+    /// on it, and guessing at it would be worse than naming it.
     fn lookup_string_field(&self, key: &LuaValue) -> LuaValue {
-        if let Some(LuaValue::Table(t)) = self.globals.get("string") {
-            t.get_with_index(key)
-        } else {
-            LuaValue::Nil
+        match lua_string_metatable()
+            .inner
+            .borrow()
+            .get(&LuaValue::Str(b"__index".to_vec()))
+        {
+            LuaValue::Table(t) => t.get_with_index(key),
+            _ => LuaValue::Nil,
         }
     }
 
@@ -9945,6 +10013,19 @@ impl<'a> LuaState<'a> {
                         }
                         None => Ok(vec![LuaValue::Nil]),
                     },
+                    // (frankenredis-string-metatable-zx80v) Every string shares one metatable, so
+                    // `getmetatable('') == getmetatable('abc')` is true -- and was ALREADY true
+                    // before this arm existed, because both sides were nil. A pair of nils comparing
+                    // equal is not the property under test.
+                    LuaValue::Str(_) => {
+                        let mt = lua_string_metatable();
+                        let masked = mt.inner.borrow().get(&LuaValue::Str(b"__metatable".to_vec()));
+                        if matches!(masked, LuaValue::Nil) {
+                            Ok(vec![LuaValue::Table(mt)])
+                        } else {
+                            Ok(vec![masked])
+                        }
+                    }
                     _ => Ok(vec![LuaValue::Nil]),
                 }
             }
@@ -16393,6 +16474,115 @@ mod tests {
     /// are recycled between pushes. The whole design rests on a recycled scope
     /// being observationally identical to a fresh one, so pin that a binding
     /// from an earlier scope can never reappear in a later one.
+    #[test]
+    fn string_metatable_is_shared_mutable_and_owns_method_lookup_zx80v() {
+        // (frankenredis-string-metatable-zx80v) Each assertion is a row MEASURED against live
+        // 7.2.4; the wording of the comparison matters more than the value, so they are stated as
+        // the incumbent's answer rather than as "reasonable".
+        let mut store = Store::new();
+        let run = |store: &mut Store, src: &[u8]| -> String {
+            match eval_script(src, &[], &[], store, 0) {
+                Ok(RespFrame::BulkString(Some(b))) => String::from_utf8_lossy(&b).into_owned(),
+                Ok(other) => format!("{other:?}"),
+                Err(e) => format!("ERR {e}"),
+            }
+        };
+
+        // The metatable EXISTS, and its __index is the very table bound to the global `string` --
+        // identity, not a copy, which is what `== string` pins.
+        assert_eq!(run(&mut store, b"return type(getmetatable(''))"), "table");
+        assert_eq!(
+            run(&mut store, b"return tostring(getmetatable('').__index == string)"),
+            "true"
+        );
+        // One metatable for every string, so two lookups yield the same table. Before this bead
+        // BOTH sides were nil and this comparison was ALREADY true -- it only means something
+        // alongside the type assertion above.
+        assert_eq!(
+            run(&mut store, b"return tostring(getmetatable('') == getmetatable('abc'))"),
+            "true"
+        );
+        // Only strings have one. A catch-all returning the string metatable would pass every
+        // assertion above.
+        for src in [
+            b"return type(getmetatable(1))".as_slice(),
+            b"return type(getmetatable(true))".as_slice(),
+            b"return type(getmetatable(nil))".as_slice(),
+            b"return type(getmetatable({}))".as_slice(),
+        ] {
+            assert_eq!(run(&mut store, src), "nil", "only strings carry the metatable");
+        }
+
+        // The metatable is MUTABLE while the string table it points at is READ-ONLY. Upstream's
+        // luaSetTableProtectionRecursively reaches the library table and not this one, so getting
+        // either half backwards diverges: 7.2.4 refuses the first and accepts the second.
+        assert_eq!(
+            run(
+                &mut store,
+                b"local ok, e = pcall(function() getmetatable('').__index.trim = 1 end) \
+                  return tostring(ok) .. '|' .. tostring(e)"
+            ),
+            "false|user_script:1: Attempt to modify a readonly table"
+        );
+        assert_eq!(
+            run(
+                &mut store,
+                b"local ok = pcall(function() getmetatable('').fresh = 1 end) return tostring(ok)"
+            ),
+            "true"
+        );
+
+        // Method lookup runs THROUGH __index, so replacing it redirects every string method and
+        // orphans the ones the string table used to serve. Both halves in one script: fr's
+        // end-of-eval cycle breaking clears a table stored across evals, which is a separate defect
+        // and would make a two-script version fail for an unrelated reason.
+        assert_eq!(
+            run(
+                &mut store,
+                b"getmetatable('').__index = {zap = function(s) return 'Z' .. s end} \
+                  local ok, e = pcall(function() return ('x'):rep(2) end) \
+                  return ('x'):zap() .. '|' .. tostring(ok)"
+            ),
+            "Zx|false",
+            "replacing __index must redirect method lookup AND orphan string.rep"
+        );
+    }
+
+    #[test]
+    fn assigning_through_a_temporary_base_does_not_raise_zx80v() {
+        // (frankenredis-string-metatable-zx80v) Lua 5.1's grammar makes a `functioncall` a
+        // `prefixexp`, so `f().x = 1` is a legal var. fr raised "invalid assignment target" AFTER
+        // performing the write, which is the worst of both: the script saw an error and the table
+        // saw the mutation. The visibility assertion is the one that would catch a "fix" that
+        // merely swallows the error.
+        let mut store = Store::new();
+        let run = |store: &mut Store, src: &[u8]| -> String {
+            match eval_script(src, &[], &[], store, 0) {
+                Ok(RespFrame::BulkString(Some(b))) => String::from_utf8_lossy(&b).into_owned(),
+                Ok(other) => format!("{other:?}"),
+                Err(e) => format!("ERR {e}"),
+            }
+        };
+        assert_eq!(
+            run(
+                &mut store,
+                b"local t = {} local function f() return t end \
+                  f().x = 9 f()['y'] = 8 \
+                  return tostring(t.x) .. ',' .. tostring(t.y)"
+            ),
+            "9,8"
+        );
+        assert_eq!(
+            run(
+                &mut store,
+                b"local t = {} local h = {g = function() return t end} \
+                  h:g().z = 7 return tostring(t.z)"
+            ),
+            "7",
+            "a method call is a prefixexp too"
+        );
+    }
+
     #[test]
     fn recycled_scopes_never_leak_a_binding() {
         let mut store = Store::new();
