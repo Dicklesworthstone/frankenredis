@@ -1002,6 +1002,22 @@ pub struct MultiClientStep {
     pub blocking_timeout_ms: Option<u64>,
 }
 
+/// Drive a protocol fixture through `Runtime::execute_bytes`.
+///
+/// SCOPE, and it is narrower than the name suggests (frankenredis-vqiki). `execute_bytes` is an
+/// INTERNAL LINK -- its own doc comment says it never receives raw bytes off a client connection,
+/// because the front-end parses those before anything reaches here. So this function measures the
+/// entry point used by replication and AOF replay, NOT the client protocol contract, and the two
+/// give different answers on malformed input: a client sending `$-2\r\n` gets
+/// `unknown command '$-2'` from an inline dispatch, while `execute_bytes` reports
+/// `invalid bulk length`. All 22 rows of `protocol_negative.json` are internal-link answers.
+///
+/// The two error renderers differ along exactly this seam: the client path formats
+/// fr-protocol's `Display for RespParseError` via `handle_parse_error`, while this path uses
+/// fr-runtime's private `protocol_error_to_resp`. Pinning the internal link is worth doing --
+/// it is genuinely reachable -- but do not cite these rows as client protocol behaviour.
+/// Client-path parity is measured over real sockets by `scripts/protocol_client_parity.py`,
+/// which finds fr byte-identical to Redis 7.2.4 on 45 of 45 adversarial vectors.
 pub fn run_protocol_fixture(
     config: &HarnessConfig,
     fixture_name: &str,

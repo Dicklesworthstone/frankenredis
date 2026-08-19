@@ -1,5 +1,6 @@
 {
   "suite": "protocol_negative",
+  "note": "INTERNAL LINK, not the client path (frankenredis-vqiki). These expectations are Runtime::execute_bytes answers, which replication and AOF replay reach; a CLIENT sending the same bytes gets different replies because the front-end parses inline commands first. All 22 rows differ from the client contract. Client-path parity lives in scripts/protocol_client_parity.py (45/45 byte-identical to Redis 7.2.4).",
   "cases": [
     {
       "name": "invalid_bulk_length",

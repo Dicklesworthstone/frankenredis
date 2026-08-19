@@ -66655,3 +66655,98 @@ executing a library BODY (it must expose `register_function`) and the wrong one 
 callback. If a future change needs load-shaped globals per call, measure `fcall_lib1` — the rung
 where library size is not a factor — before and after, because that is the only rung this cost
 shows up in cleanly.
+
+## 2026-08-19 CrimsonHawk: PARITY — fr's client protocol contract is byte-identical to Redis 7.2.4 across 45 adversarial vectors, and the suite that appeared to cover this was wrong on ALL 22 of its rows, not the 11 previously reported (frankenredis-vqiki)
+
+EVIDENCE CLASS: both engines started from their own binaries and driven over REAL TCP SOCKETS, one
+fresh connection per vector, reply bytes and connection-close state compared byte-for-byte. No
+timing, no ratio, no A/A null — this is a behavioural parity sweep and must not be read as a perf
+verdict. `scripts/protocol_client_parity.py`, committed with this row.
+
+  fr        `target/release/frankenredis`, sha256 `96faaad9630d9fcbbb10473e658e6206d98de9da`
+  incumbent `legacy_redis_code/redis/src/redis-server`, Redis 7.2.4
+  loadavg   19.46 / 14.87 / 15.57 at start, iowait 0 pct, 0 frankenredis builds
+  BINARY PROVENANCE, stated because it disqualifies this ELF for certification: it was linked
+  AFTER a peer's uncommitted `lua_eval.rs` edit, so it corresponds to no commit. That is
+  disqualifying for a RATIO and irrelevant here — the peer's change is an FCALL library-callback
+  hasher and cannot reach RESP request parsing. A behavioural result on a contaminated binary is
+  still readable; a timed one is not.
+
+### THE RESULT
+
+    45 of 45 vectors agree byte-for-byte, including connection-close state.
+
+Vectors span all ten RESP3 type prefixes as first byte, the bulk and multibulk malformed-length
+family, incomplete frames, deep nesting, and fifteen inline-command shapes (quoting, unbalanced
+quotes, tab separation, LF-only termination, empty and whitespace-only lines, pipelined
+inline-then-multibulk). **fr has no client-visible protocol divergence anywhere on this surface.**
+
+### THE SUITE THAT LOOKED LIKE IT COVERED THIS WAS WRONG ON EVERY ROW
+
+`protocol_negative.json` was previously reported as encoding fr's own answers on ELEVEN rows. The
+socket says it is **all twenty-two**. Its driver calls `runtime.execute_bytes(...)`, whose own doc
+comment states it is an INTERNAL LINK — "never raw bytes off a client connection, which the
+front-end parses before anything reaches here":
+
+    input                       fixture asserts                     what a CLIENT actually gets
+    $-2\r\n                     invalid bulk length                 unknown command '$-2'
+    *-2\r\n                     invalid multibulk length            NO REPLY, connection open
+    *2\r\n$4\r\nPING\r\n~1\r\n  unsupported RESP3 type prefix '~'   expected '$', got '~'
+    (128x *1\r\n):42\r\n        recursion depth limit exceeded      expected '$', got '*'
+
+Three rows (`*-01`, `*x`, `*2147483648`) happen to read the same through both entry points, which
+is why the file looked broadly right. **A fixture written from the implementation cannot detect the
+implementation being wrong** — the test that appears to cover an input is the reason nothing flagged
+it.
+
+The rows are not deleted and nothing is retitled here: `execute_bytes` genuinely produces those
+strings and is genuinely reachable through replication and AOF replay, so pinning it has value. What
+was wrong is the CLAIM that it measures protocol conformance.
+
+### THE TWO-RENDERER DRIFT NOW HAS A DIRECTION
+
+The drift recorded on this bead is real and splits exactly along the entry points:
+
+    client path      main.rs handle_parse_error -> format!("ERR Protocol error: {err}")
+                     which is fr-protocol's Display -- "invalid RESP integer", "incomplete frame"
+    internal link    fr-runtime protocol_error_to_resp (PRIVATE, `fn` not `pub fn`)
+                     -- "invalid integer payload", "unexpected EOF while reading request"
+
+So the fixture asserts the renderer a client never sees. Anyone grepping a protocol string must ask
+which of the two they found, and only the fr-protocol one is a client contract.
+
+### AN IN-PROCESS MODEL WAS TRIED AND ABANDONED ON EVIDENCE
+
+The cheap fix — model the front-end in-process from `should_try_inline_parsing` +
+`try_parse_inline`, no socket — was designed and then refuted by the first probe. `*-2\r\n` draws
+**no reply at all** from both engines, while `parse_frame_with_config` reports `invalid multibulk
+length`. The front-end's multibulk handling is therefore not reconstructable from the parser alone,
+and the model would have written a fiction into a fixture for the second time on the same file.
+The socket is not gold-plating here; it is the only faithful instrument.
+
+### THE GATE CAN FAIL, WHICH IS THE PART WORTH CHECKING
+
+An all-agree table from a broken harness is worse than a false divergence, so the comparison was
+mutation-tested end to end by giving the oracle `--requirepass`, making it answer NOAUTH:
+
+    clean run                 45/45 agree, exit 0
+    NOAUTH oracle             35/45 agree, 10 DIVERGENT reported, exit 1
+    missing binary            clean skip, exit 0
+
+Ten and not forty-five is the informative number: vectors that draw no reply, or that fail as
+protocol errors before authentication is consulted, still agree. The comparison discriminates
+rather than blanket-failing, which is what makes the 45/45 meaningful.
+
+### RETRY PREDICATES
+
+Retry predicate: re-run ONLY IF the front-end parse loop, `try_parse_inline`, or fr-protocol's
+`Display for RespParseError` changes — any of those three moves a client-visible string; or IF a
+vector is added, since 45 is a floor on the surface and not a proof of totality. Reopen the fixture
+question ONLY IF someone proposes rewriting `protocol_negative.json` from the socket, which would
+be a second suite rather than an edit to this one.
+
+  1. Quote fr's client protocol parity as **45/45 byte-identical**, socket-measured, not certified
+     (this is behavioural, there is no ratio to certify).
+  2. Do not cite `protocol_negative.json` as evidence of client protocol behaviour. It measures
+     `execute_bytes`.
+  3. When quoting a protocol error string, name which renderer it came from.
