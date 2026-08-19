@@ -61758,6 +61758,57 @@ mod tests {
     }
 
     #[test]
+    fn scan_borrowed_into_writes_the_generic_reply_bytes_hwcm1() {
+        // (frankenredis-hwcm1) ad0b142f7 converted the bare-SCAN floor arm from a materialised
+        // RespFrame tree to a direct `_into` encode, to shed the eight allocations per op that
+        // the reply construction was costing. The whole risk of that change is byte-identity,
+        // and it had NO direct coverage when it landed: the existing plain-SCAN tests exercise
+        // the DECLINE forms ("-1", "+1", "01"), which go to the generic path and never reach
+        // this executor.
+        //
+        // Both replies are taken from the SAME runtime rather than two identical ones, on
+        // purpose: key ORDER within a SCAN batch follows the store's hash layout, and two
+        // separately-seeded Stores need not agree on it. Comparing one runtime against itself
+        // pins the encoding, which is what changed, without depending on that.
+        let mut rt = Runtime::default_strict();
+        for i in 0..5u32 {
+            let key = format!("scanbytes:{i}");
+            rt.execute_frame(command(&[b"SET", key.as_bytes(), b"v"]), 1);
+        }
+
+        let generic = rt.execute_frame(command(&[b"SCAN", b"0"]), 2);
+        let mut want = Vec::new();
+        generic.encode_into(&mut want);
+
+        let mut got = Vec::new();
+        assert!(
+            rt.execute_plain_scan_borrowed_into(b"0", 2, false, &mut got, None)
+                .is_some(),
+            "the borrowed _into path must serve a canonical cursor"
+        );
+        assert_eq!(
+            got, want,
+            "the _into encode must be byte-identical to the frame the generic path encodes"
+        );
+
+        // The decline forms must still write NOTHING, which is what makes it safe to encode
+        // straight into the connection buffer before the outcome is known: a partial reply
+        // followed by the generic fallback would corrupt the stream.
+        for bad in [&b"-1"[..], b"+1", b"01", b"99999999999999999999", b"x"] {
+            let mut out = Vec::new();
+            assert!(
+                rt.execute_plain_scan_borrowed_into(bad, 3, false, &mut out, None)
+                    .is_none(),
+                "cursor {bad:?} must decline to generic"
+            );
+            assert!(
+                out.is_empty(),
+                "a decline must not leave bytes in the buffer (cursor {bad:?})"
+            );
+        }
+    }
+
+    #[test]
     fn scan_cursor_parses_like_redis_cursor_arg() {
         let mut rt = Runtime::default_strict();
         assert_eq!(

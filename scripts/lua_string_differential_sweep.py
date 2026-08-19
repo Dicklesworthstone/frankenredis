@@ -107,6 +107,27 @@ CASES = {
         'out[#out+1]=i..":"..tostring(ok)..":"..r end '
         'return table.concat(out,",")'
     ),
+    # (frankenredis-fcoxw) Negative zero across every numeric specifier plus the
+    # routes that are already correct. IEEE754 makes -0.0 == 0.0 true, so any
+    # equality-to-zero shortcut drops the sign; %f has no such shortcut and is the
+    # control proving the general float path is fine. tostring/concat are included
+    # because a fix must not regress them -- they already emit -0.
+    "negative_zero": (
+        'local z = 0.0*-1 local out={} local cs={'
+        'function() return string.format("%s",z) end,'
+        'function() return string.format("%g",z) end,'
+        'function() return string.format("%e",z) end,'
+        'function() return string.format("%f",z) end,'
+        'function() return string.format("%.2f",z) end,'
+        'function() return string.format("%d",z) end,'
+        'function() return tostring(z) end,'
+        'function() return ""..z end,'
+        'function() return tostring(1/z) end} '
+        'for i,f in ipairs(cs) do local ok,r=pcall(f) '
+        'r=tostring(r) r=string.gsub(r,",","<c>") '
+        'out[#out+1]=i..":"..tostring(ok)..":"..r end '
+        'return table.concat(out,",")'
+    ),
     "byte_gsub": (
         'local out={} for i=0,255 do local c=string.char(i) '
         'local ok,r=pcall(string.gsub,"a"..c.."b",c,"X") '
