@@ -56897,8 +56897,13 @@ mod tests {
             )
             .expect("EVAL itself must not be refused -- the gate is per inner call")
             {
+                // A caught error comes back as the bulk string the script returns. The OOM
+                // refusal does NOT: fr propagates it out of redis.pcall as a script error, so
+                // the EVAL itself answers with an error frame. Accept both, because what this
+                // test is about is WHICH gate answered, not how the error travelled.
                 RespFrame::BulkString(Some(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
-                other => panic!("expected a bulk reply carrying the error, got {other:?}"),
+                RespFrame::Error(msg) => msg,
+                other => panic!("expected an error or a bulk reply, got {other:?}"),
             }
         };
 
@@ -65902,11 +65907,17 @@ mod tests {
     }
 
     #[test]
-    fn cluster_reset_rejected_from_scripts_after_arity_validation() {
+    fn cluster_reset_rejected_from_scripts_before_shape_validation() {
         let mut store = Store::new();
         store.script_nesting_level = 1;
 
-        let arity = dispatch_argv(
+        // (frankenredis-noscriptcentral-asoup) This row USED to expect the container's
+        // shape error, and that encoded a divergence rather than upstream's rule. Upstream
+        // orders the script checks arity-then-noscript (script.c:524-530), and `cluster|reset`
+        // has arity -2, so four tokens PASS arity and CMD_NOSCRIPT fires next. The shape error
+        // is produced by the handler, which upstream never reaches from a script. fr answered it
+        // only because it had no central noscript gate and the handler ran first.
+        let noscript_over_shape = dispatch_argv(
             &[
                 b"CLUSTER".to_vec(),
                 b"RESET".to_vec(),
@@ -78905,13 +78916,18 @@ mod tests {
     }
 
     #[test]
-    fn replconf_rejected_from_scripts_after_shape_validation() {
+    fn replconf_rejected_from_scripts_before_shape_validation() {
         let mut store = Store::new();
         store.script_nesting_level = 1;
 
-        let arity =
+        // (frankenredis-noscriptcentral-asoup) These two rows used to expect the HANDLER's
+        // shape errors. REPLCONF's arity is -1, so it can never fail the arity check that
+        // upstream runs before CMD_NOSCRIPT (script.c:524-530) -- every REPLCONF from a script
+        // is refused as noscript, whatever its shape. fr reported SyntaxError/InvalidInteger
+        // only because the handler ran before any noscript check existed.
+        let short =
             dispatch_argv(&[b"REPLCONF".to_vec(), b"ACK".to_vec()], &mut store, 0).unwrap_err();
-        assert_eq!(arity, CommandError::SyntaxError);
+        assert_eq!(short, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
 
         let invalid = dispatch_argv(
             &[b"REPLCONF".to_vec(), b"ACK".to_vec(), b"-1".to_vec()],
