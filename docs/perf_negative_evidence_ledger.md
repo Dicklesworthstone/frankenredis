@@ -67189,3 +67189,95 @@ which is a distinct verdict from `PANICKED` and from `APPLIED` and cannot be con
   2. The PING-under-MISCONF gap is real, master-role only, and is filed separately rather than
      left inside a bead whose title says the opposite.
   3. Do not read this row as a perf verdict. It measures no time.
+
+## 2026-08-19 CrimsonHawk: REPRODUCTION — `stalelist-hto86`'s 19-command list is REFUTED (all agree), WAIT is REFUTED, and the subcommand cases are fine. What is real is the OPPOSITE: a stale replica SERVES no-shebang EVAL/EVALSHA where 7.2.4 refuses
+
+EVIDENCE CLASS: `scripts/stale_replica_gate_parity.py`, committed with this row. A genuinely stale
+replica of each engine — `replica-serve-stale-data no` plus `REPLICAOF` at a dead port, with
+`master_link_status:down` read back before anything is asked — and every disputed command asked on a
+FRESH connection. Verdicts, not timings; no ratio, no A/A null. Per-arm as the brief asks:
+loadavg 14.60 / 15.16 / 14.94 at start, 13.49 / 14.89 / 14.85 mid-run, iowait 0 pct, 0 frankenredis
+builds.
+
+  fr        `target/release/frankenredis` — SHARED, rebuilt by peers during the day, names no
+            commit. Disqualifying for a ratio; readable for a behavioural verdict.
+  incumbent `legacy_redis_code/redis/src/redis-server`, Redis 7.2.4
+
+### THE BEAD'S CLAIMS, MEASURED
+
+    claim                                          measured
+    19 commands wrongly REFUSED by fr              REFUTED -- all agree, both engines serve them
+    WAIT wrongly PERMITTED by fr                   REFUTED -- both engines REFUSE it
+    subcommand-only cases the allowlist can't      REFUTED -- object|help, xinfo|help and
+      express (object|help, xinfo|help, script|      script|load are all served by both
+      load)
+
+`debug`, `discard`, `echo`, `exec`, `failover`, `lastsave`, `monitor`, `multi`, `quit`, `reset`,
+`time`, `unwatch`, `watch` are served by both. The allowlist was evidently replaced with the flag
+as the bead recommended. **25 of 28 rows agree.**
+
+### THE THREE THAT DIVERGE, ALL ONE SHAPE, ALL THE OTHER WAY
+
+    row                     redis 7.2.4                       fr
+    eval                    REFUSED  MASTERDOWN               served  1
+    eval_ro                 REFUSED  MASTERDOWN               served  1
+    evalsha (REAL sha)      REFUSED  MASTERDOWN               served  1
+
+The bead lists `eval` and `eval_ro` among commands fr *wrongly refuses*. Measured, fr **serves**
+them and the incumbent refuses. The direction is inverted.
+
+**The mechanism, and it explains why a flag-derived fix does not cover it.** Upstream flags EVAL
+`STALE` in the command table (`commands/eval.json`), so the command-level gate lets it through —
+that part of the bead's fix is right and fr now matches. The refusal comes from a SECOND check
+inside the script engine, `script.c:200`:
+
+    } else {
+        /* Special handling for backwards compatibility (no shebang eval[sha]) mode */
+        if (running_stale) {
+            addReplyErrorObject(caller, shared.masterdownerr);
+
+A no-shebang script runs in `SCRIPT_FLAG_EVAL_COMPAT_MODE`, which SKIPS the shebang branch above it
+and lands in that `else`. So a legacy `EVAL "return 1" 0` on a stale replica is refused by
+upstream, and fr has no equivalent check. **Deriving the gate from the flag table is necessary and
+not sufficient: the flag says "the command may reach the engine", and the engine has its own rule.**
+
+Confirmed by the shebang rows, which is why they are in the harness:
+
+    eval shebang allow-stale     served by BOTH   -- upstream's allow-stale arm, fr agrees
+    eval shebang no flags        refused by BOTH
+
+So fr's behaviour is right for a script that declares `allow-stale`, and wrong only for the legacy
+no-shebang form — the overwhelmingly common one.
+
+**Why it matters:** `replica-serve-stale-data no` exists so a client cannot read data that may be
+arbitrarily out of date. A plain `EVAL "return redis.call('get',KEYS[1])" 1 k` walks straight
+through that on fr, so the setting does not do the one thing it is set for.
+
+### ROWS THAT AGREED WITHOUT REACHING THE GATE, FIXED MID-RUN
+
+The first version reported `evalsha` and `fcall` as AGREE. Both were vacuous: a bogus 40-zero digest
+answers `NOSCRIPT` and a missing function answers `Function not found`, on both engines, **before
+the stale gate is consulted**. An agreement produced upstream of the thing under test proves
+nothing about it.
+
+Fixed by `SCRIPT LOAD`-ing a real script on the stale replica first — itself a STALE-flagged
+subcommand, and served by both — and re-asking with the returned digest. That row is where the
+third divergence came from; without it this run would have reported two.
+
+`fcall` remains vacuous here (it needs a loaded library) and is left in with that noted rather than
+quietly counted as parity.
+
+`TIME` also read as DIVERGE at first, on two CORRECT answers: it is STALE-flagged and served by
+both, but it returns the clock, and the two calls are microseconds apart. Rows are now compared on
+served-vs-REFUSED rather than on bytes.
+
+### RETRY PREDICATES
+
+Retry predicate: re-run ONLY IF `reject_stale_replica_read_request`, the command STALE flag
+derivation, or the script entry path changes; and reopen the 19-command claim ONLY IF any of those
+rows returns to REFUSED on fr, which the harness reports per row.
+
+  1. Close `stalelist-hto86` — its three specific claims are each refuted by measurement.
+  2. The no-shebang EVAL/EVALSHA gap is real and filed separately, since it is the reverse of
+     what that bead's title says.
+  3. Do not read this row as a perf verdict. It measures no time.
