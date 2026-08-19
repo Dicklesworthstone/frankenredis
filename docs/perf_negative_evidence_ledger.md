@@ -65415,3 +65415,77 @@ this change is invisible.
   2. Keep `luapatq_*` alongside `luapat_*`. One shape is the optimisation's best case and the other
      its worst, and reporting either alone misrepresents it.
   3. Before calling any small effect a null, check whether the comparison crosses runs.
+
+---
+
+## ANALYSIS — gvm6z's proposed representation cannot work as written, and the obvious cheaper variant corrupts a quicklist fill decision (frankenredis-gvm6z, frankenredis-33832)
+
+`gvm6z` proposes shrinking `ListpackValueSpan` from <=32 bytes to 12 by making the integer variant
+INDIRECT: "render integer entries into one side buffer owned by the decode call and have the
+variant hold a (u32 offset, u8 len) into it". Two source facts break that, and a third argues
+against landing any version of it without a measurement. None of them is visible from the bead.
+
+### 1. THE SPANS OUTLIVE THE DECODE CALL
+
+`decode_value_spans` results are not transient. `fr-store/src/packed_set.rs:3336` stores them:
+
+      ListChunk::Listpack { bytes: Arc<Vec<u8>>, entries: Arc<Vec<ListpackValueSpan>> }
+
+A side buffer "owned by the decode call" is dropped while `entries` lives on inside an `Arc`, so
+every integer span would index a buffer that is gone. The buffer has to be STORED beside the
+spans, which changes `ListChunk`, its constructor, and `as_bytes`'s signature -- not just the
+enum.
+
+### 2. THE CHEAP FIX CORRUPTS A SIZE-BASED POLICY
+
+The obvious way to avoid a third buffer is to append the rendered digits to the `bytes` buffer
+already stored beside the spans, making BOTH variants a `Range<u32>` and leaving `as_bytes`
+untouched. That is wrong here, and silently:
+
+      Self::Listpack { bytes, entries } => quicklist_packed_node_accepts_local(
+          entries.len(), bytes.len() as u64, elem.len(), fill)      (packed_set.rs:3534)
+
+`bytes.len()` is the listpack's SIZE for the quicklist fill decision. Appending digits inflates it,
+which moves quicklist node boundaries -- an encoding-visible change that no test of listpack
+DECODING would catch.
+
+### 3. THE COPY FORM HAS ALREADY LOST TWICE, IN BOTH DIRECTIONS
+
+A simpler variant exists: hold the raw `i64` (8 bytes) and render on demand, returning
+`Cow<'a, [u8]>` from `as_bytes`. That sidesteps 1 and 2 entirely, needs no stored buffer, and
+gives `size_of == 16` rather than the bead's 12, because `i64` forces 8-byte alignment.
+
+It is still a COPY-FORM change, and this bead's own text records that the last two were measured
+LOSSES of +8.1 pct and +9.0 pct **in opposite directions**. `Cow` trades a certain 2x size win for
+a per-call heap allocation on every integer entry, and which side wins depends on how often
+integer entries are read -- exactly the quantity nobody has measured. Landing it blind is the move
+that has already failed twice on this surface.
+
+### WHAT TO MEASURE BEFORE IMPLEMENTING
+
+The deciding number is not the span size; it is how many `as_bytes` calls land on INTEGER entries
+per RESTORE of a realistic hash. If it is near zero, `Cow` is free and the 2x shrink is pure win.
+If integers are read repeatedly, the stored-side-buffer design (fact 1) is the only one that pays,
+and it costs a `ListChunk` field plus a signature change across 32 `as_bytes` call sites.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement, no ratio, no build of a candidate. This row is a reading of three source facts --
+the storage site, the fill-policy call, and the bead's own history -- and it changes what should be
+built rather than claiming a number.
+
+### PROVENANCE
+
+      source        main at 9f1695f14, reading fr-persist/src/listpack.rs:73-177,
+                    fr-store/src/packed_set.rs:3336, :3534.
+      host          loadavg 66.01 / 54.01 / 70.19, runq 9, /data 243G. No measurement slot taken.
+      disposition   ANALYSIS. No engine source changed.
+
+### RETRY PREDICATE
+
+1. Do NOT implement the bead as written -- the side buffer dangles. Either store it beside the
+   spans or use the `Cow` form.
+2. Do NOT append digits to the stored listpack buffer. `bytes.len()` is load-bearing for the
+   quicklist fill decision at packed_set.rs:3534.
+3. Instrument the integer-entry read count FIRST. It is the only number that chooses between the
+   two viable designs, and this surface has already paid twice for choosing a copy form without it.
