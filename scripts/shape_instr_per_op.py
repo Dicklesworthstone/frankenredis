@@ -623,6 +623,19 @@ SHAPES = {
     "luapatsp_256": (
         [],
         ["EVAL", "local s = string.rep('a', 256) return (string.find(s, 'a+'))", "0"]),
+    # (frankenredis-zxtuk) The luapat_* rungs use an all-'a' subject AND pattern, which
+    # is the WORST shape for a first-byte-scan plain search: every position is a
+    # candidate, so lmemfind degenerates to the naive compare-everywhere it replaces.
+    # These rungs give the first byte discriminating power -- a needle starting with a
+    # byte the haystack never contains -- so the scan rejects the whole subject in one
+    # pass where the naive form compares the full needle at every offset. No match in
+    # either engine; the work is the search itself.
+    "luapatq_16": (
+        [],
+        ["EVAL", "local s = string.rep('a', 16) return tostring(string.find(s, 'Qaaaa'))", "0"]),
+    "luapatq_256": (
+        [],
+        ["EVAL", "local s = string.rep('a', 256) return tostring(string.find(s, 'Qaaaa'))", "0"]),
     "luapat_rep16": (
         [],
         ["EVAL", "local s = string.rep('a', 16) return #s", "0"]),

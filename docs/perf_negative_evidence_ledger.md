@@ -65353,3 +65353,65 @@ something read off a profile.
 3. The lever pf1vw names -- keeping the verbatim listpack and indexing it -- is the direct answer
    to the mechanism here, and this row is the first source-level confirmation that the mechanism
    is what the certified number measures.
+
+## 2026-08-19 CrimsonHawk: MEASURED, controlled A/B — the lmemfind-shaped plain search takes luapatq_256 from 1.3291x to 1.0769x, and I had first mis-read it as a NULL by comparing across runs (frankenredis-zxtuk)
+
+EVIDENCE CLASS: callgrind Ir, fr and a LIVE vendored Redis 7.2.4 in the same invocation, slope
+method, 2000 ops. TWO fr BINARIES built from the SAME tree, differing only in the plain-search call
+site, measured back to back. The harness printed WINDOW: UNFIT, so SIZING.
+
+  fr_naive_scan     `windows(len.max(1)).position(|w| w == pattern)` -- the pre-4e07ad2e1 form
+  fr_with_lmemfind  `lua_plain_find` -- first-byte scan, then compare the tail
+  per-arm  loadavg 14.36/12.82/8.73 through 17.46/12.80/8.47; iowait 0
+
+### THE A/B
+
+    shape           naive scan   lmemfind    change
+    luapatq_256        1.3291x    1.0769x    -19.0 pct
+    luapat_256         1.0325x    1.0126x     -1.9 pct
+
+Both favourable, and the SPREAD between the two shapes is the whole finding.
+
+### WHY THE TWO SHAPES DISAGREE, AND WHY THAT MATTERS
+
+`luapat_*` searches an all-'a' subject for an all-'a' pattern. Every position is a candidate first
+byte, so a first-byte scan degenerates into exactly the compare-everywhere it replaces — this is the
+WORST case for the optimisation, and it is the shape the whole luapat family has been measured on
+since it was added.
+
+`luapatq_*` gives the first byte discriminating power: the needle is `Qaaaa` against an all-'a'
+subject, so one pass rejects the whole haystack where the naive form compares five bytes at every
+offset. That is the shape a literal search normally has.
+
+### THE METHODOLOGICAL ERROR, WHICH IS THE PART WORTH KEEPING
+
+Earlier in this same session I recorded this change as a NULL. That reading came from comparing
+`luapat_256` at 1.0298x (before) against 1.0297x (after) — two numbers from DIFFERENT runs. The
+controlled A/B on the same shape shows -1.9 pct. Cross-run variance on these rungs is around 2 pct,
+so it swallowed the effect entirely.
+
+**Two numbers from two windows cannot resolve a two-percent change.** The fix is not more draws of
+the same comparison; it is holding everything but the variable constant, which here meant building
+two binaries from one tree and running them back to back. That was affordable — two builds and four
+rungs — and it converted "no effect" into "-19 pct on the shape that matters".
+
+It also means the shape a lever is measured on can hide it completely: measured only on `luapat`,
+this change is invisible.
+
+### WHAT THIS DOES NOT SETTLE
+
+  * SIZING. The gate refused; nothing here is a bound.
+  * `luapatq_256` at 1.0769x still carries run-to-run spread — an earlier reading of the same
+    binary/shape gave 1.0596x. The naive-versus-lmemfind gap (1.3291 against 1.0769) is far outside
+    that; the absolute figure is not.
+  * The shipping ELF was left as the NAIVE build while the A/B ran and has been rebuilt to match
+    HEAD (`lua_plain_find` confirmed present by symbol). Anyone measuring between those two points
+    would have measured a binary that is not HEAD.
+
+### RETRY PREDICATES
+
+  1. Quote the A/B, not the absolute ratios: the two binaries differ only at the call site, so the
+     delta is attributable and the absolute number is not stable enough to be.
+  2. Keep `luapatq_*` alongside `luapat_*`. One shape is the optimisation's best case and the other
+     its worst, and reporting either alone misrepresents it.
+  3. Before calling any small effect a null, check whether the comparison crosses runs.
