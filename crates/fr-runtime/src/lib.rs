@@ -37984,6 +37984,19 @@ impl Runtime {
         // gate to read. Computed into a local first because the predicate borrows `self`.
         let quorum_ok = self.replica_write_quorum_ok(now_ms);
         self.server.store.good_replicas_ok = quorum_ok;
+        // (frankenredis-oo3aw follow-up) And the disk-write denial, for the same reason and with
+        // the same exemption the command gate applies: upstream's script check is
+        // `deny_write_type != DISK_ERROR_TYPE_NONE && !obey_client` (script.c:165), so an obeyed
+        // source publishes None and the command layer needs no notion of who is obeyed.
+        let disk_denial = if self.server.applying_master_stream
+            || !matches!(self.execution_source, ExecutionSource::Client)
+        {
+            None
+        } else {
+            self.active_disk_write_denial()
+                .map(DiskWriteDenialKind::error_message)
+        };
+        self.server.store.script_disk_write_denial = disk_denial;
         // (frankenredis-dpu2y) The full-arity verdict from the SAME table pass that resolves
         // the name, handed to `execute_frame_internal` as a parameter rather than recomputed
         // there. Resolving the `parent|sub` key twice per generic dispatch measured +16.0

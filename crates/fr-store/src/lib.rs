@@ -6494,6 +6494,15 @@ pub struct Store {
     /// configured. `true` is the safe default -- it means "no reason to refuse" -- so a Store
     /// built outside a runtime behaves exactly as it did before.
     pub good_replicas_ok: bool,
+    /// (frankenredis-oo3aw follow-up) The MISCONF disk-write denial in force for a SCRIPT, or
+    /// `None` when there is none. Published by the runtime once per dispatch, already carrying
+    /// upstream's `!obey_client` exemption -- so the command layer never has to re-derive who is
+    /// exempt, and cannot get that half wrong on its own.
+    ///
+    /// A `&'static str` rather than an owned message on purpose: the two wordings are consts in
+    /// fr-runtime, which owns the persistence state that decides between them. Copying them here
+    /// would be the two-renderer drift this crate already owns `NOREPLICAS_ERROR` to prevent.
+    pub script_disk_write_denial: Option<&'static str>,
     /// 1-based source line of the most recent Lua script runtime error, set by
     /// `eval_script` when it returns an Err so the command layer can stamp the
     /// real line into the `script: <sha>, on @user_script:N.` envelope suffix
@@ -6945,6 +6954,7 @@ impl Default for Store {
             script_allow_oom: false,
             is_read_only_replica: false,
             good_replicas_ok: true,
+            script_disk_write_denial: None,
             lua_error_line: 1,
             script_propagation_mode: SCRIPT_PROPAGATE_ALL,
             script_propagation_records: Vec::new(),

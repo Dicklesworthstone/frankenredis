@@ -14181,6 +14181,7 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // refusal applies to every FCALL. Checked BEFORE the nesting level is raised, so the refusal
     // path has nothing to unwind.
     let prepare_refusal = script_prepare_readonly_replica_refusal(store, has_no_writes)
+        .or_else(|| script_prepare_disk_error_refusal(store, has_no_writes))
         .or_else(|| script_prepare_ro_command_refusal(is_ro, has_no_writes))
         .or_else(|| script_prepare_replica_quorum_refusal(store, has_no_writes))
         .or_else(|| script_prepare_oom_refusal(store, store.script_allow_oom));
@@ -26957,6 +26958,12 @@ fn eval_cmd(
     let prepare_refusal = if script.starts_with(b"#!") {
         script_prepare_readonly_replica_refusal(store, script_shebang_has_no_writes_flag(script))
             .or_else(|| {
+                script_prepare_disk_error_refusal(
+                    store,
+                    script_shebang_has_no_writes_flag(script),
+                )
+            })
+            .or_else(|| {
                 script_prepare_ro_command_refusal(
                     read_only_script,
                     script_shebang_has_no_writes_flag(script),
@@ -27090,6 +27097,7 @@ fn evalsha_cmd(
         .is_some_and(|body| body.starts_with(b"#!"))
     {
         script_prepare_readonly_replica_refusal(store, no_writes)
+            .or_else(|| script_prepare_disk_error_refusal(store, no_writes))
             .or_else(|| script_prepare_ro_command_refusal(read_only_script, no_writes))
             .or_else(|| script_prepare_replica_quorum_refusal(store, no_writes))
             .or_else(|| script_prepare_oom_refusal(store, allow_oom))
@@ -27313,6 +27321,30 @@ fn script_prepare_replica_quorum_refusal(store: &Store, no_writes: bool) -> Opti
         return Some(RespFrame::Error(fr_store::NOREPLICAS_ERROR.to_string()));
     }
     None
+}
+
+/// Upstream `scriptPrepareForRun`'s disk-error refusal (script.c:165-176):
+///
+///     /* Deny writes if we're unable to persist. */
+///     int deny_write_type = writeCommandsDeniedByDiskError();
+///     if (deny_write_type != DISK_ERROR_TYPE_NONE && !obey_client) { ... MISCONF ... }
+///
+/// Last of the four checks in upstream's write-flag block, and the same story as the other
+/// three: fr refused ordinary commands with MISCONF in the runtime's pre-dispatch chain, while a
+/// script's inner `redis.call` walked around it and wrote to a server that had already failed to
+/// persist.
+///
+/// The message and the obeyed-source exemption are BOTH decided by the runtime and handed over on
+/// the store, so this function contains no policy at all -- deliberately. The wording depends on
+/// whether RDB or AOF failed, which is persistence state this layer cannot see, and the last
+/// thing this bead needs is a third place that decides who is exempt.
+fn script_prepare_disk_error_refusal(store: &Store, no_writes: bool) -> Option<RespFrame> {
+    if no_writes {
+        return None;
+    }
+    store
+        .script_disk_write_denial
+        .map(|message| RespFrame::Error(message.to_string()))
 }
 
 fn script_prepare_ro_command_refusal(ro: bool, no_writes: bool) -> Option<RespFrame> {
@@ -41751,6 +41783,79 @@ mod tests {
             xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"0"]),
             250
         );
+    }
+
+    #[test]
+    fn scripts_are_refused_when_persistence_failed_and_the_replica_check_still_wins() {
+        // Upstream scriptPrepareForRun, script.c:165-176:
+        //
+        //     /* Deny writes if we're unable to persist. */
+        //     int deny_write_type = writeCommandsDeniedByDiskError();
+        //     if (deny_write_type != DISK_ERROR_TYPE_NONE && !obey_client) { ... MISCONF ... }
+        //
+        // fr refused ordinary commands with MISCONF in the runtime chain while a script's inner
+        // redis.call walked around it and wrote to a server that had already failed to persist.
+        //
+        // The store field is set directly here because that is what the runtime publishes -- it
+        // decides the wording (RDB vs AOF) and applies the obeyed-source exemption before the
+        // command layer ever sees it. A test that tried to arrange real persistence failure would
+        // be exercising the runtime, not this gate.
+        const DENIAL: &str = "MISCONF Redis is configured to save RDB snapshots, but it's \
+                              currently unable to persist to disk.";
+        fn run_script(store: &mut Store, body: &[u8]) -> RespFrame {
+            dispatch_argv(&[b"EVAL".to_vec(), body.to_vec(), b"0".to_vec()], store, 0)
+                .unwrap_or_else(|e| e.to_resp())
+        }
+
+        // Denial in force: refused before the body runs, with the runtime's exact wording.
+        let mut store = Store::new();
+        store.script_disk_write_denial = Some(DENIAL);
+        match &run_script(&mut store, b"#!lua\nredis.call('set','d_k','v') return 1") {
+            RespFrame::Error(msg) => assert_eq!(
+                msg, DENIAL,
+                "the refusal must be the runtime's message verbatim, not a rewrite"
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(
+            dispatch_argv(&[b"EXISTS".to_vec(), b"d_k".to_vec()], &mut store, 0).expect("EXISTS"),
+            RespFrame::Integer(0),
+            "the body must not have executed"
+        );
+
+        // `no-writes` exempts: upstream's check is inside the !NO_WRITES block.
+        let mut store = Store::new();
+        store.script_disk_write_denial = Some(DENIAL);
+        assert_eq!(
+            run_script(&mut store, b"#!lua flags=no-writes\nreturn 1"),
+            RespFrame::Integer(1),
+            "a no-writes script does not need to persist anything"
+        );
+
+        // Default is None, so nothing changes for a healthy server.
+        let mut store = Store::new();
+        assert!(store.script_disk_write_denial.is_none(), "the safe default is no denial");
+        assert_eq!(
+            run_script(&mut store, b"#!lua\nredis.call('set','h_k','v') return 1"),
+            RespFrame::Integer(1)
+        );
+
+        // ORDER: upstream runs the replica check at :158 and this at :165, so a script that
+        // trips both must read READONLY. Fourth ordering pair on this bead, and like the others
+        // both answers are individually correct.
+        let mut store = Store::new();
+        store.is_read_only_replica = true;
+        store.script_disk_write_denial = Some(DENIAL);
+        match &run_script(&mut store, b"#!lua\nreturn 1") {
+            RespFrame::Error(msg) => {
+                assert!(
+                    msg.contains("Can not run script with write flag on readonly replica"),
+                    "the replica check must be answered FIRST, got {msg}"
+                );
+                assert!(!msg.contains("MISCONF"), "MISCONF must not win this race: {msg}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     #[test]
