@@ -152,6 +152,65 @@ CASES = {
         'out[#out+1]=i..":"..tostring(ok)..":"..r end '
         'return table.concat(out,",")'
     ),
+    # tonumber's accepted surface: bases, hex, whitespace, signs, and the forms
+    # that must return nil rather than a number. Lua 5.1 accepts hex literals and
+    # leading/trailing whitespace, rejects embedded whitespace, and returns nil
+    # (not an error) for anything unparseable -- so a divergence here is silent.
+    "tonumber": (
+        'local cs={"10","0x10","0X10"," 10 ","1e2","1E2",".5","5.","-7","+7",'
+        '"inf","-inf","nan","0x","","  ","1 2","10abc","0b101","1e","--1",'
+        '"9007199254740993","1e400","-1e400"} '
+        'local out={} for i,v in ipairs(cs) do '
+        'local ok,r=pcall(tonumber,v) '
+        'r=tostring(r) r=string.gsub(r,",","<c>") '
+        'out[#out+1]=i..":"..tostring(ok)..":"..r end '
+        'return table.concat(out,",")'
+    ),
+    # tonumber with an explicit base -- a different code path from the base-10 form
+    # above, and the one where an out-of-range base must RAISE rather than return nil.
+    "tonumber_base": (
+        'local cs={{"ff",16},{"FF",16},{"10",2},{"777",8},{"z",36},{"Z",36},'
+        '{"10",1},{"10",37},{"10",0},{"-ff",16},{" ff ",16},{"0x10",16},{"",16}} '
+        'local out={} for i,c in ipairs(cs) do '
+        'local ok,r=pcall(tonumber,c[1],c[2]) '
+        'r=tostring(r) r=string.gsub(r,",","<c>") '
+        'out[#out+1]=i..":"..tostring(ok)..":"..r end '
+        'return table.concat(out,",")'
+    ),
+    # string.sub index arithmetic: negatives count from the end, out-of-range
+    # clamps rather than errors, and i > j yields "". Dense in off-by-one and
+    # sign-handling mistakes, and every result is a silent value rather than an error.
+    "sub_indices": (
+        'local s="abcdef" local cs={{1,3},{-3,-1},{-3},{0,2},{2,100},{-100,2},'
+        '{4,2},{0,0},{-1,-6},{1,-1},{-6,-1},{7,9},{-9,-7},{3,3},{1,0}} '
+        'local out={} for i,c in ipairs(cs) do '
+        'local ok,r=pcall(string.sub,s,c[1],c[2]) '
+        'r=tostring(r) r=string.gsub(r,",","<c>") '
+        'out[#out+1]=i..":"..tostring(ok)..":["..r.."]" end '
+        'return table.concat(out,",")'
+    ),
+    # string.byte / string.char boundaries. char must RAISE outside 0..255 in
+    # Lua 5.1; byte with ranges and negative indices mirrors sub's arithmetic.
+    "byte_char_bounds": (
+        'local out={} local cs={ '
+        'function() return string.char(65,66) end,'
+        'function() return string.char(0) end,'
+        'function() return string.char(255) end,'
+        'function() return string.char(256) end,'
+        'function() return string.char(-1) end,'
+        'function() return string.char(65.7) end,'
+        'function() return string.byte("abc",-1) end,'
+        'function() return string.byte("abc",0) end,'
+        'function() return string.byte("abc",9) end,'
+        'function() return select("#", string.byte("abc",1,3)) end,'
+        'function() return select("#", string.byte("abc",1,99)) end,'
+        'function() return string.rep("ab",0) end,'
+        'function() return string.rep("ab",-1) end } '
+        'for i,f in ipairs(cs) do local ok,r=pcall(f) '
+        'r=tostring(r) r=string.gsub(r,",","<c>") '
+        'out[#out+1]=i..":"..tostring(ok)..":["..r.."]" end '
+        'return table.concat(out,",")'
+    ),
     "byte_gsub": (
         'local out={} for i=0,255 do local c=string.char(i) '
         'local ok,r=pcall(string.gsub,"a"..c.."b",c,"X") '
@@ -165,16 +224,21 @@ def wait_ready(port: int, deadline_s: float = 20.0) -> bool:
     end = time.monotonic() + deadline_s
     while time.monotonic() < end:
         r = subprocess.run([REDIS_CLI, "-p", str(port), "ping"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, errors="replace")
         if r.stdout.strip() == "PONG":
             return True
         time.sleep(0.3)
     return False
 
 
+# errors="replace" on every redis-cli call: a case may legitimately produce a
+# non-UTF-8 byte -- string.char(255) does -- and the default strict decode raises
+# UnicodeDecodeError, which ABORTS the entire sweep and takes the other cases with
+# it. A crash is strictly worse than a divergence. Cases that can emit raw bytes
+# should hex-render in Lua as well; this is the backstop for the ones that forget.
 def run_case(port: int, body: str) -> dict[int, str]:
     r = subprocess.run([REDIS_CLI, "-p", str(port), "EVAL", body, "0"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, errors="replace")
     out: dict[int, str] = {}
     for item in r.stdout.strip().strip('"').split(","):
         parts = item.split(":")
@@ -282,7 +346,7 @@ def main() -> int:
     finally:
         for port in (args.fr_port, args.redis_port):
             subprocess.run([REDIS_CLI, "-p", str(port), "shutdown", "nosave"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, errors="replace")
         for p in procs:
             try:
                 p.wait(timeout=10)
