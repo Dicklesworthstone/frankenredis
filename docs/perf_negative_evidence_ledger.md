@@ -65758,3 +65758,66 @@ producing a number.
    shape pf1vw actually needs.
 3. Do not quote the boundary number as the RESTORE ratio. It is the worst point for fr in the
    range, and now demonstrably so on both sides of the line.
+
+## 2026-08-19 CrimsonHawk: NO MEASUREMENT TAKEN — the ratio gate was polled for 41 minutes in the quietest window of the session and never passed; on this host its build criterion is effectively unsatisfiable, and the way out is Ir rather than wall-clock
+
+EVIDENCE CLASS: repeated evaluation of `scripts/certification_window.py --for ratio`, once per
+minute for 2,446 seconds, in the window the turn brief described as "the quietest in many ticks"
+(idle 88, runq 5, no local builds, /data 241G). No ratio was measured, deliberately: the job was
+written to fire three draws only on a FIT verdict and to take nothing otherwise.
+
+### WHAT REFUSED, AND IT IS NOT THE SAME THING EACH TIME
+
+    at open   4 cargo/rustc running | 62 pct non-stationary | 15min 46.72 above 30
+    at close  3 cargo/rustc running | 36 pct non-stationary
+    after     2 cargo/rustc running | 22 pct non-stationary
+
+The 15-minute criterion DID clear during the poll, so the host genuinely settled. Two conditions
+did not:
+
+  * **cargo/rustc under the shared uid.** The gate disqualifies on ANY, correctly, because a shared
+    uid means none can be attributed away. On a nine-project host that builds continuously this is
+    not a transient state — the count never reached zero in 41 minutes of the calmest conditions
+    observed all session.
+  * **stationarity.** 1min-vs-5min stayed 22-36 pct apart against a 15 pct limit, because the host
+    is oscillating rather than idle.
+
+### THE STRUCTURAL POINT
+
+Every vs-incumbent wall-clock ratio recorded in this ledger during this session is labelled SIZING,
+and the reason is uniform: the gate has not returned FIT once. That is not a property of fr, of the
+harness, or of the shapes. It is a property of a nine-project host where the fleet-wide measurement
+slot — the mechanism that would serialise this — is DISABLED:
+
+    acquire_build_slot -> "Build slots are disabled. Enable WORKTREES_ENABLED to use this tool."
+
+confirmed on three separate turns. Without it there is no way to reserve a window, and the gate's
+build criterion cannot be met by waiting.
+
+### WHAT ACTUALLY WORKS HERE, AND IT IS ALREADY IN THIS LEDGER
+
+Retired-instruction counts are immune to load and MHz. Two rows above rest on that and are the
+strongest evidence this arc produced:
+
+  * the six-rung within-window Ir table (`4bfce7cc1`) — fr 106.08 instructions per byte against
+    Redis's 1.03 on a special-free find;
+  * the two-binary A/B (`c65d6591e`) — same tree, one call site different, measured back to back,
+    which resolved a 1.9 pct effect that cross-run comparison had reported as a NULL.
+
+An A/B between two binaries built from one tree is the shape that survives a contended host,
+because the contention is common-mode and the only difference is the variable. A wall-clock ratio
+against a live incumbent is not, and on this host it currently cannot be certified at all.
+
+### RECOMMENDATION
+
+  1. Enable `WORKTREES_ENABLED` so `acquire_build_slot` can serialise fleet measurements. Until
+     then the standing instruction to take the slot cannot be followed.
+  2. Treat Ir A/B as the certification basis for lever work on this host, and wall-clock as
+     corroboration. The precedent exists — XREAD was certified on instruction counts.
+  3. If a wall-clock bound is genuinely required, it needs a window with ZERO cargo/rustc
+     fleet-wide, which on current evidence has to be arranged rather than waited for.
+
+### RETRY PREDICATE
+
+Re-run the same poll after the slot mechanism is enabled. If the gate still never passes, the
+build criterion itself needs revisiting rather than the measurement.
