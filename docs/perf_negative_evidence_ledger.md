@@ -66189,3 +66189,82 @@ were -1.7 pct, +0.9 pct and -0.1 pct, which changes sign and so cannot clear eit
      `lua_single_match` per call before proposing anything.
   3. Any future single-A/B result on this host needs at least three pairs before it is believed.
      This one changed sign between pairs one and two.
+
+## 2026-08-19 CrimsonHawk: SIZING — my own GEOSEARCH pair does NOT reproduce the 0.7786/0.6918 re-certification, and it splits the standing "thin margins" premise: geosearch_64 is fr AHEAD by 12-15 pct on raw, while geosearch_2 straddles 1.0 in two draws of three
+
+EVIDENCE CLASS: `balanced_square_ab.py`, square ABBAABBA, 21 rounds, 50,000 ops/slot, -P16, live
+vendored Redis 7.2.4 in the SAME invocation, three draws, gate checked at both ends. CV was NOT
+used. RATIO IS fr ops/s OVER redis ops/s, so **above 1.0 means fr is FASTER** — the opposite
+convention to the instruction-count rows elsewhere in this ledger, and the source of more than one
+misreading including one of my own.
+
+  fr        `target/release/frankenredis`, sha256 `01aa8efa0e4a5be59cd06ae1...`, HEAD `18b0fb08b`
+  gate open  FIT (after 1 second)
+  gate close **UNFIT** — 1min 36.49 vs 5min 29.09, 25 pct apart
+  fleet      0 valgrind, 0 redis-benchmark at start
+
+**Claim class: SIZING, on the closing gate.** Certification needs FIT at BOTH ends and this run had
+the host walk away from under it mid-flight. The numbers are quoted because the direction is large
+and consistent, not because the window held.
+
+### THE THREE DRAWS
+
+    draw  loadavg             iowait  geosearch_2          geosearch_64      get_control
+    1     14.11 15.59 13.80   0 pct   1.0139 STRADDLES-1   1.1172 ADM        1.1202 ADM
+    2     28.44 21.14 16.28   0 pct   1.0348 ADM           1.1348 ADM        1.1211 NULL-FAILED
+    3     20.29 20.82 17.21   0 pct   1.0082 STRADDLES-1   1.1461 ADM        1.1013 ADM
+
+### WHAT THIS SAYS ABOUT "GEOSEARCH JUST CROSSED 1.0x, THIN MARGINS"
+
+The premise is half right, and the half matters:
+
+  * `geosearch_64` — fr is AHEAD by 12 to 15 pct, admissible in 3 of 3 draws, worst bound **1.1172**.
+    That is not a thin margin and it is not near a crossing.
+  * `geosearch_2` — 1.0139 / 1.0348 / 1.0082, and the CI BRACKETS 1.0 in two draws of three. This
+    is the thin one, and the harness says so directly: intervals that admit both directions mean no
+    crossing may be claimed either way.
+
+So "thin margins" describes `geosearch_2`, the row the size audit already flags as
+intercept-dominated, and not GEOSEARCH generally. Anyone acting on the standing line should be
+acting on the n=2 shape only.
+
+### I DO NOT REPRODUCE THE 0.7786 / 0.6918 FIGURES
+
+A re-certification recorded elsewhere reports geosearch_2 worst 0.7786x and geosearch_64 worst
+0.6918x on ELF `c2853031a56520a5`, base commit `37af35720`, and reads them as fr 22-31 pct ahead.
+My three draws on ELF `01aa8efa0e4a5be5` land at 1.01-1.03 and 1.12-1.15. Those are not the same
+measurement of the same thing.
+
+I am NOT claiming that run is wrong. Two readings can both be honest here and the difference is
+worth naming rather than averaging away:
+
+  * **different binaries.** Mine is HEAD `18b0fb08b`; theirs is based on `37af35720`, which is
+    several commits earlier, and this file has moved a great deal in between.
+  * **direction convention.** Under fr-over-redis, 0.69 would mean fr THIRTY PER CENT SLOWER, not
+    ahead. If that run used the inverse convention its numbers and mine may agree in substance and
+    differ only in how they are written down. `0.6918` and `1.1461` are not reciprocals
+    (1/1.1461 = 0.8726), so that alone does not reconcile them either.
+
+Until someone re-runs both shapes on one binary in one window, the safe statement is the one this
+row makes, and no cross-date GEOSEARCH comparison should be quoted.
+
+### THE NORMALISED VIEW IS UNUSABLE ON THIS PAIR
+
+    draw 1  geosearch_64 normalised 0.9973  STRADDLES-1
+    draw 3  geosearch_64 normalised 1.0407  AHEAD
+
+It changes side between draws, and the harness flags the normaliser as WIDER than the row in both
+(3.9 vs 2.2 pct, 3.7 vs 1.8 pct) — "it injects more variance than it removes". `get_control` also
+null-failed in draw 2. Raw is the only readable column here.
+
+### RETRY PREDICATES
+
+Retry predicate: re-certify ONLY IF the gate holds FIT at both ends across three draws, and reopen
+the reconciliation above ONLY IF someone measures both shapes on ONE binary in ONE window —
+until that happens the 0.7786/0.6918 pair and this row describe different builds and cannot be
+compared.
+
+  1. Quote `geosearch_64` worst 1.1172 raw as the current sizing figure, fr ahead.
+  2. Do not quote a normalised GEOSEARCH figure from this run, and do not compare a normalised
+     figure across dates: `get_control` itself moves, so normalising rebases the scale each time.
+  3. Read "thin margins" as `geosearch_2` only.
