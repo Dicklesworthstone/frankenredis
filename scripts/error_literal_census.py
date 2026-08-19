@@ -64,6 +64,29 @@ ACCEPTED_ABSENT = {
     "Error purging dirty pages": "jemalloc-specific MEMORY PURGE path; fr uses mimalloc",
     "TESTFAILED dense/sparse disagree": "DEBUG-only PFSELFTEST path",
     "TESTFAILED sparse encoding not used": "DEBUG-only PFSELFTEST path",
+    # -- LUA DEBUGGER (LDB). fr accepts SCRIPT DEBUG YES/SYNC/NO and DISCARDS the mode
+    #    (fr-command lib.rs, the arm ending "debugging mode won't actually trigger"): there is no
+    #    ldb session, no forked debug client, and no redis-cli --ldb protocol. Both literals gate
+    #    a session fr never enters. Porting the strings alone would refuse commands on behalf of
+    #    a mode that does nothing -- the reply would be faithful and the behaviour behind it still
+    #    absent, which is worse than answering nothing, because it advertises a feature.
+    "Please use EVAL instead of EVALSHA for debugging":
+        "LDB-only; fr implements no Lua debugger session (SCRIPT DEBUG is accepted and dropped)",
+    "SCRIPT DEBUG must be called outside a pipeline":
+        "LDB-only; same reason. Also needs a notion of pending pipelined input fr does not carry "
+        "into the script layer.",
+    # -- SCRIPT KILL of a BUSY script. fr never has one: scripts run to completion synchronously,
+    #    fr sends no BUSY reply anywhere in the tree, and SCRIPT KILL is unconditionally
+    #    "NOTBUSY No scripts in execution right now." Both of these are arms of the UNKILLABLE
+    #    branch, reachable only once a script is already busy AND has either written or arrived
+    #    from a master. The capability gap is the busy-script timeout, not the literal; when
+    #    lua-time-limit is made to bite, this gate fails and both come back.
+    "Sorry the script already executed write commands against the dataset. You can either wait "
+    "the script termination or kill the server in a hard way using the SHUTDOWN NOSAVE command.":
+        "reachable only for a BUSY script; fr runs scripts to completion and never replies BUSY",
+    "The busy script was sent by a master instance in the context of replication and cannot be "
+    "killed.":
+        "same UNKILLABLE branch; fr has no busy-script state to kill",
 }
 
 # Literals whose absence says nothing because they describe a C allocation failure: Rust aborts
