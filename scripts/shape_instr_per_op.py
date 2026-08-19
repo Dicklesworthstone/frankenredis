@@ -261,7 +261,9 @@ SHAPES = {
     # engines.
     #
     # FIRST MEASUREMENT, 2026-08-19, ELF 33a2b854 at HEAD eb9f643a5, N=2000/2N=4000, redis 7.2.4
-    # e837dbb2, loadavg 25-28 across all three arms, iowait ~0.95%, CPU ~3000-3400 MHz:
+    # e837dbb2, loadavg 25-28 across all three arms, CPU ~3000-3400 MHz. (The iowait figure
+    # originally recorded here was VOID -- a since-boot average, see 169054e06 -- so it is
+    # dropped rather than restated; these rows are callgrind Ir and are immune to it anyway.)
     #
     #   shape              fr instr/op   redis instr/op   fr/redis   normalised vs control
     #   rotate_packed_8       2646.8         6153.6        0.4301x         1.493x
@@ -2133,7 +2135,17 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
     return total_ir(out)
 
 
-def window_provenance() -> str:
+def cpu_jiffies() -> tuple:
+    """(total, iowait) jiffies from /proc/stat. A SNAPSHOT of counters -- difference two."""
+    try:
+        with open("/proc/stat") as handle:
+            fields = [int(x) for x in handle.readline().split()[1:]]
+        return sum(fields), fields[4]
+    except (OSError, ValueError, IndexError):
+        return (0, 0)
+
+
+def window_provenance(since: tuple | None = None) -> str:
     """One line describing the WINDOW a measurement was taken in.
 
     (frankenredis-1cmy9) This harness recorded nothing about the window, and its
@@ -2146,6 +2158,15 @@ def window_provenance() -> str:
     apart. Two rows from different windows were therefore not comparable and looked
     it, which is exactly what the standing orders' load-and-MHz provenance rule
     exists to prevent.
+
+    IOWAIT IS DIFFERENCED ACROSS THE ARM, not sampled. `/proc/stat`'s fields are
+    counters accumulated since boot, so `iowait / total` from ONE read is the average
+    over the machine's whole uptime and cannot move: on a host three days up a
+    measurement window is ~0.0009% of the accumulated jiffies. A probe of mine
+    reported "iowait 0.93%" on every row for days that way, including on a tick the
+    fleet reported disk-bound at 32% (fixed in 169054e06). Passing the caller's
+    opening snapshot as `since` yields the share over the arm's ACTUAL duration,
+    which costs nothing extra -- the arm has already run.
 
     Cheap enough to call per arm: two small /proc reads, no subprocess.
     """
@@ -2168,7 +2189,16 @@ def window_provenance() -> str:
             mhz = "mean %.0f max %.0f" % (sum(speeds) / len(speeds), max(speeds))
     except OSError:
         pass
-    return "loadavg %s | cpu MHz %s" % (loadavg, mhz)
+    iowait = ""
+    if since is not None:
+        total_before, io_before = since
+        total_after, io_after = cpu_jiffies()
+        elapsed = total_after - total_before
+        if elapsed > 0:
+            iowait = " | iowait %.2f%% over this arm" % (
+                (io_after - io_before) / elapsed * 100
+            )
+    return "loadavg %s | cpu MHz %s%s" % (loadavg, mhz, iowait)
 
 
 def instr_per_op(engine: str, seeds, cmd, ops: int, workdir: str, label: str,
@@ -2176,10 +2206,11 @@ def instr_per_op(engine: str, seeds, cmd, ops: int, workdir: str, label: str,
     # Provenance is captured per ARM and on BOTH sides of it, because the window can
     # move mid-arm: a drift between these two lines is the reason to distrust the row.
     before = window_provenance()
+    jiffies_before = cpu_jiffies()
     low = run_once(engine, seeds, cmd, ops, workdir, label + ".n", locale)
     high = run_once(engine, seeds, cmd, ops * 2, workdir, label + ".2n", locale)
     print("  %-5s window: %s" % (label, before))
-    print("  %-5s window: %s   (after)" % (label, window_provenance()))
+    print("  %-5s window: %s   (after)" % (label, window_provenance(jiffies_before)))
     delta = high - low
     # (frankenredis-3f7jb) Two-point subtraction assumes the 2N run does strictly
     # more work than the N run. When a command carries large or VARIABLE one-time
