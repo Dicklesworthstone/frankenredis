@@ -9149,7 +9149,11 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
                 .to_string(),
         ));
     }
-    if limit_given && !trim_approx {
+    // (frankenredis-obeyclient-strlen-qxdyn) Upstream reaches this check only in the ELSE of
+    // `if (mustObeyClient(c))` (t_stream.c:1008-1019), so an obeyed source is never answered
+    // with it. Kept in upstream's position rather than moved: the two checks ABOVE sit before
+    // the obey branch there too, and are therefore still unconditional here.
+    if limit_given && !trim_approx && !store.must_obey_client {
         return Ok(RespFrame::Error(
             "ERR syntax error, LIMIT cannot be used without the special ~ option".to_string(),
         ));
@@ -9333,17 +9337,27 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     // exact-with-LIMIT path diverged from Redis node-boundary semantics.
     if let Some(min_id) = trim_minid {
         let removed = if trim_approx {
-            let approx_limit = if limit_given {
-                trim_limit_usize
-            } else {
-                Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
-            };
+            let approx_limit = stream_effective_approx_limit(
+                store.must_obey_client,
+                limit_given,
+                trim_limit_usize,
+            );
             store
                 .xtrim_minid_approx(&argv[1], min_id, approx_limit, now_ms)
                 .unwrap_or(0)
         } else {
             store
-                .xtrim_minid(&argv[1], min_id, trim_limit_usize, now_ms)
+                .xtrim_minid(
+                    &argv[1],
+                    min_id,
+                    // (frankenredis-obeyclient-strlen-qxdyn) exact MINID, obeyed source: no cap.
+                    if store.must_obey_client {
+                        None
+                    } else {
+                        trim_limit_usize
+                    },
+                    now_ms,
+                )
                 .unwrap_or(0)
         };
         trimmed_entries = trimmed_entries.saturating_add(removed);
@@ -9541,7 +9555,10 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             "ERR syntax error, XTRIM must be called with a trimming strategy".to_string(),
         ));
     }
-    if limit_given && !approx {
+    // (frankenredis-obeyclient-strlen-qxdyn) As in XADD: upstream reaches this only when NOT
+    // obeyed (t_stream.c:1008-1019). The two checks above it stay unconditional because
+    // upstream runs those before the obey branch.
+    if limit_given && !approx && !store.must_obey_client {
         return Ok(RespFrame::Error(
             "ERR syntax error, LIMIT cannot be used without the special ~ option".to_string(),
         ));
@@ -9571,11 +9588,8 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         let max_len = maxlen_value.expect("maxlen_value set when strategy = MaxLen");
         let effective_max_len = if approx {
             let current_len = store.xlen(&argv[1], now_ms)?;
-            let approx_limit = if limit_given {
-                limit
-            } else {
-                Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
-            };
+            let approx_limit =
+                stream_effective_approx_limit(store.must_obey_client, limit_given, limit);
             stream_approx_trim_target(current_len, max_len, approx_limit)
         } else {
             max_len
@@ -9583,7 +9597,11 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         // After computing the effective target, the underlying
         // store does an exact trim. Pass `None` for limit because we
         // already incorporated the cap into effective_max_len.
-        let pass_limit = if approx { None } else { limit };
+        let pass_limit = if approx || store.must_obey_client {
+            None
+        } else {
+            limit
+        };
         let removed = store.xtrim(&argv[1], effective_max_len, pass_limit, now_ms)?;
         Ok(RespFrame::Integer(
             i64::try_from(removed).unwrap_or(i64::MAX),
@@ -9591,14 +9609,17 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     } else {
         let min_id = minid_value.expect("minid_value set when strategy = MinId");
         let removed = if approx {
-            let approx_limit = if limit_given {
-                limit
-            } else {
-                Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
-            };
+            let approx_limit =
+                stream_effective_approx_limit(store.must_obey_client, limit_given, limit);
             store.xtrim_minid_approx(&argv[1], min_id, approx_limit, now_ms)?
         } else {
-            store.xtrim_minid(&argv[1], min_id, limit, now_ms)?
+            store.xtrim_minid(
+                &argv[1],
+                min_id,
+                // (frankenredis-obeyclient-strlen-qxdyn) exact MINID, obeyed source: no cap.
+                if store.must_obey_client { None } else { limit },
+                now_ms,
+            )?
         };
         Ok(RespFrame::Integer(
             i64::try_from(removed).unwrap_or(i64::MAX),
@@ -9635,16 +9656,20 @@ pub fn apply_xadd_maxlen_trim_after_add(
         // xlen returns Result<usize, StoreError>; on error, mirror the generic
         // path's no-op fallback (trim to the current length).
         let current_len = store.xlen(key, now_ms).unwrap_or(max_len);
-        let approx_limit = if limit_given {
-            trim_limit
-        } else {
-            Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
-        };
+        let approx_limit =
+            stream_effective_approx_limit(store.must_obey_client, limit_given, trim_limit);
         stream_approx_trim_target(current_len, max_len, approx_limit)
     } else {
         max_len
     };
-    let pass_limit = if trim_approx { None } else { trim_limit };
+    // (frankenredis-obeyclient-strlen-qxdyn) `limit = 0` upstream means no limit on EITHER
+    // branch, so an obeyed source drops the cap for exact trimming too -- reachable now that
+    // the LIMIT-without-`~` refusal no longer fires for obeyed sources.
+    let pass_limit = if trim_approx || store.must_obey_client {
+        None
+    } else {
+        trim_limit
+    };
     store
         .xtrim(key, effective_max_len, pass_limit, now_ms)
         .unwrap_or(0)
@@ -9663,6 +9688,36 @@ pub fn apply_xadd_maxlen_trim_after_add(
 /// LIMIT smaller than the head node size evicts nothing (whole-node granularity)
 /// rather than a partial count. The earlier "round the exact count down to a
 /// node multiple, then `.min(limit)`" model diverged on both. (frankenredis-c6j11)
+/// Resolve `args->limit` exactly as upstream's `streamParseAddOrTrimArgsOrReply` does
+/// (t_stream.c:1008-1036), including the arm fr was missing:
+///
+///     if (mustObeyClient(c)) {
+///         /* If command came from master or from AOF we must not enforce maxnodes
+///          * (The maxlen/minid argument was re-written to make sure there's no
+///          * inconsistency). */
+///         args->limit = 0;
+///     } else { ... 100 * stream_node_max_entries, capped [10000, 1000000] ... }
+///
+/// (frankenredis-obeyclient-strlen-qxdyn) The comment is the whole argument. A master
+/// REWRITES `MAXLEN ~ N` into an exact count before propagating it, precisely so every replica
+/// trims to the same place. If the replica then applies its own work cap on top, it stops early
+/// and KEEPS entries the master dropped -- a silent, permanent divergence in the opposite
+/// direction from the usual one, and invisible because trimming reports no error. The same holds
+/// for AOF replay. `0` upstream means no limit, which is `None` here.
+fn stream_effective_approx_limit(
+    obeyed: bool,
+    limit_given: bool,
+    limit: Option<usize>,
+) -> Option<usize> {
+    if obeyed {
+        None
+    } else if limit_given {
+        limit
+    } else {
+        Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
+    }
+}
+
 fn stream_approx_trim_target(current_len: usize, max_len: usize, limit: Option<usize>) -> usize {
     let mut removed = 0usize;
     loop {
@@ -41524,6 +41579,124 @@ mod tests {
             xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"0"]),
             250
         );
+    }
+
+    #[test]
+    fn obeyed_sources_get_no_stream_trim_limit_qxdyn() {
+        // Upstream's streamParseAddOrTrimArgsOrReply opens the limit resolution with
+        //
+        //     if (mustObeyClient(c)) { ... args->limit = 0; }
+        //
+        // and the comment on it (t_stream.c:1008-1011) is the whole argument: the master
+        // REWRITES `MAXLEN ~ N` to an exact count before propagating, so every replica trims to
+        // the same place. A replica that then applies its OWN work cap stops early and KEEPS
+        // entries the master dropped. Trimming reports no error, so the divergence is silent and
+        // permanent.
+        //
+        // An explicit LIMIT is used rather than the default cap because the default is
+        // 100 * STREAM_NODE_MAX_ENTRIES = 10000 entries, and seeding past it to make it bind
+        // would cost 10k XADDs for the same one-bit answer.
+        fn seed(store: &mut Store, n: usize) {
+            for i in 0..n {
+                let argv: Vec<Vec<u8>> = vec![
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    b"*".to_vec(),
+                    b"f".to_vec(),
+                    format!("{i}").into_bytes(),
+                ];
+                dispatch_argv(&argv, store, 0).expect("seed XADD");
+            }
+        }
+        fn xlen(store: &mut Store) -> i64 {
+            match dispatch_argv(&[b"XLEN".to_vec(), b"s".to_vec()], store, 0).expect("XLEN") {
+                RespFrame::Integer(n) => n,
+                other => panic!("expected an integer XLEN, got {other:?}"),
+            }
+        }
+        fn trim(store: &mut Store) -> Result<RespFrame, CommandError> {
+            dispatch_argv(
+                &[
+                    b"XTRIM".to_vec(),
+                    b"s".to_vec(),
+                    b"MAXLEN".to_vec(),
+                    b"~".to_vec(),
+                    b"0".to_vec(),
+                    b"LIMIT".to_vec(),
+                    b"100".to_vec(),
+                ],
+                store,
+                0,
+            )
+        }
+
+        // ORDINARY CLIENT: the cap binds, so a 500-entry stream is not emptied.
+        let mut store = Store::new();
+        seed(&mut store, 500);
+        trim(&mut store).expect("an ordinary approximate trim is legal");
+        let left_capped = xlen(&mut store);
+        assert!(
+            left_capped > 0,
+            "LIMIT 100 must stop the trim early; emptying the stream means the cap was ignored"
+        );
+
+        // OBEYED SOURCE: the same command trims everything, because the master already did.
+        let mut store = Store::new();
+        store.must_obey_client = true;
+        seed(&mut store, 500);
+        trim(&mut store).expect("an obeyed approximate trim is legal");
+        assert_eq!(
+            xlen(&mut store),
+            0,
+            "an obeyed source must not apply its own LIMIT -- it would keep entries the master \
+             dropped, and report success while doing it"
+        );
+
+        // ...and the cap returns once the obeyed source ends. This is the row that fails if the
+        // exemption is left latched on, which would silently disable LIMIT for every client.
+        store.must_obey_client = false;
+        seed(&mut store, 500);
+        trim(&mut store).expect("ordinary trim again");
+        assert!(xlen(&mut store) > 0, "the LIMIT must bind again");
+
+        // The syntax gate moves with it: upstream reaches "LIMIT cannot be used without the
+        // special ~ option" only in the ELSE of the mustObeyClient branch, so an obeyed source
+        // is never answered with it.
+        let mut store = Store::new();
+        seed(&mut store, 10);
+        let refused = dispatch_argv(
+            &[
+                b"XTRIM".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"5".to_vec(),
+                b"LIMIT".to_vec(),
+                b"3".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("the refusal is a reply, not an Err");
+        assert_eq!(
+            refused,
+            RespFrame::Error(
+                "ERR syntax error, LIMIT cannot be used without the special ~ option".to_string()
+            )
+        );
+        store.must_obey_client = true;
+        dispatch_argv(
+            &[
+                b"XTRIM".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"5".to_vec(),
+                b"LIMIT".to_vec(),
+                b"3".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("an obeyed source is never answered with that refusal");
     }
 
     #[test]
