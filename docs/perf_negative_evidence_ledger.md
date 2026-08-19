@@ -66400,3 +66400,74 @@ handlers.
    longest-first, so a shorter name that is a prefix of a longer one cannot be masked by it.
 3. The ACL SAVE failure path is the one genuinely open item from this sweep, and it is open
    because fr does not implement ACL SAVE at all -- a missing command, not a missing message.
+
+## 2026-08-19 CrimsonHawk: CERTIFIED — `geosearch_64` throughput worst bound **1.1206x, fr AHEAD**, admissible 3 of 3 with the gate FIT at BOTH ends. The six-replicate "straddles 1.0" history no longer describes this binary, and `geosearch_2` remains unquotable
+
+EVIDENCE CLASS: `balanced_square_ab.py`, square ABBAABBA, 21 rounds, 50,000 ops/slot, -P16, live
+vendored Redis 7.2.4 in the SAME invocation, three consecutive draws, window gate evaluated at both
+ends and FIT at both. CV was NOT used, as a gate or otherwise. RATIO IS fr ops/s OVER redis ops/s,
+so **above 1.0 means fr is FASTER** — the throughput axis, not the instruction axis.
+
+Claim class: COMPETITIVE — this is a vs-incumbent authentication of a throughput ratio, measured
+against the live legacy incumbent in the same invocation. Campaign output: yes.
+
+  fr        `target/release/frankenredis`, sha256 `9b1b1522cff323efee21f37434609271d5223eb1`
+  incumbent vendored redis 7.2.4
+  HEAD      `f9cdd0caf`
+  gate      FIT at open (after a 63-second poll) and FIT at close, 0 builds at close
+  CPU MHz at close 1429 1429 3194 4019 1429 1429 3991 1429
+
+### THE THREE DRAWS
+
+    draw  loadavg             iowait  geosearch_2          geosearch_64   get_control
+    1     9.96 15.54 18.28    1 pct   1.0025 NULL-FAILED   1.1206 ADM     1.1252 ADM
+    2     29.25 20.05 19.28   0 pct   0.9956 STRADDLES-1   1.1442 ADM     1.1602 NULL-FAILED
+    3     19.00 20.23 19.55   0 pct   1.0106 STRADDLES-1   1.1409 ADM     1.1744 NULL-FAILED
+
+### THE BOUND
+
+    geosearch_64   worst of 1.1206 / 1.1442 / 1.1409  ->  **1.1206x**, admissible 3 of 3
+
+fr serves at least 12 pct more operations per second than the incumbent on this shape, and the
+figure is stable to about 2 pct across draws.
+
+### WHAT THIS SETTLES
+
+`fe76a4034` and the row at line 60418 record that `geosearch_64`'s THROUGHPUT ratio "has straddled
+1.0 for six replicates", which is why the instruction-axis result (0.6887x, 31 pct fewer
+instructions) was framed as explaining a straddle. **That straddle is gone.** Three draws, all
+admissible, none bracketing 1.0, in a window FIT at both ends. Either the binary moved or the
+earlier replicates were taken in windows that could not resolve it; this row does not distinguish
+those, but it does mean the straddle must not be cited as current.
+
+Both axes now agree without needing reconciliation: fr retires 31 pct fewer instructions AND serves
+12 pct more ops/s on `geosearch_64`.
+
+### `geosearch_2` IS STILL NOT QUOTABLE, AND THAT IS THE ANSWER TO "THIN MARGINS"
+
+    draw 1  NULL-FAILED       draw 2  STRADDLES-1       draw 3  STRADDLES-1
+
+Not admissible in a single draw across two separate FIT-eligible runs now. Its CI brackets 1.0, so
+no crossing may be claimed in either direction — the harness says exactly that. The standing
+"GEOSEARCH just crossed 1.0x, thin margins" line describes THIS shape, the n=2 row the size audit
+flags as intercept-dominated, and it remains unresolvable rather than thin-but-positive.
+
+### THE NORMALISED COLUMN IS AGAIN UNUSABLE
+
+`get_control` null-failed in 2 of 3 draws. In draw 1, where it passed, the normalised
+`geosearch_64` is 0.9959 and STRADDLES 1.0 while the raw row does not — and the harness flags the
+normaliser as wider than the row (4.2 vs 3.2 pct), "it injects more variance than it removes". A
+normalised figure here would reverse a certified raw result on the strength of a noisier divisor.
+Raw is the certified column.
+
+### RETRY PREDICATES
+
+Retry predicate: re-certify ONLY IF a change lands that touches the geo scan path or the reply
+encoder, or IF a future run shows `geosearch_64` falling below 1.10 raw in any admissible draw —
+either would mean this bound no longer holds. Reopen `geosearch_2` ONLY IF a window produces an
+admissible row for it, which two FIT-eligible runs have now failed to do.
+
+  1. Quote `geosearch_64` as **1.1206x throughput, fr ahead** — with the axis named, per the
+     correction row above.
+  2. Do not quote `geosearch_2` at all; it has no admissible row.
+  3. Do not cite the six-replicate straddle as current standing for `geosearch_64`.
