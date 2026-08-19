@@ -122,7 +122,17 @@ def fr_code_text():
             if st.startswith("//"):
                 continue
             parts.append(line)
-    return "".join(parts)
+    text = "".join(parts)
+    # RUST LINE CONTINUATIONS. fr wraps long messages as
+    #
+    #     "OOM allow-oom flag is not set on the script, can not run it when used memory > \
+    #      'maxmemory'"
+    #
+    # where `\` + newline + leading whitespace is elided by the compiler. The SOURCE text
+    # therefore does not contain the message as a contiguous run, and a raw search reports it
+    # absent -- which it did, for a guard this session implemented. Join them first, so the text
+    # searched is the string the compiler builds.
+    return re.sub(r"\\\n\s*", "", text)
 
 
 def self_test():
@@ -164,8 +174,22 @@ def self_test():
     joined = "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1)))
     assert joined == "first half second half", joined
 
+    # 5. RUST LINE CONTINUATIONS. fr wraps a long message with a trailing `\\` and re-indents
+    #    the remainder; the compiler elides both, so the string the SERVER sends is contiguous
+    #    while the string in the FILE is not. This one reported a guard absent that this census's
+    #    own author had implemented -- the failure mode is a false ABSENCE, i.e. re-doing work.
+    wrapped = ('        "OOM allow-oom flag is not set on the script, can not run it when used \\\n'
+               '         memory > \'maxmemory\'"\n')
+    phrase = "can not run it when used memory > 'maxmemory'"
+    assert phrase not in wrapped, "precondition: raw text really does NOT contain the message"
+    joined = re.sub(r"\\\n\s*", "", wrapped)
+    assert phrase in joined, "after joining continuations it must be found"
+    assert re.search(r'"[A-Z]+ ' + re.escape("allow-oom flag is not set"), joined), (
+        "and the code-prefix form must still work on the joined text"
+    )
+
     print("PASS error_literal_census self-test: substring masking, code prefixes, comment "
-          "stripping, C concatenation")
+          "stripping, C concatenation, Rust line continuations")
     return 0
 
 
