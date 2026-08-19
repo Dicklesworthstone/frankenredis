@@ -66331,3 +66331,72 @@ claim above that a SIZING run cannot settle.
 
   1. Quote GEOSEARCH as "1.1172x throughput" or "0.6887x instructions", never as a bare ratio.
   2. Do not re-run anything on account of the apparent conflict. There was none.
+
+---
+
+## CLEAN NEGATIVE — the two missing SUBSCRIBE deny-blocking literals are correctly absent, and porting them naively would BREAK a backward-compatible behaviour (census of pubsub.c)
+
+Extending the addReplyError literal census to geo.c, hyperloglog.c, t_stream.c, pubsub.c, acl.c,
+multi.c, latency.c, tracking.c and object.c: 60 literals, 7 absent from fr. Five are genuinely
+inapplicable -- two DEBUG-only HLL self-test strings, two C allocation-failure paths with no Rust
+counterpart, one jemalloc purge message. One is an ACL SAVE failure path fr does not implement.
+
+The seventh looked real and is not, and the reason is worth more than the row.
+
+### WHAT THE CENSUS SAID
+
+`PSUBSCRIBE isn't allowed for a DENY BLOCKING client` (pubsub.c:576) absent from fr. Checking
+precisely then showed the SUBSCRIBE one (pubsub.c:544) is absent too -- the census had MISSED it,
+because `"SUBSCRIBE isn't allowed..."` is a SUBSTRING of the SSUBSCRIBE line fr does have. Same
+false-negative shape that let `new` hide from the 44-event keyspace census. A literal census must
+match with delimiters or it silently under-reports exactly the names that are prefixes of others.
+
+### WHY THEIR ABSENCE IS CORRECT
+
+Upstream's three guards are NOT the same guard:
+
+      subscribeCommand    if ((flags & CLIENT_DENY_BLOCKING) && !(flags & CLIENT_MULTI))
+      psubscribeCommand   if ((flags & CLIENT_DENY_BLOCKING) && !(flags & CLIENT_MULTI))
+      ssubscribeCommand   if  (flags & CLIENT_DENY_BLOCKING)
+
+with an in-situ comment on the first two: "we have a special treatment for multi because of
+backward compatibility". So SUBSCRIBE and PSUBSCRIBE are ALLOWED inside MULTI and SSUBSCRIBE is
+not -- and fr already matches that, refusing SSUBSCRIBE under `executing_exec` and permitting the
+other two. fr's own `monitorexec-pfcz4` test comment states the distinction outright: MONITOR,
+"unlike the subscribe family, has no MULTI exemption".
+
+That leaves only a non-MULTI deny-blocking context, and fr has none:
+
+      from EXEC     that IS CLIENT_MULTI, so upstream exempts it and fr correctly does not refuse
+      from a script `subscribe`/`psubscribe` are CMD_NOSCRIPT in BOTH tables (fr-command:18784,
+                    :18786; commands.def CMD_NOSCRIPT), so the noscript refusal fires first
+      from a module fr has no modules
+
+### THE TRAP THIS ROW EXISTS TO PREVENT
+
+A future census hit on these literals invites porting them. Porting them the obvious way -- guard
+on the deny-blocking condition alone, as the SSUBSCRIBE site already does -- would drop the
+`&& !(flags & CLIENT_MULTI)` half and start refusing SUBSCRIBE inside MULTI, which upstream
+deliberately permits for backward compatibility. That is a REGRESSION introduced by a parity fix,
+from a literal that was correctly absent.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement; loadavg 18.87, outside the <=7 envelope this instrument needs, so no timed run was
+attempted. This is a reading of three upstream guards, two command tables and fr's existing
+handlers.
+
+### PROVENANCE
+
+      source        main at 18b0fb08b; pubsub.c:534-548, :572-580, :711-717; commands.def
+                    subscribe entry; fr-runtime/src/lib.rs:46940, :46987, :47227.
+      host          loadavg 19.01 / 24.79 / 21.05, runq 10, /data 225G.
+      disposition   CLEAN NEGATIVE. No engine source changed.
+
+### RETRY PREDICATE
+
+1. Do not port these two literals. If a later census flags them again, this row is the answer.
+2. Fix the census method before trusting it again: match error literals with a delimiter, or
+   longest-first, so a shorter name that is a prefix of a longer one cannot be masked by it.
+3. The ACL SAVE failure path is the one genuinely open item from this sweep, and it is open
+   because fr does not implement ACL SAVE at all -- a missing command, not a missing message.
