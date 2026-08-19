@@ -44698,38 +44698,61 @@ impl Runtime {
                 static_override_updates.push(("bind".to_string(), joined));
                 continue;
             }
-            if parameter.eq_ignore_ascii_case("appendfilename")
-                || parameter.eq_ignore_ascii_case("appenddirname")
-                || parameter.eq_ignore_ascii_case("always-show-logo")
-                || parameter.eq_ignore_ascii_case("aof_rewrite_cpulist")
-                || parameter.eq_ignore_ascii_case("bgsave_cpulist")
-                || parameter.eq_ignore_ascii_case("bio_cpulist")
-                || parameter.eq_ignore_ascii_case("cluster-config-file")
-                || parameter.eq_ignore_ascii_case("cluster-enabled")
-                || parameter.eq_ignore_ascii_case("cluster-port")
-                || parameter.eq_ignore_ascii_case("databases")
-                || parameter.eq_ignore_ascii_case("daemonize")
-                || parameter.eq_ignore_ascii_case("disable-thp")
-                || parameter.eq_ignore_ascii_case("enable-protected-configs")
-                || parameter.eq_ignore_ascii_case("enable-debug-command")
-                || parameter.eq_ignore_ascii_case("enable-module-command")
-                || parameter.eq_ignore_ascii_case("io-threads")
-                || parameter.eq_ignore_ascii_case("io-threads-do-reads")
-                || parameter.eq_ignore_ascii_case("logfile")
-                || parameter.eq_ignore_ascii_case("pidfile")
-                || parameter.eq_ignore_ascii_case("rdbchecksum")
-                || parameter.eq_ignore_ascii_case("replicaof")
-                || parameter.eq_ignore_ascii_case("set-proc-title")
-                || parameter.eq_ignore_ascii_case("server_cpulist")
-                || parameter.eq_ignore_ascii_case("slaveof")
-                || parameter.eq_ignore_ascii_case("socket-mark-id")
-                || parameter.eq_ignore_ascii_case("supervised")
-                || parameter.eq_ignore_ascii_case("syslog-enabled")
-                || parameter.eq_ignore_ascii_case("syslog-facility")
-                || parameter.eq_ignore_ascii_case("syslog-ident")
-                || parameter.eq_ignore_ascii_case("tcp-backlog")
-                || parameter.eq_ignore_ascii_case("unixsocket")
-                || parameter.eq_ignore_ascii_case("unixsocketperm")
+            // (frankenredis-immutable-startup) A STARTUP directive is never gated by this
+            // check, for exactly the reason `frankenredis-fyi51` exempted PROTECTED_CONFIG from
+            // its own: "immutable" means NOT SETTABLE AT RUNTIME, and startup is when these ARE
+            // settable. Upstream enforces IMMUTABLE_CONFIG in `configSetCommand` only; a
+            // command-line flag or a config-file line goes through `loadServerConfigFromString`,
+            // which never consults it. fr routed startup through the runtime path and inherited
+            // the refusal, and because the command-line branch treats a rejection as fatal, fr
+            // ABORTED THE BOOT on ordinary Redis startup flags.
+            //
+            // MEASURED live, 10 of fr's 32 immutable names passed as `--name value` to each
+            // engine, fr ELF 4469e757 against vendored 7.2.4: NINE made fr refuse to start and
+            // all ten started Redis -- `--logfile`, `--databases`, `--pidfile`, `--io-threads`,
+            // `--appendfilename`, `--enable-protected-configs`, `--tcp-backlog`,
+            // `--always-show-logo`, `--rdbchecksum`. `--logfile` and `--daemonize` are how
+            // essentially every production Redis is launched.
+            //
+            // WHAT THIS DOES AND DOES NOT CLAIM: it makes fr ACCEPT and RECORD the directive, so
+            // it boots and CONFIG GET reports the value, as upstream does. Whether each of the 32
+            // is then HONOURED at runtime is a separate per-directive question and is not claimed
+            // here. The alternative -- keep refusing -- is strictly worse: fr already accepts
+            // these same directives from a CONFIG FILE with a warning, so the abort was an
+            // asymmetry between two spellings of one directive, not a considered policy.
+            if !self.server.startup_config_application
+                && (parameter.eq_ignore_ascii_case("appendfilename")
+                    || parameter.eq_ignore_ascii_case("appenddirname")
+                    || parameter.eq_ignore_ascii_case("always-show-logo")
+                    || parameter.eq_ignore_ascii_case("aof_rewrite_cpulist")
+                    || parameter.eq_ignore_ascii_case("bgsave_cpulist")
+                    || parameter.eq_ignore_ascii_case("bio_cpulist")
+                    || parameter.eq_ignore_ascii_case("cluster-config-file")
+                    || parameter.eq_ignore_ascii_case("cluster-enabled")
+                    || parameter.eq_ignore_ascii_case("cluster-port")
+                    || parameter.eq_ignore_ascii_case("databases")
+                    || parameter.eq_ignore_ascii_case("daemonize")
+                    || parameter.eq_ignore_ascii_case("disable-thp")
+                    || parameter.eq_ignore_ascii_case("enable-protected-configs")
+                    || parameter.eq_ignore_ascii_case("enable-debug-command")
+                    || parameter.eq_ignore_ascii_case("enable-module-command")
+                    || parameter.eq_ignore_ascii_case("io-threads")
+                    || parameter.eq_ignore_ascii_case("io-threads-do-reads")
+                    || parameter.eq_ignore_ascii_case("logfile")
+                    || parameter.eq_ignore_ascii_case("pidfile")
+                    || parameter.eq_ignore_ascii_case("rdbchecksum")
+                    || parameter.eq_ignore_ascii_case("replicaof")
+                    || parameter.eq_ignore_ascii_case("set-proc-title")
+                    || parameter.eq_ignore_ascii_case("server_cpulist")
+                    || parameter.eq_ignore_ascii_case("slaveof")
+                    || parameter.eq_ignore_ascii_case("socket-mark-id")
+                    || parameter.eq_ignore_ascii_case("supervised")
+                    || parameter.eq_ignore_ascii_case("syslog-enabled")
+                    || parameter.eq_ignore_ascii_case("syslog-facility")
+                    || parameter.eq_ignore_ascii_case("syslog-ident")
+                    || parameter.eq_ignore_ascii_case("tcp-backlog")
+                    || parameter.eq_ignore_ascii_case("unixsocket")
+                    || parameter.eq_ignore_ascii_case("unixsocketperm"))
             {
                 return RespFrame::Error(format!(
                     "ERR CONFIG SET failed (possibly related to argument '{parameter}') - can't set immutable config"
@@ -70054,6 +70077,51 @@ mod tests {
                 RespFrame::BulkString(Some(b"no".to_vec())),
             ]))
         );
+    }
+
+    /// An IMMUTABLE config must be ACCEPTED at startup and REFUSED at runtime -- both halves.
+    ///
+    /// (frankenredis-immutable-startup) "Immutable" in Redis means not settable at RUNTIME;
+    /// startup is exactly when these ARE settable. fr routed startup through the runtime CONFIG
+    /// SET path and inherited its refusal, and since the command-line branch treats a rejection as
+    /// fatal, fr ABORTED THE BOOT on ordinary Redis startup flags. Measured live before the fix:
+    /// nine of ten sampled names made fr refuse to start and all ten started Redis 7.2.4.
+    ///
+    /// THE SECOND HALF IS WHAT MAKES THIS A TEST RATHER THAN A RUBBER STAMP. Deleting the
+    /// immutable check outright would satisfy the startup half and silently drop a real upstream
+    /// behaviour, so the runtime refusal is asserted in the same body, on the same parameter.
+    /// Verified live against 7.2.4: started with `--databases 32`, both engines report 32 from
+    /// CONFIG GET and both refuse `CONFIG SET databases 16` with the identical wording.
+    #[test]
+    fn immutable_configs_are_settable_at_startup_and_refused_at_runtime() {
+        for parameter in ["databases", "logfile", "appendfilename", "tcp-backlog"] {
+            let value: &[u8] = match parameter {
+                "databases" => b"32",
+                "logfile" => b"/dev/null",
+                "appendfilename" => b"other.aof",
+                _ => b"511",
+            };
+
+            let mut rt = Runtime::new(RuntimePolicy::default());
+            let startup =
+                rt.execute_startup_config_directive(parameter.as_bytes(), value, 0);
+            assert!(
+                !matches!(&startup, RespFrame::Error(_)),
+                "{parameter} must be accepted as a STARTUP directive, got {startup:?}"
+            );
+
+            let runtime_set = rt.execute_frame(
+                command(&[b"CONFIG", b"SET", parameter.as_bytes(), value]),
+                0,
+            );
+            let RespFrame::Error(err) = &runtime_set else {
+                panic!("{parameter} must still be refused by a RUNTIME CONFIG SET, got {runtime_set:?}");
+            };
+            assert!(
+                err.contains("can't set immutable config"),
+                "{parameter}: expected upstream's immutable wording at runtime, got {err}"
+            );
+        }
     }
 
     #[test]
