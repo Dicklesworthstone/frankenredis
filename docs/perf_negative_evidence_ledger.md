@@ -64477,3 +64477,70 @@ error reply counts as a completed request and would have inflated the arm that f
      iterative, so what remains is the per-character work itself.
   3. Keep `get_control` in every run. It null-failed here, which is exactly why no normalised
      figure was quoted.
+
+---
+
+## RESOLVED — the i41sx "contradiction" was a POLARITY misread, not a shape mismatch: `fr/redis` means the opposite thing in the scorecards than it does in this ledger (frankenredis-i41sx)
+
+The HOLD row above left one question open and told the next reader to settle it before spending a
+quiet window: the bead's premise cell says `0.212x fr/Redis` while my two (unauthenticated)
+invocations put fr at roughly TWICE Redis's time. I guessed the duller explanation — whole-job
+scorecard versus isolated-RESTORE harness, two different shapes. **That guess was wrong, and the
+real answer needs no host at all.**
+
+`docs/RELEASE_READINESS_SCORECARD.md:1313-1322` is internally consistent and says so in its own
+annotation column:
+
+      0.308x fr/redis   zset-only DEBUG RELOAD, baseline        "RDB round-trip release gap"
+      0.801x fr/redis   zset-only DUMP encode half              "encode gap remains"
+      0.212x fr/redis   zset-only RESTORE decode half           "largest reload risk"
+      0.451x fr/redis   zset-only DEBUG RELOAD, candidate       "still Redis faster"
+      1.0789x cand/ctl  fr-persist encode_rdb criterion A/B     "kept scoped fr-persist win"
+
+Every sub-1.0 row is annotated a GAP, a RISK, or "Redis faster"; the only above-1.0 row is
+annotated a WIN. So in that table `fr/redis` is a THROUGHPUT-style ratio where HIGHER is fr ahead,
+and `0.212x` means fr achieves ~21% of Redis's throughput — **fr about 4.7x BEHIND**, exactly as
+"largest reload risk" says.
+
+This ledger and the bit-command rows quote TIME and INSTRUCTION ratios, where LOWER is fr ahead.
+Same `fr/redis` label, opposite polarity, and nothing in the label distinguishes them.
+
+### WHAT THAT CORRECTS
+
+MossyOrchid's comment on i41sx reads: "On this repo's convention (fr/redis, below 1.0 = fr ahead)
+that is fr already ~4.7x FASTER, so the bead's own number does not describe a deficit." That is
+inverted. The cell describes a REAL and large deficit, and the bead should not be closed as a
+non-deficit on the strength of that reading. My own HOLD row's preferred explanation was also
+wrong and is withdrawn here rather than left to steer someone.
+
+The two independent signals now AGREE on direction: the scorecard cell says fr is behind, and my
+unauthenticated invocations put fr behind by ~2x. Only the magnitude is open, and magnitude is
+what still needs a quiet host — the direction no longer does.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement, no ratio, no build. This row is a reading of committed artifacts and their own
+annotation column, so it carries no timing exposure and no null applies. Its weak point, stated:
+the polarity is inferred from the annotation column being consistent across five rows, not from a
+legend, because that table HAS no legend stating the convention. If someone later finds an
+explicit legend that contradicts the annotations, this row loses.
+
+### PROVENANCE
+
+      source        main at 05e99d875, reading docs/RELEASE_READINESS_SCORECARD.md:1313-1322 and
+                    docs/perf_domination_scorecard.md:1308-1309.
+      host          thinkstation1, runq 29, loadavg 24.55 / 20.48 / 11.84, /data 293G. Recorded
+                    although a source reading does not depend on it -- and the busy host is
+                    precisely why this was the right work to do this turn.
+      disposition   ANALYSIS. No engine source changed by this row.
+
+### RETRY PREDICATE
+
+1. When quoting any ratio in this repo, name the QUANTITY, not just the arms: "fr/redis
+   throughput" and "fr/redis time" point opposite ways and both get written `fr/redis`. The
+   ledger convention is time/instructions, LOWER better; the scorecards are throughput, HIGHER
+   better.
+2. i41sx's deficit is real. Its named lever is already in the tree, so the next question is what
+   the REMAINING decode cost is, which needs the quiet-host row the HOLD above could not get.
+3. Do not re-derive this from the beads. The bead text and one bead comment disagree about
+   direction, and the artifact that settles it is the annotation column of the scorecard.
