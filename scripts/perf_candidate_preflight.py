@@ -72,6 +72,29 @@ REJECT_RE = re.compile(
     r"\b(REJECT|REJECTED|NEGATIVE|NO[- ]SHIP|UNDECIDABLE|DECLINED|INVALID"
     r"|REVERT|REVERTED|NOT WORTH|ABANDON)\b", re.IGNORECASE)
 KEEP_RE = re.compile(r"\b(KEEP|SHIPPED|LANDED|WIN|PROMOTED)\b", re.IGNORECASE)
+# A CERTIFIED row is the strongest claim this ledger makes -- it is what gets quoted
+# downstream as a bound -- and until now it was the ONLY verdict class with no contract
+# at all, because it matches neither KEEP_RE nor REJECT_RE. Case-SENSITIVE on purpose:
+# the verdict labels here are uppercase by convention, so "the certified 0.557334x" in
+# an ANALYSIS row and "certified by none" in a HOLD row must not be swept in.
+CERT_RE = re.compile(r"\bRE-?CERTIFIED\b|\bCERTIFIED\b")
+# Labels that explicitly DISCLAIM certification. A row that says SIZING or HOLD is
+# telling you its window did not hold, which is the correct thing to do -- do not then
+# hold it to the certified contract.
+CERT_DISCLAIMER_RE = re.compile(
+    r"\b(SIZING|HOLD|ANALYSIS|NOT +CERTIFIED|UNCERTIFIED|RETRACT\w*)\b", re.IGNORECASE)
+# The verdict at the CLOSING end of the window. Certification is precisely the claim
+# that the window still held when the run finished, so this is the definitional field.
+CERT_CLOSE_RE = re.compile(
+    r"\b(?P<v>FIT|UNFIT)\b[^.\n]{0,60}?\bat\s+close\b"
+    r"|\b(?:gate|window)\b[^.\n]{0,30}?\bclose\b[^.\n]{0,40}?\b(?P<w>FIT|UNFIT)\b"
+    r"|\bboth\s+ends\b",
+    re.IGNORECASE)
+# "UNFIT at close" anywhere in a row claiming CERTIFIED is a mislabel, not a nuance.
+CERT_UNFIT_CLOSE_RE = re.compile(
+    r"\bUNFIT\b[^.\n]{0,60}?\bat\s+close\b"
+    r"|\b(?:gate|window)\b[^.\n]{0,30}?\bclose\b[^.\n]{0,40}?\bUNFIT\b",
+    re.IGNORECASE)
 NUMBER = r"[-+]?(?:\d+(?:\.\d+)?|\.\d+)"
 NULL_MEDIAN_CI_RE = re.compile(
     rf"\bA/A(?:\s+null)?\b.{{0,500}}?\bmedian\b[^0-9+-]{{0,40}}"
@@ -542,6 +565,22 @@ def self_reported_binary_sha(body):
     return assignment is not None
 
 
+def is_certified_class(title):
+    """True for a row whose VERDICT LABEL is CERTIFIED, disclaimers excluded."""
+    if not CERT_RE.search(title):
+        return False
+    if CERT_DISCLAIMER_RE.search(title):
+        return False
+    return REJECT_RE.search(title) is None
+
+
+def certified_close_verdict(body):
+    """Return the stated closing-window verdict, or None when the row omits it."""
+    if CERT_UNFIT_CLOSE_RE.search(body):
+        return "UNFIT"
+    return "FIT" if CERT_CLOSE_RE.search(body) else None
+
+
 def median_ci_gate(body):
     """Require an explicit statement that the verdict gate is median-CI."""
     return MEDIAN_CI_GATE_RE.search(body) is not None
@@ -575,9 +614,11 @@ def check_entry_blocks(blocks):
     cv_gated = []
     missing_retry = []
     restore_isolation = []
+    cert_errors = []
     for title, body in blocks:
         is_reject = REJECT_RE.search(title) is not None
         is_keep = KEEP_RE.search(title) is not None
+        is_cert = is_certified_class(title)
         has_null = measured_null(body)
         has_mechanism = counted_mechanism(body)
 
@@ -598,6 +639,32 @@ def check_entry_blocks(blocks):
         if is_keep or is_reject:
             for name, message in violated_standing_laws(title, body):
                 restore_isolation.append((title, name, message))
+
+        if is_cert:
+            close = certified_close_verdict(body)
+            if close is None:
+                cert_errors.append((
+                    title,
+                    "states no CLOSING-window verdict -- certification IS the claim "
+                    "that the window still held when the run finished",
+                ))
+            elif close == "UNFIT":
+                cert_errors.append((
+                    title,
+                    "claims CERTIFIED while recording UNFIT at close -- "
+                    "that row is SIZING, and this ledger already has the label",
+                ))
+            if not self_reported_binary_sha(body):
+                cert_errors.append((
+                    title,
+                    "no self-reported 64-hex executing-binary SHA-256 -- a bound "
+                    "nobody can reconstruct is not a certification",
+                ))
+            if not concrete_retry(body):
+                cert_errors.append((
+                    title,
+                    "no concrete retry predicate",
+                ))
 
         if is_keep:
             classification = claim_class(body)
@@ -637,6 +704,16 @@ def check_entry_blocks(blocks):
                         title,
                         "SELF-SPEEDUP must be visible in the entry heading",
                     ))
+
+    if cert_errors:
+        print("REJECTED: this CERTIFIED-class entry does not meet the certified contract.")
+        print("A certification is the strongest claim in this ledger and the one most")
+        print("often quoted downstream as a bound, so it carries the same provenance")
+        print("burden as a KEEP plus the window verdict that earns the label.\n")
+        for title, reason in cert_errors:
+            print(f"  {title[:130]}: {reason}")
+        print("\nIf the window did not hold to the end, the row is SIZING, not CERTIFIED.")
+        return 11
 
     if claim_errors:
         print("REJECTED (Policy 2): invalid KEEP claim classification.")
@@ -704,6 +781,7 @@ def check_entry_blocks(blocks):
         title
         for title, _ in blocks
         if REJECT_RE.search(title) or KEEP_RE.search(title)
+        or is_certified_class(title)
     ]
     if reviewed:
         print("OK: all changed verdict entries satisfy the ledger contract")
@@ -750,9 +828,17 @@ def changed_entry_blocks(path, staged_text, diff_text):
     for index, (start, heading_end, title) in enumerate(matches):
         end = matches[index + 1][0] if index + 1 < len(matches) else len(staged_text)
         start_line = staged_text.count("\n", 0, start) + 1
-        end_line = staged_text.count("\n", 0, end)
-        if end == len(staged_text) and staged_text and not staged_text.endswith("\n"):
-            end_line += 1
+        # An entry's extent stops at its last line of CONTENT, not at the blank
+        # separator before the next heading. Appending a new entry writes that
+        # blank line, and attributing it to the entry ABOVE dragged the previous
+        # entry into the changed set on every plain append -- so a row could be
+        # refused for a defect in its neighbour, and no new row could ever be
+        # appended after a non-compliant one.
+        content_end = heading_end + len(staged_text[heading_end:end].rstrip())
+        if content_end > start:
+            end_line = staged_text.count("\n", 0, content_end - 1) + 1
+        else:
+            end_line = start_line
         end_line = max(start_line, end_line)
         if not any(lo <= end_line and hi >= start_line for lo, hi in ranges):
             continue
@@ -776,7 +862,8 @@ def unsupported_verdict_headings(relative, diff_text):
         if match is None:
             continue
         title = match.group("title")
-        if not (REJECT_RE.search(title) or KEEP_RE.search(title)):
+        if not (REJECT_RE.search(title) or KEEP_RE.search(title)
+                or is_certified_class(title)):
             continue
         level = len(match.group("marks"))
         allowed = level == 2 or (

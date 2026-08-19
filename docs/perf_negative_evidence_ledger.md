@@ -66471,3 +66471,119 @@ admissible row for it, which two FIT-eligible runs have now failed to do.
      correction row above.
   2. Do not quote `geosearch_2` at all; it has no admissible row.
   3. Do not cite the six-replicate straddle as current standing for `geosearch_64`.
+
+## 2026-08-19 CrimsonHawk: GATE — the ledger contract now covers certification rows, which were the ONLY verdict class with no contract at all: 20 were invisible to the gate, and 18 of 21 do not name the binary they measured
+
+EVIDENCE CLASS: reading `scripts/perf_candidate_preflight.py` and classifying all 938 level-2
+headings in this file. No benchmark, no build, no binary. This is a tooling change, so it carries
+no ratio, no A/A null and no ELF — it is not a perf verdict and must not be read as one.
+
+### THE HOLE
+
+`check_entry_blocks` classifies every row as KEEP or REJECT:
+
+    REJECT_RE = REJECT|REJECTED|NEGATIVE|NO-SHIP|UNDECIDABLE|DECLINED|INVALID|REVERT|...
+    KEEP_RE   = KEEP|SHIPPED|LANDED|WIN|PROMOTED
+
+**A certification row matches neither.** 54 headings in this file contain some form of the word;
+21 carry it as their verdict label; **20 of those were checked by nothing whatsoever.** No binary
+SHA required, no retry predicate, no window verdict — and nothing at all stopping a row from being
+labelled certified while recording UNFIT at close.
+
+That is backwards. A KEEP is a claim about our own tree. A certification is the thing that gets
+quoted downstream as a **bound against the incumbent**, which is exactly what the standing brief
+asks for ("quote the WORST bound"). The strongest claim carried the weakest contract.
+
+### WHAT THE CENSUS FOUND, WHICH IS WORSE THAN THE HOLE
+
+Of the 21 certification-labelled rows:
+
+    states a CLOSING window verdict      8 of 21
+    names a self-reported binary SHA     3 of 21
+    carries a concrete retry predicate  15 of 21
+
+**18 of 21 certified bounds cannot be traced to the binary that produced them.** Several were
+measured on ELFs that have since been overwritten, so the provenance is not merely missing, it is
+now unrecoverable. A bound nobody can reconstruct is a number, not a measurement.
+
+### THE CONTRACT ADDED
+
+A row whose verdict label is a certification must now satisfy, in addition to nothing it satisfied
+before:
+
+  1. a stated **closing-window verdict** — certification IS the claim that the window still held
+     when the run finished, so omitting it is omitting the claim;
+  2. **not UNFIT at close** — if the window walked away mid-flight the row is SIZING, and this
+     ledger already has that label and uses it correctly elsewhere;
+  3. a **self-reported 64-hex executing-binary SHA-256**, the existing KEEP requirement;
+  4. a **concrete retry predicate**, the existing KEEP/REJECT requirement.
+
+Classification is **case-SENSITIVE** because the verdict labels here are uppercase by convention,
+and rows that DISCLAIM certification are excluded by label (SIZING, HOLD, ANALYSIS, RETRACT*).
+Both exclusions are load-bearing and both are pinned: an ANALYSIS row saying "the certified
+0.557334x" and a HOLD row saying "certified by none" are discussing a certification, not making
+one, and neither may be held to this contract.
+
+Mutation-tested on **seven** paths, each injection asserted to have actually applied before the
+run — the failure mode from earlier this session was printing "injected" without checking:
+
+    baseline good row                                  rc 0
+    UNFIT at close                                     rc 11
+    no closing verdict                                 rc 11
+    no self-reported SHA                               rc 11
+    no retry predicate                                 rc 11
+    SIZING disclaimer + UNFIT close  (must NOT fire)   rc 0
+    ANALYSIS row quoting "certified" (must NOT fire)   rc 0
+
+### THIS DOES NOT REDDEN ANYTHING, AND IT INDICTS MY OWN NEWEST ROW
+
+`check-staged` is hunk-scoped: `changed_entry_blocks` recovers only entries overlapping a staged
+hunk, so the 20 non-compliant historical rows are never re-checked unless somebody edits them —
+verified, the clean tree still exits 0. Editing such a row is precisely when its provenance should
+be fixed.
+
+Stated plainly because the alternative is quietly exempting myself: **the geosearch_64 row I
+committed twenty minutes ago would FAIL this contract.** It records a 40-character truncation
+rather than the full self-reported 64-hex SHA, and the ELF it names has already been overwritten by
+a peer rebuild, so I cannot retrofit it. The contract is correct and my row was sloppy in exactly
+the way the census describes. I have not weakened the check to spare it, and its numbers stand —
+what is missing is the provenance, not the measurement.
+
+Note for whoever writes the next meta-row: an uppercase certification token **in a heading** now
+pulls that row into this contract, which is why this heading says "certification rows" in lower
+case. Discuss the class in prose, not in the heading label.
+
+### A PRE-EXISTING SCOPING DEFECT THIS CHANGE FORCED INTO THE OPEN
+
+Adding the check immediately refused my own geosearch row — correctly on the merits, but for the
+wrong REASON, and the reason is a defect in `changed_entry_blocks` that predates this change.
+
+An entry's extent ran to the character before the next heading, which includes the **blank
+separator line**. A plain append writes that blank line, so every append was attributed in part to
+the entry ABOVE it and dragged that entry back into the checked set. Consequences, both real:
+
+  * a row could be refused for a defect in its NEIGHBOUR, which it cannot fix; and
+  * once any non-compliant row existed, **nothing could ever be appended after it** — which, with
+    the new check and 20 non-compliant rows in the file, would have blocked the whole fleet.
+
+Nobody hit it before because appends land after KEEP rows that already comply. The extent now stops
+at the last line of CONTENT. Pinned three ways, because a scoping fix is exactly where an escape
+hatch hides:
+
+    append after an entry     -> only the APPENDED entry is in scope
+    modify a line inside it   -> that entry is STILL checked
+    append a bad new entry    -> still refused, rc 11
+
+The middle case is the one that matters: a fix that scopes appends must not let an EDIT slip
+through.
+
+### RETRY PREDICATES
+
+Retry predicate: revisit ONLY IF a legitimate row is refused by this gate — that would mean the
+disclaimer list is missing a label, and the fix is to add the label rather than to relax any of
+the four requirements; or IF the certification census rises above 3 of 21 naming a binary, at
+which point sweeping the historical rows becomes worth the effort it is not worth today.
+
+  1. New certification rows must carry the closing verdict and the full self-reported ELF SHA.
+  2. Do not sweep the 20 historical rows; fix each when it is next edited.
+  3. Do not read this row as a perf verdict. It measures nothing.
