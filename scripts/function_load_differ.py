@@ -455,8 +455,7 @@ def main():
     if envelope_mismatches:
         print()
         print(f"ENVELOPE MISMATCH — {len(envelope_mismatches)} row(s) that the first-segment rule")
-        print("counted as AGREEING, but whose full error text differs. Not a failure here; read")
-        print("them before trusting the count above. (frankenredis-fnukn)")
+        print("counted as AGREEING, but whose full error text differs. (frankenredis-fnukn)")
         for name, f_reply, r_reply in envelope_mismatches:
             print(f"  {name}")
             print(f"    fr        {f_reply}")
@@ -470,6 +469,18 @@ def main():
         return 1
     if unexpected:
         print("FAIL: %d UNEXPECTED divergence(s): %s" % (len(unexpected), ", ".join(unexpected)))
+        return 1
+    # (frankenredis-fnukn) PROMOTED FROM A PRINTED WARNING TO A FAILURE. This block used to say
+    # "Not a failure here", because deciding whether a differing tail was a real envelope bug or
+    # a tail that legitimately differs needed a run against two LIVE servers, and the build
+    # freeze forbade one. That run has now happened: the single mismatch it reported --
+    # nil_index answering `user_function:4: user_script:4: ...` against 7.2.4's
+    # `user_function:4: ...` -- was a real doubled location, and it is fixed. With the count at
+    # zero, a warning nobody has to act on is exactly the shape that rots into permanent green,
+    # which is the rule this file already applies to EXPECTED_DIVERGENCES.
+    if envelope_mismatches:
+        print("FAIL: %d ENVELOPE mismatch(es): %s" % (
+            len(envelope_mismatches), ", ".join(n for n, _, _ in envelope_mismatches)))
         return 1
     rt_div, rt_control = run_round_trips(redis, fr)
     print()
