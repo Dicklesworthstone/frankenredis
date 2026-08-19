@@ -44242,6 +44242,61 @@ mod tests {
     }
 
     #[test]
+    fn new_key_event_fires_on_creation_and_not_on_overwrite() {
+        // (frankenredis-keymiss-oqhbi sibling) Upstream fires `new` from dbAddInternal
+        // (db.c:206) and ONLY on creation: the `update_if_existing` path returns above the
+        // notify call, so an overwrite is silent. That create/overwrite split is exactly what
+        // keyspace_event_coverage_gate.py cannot see -- it proves the name reaches the wire,
+        // not that it reaches it on the right branch -- so it is pinned here.
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | super::NOTIFY_NEW;
+
+        // CREATE: exactly one `new`, carrying the LOGICAL key (db prefix stripped).
+        store.set(b"k".to_vec(), b"v1".to_vec(), None, 0);
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(b"__keyevent@0__:new".to_vec(), b"k".to_vec())],
+            "creating a key must fire exactly one `new` for the logical key"
+        );
+
+        // OVERWRITE: silent. This is the row that fails if the emit is placed on the insert
+        // without consulting `is_new_key` -- the easy version of this change, which would fire
+        // `new` on every SET forever.
+        store.set(b"k".to_vec(), b"v2".to_vec(), None, 0);
+        assert!(
+            store.drain_keyspace_notifications().is_empty(),
+            "overwriting an existing key must fire nothing"
+        );
+
+        // A DIFFERENT key is a creation again, so the first row was not a one-shot.
+        store.set(b"other".to_vec(), b"v".to_vec(), None, 0);
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(b"__keyevent@0__:new".to_vec(), b"other".to_vec())]
+        );
+
+        // RE-CREATION after deletion fires again: `new` is about the key being absent before,
+        // not about it being novel to the server.
+        assert_eq!(store.del(&[b"k".to_vec()], 0), 1);
+        let _ = store.drain_keyspace_notifications();
+        store.set(b"k".to_vec(), b"v3".to_vec(), None, 0);
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(b"__keyevent@0__:new".to_vec(), b"k".to_vec())],
+            "a key recreated after DEL is a creation"
+        );
+
+        // And the flag still gates it: with NOTIFY_NEW absent, creation is silent.
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT;
+        store.set(b"ungated".to_vec(), b"v".to_vec(), None, 0);
+        assert!(
+            store.drain_keyspace_notifications().is_empty(),
+            "without the `n` flag nothing fires"
+        );
+    }
+
+    #[test]
     fn keymiss_fires_only_for_read_misses_when_the_m_flag_is_set_oqhbi() {
         // (frankenredis-keymiss-oqhbi) `keymiss` was the ONLY one of upstream's 44 keyspace
         // events fr never fired, while the `m` flag was accepted by the parser, round-tripped
