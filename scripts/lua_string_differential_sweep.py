@@ -45,6 +45,30 @@ REDIS_CLI = "legacy_redis_code/redis/src/redis-cli"
 # WHICH bytes are expected to agree rather than only that some do.
 SPECIALS = set(b"^$*+?.([%-")
 
+# Divergences that are UNDERSTOOD and are the incumbent's artifact rather than fr's
+# defect. They are still PRINTED -- hiding a divergence is how it gets re-discovered
+# six times -- but they do not fail the run, so the exit code can mean "something
+# NEW diverged".
+#
+# Each entry needs a reason that says what was PROVEN, not what is suspected. The
+# NUL rows below were settled by hex-rendering both arms in Lua:
+#
+#     gsub("a\0b", "\0", "X")  redis: 58 61 58 00 58 62 58
+#     gsub("a\0b", "",   "X")  redis: 58 61 58 00 58 62 58   <- byte-identical
+#
+# Redis's result for a NUL-containing pattern equals its result for an EMPTY
+# pattern, because the matcher and strpbrk(p, SPECIALS) stop at the C-string
+# boundary. Lua strings are binary-safe, so fr matching the NUL as a literal is the
+# more correct behaviour. Whether fr should replicate the C artifact for bug-for-bug
+# parity is a project decision, tracked separately -- until it is made, this is a
+# known difference and not a regression.
+# Currently EMPTY, and that is the healthy state. The two NUL rows this table was
+# written for were closed by 6e74f4fbf (frankenredis-jdii2), which made fr end a
+# pattern at a NUL exactly as the C matcher does -- the project chose bug-for-bug
+# parity over Lua's binary-safe reading. Their entries were removed the moment
+# they stopped firing, because of the rot described below.
+EXPECTED_DIVERGENCES: dict[str, dict[int, str]] = {}
+
 # Cases whose index IS the pattern byte, so a SPECIALS breakdown is meaningful.
 # The others are keyed by case number and must not print one.
 BYTE_INDEXED = {"byte", "byte_close_paren", "byte_close_paren_match", "byte_gsub"}
@@ -195,6 +219,8 @@ def main() -> int:
 
         names = [args.case] if args.case else list(CASES)
         total_div = 0
+        total_known = 0
+        stale: list[tuple[str, int, str]] = []
         for name in names:
             body = CASES.get(name)
             if body is None:
@@ -206,8 +232,12 @@ def main() -> int:
             if not common:
                 print(f"{name}: NO COMPARABLE OUTPUT — both arms returned nothing parseable")
                 return 1
-            div = [b for b in common if F[b] != R[b]]
+            all_div = [b for b in common if F[b] != R[b]]
+            expected = EXPECTED_DIVERGENCES.get(name, {})
+            div = [b for b in all_div if b not in expected]
+            known = [b for b in all_div if b in expected]
             total_div += len(div)
+            total_known += len(known)
             byte_indexed = name in BYTE_INDEXED
             unit = "bytes" if byte_indexed else "cases"
             print(f"\n{name}: {len(div)} of {len(common)} {unit} diverge")
@@ -228,8 +258,27 @@ def main() -> int:
                 print(f"    {label} fr={F[b][:30]:<30} redis={R[b][:30]}")
             if len(div) > 8:
                 print(f"    ... and {len(div) - 8} more")
-        print(f"\nTOTAL DIVERGENT ROWS: {total_div}")
-        return 1 if total_div else 0
+            for b in known:
+                label = f"byte {b:>3}" if byte_indexed else f"case {b:>3}"
+                print(f"    KNOWN {label}  {expected[b]}")
+                print(f"          fr={F[b][:30]:<30} redis={R[b][:30]}")
+            # An expectation that no longer fires is the dangerous kind: it would
+            # report a future REGRESSION of that exact row as a known artifact and
+            # let it through. So a stale entry FAILS the run, on good news, and
+            # says what to do about it.
+            for b, why in expected.items():
+                if b in common and b not in all_div:
+                    stale.append((name, b, why))
+        print(f"\nTOTAL UNEXPECTED DIVERGENT ROWS: {total_div}")
+        print(f"TOTAL KNOWN-ARTIFACT ROWS:       {total_known}  (printed above, not failures)")
+        for name, b, why in stale:
+            print(f"STALE EXPECTATION: {name} row {b} now AGREES -- delete its "
+                  f"EXPECTED_DIVERGENCES entry ({why})", file=sys.stderr)
+        if stale:
+            print(f"FAIL: {len(stale)} stale expectation(s). They are masking nothing today, "
+                  f"but each would report a regression of its own row as a known artifact.",
+                  file=sys.stderr)
+        return 1 if (total_div or stale) else 0
     finally:
         for port in (args.fr_port, args.redis_port):
             subprocess.run([REDIS_CLI, "-p", str(port), "shutdown", "nosave"],
