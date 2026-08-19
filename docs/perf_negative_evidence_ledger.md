@@ -65060,3 +65060,72 @@ requires touching the matcher's control flow. Build the disjunction first.
   2. Re-run these same six rungs after, and quote the deltas against this row rather than against
      any earlier cross-run figure.
   3. A certified bound still needs a window with zero cargo/rustc under the shared uid.
+
+---
+
+## HOLD (third attempt) — but the A/A bias is PLACEMENT and the swap test proves it: the harness's documented core sets are wrong for this box (frankenredis-i41sx, frankenredis-xvq1a)
+
+Three more invocations of `collection_reload_headtohead.py --competitive` on zset-only RESTORE
+decode. None authenticated, so again NO ratio from today is quotable. What today adds is not a
+number but a CAUSE, and it is one the instrument can act on.
+
+### THE FINDING
+
+Pinned exactly as the harness docstring prescribes -- fr_a on 0-3, fr_b on 4-7, redis on 8-11 --
+the two-process A/A null missed the 0.98..1.02 band three times in the SAME direction:
+
+      1.241194   1.095013   1.096331
+
+Systematic, not scattered. Whichever fr arm sat on cores 0-3 was the slower one. A one-directional
+null is not sampling noise, and raising the trial count cannot fix it -- the harness's own
+docstring already records that lesson from a different cause.
+
+THE DISCRIMINATING TEST, cheap and worth running on any new host: swap the two fr core sets and
+re-run. If the bias follows the CORES the null inverts; if it follows process identity or preload
+order it does not.
+
+      fr_a on 0-3   null 1.096331     (fr_a slower)
+      fr_a on 4-7   null 0.952773     (fr_a faster)
+
+It inverted. So cores 0-3 are not the twin of 4-7 on thinkstation1 -- they carry more of the box's
+interrupt and kernel work -- and the harness's documented pinning cannot produce symmetric arms
+here no matter how quiet the host gets.
+
+### WHAT REMOVING IT DID, AND DID NOT DO
+
+Both fr arms moved off the low cores (8-11 and 12-15, one L3 by
+`/sys/devices/system/cpu/cpu8/cache/index3/shared_cpu_list` = 8-15,40-47; redis on 16-19). The
+nulls became 1.092844 and 0.972669 -- scattered rather than one-directional, so the systematic
+term is gone. They still missed the band. Placement is NECESSARY and not SUFFICIENT: the residue
+is host noise at loadavg 16-31, and no pinning fixes that.
+
+### THE A/B, RECORDED BUT NOT CERTIFIED
+
+Across all three invocations `redis/fr` came out 0.444540, 0.502765, 0.529613. That agrees with
+xvq1a's authenticated 0.48-0.52 for the collection-heavy shape, so the direction is now supported
+four independent ways. None of today's numbers may be quoted as a result.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The null is the harness's own two-process A/A. It FAILED in all three invocations, which is why
+this is a HOLD. Per-arm host state was recorded at both ends of each: loadavg 15.48-16.48 rising
+to 27-31 on the 5- and 15-minute figures, mean CPU MHz 2687-3604, iowait 0% by vmstat.
+
+### PROVENANCE
+
+      source        main at 61d7c219a.
+      fr ELF        b9367b53edec6acc, release, env -u CARGO_TARGET_DIR, own target dir; fr_a and
+                    fr_b self-reported the SAME sha in every invocation.
+      redis ELF     e837dbb2556cff6b, vendored 7.2.4, provenance check clean.
+      job           zsets=300 members=128, hashes=0 sets=0, trials=15, DBSIZE 300 both arms.
+      disposition   HOLD. The harness docstring is updated with the placement finding in the same
+                    commit; no engine source changed.
+
+### RETRY PREDICATE
+
+1. Use 8-11 / 12-15 / 16-19, NOT the 0-3 / 4-7 / 8-11 in the older half of the docstring. The
+   systematic term is what that change removes.
+2. Run the swap test first on any host that is not thinkstation1. Two invocations is the whole
+   cost, and a null that inverts tells you the pinning is wrong before you spend a window on it.
+3. Still do not re-derive the magnitude. xvq1a's authenticated 0.48-0.52 stands, worst bound
+   0.521151, and today's three runs agree with it.

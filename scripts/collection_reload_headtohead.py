@@ -41,7 +41,30 @@ Pinned to symmetric core sets it authenticated on the first try and reproduced:
     taskset -c 8-11  redis-server  --port R ...
 
 giving A/A 1.010558 CI [1.001541, 1.015901] and 1.008119 CI [0.984687,
-1.025978] on two runs. The A/A compares two PROCESSES, so it nulls the engine
+1.025978] on two runs.
+
+THOSE CORE NUMBERS ARE NOT PORTABLE, and on thinkstation1 they are the wrong
+ones (BlackThrush, 2026-08-19). Pinned exactly as written above, three
+consecutive invocations put the two-process A/A null OUTSIDE the band in the
+SAME direction -- 1.241194, 1.095013, 1.096331 -- i.e. whichever fr arm sat on
+cores 0-3 was consistently the slower one. Systematic, not scattered, so it is
+not sampling noise.
+
+The cheap test that identifies it, and which is worth running on any new host
+before trusting a null: SWAP the two fr core sets and re-run. If the bias
+follows the CORES the null inverts; if it follows the process or the preload
+order it does not. Measured here: 1.096331 with fr_a on 0-3, and 0.952773 with
+fr_a on 4-7. It inverted, so it is placement -- cores 0-3 carry more of this
+box's interrupt and kernel work, and an arm pinned there is not the twin of one
+pinned to 4-7.
+
+Moving BOTH fr arms off the low cores (8-11 and 12-15, still one L3 by
+/sys/devices/system/cpu/cpu8/cache/index3/shared_cpu_list = 8-15,40-47, with
+redis on 16-19) removed the systematic component: the nulls became 1.092844 and
+0.972669, scattered rather than one-directional. That still did not
+authenticate at loadavg 16-31, which is the honest limit of this instrument --
+placement is necessary, quiet is also necessary, and neither substitutes for the
+other. The A/A compares two PROCESSES, so it nulls the engine
 and the process's core placement together; on a 32-core 4-CCD part an unpinned
 pair lands wherever the scheduler puts it and that term swamps the engine. The
 `fr_b halves` line is the same-process drift null, DIAGNOSTIC ONLY — it is not
