@@ -82,7 +82,20 @@ def alive(port):
     return ok
 
 
-SCRIPT = "local t = {} for i = 1, %d do t = {t} end return cjson.encode(t)"
+# (frankenredis-thread-stack-size-1tlyh) FOUR recursive walks over user-controlled structure, not
+# one. The encode bound was verified first; the other three are bounded in FRAMES with no byte
+# budget behind the number, or not bounded at all, so each needs its own survival row.
+#
+#   encode      cjson.encode over a table built at RUNTIME -- no syntax-level counter sees it
+#   decode      cjson.decode over a STRING, the cheapest of the four to send
+#   reply       the Lua -> RESP walk, bounded at 2000 frames by 4a438ed13
+#   msgpack     cmsgpack.pack, bounded at 16 by upstream's own MAX_NESTING
+WALKS = {
+    "encode":  "local t = {} for i = 1, %d do t = {t} end return cjson.encode(t)",
+    "decode":  "return cjson.decode(string.rep('[', %d) .. string.rep(']', %d))",
+    "reply":   "local t = {} for i = 1, %d do t = {t} end return t",
+    "msgpack": "local t = {} for i = 1, %d do t = {t} end return cmsgpack.pack(t)",
+}
 
 def main():
     for b in (REDIS, FR):
@@ -97,10 +110,17 @@ def main():
     print("%-8s %-46s %-46s" % ("depth", "fr", "redis 7.2.4"))
     print("-" * 104)
     try:
+        walk = sys.argv[1] if len(sys.argv) > 1 else "encode"
+        if walk not in WALKS:
+            raise SystemExit("walk must be one of: %s" % ", ".join(sorted(WALKS)))
+        tmpl = WALKS[walk]
+        n_slots = tmpl.count("%d")
+        print("walk: %s" % walk)
         for depth in (100, 900, 999, 1000, 1001, 2000):
             la = loadavg()
-            f_ok, f_txt = call(FR_PORT, "EVAL", SCRIPT % depth, "0")
-            r_ok, r_txt = call(REDIS_PORT, "EVAL", SCRIPT % depth, "0")
+            body = tmpl % ((depth,) * n_slots)
+            f_ok, f_txt = call(FR_PORT, "EVAL", body, "0")
+            r_ok, r_txt = call(REDIS_PORT, "EVAL", body, "0")
             def brief(ok, txt):
                 if not ok:
                     return txt
