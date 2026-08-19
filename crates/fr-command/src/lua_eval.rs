@@ -22283,6 +22283,15 @@ end
     /// cycles the parser actually has.
     #[test]
     fn lua_parser_bounds_syntax_nesting_like_upstream_lparser() {
+        // (frankenredis-5h2lu) 64 MiB, for the same TEST-PROFILE reason stated on
+        // `lua_reply_walk_bounds_nesting_like_upstream_luareplytoredisreply` and on the
+        // depth-wording test below: this workspace defines no [profile.test], so at opt-level 0
+        // the parser's frames are far fatter than in the shipping binary. MEASURED, not assumed --
+        // without this the 500-deep cases overflow and SIGABRT the whole fr-command test binary
+        // before the guard can fire, which is what they were doing: no test in the crate ran.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
         const DEEP: usize = 500; // comfortably past upstream's 200
         let cases: [(&str, String); 4] = [
             (
@@ -22352,6 +22361,10 @@ end
             parse_lua_chunk_located(sequential.as_bytes()).is_ok(),
             "300 sequential shallow nests must parse: depth is nesting, not a running total"
         );
+            })
+            .expect("spawn a test thread with headroom")
+            .join()
+            .expect("the parser bound must fire instead of overflowing the stack");
     }
 
     /// `lua_to_resp` walks the script's return value recursively and had no
