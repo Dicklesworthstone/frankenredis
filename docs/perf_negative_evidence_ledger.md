@@ -65489,3 +65489,61 @@ built rather than claiming a number.
    quicklist fill decision at packed_set.rs:3534.
 3. Instrument the integer-entry read count FIRST. It is the only number that chooses between the
    two viable designs, and this surface has already paid twice for choosing a copy form without it.
+
+## 2026-08-19 CrimsonHawk: SIZING — the wall-clock luapat rows are RE-TAKEN after the Lua fixes and move the right way (0.645 -> 0.79 at 256 bytes), but luapat_256 NULL-FAILED in all three draws, so this corroborates the Ir work and bounds nothing (frankenredis-zxtuk)
+
+EVIDENCE CLASS: `balanced_square_ab.py`, square ABBAABBA, 21 rounds, 50,000 ops/slot, -P16, live
+Redis 7.2.4 in the SAME invocation, three consecutive draws, gate run at BOTH ends. No build: the
+release ELF already matched HEAD.
+
+  fr        `target/release/frankenredis`, sha256 `5b8cebb07719fddd...`, verified NEWER than the
+            newest lua_eval commit before measuring (built 07:22:13, commit 07:20:41)
+  incumbent vendored redis 7.2.4
+
+**Claim class: SIZING, and weaker than the last one.** The gate returned UNFIT at both ends — 41 pct
+non-stationary at open with a 15min loadavg of 71.79 against a limit of 30. `luapat_256`, the shape
+the fixes actually target, NULL-FAILED in **all three** draws. There is no admissible row for it, so
+it cannot be quoted as a bound at any confidence.
+
+    draw  loadavg               iowait  luapat_16          luapat_256         get_control
+    1     27.01 46.15 71.79     0 pct   0.7358 NULL-FAIL   0.7743 NULL-FAIL   1.0971 NULL-FAIL
+    2     69.77 54.99 70.42     0 pct   0.7431 ADM         0.7857 NULL-FAIL   1.1532 ADM
+    3     30.74 44.79 64.69     0 pct   0.7667 ADM         0.8060 NULL-FAIL   1.1477 NULL-FAIL
+
+### WHY IT WAS WORTH RE-TAKING ANYWAY
+
+The rows recorded earlier for these shapes (0.6425 / 0.6503 / 0.6442 raw at 256) described a version
+of fr that no longer exists: they predate the plain-search branch, the lmemfind scan, and the
+capture and format fixes. Leaving them as the standing description of fr would have been the
+staler error.
+
+### THE DIRECTION, WHICH IS ALL THIS SUPPORTS
+
+    shape        before (3 draws)        after (3 draws)
+    luapat_256   0.6425 0.6503 0.6442    0.7743 0.7857 0.8060
+    luapat_16    0.7325 0.7343 0.7504    0.7358 0.7431 0.7667
+
+`luapat_256` moves up by roughly 0.14 in every draw; `luapat_16` does not move outside its own
+spread. That is the SAME falsifier the Ir A/B satisfied — the fixes target the per-matched-byte
+term, so the 256-byte shape should move and the 16-byte shape should not — and it is satisfied here
+too, on a completely different instrument.
+
+That agreement is the value of this run. It is NOT a bound: three null-failed rows for the shape in
+question mean the numbers above are readings.
+
+### WHAT THE NULL FAILURES SAY ABOUT THE WINDOW
+
+`get_control` null-failed in 2 of 3 draws and `luapat_256` in 3 of 3, on a host whose loadavg ran
+27 to 70 across the draws with iowait at 0. The contention is CPU scheduling, not disk. The
+fleet-wide measurement slot exists precisely for this, and it could not be taken:
+`acquire_build_slot` returns "Build slots are disabled. Enable WORKTREES_ENABLED to use this tool."
+Fleet clarity was instead verified by process inspection before starting — no valgrind, no
+redis-benchmark, no harness — which rules out other MEASURERS but not the general build load.
+
+### RETRY PREDICATES
+
+  1. This shape needs a window where `get_control` itself is admissible. Until then the Ir A/B
+     (`c65d6591e`) is the load-bearing evidence for the fixes and this row is corroboration.
+  2. Do not quote 0.79. Quote "moved up ~0.14 in all three draws, all null-failed".
+  3. The earlier 0.6425/0.6503/0.6442 rows are SUPERSEDED as a description of fr and should not be
+     cited as current standing.
