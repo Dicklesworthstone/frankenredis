@@ -64932,3 +64932,60 @@ that is 21 pct of Redis's op and 37 pct of fr's, so closing it entirely moves lu
      flat find cost. luapatsp_256 must NOT move; if it does, the change escaped its scope.
   3. Only then judge the cascade, against luapatsp. Its ceiling is ~1.02x on that shape, not parity
      on all of them.
+
+## 2026-08-19 CrimsonHawk: CONFIRMATION — all six Redis rungs re-taken in ONE window put its plain-search at 0.64 instructions per byte against its matcher's 8.74, and my own harness call truncated fr's half (frankenredis-25uop)
+
+EVIDENCE CLASS: callgrind Ir, six rungs back to back in a single window so no subtraction crosses
+runs — the retry predicate the row above asked for. Live Redis 7.2.4 in the same invocation. The
+harness printed "WINDOW: UNFIT for ratio" on every rung (4-5 cargo/rustc, 36-37 pct non-stationary),
+so SIZING again. No build: our project's slot was in flight.
+
+  per-arm  loadavg 14.66/23.02/27.36 at the first rung down to 14.02/22.07/26.91 at the last;
+           CPU MHz mean 3239 -> 2324 across the six, max 4292
+
+### REDIS, ALL SIX RUNGS, ONE WINDOW
+
+    rung              redis instr/op
+    luapat_rep16            13,269.9
+    luapat_rep256           24,644.4      rep slope           47.39 / byte
+    luapat_16               17,076.5
+    luapat_256              28,603.1      find slope          48.03 / byte
+    luapatsp_16             17,452.1
+    luapatsp_256            30,923.7      find slope (sp)     56.13 / byte
+
+Subtracting the rep slope, now entirely within one window:
+
+    Redis plain search (no SPECIALS)   48.03 - 47.39 =  0.64 instructions per byte
+    Redis matcher      ('a+')          56.13 - 47.39 =  8.74 instructions per byte
+
+**This confirms the two previous rows by an independent route.** The cross-run subtraction had put
+Redis's matcher at 8.55/byte; within one window it is 8.74. And Redis's plain search at 0.64/byte is
+the memchr behaviour the correction row inferred from flatness — now measured directly rather than
+read off two nearly-equal numbers.
+
+### MY OWN ERROR IN THIS RUN
+
+I filtered each rung's output with `head -6`, which captures the window banner, the four per-arm
+loadavg lines and Redis's ladder — and cuts off immediately before fr's ladder and the fr/redis
+ratio. So this run has no fr half at all. The fr figures still standing are the cross-run ones
+(134.7 luapat slope, 38.75 matcher, 28.52 rep) and they remain subject to the cross-run caveat the
+row above records. Nothing here supersedes them; it only firms up the incumbent side.
+
+That is a harness-invocation mistake, not an instrument problem: the rungs ran correctly and the
+data existed. Re-running the same six with the filter widened costs one window and would close the
+last methodological gap.
+
+### WHAT THE INCUMBENT SIDE NOW SAYS ON ITS OWN
+
+Redis spends 0.64 instructions per byte on a special-free find and 8.74 on a pattern that reaches
+its matcher — a 13.7x difference between the two paths, in the incumbent, from taking the plain
+route. That is the size of the mechanism fr is missing, measured without reference to fr at all.
+
+### RETRY PREDICATES
+
+  1. Re-run all six with the output filter widened, so fr's slopes are within-window too.
+  2. Then land the SPECIALS disjunction. luapat_256 should fall toward Redis's flat find cost;
+     luapatsp_256 must not move.
+  3. The gate has now refused in eight consecutive attempts across four turns. A certified bound
+     needs a window with zero cargo/rustc under the shared uid, which has not occurred while I have
+     been measuring.
