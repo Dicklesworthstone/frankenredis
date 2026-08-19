@@ -64410,3 +64410,70 @@ cell and the harness measure different jobs then no amount of host quiet will re
    the disagreement is not a defect and the bead's acceptance row should name which shape it wants.
 3. Do not "fix" i41sx on the strength of the direction seen here. The lever it asks for is
    already in the tree; what is missing is a number, and this row is the absence of one.
+
+## 2026-08-19 CrimsonHawk: SIZING — Lua pattern matching is fr's, not Redis's, problem: 0.6358x raw at a 256-byte literal and the gap WIDENS with pattern length (`frankenredis-zm8x5`)
+
+EVIDENCE CLASS: `balanced_square_ab.py`, square ABBAABBA, 21 rounds, 50,000 ops/slot, -P16, live
+Redis 7.2.4 in the SAME invocation. CV was NOT used and no coefficient of variation appears in this
+row's decision path. NO BUILD: the release ELF already carried the changes and our project's build
+slot was continuously held by other panes.
+
+  fr        `target/release/frankenredis`, sha256 `b4729412aa36357e6e2082fce4f0f25bb1e44f53f357299c86fdc242daeafde9`
+  incumbent vendored redis 7.2.4, sha256 `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  host      loadavg 21.58 / 11.07 / 7.04 on 64 cpus; CPU MHz mean 3515 -> 2750 (min 1429, max 4195,
+            spread 2.94x); governor powersave; servers UNPINNED
+
+**Claim class: SIZING, NOT CERTIFIED, and three independent reasons say so.**
+`certification_window.py --for ratio` returned UNFIT before the run: ELEVEN cargo/rustc processes
+under the shared uid, and a 1min-vs-5min loadavg 91 pct apart against a 15 pct limit. TWO of three
+rows NULL-FAILED. And it is a SINGLE draw, so the replicated-standing convention does not apply --
+there is no worst-of-N to quote and I am not quoting one.
+
+### THE ROWS
+
+    shape          raw ratio            95% CI      null redis   null fr   verdict
+    luapat_16       0.7373    [0.7128, 0.7558]        0.9883     1.0271   NULL-FAILED
+    luapat_256      0.6358    [0.6294, 0.6467]        0.9941     0.9992   ADMISSIBLE
+    get_control     1.1179    [1.0940, 1.1415]        0.9820     0.9724   NULL-FAILED
+
+Ratio is fr ops/s over redis ops/s, so **below 1.0 means fr is BEHIND**. The control null-failed, so
+no control-normalised figure is available from this run and only RAW ratios may be quoted -- which
+is the same distinction that decides the GEOSEARCH reading recorded above.
+
+### WHAT THE ONE ADMISSIBLE ROW SAYS
+
+At a 256-byte literal pattern fr sustains 63.6 pct of Redis's throughput: Redis is about 1.57x fr
+here. That is one of the widest vs-incumbent gaps on this board, and it is a shape nobody had
+measured.
+
+The DIRECTION across the two sizes is the more useful half, even though the 16-byte row null-failed:
+0.7373 at 16 bytes against 0.6358 at 256. fr falls FURTHER behind as the pattern lengthens, so the
+deficit is in per-matched-byte cost rather than in EVAL's fixed overhead. A fixed-cost deficit would
+show the opposite slope, improving as the payload grows and the constant amortises.
+
+### WHY THIS SHAPE COULD NOT HAVE BEEN MEASURED BEFORE
+
+`f03c9bcb4` is what makes the 256-byte point legitimate. Before it, fr's matcher recursed once per
+matched BYTE and gave up past its depth guard, so at 256 bytes fr returned nil where Redis returns
+1. A ratio taken then would have compared a full match against a bail-out -- different work, and the
+number would have been a fiction. VERIFIED rather than assumed for this run: fr and Redis were
+probed directly at 16, 256 and 1000 bytes and agree on every one (`1`). That check exists because an
+error reply counts as a completed request and would have inflated the arm that failed.
+
+### WHAT THIS DOES NOT SETTLE
+
+  * It is ONE draw in a window the gate refuses. Nothing here may be quoted as a bound.
+  * The ELF predates `04aa04016` by about 100 minutes, so it lacks the `%b`/`%f` fix. Irrelevant to
+    a literal pattern and confirmed by the reply probe, but stated because the binary is not HEAD.
+  * The 16-byte row null-failed on the fr arm (1.0271), so the SLOPE is a direction, not a measured
+    coefficient. Two admissible sizes are needed before the per-byte claim is more than a reading.
+
+### RETRY PREDICATES
+
+  1. Re-run `--shapes luapat --rounds 21` in a window where the gate is FIT and no cargo is running,
+     three draws, and quote the WORST. That is the run that decides whether 0.6358x stands.
+  2. If it stands, profile the matcher per byte rather than per call: the slope says the cost is in
+     the inner loop, and `lua_pat_match` is 240 bytes of frame per level with the tails now
+     iterative, so what remains is the per-character work itself.
+  3. Keep `get_control` in every run. It null-failed here, which is exactly why no normalised
+     figure was quoted.
