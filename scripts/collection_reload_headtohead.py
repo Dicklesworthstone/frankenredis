@@ -277,6 +277,17 @@ def running_image_sha(c):
     return digest.hexdigest()
 
 
+def contention_verdict(runq_samples, limit):
+    """(contended, peak) from run-queue samples taken THROUGHOUT a run.
+
+    Separated from the measurement so it can be self-tested: the case it exists for -- a
+    neighbour that starts and finishes mid-run, leaving both endpoints quiet -- cannot be
+    reproduced by starting servers, only by feeding it samples.
+    """
+    peak = max(runq_samples)
+    return peak > limit, peak
+
+
 def host_snapshot():
     """(loadavg1, running_procs, iowait_pct) — the three numbers that decide whether a
     measurement window is real.
@@ -402,6 +413,11 @@ def run_competitive_restore(fr_a, fr_b, redis):
     # So the run records the run queue at BOTH ends. A quiet reading is not a quiet window,
     # and the number that exposes the difference is the delta, not either endpoint.
     load_before, runq_before, iowait_before = host_snapshot()
+    # (frankenredis-i41sx) Sampled THROUGHOUT, not just at the ends. `--confirm 3` triples the
+    # wall time of this call, and a neighbour that starts and finishes inside it leaves both
+    # endpoints reading quiet -- the same "a quiet reading is not a quiet window" failure this
+    # guard exists for, one level down. The decision is made on the PEAK.
+    runq_samples = [runq_before]
     if runq_before > CONTENDED_RUNQ and not ALLOW_CONTENDED:
         print("  PREFLIGHT REFUSED: run queue %d exceeds %d — the host is already contended."
               % (runq_before, CONTENDED_RUNQ))
@@ -483,6 +499,7 @@ def run_competitive_restore(fr_a, fr_b, redis):
                 sample[arm] = time_restore(arms[arm], payloads)
             extra.append(sample["fr_a"] / sample["fr_b"])
         aa_history.append(statistics.median(extra))
+        runq_samples.append(host_snapshot()[1])
     ab, ab_lo, ab_hi = bootstrap_median_ci(ab_ratios)
     # SAME-PROCESS A/A. The fr_a/fr_b null compares two separate fr PROCESSES, so
     # it nulls the engine and the process placement together — and on a busy
@@ -519,15 +536,19 @@ def run_competitive_restore(fr_a, fr_b, redis):
     # what is still needed; `--confirm N` repeats the whole sampling N times in ONE
     # invocation and only accepts when EVERY null lands in band, via `competitive_verdict`.
     load_after, runq_after, iowait_after = host_snapshot()
-    print("  host   runq %d -> %d, loadavg %.2f -> %.2f, iowait %.2f -> %.2f pct"
-          % (runq_before, runq_after, load_before, load_after, iowait_before, iowait_after))
-    contended = runq_after > CONTENDED_RUNQ or runq_before > CONTENDED_RUNQ
+    runq_samples.append(runq_after)
+    contended_by_peak, runq_peak = contention_verdict(runq_samples, CONTENDED_RUNQ)
+    print("  host   runq %d -> %d (peak %d over %d samples), loadavg %.2f -> %.2f, "
+          "iowait %.2f -> %.2f pct"
+          % (runq_before, runq_after, runq_peak, len(runq_samples),
+             load_before, load_after, iowait_before, iowait_after))
+    contended = contended_by_peak
     if contended:
         # Stated ABOVE the verdict on purpose: a reader who sees only the null has to go
         # find out why it moved, and by then the window is gone.
-        print("  CONTENTION: the run queue crossed %d during this invocation. Any null "
-              "outside band is explained by this before it is explained by the engines."
-              % CONTENDED_RUNQ)
+        print("  CONTENTION: run queue peaked at %d (limit %d) during this invocation. Any "
+              "null outside band is explained by this before it is explained by the engines."
+              % (runq_peak, CONTENDED_RUNQ))
 
     nulls = aa_history + [aa]
     accepted, why = competitive_verdict(nulls)
@@ -535,8 +556,8 @@ def run_competitive_restore(fr_a, fr_b, redis):
         # A pass under contention is the dangerous case: the gate is satisfied and the
         # number is still an artifact. Downgrade it rather than print an acceptance.
         print("  VERDICT: HOLD — nulls landed in band BUT the host was contended "
-              "(runq %d -> %d). A pass measured against a moving neighbour is not a pass."
-              % (runq_before, runq_after))
+              "(runq peaked at %d, limit %d). A pass measured against a moving neighbour is "
+              "not a pass." % (runq_peak, CONTENDED_RUNQ))
         return
     if accepted:
         print("  VERDICT: COMPETITIVE ROW — %s; record A/B with its CI" % why)
@@ -580,6 +601,19 @@ def self_test():
     assert isinstance(running, int), "running must be an int for the threshold comparison"
     print("  host_snapshot: runq %d, loadavg %.2f, iowait %.2f pct — shape OK"
           % (running, load1, iowait))
+
+    # (frankenredis-i41sx) The case the peak exists for: a neighbour that starts AND finishes
+    # inside the run. Both endpoints read quiet, so an endpoints-only check passes it -- which
+    # is what this harness did until the samples were taken throughout.
+    contended, peak = contention_verdict([5, 40, 5], 24)
+    assert contended and peak == 40, "a mid-run spike must be caught, got %r" % ((contended, peak),)
+    contended, peak = contention_verdict([5, 5, 5], 24)
+    assert not contended and peak == 5, "a genuinely quiet run must pass"
+    contended, _ = contention_verdict([24], 24)
+    assert not contended, "the limit itself is not contended -- the comparison is strict"
+    contended, _ = contention_verdict([25], 24)
+    assert contended, "one above the limit is contended"
+    print("  contention_verdict: mid-run spike caught, boundary exact")
 
     assert len(ARM_ORDERS) == 6
     for arm in ("fr_a", "fr_b", "redis"):
