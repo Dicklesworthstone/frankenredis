@@ -122,6 +122,57 @@ WALKS = {
                  "return string.match(s, p)"),
 }
 
+
+def bisect_ceiling(port, tag, tmpl, n_slots, cap):
+    """Binary-search the deepest depth that still COMPLETES on one engine.
+
+    (frankenredis-lua-call-depth-ug22x) A ladder of hand-picked depths reports which rungs
+    pass; it cannot report the BOUNDARY, and the boundary is the number the residual gap is
+    computed from. The doc comment on MAX_CALL_DEPTH quoted upstream as running "to ~16000
+    and refusing by 18000" from such a ladder; bisection puts the exact ceiling at 19996,
+    which moves the stated gap from ~21x to 26.1x.
+
+    Liveness is checked after every FAILING probe, because the failure this whole tool exists
+    to distinguish -- a guard firing versus the process aborting on a real stack overflow --
+    looks identical from a single reply. A dead server ends the search rather than being
+    bisected further, and says so.
+    """
+    def completes(n):
+        # `call` returns ok=True for an ERROR REPLY on purpose -- its own contract is
+        # "ok=False means the connection died", because process death is what the ladder
+        # exists to catch. Bisection asks a DIFFERENT question, so it must not reuse that
+        # flag: a refusal at depth n is exactly what bounds the search. Reading `ok` here
+        # reported "fr reaches 1.0000x the incumbent's depth" against a stack-overflow
+        # reply printed on the same line.
+        ok, txt = call(port, "EVAL", tmpl % ((n,) * n_slots), "0")
+        if not ok:
+            if not alive(port):
+                print("    %s DIED at depth %d -- process abort, not a guard: %s" % (tag, n, txt))
+                return None, txt
+            return False, txt
+        if txt.startswith("ERR ") or txt.startswith("NESTED ERR"):
+            return False, txt
+        return True, txt
+
+    ok, txt = completes(cap)
+    if ok is None:
+        return None, txt
+    if ok:
+        print("    %s: still completes at the cap %d; the ceiling is above it" % (tag, cap))
+        return cap, txt
+    lo, hi, detail = 1, cap, txt
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        good, t = completes(mid)
+        if good is None:
+            return None, t
+        if good:
+            lo = mid
+        else:
+            hi, detail = mid, t
+    return lo, detail
+
+
 def main():
     for b in (REDIS, FR):
         if not os.path.exists(b):
@@ -145,6 +196,24 @@ def main():
         # have DIFFERENT limits: encode/decode turn over at 1000, the reply walk at 2000, and
         # cmsgpack degrades at 16. A ladder that stops at 2000 exercises the reply walk without
         # ever reaching its bound, which is exactly the gap this argument closes.
+        if len(sys.argv) > 2 and sys.argv[2] == "--bisect":
+            cap = int(sys.argv[3]) if len(sys.argv) > 3 else 40000
+            print("mode: BISECT -- exact ceiling per engine, cap %d, loadavg %s" % (cap, loadavg()))
+            fr_max, fr_txt = bisect_ceiling(FR_PORT, "fr", tmpl, n_slots, cap)
+            rd_max, rd_txt = bisect_ceiling(REDIS_PORT, "redis", tmpl, n_slots, cap)
+            print()
+            print("fr    deepest completing: %s" % fr_max)
+            print("      first failure:      %s" % fr_txt)
+            print("redis deepest completing: %s" % rd_max)
+            print("      first failure:      %s" % rd_txt)
+            if fr_max and rd_max:
+                print()
+                print("fr reaches %.4fx the incumbent's depth (%s vs %s), a %.1fx shortfall"
+                      % (fr_max / rd_max, fr_max, rd_max, rd_max / fr_max))
+            print("fr alive at end:    %s" % alive(FR_PORT))
+            print("redis alive at end: %s" % alive(REDIS_PORT))
+            print("loadavg at end: %s" % loadavg())
+            return 0
         depths = ([int(x) for x in sys.argv[2].split(",")] if len(sys.argv) > 2
                   else [100, 900, 999, 1000, 1001, 2000])
         for depth in depths:

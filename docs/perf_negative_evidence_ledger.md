@@ -66750,3 +66750,87 @@ be a second suite rather than an edit to this one.
   2. Do not cite `protocol_negative.json` as evidence of client protocol behaviour. It measures
      `execute_bytes`.
   3. When quoting a protocol error string, name which renderer it came from.
+
+## 2026-08-19 CrimsonHawk: TRIAGE — FIVE of the six top ready capability beads are ALREADY FIXED and differentially verified so; only `ug22x` is live, and bisection puts its true gap at 26.1x rather than the ~21x the source comment claims
+
+EVIDENCE CLASS: both engines started from their own binaries and driven over real sockets, one
+command sequence per bead, replies compared. Verdicts, not timings — no ratio, no A/A null, and
+nothing here is a perf claim. Per-arm figures recorded because the brief asks for them, not because
+they bear on a verdict: loadavg 8.25 / 11.60 / 13.56 at start, 13.31 / 11.69 / 12.96 at end,
+iowait 0 pct, 0 frankenredis builds local.
+
+  fr        `target/release/frankenredis`, sha256 `892149b43ad1d96d590c7e3e605c44873223849f`
+  incumbent `legacy_redis_code/redis/src/redis-server`, Redis 7.2.4
+  BINARY PROVENANCE: the ELF was linked at 12:45:04, AFTER peer edits to `fr-command/src/lib.rs`,
+  `fr-runtime`, `fr-store` (12:39) and BEFORE the latest `lua_eval.rs` write (12:59). It
+  corresponds to no commit and is disqualified for any certification. For BEHAVIOURAL verdicts it
+  is readable, and the peer diff was checked for overlap: it contains no `sort`/`acl` lines, so the
+  ACL row below is HEAD's code.
+
+### THE TRIAGE
+
+    bead                              probe result                                    verdict
+    yx1wa  SORT BY/GET ACL bypass     fr refuses with upstream's exact wording        ALREADY FIXED
+    oo3aw  writable script OOM gate   byte-identical, INCLUDING the script SHA        ALREADY FIXED
+    1153w  MULTI queue-time OOM       -OOM at queue time then EXECABORT, identical    ALREADY FIXED
+    zm8x5  Lua pattern length > 200   250 and 400 byte literals both match            ALREADY FIXED
+    ps0le  Lua proper tail calls      5000 tail calls complete on both                ALREADY FIXED
+    ug22x  Lua self-recursion depth   fr 767, redis 19998                             LIVE
+
+`yx1wa` is the sharpest case. It was filed 2026-08-18 as a SECURITY defect — an ACL key-pattern
+bypass giving a restricted user a read primitive — on the finding that "neither phrase appears
+anywhere in the workspace, zero occurrences of `denied due to insufficient ACL`". There are now
+four occurrences, landed by `8c85866f8` and pinned by `1e10a11ba`. Probed live, fr returns
+upstream's exact text for both BY and GET, **and still serves `BY nosort`**, which is the carve-out
+that makes this subtle: a pattern with no `*` is upstream's `dontsort` case, dereferences nothing,
+and must stay allowed. Unit tests pin the rule; this is the first check of it against the live
+incumbent.
+
+The bead titles are what went stale, and they are what `br ready` shows. `ug22x` is still titled
+"refused at depth 128 ... ~130x too strict" when the constant has been 768 since `79e2438e3`.
+**A bead's title is a claim with a timestamp, and the ready list ranks on it.**
+
+### THE ONE LIVE BEAD, MEASURED EXACTLY
+
+    fr    deepest completing self-recursion    767   (= MAX_CALL_DEPTH - 1, exactly)
+    redis deepest completing self-recursion  19998
+    shortfall                                 26.1x
+    both engines ALIVE at the end -- the guard fires, the stack does not die
+
+767 landing exactly one below the constant is the useful confirmation: the ceiling is fr's own
+bound, not stack exhaustion, so raising it is a decision about stack budget rather than a bug hunt.
+
+This CORRECTS the derivation in `MAX_CALL_DEPTH`'s own doc comment, which I wrote: it says upstream
+"runs this to ~16000 levels and refuses by 18000" and puts the gap at "~21x". Both came from a
+LADDER of hand-picked depths, which reports which rungs pass and cannot report a boundary. The
+boundary is 19998 and the gap is 26.1x. The comment invites the reader to redo the arithmetic
+rather than trust it; this is that redo, and it moved the answer.
+
+### THE BISECT MODE, AND THE FLAG THAT ALMOST FAKED A NULL
+
+`scripts/lua_depth_survival_differential.py` gains `--bisect [cap]`. It nearly shipped reporting
+**"fr reaches 1.0000x the incumbent's depth (40000 vs 40000)"** — a perfect false agreement,
+printed on the same line as a `stack overflow` reply.
+
+The cause is worth stating because the flag is correct and my use of it was not. `call()` documents
+itself as "ok=False means the connection died", because the tool it belongs to exists to catch
+process ABORTS; an ERROR REPLY is therefore `ok=True`. Bisection asks a different question — a
+refusal at depth n is exactly what bounds the search — so reusing that flag classified every
+refusal as a success and drove the search to the cap. **A predicate borrowed from a tool with a
+different question will answer that other question, silently.** Fixed by classifying on the reply
+text, and the fix is what produced 767 / 19998.
+
+Only the contradiction between the printed cap and the printed error caught it. Had the cap been
+below fr's real ceiling, both engines would have "agreed" at the cap and the row would have read as
+parity.
+
+### RETRY PREDICATES
+
+Retry predicate: re-triage ONLY IF a capability bead sits in the ready list for more than a day
+without a comment dated after its last relevant commit — that is the condition this run found five
+instances of; and re-bisect `ug22x` ONLY IF `MAX_CALL_DEPTH` or `WORKER_THREAD_STACK_SIZE` changes,
+since 767 is derived from the first and the safe ceiling from both.
+
+  1. Close `yx1wa`, `oo3aw`, `1153w`, `zm8x5`, `ps0le` — all verified fixed against the incumbent.
+  2. Quote `ug22x` as **767 vs 19998, 26.1x**, not as "depth 128" and not as "~21x".
+  3. Do not read this row as a perf verdict. It measures no time.
