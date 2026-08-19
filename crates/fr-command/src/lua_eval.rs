@@ -12272,55 +12272,23 @@ fn hello_script_result(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
         return None;
     }
 
-    if argv.len() == 1 {
-        return Some(Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
-    }
-
-    let protocol_version = match parse_i64_arg(&argv[1]) {
-        Ok(version) => version,
-        Err(err) => return Some(Err(command_error_string(err))),
-    };
-
-    if protocol_version != 2 && protocol_version != 3 {
-        return Some(Err(format!(
-            "NOPROTO unsupported protocol version '{}'",
-            protocol_version
-        )));
-    }
-
-    let mut options = argv[2..].iter();
-    while let Some(option_arg) = options.next() {
-        let option = match std::str::from_utf8(option_arg) {
-            Ok(option) => option,
-            Err(_) => return Some(Err(command_error_string(CommandError::InvalidUtf8Argument))),
-        };
-        if option.eq_ignore_ascii_case("AUTH") {
-            if options.next().is_none() || options.next().is_none() {
-                return Some(Err(command_error_string(CommandError::SyntaxError)));
-            }
-            continue;
-        }
-        if option.eq_ignore_ascii_case("SETNAME") {
-            let Some(name) = options.next() else {
-                return Some(Err(command_error_string(CommandError::SyntaxError)));
-            };
-            if !hello_client_name_is_valid(name) {
-                return Some(Err(
-                    "ERR Client names cannot contain spaces, newlines or special characters."
-                        .to_string(),
-                ));
-            }
-            continue;
-        }
-        return Some(Err(command_error_string(CommandError::SyntaxError)));
-    }
-
+    // Upstream script.c::scriptCall runs exactly two gates before a command may
+    // execute from a script: scriptVerifyCommandArity (script.c:319-328) and then
+    // the CMD_NOSCRIPT check (script.c:529-532), in that order. HELLO carries
+    // CMD_NOSCRIPT (commands.def) and its arity is -1, which EVERY call satisfies
+    // because argv[0] is the command name itself -- so every
+    // `redis.call('HELLO', ...)` in 7.2.4 stops at the NOSCRIPT gate, and HELLO's
+    // own argument parsing is never reached.
+    //
+    // fr validated the protocol version and the AUTH/SETNAME options FIRST, so a
+    // script asking for HELLO 4 was told "NOPROTO unsupported protocol version"
+    // where the incumbent says the command is not allowed here at all. Since the
+    // version can never take effect from a script, reporting a fault in it
+    // describes a step upstream does not take -- and it leaks a different error
+    // class (NOPROTO, syntax) for what is one refusal.
     Some(Err(SCRIPT_NOSCRIPT_ERROR.to_string()))
 }
 
-fn hello_client_name_is_valid(name: &[u8]) -> bool {
-    name.iter().all(|&b| b > b' ')
-}
 
 fn sync_script_result(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
     let command = argv.first()?;
@@ -12635,7 +12603,13 @@ fn lua_pat_match(
     // recursion"), so a literal pattern costs it NO stack. fr recursed at
     // every one of them, which made `depth` grow once per matched BYTE and
     // silently turned a pattern longer than the limit into a non-match.
-    loop {
+    //
+    // The label is load-bearing: the %b arm's tail sits inside the inner
+    // balance-scan `while`, so a bare `continue` there binds to THAT loop and
+    // resumes the scan instead of restarting the match. The original code was a
+    // `return`, which left both loops. rustc caught it as "value assigned to
+    // `si` is never read".
+    'match_pattern: loop {
         if pi >= pat.len() {
             return Some(si);
         }
@@ -12713,7 +12687,7 @@ fn lua_pat_match(
             }
             si = end;
             pi += 2;
-            continue;
+            continue 'match_pattern;
         }
 
         // (frankenredis-3zxc1) Handle %f[set] frontier matcher — a zero-width
@@ -12729,7 +12703,7 @@ fn lua_pat_match(
             let cur = if si < s.len() { s[si] } else { 0u8 };
             if !lua_set_match(pat, pi + 2, prev) && lua_set_match(pat, pi + 2, cur) {
                 pi = pi + 2 + set_len;
-                continue;
+                continue 'match_pattern;
             }
             return None;
         }
@@ -12755,7 +12729,7 @@ fn lua_pat_match(
                     if depth_b == 0 {
                         si = j + 1;
                         pi += 4;
-                        continue;
+                        continue 'match_pattern;
                     }
                 } else if s[j] == open_ch {
                     depth_b += 1;
@@ -12796,7 +12770,7 @@ fn lua_pat_match(
                         return Some(end);
                     }
                     pi = after_elem + 1;
-                    continue;
+                    continue 'match_pattern;
                 }
                 _ => {}
             }
@@ -12806,7 +12780,7 @@ fn lua_pat_match(
         if si < s.len() && lua_single_match(pat, pi, s[si]) {
             si += 1;
             pi = after_elem;
-            continue;
+            continue 'match_pattern;
         }
 
         return None;
@@ -20897,16 +20871,14 @@ end
             &mut store,
             0,
         );
-        assert_eq!(
-            hello_integer,
-            Err("ERR value is not an integer or out of range".to_string())
-        );
+        // Upstream never parses HELLO's arguments from a script: the CMD_NOSCRIPT
+        // gate (script.c:529) fires first, and HELLO's -1 arity means the only gate
+        // ahead of it always passes. So every one of these is the SAME refusal, and
+        // the argument being bad is beside the point.
+        assert_eq!(hello_integer, Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
 
         let hello_proto = eval_script(b"return redis.call('HELLO', '4')", &[], &[], &mut store, 0);
-        assert_eq!(
-            hello_proto,
-            Err("NOPROTO unsupported protocol version '4'".to_string())
-        );
+        assert_eq!(hello_proto, Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
 
         let hello_auth_syntax = eval_script(
             b"return redis.call('HELLO', '3', 'AUTH', 'alice')",
@@ -20915,7 +20887,7 @@ end
             &mut store,
             0,
         );
-        assert_eq!(hello_auth_syntax, Err("ERR syntax error".to_string()));
+        assert_eq!(hello_auth_syntax, Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
 
         let hello_setname_syntax = eval_script(
             b"return redis.call('HELLO', '3', 'SETNAME')",
@@ -20924,7 +20896,7 @@ end
             &mut store,
             0,
         );
-        assert_eq!(hello_setname_syntax, Err("ERR syntax error".to_string()));
+        assert_eq!(hello_setname_syntax, Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
 
         let hello_setname_invalid = eval_script(
             b"return redis.call('HELLO', '3', 'SETNAME', 'bad\\nname')",
@@ -20935,10 +20907,7 @@ end
         );
         assert_eq!(
             hello_setname_invalid,
-            Err(
-                "ERR Client names cannot contain spaces, newlines or special characters."
-                    .to_string()
-            )
+            Err(SCRIPT_NOSCRIPT_ERROR.to_string())
         );
 
         let hello_unknown_option = eval_script(
@@ -20948,7 +20917,7 @@ end
             &mut store,
             0,
         );
-        assert_eq!(hello_unknown_option, Err("ERR syntax error".to_string()));
+        assert_eq!(hello_unknown_option, Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
 
         let pcall = eval_script(
             b"local reply = redis.pcall('HELLO'); return reply.err",
@@ -22491,8 +22460,11 @@ end
         }
 
         // Same shape through find(), which reaches the matcher by another route.
+        // The parentheses are load-bearing: string.find returns TWO values (start
+        // and end), and a bare `return string.find(...)` would not yield a single
+        // integer. Wrapping truncates to the first, which is Lua's own rule.
         let frame = eval_script(
-            b"local s = string.rep('ab', 200) return string.find(s, s)",
+            b"local s = string.rep('ab', 200) return (string.find(s, s))",
             &[],
             &[],
             &mut store,
@@ -22583,6 +22555,40 @@ end
             RespFrame::Integer(1),
             "upstream checks at capture-open, so this is nil and NOT an error"
         );
+    }
+
+    /// `%bxy` had NO test in this file, which is how f03c9bcb4's mis-bound
+    /// `continue` reached main: the arm's tail sits inside its own balance-scan
+    /// `while`, so a bare `continue` resumed that scan instead of restarting the
+    /// match, and every %b pattern silently stopped matching. rustc's "value
+    /// assigned to `si` is never read" was the only thing that noticed.
+    #[test]
+    fn lua_pattern_balanced_match_survives_the_goto_init_rewrite() {
+        let mut store = Store::new();
+        let frame = eval_script(
+            b"return string.match('(nested (parens)) tail', '%b()')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("a balanced match must not error");
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"(nested (parens))".to_vec())),
+            "%b must span the outermost pair, not fall through to a non-match"
+        );
+
+        // The degenerate open == close form takes the same tail.
+        let frame = eval_script(
+            b"return string.match('x|inner|y', '%b||')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("a degenerate balanced match must not error");
+        assert_eq!(frame, RespFrame::BulkString(Some(b"|inner|".to_vec())));
     }
 
     #[test]
