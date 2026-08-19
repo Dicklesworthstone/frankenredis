@@ -274,6 +274,28 @@ SHAPES = {
     # Whatever makes fr's list path cost ~1.5x its own whole-process baseline is NOT specific to
     # the packed encoding.
     #
+    # REPLICATED 2026-08-19 on a second ELF (b616c975), which is what the standing convention asks
+    # for before a thin margin is quoted. rotate_packed_8 across the two draws, and get_control
+    # across three:
+    #
+    #   shape             fr spread   redis spread   ratios
+    #   rotate_packed_8   0.23%       9.70%          0.4301x, 0.4729x
+    #   get_control       0.53%       5.57%          0.2713x, 0.2880x, 0.2868x
+    #
+    #   central 0.4505 / 0.2818 = 1.599x normalised
+    #   WORST   0.4729 / 0.2713 = 1.743x normalised    <- quote this one
+    #
+    # THE RATIO MOVED 10% BETWEEN DRAWS AND fr DID NOT MOVE AT ALL. Every bit of that came from the
+    # redis denominator. It is the third independent confirmation of this file's asymmetry note and
+    # the concrete reason a single-pair ratio on this harness must be quoted at its worst bound: a
+    # second draw of the SAME shape on a NEWER fr build read 0.4301x then 0.4729x, and a reader
+    # comparing those two numbers would reasonably but wrongly conclude fr had regressed 10%.
+    #
+    # DISPATCH IS NOT WHERE IT GOES. rotate_packed_8's dispatch share is 23.1% (~612 of 2652.8
+    # instr/op) against the 21.5% this harness quotes for an already front-classified route, and
+    # RPOPLPUSH does have a floor class. So the ~1.6x is in execution, not in deciding which command
+    # to run -- do not take a dispatch lever here on the strength of the list rows.
+    #
     # WHAT THIS PAIR CANNOT TELL YOU, because encoding and SIZE cannot be varied independently --
     # the encoding is chosen BY the size. `rotate_packed_8` is a small listpack and
     # `rotate_deque_512` is a large quicklist, so the contrast is realistic but conflated. A
