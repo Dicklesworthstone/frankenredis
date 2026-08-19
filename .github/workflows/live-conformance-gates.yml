@@ -104,6 +104,25 @@ jobs:
             --json "${FORENSICS_ROOT}/${LIVE_RUN_ID}/protocol_client_parity.json" \
             | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/protocol_client_parity.log"
 
+      - name: G3+G5 - Capability Bead Parity Triage
+        # Runs each CLOSED capability bead's own shape against the live incumbent, so the
+        # eight beads closed on 2026-08-19 have a regression check they did not previously
+        # have -- their fixes were pinned by unit tests, never by a live-oracle differential.
+        #
+        # Exit 1 means a bead believed fixed has started diverging again. Beads listed in
+        # KNOWN_LIVE (currently lua-call-depth-ug22x) are expected to diverge and do not fail
+        # the gate; one of them AGREEING is reported as STALE-EXPECT, because good news that
+        # can hide is how a stale expectation masks a regression of its own row.
+        #
+        # Debug binary on purpose: this compares REPLIES, never timings. Private ports
+        # 28911/28912, so it does not touch the 6379 server this job already started.
+        run: |
+          cargo build -p fr-server
+          python3 scripts/bead_parity_triage.py \
+            --fr target/debug/frankenredis \
+            --redis "$(command -v redis-server)" \
+            | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/bead_parity_triage.log"
+
       - name: G7 - Enforce Coverage/Flake Budgets
         run: ./scripts/check_coverage_flake_budget.sh "artifacts/e2e_orchestrator/${LIVE_RUN_ID}/coverage_summary.json"
 

@@ -66941,3 +66941,90 @@ AGREE, divergent rows 8 -> 1.
 2. If you own a verdict differential script, print the ELF sha256 of every arm it starts. That
    removes this failure mode from the whole class rather than from one bead.
 3. When a bound constant is raised, re-derive every fixture depth that was written as a literal.
+
+## 2026-08-19 CrimsonHawk: TRIAGE — EIGHT more open capability beads verified fixed against the live incumbent and closed, taking the two-turn total to twelve; `ug22x` is still the only live one, and the tool now refuses to let a green probe imply a close
+
+EVIDENCE CLASS: `scripts/bead_parity_triage.py`, committed with this row. Each bead's OWN shape run
+against fr and vendored Redis 7.2.4 in one invocation, replies compared. Verdicts, not timings — no
+ratio, no A/A null, nothing here is a perf claim. Per-arm figures because the brief asks:
+loadavg 11.06 / 10.92 / 12.11 at start, 23.09 / 15.84 / 13.77 at close, iowait 0 pct, 0 frankenredis
+builds.
+
+  fr        `target/release/frankenredis`, sha256 `9df0749546b1f5fd4a3853806d35b3766cb6e75c281fd65d12f30bcdb8b150c8`
+  incumbent `legacy_redis_code/redis/src/redis-server`, Redis 7.2.4
+  HEAD      `76c0b76f7`, ELF linked 13:11:32 against a HEAD of 13:08:44
+  PROVENANCE: three sources under `crates/` were uncommitted at probe time, so **every green row is
+  PROVISIONAL by construction** and the tool says so in its own output.
+
+### THE CLOSES, AND THE RULE THAT LICENSED THEM
+
+Last turn I closed a bead on a green probe alone and had to reopen it: the ELF predated the very
+work the bead tracked. So the bar this turn was **green probe PLUS a committed fix I can name**, and
+every close carries one:
+
+    bead                shapes probed                                  fix committed at
+    zy8kq               capture counts 31 / 32 / 40                    0c71e2757, d93ec40c7
+    1tlyh               cjson.encode at 900 / 1000 / 1001 + liveness   c63b56ef1
+    gvex0               bare ^, mid-pattern ^, unread capture, %1      8c3e407b9 + peer follow-ups
+    mzkxl               four RAW-BYTE length headers                   eaa1cb7b4
+    xreadopts-hhz9g     five XREAD/XREADGROUP diagnostics              a37f3e6b3
+    monitorexec-pfcz4   MULTI / MONITOR / EXEC                         fc69fc5c2
+    qeef0               HELLO from Lua, no-arg / 3 / bogus             04aa04016
+    vqiki               45 socket vectors (settled last turn)          d831b452d, 3d5066c59
+
+All eight were OPEN, none `in_progress` — checked first, because that is what made the `ps0le` close
+wrong.
+
+Two are worth naming individually. **`1tlyh`'s premise is simply false now**: "fr sets no thread
+stack_size anywhere" — `WORKER_THREAD_STACK_SIZE` is 8 MiB at `fr-server/src/main.rs:79`, applied at
+three spawn sites. **`monitorexec-pfcz4` was fixed by `fc69fc5c2`, whose finding was that the guard
+already EXISTED and control flow never reached it** — so a grep for the check would have reported
+the bead fixed while a client still saw the old behaviour. That is the same failure mode as
+`vqiki`'s fixture, and it is why these are probed rather than read.
+
+### MY OWN TOOL HAD A ROW THAT COULD NOT FAIL
+
+The first `mzkxl` probe returned a canned note plus a `PING`. It agreed, it counted toward the
+agree total, and it tested **nothing** — an oversized length header never becomes an argv, so it
+cannot be sent through a command-shaped client at all.
+
+A vacuous AGREE is the same hazard as a false AGREE: **nobody investigates agreement.** It inflates
+the denominator with a row that is structurally incapable of dissent. Replaced with a raw-byte
+exchange, and then checked that the four rows carry real content rather than agreeing on two empty
+strings:
+
+    $536870913   ->  "unknown command '$536870913'"                 both, connection OPEN
+    $x           ->  "unknown command '$x'"                          both, connection OPEN
+    *2147483648  ->  "-ERR Protocol error: invalid multibulk length" both, connection CLOSED
+    *x           ->  "-ERR Protocol error: invalid multibulk length" both, connection CLOSED
+
+That check — assert the agreeing values are non-trivial — is the one I keep having to add after the
+fact, most recently when `cat -v` produced empty output on both arms and five probes read as agree.
+
+### THE TOOL REFUSES TO IMPLY A CLOSE
+
+`bead_parity_triage.py` prints a PROVENANCE block first: binary sha256, link time, HEAD, and every
+uncommitted source under `crates/`. When the tree is dirty it marks **every** green row
+`[PROVISIONAL]` and says in its own output that green means "this binary passes", not "this bead is
+fixed at HEAD". It never touches bead state. `KNOWN_LIVE` holds beads measured live, and a bead
+listed there that AGREES is reported as `STALE-EXPECT` rather than silently passing — good news must
+not be able to hide.
+
+### WHAT IS ACTUALLY LEFT
+
+`lua-call-depth-ug22x`, unchanged and reconfirmed this run: fr refuses at 1000 where the incumbent
+returns. Bisected last turn to **767 vs 19998, a 26.1x shortfall**, and 767 is exactly
+`MAX_CALL_DEPTH - 1`, so it is fr's own bound rather than stack exhaustion. Closing it needs a
+cheaper frame or a heap-allocated interpreter stack: 19998 levels at the measured 4352 B/level is
+~83 MiB of stack, which no plausible `WORKER_THREAD_STACK_SIZE` reaches.
+
+### RETRY PREDICATES
+
+Retry predicate: re-run ONLY IF a bead in `KNOWN_LIVE` starts agreeing (that is a fix worth
+confirming and the expectation is then stale), or IF a closed bead's shape starts diverging — which
+is exactly what the gate's exit 1 reports and is the regression signal these eight fixes did not
+previously have.
+
+  1. Treat a bead TITLE as a claim with a timestamp; `br ready` ranks on titles.
+  2. Never close on a green probe alone — name the commit, and check the bead is not `in_progress`.
+  3. Do not read this row as a perf verdict. It measures no time.
