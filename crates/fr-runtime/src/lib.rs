@@ -38056,8 +38056,19 @@ impl Runtime {
         // bypasses the top-level read-only gate (reject_write_on_readonly_replica)
         // — is still rejected with -READONLY. Cleared while replaying the
         // primary's stream so propagated writes always apply.
+        // (frankenredis-obeyclient-strlen-qxdyn) `applying_master_stream` is only HALF of
+        // upstream's `!obey_client`. `mustObeyClient` is true for the master link AND for the AOF
+        // client (server.c:3209), and the read-only check it guards is
+        // `server.masterhost && server.repl_slave_ro && !obey_client` (script.c:158,
+        // server.c:3995). Publishing without the AOF half left every consumer of this flag
+        // refusing writes replayed from the AOF on a replica -- the runtime's own gate happens to
+        // be safe because it separately tests `execution_source != Client`, but the flag itself
+        // was wrong, and the script-prepare gate had to spell the missing half out by hand rather
+        // than trust it. Decided ONCE here instead.
+        let obeyed = self.server.store.must_obey_client;
         self.server.store.is_read_only_replica = self.server.replica_read_only
             && !self.server.applying_master_stream
+            && !obeyed
             && matches!(
                 self.server.replication_runtime_state.role,
                 ReplicationRoleState::Replica { .. }

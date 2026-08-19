@@ -27307,10 +27307,12 @@ fn script_shebang_line_has_flag(line: &[u8], wanted: &str) -> bool {
 /// is invisible to any test that arranges only one of the two conditions -- which is exactly how
 /// oo3aw row 5 went wrong.
 ///
-/// `!store.must_obey_client` carries upstream's `!obey_client` in full. `is_read_only_replica` is
-/// published cleared for `applying_master_stream` but NOT for AOF replay, so relying on it alone
-/// would inherit that gap here; this spells the AOF half out rather than assuming the flag covers
-/// it.
+/// `!store.must_obey_client` is RETAINED even though the runtime's publish now folds the same
+/// term into `is_read_only_replica`. Removing it is the tidier code and I tried it: this gate is
+/// unit-tested by setting the two store fields DIRECTLY, which is upstream of the publish, so the
+/// simplification turns a passing test red and there is no build slot this turn to catch that.
+/// The redundancy is therefore deliberate and cheap -- both terms mean the same thing and neither
+/// can drift toward permitting a write -- and collapsing it belongs in a turn that can run tests.
 /// Upstream `scriptPrepareForRun`'s third write-flag check (script.c:178-181):
 ///
 ///     if (ro) {
