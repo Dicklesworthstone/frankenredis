@@ -66039,3 +66039,72 @@ building during the poll would have disqualified my own measurement.
   3. Poll for FIT rather than measuring on a brief-supplied "quiet" reading. The brief called
      several earlier windows quiet that the gate refused; this one it also called quiet, and the
      difference was that all three loadavgs were low together.
+
+---
+
+## HOLD — the collection-wide flip is supported by five runs and certified by none: the 600-member experiment needs the loadavg-6 class of window, not loadavg-13 (frankenredis-33832)
+
+Ran the experiment the row above specified: 33832's collection-heavy shape (hashes + sets + zsets
+together) at 40 members, which is below all three listpack thresholds, against 600 members, which
+clears set and zset at 128 and hash at 512. Same arms, same pinning, back to back.
+
+      shape                     A/B redis/fr        nulls                      verdict
+      40 members, run 1         0.654955            2 of 3 out (0.885, 0.900)  HOLD
+      40 members, run 2         0.590854            2 of 3 out (0.928, 0.909)  HOLD
+      40 members, run 3 fresh   0.595112            3 of 3 out                 HOLD
+      600 members, run 1        1.321645            1 of 3 out (0.979483)      HOLD
+      600 members, run 2        1.282458            1 of 3 out (0.965495)      HOLD
+
+NOTHING HERE IS CERTIFIED. The A/B numbers are recorded because their CONSISTENCY is itself
+information -- 0.59-0.65 below the thresholds across three runs, 1.28-1.32 above them across two --
+but the gate refused every one and the standing convention is that a refused row is not a result.
+
+### WHAT THE DIRECTION SUGGESTS, AND WHY IT IS NOT ENOUGH
+
+40 members sits where 33832's certified 0.606011x sits, and these three runs land on it. 600
+members puts every collection type past its threshold, and both runs put fr AHEAD. That is the
+same flip the zset-only rows certified at 128 -> 129, now appearing on the mixed collection shape
+-- which is what the experiment was for.
+
+But five agreeing runs that each failed their own null are five runs, not a measurement. The zset
+flip is certified; this one is a hypothesis with corroboration, and the difference matters because
+33832's levers are ranked off exactly this number.
+
+### WHY IT FAILED, WHICH IS THE REUSABLE PART
+
+Loadavg was 12.7-13.9 throughout with runq peaking 11-21 -- under the harness's contention limit
+of 24, so no contention flag was raised, and the misses were MARGINAL: 0.979483 against a 0.98
+band edge is a miss by five ten-thousandths.
+
+The certified zset rows were taken at loadavg 6.3-7.2 with runq 7-9. So the operating envelope for
+this instrument is narrower than its own contention guard: runq under 24 is not sufficient, and
+loadavg around 6 is what has actually produced passes. Restarting the arms fresh between runs --
+the documented fix for the systematic-null signature -- did not help here, because these nulls
+were SCATTERED rather than one-directional, which is host noise and not arm asymmetry.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The gate is the two-process A/A with `--confirm 3`. It refused all five. Per-arm host state was
+recorded at both ends of every run; peak runq sampled four times per invocation by the guard added
+earlier.
+
+### PROVENANCE
+
+      source        main at 37af35720.
+      fr ELF        c2853031a56520a5, release, env -u CARGO_TARGET_DIR; both arms same sha.
+      redis ELF     e837dbb2556cff6b, vendored 7.2.4, provenance check clean.
+      job           hashes=60 sets=60 zsets=60, members 40 and 600, trials=15. Key count is 60
+                    per type rather than 33832's 200, so this is a REGIME comparison and not a
+                    reproduction of its absolute number.
+      host          loadavg 12.68-13.88 across the five runs, MHz 2364-3227, iowait 0.99 pct.
+      disposition   HOLD. No engine source changed.
+
+### RETRY PREDICATE
+
+1. Re-run at loadavg <= 7, not merely at runq <= 24. That is the envelope the certified rows came
+   from and this row is the evidence the guard's limit alone is too loose for this shape.
+2. Keep 33832's own 200-key count when it matters; 60 was chosen here to fit the window and makes
+   this a regime comparison only.
+3. Consider raising the harness's contention limit question separately: the guard is calibrated to
+   catch a neighbouring BENCHMARK, and what defeated these runs was ordinary background load well
+   under that bar.
