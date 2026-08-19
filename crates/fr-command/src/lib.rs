@@ -8581,7 +8581,16 @@ fn geosearchstore(
 ) -> Result<RespFrame, CommandError> {
     // GEOSEARCHSTORE destination source FROMMEMBER member | FROMLONLAT lon lat BYRADIUS radius m|km|ft|mi | BYBOX width height m|km|ft|mi
     //   [ASC|DESC] [COUNT count [ANY]] [STOREDIST]
-    if argv.len() < 5 {
+    // Upstream declares GEOSEARCHSTORE with arity -8 (commands.def,
+    // geosearchstoreCommand,-8) -- destination, source, a FROM form and a BY form
+    // cannot be expressed in fewer. fr gated at 5, so 5/6/7-argument calls got past
+    // the arity check and were answered by whatever option check they happened to
+    // reach: `GEOSEARCHSTORE d k FROMLONLAT 15` replied "syntax error" and
+    // `... FROMLONLAT 15 37 ASC` replied the BYRADIUS/BYBOX message, where 7.2.4
+    // replies wrong-arity to both. Verified differentially against a live incumbent.
+    //
+    // Its sibling GEOSEARCH is -7 and fr already gates there correctly.
+    if argv.len() < 8 {
         return Err(CommandError::WrongArity("GEOSEARCHSTORE"));
     }
     let dest = argv[1].clone();
@@ -63101,6 +63110,8 @@ mod tests {
                 b"15".to_vec(),
                 b"37".to_vec(),
                 b"ASC".to_vec(),
+                b"COUNT".to_vec(),
+                b"5".to_vec(),
             ],
             &mut store,
             0,
