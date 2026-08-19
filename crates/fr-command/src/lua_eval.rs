@@ -3222,6 +3222,26 @@ fn resolve_lua_local_slots(stmts: &mut Block) {
 
 // ── Evaluator ───────────────────────────────────────────────────────────
 
+/// (frankenredis-5h2lu follow-up) fr refuses a Lua recursion at depth 129; the incumbent refuses
+/// at 20001. The two constants that look like this one in vendored Lua 5.1.5 are NOT
+/// interchangeable, and the wrong one has been quoted in this repo before:
+///
+///   * `LUAI_MAXCCALLS 200` (luaconf.h:468) bounds nested **C** calls -- `luaD_call` (ldo.c:371)
+///     and `lua_resume` (ldo.c:423). A Lua function calling a Lua function does NOT go through
+///     it: `luaV_execute` re-enters its own loop for `PCRLUA`, so no C frame is added.
+///   * `LUAI_MAXCALLS 20000` (luaconf.h:435, "limits the number of nested calls") is the one that
+///     applies, enforced in `luaD_growCI` (ldo.c:170-175) as `luaG_runerror(L, "stack overflow")`.
+///
+/// So `EVAL "local function f(n) if n==0 then return 0 end return f(n-1) end return f(200)" 0`
+/// returns 0 on 7.2.4 and is refused by fr. Exact parity is not reachable by moving this number:
+/// fr's evaluator uses a native frame per Lua call where upstream reuses one loop, so 20000 levels
+/// is a stack budget fr does not have. RAISING IT IS GATED ON PRICING THE FRAME -- read the
+/// prologue of the three recursive callers off the shipping ELF (`8 + 8*pushes + sub $N,%rsp`) and
+/// divide into the 8 MiB worker stack from c63b56ef1; do not guess a bigger number.
+///
+/// The WORDING is fixed independently of the bound, because it needed no measurement: fr answered
+/// "script exceeded maximum call depth", which appears nowhere in Redis. While fr still refuses
+/// earlier than the incumbent, it now refuses with the incumbent's own message.
 const MAX_CALL_DEPTH: usize = 128;
 const MAX_ITERATIONS: u64 = 1_000_000;
 const LUA_EXACT_INTEGER_LIMIT: i128 = 1_i128 << 53;
@@ -6979,7 +6999,7 @@ impl<'a> LuaState<'a> {
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
             self.call_depth -= 1;
-            return Err("script exceeded maximum call depth".to_string());
+            return Err("stack overflow".to_string());
         }
         self.lua_frame_kinds.push(false);
         let is_pcall = matches!(intrinsic, RedisIntrinsic::PCall);
@@ -7119,7 +7139,7 @@ impl<'a> LuaState<'a> {
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
             self.call_depth -= 1;
-            return Err("script exceeded maximum call depth".to_string());
+            return Err("stack overflow".to_string());
         }
         self.lua_frame_kinds.push(false);
         // (frankenredis-zsbhn) No `current_invocation_name` write here either —
@@ -8336,7 +8356,7 @@ impl<'a> LuaState<'a> {
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
             self.call_depth -= 1;
-            return Err("script exceeded maximum call depth".to_string());
+            return Err("stack overflow".to_string());
         }
         // (frankenredis-4ovjf) Snapshot the caller's frame kind BEFORE
         // pushing so the bad-callable arms below can decide whether to
@@ -21725,6 +21745,48 @@ end
         assert!(
             err.contains("OOM command not allowed"),
             "expected the OOM refusal to come back, got {err}"
+        );
+    }
+
+    #[test]
+    fn deep_lua_recursion_refuses_with_the_incumbents_wording_5h2lu() {
+        // fr refuses deep Lua recursion earlier than 7.2.4 does -- see the derivation on
+        // MAX_CALL_DEPTH -- and that gap cannot be closed by moving a constant. What it CAN do,
+        // and what this pins, is refuse with the message the incumbent uses instead of one that
+        // appears nowhere in Redis: `luaD_growCI` raises `luaG_runerror(L, "stack overflow")`
+        // (ldo.c:170-175), while fr answered "script exceeded maximum call depth".
+        //
+        // Nothing else pinned the old string -- three emission sites, no test, no fixture -- which
+        // is exactly why it survived: an invented error nobody asserts on reads as correct forever.
+        let mut store = Store::new();
+
+        // CONTROL, and it is the half that catches an over-eager fix: a recursion comfortably
+        // inside the bound must still RUN. 101 nested calls against a bound of 128.
+        let ok = eval_script(
+            b"local function f(n) if n == 0 then return 0 end return f(n-1) end return f(100)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("a recursion inside the bound must still run");
+        assert_eq!(ok, RespFrame::Integer(0));
+
+        let err = eval_script(
+            b"local function f(n) if n == 0 then return 0 end return f(n-1) end return f(500)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("a recursion past the bound must be refused");
+        assert!(
+            err.contains("stack overflow"),
+            "expected the incumbent's wording, got {err}"
+        );
+        assert!(
+            !err.contains("maximum call depth"),
+            "the invented string must be gone: {err}"
         );
     }
 
