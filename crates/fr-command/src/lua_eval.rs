@@ -6127,6 +6127,25 @@ impl<'a> LuaState<'a> {
             }
             Stmt::While(cond, body) => self.exec_while_stmt(cond, body, env, varargs),
             Stmt::Repeat(body, cond) => self.exec_repeat_stmt(body, cond, env, varargs),
+            // (frankenredis-lua-call-depth-ug22x) THE LAST BIG ARM STILL INLINE HERE, and the
+            // next frame reduction if anyone wants one. Measured from the shipping ELF at
+            // bb2ccf822: `exec_stmt` allocates `sub $0x4b8,%rsp` = 1208 B, which with its six
+            // pushes and the return address is the 1264 B/level the recursion budget gate
+            // charges it -- the largest single term in the 4352 B Lua call cycle, ahead of
+            // eval_expr's 816.
+            //
+            // Rust sizes a match frame for its LARGEST arm, so every statement kind pays for
+            // this one. While, Repeat, GenericFor and DoBlock were already moved out to their
+            // own methods by 79e2438e3 for exactly that reason; NumericFor is the one left, at
+            // 92 lines holding three evaluated LuaValues (32 B each) plus loop state and a
+            // fast-path helper's temporaries.
+            //
+            // NOT DONE HERE because it could not be verified this turn: the WIN is a release
+            // build plus recursion_stack_budget_gate.py, but the CORRECTNESS is the fr-command
+            // suite, which is a debug build the host could not afford (load 104, /data down to
+            // 143G from 227G in three ticks). Extracting an interpreter arm unverified is the
+            // coin flip this bead already refused once. The measurement above is the part that
+            // does not need repeating.
             Stmt::NumericFor(name, start, stop, step, body) => {
                 // (frankenredis-7vqyo) Upstream luaV_execute raises these
                 // via luaG_runerror which prepends the script source
