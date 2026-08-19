@@ -4418,6 +4418,12 @@ pub struct ServerState {
     min_replicas_max_lag: u64,
     /// Whether failed RDB persistence should make Redis-compatible write commands fail closed.
     stop_writes_on_bgsave_error: bool,
+    /// Whether ANY RDB save point is configured -- upstream's `server.saveparamslen > 0`.
+    ///
+    /// The MISCONF write denial is gated on this upstream and was not gated on it here, so with
+    /// `save ""` -- snapshotting disabled, the ordinary cache configuration -- fr refused writes
+    /// that Redis 7.2.4 serves. See `active_disk_write_denial`.
+    rdb_save_points_configured: bool,
     /// Replica promotion priority reported in INFO replication / CONFIG.
     pub replica_priority: usize,
     /// (frankenredis-w1djx) Longest single event-loop cycle observed, in microseconds.
@@ -4671,6 +4677,9 @@ impl Default for ServerState {
             min_replicas_to_write: 0,
             min_replicas_max_lag: 10,
             stop_writes_on_bgsave_error: true,
+            // Upstream's CONFIG_DEFAULT_SAVE_PARAMS ("3600 1 300 100 60 10000") is non-empty, and
+            // fr's own default `save` string matches it, so the default is "configured".
+            rdb_save_points_configured: true,
             masteruser: None,
             masterauth: None,
             replica_serve_stale_data: true,
@@ -38227,6 +38236,23 @@ impl Runtime {
                 .map(DiskWriteDenialKind::script_error_message)
         };
         self.server.store.script_disk_write_denial = disk_denial;
+        // (frankenredis-oo3aw follow-up) And the INNER copy, which is a DIFFERENT value computed
+        // from the same condition. `scriptVerifyWriteCommandAllow` (script.c:379) tests
+        // `deny_write_type != DISK_ERROR_TYPE_NONE` with no `mustObeyClient` exemption -- the
+        // exemption sits on the readonly-replica check three lines above it, not on this one --
+        // and renders the COMMAND message. So this one is published unconditionally and with
+        // `error_message`, where its neighbour is exempted and uses `script_error_message`.
+        //
+        // PUBLISHING IT UNEXEMPTED IS SAFE HERE, and that needed checking rather than assuming:
+        // an unexempted write gate is how a replica stops applying its master's stream and
+        // silently diverges. It cannot happen, because the gate that reads this field fires only
+        // at `script_nesting_level >= 1` and fr propagates a script's EFFECTS rather than the
+        // script -- a replica replaying the stream applies the individual SETs and never enters
+        // a script at all, so the nesting level is 0 for the whole replay.
+        let inner_disk_denial = self
+            .active_disk_write_denial()
+            .map(DiskWriteDenialKind::error_message);
+        self.server.store.script_inner_disk_write_denial = inner_disk_denial;
         // (frankenredis-oo3aw follow-up) And the stale verdict, for the same reason: the gate
         // above never sees a script's inner redis.call. Only the argv-independent half is
         // published -- the CMD_STALE test is per inner command and belongs at the call site.
@@ -38447,7 +38473,31 @@ impl Runtime {
     }
 
     fn active_disk_write_denial(&self) -> Option<DiskWriteDenialKind> {
+        // Upstream server.c:
+        //
+        //     if (server.stop_writes_on_bgsave_err &&
+        //         server.saveparamslen > 0 &&
+        //         server.lastbgsave_status == C_ERR) -> MISCONF
+        //
+        // ALL THREE TERMS, and the middle one was missing here. `saveparamslen` counts CONFIGURED
+        // SAVE POINTS, so with `save ""` upstream never refuses a write however badly BGSAVE
+        // failed -- snapshotting is off, and there is no persistence guarantee to protect. fr
+        // tested `rdb_path.is_some()` instead, which is true whenever a filename is configured
+        // (always), so the denial armed in a configuration upstream leaves open.
+        //
+        // MEASURED live, single instance, RDB target made read-only, BGSAVE run to failure, then
+        // one SET, on ELF 9df07495 against vendored 7.2.4:
+        //
+        //     save points   fr           redis 7.2.4
+        //     (none)        MISCONF      OK           <- the divergence: fr refuses, upstream serves
+        //     "900 1"       MISCONF      MISCONF      <- agree, so the wording and mechanism were fine
+        //
+        // The direction is a FALSE REFUSAL: fr goes read-only where the incumbent keeps serving.
+        // `save ""` is the ordinary cache configuration and is what every harness in this repo
+        // uses, so a disk that fills or a directory that turns read-only takes fr's writes down
+        // and leaves Redis's up.
         if self.server.stop_writes_on_bgsave_error
+            && self.server.rdb_save_points_configured
             && self.server.rdb_path.is_some()
             && !self.server.store.stat_rdb_last_bgsave_ok
         {
@@ -43440,6 +43490,7 @@ impl Runtime {
         let mut rdb_path_changed = false;
         let mut encoding_threshold_updates: Vec<(&str, usize)> = Vec::new();
         let mut static_override_updates: Vec<(String, String)> = Vec::new();
+        let mut next_save_points_configured: Option<bool> = None;
 
         // Upstream config.c::configSetCommand:872-880 walks the pair
         // list once, tracks each resolved config in a `set_configs[]`
@@ -45267,6 +45318,12 @@ impl Runtime {
                     }
                 }
                 if canonical == "save" {
+                    // Upstream's `saveparamslen` after `setConfigSaveOption`: an empty value
+                    // clears every save point, any valid non-empty value installs at least one.
+                    // Command-line options are applied through this same path, so `--save ''`
+                    // lands here too.
+                    next_save_points_configured =
+                        Some(!String::from_utf8_lossy(value_bytes).trim().is_empty());
                     // (frankenredis-uxn6b) Mirror upstream
                     // config.c::setConfigSaveOption (lines 2725-2736):
                     // arguments come in (seconds, changes) pairs;
@@ -45426,6 +45483,9 @@ impl Runtime {
         }
         if let Some(stop) = next_stop_writes_on_bgsave_error {
             self.server.stop_writes_on_bgsave_error = stop;
+        }
+        if let Some(configured) = next_save_points_configured {
+            self.server.rdb_save_points_configured = configured;
         }
         if let Some(query_buffer_limit) = next_query_buffer_limit {
             self.server.query_buffer_limit = query_buffer_limit;
@@ -71889,6 +71949,49 @@ mod tests {
     /// (frankenredis-61w0b) `hide-user-data-from-log` is a Redis 7.4
     /// addition; vendored 7.2.4 (our parity target) doesn't ship it.
     /// Pin the wildcard sweep so the key doesn't sneak back in.
+    /// The MISCONF write denial must require CONFIGURED SAVE POINTS, as upstream's third term does.
+    ///
+    /// Upstream server.c gates it on `stop_writes_on_bgsave_err && saveparamslen > 0 &&
+    /// lastbgsave_status == C_ERR`. fr had the first and third terms and tested
+    /// `rdb_path.is_some()` for the second, which is true whenever a filename is configured --
+    /// i.e. always -- so the denial armed with `save ""`, where upstream leaves writes open
+    /// because snapshotting is off and there is no persistence guarantee to protect.
+    ///
+    /// MEASURED live before this was written, single instance with a read-only RDB directory and
+    /// BGSAVE run to failure, fr ELF 9df07495 against vendored 7.2.4:
+    ///
+    ///     save points   fr         redis 7.2.4
+    ///     (none)        MISCONF    OK            <- fr refuses what upstream serves
+    ///     "900 1"       MISCONF    MISCONF       <- agree
+    ///
+    /// BOTH ROWS ARE THE TEST. The `save ""` row is the defect; the `900 1` row is what stops an
+    /// over-eager fix from deleting the denial outright, which would pass the first assertion and
+    /// silently drop a real upstream behaviour.
+    #[test]
+    fn misconf_write_denial_requires_configured_save_points() {
+        for (save_value, expect_refusal) in [("", false), ("900 1", true)] {
+            let mut rt = Runtime::new(RuntimePolicy::default());
+            rt.set_rdb_path(std::path::PathBuf::from("dump.rdb"));
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"save", save_value.as_bytes()]),
+                0,
+            );
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"stop-writes-on-bgsave-error", b"yes"]),
+                0,
+            );
+            // The disk error itself: the last BGSAVE failed.
+            rt.server.store.stat_rdb_last_bgsave_ok = false;
+
+            let reply = rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+            let refused = matches!(&reply, RespFrame::Error(e) if e.starts_with("MISCONF"));
+            assert_eq!(
+                refused, expect_refusal,
+                "save={save_value:?}: expected refusal={expect_refusal}, got {reply:?}"
+            );
+        }
+    }
+
     #[test]
     fn config_omits_redis_7_4_only_keys_61w0b() {
         let mut rt = Runtime::default_strict();
@@ -73913,6 +74016,68 @@ mod tests {
             rt.execute_frame(command(&[b"EVAL", read_only.as_slice(), b"0"]), 4),
             RespFrame::Integer(7),
             "a no-writes script must run while writes are denied"
+        );
+    }
+
+    /// A script with NO shebang must not write through an active disk error.
+    ///
+    /// This is the arm the wording fix above does not reach, and it is the common one: a body
+    /// without `#!` is upstream's `SCRIPT_FLAG_EVAL_COMPAT_MODE`, which skips every
+    /// `scriptPrepareForRun` check (script.c:140) and is refused at the inner `redis.call` by
+    /// `scriptVerifyWriteCommandAllow` (script.c:379) with the COMMAND wording instead.
+    ///
+    /// fr implemented the prepare half only, so this EVAL used to answer `OK` -- it wrote to a
+    /// dataset the server had already told a plain SET it could not persist. Found by writing the
+    /// wording test above with a shebang-less script by mistake and reading why it passed.
+    #[test]
+    fn compat_mode_script_cannot_write_through_a_disk_error() {
+        let dir = std::env::temp_dir().join("fr_runtime_compat_script_disk_error_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(dir);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGSAVE"]), 1),
+            RespFrame::SimpleString("Background saving started".to_string())
+        );
+        rt.wait_for_child_processes();
+
+        // No `#!`: compat mode, so the prepare chain is skipped by design and the refusal must
+        // come from the inner call -- carrying the COMMAND wording, not the script one.
+        let script = b"return redis.call('SET', KEYS[1], 'v')";
+        let reply = rt.execute_frame(
+            command(&[b"EVAL", script.as_slice(), b"1", b"compat_blocked"]),
+            2,
+        );
+        let RespFrame::Error(text) = &reply else {
+            panic!("a compat-mode script must not write through a disk error: {reply:?}");
+        };
+        assert!(
+            text.contains("MISCONF") && text.contains("Commands that may modify the data set"),
+            "the inner gate answers the COMMAND wording (script.c:380): {text}"
+        );
+        assert!(
+            !text.contains("Writable scripts are blocked"),
+            "the script wording belongs to the prepare gate, which compat mode skips: {text}"
+        );
+
+        // AND THE WRITE MUST NOT HAVE HAPPENED. An error reply with the key set would be the
+        // worse bug of the two, so the dataset is checked rather than the message alone.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"compat_blocked"]), 3),
+            RespFrame::BulkString(None),
+            "the refused write must not have landed"
+        );
+
+        // A READ-ONLY compat script is unaffected: upstream returns C_OK at script.c:360 for any
+        // command without CMD_WRITE, so the gate must not become a blanket script refusal.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"EVAL", b"return redis.call('GET', KEYS[1])".as_slice(), b"1", b"compat_blocked"]),
+                4
+            ),
+            RespFrame::BulkString(None),
+            "a read-only compat script must still run during a disk error"
         );
     }
 
