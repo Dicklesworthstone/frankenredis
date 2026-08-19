@@ -95,6 +95,26 @@ const AUTH_NOT_CONFIGURED_ERROR: &str = "ERR AUTH <password> called without any 
 const RDB_DISK_ERROR_WRITE_DENIED: &str = "MISCONF Redis is configured to save RDB snapshots, but it's currently unable to persist to disk. Commands that may modify the data set are disabled, because this instance is configured to report errors during writes if RDB snapshotting fails (stop-writes-on-bgsave-error option). Please check the Redis logs for details about the RDB error.";
 const AOF_DISK_ERROR_WRITE_DENIED: &str =
     "MISCONF Errors writing to the AOF file: previous AOF write failed";
+/// Upstream answers a DIFFERENT message for the same disk condition when the writer is a SCRIPT.
+///
+/// `rejectCommand` (server.c:1862, :4501) tells a client that "Commands that may modify the data
+/// set are disabled" and points at the logs; `scriptPrepareForRun` (script.c:167) instead tells the
+/// caller that "Writable scripts are blocked" and names the remedy -- the `no-writes` shebang flag,
+/// which is the one thing a script author can do about it and which no command caller has. The two
+/// literals are not prefixes of one another and only the first sentence is shared.
+///
+/// fr had ONE pair of constants and published the COMMAND pair into the script gate, so a blocked
+/// EVAL was answered advice meant for SET. Found by `scripts/error_literal_census.py`, which lists
+/// "Redis is configured to save RDB snapshots, but it's currently un..." as absent from fr: the
+/// census is matching upstream's SCRIPT literal, and fr genuinely did not contain it.
+const SCRIPT_RDB_DISK_ERROR_WRITE_DENIED: &str = "MISCONF Redis is configured to save RDB snapshots, but it's currently unable to persist to disk. Writable scripts are blocked. Use 'no-writes' flag for read only scripts.";
+/// The AOF arm of [`SCRIPT_RDB_DISK_ERROR_WRITE_DENIED`].
+///
+/// Upstream closes this one with `"AOF error: %s", strerror(server.aof_last_write_errno)`. fr has
+/// no errno to render and already made that substitution at the command site -- where upstream's
+/// `"Errors writing to the AOF file: %s"` became `"...: previous AOF write failed"` -- so the same
+/// static phrase is used here rather than inventing a second convention for one call site.
+const SCRIPT_AOF_DISK_ERROR_WRITE_DENIED: &str = "MISCONF Redis is configured to persist data to AOF, but it's currently unable to persist to disk. Writable scripts are blocked. Use 'no-writes' flag for read only scripts. AOF error: previous AOF write failed";
 #[allow(dead_code)]
 const ACL_UNKNOWN_SUBCOMMAND_ERROR: &str =
     "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP.";
@@ -3538,6 +3558,17 @@ impl DiskWriteDenialKind {
         match self {
             Self::Rdb => RDB_DISK_ERROR_WRITE_DENIED,
             Self::Aof => AOF_DISK_ERROR_WRITE_DENIED,
+        }
+    }
+
+    /// The wording for a SCRIPT refused by this same condition -- see
+    /// [`SCRIPT_RDB_DISK_ERROR_WRITE_DENIED`]. Split from [`Self::error_message`] rather than
+    /// parameterised on a bool, so that a reader of either call site sees which of upstream's two
+    /// literals it will send without following an argument.
+    fn script_error_message(self) -> &'static str {
+        match self {
+            Self::Rdb => SCRIPT_RDB_DISK_ERROR_WRITE_DENIED,
+            Self::Aof => SCRIPT_AOF_DISK_ERROR_WRITE_DENIED,
         }
     }
 
@@ -38189,8 +38220,11 @@ impl Runtime {
         {
             None
         } else {
+            // SCRIPT wording, not the command wording: this field is read only by
+            // `script_prepare_disk_error_refusal`, and upstream's script.c:167 message differs
+            // from `rejectCommand`'s past the first sentence.
             self.active_disk_write_denial()
-                .map(DiskWriteDenialKind::error_message)
+                .map(DiskWriteDenialKind::script_error_message)
         };
         self.server.store.script_disk_write_denial = disk_denial;
         // (frankenredis-oo3aw follow-up) And the stale verdict, for the same reason: the gate
@@ -51051,7 +51085,8 @@ mod tests {
         ACL_FILE_NOT_CONFIGURED_ERR, AOF_DISK_ERROR_WRITE_DENIED, AclPubsubDefault, ClientSession,
         ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
         OutputBufferClassLimit, PlainBitfieldGetCmd, PlainCardinalityCmd, PlainKeyMetaCmd,
-        PlainObjectStatCmd, PlainRandMemberCmd, RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState,
+        PlainObjectStatCmd, PlainRandMemberCmd, RDB_DISK_ERROR_WRITE_DENIED, Runtime,
+        SCRIPT_RDB_DISK_ERROR_WRITE_DENIED, ServerState,
         acl_list_entries_from_rules, build_hello_response, canonical_static_config_param,
         canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
@@ -73808,6 +73843,76 @@ mod tests {
                 RespFrame::BulkString(Some(b"stop-writes-on-bgsave-error".to_vec())),
                 RespFrame::BulkString(Some(b"no".to_vec())),
             ]))
+        );
+    }
+
+    /// A script refused for the SAME disk condition must be told the SCRIPT message.
+    ///
+    /// Upstream keeps two literals: `rejectCommand` (server.c:1862) says "Commands that may
+    /// modify the data set are disabled ... check the Redis logs", and `scriptPrepareForRun`
+    /// (script.c:167) says "Writable scripts are blocked. Use 'no-writes' flag for read only
+    /// scripts." Only the first sentence is shared. The second names a remedy that exists for a
+    /// script author and for nobody else, which is why upstream bothered to write it twice.
+    ///
+    /// fr had one pair of constants and published the COMMAND pair into the script gate, so a
+    /// blocked EVAL was answered advice meant for SET. Asserted here through a REAL disk error
+    /// rather than by comparing the constants to themselves: the same runtime, in the same state,
+    /// answers one wording to SET and the other to EVAL, and then honours the flag it advertises.
+    #[test]
+    fn rdb_disk_error_answers_scripts_the_script_wording_not_the_command_one() {
+        let dir = std::env::temp_dir().join("fr_runtime_script_disk_error_wording_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(dir);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGSAVE"]), 1),
+            RespFrame::SimpleString("Background saving started".to_string())
+        );
+        rt.wait_for_child_processes();
+
+        // The command gate, unchanged: this is the arm that must NOT move.
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"blocked", b"write"]), 2),
+            RespFrame::Error(RDB_DISK_ERROR_WRITE_DENIED.to_string())
+        );
+
+        // The script gate, in the same state, on the same runtime.
+        //
+        // SHEBANG, and that is load-bearing: upstream wraps every one of these prepare checks in
+        // `if (!(script_flags & SCRIPT_FLAG_EVAL_COMPAT_MODE))` (script.c:140). A shebang-less
+        // EVAL is compat mode, where NONE of them run and the refusal comes from the inner
+        // `redis.call` with the COMMAND wording instead. Testing this arm with a bare script
+        // therefore tests the wrong gate -- it did, first time, and answered OK.
+        let script = b"#!lua\nreturn redis.call('SET', KEYS[1], 'v')";
+        let refusal = rt.execute_frame(
+            command(&[b"EVAL", script.as_slice(), b"1", b"blocked"]),
+            3,
+        );
+        assert_eq!(
+            refusal,
+            RespFrame::Error(SCRIPT_RDB_DISK_ERROR_WRITE_DENIED.to_string()),
+            "a blocked script must be told the script wording"
+        );
+        let RespFrame::Error(text) = &refusal else {
+            unreachable!("refusal is an error frame");
+        };
+        assert!(
+            text.contains("Writable scripts are blocked"),
+            "the script arm must name what is blocked: {text}"
+        );
+        assert!(
+            !text.contains("Commands that may modify the data set"),
+            "and must not carry the command arm's sentence: {text}"
+        );
+
+        // THE REMEDY THE MESSAGE ADVERTISES MUST WORK. A message naming a flag that changes
+        // nothing would be worse than the wrong message, so the flag is exercised, not trusted.
+        let read_only = b"#!lua flags=no-writes\nreturn 7";
+        assert_eq!(
+            rt.execute_frame(command(&[b"EVAL", read_only.as_slice(), b"0"]), 4),
+            RespFrame::Integer(7),
+            "a no-writes script must run while writes are denied"
         );
     }
 
