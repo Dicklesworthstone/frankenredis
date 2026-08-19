@@ -673,6 +673,29 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
          ["EVAL", "for i=1,50 do redis.call('GET', KEYS[1]) end return 1", "1", "k"]),
         ("get_control", ["SET k val"], ["GET", "k"]),
     ],
+    # Lua pattern matching over a LITERAL pattern -- the per-matched-byte cost.
+    #
+    # fr expressed upstream's five `goto init` tails (lstrlib.c:366) as recursion,
+    # so `depth` grew once per matched BYTE and the matcher gave up past its guard.
+    # Two consequences for measurement, and the second is why this shape did not
+    # exist before: the per-byte cost was a call frame rather than a loop
+    # iteration, AND at 256 bytes fr returned nil where Redis returns 1. A ratio
+    # taken then would have compared a full match against a bail-out -- different
+    # work, so the number would have been a fiction. It is comparable only now.
+    #
+    # Two sizes on purpose (frankenredis-eh2ct): 16 bytes is dominated by EVAL's
+    # fixed cost, 256 by the match itself. Reading either alone answers a
+    # different question, and --audit-sizes requires the larger-N twin.
+    #
+    # No keys, no setup: the script builds its own subject, so request 1 and
+    # request 50,000 do identical work.
+    "luapat": [
+        ("luapat_16", [],
+         ["EVAL", "local s = string.rep('a', 16) return (string.find(s, s))", "0"]),
+        ("luapat_256", [],
+         ["EVAL", "local s = string.rep('a', 256) return (string.find(s, s))", "0"]),
+        ("get_control", ["SET k val"], ["GET", "k"]),
+    ],
     # Commands that MUTATE their key, measured on their NO-OP path so the square is
     # valid at all. (frankenredis-va5me, frankenredis-5yhyh, frankenredis-wgrny)
     #
