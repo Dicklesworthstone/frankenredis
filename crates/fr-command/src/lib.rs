@@ -8408,8 +8408,24 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // shared.syntaxerr) on the unknown-token branch.
     let (withcoord, withdist, withhash, count, any, sort, _) =
         parse_geo_search_flags(argv, i, unit_mult, GeoFlagContext::GeoSearch)?;
-    if !(has_frommember || has_fromlonlat) || !(has_byradius || has_bybox) {
-        return Err(CommandError::WrongArity("GEOSEARCH"));
+    // Upstream geo.c::georadiusGeneric checks these SEPARATELY, in this order,
+    // and neither is an arity error -- the arity check (-7) has already passed
+    // by the time either can fire, so `GEOSEARCH key BYRADIUS 100 m ASC COUNT 5`
+    // is eight arguments and still reaches the first of them. Collapsing both
+    // into WrongArity told the client the wrong thing AND lost which of the two
+    // option groups was missing. The command name is echoed from argv[0] as the
+    // client sent it, which is what upstream's `c->argv[0]->ptr` does.
+    if !(has_frommember || has_fromlonlat) {
+        return Err(CommandError::Custom(format!(
+            "ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for {}",
+            String::from_utf8_lossy(&argv[0])
+        )));
+    }
+    if !(has_byradius || has_bybox) {
+        return Err(CommandError::Custom(format!(
+            "ERR exactly one of BYRADIUS and BYBOX can be specified for {}",
+            String::from_utf8_lossy(&argv[0])
+        )));
     }
     let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
         // Missing source key with FROMMEMBER — return empty set.
@@ -8573,9 +8589,12 @@ fn geosearchstore(
     while i < synth.len() {
         if eq_ascii_command(&synth[i], b"FROMMEMBER") {
             if has_fromlonlat {
-                return Ok(RespFrame::Error(
-                    "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
-                ));
+                // Upstream's `frommember` arm carries `&& !fromloc` in its own
+                // CONDITION (geo.c:617-620), so a second source option does not
+                // match it and falls through to the loop's else, which replies
+                // shared.syntaxerr. fr's sibling `geosearch` already does this;
+                // only GEOSEARCHSTORE invented a message here.
+                return Err(CommandError::SyntaxError);
             }
             has_frommember = true;
             i += 1;
@@ -8600,9 +8619,7 @@ fn geosearchstore(
             }
         } else if eq_ascii_command(&synth[i], b"FROMLONLAT") {
             if has_frommember {
-                return Ok(RespFrame::Error(
-                    "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
-                ));
+                return Err(CommandError::SyntaxError);
             }
             has_fromlonlat = true;
             if i + 2 >= synth.len() {
@@ -8626,9 +8643,7 @@ fn geosearchstore(
             i += 2;
         } else if eq_ascii_command(&synth[i], b"BYRADIUS") {
             if has_bybox {
-                return Ok(RespFrame::Error(
-                    "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
-                ));
+                return Err(CommandError::SyntaxError);
             }
             has_byradius = true;
             if i + 2 >= synth.len() {
@@ -8657,9 +8672,7 @@ fn geosearchstore(
             i += 2;
         } else if eq_ascii_command(&synth[i], b"BYBOX") {
             if has_byradius {
-                return Ok(RespFrame::Error(
-                    "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
-                ));
+                return Err(CommandError::SyntaxError);
             }
             has_bybox = true;
             if i + 3 >= synth.len() {
@@ -8716,12 +8729,28 @@ fn geosearchstore(
         ));
     }
 
+    // Upstream applies the same two checks here: georadiusGeneric gates them on
+    // `flags & GEOSEARCH`, which GEOSEARCHSTORE also carries (geo.c:871 passes
+    // GEOSEARCH|GEOSEARCHSTORE). They belong BEFORE the centre is unpacked --
+    // fr's FROM check was nested inside the missing-centre branch, so it could
+    // only speak when the centre happened to be absent, and the BYRADIUS/BYBOX
+    // check did not exist at all. The old wording ("must be provided") was fr's
+    // own; upstream's is echoed verbatim below, including its inconsistent
+    // "or" / "and".
+    if !(has_frommember || has_fromlonlat) {
+        return Ok(RespFrame::Error(format!(
+            "ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for {}",
+            String::from_utf8_lossy(&argv[0])
+        )));
+    }
+    if !(has_byradius || has_bybox) {
+        return Ok(RespFrame::Error(format!(
+            "ERR exactly one of BYRADIUS and BYBOX can be specified for {}",
+            String::from_utf8_lossy(&argv[0])
+        )));
+    }
+
     let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
-        if !(has_frommember || has_fromlonlat) {
-            return Ok(RespFrame::Error(
-                "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
-            ));
-        }
         // FROMMEMBER with missing source key: store nothing,
         // return 0.
         store.del(std::slice::from_ref(&synth[0]), now_ms);
@@ -61816,6 +61845,118 @@ mod tests {
             "expected SyntaxError for BYRADIUS+BYBOX mix, got {:?}",
             err
         );
+    }
+
+    /// Upstream geo.c:678-690 replies two DISTINCT errors when a GEOSEARCH-family
+    /// command finishes option parsing with no source or no shape, and NEITHER is
+    /// an arity error -- the arity gate has already passed by the time either can
+    /// fire. fr collapsed both into WrongArity for GEOSEARCH; GEOSEARCHSTORE
+    /// checked only the source, only when the centre happened to be missing, with
+    /// wording of its own invention and no shape check at all.
+    ///
+    /// The command name is echoed from argv[0] as the client sent it, which is
+    /// what upstream's `c->argv[0]->ptr` yields.
+    #[test]
+    fn geosearch_missing_option_group_matches_upstream_wording() {
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+
+        // Eight arguments, so the arity gate is long past when this fires.
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"mygeo".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"ASC".to_vec(),
+                b"COUNT".to_vec(),
+                b"5".to_vec(),
+            ],
+            &mut store,
+        );
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for GEOSEARCH"
+                    .to_string()
+            ),
+            "a missing source is not a wrong-arity condition"
+        );
+
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"ASC".to_vec(),
+                b"COUNT".to_vec(),
+                b"5".to_vec(),
+            ],
+            &mut store,
+        );
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR exactly one of BYRADIUS and BYBOX can be specified for GEOSEARCH"
+                    .to_string()
+            ),
+            "upstream writes this one with `and`, not `or` -- copied verbatim"
+        );
+
+        // GEOSEARCHSTORE carries the same GEOSEARCH flag upstream (geo.c:871),
+        // so both checks apply there too, naming that command.
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCHSTORE".to_vec(),
+                b"dest".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"ASC".to_vec(),
+            ],
+            &mut store,
+        );
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR exactly one of BYRADIUS and BYBOX can be specified for GEOSEARCHSTORE"
+                    .to_string()
+            ),
+            "GEOSEARCHSTORE had no shape check at all"
+        );
+
+        // A DUPLICATE source is a different fault: upstream's arm carries
+        // `&& !fromloc` in its own condition, so the second one fails to match
+        // and falls through to shared.syntaxerr.
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCHSTORE".to_vec(),
+                b"dest".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"FROMMEMBER".to_vec(),
+                b"Palermo".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+            ],
+            &mut store,
+        );
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR syntax error"
+                    .to_string()
+            ),
+            "a duplicate source is a syntax error, not the exactly-one message"
+        );
+
     }
 
     #[test]
