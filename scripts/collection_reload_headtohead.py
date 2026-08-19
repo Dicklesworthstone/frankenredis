@@ -70,6 +70,21 @@ pair lands wherever the scheduler puts it and that term swamps the engine. The
 `fr_b halves` line is the same-process drift null, DIAGNOSTIC ONLY — it is not
 the gate, because the A/B it would authenticate is itself a cross-process
 comparison and must be nulled by one.
+
+CONFIRMED INDEPENDENTLY 2026-08-19 (BrownIbis), thinkstation1, fr_a on 8-11,
+fr_b on 12-15, redis on 16-19, loadavg 21.8-23.5, iowait 0.93%, both fr arms
+reporting the SAME ELF sha256 and the incumbent verified against vendored HEAD:
+
+    --trials 12              A/A 0.999246 CI [0.904607, 1.053946]
+    --trials 12 --confirm 3  1 of 3 nulls outside band (0.968775) -> HOLD
+
+The revised pinning reproduces: the A/A medians here are 0.981 and 0.999 rather
+than the one-directional 1.24/1.10/1.10 that cores 0-3 produced, so the
+systematic placement term really is gone. What remains is scatter, and at this
+load the CI is far too wide to gate a 0.5-0.7 effect. Both halves of the earlier
+finding hold — placement is necessary, quiet is also necessary — and the
+instrument refusing here is it working, not failing. Do not quote the A/B from
+a HOLD run.
 """
 import hashlib
 import itertools
