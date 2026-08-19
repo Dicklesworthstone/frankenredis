@@ -1094,6 +1094,38 @@ fn call_is_method() -> bool {
 /// length. So a pattern of `a\0(` is judged special-free on its first byte and then searched for
 /// verbatim, `(` included. MEASURED on 7.2.4: `string.find('a\0(b', 'a\0(')` returns 1, and
 /// `string.find('xa\0(b', 'a\0(')` returns 2.
+/// Byte search mirroring upstream's `lmemfind`: locate a candidate by first byte,
+/// then compare the remainder. Returns the offset within `hay`.
+///
+/// An EMPTY needle reaches here and returning Some(0) is correct: the caller then
+/// computes start = init+1 and end = start + 0 - 1 = init, which is upstream's
+/// (init+1, init). The caller's is_empty branch becomes unreachable rather than
+/// wrong.
+fn lua_plain_find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if needle.len() > hay.len() {
+        return None;
+    }
+    let first = needle[0];
+    let last_start = hay.len() - needle.len();
+    let mut at = 0usize;
+    while at <= last_start {
+        match hay[at..=last_start].iter().position(|&b| b == first) {
+            Some(off) => {
+                let cand = at + off;
+                if &hay[cand..cand + needle.len()] == needle {
+                    return Some(cand);
+                }
+                at = cand + 1;
+            }
+            None => return None,
+        }
+    }
+    None
+}
+
 fn lua_pattern_has_specials(pattern: &[u8]) -> bool {
     const SPECIALS: &[u8] = b"^$*+?.([%-";
     pattern
@@ -10799,10 +10831,11 @@ impl<'a> LuaState<'a> {
                 }
                 if plain {
                     // Plain substring search
-                    if let Some(pos) = s[init..]
-                        .windows(pattern.len().max(1))
-                        .position(|w| w == pattern.as_slice())
-                    {
+                    // Upstream's lmemfind finds a candidate by first byte and only
+                    // then compares the tail; windows().position() compared the FULL
+                    // pattern at every offset, which is O(n*m) where upstream is
+                    // effectively O(n). Same answers, and the byte scan vectorises.
+                    if let Some(pos) = lua_plain_find(&s[init..], &pattern) {
                         let start = init + pos + 1; // 1-indexed
                         let end = start + pattern.len() - 1;
                         Ok(vec![
