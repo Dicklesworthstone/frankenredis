@@ -19428,6 +19428,41 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
 /// `reject_cmd_on_oom = c->cmd->flags & CMD_DENYOOM`). Writes that DON'T allocate
 /// (DEL/UNLINK/EXPIRE/LPOP/HDEL/SREM/...) are NOT denyoom and stay ALLOWED over
 /// maxmemory so a user can free memory to recover. (frankenredis-oomdenyoom)
+/// Whether the resolved command carries upstream's `CMD_STALE` flag.
+///
+/// (frankenredis-stalelist-hto86) This is what upstream's stale-replica gate asks --
+/// `is_denystale_command = !(c->cmd->flags & CMD_STALE)` -- and fr's tables already carry the
+/// answer: the `stale` flag matches vendored 7.2.4 on all 136 entries, zero missing and zero
+/// extra, across COMMAND_TABLE and SUBCOMMAND_TABLE together. The gate simply restated the set
+/// as a hand-written allowlist instead of reading it.
+///
+/// Takes the whole argv because the flag is per RESOLVED command: `object|help` is stale while
+/// `object|encoding` is not, and a parent-keyed answer cannot express that.
+///
+/// UNKNOWN names return true -- permitted -- on purpose, and it is the one part of this that is
+/// about ORDERING rather than flags. Upstream resolves the command BEFORE the stale gate, so an
+/// unknown command or an unknown subcommand of a known container is answered with its own
+/// "unknown command" / "unknown subcommand" error and never reaches the gate at all. fr's gate
+/// runs pre-dispatch, so returning true here lets dispatch produce that same error instead of
+/// masking it with MASTERDOWN.
+#[must_use]
+pub fn command_is_stale(argv: &[Vec<u8>]) -> bool {
+    let Some(parent) = argv.first() else {
+        return false;
+    };
+    if command_has_subcommands_bytes(parent) && argv.len() >= 2 {
+        let fullname = canonical_command_fullname(argv);
+        return match subcommand_table_index(fullname.as_bytes()) {
+            Some(index) => SUBCOMMAND_TABLE[index].2.split(' ').any(|f| f == "stale"),
+            None => true,
+        };
+    }
+    match command_table_index(parent) {
+        Some(index) => COMMAND_TABLE[index].2.split(' ').any(|f| f == "stale"),
+        None => true,
+    }
+}
+
 pub fn command_is_denyoom(name: &[u8]) -> bool {
     command_table_index(name)
         .is_some_and(|idx| COMMAND_TABLE[idx].2.split(' ').any(|f| f == "denyoom"))

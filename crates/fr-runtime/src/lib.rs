@@ -38266,11 +38266,7 @@ impl Runtime {
         ))
     }
 
-    fn reject_stale_replica_read_request(
-        &self,
-        argv: &[Vec<u8>],
-        special_command: Option<RuntimeSpecialCommand>,
-    ) -> Option<RespFrame> {
+    fn reject_stale_replica_read_request(&self, argv: &[Vec<u8>]) -> Option<RespFrame> {
         if self.server.replica_serve_stale_data {
             return None;
         }
@@ -38282,53 +38278,24 @@ impl Runtime {
         if *state == "connected" {
             return None; // Not stale if connected to primary
         }
-        let command = argv.first()?;
-        // The following commands are permitted during a stale state.
-        let permitted = matches!(
-            special_command,
-            Some(RuntimeSpecialCommand::Acl)
-                | Some(RuntimeSpecialCommand::Client)
-                | Some(RuntimeSpecialCommand::Replicaof)
-                | Some(RuntimeSpecialCommand::Slaveof)
-                | Some(RuntimeSpecialCommand::Auth)
-                | Some(RuntimeSpecialCommand::Hello)
-                | Some(RuntimeSpecialCommand::Shutdown)
-                | Some(RuntimeSpecialCommand::Replconf)
-                | Some(RuntimeSpecialCommand::Role)
-                | Some(RuntimeSpecialCommand::Config)
-                | Some(RuntimeSpecialCommand::Readonly)
-                | Some(RuntimeSpecialCommand::Readwrite)
-                | Some(RuntimeSpecialCommand::Cluster)
-                | Some(RuntimeSpecialCommand::Subscribe)
-                | Some(RuntimeSpecialCommand::Unsubscribe)
-                | Some(RuntimeSpecialCommand::Psubscribe)
-                | Some(RuntimeSpecialCommand::Punsubscribe)
-                | Some(RuntimeSpecialCommand::Ssubscribe)
-                | Some(RuntimeSpecialCommand::Sunsubscribe)
-                | Some(RuntimeSpecialCommand::Publish)
-                | Some(RuntimeSpecialCommand::Spublish)
-                | Some(RuntimeSpecialCommand::Pubsub)
-                // (frankenredis-stalelist-hto86) WAIT is NOT stale-flagged upstream, so 7.2.4
-                // answers it with MASTERDOWN here. It was the one entry in this list that
-                // upstream refuses, and it is the entry that makes least sense to serve: WAIT
-                // asks how many REPLICAS acknowledged a write, and this branch runs only on a
-                // replica whose own master link is down -- so the number it returns describes a
-                // replication topology the caller cannot be asking about.
-                //
-                // The rest of this list is wrong in the other direction and is NOT fixed here:
-                // upstream gates on the command's own CMD_STALE flag, and 19 commands it serves
-                // -- MULTI/EXEC/DISCARD/WATCH/UNWATCH, the EVAL/FCALL family, ECHO, TIME, QUIT,
-                // RESET, MONITOR, DEBUG, LASTSAVE, FAILOVER -- are refused by this allowlist.
-                // Fixing that means reading the flag instead of restating it, which needs a
-                // `command_is_stale` accessor beside `command_is_denyoom` in fr-command; that
-                // file was leased when this landed. Removing WAIT is the part of the bead that
-                // does not depend on the accessor and stays correct once it exists.
-                | Some(RuntimeSpecialCommand::Select)
-        ) || eq_ascii_token(command, b"INFO")
-            || eq_ascii_token(command, b"COMMAND")
-            || eq_ascii_token(command, b"LATENCY");
-
-        if permitted {
+        if argv.is_empty() {
+            return None;
+        }
+        // (frankenredis-stalelist-hto86) Ask the FLAG, which is what upstream asks:
+        // `is_denystale_command = !(c->cmd->flags & CMD_STALE)`. This was a hand-written
+        // allowlist, and it disagreed with the table in both directions -- it refused 19
+        // commands upstream serves (MULTI/EXEC/DISCARD/WATCH/UNWATCH, the EVAL/FCALL family,
+        // ECHO, TIME, QUIT, RESET, MONITOR, DEBUG, LASTSAVE, FAILOVER) and served WAIT, which
+        // upstream refuses.
+        //
+        // The table needed no correction to support this: fr's `stale` flags already match
+        // vendored 7.2.4 on all 136 entries, zero missing and zero extra. Only the gate ignored
+        // them.
+        //
+        // Reading the flag also fixes a case the parent-keyed list could not express at all --
+        // `object|help` is stale while `object|encoding` is not, and the same split applies to
+        // function, memory, module, xgroup, xinfo, sentinel and script|load.
+        if fr_command::command_is_stale(argv) {
             return None;
         }
 
@@ -38673,7 +38640,7 @@ impl Runtime {
             return reply;
         }
 
-        if let Some(reply) = self.reject_stale_replica_read_request(argv, special_command) {
+        if let Some(reply) = self.reject_stale_replica_read_request(argv) {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
