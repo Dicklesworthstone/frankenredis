@@ -67156,8 +67156,16 @@ mod tests {
         // carries the FUNCTION2 records, the replica's apply path used to drop
         // them (decode_rdb), leaving FUNCTION LIST empty / FCALL broken.
         let mut primary = Runtime::default_strict();
-        let lib =
-            b"#!lua name=replib\nredis.register_function('rf', function() return 'synced' end)";
+        // (frankenredis-oo3aw follow-up) `no-writes` is REQUIRED for the FCALL below, not
+        // decoration. Upstream's scriptPrepareForRun refuses a function without it on a
+        // read-only replica (script.c:158) -- the gate is FLAG-based, not behaviour-based, so
+        // a function that merely happens not to write is still refused. This test used the
+        // positional form, which has no flags slot, and asserted the call SUCCEEDS on a
+        // replica; that is behaviour 7.2.4 does not have, and it only passed while fr was
+        // missing the gate. The table form is what a real user writes to call a function on a
+        // replica, so the test now exercises the supported way rather than the absent gate.
+        let lib = b"#!lua name=replib\nredis.register_function{function_name='rf', \
+                    callback=function() return 'synced' end, flags={'no-writes'}}";
         primary.execute_frame(command(&[b"FUNCTION", b"LOAD", lib.as_slice()]), 1);
         primary.execute_frame(command(&[b"SET", b"k", b"v"]), 2);
         let reply = match primary.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 3) {
