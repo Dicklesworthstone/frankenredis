@@ -61,6 +61,25 @@ jobs:
             --output-root artifacts/e2e_orchestrator \
             --run-id "${LIVE_RUN_ID}"
 
+      - name: G3+G5 - Lua String Differential Sweep
+        # Byte-exhaustive reply comparison of fr's Lua string library against the
+        # vendored incumbent: ~900 comparisons across 12 cases, run as ONE EVAL per
+        # engine so the whole sweep is a couple of round trips.
+        #
+        # A DEBUG binary is correct here on purpose -- this gate compares REPLIES,
+        # never timings, so it needs no release build and is unaffected by runner
+        # contention. It starts its own fr and redis on private ports and shuts both
+        # down in a finally block, so it does not touch the 6379 server above.
+        #
+        # Exit code means a NEW divergence: rows listed in EXPECTED_DIVERGENCES are
+        # printed with their reason but do not fail, and an expectation that has
+        # stopped firing fails the gate so a stale entry cannot mask a regression of
+        # its own row.
+        run: |
+          cargo build -p fr-server
+          python3 scripts/lua_string_differential_sweep.py target/debug/frankenredis \
+            | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/lua_string_sweep.log"
+
       - name: G7 - Enforce Coverage/Flake Budgets
         run: ./scripts/check_coverage_flake_budget.sh "artifacts/e2e_orchestrator/${LIVE_RUN_ID}/coverage_summary.json"
 
