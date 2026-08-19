@@ -5822,40 +5822,39 @@ impl<'a> LuaState<'a> {
         env: &mut Env,
         varargs: &mut Vec<LuaValue>,
     ) -> Result<ControlFlow, String> {
-            loop {
-                self.iterations += 1;
-                if self.iterations > MAX_ITERATIONS {
-                    return Err("script exceeded maximum iteration count".to_string());
-                }
-                // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` loop
-                // condition suspends here; on resume the yielded value is the
-                // condition result (truthy → run body then re-check; falsy →
-                // exit). Only valid at the coroutine's top statement level;
-                // deeper it errors as before.
-                if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
-                    return self.start_coroutine_yield(
-                        yield_args,
-                        LuaCoroutineContinuation::While {
-                            cond: cond.clone(),
-                            body: body.to_vec(),
-                        },
-                        false,
-                        env,
-                        varargs,
-                    );
-                }
-                let cv = self.eval_expr(cond, env, varargs)?;
-                if !cv.is_truthy() {
-                    break;
-                }
-                match self.exec_block(body, env, varargs)? {
-                    ControlFlow::Break => break,
-                    ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
-                    ControlFlow::None => {}
-                }
+        loop {
+            self.iterations += 1;
+            if self.iterations > MAX_ITERATIONS {
+                return Err("script exceeded maximum iteration count".to_string());
             }
-            Ok(ControlFlow::None)
-        
+            // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` loop
+            // condition suspends here; on resume the yielded value is the
+            // condition result (truthy → run body then re-check; falsy →
+            // exit). Only valid at the coroutine's top statement level;
+            // deeper it errors as before.
+            if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
+                return self.start_coroutine_yield(
+                    yield_args,
+                    LuaCoroutineContinuation::While {
+                        cond: cond.clone(),
+                        body: body.to_vec(),
+                    },
+                    false,
+                    env,
+                    varargs,
+                );
+            }
+            let cv = self.eval_expr(cond, env, varargs)?;
+            if !cv.is_truthy() {
+                break;
+            }
+            match self.exec_block(body, env, varargs)? {
+                ControlFlow::Break => break,
+                ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
+                ControlFlow::None => {}
+            }
+        }
+        Ok(ControlFlow::None)
     }
 
     /// (frankenredis-lua-call-depth-ug22x) See `exec_while_stmt`: same reason, same cycle.
@@ -5867,51 +5866,50 @@ impl<'a> LuaState<'a> {
         env: &mut Env,
         varargs: &mut Vec<LuaValue>,
     ) -> Result<ControlFlow, String> {
-            loop {
-                self.iterations += 1;
-                if self.iterations > MAX_ITERATIONS {
-                    return Err("script exceeded maximum iteration count".to_string());
-                }
-                env.push_scope();
-                let cf = self.exec_stmts(body, env, varargs)?;
-                // A `break`/`return` in the body exits before the until
-                // condition is ever evaluated (matches Lua 5.1).
-                match cf {
-                    ControlFlow::Break => {
-                        env.pop_scope();
-                        break;
-                    }
-                    ControlFlow::Return(v) => {
-                        env.pop_scope();
-                        return Ok(ControlFlow::Return(v));
-                    }
-                    ControlFlow::None => {}
-                }
-                // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` until
-                // condition suspends here. The body scope stays pushed so the
-                // yield args see body locals; it is saved with the env on
-                // yield and popped in the resume handler. Top-level only;
-                // deeper it errors as before.
-                if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
-                    return self.start_coroutine_yield(
-                        yield_args,
-                        LuaCoroutineContinuation::Repeat {
-                            body: body.to_vec(),
-                            cond: cond.clone(),
-                        },
-                        false,
-                        env,
-                        varargs,
-                    );
-                }
-                let cv = self.eval_expr(cond, env, varargs)?;
-                env.pop_scope();
-                if cv.is_truthy() {
+        loop {
+            self.iterations += 1;
+            if self.iterations > MAX_ITERATIONS {
+                return Err("script exceeded maximum iteration count".to_string());
+            }
+            env.push_scope();
+            let cf = self.exec_stmts(body, env, varargs)?;
+            // A `break`/`return` in the body exits before the until
+            // condition is ever evaluated (matches Lua 5.1).
+            match cf {
+                ControlFlow::Break => {
+                    env.pop_scope();
                     break;
                 }
+                ControlFlow::Return(v) => {
+                    env.pop_scope();
+                    return Ok(ControlFlow::Return(v));
+                }
+                ControlFlow::None => {}
             }
-            Ok(ControlFlow::None)
-        
+            // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` until
+            // condition suspends here. The body scope stays pushed so the
+            // yield args see body locals; it is saved with the env on
+            // yield and popped in the resume handler. Top-level only;
+            // deeper it errors as before.
+            if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
+                return self.start_coroutine_yield(
+                    yield_args,
+                    LuaCoroutineContinuation::Repeat {
+                        body: body.to_vec(),
+                        cond: cond.clone(),
+                    },
+                    false,
+                    env,
+                    varargs,
+                );
+            }
+            let cv = self.eval_expr(cond, env, varargs)?;
+            env.pop_scope();
+            if cv.is_truthy() {
+                break;
+            }
+        }
+        Ok(ControlFlow::None)
     }
 
     /// (frankenredis-lua-call-depth-ug22x) See `exec_while_stmt`: same reason, same cycle.
@@ -5924,30 +5922,29 @@ impl<'a> LuaState<'a> {
         env: &mut Env,
         varargs: &mut Vec<LuaValue>,
     ) -> Result<ControlFlow, String> {
-            // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` anywhere in
-            // the iterator expression list suspends here; on resume the
-            // yielded value(s) complete the iterator triple and the loop
-            // runs. Top-level only; deeper it errors as before.
-            if let Some((prefix, yield_args, remaining, yield_was_last)) =
-                self.split_direct_yield_exprs(iter_exprs, env, varargs)?
-            {
-                return self.start_coroutine_yield(
-                    &yield_args,
-                    LuaCoroutineContinuation::GenericFor {
-                        names: names.to_vec(),
-                        prefix,
-                        remaining,
-                        yield_was_last,
-                        body: body.to_vec(),
-                    },
-                    false,
-                    env,
-                    varargs,
-                );
-            }
-            let iter_vals = self.eval_expr_list(iter_exprs, env, varargs)?;
-            self.run_generic_for_from_iter_vals(names, iter_vals, body, env, varargs)
-        
+        // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` anywhere in
+        // the iterator expression list suspends here; on resume the
+        // yielded value(s) complete the iterator triple and the loop
+        // runs. Top-level only; deeper it errors as before.
+        if let Some((prefix, yield_args, remaining, yield_was_last)) =
+            self.split_direct_yield_exprs(iter_exprs, env, varargs)?
+        {
+            return self.start_coroutine_yield(
+                &yield_args,
+                LuaCoroutineContinuation::GenericFor {
+                    names: names.to_vec(),
+                    prefix,
+                    remaining,
+                    yield_was_last,
+                    body: body.to_vec(),
+                },
+                false,
+                env,
+                varargs,
+            );
+        }
+        let iter_vals = self.eval_expr_list(iter_exprs, env, varargs)?;
+        self.run_generic_for_from_iter_vals(names, iter_vals, body, env, varargs)
     }
 
     fn exec_stmt(
@@ -6546,6 +6543,350 @@ impl<'a> LuaState<'a> {
         }
     }
 
+    /// (frankenredis-lua-call-depth-ug22x) OUTLINED OUT OF `eval_expr`, for stack DEPTH.
+    ///
+    /// `eval_expr` is the frame that MULTIPLIES: one Lua call level costs a whole
+    /// recursion cycle, and a nested expression adds another `eval_expr` on top of it,
+    /// so every byte here is paid more than once per level. These arms carry large
+    /// locals and none of them is on the call cycle that `f(n-1)` walks, which runs
+    /// through `BinOp` and `Call` only.
+    ///
+    /// `#[inline(never)]` is load-bearing: folding these back into the caller restores
+    /// the frame this is removing. The cost is one call per evaluation of that arm.
+    #[inline(never)]
+    fn eval_unary_op_expr(
+        &mut self,
+        op: &UnaryOp,
+        inner: &Expr,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<LuaValue, String> {
+        let val = self.eval_expr(inner, env, varargs)?;
+        match op {
+            UnaryOp::Neg => {
+                // (frankenredis-mdxsk) Try __unm before bailing
+                // when the operand isn't a coercible number.
+                // Lua 5.1 invokes __unm(value) and uses the first
+                // return value; non-callable handlers naturally
+                // produce "attempt to call a TYPE value" via
+                // call_function.
+                if val.to_number().is_none()
+                    && let LuaValue::Table(t) = &val
+                {
+                    let handler = {
+                        let inner = t.inner.borrow();
+                        inner
+                            .metatable
+                            .as_ref()
+                            .map(|mt| mt.get(&LuaValue::Str(b"__unm".to_vec())))
+                            .unwrap_or(LuaValue::Nil)
+                    };
+                    if !matches!(handler, LuaValue::Nil) {
+                        let mut args = vec![val.clone()];
+                        let results = self.call_function(&handler, &mut args, env, varargs)?;
+                        return Ok(results.into_iter().next().unwrap_or(LuaValue::Nil));
+                    }
+                }
+                // (frankenredis-7w22v) Use the operand's actual
+                // type name to match Lua 5.1's "a string value" /
+                // "a boolean value" wording.
+                // (frankenredis-9ckvq) Label the operand by its
+                // syntactic accessor when available.
+                let n = val.to_number().ok_or_else(|| {
+                    self.type_error_with_label("perform arithmetic on", inner, &val, env)
+                })?;
+                Ok(LuaValue::Number(-n))
+            }
+            UnaryOp::Not => Ok(LuaValue::Bool(!val.is_truthy())),
+            UnaryOp::Len => match &val {
+                LuaValue::Str(s) => Ok(LuaValue::Number(s.len() as f64)),
+                // (frankenredis-y0ri2) `#t` mirrors Lua 5.1
+                // luaH_getn which does a binary border search
+                // when the array part ends in nil (or extends
+                // the search into the hash part). t.len() only
+                // returns the raw array.len(), which diverges
+                // from vendored on sparse / nil-hole tables.
+                LuaValue::Table(t) => Ok(LuaValue::Number(t.inner.borrow().border_len() as f64)),
+                // (frankenredis-7w22v / frankenredis-9ckvq) Prepend
+                // user_script:1: prefix and label the bad operand.
+                _ => Err(self.type_error_with_label("get length of", inner, &val, env)),
+            },
+        }
+    }
+
+    /// (frankenredis-lua-call-depth-ug22x) See `eval_unary_op_expr`: same reason.
+    #[inline(never)]
+    fn eval_index_expr(
+        &mut self,
+        table_expr: &Expr,
+        key_expr: &Expr,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<LuaValue, String> {
+        let table = self.eval_expr(table_expr, env, varargs)?;
+        let key = self.eval_expr(key_expr, env, varargs)?;
+        match &table {
+            // (frankenredis-vhbp3) Route through the full __index
+            // metamethod chain so function-valued __index is
+            // invoked rather than silently returning nil.
+            LuaValue::Table(t) => {
+                // (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0)
+                // Array-hit fast path. `KEYS[1]` is an integer index into
+                // the array part on every redis.call, and routing it
+                // through the generic lookup cost a call plus the
+                // metatable bookkeeping (table_lookup_with_index_meta was
+                // 4.82% of a cycles:u profile).
+                //
+                // Only a NON-Nil array hit short-circuits, mirroring the
+                // generic path's `!matches!(raw, Nil)` guard -- the array
+                // CAN hold Nil (it is padded on insert), and a Nil there
+                // must still fall through to the __index chain. Unlike
+                // the string-key case this guard is genuinely reachable.
+                if let LuaValue::Number(n) = &key {
+                    let index = *n as usize;
+                    let inner = t.inner.borrow();
+                    if index >= 1
+                        && index <= inner.array.len()
+                        && *n == index as f64
+                        && !matches!(inner.array[index - 1], LuaValue::Nil)
+                    {
+                        return Ok(inner.array[index - 1].clone());
+                    }
+                }
+                self.table_lookup_with_index_meta(t, &key, env, varargs)
+            }
+            // (frankenredis-tbu4k) Lua 5.1 sets the string library
+            // as the metatable __index for strings, so indexing a
+            // string with a string key looks up that field in the
+            // 'string' table (unknown keys yield nil). Non-string
+            // keys (numeric, boolean, etc.) just return nil.
+            LuaValue::Str(_) => Ok(self.lookup_string_field(&key)),
+            // (frankenredis-9ckvq) Label the bad operand by the
+            // syntactic accessor that produced it.
+            _ => Err(self.type_error_with_label("index", table_expr, &table, env)),
+        }
+    }
+
+    /// (frankenredis-lua-call-depth-ug22x) See `eval_unary_op_expr`: same reason.
+    #[inline(never)]
+    fn eval_field_expr(
+        &mut self,
+        table_expr: &Expr,
+        field: &Rc<str>,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<LuaValue, String> {
+        let table = self.eval_expr(table_expr, env, varargs)?;
+        match &table {
+            LuaValue::Table(t) => {
+                // Hit-only fast path: no key allocation. A miss takes
+                // the unchanged path below, so __index chains still
+                // resolve (pinned by
+                // field_fast_path_still_consults_index_metamethod).
+                //
+                // The non-Nil check mirrors the full lookup's
+                // `!matches!(raw, Nil)` guard. It is DEFENSIVE and
+                // currently unreachable: assigning nil to a string key
+                // does `string_hash.remove`, so a stored Nil cannot be
+                // observed here. Verified by mutation -- deleting the
+                // check does not fail any test today. Kept so this stays
+                // correct if Nil ever becomes storable.
+                // Memoised by (field-name address, table address, epoch).
+                // A hit skips the name's hash and the key memcmp
+                // entirely; anything that could change what `get_str`
+                // would return bumps the epoch and makes every entry
+                // unservable (see LUA_TABLE_FIELD_EPOCH).
+                let field_ptr = field.as_ptr();
+                let field_len = field.len();
+                let table_ptr = Rc::as_ptr(&t.inner).cast::<()>();
+                let epoch = lua_field_epoch();
+                for slot in &self.field_cache {
+                    if let Some((cached_ptr, cached_len, cached_table, cached_epoch, value)) = slot
+                        && *cached_ptr == field_ptr
+                        && *cached_len == field_len
+                        && *cached_table == table_ptr
+                        && *cached_epoch == epoch
+                    {
+                        return Ok(value.clone());
+                    }
+                }
+                let borrowed = t.inner.borrow().get_str(field.as_bytes());
+                if let Some(value) = borrowed
+                    && !matches!(value, LuaValue::Nil)
+                {
+                    // Only HITS are cached. A miss must keep taking the
+                    // full lookup so __index chains still resolve.
+                    let slot = self.field_cache_next % self.field_cache.len();
+                    self.field_cache[slot] =
+                        Some((field_ptr, field_len, table_ptr, epoch, value.clone()));
+                    self.field_cache_next = self.field_cache_next.wrapping_add(1);
+                    return Ok(value);
+                }
+                let key = LuaValue::Str(field.as_bytes().to_vec());
+                self.table_lookup_with_index_meta(t, &key, env, varargs)
+            }
+            // (frankenredis-tbu4k) Same string-as-metatable behavior
+            // as Expr::Index — `s.upper` returns string.upper,
+            // `s.fld` for unknown field returns nil.
+            LuaValue::Str(_) => {
+                Ok(self.lookup_string_field(&LuaValue::Str(field.as_bytes().to_vec())))
+            }
+            _ => Err(self.type_error_with_label("index", table_expr, &table, env)),
+        }
+    }
+
+    /// (frankenredis-lua-call-depth-ug22x) See `eval_unary_op_expr`: same reason.
+    #[inline(never)]
+    fn eval_method_call_expr(
+        &mut self,
+        obj_expr: &Expr,
+        method: &Rc<str>,
+        args: &[Expr],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<LuaValue, String> {
+        let obj = self.eval_expr(obj_expr, env, varargs)?;
+        let func = match &obj {
+            LuaValue::Table(t) => {
+                // (frankenredis-vhbp3) Method dispatch uses the
+                // same __index metamethod chain as field reads;
+                // function-valued __index can return the method
+                // dynamically.
+                let key = LuaValue::Str(method.as_bytes().to_vec());
+                self.table_lookup_with_index_meta(t, &key, env, varargs)?
+            }
+            LuaValue::Str(_) => {
+                // (frankenredis-tbu4k) Look up the method in the
+                // 'string' library so `s:upper()` / `s:len()` etc.
+                // resolve to the corresponding RustFunction;
+                // unknown methods still yield nil, which then
+                // reports "attempt to call method 'NAME'".
+                self.lookup_string_field(&LuaValue::Str(method.as_bytes().to_vec()))
+            }
+            _ => {
+                // (frankenredis-md71j) Mirror Lua 5.1's "attempt to
+                // index a TYPE value" wording for the receiver-side
+                // index failure of `obj:m()` against nil/bool/etc.
+                // (frankenredis-aaudb) Route through
+                // type_error_with_label so the receiver accessor
+                // (local 'x' / field 'f' / etc.) is preserved —
+                // upstream emits the indexing error here BEFORE
+                // attempting the call, with full accessor context.
+                return Err(self.type_error_with_label("index", obj_expr, &obj, env));
+            }
+        };
+        let mut arg_vals = vec![obj.clone()];
+        arg_vals.extend(self.eval_call_args(args, env, varargs)?);
+        // (frankenredis-md71j) method-call errors carry "method
+        // 'NAME'" context regardless of the receiver expression.
+        let results = self.call_function_with_callee(
+            obj_expr,
+            &func,
+            &mut arg_vals,
+            env,
+            varargs,
+            Some(method),
+        )?;
+        Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
+    }
+
+    /// (frankenredis-lua-call-depth-ug22x) See `eval_unary_op_expr`: same reason.
+    #[inline(never)]
+    fn eval_table_constructor_expr(
+        &mut self,
+        fields: &[TableField],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<LuaValue, String> {
+        let table = LuaTable::new();
+        let mut auto_idx = 1usize;
+        let last_idx = fields.len().checked_sub(1);
+        for (i, field) in fields.iter().enumerate() {
+            match field {
+                TableField::Positional(expr) => {
+                    // (frankenredis-d4vlx) Lua 5.1 expands the
+                    // LAST field of a table constructor to its
+                    // full multi-value if it's `...` or a function
+                    // call. Other positions take only the first
+                    // value. Mirrors the call-args expansion rule
+                    // in eval_call_args.
+                    let is_last_field = Some(i) == last_idx;
+                    if is_last_field {
+                        let values: Vec<LuaValue> = match expr {
+                            Expr::VarArgs => varargs.clone(),
+                            Expr::Call(func_expr, call_args) => {
+                                let func = self.eval_expr(func_expr, env, varargs)?;
+                                let mut arg_vals = self.eval_call_args(call_args, env, varargs)?;
+                                self.call_function_with_callee(
+                                    func_expr,
+                                    &func,
+                                    &mut arg_vals,
+                                    env,
+                                    varargs,
+                                    None,
+                                )?
+                            }
+                            Expr::IntrinsicCall(intrinsic, fallback, call_args) => self
+                                .eval_intrinsic_call(
+                                    *intrinsic, fallback, call_args, env, varargs,
+                                )?,
+                            Expr::MethodCall(obj_expr, method, call_args) => {
+                                let obj = self.eval_expr(obj_expr, env, varargs)?;
+                                let func = match &obj {
+                                    // (frankenredis-vhbp3) Same __index
+                                    // metamethod chain handling as the
+                                    // single MethodCall arm.
+                                    LuaValue::Table(t) => {
+                                        let key = LuaValue::Str(method.as_bytes().to_vec());
+                                        self.table_lookup_with_index_meta(t, &key, env, varargs)?
+                                    }
+                                    LuaValue::Str(_) => self.lookup_string_field(&LuaValue::Str(
+                                        method.as_bytes().to_vec(),
+                                    )),
+                                    _ => LuaValue::Nil,
+                                };
+                                let mut arg_vals = vec![obj];
+                                arg_vals.extend(self.eval_call_args(call_args, env, varargs)?);
+                                self.call_function_with_callee(
+                                    obj_expr,
+                                    &func,
+                                    &mut arg_vals,
+                                    env,
+                                    varargs,
+                                    Some(method),
+                                )?
+                            }
+                            _ => vec![self.eval_expr(expr, env, varargs)?],
+                        };
+                        for val in values {
+                            set_positional_array_slot(&table, auto_idx, val);
+                            auto_idx += 1;
+                        }
+                    } else {
+                        let val = self.eval_expr(expr, env, varargs)?;
+                        set_positional_array_slot(&table, auto_idx, val);
+                        auto_idx += 1;
+                    }
+                }
+                TableField::Named(name, expr) => {
+                    let val = self.eval_expr(expr, env, varargs)?;
+                    table.set(LuaValue::Str(name.as_bytes().to_vec()), val);
+                }
+                TableField::Index(key_expr, val_expr) => {
+                    let key = self.eval_expr(key_expr, env, varargs)?;
+                    let val = self.eval_expr(val_expr, env, varargs)?;
+                    // (frankenredis-tb9vb) {[k]=v} constructors
+                    // funnel through the same luaV_settable as
+                    // assignment, so nil/NaN keys raise here
+                    // too — not at first lookup.
+                    lua_check_table_key(&key)?;
+                    table.set(key, val);
+                }
+            }
+        }
+        Ok(LuaValue::Table(table))
+    }
+
     fn eval_expr(
         &mut self,
         expr: &Expr,
@@ -6835,166 +7176,11 @@ impl<'a> LuaState<'a> {
                     }
                 }
             }
-            Expr::UnaryOp(op, inner) => {
-                let val = self.eval_expr(inner, env, varargs)?;
-                match op {
-                    UnaryOp::Neg => {
-                        // (frankenredis-mdxsk) Try __unm before bailing
-                        // when the operand isn't a coercible number.
-                        // Lua 5.1 invokes __unm(value) and uses the first
-                        // return value; non-callable handlers naturally
-                        // produce "attempt to call a TYPE value" via
-                        // call_function.
-                        if val.to_number().is_none()
-                            && let LuaValue::Table(t) = &val
-                        {
-                            let handler = {
-                                let inner = t.inner.borrow();
-                                inner
-                                    .metatable
-                                    .as_ref()
-                                    .map(|mt| mt.get(&LuaValue::Str(b"__unm".to_vec())))
-                                    .unwrap_or(LuaValue::Nil)
-                            };
-                            if !matches!(handler, LuaValue::Nil) {
-                                let mut args = vec![val.clone()];
-                                let results =
-                                    self.call_function(&handler, &mut args, env, varargs)?;
-                                return Ok(results.into_iter().next().unwrap_or(LuaValue::Nil));
-                            }
-                        }
-                        // (frankenredis-7w22v) Use the operand's actual
-                        // type name to match Lua 5.1's "a string value" /
-                        // "a boolean value" wording.
-                        // (frankenredis-9ckvq) Label the operand by its
-                        // syntactic accessor when available.
-                        let n = val.to_number().ok_or_else(|| {
-                            self.type_error_with_label("perform arithmetic on", inner, &val, env)
-                        })?;
-                        Ok(LuaValue::Number(-n))
-                    }
-                    UnaryOp::Not => Ok(LuaValue::Bool(!val.is_truthy())),
-                    UnaryOp::Len => match &val {
-                        LuaValue::Str(s) => Ok(LuaValue::Number(s.len() as f64)),
-                        // (frankenredis-y0ri2) `#t` mirrors Lua 5.1
-                        // luaH_getn which does a binary border search
-                        // when the array part ends in nil (or extends
-                        // the search into the hash part). t.len() only
-                        // returns the raw array.len(), which diverges
-                        // from vendored on sparse / nil-hole tables.
-                        LuaValue::Table(t) => {
-                            Ok(LuaValue::Number(t.inner.borrow().border_len() as f64))
-                        }
-                        // (frankenredis-7w22v / frankenredis-9ckvq) Prepend
-                        // user_script:1: prefix and label the bad operand.
-                        _ => Err(self.type_error_with_label("get length of", inner, &val, env)),
-                    },
-                }
-            }
+            Expr::UnaryOp(op, inner) => self.eval_unary_op_expr(op, inner, env, varargs),
             Expr::Index(table_expr, key_expr) => {
-                let table = self.eval_expr(table_expr, env, varargs)?;
-                let key = self.eval_expr(key_expr, env, varargs)?;
-                match &table {
-                    // (frankenredis-vhbp3) Route through the full __index
-                    // metamethod chain so function-valued __index is
-                    // invoked rather than silently returning nil.
-                    LuaValue::Table(t) => {
-                        // (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0)
-                        // Array-hit fast path. `KEYS[1]` is an integer index into
-                        // the array part on every redis.call, and routing it
-                        // through the generic lookup cost a call plus the
-                        // metatable bookkeeping (table_lookup_with_index_meta was
-                        // 4.82% of a cycles:u profile).
-                        //
-                        // Only a NON-Nil array hit short-circuits, mirroring the
-                        // generic path's `!matches!(raw, Nil)` guard -- the array
-                        // CAN hold Nil (it is padded on insert), and a Nil there
-                        // must still fall through to the __index chain. Unlike
-                        // the string-key case this guard is genuinely reachable.
-                        if let LuaValue::Number(n) = &key {
-                            let index = *n as usize;
-                            let inner = t.inner.borrow();
-                            if index >= 1
-                                && index <= inner.array.len()
-                                && *n == index as f64
-                                && !matches!(inner.array[index - 1], LuaValue::Nil)
-                            {
-                                return Ok(inner.array[index - 1].clone());
-                            }
-                        }
-                        self.table_lookup_with_index_meta(t, &key, env, varargs)
-                    }
-                    // (frankenredis-tbu4k) Lua 5.1 sets the string library
-                    // as the metatable __index for strings, so indexing a
-                    // string with a string key looks up that field in the
-                    // 'string' table (unknown keys yield nil). Non-string
-                    // keys (numeric, boolean, etc.) just return nil.
-                    LuaValue::Str(_) => Ok(self.lookup_string_field(&key)),
-                    // (frankenredis-9ckvq) Label the bad operand by the
-                    // syntactic accessor that produced it.
-                    _ => Err(self.type_error_with_label("index", table_expr, &table, env)),
-                }
+                self.eval_index_expr(table_expr, key_expr, env, varargs)
             }
-            Expr::Field(table_expr, field) => {
-                let table = self.eval_expr(table_expr, env, varargs)?;
-                match &table {
-                    LuaValue::Table(t) => {
-                        // Hit-only fast path: no key allocation. A miss takes
-                        // the unchanged path below, so __index chains still
-                        // resolve (pinned by
-                        // field_fast_path_still_consults_index_metamethod).
-                        //
-                        // The non-Nil check mirrors the full lookup's
-                        // `!matches!(raw, Nil)` guard. It is DEFENSIVE and
-                        // currently unreachable: assigning nil to a string key
-                        // does `string_hash.remove`, so a stored Nil cannot be
-                        // observed here. Verified by mutation -- deleting the
-                        // check does not fail any test today. Kept so this stays
-                        // correct if Nil ever becomes storable.
-                        // Memoised by (field-name address, table address, epoch).
-                        // A hit skips the name's hash and the key memcmp
-                        // entirely; anything that could change what `get_str`
-                        // would return bumps the epoch and makes every entry
-                        // unservable (see LUA_TABLE_FIELD_EPOCH).
-                        let field_ptr = field.as_ptr();
-                        let field_len = field.len();
-                        let table_ptr = Rc::as_ptr(&t.inner).cast::<()>();
-                        let epoch = lua_field_epoch();
-                        for slot in &self.field_cache {
-                            if let Some((cached_ptr, cached_len, cached_table, cached_epoch, value)) =
-                                slot
-                                && *cached_ptr == field_ptr
-                                && *cached_len == field_len
-                                && *cached_table == table_ptr
-                                && *cached_epoch == epoch
-                            {
-                                return Ok(value.clone());
-                            }
-                        }
-                        let borrowed = t.inner.borrow().get_str(field.as_bytes());
-                        if let Some(value) = borrowed
-                            && !matches!(value, LuaValue::Nil)
-                        {
-                            // Only HITS are cached. A miss must keep taking the
-                            // full lookup so __index chains still resolve.
-                            let slot = self.field_cache_next % self.field_cache.len();
-                            self.field_cache[slot] =
-                                Some((field_ptr, field_len, table_ptr, epoch, value.clone()));
-                            self.field_cache_next = self.field_cache_next.wrapping_add(1);
-                            return Ok(value);
-                        }
-                        let key = LuaValue::Str(field.as_bytes().to_vec());
-                        self.table_lookup_with_index_meta(t, &key, env, varargs)
-                    }
-                    // (frankenredis-tbu4k) Same string-as-metatable behavior
-                    // as Expr::Index — `s.upper` returns string.upper,
-                    // `s.fld` for unknown field returns nil.
-                    LuaValue::Str(_) => {
-                        Ok(self.lookup_string_field(&LuaValue::Str(field.as_bytes().to_vec())))
-                    }
-                    _ => Err(self.type_error_with_label("index", table_expr, &table, env)),
-                }
-            }
+            Expr::Field(table_expr, field) => self.eval_field_expr(table_expr, field, env, varargs),
             Expr::Call(func_expr, args) => {
                 let func = self.eval_expr(func_expr, env, varargs)?;
                 let mut arg_vals = self.eval_call_args(args, env, varargs)?;
@@ -7049,142 +7235,10 @@ impl<'a> LuaState<'a> {
                 self.eval_intrinsic_call_value(*intrinsic, fallback, args, env, varargs)
             }
             Expr::MethodCall(obj_expr, method, args) => {
-                let obj = self.eval_expr(obj_expr, env, varargs)?;
-                let func = match &obj {
-                    LuaValue::Table(t) => {
-                        // (frankenredis-vhbp3) Method dispatch uses the
-                        // same __index metamethod chain as field reads;
-                        // function-valued __index can return the method
-                        // dynamically.
-                        let key = LuaValue::Str(method.as_bytes().to_vec());
-                        self.table_lookup_with_index_meta(t, &key, env, varargs)?
-                    }
-                    LuaValue::Str(_) => {
-                        // (frankenredis-tbu4k) Look up the method in the
-                        // 'string' library so `s:upper()` / `s:len()` etc.
-                        // resolve to the corresponding RustFunction;
-                        // unknown methods still yield nil, which then
-                        // reports "attempt to call method 'NAME'".
-                        self.lookup_string_field(&LuaValue::Str(method.as_bytes().to_vec()))
-                    }
-                    _ => {
-                        // (frankenredis-md71j) Mirror Lua 5.1's "attempt to
-                        // index a TYPE value" wording for the receiver-side
-                        // index failure of `obj:m()` against nil/bool/etc.
-                        // (frankenredis-aaudb) Route through
-                        // type_error_with_label so the receiver accessor
-                        // (local 'x' / field 'f' / etc.) is preserved —
-                        // upstream emits the indexing error here BEFORE
-                        // attempting the call, with full accessor context.
-                        return Err(self.type_error_with_label("index", obj_expr, &obj, env));
-                    }
-                };
-                let mut arg_vals = vec![obj.clone()];
-                arg_vals.extend(self.eval_call_args(args, env, varargs)?);
-                // (frankenredis-md71j) method-call errors carry "method
-                // 'NAME'" context regardless of the receiver expression.
-                let results = self.call_function_with_callee(
-                    obj_expr,
-                    &func,
-                    &mut arg_vals,
-                    env,
-                    varargs,
-                    Some(method),
-                )?;
-                Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
+                self.eval_method_call_expr(obj_expr, method, args, env, varargs)
             }
             Expr::TableConstructor(fields) => {
-                let table = LuaTable::new();
-                let mut auto_idx = 1usize;
-                let last_idx = fields.len().checked_sub(1);
-                for (i, field) in fields.iter().enumerate() {
-                    match field {
-                        TableField::Positional(expr) => {
-                            // (frankenredis-d4vlx) Lua 5.1 expands the
-                            // LAST field of a table constructor to its
-                            // full multi-value if it's `...` or a function
-                            // call. Other positions take only the first
-                            // value. Mirrors the call-args expansion rule
-                            // in eval_call_args.
-                            let is_last_field = Some(i) == last_idx;
-                            if is_last_field {
-                                let values: Vec<LuaValue> = match expr {
-                                    Expr::VarArgs => varargs.clone(),
-                                    Expr::Call(func_expr, call_args) => {
-                                        let func = self.eval_expr(func_expr, env, varargs)?;
-                                        let mut arg_vals =
-                                            self.eval_call_args(call_args, env, varargs)?;
-                                        self.call_function_with_callee(
-                                            func_expr,
-                                            &func,
-                                            &mut arg_vals,
-                                            env,
-                                            varargs,
-                                            None,
-                                        )?
-                                    }
-                                    Expr::IntrinsicCall(intrinsic, fallback, call_args) => self
-                                        .eval_intrinsic_call(
-                                            *intrinsic, fallback, call_args, env, varargs,
-                                        )?,
-                                    Expr::MethodCall(obj_expr, method, call_args) => {
-                                        let obj = self.eval_expr(obj_expr, env, varargs)?;
-                                        let func = match &obj {
-                                            // (frankenredis-vhbp3) Same __index
-                                            // metamethod chain handling as the
-                                            // single MethodCall arm.
-                                            LuaValue::Table(t) => {
-                                                let key = LuaValue::Str(method.as_bytes().to_vec());
-                                                self.table_lookup_with_index_meta(
-                                                    t, &key, env, varargs,
-                                                )?
-                                            }
-                                            LuaValue::Str(_) => self.lookup_string_field(
-                                                &LuaValue::Str(method.as_bytes().to_vec()),
-                                            ),
-                                            _ => LuaValue::Nil,
-                                        };
-                                        let mut arg_vals = vec![obj];
-                                        arg_vals
-                                            .extend(self.eval_call_args(call_args, env, varargs)?);
-                                        self.call_function_with_callee(
-                                            obj_expr,
-                                            &func,
-                                            &mut arg_vals,
-                                            env,
-                                            varargs,
-                                            Some(method),
-                                        )?
-                                    }
-                                    _ => vec![self.eval_expr(expr, env, varargs)?],
-                                };
-                                for val in values {
-                                    set_positional_array_slot(&table, auto_idx, val);
-                                    auto_idx += 1;
-                                }
-                            } else {
-                                let val = self.eval_expr(expr, env, varargs)?;
-                                set_positional_array_slot(&table, auto_idx, val);
-                                auto_idx += 1;
-                            }
-                        }
-                        TableField::Named(name, expr) => {
-                            let val = self.eval_expr(expr, env, varargs)?;
-                            table.set(LuaValue::Str(name.as_bytes().to_vec()), val);
-                        }
-                        TableField::Index(key_expr, val_expr) => {
-                            let key = self.eval_expr(key_expr, env, varargs)?;
-                            let val = self.eval_expr(val_expr, env, varargs)?;
-                            // (frankenredis-tb9vb) {[k]=v} constructors
-                            // funnel through the same luaV_settable as
-                            // assignment, so nil/NaN keys raise here
-                            // too — not at first lookup.
-                            lua_check_table_key(&key)?;
-                            table.set(key, val);
-                        }
-                    }
-                }
-                Ok(LuaValue::Table(table))
+                self.eval_table_constructor_expr(fields, env, varargs)
             }
             Expr::FunctionDef(params, is_variadic, body) => Ok(LuaValue::function(LuaFunc {
                 params: params.iter().map(ToString::to_string).collect(),
