@@ -9224,6 +9224,21 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         id
     };
 
+    // (upstream t_stream.c::streamAppendItem, lines 464-474) A listpack can only
+    // carry 32-bit lengths, so upstream sums EVERY field and value in this one
+    // XADD and refuses the whole append past STREAM_LISTPACK_MAX_SIZE, setting
+    // ERANGE, which xaddCommand reports as "Elements are too large to be
+    // stored". Placed after the ID comparison above because upstream's EDOM
+    // branch wins when a call is guilty of both: xaddCommand tests errno for
+    // EDOM first and only then falls through to this wording.
+    const STREAM_LISTPACK_MAX_SIZE: usize = 1 << 30;
+    let totelelen: usize = fields.iter().map(|(f, v)| f.len() + v.len()).sum();
+    if totelelen > STREAM_LISTPACK_MAX_SIZE {
+        return Ok(RespFrame::Error(
+            "ERR Elements are too large to be stored".to_string(),
+        ));
+    }
+
     store.xadd(&argv[1], id, &fields, now_ms)?;
     // (frankenredis-xaddtrimdirty) Upstream t_stream.c::xaddCommand bumps
     // server.dirty exactly once (for the add). Its inline MAXLEN/MINID trim
@@ -39942,6 +39957,34 @@ mod tests {
             RespFrame::Error(
                 "ERR Invalid stream ID specified as stream command argument".to_string()
             )
+        );
+    }
+
+    #[test]
+    fn xadd_element_size_guard_leaves_ordinary_payloads_alone() {
+        // Upstream refuses an XADD whose fields and values SUM past
+        // STREAM_LISTPACK_MAX_SIZE (1 GiB, t_stream.c:54) with "Elements are
+        // too large to be stored". Reaching that ceiling needs more than a
+        // gigabyte of payload in one command, which is not something to
+        // allocate in a unit test -- so what is pinned here is the direction
+        // that would actually hurt users: an ordinary large value must still
+        // be accepted. An inverted comparison passes every other XADD test in
+        // this file and fails only this one.
+        let mut store = Store::new();
+        let big = vec![b'x'; 2 * 1024 * 1024];
+        let out = dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                big,
+            ],
+            &mut store,
+        );
+        assert!(
+            matches!(out, RespFrame::BulkString(Some(_))),
+            "a 2 MiB field is three orders of magnitude inside upstream's ceiling, got {out:?}"
         );
     }
 
