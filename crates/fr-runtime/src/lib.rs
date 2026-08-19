@@ -48497,6 +48497,33 @@ replica_announced:1\r\n",
             return RespFrame::Error("ERR FAILOVER requires connected replicas.".to_string());
         }
 
+        // (frankenredis-eh2ct) Upstream replication.c:4129, sitting exactly here -- after the
+        // connected-replicas check above and before the target validation below:
+        //
+        //     if (force_flag && (!timeout_in_ms || !host)) {
+        //         addReplyError(c,"FAILOVER with force option requires both a timeout "
+        //             "and target HOST and IP.");
+        //
+        // fr PARSED `FORCE` and never read it: `force` was assigned at its arm of the option
+        // loop and appeared nowhere else in the handler, so `FAILOVER FORCE` alone was ACCEPTED
+        // where 7.2.4 refuses it. A flag the parser recognises and no gate consults is a false
+        // acceptance -- the same shape as `no-cluster` and `allow-stale` before df0615769, and
+        // found the same way, by an error literal the incumbent can send and fr never did.
+        //
+        // ORDER IS UPSTREAM'S AND IT IS OBSERVABLE: `FAILOVER FORCE` on a master with no
+        // replicas trips this condition AND the one above, and must read the connected-replicas
+        // wording, because upstream tests that first.
+        //
+        // "HOST and IP" is upstream's wording, not a typo introduced here -- the argument is a
+        // host and a PORT. Copied verbatim; a client matching on the message would not care that
+        // the incumbent misnamed its own argument.
+        if force && (timeout_ms.is_none() || target_host.is_none()) {
+            return RespFrame::Error(
+                "ERR FAILOVER with force option requires both a timeout and target HOST and IP."
+                    .to_string(),
+            );
+        }
+
         let selected_target = if let (Some(host), Some(port)) = (target_host, target_port) {
             // The port was already parsed permissively per upstream;
             // narrow it to u16 here for the replica-selection match.
@@ -66290,6 +66317,95 @@ mod tests {
             RespFrame::Error("ERR FAILOVER is not valid when server is a replica.".to_string())
         );
     }
+
+
+    /// `FORCE` was PARSED and never read, so `FAILOVER FORCE` alone was accepted.
+    ///
+    /// Upstream refuses it at replication.c:4129 -- `force_flag && (!timeout_in_ms || !host)` --
+    /// between the connected-replicas check and the target validation. fr assigned `force` at its
+    /// arm of the option loop and consulted it nowhere, which is a false acceptance: the parser
+    /// recognises a flag that changes nothing. Found by the error-literal census, same as the
+    /// `no-cluster` and `allow-stale` gates in df0615769.
+    #[test]
+    fn failover_force_requires_both_a_timeout_and_a_target_eh2ct() {
+        const FORCE_ERR: &str =
+            "ERR FAILOVER with force option requires both a timeout and target HOST and IP.";
+
+        // `REPLCONF listening-port` is what registers a replica, so this is the cheapest master
+        // that gets past the connected-replicas check above.
+        fn master_with_a_replica() -> Runtime {
+            let mut rt = Runtime::default_strict();
+            rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"6380"]), 0);
+            rt
+        }
+
+        // Neither half supplied.
+        let mut rt = master_with_a_replica();
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER", b"FORCE"]), 1),
+            RespFrame::Error(FORCE_ERR.to_string())
+        );
+
+        // A timeout but no target.
+        let mut rt = master_with_a_replica();
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER", b"FORCE", b"TIMEOUT", b"100"]), 1),
+            RespFrame::Error(FORCE_ERR.to_string())
+        );
+
+        // A target but no timeout.
+        let mut rt = master_with_a_replica();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"FAILOVER", b"FORCE", b"TO", b"127.0.0.1", b"6380"]),
+                1
+            ),
+            RespFrame::Error(FORCE_ERR.to_string())
+        );
+
+        // ORDER, and it is observable: with NO replicas both this condition and the one above
+        // hold, and upstream tests connected-replicas first (:4124 before :4129).
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER", b"FORCE"]), 0),
+            RespFrame::Error("ERR FAILOVER requires connected replicas.".to_string()),
+            "the connected-replicas check must be answered first"
+        );
+
+        // NOT A BLANKET REFUSAL -- the half that catches an over-eager gate. FORCE with both
+        // parts must CLEAR this check; what happens afterwards is the target validation's
+        // business, so only this error is ruled out.
+        let mut rt = master_with_a_replica();
+        let both = rt.execute_frame(
+            command(&[
+                b"FAILOVER",
+                b"FORCE",
+                b"TIMEOUT",
+                b"100",
+                b"TO",
+                b"127.0.0.1",
+                b"6380",
+            ]),
+            1,
+        );
+        if let RespFrame::Error(msg) = &both {
+            assert!(
+                !msg.contains("force option requires"),
+                "FORCE with a timeout AND a target must clear this gate: {msg}"
+            );
+        }
+
+        // And a FAILOVER that never said FORCE is untouched by it.
+        let mut rt = master_with_a_replica();
+        let plain = rt.execute_frame(command(&[b"FAILOVER"]), 1);
+        if let RespFrame::Error(msg) = &plain {
+            assert!(
+                !msg.contains("force option requires"),
+                "no FORCE, no force refusal: {msg}"
+            );
+        }
+    }
+
 
     #[test]
     fn failover_parse_errors_fire_before_replica_check_w1v61() {
