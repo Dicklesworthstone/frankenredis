@@ -64544,3 +64544,58 @@ explicit legend that contradicts the annotations, this row loses.
    the REMAINING decode cost is, which needs the quiet-host row the HOLD above could not get.
 3. Do not re-derive this from the beads. The bead text and one bead comment disagree about
    direction, and the artifact that settles it is the annotation column of the scorecard.
+
+---
+
+## AMENDMENT — an AUTHENTICATED magnitude for this shape already existed; do not spend a quiet window re-deriving it (frankenredis-i41sx, frankenredis-xvq1a)
+
+The HOLD row said magnitude was open and needed a quiet host. That is too strong, and following it
+would have burned the next quiet window on a number already on record.
+
+`frankenredis-xvq1a` carries an AUTHENTICATED result from `9c4a3d3c4`, produced by the same
+`--competitive` mode used for the HOLD above, on a collection-heavy DB (2000 hashes + 2000 sets +
+2000 zsets, 40 string members each):
+
+      run 1   A/A 1.010558  CI [1.001541, 1.015901]   A/B redis/fr 0.521151  CI [0.507288, 0.535630]
+      run 2   A/A 1.008119  CI [0.984687, 1.025978]   A/B redis/fr 0.479870  CI [0.473905, 0.491916]
+
+Both nulls IN band, so unlike today's attempt those A/B numbers are quotable: RESTORE decode
+**0.48-0.52x, i.e. Redis about 1.9-2.1x faster**, worst bound 0.521151. Today's unauthenticated
+zset-only run landed at 0.492 and 0.536 — the same neighbourhood, which is why it is worth saying
+plainly that today's run added no magnitude, only agreement.
+
+### WHAT IS ACTUALLY STILL OPEN
+
+Three different cells are now in play and they are NOT interchangeable, which is the same trap the
+polarity row above records:
+
+      0.212x fr/redis THROUGHPUT   scorecard, zset-only RESTORE decode half   fr ~4.7x behind
+      0.48-0.52x redis/fr TIME     xvq1a, collection-heavy (hash+set+zset)    fr ~2x behind
+      0.49-0.54x redis/fr TIME     today, zset-only, NOT authenticated        fr ~2x behind
+
+xvq1a's own comment already warns "neither number should be quoted for the other". So the open
+question is not "what is the magnitude" but "why does the zset-only THROUGHPUT cell say 4.7x when
+the timed cells say 2x" — and that gap may be shape, pipelining, or the throughput/time polarity
+itself, none of which a repeat of today's run would distinguish.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement in this row; it reads two committed records and compares them. The authenticated
+numbers quoted are xvq1a's, with its nulls reproduced above so the quotation carries its own gate.
+
+### PROVENANCE
+
+      source        main at 9b83758d9; xvq1a's authenticated run is 9c4a3d3c4, fr ELF
+                    aa85ba7b8ac8b4d9, redis ELF e837dbb2556cff6b, its host at loadavg 11-17.
+      host          thinkstation1, runq 93, loadavg 34.80 / 30.39 / 22.74, /data 273G. No ratio
+                    was taken on this host today and none is claimed.
+      disposition   AMENDMENT to the HOLD row. No engine source changed.
+
+### RETRY PREDICATE
+
+1. Supersedes retry item 2 of the HOLD row. Do NOT re-run zset-only RESTORE for a magnitude; one
+   exists for the collection-heavy shape and today's run agrees with it.
+2. If a quiet window is spent here, spend it reconciling the 4.7x throughput cell against the 2x
+   timed cells, with BOTH instruments in one invocation. Anything less compares across sessions.
+3. Quote 0.521151 as the worst bound if this shape needs a number today; it is the worse of the
+   two authenticated runs, per the replicated-standing convention.
