@@ -38627,7 +38627,9 @@ impl Runtime {
                 input_source: ThreatInputDigestSource::Argv(argv),
                 output: &reply,
             });
-            return reply;
+            // (frankenredis-multitaint-8kq2r) upstream raises NOAUTH via rejectCommand(c, shared.noautherr), which flags the
+            // transaction first (server.c:3700-3701).
+            return self.reject_and_flag_transaction(reply);
         }
 
         if let Some(permission_error) = self.acl_permission_error(argv, resolved_parent_arity_ok) {
@@ -38713,7 +38715,9 @@ impl Runtime {
                 input_source: ThreatInputDigestSource::Argv(argv),
                 output: &reply,
             });
-            return reply;
+            // (frankenredis-multitaint-8kq2r) upstream raises NOPERM via rejectCommandFormat, which flags the transaction first
+            // (server.c:3712-3713).
+            return self.reject_and_flag_transaction(reply);
         }
 
         // (frankenredis-7tpx0) Full arity = parent arity AND, for container
@@ -38756,8 +38760,13 @@ impl Runtime {
             && self.is_in_subscription_mode()
             && !Self::pubsub_command_allowed_in_subscription_mode(special_command, argv)
         {
-            self.apply_existing_client_reply_suppression_to_undispatched_reply();
-            return Self::pubsub_context_error(&Self::pubsub_blocked_command_name(argv));
+            // (frankenredis-multitaint-8kq2r) upstream rejects this with rejectCommandFormat
+            // ("Can't execute '%s': only (P|S)SUBSCRIBE / ... allowed in this context"), which
+            // flags the transaction. reject_and_flag_transaction also performs the reply
+            // suppression this site did inline.
+            return self.reject_and_flag_transaction(Self::pubsub_context_error(
+                &Self::pubsub_blocked_command_name(argv),
+            ));
         }
         // Upstream networking.c::pingCommand emits a 2-element array
         // ["pong", optional-msg] when the client is in subscribe mode
@@ -67350,6 +67359,69 @@ mod tests {
     }
 
     #[test]
+    fn an_acl_rejection_inside_multi_taints_the_transaction() {
+        // (frankenredis-multitaint-8kq2r) Upstream raises NOPERM through `rejectCommandFormat`,
+        // which opens with `flagTransaction(c)` (server.c:3712-3713) -- so a command the ACL
+        // refuses while a transaction is open makes the later EXEC answer EXECABORT rather than
+        // running the commands that were accepted.
+        //
+        // ACL is the gate worth testing of the three fixed here: NOAUTH and the pubsub-context
+        // restriction cannot CO-OCCUR with an open MULTI, because neither state lets a client
+        // issue MULTI in the first place. Tainting them is still correct -- it costs nothing and
+        // removes a standing "why is this one different" -- but only this one is reachable.
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                // +@transaction as well as +@read: MULTI/EXEC are @transaction commands, so a
+                // read-only user cannot even open the transaction this row needs.
+                command(&[
+                    b"ACL",
+                    b"SETUSER",
+                    b"reader",
+                    b"on",
+                    b">pw",
+                    b"+@read",
+                    b"+@transaction",
+                    b"~*",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"reader", b"pw"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // A read is accepted into the queue, so the transaction has real content to lose.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 3),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        // The write is refused by the ACL.
+        let refused = rt.execute_frame(command(&[b"SET", b"k", b"v"]), 4);
+        assert!(
+            matches!(&refused, RespFrame::Error(msg) if msg.starts_with("NOPERM")),
+            "expected a NOPERM refusal, got {refused:?}"
+        );
+
+        // ...and that must abort the whole transaction, not merely drop the one command. Before
+        // this fix EXEC answered an array containing the QUEUED read's result, so a client that
+        // checked only for a non-error reply would believe its transaction ran.
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 5),
+            RespFrame::Error(
+                "EXECABORT Transaction discarded because of previous errors.".to_string()
+            ),
+            "an ACL rejection inside MULTI must taint the transaction"
+        );
+    }
+
+    #[test]
     fn multi_queued_write_on_a_readonly_replica_is_refused() {
         // Upstream processCommand runs its rejection gates BEFORE the MULTI queuing branch --
         // the read-only-replica check is at server.c:3995 and `queueMultiCommand` at :4155 --
@@ -76638,9 +76710,17 @@ mod tests {
                 "NOPERM User antirez has no permissions to run the 'incr' command".to_string()
             )
         );
+        // (frankenredis-multitaint-8kq2r) EXECABORT, not an empty array. This row's subject is
+        // the ACL LOG context below and the EXEC reply was incidental to it -- which is exactly
+        // how it came to pin fr's behaviour rather than the incumbent's. Upstream raises NOPERM
+        // through rejectCommandFormat, which calls flagTransaction first (server.c:3712-3713),
+        // so the queue-time denial aborts the transaction. The log assertions that follow are
+        // unaffected: the entry is made when the command is DENIED, not when EXEC answers.
         assert_eq!(
             rt.execute_frame(command(&[b"EXEC"]), 5),
-            RespFrame::Array(Some(vec![]))
+            RespFrame::Error(
+                "EXECABORT Transaction discarded because of previous errors.".to_string()
+            )
         );
         assert_eq!(
             rt.execute_frame(command(&[b"AUTH", b"default", b""]), 6),
