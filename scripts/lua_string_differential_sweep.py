@@ -94,6 +94,19 @@ CASES = {
         'out[#out+1]=i..":"..tostring(ok)..":"..tostring(r) end '
         'return table.concat(out,",")'
     ),
+    # string.format specifier parity. Results are comma-sanitised in Lua because the
+    # transport joins on commas and a formatted value may contain one.
+    "format": (
+        'local cs={{"%d",3.7},{"%d","5"},{"%i",42},{"%5.2f",3.14159},{"%x",255},'
+        '{"%X",255},{"%o",8},{"%c",65},{"%e",1234.5},{"%g",0.0001},{"%s",true},'
+        '{"%q","a b"},{"%%",1},{"%10s","hi"},{"%.3s","abcdef"},{"%d",2^53},'
+        '{"%s",-0.0},{"%d",-2^53},{"%5d",7},{"%-5d|",7},{"%+d",7},{"%.0f",2.5}} '
+        'local out={} for i,c in ipairs(cs) do '
+        'local ok,r=pcall(string.format,c[1],c[2]) '
+        'r=tostring(r) r=string.gsub(r,",","<c>") '
+        'out[#out+1]=i..":"..tostring(ok)..":"..r end '
+        'return table.concat(out,",")'
+    ),
     "byte_gsub": (
         'local out={} for i=0,255 do local c=string.char(i) '
         'local ok,r=pcall(string.gsub,"a"..c.."b",c,"X") '
