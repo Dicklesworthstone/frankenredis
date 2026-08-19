@@ -112,6 +112,10 @@ WALKS = {
     "decode":  "return cjson.decode(string.rep('[', %d) .. string.rep(']', %d))",
     "reply":   "local t = {} for i = 1, %d do t = {t} end return t",
     "msgpack": "local t = {} for i = 1, %d do t = {t} end return cmsgpack.pack(t)",
+    # Plain Lua self-recursion. Not a serialiser walk -- this probes the INTERPRETER's own call
+    # depth, which fr bounds with MAX_CALL_DEPTH while Lua bounds it by stack.
+    "recurse": ("local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end "
+                "return f(%d)"),
 }
 
 def main():
