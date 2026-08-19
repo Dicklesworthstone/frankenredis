@@ -2445,13 +2445,21 @@ pub fn dispatch_argv(
     // per-command guards stay: they are unreachable now for the commands this covers, but
     // several encode subcommand-level nuance and none of them is wrong.
     //
-    // ORDER matches script.c:524-530 -- arity is verified BEFORE noscript, so a scripted
-    // `MULTI x` still reports wrong-arity rather than the noscript error. Checking arity here
-    // rather than relying on position is what preserves that, since this runs ahead of the
-    // table arity check below.
+    // ARITY STILL WINS, per script.c:524-530: a scripted `MULTI x` reports wrong-arity rather
+    // than the noscript error, because the gate fires only when arity is ALSO ok and otherwise
+    // falls through to the table's own arity check below. Both conjuncts must hold, so the
+    // outcome does not depend on which is evaluated first.
+    //
+    // The cheap test is evaluated first on purpose. Every inner `redis.call` in every script
+    // reaches this line, and the overwhelming majority of them are NOT noscript -- so putting
+    // `check_full_command_arity` first made each of them pay a full arity resolution just to
+    // learn the gate does not apply. `command_is_noscript` rejects the common case on a table
+    // lookup, and arity is then resolved only for the commands actually about to be refused.
+    // That matters here specifically: the per-inner-call cost of the script path is what
+    // frankenredis-kbyhy is measuring.
     if store.script_nesting_level >= 1
-        && check_full_command_arity(argv).is_ok()
         && command_is_noscript(argv)
+        && check_full_command_arity(argv).is_ok()
     {
         return Err(script_noscript_command_error());
     }
@@ -14811,7 +14819,16 @@ fn setrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
         let cur = store.strlen(&argv[1], now_ms)?;
         return Ok(RespFrame::Integer(i64::try_from(cur).unwrap_or(i64::MAX)));
     }
-    if offset_u64.saturating_add(added_len as u64) > store.proto_max_bulk_len as u64 {
+    // (frankenredis-obeyclient-strlen-qxdyn) An OBEYED client is exempt. Upstream's
+    // checkStringLength opens with `if (mustObeyClient(c)) return C_OK;` (t_string.c:41) and
+    // setrangeCommand calls it twice (:464, :484). mustObeyClient is the AOF client or the master
+    // link (server.c:3209): a limit that refuses a normal client's write must never refuse a write
+    // that has ALREADY HAPPENED somewhere else. Without this a replica whose proto-max-bulk-len is
+    // smaller than its master's silently keeps the SHORT value -- the refusal is a reply to a link
+    // nobody reads -- and an AOF recorded before the limit was lowered fails to reload.
+    if !store.must_obey_client
+        && offset_u64.saturating_add(added_len as u64) > store.proto_max_bulk_len as u64
+    {
         // Upstream reply: "string exceeds maximum allowed size
         // (proto-max-bulk-len)" (br-frankenredis-68ql).
         return Err(CommandError::Custom(
@@ -15255,7 +15272,12 @@ fn setbit(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     let offset = parse_i64_arg(&argv[2]).map_err(|_| {
         CommandError::Custom("ERR bit offset is not an integer or out of range".to_string())
     })?;
-    if !(0..4_294_967_296).contains(&offset) {
+    // (frankenredis-obeyclient-strlen-qxdyn) Was a bare 4_294_967_296 -- the 512 MiB default
+    // written out in bits, a fourth copy of one upstream bound. It now reads the live limit,
+    // which is also where the obeyed-client exemption lives.
+    if offset < 0
+        || (offset as u64) >= bit_offset_limit(store.proto_max_bulk_len, store.must_obey_client)
+    {
         return Err(CommandError::Custom(
             "ERR bit offset is not an integer or out of range".to_string(),
         ));
@@ -15276,24 +15298,49 @@ fn getbit(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("GETBIT"));
     }
-    let offset = parse_bit_offset_or_reply(&argv[2])?;
+    let offset = parse_bit_offset_or_reply(
+        &argv[2],
+        bit_offset_limit(store.proto_max_bulk_len, store.must_obey_client),
+    )?;
     let bit = store.getbit(&argv[1], offset as usize, now_ms)?;
     Ok(RespFrame::Integer(if bit { 1 } else { 0 }))
 }
 
+/// The exclusive upper bound on a bit offset, i.e. upstream's
+/// `(loffset >> 3) >= server.proto_max_bulk_len` rearranged.
+///
+/// (frankenredis-obeyclient-strlen-qxdyn) Two corrections live here, and both come from reading
+/// the one guard upstream actually writes -- `getBitOffsetFromArgument` (bitops.c:433) is
+/// `if (loffset < 0 || (!mustObeyClient(c) && (loffset >> 3) >= server.proto_max_bulk_len))`:
+///
+///   * the bound is the LIVE `proto-max-bulk-len`, not the 512 MiB default. fr hard-coded the
+///     default in three separate places, so a server configured LARGER refused offsets upstream
+///     accepts, and one configured SMALLER accepted offsets upstream refuses. The name and the
+///     wording were right in all three; only the bound was wrong, which is why a census of the
+///     error string finds nothing.
+///   * an OBEYED client -- the master link or the AOF -- skips the CAP, so a replica cannot
+///     refuse a write its master already applied. The negative half stays unconditional, exactly
+///     as upstream leaves `loffset < 0` outside the `!mustObeyClient` conjunct.
+///
+/// Returning the bound rather than taking `&Store` keeps the seven BITFIELD call sites free of a
+/// second borrow while `argv` is borrowed.
+fn bit_offset_limit(max_bulk_len: usize, obeyed: bool) -> u64 {
+    if obeyed {
+        u64::MAX
+    } else {
+        (max_bulk_len as u64).saturating_mul(8)
+    }
+}
+
 /// Mirror upstream bitops.c::getBitOffsetFromArgument: a bit offset
 /// must parse as a non-negative i64 AND `offset >> 3` must stay
-/// below proto_max_bulk_len (default 512MB → bits < 4 GiB).
-/// (br-frankenredis-bitoff)
-fn parse_bit_offset_or_reply(arg: &[u8]) -> Result<i64, CommandError> {
+/// below the live proto-max-bulk-len. `limit` comes from
+/// [`bit_offset_limit`]. (br-frankenredis-bitoff)
+fn parse_bit_offset_or_reply(arg: &[u8], limit: u64) -> Result<i64, CommandError> {
     let err =
         || CommandError::Custom("ERR bit offset is not an integer or out of range".to_string());
     let offset = parse_i64_arg(arg).map_err(|_| err())?;
-    // Upstream's default proto_max_bulk_len is 512 * 1024 * 1024 bytes.
-    // The check is `(loffset >> 3) >= server.proto_max_bulk_len`, i.e.
-    // bit-offsets >= 512 MiB << 3 = 2^32 are rejected.
-    const MAX_BIT_OFFSET_EXCLUSIVE: i64 = 512 * 1024 * 1024 * 8;
-    if !(0..MAX_BIT_OFFSET_EXCLUSIVE).contains(&offset) {
+    if offset < 0 || (offset as u64) >= limit {
         return Err(err());
     }
     Ok(offset)
@@ -28972,6 +29019,9 @@ fn bitfield_cmd(
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("BITFIELD"));
     }
+    // (frankenredis-obeyclient-strlen-qxdyn) Resolved once: upstream calls
+    // getBitOffsetFromArgument per op, but the bound it reads cannot change mid-command.
+    let offset_limit = bit_offset_limit(store.proto_max_bulk_len, store.must_obey_client);
     let key = &argv[1];
 
     // (frankenredis-bitfieldorder) Upstream bitfieldCommand validates EVERY
@@ -29011,7 +29061,7 @@ fn bitfield_cmd(
                 let Some((_signed, bits)) = bitfield_parse_encoding(&argv[j + 1]) else {
                     return invalid_type();
                 };
-                if bitfield_parse_offset(&argv[j + 2], bits).is_none() {
+                if bitfield_parse_offset(&argv[j + 2], bits, offset_limit).is_none() {
                     return invalid_offset();
                 }
                 if needs_value {
@@ -29066,7 +29116,7 @@ fn bitfield_cmd(
         while i < argv.len() {
             if argv[i].eq_ignore_ascii_case(b"GET") {
                 if let Some((signed, bits)) = bitfield_parse_encoding(&argv[i + 1])
-                    && let Some(bit_offset) = bitfield_parse_offset(&argv[i + 2], bits)
+                    && let Some(bit_offset) = bitfield_parse_offset(&argv[i + 2], bits, offset_limit)
                 {
                     ops.push((bit_offset, bits, signed));
                 }
@@ -29123,7 +29173,7 @@ fn bitfield_cmd(
                     ));
                 }
             };
-            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits) {
+            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits, offset_limit) {
                 Some(v) => v,
                 None => {
                     return Ok(RespFrame::Error(
@@ -29151,7 +29201,7 @@ fn bitfield_cmd(
                     ));
                 }
             };
-            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits) {
+            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits, offset_limit) {
                 Some(v) => v,
                 None => {
                     return Ok(RespFrame::Error(
@@ -29189,7 +29239,7 @@ fn bitfield_cmd(
                     ));
                 }
             };
-            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits) {
+            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits, offset_limit) {
                 Some(v) => v,
                 None => {
                     return Ok(RespFrame::Error(
@@ -29311,6 +29361,9 @@ fn bitfield_ro_cmd(
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("BITFIELD_RO"));
     }
+    // (frankenredis-obeyclient-strlen-qxdyn) Resolved once: upstream calls
+    // getBitOffsetFromArgument per op, but the bound it reads cannot change mid-command.
+    let offset_limit = bit_offset_limit(store.proto_max_bulk_len, store.must_obey_client);
     let key = &argv[1];
 
     // (frankenredis-bfro-order) Upstream bitops.c::bitfieldGeneric validates
@@ -29345,7 +29398,7 @@ fn bitfield_ro_cmd(
                             .to_string(),
                     ));
                 };
-                if bitfield_parse_offset(&argv[j + 2], bits).is_none() {
+                if bitfield_parse_offset(&argv[j + 2], bits, offset_limit).is_none() {
                     return Ok(RespFrame::Error(
                         "ERR bit offset is not an integer or out of range".to_string(),
                     ));
@@ -29407,7 +29460,7 @@ fn bitfield_ro_cmd(
             let (signed, bits) =
                 bitfield_parse_encoding(&argv[i + 1]).expect("GET encoding validated");
             let bit_offset =
-                bitfield_parse_offset(&argv[i + 2], bits).expect("GET offset validated");
+                bitfield_parse_offset(&argv[i + 2], bits, offset_limit).expect("GET offset validated");
             let val = store
                 .bitfield_get_no_stat(key, bit_offset, bits, signed, now_ms)
                 .map_err(CommandError::Store)?;
@@ -29456,13 +29509,13 @@ fn bitfield_parse_encoding(arg: &[u8]) -> Option<(bool, u8)> {
 }
 
 /// Parse a BITFIELD offset like "100" (plain bit offset) or "#5" (type-aligned offset).
-fn bitfield_parse_offset(arg: &[u8], bits: u8) -> Option<u64> {
+fn bitfield_parse_offset(arg: &[u8], bits: u8, limit: u64) -> Option<u64> {
     // Upstream bitops.c::getBitOffsetFromArgument enforces
-    // (offset >> 3) < proto_max_bulk_len (default 512 MiB), i.e.
-    // bit-offsets must stay below 2^32. The #N hash form multiplies
-    // by `bits` first, then applies the same cap.
+    // (offset >> 3) < proto_max_bulk_len, i.e. bit-offsets must stay
+    // below `limit` from [`bit_offset_limit`]. The #N hash form
+    // multiplies by `bits` first, then applies the same cap.
     // (br-frankenredis-bitfieldoff)
-    const MAX_BIT_OFFSET_EXCLUSIVE: u64 = 512 * 1024 * 1024 * 8;
+    let max_bit_offset_exclusive: u64 = limit;
     let s = std::str::from_utf8(arg).ok()?;
     let offset = if let Some(rest) = s.strip_prefix('#') {
         let n: u64 = rest.parse().ok()?;
@@ -29470,7 +29523,7 @@ fn bitfield_parse_offset(arg: &[u8], bits: u8) -> Option<u64> {
     } else {
         s.parse::<u64>().ok()?
     };
-    if offset >= MAX_BIT_OFFSET_EXCLUSIVE {
+    if offset >= max_bit_offset_exclusive {
         return None;
     }
     Some(offset)
@@ -49483,6 +49536,80 @@ mod tests {
     }
 
     #[test]
+    fn bit_offset_bound_is_the_live_config_and_obeyed_clients_skip_it_qxdyn() {
+        // Upstream writes this bound ONCE, in getBitOffsetFromArgument (bitops.c:433):
+        //
+        //     if (loffset < 0 || (!mustObeyClient(c) && (loffset >> 3) >= server.proto_max_bulk_len))
+        //
+        // fr had written it FOUR times -- a bare 4_294_967_296 in SETBIT, a const in the GETBIT
+        // helper, a const in the BITFIELD parser, and the store-side guards -- each spelling the
+        // 512 MiB DEFAULT rather than reading the configured value. The error wording was right in
+        // every copy, so no census of the message could see it. The neighbouring
+        // `bitfield_offsets_above_4gib_rejected_with_invalid_offset_wording` still passes because
+        // it runs at the default, which is precisely why the default is the wrong thing to pin.
+        //
+        // Cap lowered to 1 KiB, so bit offset 8192 is the first one past it and an obeyed write
+        // allocates a kilobyte rather than half a gigabyte.
+        let mut store = Store::new();
+        store.proto_max_bulk_len = 1024;
+
+        // Nested `fn` items rather than closures: a closure taking `&mut Store` gets ONE
+        // inferred lifetime for the parameter across every call site, which is a needless hazard
+        // in a commit that cannot be compiled. An item is generic over its lifetimes.
+        fn refused(store: &mut Store, argv_in: &[&[u8]]) {
+            let argv: Vec<Vec<u8>> = argv_in.iter().map(|s| s.to_vec()).collect();
+            let got = match dispatch_argv(&argv, store, 0) {
+                Ok(RespFrame::Error(s)) => s,
+                Err(e) => match e.to_resp() {
+                    RespFrame::Error(s) => s,
+                    other => panic!("expected error frame, got {other:?}"),
+                },
+                other => panic!("expected {argv_in:?} to be refused, got {other:?}"),
+            };
+            assert_eq!(
+                got,
+                "ERR bit offset is not an integer or out of range".to_string(),
+                "argv: {argv_in:?}"
+            );
+        }
+        fn run(store: &mut Store, argv_in: &[&[u8]]) -> Result<RespFrame, CommandError> {
+            let argv: Vec<Vec<u8>> = argv_in.iter().map(|s| s.to_vec()).collect();
+            dispatch_argv(&argv, store, 0)
+        }
+
+        // Under the LOWERED cap every entry point refuses -- the old hard-coded bound accepted
+        // all four, because 8192 is far below 2^32.
+        refused(&mut store, &[b"SETBIT", b"k", b"8192", b"1"]);
+        refused(&mut store, &[b"GETBIT", b"k", b"8192"]);
+        refused(&mut store, &[b"BITFIELD", b"k", b"GET", b"u8", b"8192"]);
+        refused(&mut store, &[b"BITFIELD", b"k", b"SET", b"u8", b"8192", b"1"]);
+        refused(&mut store, &[b"BITFIELD_RO", b"k", b"GET", b"u8", b"8192"]);
+
+        // Just below the lowered cap still works, so the bound moved rather than the command
+        // breaking outright.
+        assert_eq!(
+            run(&mut store, &[b"SETBIT", b"k", b"8191", b"1"]).expect("just below the cap"),
+            RespFrame::Integer(0)
+        );
+
+        // An OBEYED source -- the master link or AOF replay -- skips the cap, so a replica
+        // configured below its master cannot refuse a write the master already applied.
+        store.must_obey_client = true;
+        assert_eq!(
+            run(&mut store, &[b"SETBIT", b"k", b"8192", b"1"]).expect("obeyed SETBIT"),
+            RespFrame::Integer(0)
+        );
+        run(&mut store, &[b"BITFIELD", b"k", b"SET", b"u8", b"8192", b"1"])
+            .expect("obeyed BITFIELD SET");
+
+        // And the cap returns when the obeyed source ends: an exemption that failed to clear
+        // would lift the limit for ordinary clients.
+        store.must_obey_client = false;
+        refused(&mut store, &[b"SETBIT", b"k", b"8192", b"0"]);
+    }
+
+
+    #[test]
     fn bitpos_missing_key_short_circuits_before_arg_parse() {
         // Pin upstream t_string.c::bitposCommand ordering: missing
         // key returns (bit ? -1 : 0) regardless of any trailing
@@ -65946,13 +66073,10 @@ mod tests {
             &mut store,
             0,
         )
-        .expect_err("cluster reset arity");
+        .expect_err("cluster reset from a script");
         assert_eq!(
-            arity,
-            CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments for 'RESET'. Try CLUSTER HELP."
-                    .to_string()
-            )
+            noscript_over_shape,
+            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
         );
 
         for argv in [
@@ -78954,7 +79078,7 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert_eq!(invalid, CommandError::InvalidInteger);
+        assert_eq!(invalid, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
 
         let ack = dispatch_argv(
             &[b"REPLCONF".to_vec(), b"ACK".to_vec(), b"100".to_vec()],
