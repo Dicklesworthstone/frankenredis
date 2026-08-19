@@ -4872,7 +4872,32 @@ pub fn function_load_execute(
         // one. The command layer cannot distinguish them from the message alone without this.
         Err(err) => match is_register_function_arg_message(&err) {
             Some(bare) => Err((0, bare.to_string())),
-            None => Err((state.current_line, err)),
+            // (frankenredis-fnukn) A genuine RAISE arrives already carrying the interpreter's
+            // own `user_script:<n>: ` location, and the command layer then prepends the
+            // canonical `user_function:<line>: ` -- so fr answered a DOUBLED location where
+            // 7.2.4 emits one. MEASURED against vendored 7.2.4, both servers live:
+            //
+            //   redis  ERR ... ERR user_function:4: attempt to index local 't' (a nil value)
+            //   fr     ERR ... ERR user_function:4: user_script:4: attempt to index local 't' ...
+            //
+            // Only this row doubles, which is why it survived: the differ's other three raising
+            // rows (top_level_error, undeclared_global, tonumber_call) never reach the
+            // interpreter's raise path at all -- they take the explicit "nonexistent global
+            // variable" formatter, which supplies its own single location.
+            //
+            // The strip is conditional on the embedded line MATCHING the one about to be
+            // emitted. If they ever disagree the two segments are describing different places,
+            // and dropping one would silently discard a location; leaving the doubled text is
+            // the visible failure, and the differ's envelope check reports it.
+            None => {
+                let line = state.current_line;
+                let redundant = format!("user_script:{line}: ");
+                let message = match err.strip_prefix(&redundant) {
+                    Some(rest) => rest.to_string(),
+                    None => err,
+                };
+                Err((line, message))
+            }
         },
     }
 }
@@ -10892,7 +10917,13 @@ impl<'a> LuaState<'a> {
                                 LuaCapture::Substring(cs, Some(ce)) => {
                                     result.push(LuaValue::Str(s[*cs..*ce].to_vec()));
                                 }
-                                LuaCapture::Substring(_, None) => {}
+                                // (frankenredis-gvex0) find pushes its captures, which IS a read.
+                                LuaCapture::Substring(_, None) => {
+                                    return Err(lua_pattern_raise(
+                                        self.current_invocation_name.as_deref(),
+                                        "unfinished capture".to_string(),
+                                    ));
+                                }
                                 LuaCapture::Position(pos) => {
                                     result.push(LuaValue::Number(*pos as f64 + 1.0));
                                 }
@@ -10929,7 +10960,8 @@ impl<'a> LuaState<'a> {
                 if let Some(m) = lua_pattern_find(&s, &pattern, init)
                     .map_err(|e| lua_pattern_raise(self.current_invocation_name.as_deref(), e))?
                 {
-                    Ok(lua_match_captures(&s, &m))
+                    lua_match_captures(&s, &m)
+                        .map_err(|e| lua_pattern_raise(self.current_invocation_name.as_deref(), e))
                 } else {
                     Ok(vec![LuaValue::Nil])
                 }
@@ -10960,7 +10992,9 @@ impl<'a> LuaState<'a> {
                                 lua_pattern_raise(self.current_invocation_name.as_deref(), e)
                             })?
                     {
-                        matches.push(lua_match_captures(&s, &m));
+                        matches.push(lua_match_captures(&s, &m).map_err(|e| {
+                            lua_pattern_raise(self.current_invocation_name.as_deref(), e)
+                        })?);
                         pos = if m.end == m.start { m.end + 1 } else { m.end };
                     } else {
                         break;
@@ -11089,7 +11123,8 @@ impl<'a> LuaState<'a> {
                         let replacement: Vec<u8> = match &repl {
                             LuaValue::Str(repl_bytes) => lua_gsub_replace(&s, &m, repl_bytes)?,
                             LuaValue::Table(t) => {
-                                let key_bytes = lua_gsub_capture_key(&s, &m);
+                                let key_bytes = lua_gsub_capture_key(&s, &m)
+                                    .map_err(|e| lua_pattern_raise(inv_owned.as_deref(), e))?;
                                 let key = LuaValue::Str(key_bytes);
                                 let val = t.get(&key);
                                 lua_gsub_normalise_repl(&s, &m, &val)?
@@ -11097,7 +11132,8 @@ impl<'a> LuaState<'a> {
                             LuaValue::Function(_)
                             | LuaValue::RustFunction(_)
                             | LuaValue::WrappedCoroutine(_) => {
-                                let mut call_args = lua_gsub_capture_args(&s, &m);
+                                let mut call_args = lua_gsub_capture_args(&s, &m)
+                                    .map_err(|e| lua_pattern_raise(inv_owned.as_deref(), e))?;
                                 let mut varargs = Vec::new();
                                 let ret =
                                     self.call_function(&repl, &mut call_args, env, &mut varargs)?;
@@ -12751,9 +12787,17 @@ fn lua_pattern_validate_named(inv_name: Option<&str>, pat: &[u8]) -> Result<(), 
             _ => i += 1,
         }
     }
-    if open_captures > 0 {
-        return Err(err("unfinished capture"));
-    }
+    // (frankenredis-gvex0) NO eager "unfinished capture" here, deliberately. Upstream opens the
+    // capture, matches to the end of the pattern, and complains only when something READS an
+    // unfinished capture -- `get_onecapture`'s `if (l == CAP_UNFINISHED)`. With a replacement that
+    // never names a capture, nothing reads one and the gsub COMPLETES.
+    //
+    // MEASURED on live 7.2.4, where fr answered "unfinished capture" for all three:
+    //     string.gsub('zazbz', '(',  'X')  ->  XzXaXzXbXzX
+    //     string.gsub('zazbz', 'a(', 'X')  ->  zXzbz
+    //     string.gsub('a b',   '(',  'X')  ->  XaX XbX
+    // The `open_captures` counter stays, because the OTHER direction -- an extra ')' -- is still
+    // rejected here, and upstream raises that one from `capture_to_close` on the same pattern.
     Ok(())
 }
 
@@ -13229,16 +13273,19 @@ fn lua_pattern_find_with_caret(
 }
 
 /// Extract capture values from a match. If no explicit captures, return the whole match.
-fn lua_match_captures(s: &[u8], m: &LuaPatMatch) -> Vec<LuaValue> {
+/// (frankenredis-gvex0) Fallible because reading a capture is exactly where upstream raises:
+/// `get_onecapture` errors on `CAP_UNFINISHED`, and match/gmatch reach it through `push_captures`.
+/// The message is BARE; the caller supplies the position prefix via `lua_pattern_raise`.
+fn lua_match_captures(s: &[u8], m: &LuaPatMatch) -> Result<Vec<LuaValue>, String> {
     if m.captures.is_empty() {
-        return vec![LuaValue::Str(s[m.start..m.end].to_vec())];
+        return Ok(vec![LuaValue::Str(s[m.start..m.end].to_vec())]);
     }
     m.captures
         .iter()
         .map(|cap| match cap {
-            LuaCapture::Substring(start, Some(end)) => LuaValue::Str(s[*start..*end].to_vec()),
-            LuaCapture::Substring(_, None) => LuaValue::Nil,
-            LuaCapture::Position(pos) => LuaValue::Number(*pos as f64 + 1.0), // 1-indexed
+            LuaCapture::Substring(start, Some(end)) => Ok(LuaValue::Str(s[*start..*end].to_vec())),
+            LuaCapture::Substring(_, None) => Err("unfinished capture".to_string()),
+            LuaCapture::Position(pos) => Ok(LuaValue::Number(*pos as f64 + 1.0)), // 1-indexed
         })
         .collect()
 }
@@ -13247,14 +13294,17 @@ fn lua_match_captures(s: &[u8], m: &LuaPatMatch) -> Vec<LuaValue> {
 /// (frankenredis-76y97) Build the lookup key for table-style
 /// gsub replacement. Uses the 1st capture if present, otherwise the
 /// whole match. Mirrors Lua 5.1's lstrlib.c::str_gsub when typ == LUA_TTABLE.
-fn lua_gsub_capture_key(s: &[u8], m: &LuaPatMatch) -> Vec<u8> {
+/// (frankenredis-gvex0) Fallible for the same reason as `lua_match_captures`: a table-style gsub
+/// INDEXES by the first capture, which is a read. It used to substitute `s[cs..]` -- the rest of the
+/// subject -- for an unfinished capture, which is not a value upstream can produce.
+fn lua_gsub_capture_key(s: &[u8], m: &LuaPatMatch) -> Result<Vec<u8>, String> {
     if m.captures.is_empty() {
-        s[m.start..m.end].to_vec()
+        Ok(s[m.start..m.end].to_vec())
     } else {
         match &m.captures[0] {
-            LuaCapture::Substring(cs, Some(ce)) => s[*cs..*ce].to_vec(),
-            LuaCapture::Substring(cs, None) => s[*cs..].to_vec(),
-            LuaCapture::Position(pos) => format!("{}", pos + 1).into_bytes(),
+            LuaCapture::Substring(cs, Some(ce)) => Ok(s[*cs..*ce].to_vec()),
+            LuaCapture::Substring(_, None) => Err("unfinished capture".to_string()),
+            LuaCapture::Position(pos) => Ok(format!("{}", pos + 1).into_bytes()),
         }
     }
 }
@@ -13263,19 +13313,20 @@ fn lua_gsub_capture_key(s: &[u8], m: &LuaPatMatch) -> Vec<u8> {
 /// function-style gsub replacement: every capture as a Lua value, or
 /// the whole match when there are no captures. Position captures
 /// become numbers; substring captures become strings.
-fn lua_gsub_capture_args(s: &[u8], m: &LuaPatMatch) -> Vec<LuaValue> {
+/// (frankenredis-gvex0) Fallible: a function-style gsub PASSES every capture to the replacement
+/// function, which is a read of each one.
+fn lua_gsub_capture_args(s: &[u8], m: &LuaPatMatch) -> Result<Vec<LuaValue>, String> {
     if m.captures.is_empty() {
-        vec![LuaValue::Str(s[m.start..m.end].to_vec())]
-    } else {
-        m.captures
-            .iter()
-            .map(|c| match c {
-                LuaCapture::Substring(cs, Some(ce)) => LuaValue::Str(s[*cs..*ce].to_vec()),
-                LuaCapture::Substring(cs, None) => LuaValue::Str(s[*cs..].to_vec()),
-                LuaCapture::Position(pos) => LuaValue::Number((*pos + 1) as f64),
-            })
-            .collect()
+        return Ok(vec![LuaValue::Str(s[m.start..m.end].to_vec())]);
     }
+    m.captures
+        .iter()
+        .map(|c| match c {
+            LuaCapture::Substring(cs, Some(ce)) => Ok(LuaValue::Str(s[*cs..*ce].to_vec())),
+            LuaCapture::Substring(_, None) => Err("unfinished capture".to_string()),
+            LuaCapture::Position(pos) => Ok(LuaValue::Number((*pos + 1) as f64)),
+        })
+        .collect()
 }
 
 /// (frankenredis-76y97) Normalise a table-lookup or function-return
@@ -16798,6 +16849,53 @@ mod tests {
             "Zx|false",
             "replacing __index must redirect method lookup AND orphan string.rep"
         );
+    }
+
+    /// (frankenredis-gvex0 defect B) The unfinished-capture error is raised on READ, not on
+    /// compile. Every assertion is a row MEASURED against live 7.2.4.
+    ///
+    /// The pairing is the point: the SAME pattern that gsub now accepts must still raise from
+    /// match, find and gmatch, because those read their captures through `push_captures` and gsub
+    /// with a capture-free replacement never reads one. A change that simply stopped erroring
+    /// would satisfy the first three assertions and break the last three.
+    #[test]
+    fn an_unfinished_capture_raises_when_read_not_when_compiled_gvex0() {
+        let mut store = Store::new();
+        let run = |store: &mut Store, src: &[u8]| -> String {
+            match eval_script(src, &[], &[], store, 0) {
+                Ok(RespFrame::BulkString(Some(b))) => String::from_utf8_lossy(&b).into_owned(),
+                Ok(other) => format!("{other:?}"),
+                Err(e) => format!("ERR {e}"),
+            }
+        };
+
+        // gsub with a replacement that names no capture COMPLETES.
+        assert_eq!(run(&mut store, b"return (string.gsub('zazbz','(','X'))"), "XzXaXzXbXzX");
+        assert_eq!(run(&mut store, b"return (string.gsub('zazbz','a(','X'))"), "zXzbz");
+        assert_eq!(run(&mut store, b"return (string.gsub('a b','(','X'))"), "XaX XbX");
+
+        // The same pattern still raises everywhere a capture IS read.
+        for src in [
+            b"return string.match('abc','(')".as_slice(),
+            b"return string.find('abc','(')".as_slice(),
+            b"return (function() for m in string.gmatch('abc','(') do end end)()".as_slice(),
+        ] {
+            assert_eq!(
+                run(&mut store, src),
+                "ERR user_script:1: unfinished capture",
+                "reading a capture must still raise"
+            );
+        }
+
+        // An extra ')' is the OTHER direction and is still rejected -- upstream raises it from
+        // capture_to_close, so removing the eager unfinished check must not take this with it.
+        assert_eq!(
+            run(&mut store, b"return string.match('abc','.*)')"),
+            "ERR user_script:1: invalid pattern capture"
+        );
+
+        // A closed capture is unaffected, which is the control for all of the above.
+        assert_eq!(run(&mut store, b"return (string.gsub('zazbz','(a)','[%1]'))"), "z[a]zbz");
     }
 
     #[test]
