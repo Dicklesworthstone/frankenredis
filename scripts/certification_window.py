@@ -54,6 +54,32 @@ FR_ONLY_MAX_DRIFT = 0.60
 # The 15-minute is the settled-ness witness: a low 1-minute with a huge 15-minute is a dip.
 RATIO_MAX_15MIN = 30.0
 
+# THE DRIFT TEST IS SCALE-FREE, AND THAT MAKES IT HARDEST TO PASS ON AN IDLE BOX.
+# `drift` is a RATIO of two load averages, so the same absolute wobble is a larger
+# percentage the quieter the host gets: 1min 7.06 against 5min 5.96 is 1.1 of load
+# on a 64-core machine -- roughly 10 pct utilisation either way, with nothing to
+# contend over -- and it scores 18 pct, failing a 15 pct limit that a busy host
+# passes at 60-vs-66. The gate was therefore rejecting exactly the windows it
+# exists to reward.
+#
+# MEASURED, and this is why the exemption is defensible rather than convenient.
+# Three consecutive geoadd_same ratio draws taken inside such a window, zero
+# builds, iowait 0.02-0.17 pct:
+#     fr     3375.1 / 3376.3 / 3381.9 instr/op   spread 0.2 pct
+#     redis 10575.5 / 10659.2 / 10454.8          spread 2.0 pct
+# The fr arm is the tightest reproducibility recorded in this campaign, and the
+# redis arm -- historically the unstable half at 6.1 pct across seven draws -- is
+# three times tighter here than in the windows the gate DID accept. The window was
+# good; the test was measuring the wrong thing.
+#
+# WHAT THE DRIFT TEST IS ACTUALLY FOR: catching a host whose CONTENTION is changing
+# under the run. Contention needs load approaching core count. Below a quarter of
+# the cores, with no builds anywhere, there is no contention to change -- so drift
+# there is arithmetic noise, not a signal. The exemption requires ALL of: no
+# build processes (already mandatory for a ratio), both the 1min and the 5min under
+# the floor, and the 15min settled check unchanged. It never fires on a busy host.
+QUIET_ABS_LOAD_FRACTION = 0.25
+
 
 def loadavg():
     with open("/proc/loadavg") as fh:
@@ -132,12 +158,23 @@ def cpu_mhz(limit=8):
     return out
 
 
-def verdict(kind, one, five, fifteen, builds):
+def quiet_floor(ncpu=None):
+    """Absolute load below which drift cannot mean contention. See the constant above."""
+    if ncpu is None:
+        ncpu = os.cpu_count() or 1
+    return ncpu * QUIET_ABS_LOAD_FRACTION
+
+
+def verdict(kind, one, five, fifteen, builds, ncpu=None):
     """(fit, reasons). `kind` is 'ratio' or 'fr-only'."""
     reasons = []
     strict = kind == "ratio"
     drift = abs(one - five) / five if five else 0.0
     limit = RATIO_MAX_DRIFT if strict else FR_ONLY_MAX_DRIFT
+    floor = quiet_floor(ncpu)
+    # Both averages under the floor AND nothing building: drift is arithmetic on
+    # small numbers, not a changing host.
+    quiet = (not builds) and max(one, five) <= floor
 
     if strict and builds:
         reasons.append(
@@ -147,10 +184,16 @@ def verdict(kind, one, five, fifteen, builds):
     elif builds:
         reasons.append(f"NOTE: {len(builds)} cargo/rustc process(es) running; fine for fr-only")
 
-    if drift > limit:
+    if drift > limit and not quiet:
         reasons.append(
             f"non-stationary: 1min {one:.2f} vs 5min {five:.2f} = {100 * drift:.0f} pct apart "
             f"(limit {100 * limit:.0f} pct)"
+        )
+    elif drift > limit:
+        reasons.append(
+            f"NOTE: 1min {one:.2f} vs 5min {five:.2f} = {100 * drift:.0f} pct apart, but both "
+            f"are under the quiet floor {floor:.1f} ({os.cpu_count()} cpus) with no builds "
+            f"running — drift on numbers this small is not contention changing"
         )
     if strict and fifteen > RATIO_MAX_15MIN:
         reasons.append(
