@@ -66873,3 +66873,71 @@ tested here.
 
   1. Do not read the triage row as "ps0le is done".
   2. Before closing any bead on a probe, check the ELF's mtime against every dirty source.
+
+## 2026-08-19 TanMarsh: CORRECTION — a bead was closed on a live probe of a binary the commit did not build. `target/release/<bin>` is SHARED, and a verdict differential has no ELF self-report to catch it (frankenredis-lua-tail-calls-ps0le)
+
+### WHAT HAPPENED
+
+`frankenredis-lua-tail-calls-ps0le` was closed at 17:05 UTC as "VERIFIED FIXED against live Redis
+7.2.4 (a07a5e5c8)", on a probe showing a proper tail-call chain of 600 AND of 5000 completing on
+both engines. The probe ran. The result was real. The binary it exercised was an UNCOMMITTED
+trampoline built at 16:58 UTC — seven minutes earlier — sitting in the shared
+`target/release/frankenredis`.
+
+### WHY THE ATTRIBUTION CANNOT HOLD, WITHOUT RE-RUNNING ANYTHING
+
+      git show a07a5e5c8:crates/fr-command/src/lua_eval.rs | grep -c TailCall   ->  0
+      ... | grep -n 'self.call_depth += 1;'                                     ->  3 sites,
+                                                                    all unconditional
+      ... | grep MAX_CALL_DEPTH                                                 ->  768
+
+A tail call in that tree is charged a frame exactly like any other call, so a tail chain of 5000
+must hit the 768 bound. No reading of that source produces the observed 5000 row.
+
+### THE ROW THAT MADE IT LOOK FIXED WAS THE UNINFORMATIVE ONE
+
+600 is UNDER `MAX_CALL_DEPTH`, so it passes on any binary since `ug22x` raised the constant
+512 -> 768. The bead was filed when the bound was 512, which is why its original table shows fr
+failing a TAIL at 600. THE BOUND MOVED UNDERNEATH THE FIXTURE. Only the 5000 row discriminates, and
+it is the one that required a trampoline.
+
+Generalises past this bead: when a bound is raised, every fixture whose depth sits between the old
+and new bound silently changes meaning from "past the limit" to "inside it" while still passing.
+A depth fixture should be derived from the constant, not written as a literal — which is exactly
+the correction `5h2lu` already carries in its own comment, applied to a different pair of numbers.
+
+### THE INSTRUMENT DEFECT, WHICH IS THE REUSABLE PART
+
+`target/release/<bin>` is shared by every agent in this checkout, so "I built HEAD, then probed" and
+"I probed whatever was last built" are INDISTINGUISHABLE FROM INSIDE THE PROBE. The ratio harness is
+immune — it computes and re-verifies a `bench_elf_sha256` per arm — but a VERDICT differential
+prints only agree/diverge and carries no binary identity at all. That asymmetry is why this class of
+error lands on correctness triage and not on perf rows.
+
+Cheapest available guard, and it costs one command: before attributing a live result to a commit,
+grep that COMMIT'S OWN TREE for the mechanism the result implies. The three greps above would have
+flagged this immediately. Adding an ELF sha to the verdict differentials would be the durable fix.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timings. Both halves of this row are verdicts (agree/diverge) and static source facts, neither of
+which the host window can affect. The replacement fix's own live differential is recorded on the
+bead: fr ELF `d90cf341c6ed169d39e093a57278d69a017d22972c41c49015b94a47823abdd0`, fr arm loadavg
+10.44/11.19/13.18 runq 12, redis arm same window runq 13, iowait under 0.2 pct — all four TAIL rows
+AGREE, divergent rows 8 -> 1.
+
+### PROVENANCE
+
+      source        a07a5e5c8 vs 21bcf7a93; crates/fr-command/src/lua_eval.rs
+      incumbent     legacy_redis_code/redis/src/redis-server, 7.2.4
+      host          /data 225G, loadavg 9-14, runq 12-13
+      disposition   BEAD REOPENED AND RE-CLOSED on the real fix (21bcf7a93). Four sibling beads
+                    closed in the same triage window through the same shared binary are flagged to
+                    their author, NOT asserted wrong.
+
+### RETRY PREDICATE
+
+1. Do not re-close a bead on a verdict differential whose binary provenance is unstated.
+2. If you own a verdict differential script, print the ELF sha256 of every arm it starts. That
+   removes this failure mode from the whole class rather than from one bead.
+3. When a bound constant is raised, re-derive every fixture depth that was written as a literal.
