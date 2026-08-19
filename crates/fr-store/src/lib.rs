@@ -6503,6 +6503,13 @@ pub struct Store {
     /// fr-runtime, which owns the persistence state that decides between them. Copying them here
     /// would be the two-renderer drift this crate already owns `NOREPLICAS_ERROR` to prevent.
     pub script_disk_write_denial: Option<&'static str>,
+    /// (frankenredis-oo3aw follow-up) Are we a STALE replica -- link to the master down and
+    /// `replica-serve-stale-data no` -- so that a script's inner command must be refused unless
+    /// it carries `CMD_STALE`? Published by the runtime once per dispatch, for the same reason as
+    /// its neighbours: the runtime's own stale gate never sees a script's inner `redis.call`.
+    ///
+    /// `false` is the safe default: not stale, nothing to refuse.
+    pub script_stale_replica: bool,
     /// 1-based source line of the most recent Lua script runtime error, set by
     /// `eval_script` when it returns an Err so the command layer can stamp the
     /// real line into the `script: <sha>, on @user_script:N.` envelope suffix
@@ -6955,6 +6962,7 @@ impl Default for Store {
             is_read_only_replica: false,
             good_replicas_ok: true,
             script_disk_write_denial: None,
+            script_stale_replica: false,
             lua_error_line: 1,
             script_propagation_mode: SCRIPT_PROPAGATE_ALL,
             script_propagation_records: Vec::new(),

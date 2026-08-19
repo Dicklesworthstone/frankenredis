@@ -37997,6 +37997,11 @@ impl Runtime {
                 .map(DiskWriteDenialKind::error_message)
         };
         self.server.store.script_disk_write_denial = disk_denial;
+        // (frankenredis-oo3aw follow-up) And the stale verdict, for the same reason: the gate
+        // above never sees a script's inner redis.call. Only the argv-independent half is
+        // published -- the CMD_STALE test is per inner command and belongs at the call site.
+        let stale_active = self.stale_replica_active();
+        self.server.store.script_stale_replica = stale_active;
         // (frankenredis-dpu2y) The full-arity verdict from the SAME table pass that resolves
         // the name, handed to `execute_frame_internal` as a parameter rather than recomputed
         // there. Resolving the `parent|sub` key twice per generic dispatch measured +16.0
@@ -38303,17 +38308,28 @@ impl Runtime {
         ))
     }
 
-    fn reject_stale_replica_read_request(&self, argv: &[Vec<u8>]) -> Option<RespFrame> {
+    /// The argv-independent half of [`Self::reject_stale_replica_read_request`]: are we a replica
+    /// whose master link is down while `replica-serve-stale-data` is off?
+    ///
+    /// (frankenredis-oo3aw follow-up) Split out so the script path can ask the same question. It
+    /// is upstream's first three tests in `scriptVerifyAllowStale` (script.c:483-496) -- not a
+    /// master, not connected, not serving stale data -- with the per-command `CMD_STALE` test
+    /// left to the caller, exactly as upstream leaves it.
+    fn stale_replica_active(&self) -> bool {
         if self.server.replica_serve_stale_data {
-            return None;
+            return false;
         }
         let ReplicationRoleState::Replica { state, .. } =
             &self.server.replication_runtime_state.role
         else {
-            return None; // Masters do not enforce replica-serve-stale-data
+            return false; // Masters do not enforce replica-serve-stale-data
         };
-        if *state == "connected" {
-            return None; // Not stale if connected to primary
+        *state != "connected"
+    }
+
+    fn reject_stale_replica_read_request(&self, argv: &[Vec<u8>]) -> Option<RespFrame> {
+        if !self.stale_replica_active() {
+            return None;
         }
         if argv.is_empty() {
             return None;

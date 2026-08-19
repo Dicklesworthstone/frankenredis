@@ -2486,6 +2486,18 @@ pub fn dispatch_argv(
     {
         return Err(read_only_script_write_command_error());
     }
+    // (frankenredis-oo3aw follow-up) Upstream's `scriptVerifyAllowStale` (script.c:482), run at
+    // scriptCall:534 -- BEFORE the ACL and write-allow checks below, which is why it sits here
+    // rather than beside them. A script's inner redis.call never passes the runtime's own stale
+    // gate, so on a replica whose master link is down with `replica-serve-stale-data no` a script
+    // could serve exactly the data that setting exists to withhold.
+    //
+    // `command_is_stale` is the same per-RESOLVED-command flag the runtime gate reads, so the two
+    // agree by construction rather than by a second allowlist -- `object|help` is stale while
+    // `object|encoding` is not, and only the resolved answer can express that.
+    if store.script_nesting_level >= 1 && store.script_stale_replica && !command_is_stale(argv) {
+        return Err(CommandError::Custom(SCRIPT_STALE_REPLICA_ERROR.to_string()));
+    }
     // (frankenredis-replro) A script/function on a read-only replica must not
     // write: the inner redis.call bypasses the runtime's top-level read-only
     // gate, so reject the write here with the same -READONLY error a client
@@ -23930,6 +23942,9 @@ fn client_wrong_subcommand_arity(subcommand: &str) -> CommandError {
 const SCRIPT_NOSCRIPT_ERROR: &str = "ERR This Redis command is not allowed from script";
 const READ_ONLY_SCRIPT_WRITE_ERROR: &str =
     "ERR Write commands are not allowed from read-only scripts.";
+/// Upstream `scriptVerifyAllowStale` (script.c:503). A bare phrase there, so it carries `ERR`
+/// here for the same reason `READ_ONLY_SCRIPT_WRITE_ERROR` above does.
+const SCRIPT_STALE_REPLICA_ERROR: &str = "ERR Can not execute the command on a stale replica";
 const CLIENT_TRACKING_REDIRECT_MISSING: &str =
     "ERR The client ID you want redirect to does not exist";
 const CLIENT_TRACKING_PREFIX_REQUIRES_BCAST: &str =
@@ -41792,6 +41807,74 @@ mod tests {
             xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"0"]),
             250
         );
+    }
+
+    #[test]
+    fn a_stale_replica_refuses_a_scripts_inner_command_unless_it_is_cmd_stale() {
+        // Upstream `scriptVerifyAllowStale` (script.c:482), run per INNER command at
+        // scriptCall:534. fr's runtime has the equivalent gate for ordinary commands, but a
+        // script's redis.call reaches dispatch_argv directly and never passes it -- so on a
+        // replica whose master link is down with `replica-serve-stale-data no`, a script could
+        // serve exactly the data that setting exists to withhold.
+        //
+        // This is a PER-CALL gate, not a prepare-time one: upstream tests CMD_STALE against each
+        // inner command, so a single script can have one call refused and another allowed.
+        fn run_script(store: &mut Store, body: &[u8]) -> RespFrame {
+            dispatch_argv(&[b"EVAL".to_vec(), body.to_vec(), b"0".to_vec()], store, 0)
+                .unwrap_or_else(|e| e.to_resp())
+        }
+
+        // A non-stale command inside a script on a stale replica is refused.
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+        store.script_stale_replica = true;
+        match &run_script(&mut store, b"return redis.call('get','k')") {
+            RespFrame::Error(msg) => assert!(
+                msg.contains("Can not execute the command on a stale replica"),
+                "expected the stale refusal, got {msg}"
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // ...and a CMD_STALE command in the same state is ALLOWED. This is the row that fails on
+        // a fix that refuses everything while stale, which would be the easy over-correction --
+        // upstream refuses only commands that lack the flag.
+        let mut store = Store::new();
+        store.script_stale_replica = true;
+        assert_eq!(
+            run_script(&mut store, b"return redis.call('echo','hi')"),
+            RespFrame::BulkString(Some(b"hi".to_vec())),
+            "ECHO carries CMD_STALE, so a stale replica must still serve it"
+        );
+
+        // Not stale: the same non-stale command works, so the gate is not simply always-on.
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+        assert!(!store.script_stale_replica, "the safe default is not-stale");
+        assert_eq!(
+            run_script(&mut store, b"return redis.call('get','k')"),
+            RespFrame::BulkString(Some(b"v".to_vec()))
+        );
+
+        // ORDER: upstream runs the stale check at scriptCall:534, BEFORE the read-only write
+        // check at :542. A write from a script on a stale read-only replica trips both, and must
+        // read the stale one. Fifth ordering pair on this bead.
+        let mut store = Store::new();
+        store.script_stale_replica = true;
+        store.is_read_only_replica = true;
+        match &run_script(&mut store, b"return redis.call('set','x','1')") {
+            RespFrame::Error(msg) => {
+                assert!(
+                    msg.contains("stale replica"),
+                    "the stale check must be answered FIRST, got {msg}"
+                );
+                assert!(
+                    !msg.contains("read only replica"),
+                    "the read-only refusal must not win this race: {msg}"
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     #[test]
