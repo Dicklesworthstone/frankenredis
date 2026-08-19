@@ -32009,7 +32009,23 @@ impl Store {
             }
             if result.len() < batch {
                 result.push(logical.to_vec());
-                last_key = Some(physical.to_vec());
+                // (frankenredis-hwcm1) Copy the resume key ONCE, when the batch
+                // fills -- not on every push. `last_key` is read in exactly one
+                // place: the `next_cursor != 0` block below, which is reachable
+                // only after `has_more` is set, which happens only after the
+                // batch is FULL. So every copy taken before `result.len() ==
+                // batch` is written, overwritten and dropped without ever being
+                // read, and on a batch that never fills -- the bare `SCAN 0`
+                // shape, where the range exhausts first -- every one of them is
+                // dead, because `next_cursor` is 0 and the block is skipped.
+                //
+                // The key kept is unchanged: the batch-th returned key, which is
+                // what the resume contract in the comment above requires.
+                // COUNT 10 over a 5-key db goes from 5 allocations to 0, and a
+                // full batch from `batch` to 1.
+                if result.len() == batch {
+                    last_key = Some(physical.to_vec());
+                }
                 continue;
             }
             // One match beyond the batch => more remain; stop without returning it
