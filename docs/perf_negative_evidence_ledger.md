@@ -65278,3 +65278,78 @@ diagnostic only and is not the gate, as the harness documents.
    what separated this row from the three HOLDs.
 3. The scorecard cell should be re-dated or re-measured rather than trusted; it is two months old
    and understates fr by roughly 2.6x on this shape.
+
+---
+
+## ANALYSIS — the certified 0.557334x was measured AT the listpack threshold, which is the shape that maximally favours Redis; the mechanism is validate-and-adopt vs decode-and-rebuild (frankenredis-i41sx, frankenredis-pf1vw)
+
+Qualifying my OWN certified row above, from source alone, because quoting `0.557334` as "the"
+zset RESTORE ratio would overstate the deficit everywhere except the exact size it was taken at.
+
+### THE MECHANISM
+
+Redis's `RDB_TYPE_ZSET_LISTPACK` arm (rdb.c:2407-2425) does no per-element work at all:
+
+      lpValidateIntegrityAndDups(encoded, encoded_len, deep, 1);   /* validate IN PLACE */
+      o->type = OBJ_ZSET;
+      o->encoding = OBJ_ENCODING_LISTPACK;                          /* adopt the wire bytes */
+      if (zsetLength(o) > server.zset_max_listpack_entries)
+          zsetConvert(o, OBJ_ENCODING_SKIPLIST);
+
+It validates the payload where it lies and ADOPTS it as the object representation. fr's
+`zset_from_listpack_spans` (fr-store:37842) decodes every element into a `Vec<(&[u8], f64)>` and
+builds a `PackedZSet`. There is no verbatim-keep path. That asymmetry -- not a slow decoder -- is
+what the certified 1.79x is measuring.
+
+### WHY THE SHAPE MATTERS, AND WHY 128 IS THE WORST ONE TO PICK
+
+`zset-max-listpack-entries` defaults to **128** in both engines (config.c:3219; fr-store:6931).
+The certified row used **128 members exactly**. At that size `zsetLength(o) > 128` is FALSE, so
+Redis takes the adopt path and pays nothing per element, while fr pays for all 128. It is
+precisely the largest zset for which Redis still does no work -- the maximum of the advantage.
+
+One element more and Redis must call `zsetConvert`, walking all 129 entries into a skiplist AND a
+dict. fr's packed build does not obviously cost more than that, so the ratio should move sharply
+toward fr just past the threshold, and may cross.
+
+This is the intercept-row hazard already recorded for GEOSEARCH, in a new place: a number taken at
+a regime boundary describes the boundary, not the command.
+
+### FALSIFIABLE PREDICTION, for the next quiet window
+
+Same harness, same pinning, three sizes, one invocation each:
+
+      members=64    both engines adopt/decode small     expect ~0.5x, similar to certified
+      members=128   the certified row                   0.557334x  (already measured)
+      members=129   Redis starts paying zsetConvert     expect a MARKED move toward fr,
+                    possibly past 1.0
+
+If 129 does NOT move, the mechanism above is wrong and the deficit is in fr's decoder rather than
+in the convert-vs-keep asymmetry -- which would redirect pf1vw's whole premise. Either outcome is
+worth the window.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement in this row. It reads two decode paths and two config defaults, and it QUALIFIES a
+certified number rather than adding one. Its weak point, stated: the prediction rests on
+`zsetConvert` costing more per element than fr's packed build, which is an expectation and not
+something read off a profile.
+
+### PROVENANCE
+
+      source        main at 6bf2f6dc4, reading rdb.c:2407-2425, config.c:3219,
+                    fr-store/src/lib.rs:37842 and :6931.
+      host          runq 21, loadavg 13.27, build slot held by another agent -- which is why this
+                    turn produced an argument rather than a row.
+      disposition   ANALYSIS. No engine source changed.
+
+### RETRY PREDICATE
+
+1. Do NOT quote 0.557334 as the zset RESTORE ratio without the words "at 128 members". It is a
+   boundary measurement by construction.
+2. Run the three-size sweep above before spending effort on pf1vw. If 129 crosses, the lever is
+   worth much less than the certified row suggests, because real workloads are not all pinned to
+   the threshold.
+3. The lever pf1vw names -- keeping the verbatim listpack and indexing it -- is the direct answer
+   to the mechanism here, and this row is the first source-level confirmation that the mechanism
+   is what the certified number measures.
