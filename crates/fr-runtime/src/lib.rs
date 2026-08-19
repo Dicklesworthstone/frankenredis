@@ -67433,6 +67433,43 @@ mod tests {
     }
 
     #[test]
+    fn the_readonly_replica_flag_published_to_the_store_folds_in_obeyed_sources() {
+        // (frankenredis-obeyclient-strlen-qxdyn) `is_read_only_replica` is the store-visible form
+        // of upstream's `server.masterhost && server.repl_slave_ro && !obey_client`. The
+        // `!obey_client` half is decided HERE, once, so that the command layer's script gates do
+        // not each have to re-derive who is obeyed -- `mustObeyClient` covers the master link AND
+        // the AOF client (server.c:3209), and the publish used to carry only the master half.
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1);
+
+        // An ordinary client on a read-only replica: the flag is SET, so the script gates refuse.
+        rt.execute_frame(command(&[b"PING"]), 2);
+        assert!(
+            rt.server.store.is_read_only_replica,
+            "a replica with an ordinary client must publish the read-only flag"
+        );
+
+        // An OBEYED source -- AOF replay or the master link -- clears it, so replayed writes
+        // apply. This is the half that was missing: `applying_master_stream` alone left the flag
+        // set for AOF replay.
+        rt.set_must_obey_client(true);
+        rt.execute_frame(command(&[b"PING"]), 3);
+        assert!(
+            !rt.server.store.is_read_only_replica,
+            "an obeyed source must clear the flag, or AOF replay refuses its own writes"
+        );
+
+        // ...and it comes back when the obeyed source ends. A flag that latched on would disable
+        // the read-only gate for every subsequent client.
+        rt.set_must_obey_client(false);
+        rt.execute_frame(command(&[b"PING"]), 4);
+        assert!(
+            rt.server.store.is_read_only_replica,
+            "the flag must return once the obeyed source ends"
+        );
+    }
+
+    #[test]
     fn multi_queued_write_on_a_readonly_replica_is_refused() {
         // Upstream processCommand runs its rejection gates BEFORE the MULTI queuing branch --
         // the read-only-replica check is at server.c:3995 and `queueMultiCommand` at :4155 --

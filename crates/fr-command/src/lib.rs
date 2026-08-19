@@ -27307,12 +27307,11 @@ fn script_shebang_line_has_flag(line: &[u8], wanted: &str) -> bool {
 /// is invisible to any test that arranges only one of the two conditions -- which is exactly how
 /// oo3aw row 5 went wrong.
 ///
-/// `!store.must_obey_client` is RETAINED even though the runtime's publish now folds the same
-/// term into `is_read_only_replica`. Removing it is the tidier code and I tried it: this gate is
-/// unit-tested by setting the two store fields DIRECTLY, which is upstream of the publish, so the
-/// simplification turns a passing test red and there is no build slot this turn to catch that.
-/// The redundancy is therefore deliberate and cheap -- both terms mean the same thing and neither
-/// can drift toward permitting a write -- and collapsing it belongs in a turn that can run tests.
+/// This gate does NOT re-test `must_obey_client`. The runtime's publish folds upstream's whole
+/// `!obey_client` term into `is_read_only_replica` -- master link and AOF client both -- and
+/// `the_readonly_replica_flag_published_to_the_store_folds_in_obeyed_sources` in fr-runtime pins
+/// that. Two layers deciding who is obeyed is how they come to disagree, so it is decided once,
+/// upstream of here.
 /// Upstream `scriptPrepareForRun`'s third write-flag check (script.c:178-181):
 ///
 ///     if (ro) {
@@ -27383,7 +27382,7 @@ fn script_prepare_ro_command_refusal(ro: bool, no_writes: bool) -> Option<RespFr
 }
 
 fn script_prepare_readonly_replica_refusal(store: &Store, no_writes: bool) -> Option<RespFrame> {
-    if !no_writes && store.is_read_only_replica && !store.must_obey_client {
+    if !no_writes && store.is_read_only_replica {
         return Some(RespFrame::Error(
             "READONLY Can not run script with write flag on readonly replica".to_string(),
         ));
@@ -42170,15 +42169,12 @@ mod tests {
         );
         assert_eq!(out, RespFrame::Integer(1), "a no-writes script must still run on a replica");
 
-        // An OBEYED source is exempt -- upstream spells it `!obey_client`, covering both the
-        // master link and AOF replay.
-        let mut store = replica();
-        store.must_obey_client = true;
-        let out = run_script(&mut store, WRITER);
-        assert!(
-            !matches!(&out, RespFrame::Error(msg) if msg.contains("write flag on readonly replica")),
-            "an obeyed source must not read the prepare refusal, got {out:?}"
-        );
+        // The obeyed-source exemption is NOT tested here any more. It moved into the runtime's
+        // publish, which folds `!obey_client` into `is_read_only_replica` itself, so a row here
+        // that set `must_obey_client` by hand would be asserting against a decision this layer no
+        // longer makes -- it would pass or fail on the store field it sets, not on the gate. It is
+        // pinned where it is decided, by
+        // `the_readonly_replica_flag_published_to_the_store_folds_in_obeyed_sources` in fr-runtime.
 
         // LEGACY body: EVAL_COMPAT_MODE, so no prepare refusal. It still cannot write -- it
         // reaches the existing inner gate and reads THAT message instead.
