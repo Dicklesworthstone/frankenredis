@@ -2471,4 +2471,73 @@ mod tests {
         assert_eq!(zpair_bits(&new), zpair_bits(&orig));
         assert_eq!(new.len(), 200);
     }
+    /// (frankenredis-gvm6z) THE NUMBER THAT CHOOSES THE DESIGN, and it needs no timed run.
+    ///
+    /// gvm6z wants `ListpackValueSpan` shrunk from <=32 bytes by making the integer variant
+    /// indirect. The ledger row on it records that the two viable designs are decided by ONE
+    /// quantity -- how often an entry is INTEGER-encoded -- because the cheap design
+    /// (`Cow<[u8]>` from a raw `i64`) costs a heap allocation on every integer read while
+    /// costing nothing on a string read.
+    ///
+    /// That quantity is a property of the DATA, not of the clock, so it is pinned here rather
+    /// than measured on a busy host. fr's encoder probes every entry with
+    /// `parse_listpack_integer`, so any element whose bytes parse as an integer is stored as
+    /// one -- which makes the fraction swing from 0 to 100 pct on realistic shapes:
+    ///
+    ///     name list      0/6   integer   a `Cow` design pays NOTHING here
+    ///     counter hash   3/6   integer   half the entries allocate per read
+    ///     id list        6/6   integer   every read allocates
+    ///
+    /// So there is no single answer, and a design chosen from one shape is wrong for another.
+    /// That is the finding: the `Cow` form is not safe to land as a blanket change, and the
+    /// stored-side-buffer design is the one that is workload-independent.
+    #[test]
+    fn integer_entry_fraction_is_workload_dependent_gvm6z() {
+        fn split(entries: &[&[u8]]) -> (usize, usize) {
+            let blob = crate::encode_listpack_strings_blob(entries).expect("fixture encodes");
+            let spans = decode_value_spans(&blob).expect("fixture decodes");
+            assert_eq!(spans.len(), entries.len(), "one span per entry");
+            let ints = spans
+                .iter()
+                .filter(|s| matches!(s, ListpackValueSpan::Integer(_)))
+                .count();
+            (ints, spans.len())
+        }
+
+        // A list of names: nothing parses as an integer.
+        assert_eq!(
+            split(&[b"alice", b"bob", b"carol", b"dave", b"erin", b"frank"]),
+            (0, 6),
+            "no entry of a name list is integer-encoded"
+        );
+
+        // A counter hash, field/value interleaved as the listpack stores it: the VALUES are
+        // integers and the FIELDS are not, so exactly half.
+        assert_eq!(
+            split(&[b"hits", b"41", b"misses", b"7", b"evictions", b"0"]),
+            (3, 6),
+            "a counter hash integer-encodes its values and not its fields"
+        );
+
+        // A list of ids: every entry is an integer.
+        assert_eq!(
+            split(&[b"1", b"2", b"3", b"100", b"-9223372036854775808", b"9223372036854775807"]),
+            (6, 6),
+            "every entry of an id list is integer-encoded"
+        );
+
+        // The negative case gvm6z names explicitly: i64::MIN renders to 20 bytes, and any
+        // design that NARROWS the inline buffer instead of making it indirect truncates it.
+        // Pinned here so that trap fails loudly whichever design is eventually taken.
+        let blob = crate::encode_listpack_strings_blob(&[
+            b"-9223372036854775808".as_slice(),
+            b"9223372036854775807".as_slice(),
+        ])
+        .expect("extremes encode");
+        let spans = decode_value_spans(&blob).expect("extremes decode");
+        assert_eq!(spans[0].as_bytes(&blob), b"-9223372036854775808");
+        assert_eq!(spans[1].as_bytes(&blob), b"9223372036854775807");
+        assert_eq!(spans[0].byte_len(), 20, "i64::MIN renders to 20 bytes");
+    }
+
 }

@@ -65547,3 +65547,71 @@ redis-benchmark, no harness — which rules out other MEASURERS but not the gene
   2. Do not quote 0.79. Quote "moved up ~0.14 in all three draws, all null-failed".
   3. The earlier 0.6425/0.6503/0.6442 rows are SUPERSEDED as a description of fr and should not be
      cited as current standing.
+
+---
+
+## RESOLVED — gvm6z's deciding number is 0 to 100 pct depending on the workload, so the cheap design is ruled OUT and the expensive one is the only safe answer (frankenredis-gvm6z)
+
+The row above named one quantity as the thing that chooses between gvm6z's two viable designs:
+how often a listpack entry is INTEGER-encoded. It is a property of the DATA, not of the clock, so
+it was obtained on a host at runq 109 without a timed run -- by decoding fixtures and counting.
+
+Pinned as `integer_entry_fraction_is_workload_dependent_gvm6z` (fr-persist/src/listpack.rs):
+
+      name list      alice, bob, carol, ...                      0/6 integer
+      counter hash   hits 41 misses 7 evictions 0                3/6 integer
+      id list        1, 2, 3, 100, i64::MIN, i64::MAX            6/6 integer
+
+fr's encoder probes every entry with `parse_listpack_integer`, so any element whose bytes parse as
+an integer is stored as one. The fraction therefore swings across the FULL range on shapes that
+are all realistic.
+
+### WHAT THAT DECIDES
+
+The cheap design -- hold the raw `i64`, return `Cow<[u8]>`, allocate on demand -- costs nothing on
+a string entry and one heap allocation per READ on an integer entry. At 0 pct it is free and the
+2x span shrink is pure win. At 100 pct every read of a restored id list allocates, on a surface
+where the last two copy-form changes were measured LOSSES of +8.1 pct and +9.0 pct in opposite
+directions.
+
+So `Cow` is not a blanket change: it is a bet that the deployment's lists are names rather than
+ids, and nothing in the code can know which. The stored-side-buffer design -- a digits buffer held
+beside the spans in `ListChunk::Listpack`, per fact 1 of the row above -- is the only one that is
+workload-INDEPENDENT: integer entries cost one indirection instead of one allocation, at every
+fraction.
+
+That is a more expensive change (a `ListChunk` field, a constructor, and 32 `as_bytes` call
+sites), and it is now the recommended one rather than the fallback.
+
+### ALSO PINNED, because gvm6z names it as the trap
+
+`i64::MIN` renders to 20 bytes, and the bead warns that a design NARROWING the inline buffer
+rather than making it indirect truncates it silently, with a small-integer corpus passing. The
+test round-trips i64::MIN and i64::MAX through encode/decode and asserts `byte_len() == 20`, so
+that trap now fails loudly whichever design is taken.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement, no ratio, no timed run -- the host was at runq 109 with two other projects
+benchmarking simultaneously, and the numbers here are COUNTS from a unit test, which do not
+depend on load. What is NOT answered: how often each entry is read, which is deployment
+behaviour rather than data shape, and which is why the recommendation is the design that does not
+depend on it.
+
+### PROVENANCE
+
+      source        main at 284e465e2 plus this commit.
+      host          loadavg 73.62 / 55.55 / 62.77, runq 109, /data 241G. No measurement slot
+                    taken and none needed.
+      disposition   ANALYSIS, resolving the open question of the preceding row. One test added;
+                    no engine source changed.
+
+### RETRY PREDICATE
+
+1. Implement the STORED-SIDE-BUFFER design, not the `Cow` one. The fraction test says the cheap
+   design's cost is unbounded across realistic shapes.
+2. Keep `integer_entry_fraction_is_workload_dependent_gvm6z` when the representation changes: its
+   fixtures are about the ENCODER's integer probe, not about the span layout, so it stays valid
+   and its i64::MIN row is the trap gvm6z names.
+3. Only then measure, and measure a shape at each end -- a name list and an id list. A single
+   mixed shape would average away the exact effect this row found.
