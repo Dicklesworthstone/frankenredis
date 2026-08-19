@@ -104,11 +104,31 @@ def opt(flag, default):
 
 
 SELF_TEST = "--self-test" in sys.argv
-# (frankenredis-i41sx) 24 on a 64-way box: high enough that an ordinarily busy host still
-# measures, low enough that a neighbouring project's benchmark trips it. Deliberately not
-# derived from CPU count -- the number that matters is how many runnable threads are
-# competing with THREE pinned servers, not how wide the machine is.
-CONTENDED_RUNQ = int(opt("--contended-runq", "24"))
+# (frankenredis-i41sx) 10, RECALIBRATED FROM OUTCOMES. It started at 24 -- reasoned as "high
+# enough that an ordinarily busy host still measures, low enough that a neighbouring project's
+# benchmark trips it" -- and that was set by argument, not by data. The data now exist, because
+# every invocation of this harness records its own peak run queue beside its verdict:
+#
+#     peak runq   verdict     shape
+#     7           PASS        zset-only 129 members, --confirm 3, all nulls in band
+#     8           PASS        zset-only 129 (re-run), and 1000 members
+#     9           PASS        zset-only 1000 members
+#     11          HOLD        mixed collections 600 members, null missed by 0.0005
+#     17          HOLD        mixed collections 40 members
+#     20, 21      HOLD        mixed collections 40 and 600 members
+#
+# Passes sit at 7-9, failures at 11-21, and nothing has ever passed above 9. A limit of 24 let
+# five consecutive runs start that had no chance of authenticating -- each spending a window and
+# ~4 cores, and each reporting only that its null missed, with no hint that the host was why.
+#
+# 10 separates the two populations with the failures' own margin. It is deliberately STRICTER than
+# "is a neighbour benchmarking": ordinary background load defeats this instrument well below the
+# bar that catches a neighbour, and refusing early costs a message where proceeding costs the
+# window.
+#
+# Raise it with --contended-runq if you are measuring something coarser than a RESTORE ratio; this
+# number is calibrated for THIS harness's sensitivity, not for the host being unusable.
+CONTENDED_RUNQ = int(opt("--contended-runq", "10"))
 ALLOW_CONTENDED = "--allow-contended" in sys.argv
 RS = 17812 if SELF_TEST else (int(sys.argv[1]) if len(sys.argv) > 1 else 17812)
 FR = 17811 if SELF_TEST else (int(sys.argv[2]) if len(sys.argv) > 2 else 17811)
@@ -421,6 +441,8 @@ def run_competitive_restore(fr_a, fr_b, redis):
     if runq_before > CONTENDED_RUNQ and not ALLOW_CONTENDED:
         print("  PREFLIGHT REFUSED: run queue %d exceeds %d — the host is already contended."
               % (runq_before, CONTENDED_RUNQ))
+        print("  Measured envelope for this harness: every authenticated row came from peak "
+              "runq 7-9; every run at 11 or above has HELD, several by margins under 0.001.")
         print("  Nothing measured. Re-run in a quiet window, or pass --allow-contended to "
               "record a deliberately unusable row.")
         return None
@@ -614,6 +636,16 @@ def self_test():
     contended, _ = contention_verdict([25], 24)
     assert contended, "one above the limit is contended"
     print("  contention_verdict: mid-run spike caught, boundary exact")
+
+    # (frankenredis-i41sx) Pin the DEFAULT, not just the function. The limit was 24 by argument
+    # and is 10 by outcome -- every authenticated row came from peak runq 7-9 and nothing has
+    # passed above 9. A future edit that loosens it should have to change this line and say why,
+    # rather than have it drift back to a number that let five doomed runs start.
+    assert CONTENDED_RUNQ <= 10, (
+        "default contention limit loosened to %d; the measured envelope is 7-9 passing, "
+        "11+ holding" % CONTENDED_RUNQ
+    )
+    print("  contention limit: default %d, within the measured 7-9 pass envelope" % CONTENDED_RUNQ)
 
     assert len(ARM_ORDERS) == 6
     for arm in ("fr_a", "fr_b", "redis"):
