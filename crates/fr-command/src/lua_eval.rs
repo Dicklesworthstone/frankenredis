@@ -11765,6 +11765,18 @@ impl<'a> LuaState<'a> {
         if !self.store.script_allow_oom
             && !self.script_wrote
             && self.store.maxmemory_bytes_live != 0
+            // (frankenredis-obeyclient-strlen-qxdyn) Upstream's scriptVerifyOOM carries FIVE
+            // conjuncts (script.c:405-412) and this gate shipped with four. The missing one sits
+            // right here, commented in upstream as "Don't care about mem for replicas or AOF":
+            //
+            //     server.maxmemory && !mustObeyClient(run_ctx->original_client) && ...
+            //
+            // Without it a replica over its own maxmemory refuses a write its master's script
+            // already applied, and an AOF written before maxmemory was lowered stops replaying --
+            // the same silent divergence the APPEND and bit-offset caps had, reached through a
+            // different door. The flag is published on Store by `with_execution_source`, which is
+            // what wraps script execution on the replay paths.
+            && !self.store.must_obey_client
             && self.store.over_maxmemory_live
             && argv
                 .first()
@@ -21607,8 +21619,8 @@ end
         );
     }
 
-    #[test]
-    /// (frankenredis-oo3aw) The four conjuncts of `script.c::scriptVerifyOOM`, one row each.
+    /// (frankenredis-oo3aw) The conjuncts of `script.c::scriptVerifyOOM`, one row each -- five
+    /// of them, after qxdyn found the obeyed-client one missing.
     ///
     /// `over_maxmemory_live` is what the runtime publishes BEFORE the script runs -- upstream's
     /// `server.pre_command_oom_state` -- so setting it directly here is the same state a script
@@ -21688,6 +21700,31 @@ end
         assert!(
             err.contains("Write commands are not allowed from read-only scripts"),
             "expected the read-only refusal, got {err}"
+        );
+
+        // ROW 6: an OBEYED source skips the gate. Upstream spells this conjunct
+        // `!mustObeyClient(run_ctx->original_client)` with the comment "Don't care about mem for
+        // replicas or AOF" (script.c:408); this gate shipped with the other four and without it.
+        //
+        // It is the one conjunct whose absence is INVISIBLE to an ordinary client: every row above
+        // passes either way. What it costs is a replica over its own maxmemory refusing a write
+        // its master's script already applied -- the master sees a reply nobody reads, and the two
+        // keyspaces diverge silently from then on.
+        let mut store = Store::new();
+        store.maxmemory_bytes_live = 1;
+        store.over_maxmemory_live = true;
+        store.must_obey_client = true;
+        eval_script(b"return redis.call('set','k','v')", &[], &[], &mut store, 0)
+            .expect("a replica must apply the write its master's script already applied");
+
+        // And the gate returns the moment the obeyed source ends -- an exemption that failed to
+        // clear would let ordinary clients write past maxmemory forever.
+        store.must_obey_client = false;
+        let err = eval_script(b"return redis.call('set','k2','v')", &[], &[], &mut store, 0)
+            .expect_err("an ordinary client is still refused");
+        assert!(
+            err.contains("OOM command not allowed"),
+            "expected the OOM refusal to come back, got {err}"
         );
     }
 
