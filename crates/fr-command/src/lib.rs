@@ -14182,6 +14182,15 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // `script_shebang_is_oom_exempt` -- without this term the OOM gate answers a no-writes
     // function before the read-only refusal does, and the client reads the wrong error.
     store.script_allow_oom = has_allow_oom || has_no_writes;
+    // (frankenredis-obeyclient-strlen-qxdyn follow-up) A FUNCTION is never in EVAL_COMPAT_MODE --
+    // it always carries flags -- so unlike EVAL there is no shebang gate here: the prepare-time
+    // refusal applies to every FCALL. Checked BEFORE the nesting level is raised, so the refusal
+    // path has nothing to unwind.
+    if let Some(refusal) = script_prepare_oom_refusal(store, store.script_allow_oom) {
+        store.script_read_only = previous_read_only;
+        store.script_allow_oom = previous_allow_oom;
+        return Ok(refusal);
+    }
     store.script_nesting_level += 1;
     // (frankenredis-9hori) `target_func_line` is Some exactly when the SCAN above produced a
     // `local function <func_name>(` line for the function being called. Both transform forms --
@@ -26942,6 +26951,15 @@ fn eval_cmd(
     let previous_allow_oom = store.script_allow_oom;
     store.script_read_only = read_only_script || script_shebang_has_no_writes_flag(script);
     store.script_allow_oom = script_shebang_is_oom_exempt(script);
+    // (frankenredis-obeyclient-strlen-qxdyn follow-up) Shebang scripts only: a body with no `#!`
+    // is upstream's EVAL_COMPAT_MODE and never reaches this check.
+    if script.starts_with(b"#!")
+        && let Some(refusal) = script_prepare_oom_refusal(store, store.script_allow_oom)
+    {
+        store.script_read_only = previous_read_only;
+        store.script_allow_oom = previous_allow_oom;
+        return Ok(refusal);
+    }
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
     {
@@ -27044,6 +27062,19 @@ fn evalsha_cmd(
             .script_get(sha1)
             .is_some_and(script_shebang_has_allow_oom_flag);
     store.script_allow_oom = allow_oom;
+    // (frankenredis-obeyclient-strlen-qxdyn follow-up) Same prepare-time refusal as EVAL, and
+    // gated the same way: only a body carrying a `#!` shebang leaves EVAL_COMPAT_MODE. The body
+    // is re-borrowed rather than materialised, exactly as `allow_oom` above is, so the
+    // fast-path HIT still never copies or hashes it.
+    if store
+        .script_get(sha1)
+        .is_some_and(|body| body.starts_with(b"#!"))
+        && let Some(refusal) = script_prepare_oom_refusal(store, allow_oom)
+    {
+        store.script_read_only = previous_read_only;
+        store.script_allow_oom = previous_allow_oom;
+        return Ok(refusal);
+    }
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
     {
@@ -27174,6 +27205,45 @@ fn script_shebang_line_has_flag(line: &[u8], wanted: &str) -> bool {
 /// Folded in here rather than at the call sites so the implication cannot be dropped by one of
 /// them: it was, at all three, when the flag was first wired to an allow-oom-only accessor.
 #[must_use]
+/// Upstream `scriptPrepareForRun`'s OOM refusal (script.c:191-199), which fr had no counterpart
+/// for:
+///
+///     /* Check OOM state. the no-writes flag imply allow-oom. we tested it
+///      * after the no-write error, so no need to mention it in the error reply. */
+///     if (!client_allow_oom && server.pre_command_oom_state && server.maxmemory &&
+///         !(script_flags & (SCRIPT_FLAG_ALLOW_OOM|SCRIPT_FLAG_NO_WRITES)))
+///
+/// This refuses the WHOLE script before a line of it runs, and it is NOT the same gate as
+/// `scriptVerifyOOM` (script.c:405), which fr already has: that one refuses an individual inner
+/// `redis.call` mid-script and answers "OOM command not allowed when used memory > 'maxmemory'".
+/// Both exist upstream and they say different things, so a client that parses the message could
+/// tell fr from Redis on this path.
+///
+/// TWO ASYMMETRIES, both deliberate and both upstream's:
+///
+///   * it applies only OUTSIDE `EVAL_COMPAT_MODE` (script.c:140 opens that guard and :201 closes
+///     it), i.e. to scripts that carry a `#!` shebang and to functions. A legacy EVAL body has no
+///     flags at all and keeps the per-inner-call behaviour, which is why this must be gated on
+///     the shebang rather than applied to every script.
+///   * unlike `scriptVerifyOOM` it carries NO `mustObeyClient` term. The per-call gate exempts an
+///     obeyed source; this one does not, and it is mirrored as written rather than "made
+///     consistent".
+///
+/// `client_allow_oom` is the caller's CLIENT_ALLOW_OOM flag, which fr does not model; it is false
+/// for every client fr can construct, so it is folded out rather than faked.
+fn script_prepare_oom_refusal(store: &Store, oom_exempt: bool) -> Option<RespFrame> {
+    if !oom_exempt && store.maxmemory_bytes_live != 0 && store.over_maxmemory_live {
+        // Upstream passes a literal already carrying '-OOM', which addReplyError leaves alone;
+        // RespFrame::Error writes the '-' itself, so the code is spelled without it here.
+        return Some(RespFrame::Error(
+            "OOM allow-oom flag is not set on the script, can not run it when used memory > \
+             'maxmemory'"
+                .to_string(),
+        ));
+    }
+    None
+}
+
 pub fn script_shebang_is_oom_exempt(script: &[u8]) -> bool {
     script_shebang_has_allow_oom_flag(script) || script_shebang_has_no_writes_flag(script)
 }
@@ -41578,6 +41648,115 @@ mod tests {
         assert_eq!(
             xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"0"]),
             250
+        );
+    }
+
+    #[test]
+    fn shebang_scripts_are_refused_at_prepare_time_over_maxmemory_but_legacy_eval_is_not() {
+        // Upstream has TWO OOM gates for scripts and they are not interchangeable:
+        //
+        //   scriptPrepareForRun (script.c:191)  refuses the WHOLE script before it runs, with
+        //                                       "allow-oom flag is not set on the script, can
+        //                                        not run it when used memory > 'maxmemory'"
+        //   scriptVerifyOOM     (script.c:405)  refuses one inner redis.call mid-script, with
+        //                                       "OOM command not allowed when used memory >
+        //                                        'maxmemory'"
+        //
+        // fr had only the second. The first is gated on being OUTSIDE EVAL_COMPAT_MODE
+        // (script.c:140 opens that guard, :201 closes it), which is what the legacy row below
+        // pins -- a body with no `#!` must still reach the inner gate and read the OTHER
+        // message. A fix that applied the prepare refusal to every script would pass every row
+        // here except that one.
+        fn run_script(store: &mut Store, body: &[u8]) -> RespFrame {
+            dispatch_argv(&[b"EVAL".to_vec(), body.to_vec(), b"0".to_vec()], store, 0)
+                .unwrap_or_else(|e| e.to_resp())
+        }
+        fn exists(store: &mut Store, key: &[u8]) -> RespFrame {
+            dispatch_argv(&[b"EXISTS".to_vec(), key.to_vec()], store, 0).expect("EXISTS")
+        }
+        fn over_maxmemory() -> Store {
+            let mut store = Store::new();
+            store.maxmemory_bytes_live = 1;
+            store.over_maxmemory_live = true;
+            store
+        }
+
+        // SHEBANG, no flags: refused before a line runs.
+        let mut store = over_maxmemory();
+        let out = run_script(
+            &mut store,
+            b"#!lua\nredis.call('set','prepare_k','v') return 1",
+        );
+        match &out {
+            RespFrame::Error(msg) => assert!(
+                msg.contains("allow-oom flag is not set on the script"),
+                "expected the PREPARE refusal, got {msg}"
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        // ...and it really did not run. Without this the row would pass on a fix that returns
+        // the refusal while still executing the body.
+        assert_eq!(
+            exists(&mut store, b"prepare_k"),
+            RespFrame::Integer(0),
+            "the script body must not have executed"
+        );
+
+        // LEGACY, no shebang: upstream's EVAL_COMPAT_MODE skips the prepare gate entirely, so
+        // this must reach the INNER gate and read its different message.
+        let mut store = over_maxmemory();
+        let out = run_script(&mut store, b"return redis.call('set','legacy_k','v')");
+        match &out {
+            RespFrame::Error(msg) => {
+                assert!(
+                    msg.contains("OOM command not allowed"),
+                    "a legacy body must read the INNER refusal, got {msg}"
+                );
+                assert!(
+                    !msg.contains("allow-oom flag is not set"),
+                    "a legacy body must NOT read the prepare refusal, got {msg}"
+                );
+            }
+            other => panic!("expected the inner refusal, got {other:?}"),
+        }
+
+        // SHEBANG with allow-oom: exempt, so it runs and writes.
+        let mut store = over_maxmemory();
+        run_script(
+            &mut store,
+            b"#!lua flags=allow-oom\nredis.call('set','allowed_k','v') return 1",
+        );
+        assert_eq!(
+            exists(&mut store, b"allowed_k"),
+            RespFrame::Integer(1),
+            "an allow-oom script must still run over maxmemory"
+        );
+
+        // SHEBANG with no-writes: upstream folds no-writes into the OOM exemption, so the
+        // prepare refusal must NOT fire -- it is refused later, for writing from a read-only
+        // script.
+        let mut store = over_maxmemory();
+        let out = run_script(
+            &mut store,
+            b"#!lua flags=no-writes\nredis.call('set','nw_k','v') return 1",
+        );
+        if let RespFrame::Error(msg) = &out {
+            assert!(
+                !msg.contains("allow-oom flag is not set"),
+                "no-writes implies allow-oom, so the prepare refusal must not fire: {msg}"
+            );
+        }
+
+        // With maxmemory unset, a plain shebang script runs.
+        let mut store = Store::new();
+        run_script(
+            &mut store,
+            b"#!lua\nredis.call('set','fine_k','v') return 1",
+        );
+        assert_eq!(
+            exists(&mut store, b"fine_k"),
+            RespFrame::Integer(1),
+            "no maxmemory means no refusal"
         );
     }
 
