@@ -5734,6 +5734,24 @@ fn main() -> ExitCode {
                 if runtime.is_pubsub_client(conn.session.client_id) {
                     continue;
                 }
+                // (frankenredis-obeyclient-strlen-qxdyn, found while enumerating upstream's
+                // mustObeyClient sites) Upstream's guard skips `c->flags & CLIENT_SLAVE`, and its
+                // comment states the reach: "No timeout for slaves and monitors"
+                // (timeout.c:60). One flag covers both because monitorCommand sets
+                // CLIENT_SLAVE|CLIENT_MONITOR. fr tracks the two SEPARATELY -- a replica by
+                // `replication_sent_offset`, a monitor in `server.monitor_clients` -- so the
+                // replica skip above lands only half of it.
+                //
+                // A MONITOR client is idle BY CONSTRUCTION: it issues one command and thereafter
+                // only receives, and feeding it does not touch `last_interaction_ms` (upstream
+                // does not refresh `lastinteraction` for monitor traffic either). So with
+                // `timeout` set to anything non-zero, fr disconnected EVERY monitor exactly
+                // `timeout` seconds after it attached, while redis keeps it forever. That is the
+                // whole failure: not a slow leak, a guaranteed drop of the one client type whose
+                // entire job is to sit still.
+                if runtime.server.monitor_clients.contains(&conn.session.client_id) {
+                    continue;
+                }
                 let idle_ms = ts.saturating_sub(conn.session.last_interaction_ms);
                 if idle_ms > timeout_ms {
                     conn.closing = true;
