@@ -42216,6 +42216,83 @@ mod tests {
     /// 3 members (packed) and above `SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES` (the Full tier,
     /// which sorts via its dict and has no selection to get wrong). If only the packed tier
     /// were tested, a threshold change would silently drop the coverage.
+    /// (frankenredis-i41sx) Does the ordered bulk-builder's gate actually FIRE on bytes Redis
+    /// emits? Every other test here proves the gate is CORRECT; none proves it is REACHABLE.
+    ///
+    /// That distinction is not hypothetical in this codebase. The owned twin of this gate was
+    /// REJECTED on measurement (frankenredis-qj6jn) because it could never fire: the RDB load path
+    /// hashes the pair order away one frame before the builder sees it, so the predicate was dead
+    /// code that still cost a full scan. The borrowed path is different -- `zset_from_listpack_spans`
+    /// pushes pairs in wire order and its duplicate check reads through a HashSet without reordering
+    /// them -- and this test is what holds that difference in place.
+    ///
+    /// The fixture is REAL Redis 7.2.4 output, not a synthetic listpack: it is the exact DUMP
+    /// payload for `ZADD z 0 alpha 1 beta 2 gamma`, captured from the vendored server. A
+    /// hand-built listpack would prove the predicate works on bytes I chose, which is the thing
+    /// already covered.
+    #[test]
+    fn the_sorted_zset_gate_fires_on_real_redis_dump_bytes_i41sx() {
+        // ZADD z 0 alpha 1 beta 2 gamma, then DUMP, on vendored redis-server 7.2.4.
+        const REDIS_DUMP: &[u8] = &[
+            0x11, 0x21, 0x21, 0x00, 0x00, 0x00, 0x06, 0x00, 0x85, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x06,
+            0x00, 0x01, 0x84, 0x62, 0x65, 0x74, 0x61, 0x05, 0x01, 0x01, 0x85, 0x67, 0x61, 0x6d, 0x6d,
+            0x61, 0x06, 0x02, 0x01, 0xff, 0x0b, 0x00, 0x94, 0x81, 0x8e, 0x09, 0x95, 0xb8, 0x86, 0xc5
+        ];
+        // RDB_TYPE_ZSET_LISTPACK. If this ever changes, the fixture is stale and the rest of the
+        // test would be reading the wrong bytes rather than failing honestly.
+        assert_eq!(REDIS_DUMP[0], 17, "fixture must be a zset listpack payload");
+        // 6-bit string length (top two bits 00), then that many listpack bytes, then the 2-byte RDB
+        // version and 8-byte CRC footer.
+        assert_eq!(REDIS_DUMP[1] & 0xC0, 0, "fixture length prefix must be the 6-bit form");
+        let len = (REDIS_DUMP[1] & 0x3F) as usize;
+        let listpack = &REDIS_DUMP[2..2 + len];
+        assert_eq!(REDIS_DUMP.len(), 2 + len + 10, "fixture must end in the RDB footer");
+
+        let decoded = fr_persist::listpack::decode_zset_spans_and_scores(listpack)
+            .expect("real Redis listpack must decode");
+        // Rebuild `pairs` exactly as zset_from_listpack_spans does, in WIRE order.
+        let pairs: Vec<(&[u8], f64)> = decoded
+            .iter()
+            .map(|(span, score)| (span.as_bytes(listpack), *score))
+            .collect();
+        assert_eq!(
+            pairs
+                .iter()
+                .map(|(m, s)| (String::from_utf8_lossy(m).into_owned(), *s))
+                .collect::<Vec<_>>(),
+            vec![
+                ("alpha".to_string(), 0.0),
+                ("beta".to_string(), 1.0),
+                ("gamma".to_string(), 2.0)
+            ],
+            "wire order is what the gate is handed"
+        );
+
+        // THE ASSERTION THIS TEST EXISTS FOR: on real incumbent bytes the predicate is TRUE, so the
+        // ordered builder is the one that runs. If a future decode change hashes or reorders the
+        // pairs the way the RDB path does, this fails and the gate is dead weight again.
+        assert!(
+            crate::packed_set::PackedZSet::borrowed_pairs_are_sorted(&pairs),
+            "the ordered bulk-builder is unreachable on Redis-emitted payloads"
+        );
+
+        // And the payload still restores to the right set, so a passing gate is not passing on
+        // pairs that decoded wrongly.
+        let set = super::SortedSet::from_unique_borrowed_pairs_with_limits(
+            pairs,
+            super::SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES,
+            super::SORTED_SET_PACKED_DEFAULT_MAX_VALUE,
+        );
+        assert_eq!(
+            set.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect::<Vec<_>>(),
+            vec![
+                (b"alpha".to_vec(), 0.0),
+                (b"beta".to_vec(), 1.0),
+                (b"gamma".to_vec(), 2.0)
+            ]
+        );
+    }
+
     #[test]
     fn zset_builder_selection_normalises_an_unordered_payload_gvm6z() {
         fn build(pairs: Vec<(&[u8], f64)>) -> Vec<(Vec<u8>, f64)> {
