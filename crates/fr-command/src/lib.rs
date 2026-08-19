@@ -10042,6 +10042,22 @@ fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             idx += 2;
             continue;
         }
+        // (frankenredis-xreadopts-hhz9g) Upstream t_stream.c:2219-2233 names the mistake
+        // instead of falling through to the generic syntax error: both options exist, they are
+        // simply XREADGROUP's. Reaching `break` here surfaced `ERR syntax error`, which tells a
+        // user only that something in the line is wrong.
+        if eq_ascii_command(&argv[idx], b"GROUP") && idx + 2 < argv.len() {
+            return Err(CommandError::Custom(
+                "ERR The GROUP option is only supported by XREADGROUP. You called XREAD instead."
+                    .to_string(),
+            ));
+        }
+        if eq_ascii_command(&argv[idx], b"NOACK") {
+            return Err(CommandError::Custom(
+                "ERR The NOACK option is only supported by XREADGROUP. You called XREAD instead."
+                    .to_string(),
+            ));
+        }
         break;
     }
 
@@ -10082,6 +10098,16 @@ fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let mut cursors = Vec::with_capacity(stream_count);
     for (key, id_arg) in keys.iter().zip(ids.iter()) {
         let resolved_last = store.xlast_id(key, now_ms)?;
+        // (frankenredis-xreadopts-hhz9g) Upstream t_stream.c:2302-2305 rejects '>' here by
+        // name; fr fell through to parse_xread_id and reported a generic invalid-ID error,
+        // losing the one thing the user needed to know -- that '>' belongs to XREADGROUP.
+        if id_arg.as_slice() == b">" {
+            return Err(CommandError::Custom(
+                "ERR The > ID can be specified only when calling XREADGROUP using the GROUP \
+                 <group> <consumer> option."
+                    .to_string(),
+            ));
+        }
         let cursor = if id_arg.as_slice() == b"$" {
             resolved_last.unwrap_or((u64::MAX, u64::MAX))
         } else {
@@ -10132,6 +10158,17 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         return Err(CommandError::WrongArity("XREADGROUP"));
     }
     if !eq_ascii_command(&argv[1], b"GROUP") {
+        // (frankenredis-xreadopts-hhz9g) Upstream t_stream.c:2248-2251 answers a missing GROUP
+        // with its own wording. Only when the token is ABSENT ENTIRELY, though: upstream parses
+        // options in any order, so `XREADGROUP COUNT 1 GROUP g c STREAMS s >` is legal there and
+        // is still refused here, because this parser requires GROUP at argv[1]. That positional
+        // limit is a separate defect and is recorded on the bead rather than papered over -- a
+        // misplaced GROUP keeps the syntax error it already produced.
+        if !argv.iter().any(|a| eq_ascii_command(a, b"GROUP")) {
+            return Err(CommandError::Custom(
+                "ERR Missing GROUP option for XREADGROUP".to_string(),
+            ));
+        }
         return Err(CommandError::SyntaxError);
     }
 
@@ -10220,6 +10257,23 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             match parse_xread_id(id_arg) {
                 Ok(id) => StreamGroupReadCursor::Id(id),
                 Err(id_reply) => {
+                    // (frankenredis-xreadopts-hhz9g) '$' is not a valid ID, so it lands here --
+                    // which is exactly where upstream answers it. t_stream.c:2283 runs the '$'
+                    // check AFTER the key lookup, the type check and the group resolution
+                    // (2263-2280), so a missing key or group still reports NOGROUP and only a
+                    // valid stream with an existing group lets this wording stand. Swapping the
+                    // reply here rather than returning early is what keeps that order intact.
+                    let id_reply = if id_arg.as_slice() == b"$" {
+                        RespFrame::Error(
+                            "ERR The $ ID is meaningless in the context of XREADGROUP: you want \
+                             to read the history of this consumer by specifying a proper ID, or \
+                             use the > ID to get new messages. The $ ID would just return an \
+                             empty result set."
+                                .to_string(),
+                        )
+                    } else {
+                        id_reply
+                    };
                     // (frankenredis-xrgord) Upstream t_stream.c::xreadCommand
                     // looks up the key (recording the keyspace hit/miss) and
                     // checks its type, then the consumer group, BEFORE parsing
@@ -42565,6 +42619,80 @@ mod tests {
             Err(CommandError::Custom(
                 "XREAD command is not allowed with BLOCK option from scripts".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn xread_option_errors_name_the_mistake_like_upstream_hhz9g() {
+        // (frankenredis-xreadopts-hhz9g) Five upstream diagnostics that fr answered with a
+        // generic `ERR syntax error` or invalid-stream-ID. All five refuse the same inputs
+        // upstream refuses, so no accept/reject differ could see them -- only the text moved,
+        // and the text is the part that tells a user WHICH option was wrong.
+        let mut store = Store::new();
+        // Some of these surface as Err(CommandError) and some as Ok(RespFrame::Error), because
+        // the '$' case flows through the ordering path below; normalise both.
+        let err = |store: &mut Store, argv: &[&[u8]]| -> String {
+            let owned: Vec<Vec<u8>> = argv.iter().map(|a| a.to_vec()).collect();
+            match dispatch_argv(&owned, store, 0) {
+                Err(e) => match e.to_resp() {
+                    RespFrame::Error(m) => m,
+                    other => panic!("expected an error frame, got {other:?}"),
+                },
+                Ok(RespFrame::Error(m)) => m,
+                Ok(other) => panic!("expected an error, got {other:?}"),
+            }
+        };
+
+        assert_eq!(
+            err(&mut store, &[b"XREAD", b"GROUP", b"g", b"c", b"STREAMS", b"s", b"0"]),
+            "ERR The GROUP option is only supported by XREADGROUP. You called XREAD instead."
+        );
+        assert_eq!(
+            err(&mut store, &[b"XREAD", b"NOACK", b"STREAMS", b"s", b"0"]),
+            "ERR The NOACK option is only supported by XREADGROUP. You called XREAD instead."
+        );
+        assert_eq!(
+            err(&mut store, &[b"XREAD", b"STREAMS", b"s", b">"]),
+            "ERR The > ID can be specified only when calling XREADGROUP using the GROUP \
+             <group> <consumer> option."
+        );
+        // GROUP absent ENTIRELY. A misplaced GROUP keeps the syntax error -- fr's parser
+        // requires it at argv[1] while upstream accepts any order, which is a separate defect
+        // recorded on the bead.
+        assert_eq!(
+            err(
+                &mut store,
+                &[b"XREADGROUP", b"COUNT", b"1", b"STREAMS", b"a", b"b", b">", b">"]
+            ),
+            "ERR Missing GROUP option for XREADGROUP"
+        );
+
+        // '$' needs a real stream and group, because upstream answers it only AFTER the key
+        // lookup, the type check and the group resolution.
+        dispatch_argv(
+            &[b"XADD".to_vec(), b"s".to_vec(), b"*".to_vec(), b"f".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xadd");
+        dispatch_argv(
+            &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"s".to_vec(), b"g".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+        assert_eq!(
+            err(&mut store, &[b"XREADGROUP", b"GROUP", b"g", b"c", b"STREAMS", b"s", b"$"]),
+            "ERR The $ ID is meaningless in the context of XREADGROUP: you want to read the \
+             history of this consumer by specifying a proper ID, or use the > ID to get new \
+             messages. The $ ID would just return an empty result set."
+        );
+        // ORDER: a missing key still reports NOGROUP, not the '$' wording. This is the row a
+        // future refactor is most likely to break, by answering '$' before resolving the group.
+        assert!(
+            err(&mut store, &[b"XREADGROUP", b"GROUP", b"g", b"c", b"STREAMS", b"missing", b"$"])
+                .starts_with("NOGROUP"),
+            "group resolution must precede the $ diagnostic"
         );
     }
 
