@@ -80,6 +80,30 @@ jobs:
           python3 scripts/lua_string_differential_sweep.py target/debug/frankenredis \
             | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/lua_string_sweep.log"
 
+      - name: G3+G5 - Client-Path Protocol Parity
+        # Byte-exact comparison of fr's CLIENT protocol contract against the vendored
+        # incumbent over real TCP sockets: 45 adversarial vectors, one fresh connection
+        # each, comparing reply bytes AND whether the connection was closed.
+        #
+        # This exists because protocol_negative.json does NOT cover this surface
+        # (frankenredis-vqiki). That fixture drives Runtime::execute_bytes, an INTERNAL
+        # link reached by replication and AOF replay, and all 22 of its expectations
+        # differ from what a client receives -- a client sending `$-2` gets
+        # "unknown command", not "invalid bulk length". A fixture written from the
+        # implementation cannot detect the implementation being wrong, so the incumbent
+        # is the oracle here and fr's own answers are never the expectation.
+        #
+        # A DEBUG binary is correct on purpose, as above: this compares REPLIES, never
+        # timings. It starts its own fr and redis on private ports (28871/28872) and
+        # terminates both in a finally block, so it does not touch the 6379 server.
+        run: |
+          cargo build -p fr-server
+          python3 scripts/protocol_client_parity.py \
+            --fr target/debug/frankenredis \
+            --redis "$(command -v redis-server)" \
+            --json "${FORENSICS_ROOT}/${LIVE_RUN_ID}/protocol_client_parity.json" \
+            | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/protocol_client_parity.log"
+
       - name: G7 - Enforce Coverage/Flake Budgets
         run: ./scripts/check_coverage_flake_budget.sh "artifacts/e2e_orchestrator/${LIVE_RUN_ID}/coverage_summary.json"
 
