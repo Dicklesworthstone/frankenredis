@@ -64989,3 +64989,74 @@ route. That is the size of the mechanism fr is missing, measured without referen
   3. The gate has now refused in eight consecutive attempts across four turns. A certified bound
      needs a window with zero cargo/rustc under the shared uid, which has not occurred while I have
      been measuring.
+
+## 2026-08-19 CrimsonHawk: SIZING, all six rungs BOTH arms in ONE window — fr pays 106.08 instructions per byte on a special-free find where Redis pays 1.03, and 38.66 against 9.73 on the matcher path (frankenredis-25uop)
+
+EVIDENCE CLASS: callgrind Ir, fr and a LIVE vendored Redis 7.2.4 in the same invocation, six rungs
+back to back, slope method, 2000 ops each. Every subtraction below is now WITHIN one window — the
+methodological gap the three rows above each carried is closed. The harness printed "WINDOW: UNFIT
+for ratio" throughout, so SIZING. No build: our project's slot was in flight.
+
+  per-arm  loadavg 14.45/19.92/25.07 at the first rung, drifting to 12.86/19.00/24.60 at the last
+
+### THE SIX RUNGS
+
+    rung             fr instr/op    redis instr/op    fr/redis
+    luapat_rep16        16,919.6         13,489.3      1.2543x
+    luapat_rep256       23,774.0         24,575.2      0.9674x
+    luapat_16           22,713.0         17,206.8      1.3200x
+    luapat_256          55,026.6         28,539.3      1.9281x
+    luapatsp_16         21,837.1         17,441.8      1.2520x
+    luapatsp_256        37,969.8         30,862.2      1.2303x
+
+### PER-BYTE SLOPES, REP SUBTRACTED, ALL WITHIN WINDOW
+
+    engine   rep      find plain (net)      find special (net)
+    fr      28.56     134.64  (106.08)      67.22  (38.66)
+    redis   46.19      47.22  (  1.03)      55.92  ( 9.73)
+
+**The special-free path is the finding.** Redis's net cost there is 1.03 instructions per byte —
+its memchr plain search, effectively flat. fr's is 106.08, because fr runs its full pattern matcher
+on a pattern that has no pattern semantics. The meaningful quantity is the ABSOLUTE difference,
+105 instructions per byte; the ratio (103x) divides by a near-zero denominator and is therefore
+unstable, so it should not be the number anyone quotes.
+
+**The matcher path is the smaller, real one.** 38.66 against 9.73, about 4x, on the shape where both
+engines actually match.
+
+### AGREEMENT WITH THE THREE EARLIER DERIVATIONS
+
+    quantity              cross-run    within-window (redis only)    this run
+    fr find plain net       106.2              —                      106.08
+    fr matcher net           38.75             —                       38.66
+    redis matcher net         8.55            8.74                      9.73
+    redis plain net           —               0.64                      1.03
+
+fr's two figures reproduce to three significant figures. Redis's move by about 1 instruction per
+byte across derivations, which is the noise band on a quantity that small — worth stating rather
+than presenting 9.73 as exact.
+
+### WHAT THIS FIXES ABOUT THE LEVER ORDER
+
+The plain-search omission is not a tuning gap, it is a missing branch: fr does 105 more
+instructions per byte than the incumbent for work the incumbent does not do at all. The cascade
+rewrite addresses the 38.66-against-9.73 term, which is real but roughly a quarter the size and
+requires touching the matcher's control flow. Build the disjunction first.
+
+### WHAT IS NOT SETTLED
+
+  * SIZING. The gate refused every rung — nine consecutive refusals now across five turns.
+  * These are instruction counts, not time. The wall-clock rows above (0.6425/0.6503/0.6442 raw at
+    256) remain the throughput statement and remain uncertified.
+  * fr's string.rep is CHEAPER than Redis's (28.56 against 46.19 per byte). That is worth carrying
+    forward: it means the luapat gap is entirely the find, and none of it is Lua-side string
+    construction.
+
+### RETRY PREDICATES
+
+  1. Land the SPECIALS disjunction. luapat_256 must fall toward Redis's flat find cost;
+     luapatsp_256 must NOT move. If both move, the change reached string.match, which upstream
+     never routes through the plain path.
+  2. Re-run these same six rungs after, and quote the deltas against this row rather than against
+     any earlier cross-run figure.
+  3. A certified bound still needs a window with zero cargo/rustc under the shared uid.
