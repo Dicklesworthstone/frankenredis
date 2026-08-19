@@ -67100,3 +67100,92 @@ does not.
      defect, and the incumbent does the same job in 8.
   3. `eval_expr` at 55.6 pct of the cycle is the first place to look, and the prologue read scores
      an attempt without a benchmark.
+
+## 2026-08-19 CrimsonHawk: REPRODUCTION — `miscobey-2160s`'s central claim is REFUTED. fr's MISCONF'd replica APPLIES its master's writes, which is upstream's `replica-ignore-disk-write-errors=yes` arm and exactly the deviation the bead proposed as its own fix. A DIFFERENT divergence turned up instead: PING under MISCONF, master role only
+
+EVIDENCE CLASS: `scripts/misconf_obey_client_repro.py`, committed with this row. Real master/replica
+pairs of each engine, replication established and verified before anything is broken, MISCONF
+induced by making the server's own data directory unwritable. Verdicts, not timings; no ratio, no
+A/A null. Per-arm figures as the brief asks: loadavg 15.71 / 19.30 / 16.48 at start, 14.08 / 18.76 /
+16.34 mid-run, iowait 0 pct. One frankenredis build was in flight for the whole turn, so no timed
+measurement was attempted and none is reported.
+
+  fr        `target/release/frankenredis` — SHARED and rebuilt by a peer during this turn, so it
+            names no commit. Disqualifying for a ratio; readable for a behavioural verdict, which
+            is all that is claimed.
+  incumbent `legacy_redis_code/redis/src/redis-server`, Redis 7.2.4
+
+### THE CLAIM, AND WHAT ACTUALLY HAPPENS
+
+The bead: *"a REPLICA whose own RDB/AOF write failed answers MISCONF to its master's replicated
+writes and drops them -- silent divergence ... The replica keeps serving, now missing data its
+master has."* Filed SOURCE-VERIFIED and explicitly **not reproduced**.
+
+Reproduced now, three arms, same scenario:
+
+    redis 7.2.4, default                 replica PANICKED -- process gone, rc -11
+    redis 7.2.4, ignore-errors=yes       replica APPLIED the write, stayed up and linked
+    fr                                   replica APPLIED the write, stayed up and linked
+
+**fr does not drop the write.** It applies it, byte-for-byte matching upstream's
+`replica-ignore-disk-write-errors=yes` arm — which is precisely the behaviour the bead proposed
+adopting as a "DELIBERATE DEVIATION" in its own fix section. fr already does the thing the bead
+asked for.
+
+Worth recording because it changes what parity even means here: **upstream's DEFAULT is to
+`serverPanic` and die.** `replica-ignore-disk-write-errors` defaults to 0 in `config.c:3097`, so an
+obeyed non-PING write under disk error kills the incumbent's replica. Measured, not inferred — rc
+-11. So the choice on this gate is not "match upstream or deviate"; it is *which* of upstream's two
+arms to implement, and fr implements the one that does not crash.
+
+Note the config NAME, since the bead and `server.h` disagree with it: the field is
+`repl_ignore_disk_write_error`, the directive is **`replica-ignore-disk-write-errors`**. Starting a
+server with the field name is a fatal config error, which is how this was found.
+
+### THE DIVERGENCE THAT IS REAL, AND THE BEAD ASSERTS ITS OPPOSITE
+
+The bead states: *"PING is correctly included in fr's denial set already (upstream's
+`|| c->cmd->proc == pingCommand`)."* It is not. Measured across both roles:
+
+    role       redis 7.2.4 PING      fr PING
+    master     MISCONF               PONG        <- DIVERGES
+    replica    MISCONF               MISCONF     <- agrees
+
+fr's `SET` is refused correctly in both roles, so this is only about PING, and only when fr is a
+MASTER. Upstream denies PING under disk error deliberately: a client using PING as a liveness probe
+is meant to see the instance as unhealthy. fr answers PONG, so a health check keeps a
+cannot-persist master in rotation.
+
+This is the OPPOSITE direction from the bead's headline. The bead says fr is too STRICT — refusing
+obeyed writes it should apply. The measurement says fr is, in this one spot, too LENIENT.
+
+### THE SETUP FACTS THAT DECIDE WHETHER ANY OF THIS MEANS ANYTHING
+
+Two attempts produced a confident, entirely vacuous "no divergence" before the control caught it:
+
+  * **`--save ""` disables the gate outright.** `writeCommandsDeniedByDiskError` (server.c:4473)
+    requires `server.saveparamslen > 0`. With no save points a failed BGSAVE denies nothing, so
+    both engines "agreed" while neither was ever in the state under test.
+  * **`CONFIG SET dir` is a PROTECTED config** and is refused by both engines, so the first attempt
+    never broke the RDB target at all.
+
+What caught both was **LEG A** — a standalone server where a direct client write must be refused
+with MISCONF before leg B is read. The first run reported the direct write as `READONLY`, not
+MISCONF, which is the tell that the gate was never reached. Without that leg the run would have
+read as "bug not reproduced, bead is stale" for the wrong reason, and I would have closed a live
+bead on a broken harness. The script now exits 2 on `INCONCLUSIVE` rather than 0.
+
+Running as root would also bypass the read-only directory and hand back a cheerfully successful
+BGSAVE; the harness refuses to run as root for that reason.
+
+### RETRY PREDICATES
+
+Retry predicate: re-run ONLY IF the disk-error gate, `reject_due_to_disk_write_error`, or the
+replication apply path changes; and reopen the drop claim ONLY IF the harness reports `DROPPED`,
+which is a distinct verdict from `PANICKED` and from `APPLIED` and cannot be confused with either.
+
+  1. Close `miscobey-2160s`: the replica does not drop writes, and fr already implements the arm
+     the bead proposed.
+  2. The PING-under-MISCONF gap is real, master-role only, and is filed separately rather than
+     left inside a bead whose title says the opposite.
+  3. Do not read this row as a perf verdict. It measures no time.
