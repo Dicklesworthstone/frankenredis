@@ -87,6 +87,36 @@ ACCEPTED_ABSENT = {
     "The busy script was sent by a master instance in the context of replication and cannot be "
     "killed.":
         "same UNKILLABLE branch; fr has no busy-script state to kill",
+    # -- NO REPLICA STATE MACHINE. Upstream gives every attached replica a `replstate`
+    #    (WAIT_BGSAVE_START -> WAIT_BGSAVE_END -> SEND_BULK -> ONLINE) and the server a
+    #    `failover_state`. fr has neither: `ReplicaState` carries offsets, port, ip and ack time
+    #    and NO state field, INFO renders `state=online` as a literal with the comment "We only
+    #    track registered replicas", and FAILOVER completes synchronously inside the command --
+    #    which is why FAILOVER ABORT answers "No failover in progress." unconditionally. A replica
+    #    fr knows about is online by construction, and a failover is never in flight to collide
+    #    with, so none of these five conditions can arise.
+    #
+    #    The gap is the state machine, not the strings. Build it and this gate fails on all five
+    #    at once, which is the point of naming them individually here.
+    "BGSAVE failed, replication can't continue":
+        "needs SLAVE_STATE_WAIT_BGSAVE_START; fr tracks no replica sync state",
+    "FAILOVER target replica is not online.":
+        "fr's replica list holds only registered replicas -- INFO hardcodes state=online -- so a "
+        "known replica is online by construction. fr DOES implement the sibling check, "
+        "'FAILOVER target HOST and PORT is not a replica.'",
+    "FAILOVER already in progress.":
+        "fr's FAILOVER is synchronous; there is no pending failover_state to collide with",
+    "Can't SYNC while failing over":
+        "same: no failover_state, so a SYNC can never arrive during one",
+    "REPLICAOF not allowed while failing over.":
+        "same: no failover_state",
+    # -- NO `REPLCONF rdb-filter-only`. fr does not implement the filtered-RDB replica request at
+    #    all (zero occurrences in the tree), so neither its argument parse nor the EOF-capability
+    #    precondition it guards has a site to live at. Both return together with that feature.
+    "Filtered replica requires EOF capability":
+        "fr implements no REPLCONF rdb-filter-only, so SLAVE_REQ_RDB_MASK is never set",
+    "Missing rdb-filter-only values":
+        "same: the argument this parses is never accepted",
 }
 
 # Literals whose absence says nothing because they describe a C allocation failure: Rust aborts
