@@ -65129,3 +65129,68 @@ to 27-31 on the 5- and 15-minute figures, mean CPU MHz 2687-3604, iowait 0% by v
    cost, and a null that inverts tells you the pinning is wrong before you spend a window on it.
 3. Still do not re-derive the magnitude. xvq1a's authenticated 0.48-0.52 stands, worst bound
    0.521151, and today's three runs agree with it.
+
+## 2026-08-19 CrimsonHawk: MEASURED — the plain-search branch (a53c756f1) takes luapat_256 from 1.9281x to 1.0298x against the incumbent, and the falsifier holds: the matcher shape did not move (frankenredis-zxtuk, frankenredis-25uop)
+
+EVIDENCE CLASS: callgrind Ir, fr and a LIVE vendored Redis 7.2.4 in the same invocation, slope
+method, 2000 ops per rung. Before-figures are the within-window set recorded at 4bfce7cc1; the
+after-figures are this run. The harness printed WINDOW: UNFIT throughout, so SIZING.
+
+  per-arm  loadavg 16.18/29.79/31.77 at the first rung to 15.30/28.70/31.37 at the last; iowait 0
+  fr ELF   rebuilt 02:04, contains a53c756f1 (landed 01:55) -- verified by symbol, not by timestamp
+           alone: nm shows lua_pattern_has_specials present
+
+### BEFORE AND AFTER
+
+    rung             fr before    fr after     ratio before   ratio after
+    luapat_16         22,713.0     21,105.2      1.3200x        1.2302x
+    luapat_256        55,026.6     29,447.5      1.9281x        1.0298x
+    luapatsp_16       21,837.1     21,903.9      1.2520x        1.2714x
+    luapatsp_256      37,969.8     38,062.4      1.2303x        1.2308x
+
+**The falsifier I wrote before the fix existed is satisfied on both arms.** It said: luapat_256
+must fall toward Redis's flat find cost, and luapatsp_256 must NOT move, because upstream's
+condition is `find && (explicit || no specials)` and a special-bearing pattern reaches the matcher
+in both engines regardless. luapatsp_256 moved 1.2303 -> 1.2308, four parts in ten thousand. The
+change did not escape the branch it was scoped to.
+
+### THE CORRECTNESS HALF, MEASURED THE SAME WAY
+
+    sweep                     before        after
+    byte_close_paren          246 of 256    0 of 256
+    byte_close_paren_match      1 of 256    1 of 256
+
+The find divergence class is closed entirely. The one remaining match divergence is the byte-0 NUL
+lead already recorded on frankenredis-gvex0 and predates the fix -- it did not appear as a result
+of it, which is the second thing the match sweep is there to check.
+
+### WHAT REMAINS, AND IT IS THE HALF THAT DID NOT LAND
+
+`a53c756f1` took upstream's disjunction but kept fr's existing plain scan:
+
+    s[init..].windows(pattern.len().max(1)).position(|w| w == pattern.as_slice())
+
+which compares the FULL pattern at every offset. Upstream's `lmemfind` finds a candidate by first
+byte and only then compares the tail. Netting the rep slope out of the find slope:
+
+    fr plain, before   106.08 instructions per byte
+    fr plain, after      6.20
+    redis plain          1.47
+
+So the branch captured about 94 pct of the gap and the remaining ~4x is the O(n*m) scan. CAVEAT ON
+THAT NETTING: the rep slopes used (fr 28.56, redis 46.19) come from the earlier within-window set,
+so the netted figures cross runs even though the raw ratios above do not. The raw ratio movement
+1.9281 -> 1.0298 needs no such subtraction and is the number to quote.
+
+### WHAT THIS DOES NOT SETTLE
+
+  * SIZING. The gate refused every rung; nine-plus consecutive refusals now.
+  * These are instruction counts. The throughput rows recorded earlier for these shapes were taken
+    before the fix and are now stale as a description of fr.
+
+### RETRY PREDICATES
+
+  1. Land the lmemfind-shaped scan and re-run these four rungs. luapat_256 should fall further
+     toward 1.0x; luapatsp_256 must again not move.
+  2. Re-take the wall-clock luapat rows, which now describe a version of fr that no longer exists.
+  3. A certified bound still needs a window with zero cargo/rustc under the shared uid.
