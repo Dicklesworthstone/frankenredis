@@ -3341,25 +3341,57 @@ fn resolve_lua_local_slots(stmts: &mut Block) {
 /// earlier than the incumbent, it now refuses with the incumbent's own message.
 /// Maximum nested Lua function calls before the interpreter refuses with "stack overflow".
 ///
-/// (frankenredis-lua-call-depth-ug22x) MEASURED, not guessed, and the number that matters is the
-/// FRAME COST rather than this depth. With the bound removed entirely, a release fr on an 8 MiB
-/// worker thread (`WORKER_THREAD_STACK_SIZE`, c63b56ef1) survives a self-recursion of 1200 and
-/// ABORTS at 1500 -- so a Lua call costs roughly 6.2 KB of Rust stack, and fr's own hard ceiling is
-/// about 1350. At 512 the walk occupies 3.03 MB, 37.9 pct of the thread, matching the margin
-/// `LUA_REPLY_MAX_DEPTH` uses and leaving the dispatch frames beneath it their room.
+/// (frankenredis-lua-call-depth-ug22x) SUPERSEDED, kept because the method is still the method:
+/// the number that matters is the FRAME COST rather than this depth. It was first obtained by
+/// removing the bound entirely and finding where a release fr died on an 8 MiB worker thread
+/// (`WORKER_THREAD_STACK_SIZE`, c63b56ef1) -- survived 1200, aborted at 1500, so ~6.2 KB per call
+/// and a hard ceiling near 1350, which is what made 512 the right value at the time.
+///
+/// THOSE FIGURES NO LONGER DESCRIBE THIS BINARY. 79e2438e3 cut the per-level cost to 4352 B, so
+/// the ceiling moved to ~1928 and the bound to 768. The current derivation is the one immediately
+/// above the constant; read that, not this paragraph. Both are kept because a reader who finds
+/// only the new numbers cannot tell whether anyone ever checked them against a running process --
+/// someone did, twice, and the second check is recorded below.
 ///
 /// THE OLD VALUE WAS 128, which refused scripts fr could run perfectly well: it sat at 10 pct of
 /// the depth the process actually survives. Measured against vendored 7.2.4 with
 /// `scripts/lua_depth_survival_differential.py recurse`, redis ran the same recursion to at least
 /// 16000 and refused by 18000, so fr was refusing replies -- a FALSE REJECTION -- from 128 up.
 ///
-/// A RESIDUAL GAP REMAINS AND IS NOT HIDDEN: upstream's ceiling is ~17000 and fr's is ~1350, so
-/// scripts recursing between 513 and ~16000 still work on Redis and fail here. That is not
-/// closable by moving this constant -- at 6.2 KB per call, upstream's depth would need 100 MB of
-/// stack. Closing it means making the interpreter's call path cheaper or trampolining it, which is
-/// its own piece of work and is recorded on the bead. Raising this number past ~1350 would convert
-/// a refusal into a process abort, which is strictly worse.
-const MAX_CALL_DEPTH: usize = 512;
+/// The residual gap is restated with current numbers immediately above the constant; the version
+/// that stood here quoted the 6.2 KB frame and a ~1350 ceiling and is left out rather than left
+/// wrong, because two contradictory derivations in one comment is how the next person picks the
+/// stale one.
+///
+/// VERIFIED LIVE AT THE RAISED BOUND (CrimsonHawk, 2026-08-19), which arithmetic alone cannot
+/// establish, since the failure mode being guarded is a process ABORT rather than an error:
+/// `scripts/lua_depth_survival_differential.py recurse 500,767,768,769,1000,2000,5000` against
+/// vendored 7.2.4, both engines live. fr serves 500 and 767, refuses from 768 up with upstream's
+/// own "stack overflow" wording, and IS STILL ALIVE after every row including 5000 -- the guard
+/// fires instead of the stack dying, which is the whole reason the bound exists. Redis serves all
+/// seven, which is the residual gap and not a regression. Verdicts, not timings, so the loaded
+/// host (1min 254.95) does not bear on them.
+/// (frankenredis-lua-call-depth-ug22x) 768, raised from 512 once 79e2438e3 cut the per-level
+/// cost. The arithmetic, so the next person can redo it rather than trust it:
+///
+///     cycle cost      4352 B/level   call_function 416 + exec_block 96 + exec_stmts 128
+///                                    + exec_stmt 1264 + eval_expr 816 x3, read from the
+///                                    shipping ELF's prologues by recursion_stack_budget_gate.py
+///     worker stack    8 MiB          WORKER_THREAD_STACK_SIZE, fr-server/src/main.rs:79
+///     absolute cap    1928 levels    8 MiB / 4352 B
+///     41 pct margin   790 levels     the convention the reply-walk bound uses
+///
+/// 768 rather than 790: it is under the convention at 39.8 pct, and a power of two is a number
+/// someone can recognise as chosen rather than fitted. The margin is not decoration -- a Lua
+/// stack overflow ABORTS the process, so the limit exists to convert a crash into an error.
+///
+/// THE RESIDUAL IS STILL LARGE AND IS NOT HIDDEN. Upstream runs this to ~16000 levels and
+/// refuses by 18000 (measured live, both engines, on the bead). fr cannot reach that at any
+/// frame cost near 4352 B -- 16000 levels would need 66 MiB of stack. So a Redis script with a
+/// recursive helper deeper than 767 frames still fails against fr with an error it never sees on
+/// Redis. This raise takes the gap from ~125x to ~21x; closing it needs either a much cheaper
+/// frame or a heap-allocated interpreter stack, and neither is this change.
+const MAX_CALL_DEPTH: usize = 768;
 const MAX_ITERATIONS: u64 = 1_000_000;
 const LUA_EXACT_INTEGER_LIMIT: i128 = 1_i128 << 53;
 const LUA_YIELD_SENTINEL: &str = "__frankenredis_lua_coroutine_yield__";
