@@ -23026,18 +23026,28 @@ fn try_dispatch_floor_classified_action(
             // (frankenredis-ozrro) The executor validates the option keyword and the COUNT
             // range, declining wherever the generic is more permissive so those packets
             // reach the error the generic would have produced.
+            // (frankenredis-hwcm1) Encode straight into the connection buffer, as the bare
+            // form does. MEASURED on scan_match before this: 8.0 allocations per op, 8.004
+            // memcpy, and 4.000 each of RespFrame::encode_into and drop_glue -- the identical
+            // profile the bare form carried before ad0b142f7 took it to zero. The executor
+            // declines only BEFORE it writes anything, so a decline cannot leave a partial
+            // reply in `out` and the generic fallback re-processes the packet byte-exactly.
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) = parse_borrowed_plain_scan_opt_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_scan_opt_borrowed(
-                    packet.cursor,
-                    packet.keyword,
-                    packet.value,
-                    ts,
-                    default_read_allowed,
-                )
+                && runtime
+                    .execute_plain_scan_opt_borrowed_into(
+                        packet.cursor,
+                        packet.keyword,
+                        packet.value,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -23082,20 +23092,30 @@ fn try_dispatch_floor_classified_action(
             // (frankenredis-ozrro) Both options go through the SAME helper the arity-4 arm
             // uses, applied in order, so duplicates are last-wins exactly as the generic's
             // option loop does. A bad keyword in either position declines to generic.
+            // (frankenredis-hwcm1) Encode straight into the connection buffer, as the bare
+            // form does. MEASURED on scan_match before this: 8.0 allocations per op, 8.004
+            // memcpy, and 4.000 each of RespFrame::encode_into and drop_glue -- the identical
+            // profile the bare form carried before ad0b142f7 took it to zero. The executor
+            // declines only BEFORE it writes anything, so a decline cannot leave a partial
+            // reply in `out` and the generic fallback re-processes the packet byte-exactly.
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) = parse_borrowed_plain_scan_opt2_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_scan_opt2_borrowed(
-                    packet.cursor,
-                    packet.keyword1,
-                    packet.value1,
-                    packet.keyword2,
-                    packet.value2,
-                    ts,
-                    default_read_allowed,
-                )
+                && runtime
+                    .execute_plain_scan_opt2_borrowed_into(
+                        packet.cursor,
+                        packet.keyword1,
+                        packet.value1,
+                        packet.keyword2,
+                        packet.value2,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -23117,22 +23137,32 @@ fn try_dispatch_floor_classified_action(
             // (frankenredis-ozrro) All three option pairs go through the same shared
             // executor the arity-4 and arity-6 arms use, applied in order, so duplicates
             // are last-wins as the generic's option loop makes them.
+            // (frankenredis-hwcm1) Encode straight into the connection buffer, as the bare
+            // form does. MEASURED on scan_match before this: 8.0 allocations per op, 8.004
+            // memcpy, and 4.000 each of RespFrame::encode_into and drop_glue -- the identical
+            // profile the bare form carried before ad0b142f7 took it to zero. The executor
+            // declines only BEFORE it writes anything, so a decline cannot leave a partial
+            // reply in `out` and the generic fallback re-processes the packet byte-exactly.
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) = parse_borrowed_plain_scan_opt3_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_scan_opt3_borrowed(
-                    packet.cursor,
-                    packet.keyword1,
-                    packet.value1,
-                    packet.keyword2,
-                    packet.value2,
-                    packet.keyword3,
-                    packet.value3,
-                    ts,
-                    default_read_allowed,
-                )
+                && runtime
+                    .execute_plain_scan_opt3_borrowed_into(
+                        packet.cursor,
+                        packet.keyword1,
+                        packet.value1,
+                        packet.keyword2,
+                        packet.value2,
+                        packet.keyword3,
+                        packet.value3,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(

@@ -27124,6 +27124,205 @@ impl Runtime {
     /// Declines (=> generic) on a non-canonical cursor, an unknown option keyword, a COUNT
     /// outside 1..=i64::MAX, an oversized argument, or a session the borrowed-read
     /// admission guard refuses.
+    /// `SCAN cursor <opt> <val> ...`, encoded straight into the connection buffer.
+    ///
+    /// (frankenredis-hwcm1) The owning twin below builds the reply as a RespFrame tree and
+    /// takes the keys owned out of `scan_in_db`. MEASURED on scan_match, that is 8.0
+    /// allocations per op, 8.004 memcpy, and 4.000 each of `RespFrame::encode_into` and
+    /// `drop_glue::<RespFrame>` -- the identical profile the BARE form had before
+    /// ad0b142f7, which took it to zero. Same two levers, same shape.
+    ///
+    /// The reply is `[cursor, [keys...]]`, so the cursor and the array header both PRECEDE
+    /// the keys and neither is known until the walk ends: the cursor is its result and the
+    /// header needs the count. Buffering the keys anywhere is the allocation being removed,
+    /// so they are encoded first, the prefix is appended AFTER them, and one `rotate_left`
+    /// swings it in front -- `rotate_left(keys_len)` moves the first `keys_len` bytes to the
+    /// end, turning [keys][prefix] into [prefix][keys], in place.
+    ///
+    /// DECLINES WRITE NOTHING. Every `return None` below happens before a byte is emitted,
+    /// which is what makes it safe to encode before the outcome is known: a partial reply
+    /// followed by the generic fallback would corrupt the stream.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_plain_scan_opts_borrowed_into(
+        &mut self,
+        cursor_arg: &[u8],
+        opts: &[(&[u8], &[u8])],
+        min_array_len: usize,
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < min_array_len
+            || self.policy.gate.max_bulk_len < b"SCAN".len()
+            || cursor_arg.len() > self.policy.gate.max_bulk_len
+            || opts.iter().any(|(k, v)| {
+                k.len() > self.policy.gate.max_bulk_len || v.len() > self.policy.gate.max_bulk_len
+            })
+        {
+            return None;
+        }
+        let cursor = Self::parse_canonical_scan_cursor(cursor_arg)?;
+        let mut pattern: Option<&[u8]> = None;
+        let mut type_filter: Option<&[u8]> = None;
+        let mut count: usize = 10;
+        for (keyword, value) in opts {
+            Self::apply_scan_option(keyword, value, &mut pattern, &mut type_filter, &mut count)?;
+        }
+
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
+            return None;
+        }
+        let argv_len_sum = b"SCAN".len()
+            + cursor_arg.len()
+            + opts.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+        let packet_id = self.plain_read_borrowed_preamble("scan", argv_len_sum, now_ms);
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        // `db` is read out before the call because the receiver `self.server.store` is
+        // borrowed at the call site, and reading `self.session.selected_db` in the argument
+        // list would be a second borrow of `self` while that one is live.
+        let db = self.session.selected_db;
+        let keys_start = out.len();
+        let mut returned = 0usize;
+        let next_cursor = self.server.store.scan_in_db_visit(
+            db,
+            cursor,
+            pattern,
+            type_filter,
+            count,
+            now_ms,
+            |logical| {
+                returned += 1;
+                if !suppress_reply {
+                    fr_protocol::encode_bulk_string_slice(Some(logical), resp3, out);
+                }
+            },
+        );
+        if !suppress_reply {
+            let keys_len = out.len() - keys_start;
+            out.extend_from_slice(b"*2\r\n");
+            let mut cursor_buf = [0u8; 20];
+            let mut n = next_cursor;
+            let mut i = cursor_buf.len();
+            loop {
+                i -= 1;
+                cursor_buf[i] = b'0' + (n % 10) as u8;
+                n /= 10;
+                if n == 0 {
+                    break;
+                }
+            }
+            fr_protocol::encode_bulk_string_slice(Some(&cursor_buf[i..]), resp3, out);
+            fr_protocol::encode_aggregate_header(returned, false, out);
+            out[keys_start..].rotate_left(keys_len);
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        self.record_plain_zremrange_borrowed_metrics(
+            "scan",
+            "SCAN",
+            || {
+                let mut argv = Vec::with_capacity(2 + opts.len() * 2);
+                argv.push(b"SCAN".to_vec());
+                argv.push(cursor_arg.to_vec());
+                for (keyword, value) in opts {
+                    argv.push(keyword.to_vec());
+                    argv.push(value.to_vec());
+                }
+                argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            // Cannot fail: cursor canonical, keywords validated, count in range,
+            // scan_in_db infallible. `account_plain_borrowed_error_reply` is therefore
+            // not called here -- there is no error frame to account, which is the same
+            // reason the bare `_into` twin omits it.
+            false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        Some(())
+    }
+
+    /// (frankenredis-hwcm1) One-option `_into` form. See
+    /// `execute_plain_scan_opts_borrowed_into`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_scan_opt_borrowed_into(
+        &mut self,
+        cursor_arg: &[u8],
+        keyword: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        self.execute_plain_scan_opts_borrowed_into(
+            cursor_arg,
+            &[(keyword, value)],
+            4,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    /// (frankenredis-hwcm1) Two-option `_into` form.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_scan_opt2_borrowed_into(
+        &mut self,
+        cursor_arg: &[u8],
+        keyword1: &[u8],
+        value1: &[u8],
+        keyword2: &[u8],
+        value2: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        self.execute_plain_scan_opts_borrowed_into(
+            cursor_arg,
+            &[(keyword1, value1), (keyword2, value2)],
+            6,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    /// (frankenredis-hwcm1) Three-option `_into` form.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_scan_opt3_borrowed_into(
+        &mut self,
+        cursor_arg: &[u8],
+        keyword1: &[u8],
+        value1: &[u8],
+        keyword2: &[u8],
+        value2: &[u8],
+        keyword3: &[u8],
+        value3: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        self.execute_plain_scan_opts_borrowed_into(
+            cursor_arg,
+            &[(keyword1, value1), (keyword2, value2), (keyword3, value3)],
+            8,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
     fn execute_plain_scan_opts_borrowed(
         &mut self,
         cursor_arg: &[u8],
@@ -61797,6 +61996,74 @@ mod tests {
         );
         let reply = rt.execute_frame(command(&[b"SCAN", b"0", b"COUNT", b"0"]), 2);
         assert_eq!(reply, RespFrame::Error("ERR syntax error".to_string()));
+    }
+
+    #[test]
+    fn scan_opt_borrowed_into_writes_the_owning_reply_bytes_hwcm1() {
+        // (frankenredis-hwcm1) The MATCH/COUNT/TYPE arms encode straight into the connection
+        // buffer, like the bare form. The risk is entirely byte-identity, and specifically
+        // the `rotate_left`: the reply is [cursor, [keys...]] but neither the cursor nor the
+        // array header is known until the walk ends, so the keys are written FIRST and the
+        // prefix is rotated in front of them afterwards. Get the rotation amount wrong and
+        // the reply is still well-formed RESP of the right length -- just with the pieces in
+        // the wrong order, which nothing else in the suite would catch.
+        //
+        // Compared against the OWNING twin on the same runtime, so the assertion does not
+        // depend on two separately-seeded Stores agreeing on intra-batch key order.
+        let mut rt = Runtime::default_strict();
+        for i in 0..5u32 {
+            let key = format!("scopt:{i}");
+            rt.execute_frame(command(&[b"SET", key.as_bytes(), b"v"]), 1);
+        }
+        rt.execute_frame(command(&[b"SET", b"unmatched", b"v"]), 1);
+
+        let owning = rt
+            .execute_plain_scan_opt_borrowed(b"0", b"MATCH", b"scopt:*", 2, None)
+            .expect("the owning twin must serve a canonical cursor and a known keyword");
+        let mut want = Vec::new();
+        owning.encode_into(&mut want);
+
+        let mut got = Vec::new();
+        assert!(
+            rt.execute_plain_scan_opt_borrowed_into(
+                b"0",
+                b"MATCH",
+                b"scopt:*",
+                3,
+                false,
+                &mut got,
+                None,
+            )
+            .is_some(),
+            "the _into path must serve what the owning twin serves"
+        );
+        assert_eq!(
+            got, want,
+            "the _into encode must be byte-identical to the frame the owning twin encodes"
+        );
+
+        // A DECLINE must write NOTHING. That is what makes it safe to encode before the
+        // outcome is known -- a partial reply followed by the generic fallback would corrupt
+        // the stream, and the fallback re-processes the whole packet.
+        let declines: [(&[u8], &[u8], &[u8]); 3] = [
+            (b"0", b"NOSUCHOPT", b"1"),
+            (b"-1", b"MATCH", b"scopt:*"),
+            (b"01", b"MATCH", b"scopt:*"),
+        ];
+        for (cursor, keyword, value) in declines {
+            let mut out = Vec::new();
+            assert!(
+                rt.execute_plain_scan_opt_borrowed_into(
+                    cursor, keyword, value, 4, false, &mut out, None,
+                )
+                .is_none(),
+                "cursor {cursor:?} keyword {keyword:?} must decline to generic"
+            );
+            assert!(
+                out.is_empty(),
+                "a decline must not leave bytes in the buffer ({cursor:?} {keyword:?})"
+            );
+        }
     }
 
     #[test]
