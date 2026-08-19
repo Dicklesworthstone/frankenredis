@@ -5801,6 +5801,155 @@ impl<'a> LuaState<'a> {
         Some(Ok(ControlFlow::None))
     }
 
+    /// (frankenredis-lua-call-depth-ug22x) OUTLINED OUT OF `exec_stmt`, and the reason is
+    /// stack DEPTH rather than speed.
+    ///
+    /// `exec_stmt`'s frame is sized for the union of every arm inlined into it, and the
+    /// loop arms carry the most locals while sitting OFF the function-call recursion
+    /// cycle. A recursive Lua call runs call_function, exec_block, exec_stmts, exec_stmt,
+    /// eval_expr and back into call_function; `While`/`Repeat`/`GenericFor` never appear
+    /// in it. Every byte they contribute to that frame is therefore paid by EVERY level
+    /// of every recursion and used by none of them.
+    ///
+    /// `#[inline(never)]` is load-bearing: without it the compiler may fold these back
+    /// into the caller and restore the frame, which is exactly what is being undone. The
+    /// cost is one call per loop STATEMENT (not per iteration), noise beside the loop body.
+    #[inline(never)]
+    fn exec_while_stmt(
+        &mut self,
+        cond: &Expr,
+        body: &[(u32, Stmt)],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<ControlFlow, String> {
+            loop {
+                self.iterations += 1;
+                if self.iterations > MAX_ITERATIONS {
+                    return Err("script exceeded maximum iteration count".to_string());
+                }
+                // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` loop
+                // condition suspends here; on resume the yielded value is the
+                // condition result (truthy → run body then re-check; falsy →
+                // exit). Only valid at the coroutine's top statement level;
+                // deeper it errors as before.
+                if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
+                    return self.start_coroutine_yield(
+                        yield_args,
+                        LuaCoroutineContinuation::While {
+                            cond: cond.clone(),
+                            body: body.to_vec(),
+                        },
+                        false,
+                        env,
+                        varargs,
+                    );
+                }
+                let cv = self.eval_expr(cond, env, varargs)?;
+                if !cv.is_truthy() {
+                    break;
+                }
+                match self.exec_block(body, env, varargs)? {
+                    ControlFlow::Break => break,
+                    ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
+                    ControlFlow::None => {}
+                }
+            }
+            Ok(ControlFlow::None)
+        
+    }
+
+    /// (frankenredis-lua-call-depth-ug22x) See `exec_while_stmt`: same reason, same cycle.
+    #[inline(never)]
+    fn exec_repeat_stmt(
+        &mut self,
+        body: &[(u32, Stmt)],
+        cond: &Expr,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<ControlFlow, String> {
+            loop {
+                self.iterations += 1;
+                if self.iterations > MAX_ITERATIONS {
+                    return Err("script exceeded maximum iteration count".to_string());
+                }
+                env.push_scope();
+                let cf = self.exec_stmts(body, env, varargs)?;
+                // A `break`/`return` in the body exits before the until
+                // condition is ever evaluated (matches Lua 5.1).
+                match cf {
+                    ControlFlow::Break => {
+                        env.pop_scope();
+                        break;
+                    }
+                    ControlFlow::Return(v) => {
+                        env.pop_scope();
+                        return Ok(ControlFlow::Return(v));
+                    }
+                    ControlFlow::None => {}
+                }
+                // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` until
+                // condition suspends here. The body scope stays pushed so the
+                // yield args see body locals; it is saved with the env on
+                // yield and popped in the resume handler. Top-level only;
+                // deeper it errors as before.
+                if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
+                    return self.start_coroutine_yield(
+                        yield_args,
+                        LuaCoroutineContinuation::Repeat {
+                            body: body.to_vec(),
+                            cond: cond.clone(),
+                        },
+                        false,
+                        env,
+                        varargs,
+                    );
+                }
+                let cv = self.eval_expr(cond, env, varargs)?;
+                env.pop_scope();
+                if cv.is_truthy() {
+                    break;
+                }
+            }
+            Ok(ControlFlow::None)
+        
+    }
+
+    /// (frankenredis-lua-call-depth-ug22x) See `exec_while_stmt`: same reason, same cycle.
+    #[inline(never)]
+    fn exec_generic_for_stmt(
+        &mut self,
+        names: &[String],
+        iter_exprs: &[Expr],
+        body: &[(u32, Stmt)],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<ControlFlow, String> {
+            // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` anywhere in
+            // the iterator expression list suspends here; on resume the
+            // yielded value(s) complete the iterator triple and the loop
+            // runs. Top-level only; deeper it errors as before.
+            if let Some((prefix, yield_args, remaining, yield_was_last)) =
+                self.split_direct_yield_exprs(iter_exprs, env, varargs)?
+            {
+                return self.start_coroutine_yield(
+                    &yield_args,
+                    LuaCoroutineContinuation::GenericFor {
+                        names: names.to_vec(),
+                        prefix,
+                        remaining,
+                        yield_was_last,
+                        body: body.to_vec(),
+                    },
+                    false,
+                    env,
+                    varargs,
+                );
+            }
+            let iter_vals = self.eval_expr_list(iter_exprs, env, varargs)?;
+            self.run_generic_for_from_iter_vals(names, iter_vals, body, env, varargs)
+        
+    }
+
     fn exec_stmt(
         &mut self,
         stmt: &Stmt,
@@ -5947,87 +6096,8 @@ impl<'a> LuaState<'a> {
                 }
                 Ok(ControlFlow::None)
             }
-            Stmt::While(cond, body) => {
-                loop {
-                    self.iterations += 1;
-                    if self.iterations > MAX_ITERATIONS {
-                        return Err("script exceeded maximum iteration count".to_string());
-                    }
-                    // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` loop
-                    // condition suspends here; on resume the yielded value is the
-                    // condition result (truthy → run body then re-check; falsy →
-                    // exit). Only valid at the coroutine's top statement level;
-                    // deeper it errors as before.
-                    if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
-                        return self.start_coroutine_yield(
-                            yield_args,
-                            LuaCoroutineContinuation::While {
-                                cond: cond.clone(),
-                                body: body.clone(),
-                            },
-                            false,
-                            env,
-                            varargs,
-                        );
-                    }
-                    let cv = self.eval_expr(cond, env, varargs)?;
-                    if !cv.is_truthy() {
-                        break;
-                    }
-                    match self.exec_block(body, env, varargs)? {
-                        ControlFlow::Break => break,
-                        ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
-                        ControlFlow::None => {}
-                    }
-                }
-                Ok(ControlFlow::None)
-            }
-            Stmt::Repeat(body, cond) => {
-                loop {
-                    self.iterations += 1;
-                    if self.iterations > MAX_ITERATIONS {
-                        return Err("script exceeded maximum iteration count".to_string());
-                    }
-                    env.push_scope();
-                    let cf = self.exec_stmts(body, env, varargs)?;
-                    // A `break`/`return` in the body exits before the until
-                    // condition is ever evaluated (matches Lua 5.1).
-                    match cf {
-                        ControlFlow::Break => {
-                            env.pop_scope();
-                            break;
-                        }
-                        ControlFlow::Return(v) => {
-                            env.pop_scope();
-                            return Ok(ControlFlow::Return(v));
-                        }
-                        ControlFlow::None => {}
-                    }
-                    // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` until
-                    // condition suspends here. The body scope stays pushed so the
-                    // yield args see body locals; it is saved with the env on
-                    // yield and popped in the resume handler. Top-level only;
-                    // deeper it errors as before.
-                    if let Some(yield_args) = Self::direct_coroutine_yield_args(cond) {
-                        return self.start_coroutine_yield(
-                            yield_args,
-                            LuaCoroutineContinuation::Repeat {
-                                body: body.clone(),
-                                cond: cond.clone(),
-                            },
-                            false,
-                            env,
-                            varargs,
-                        );
-                    }
-                    let cv = self.eval_expr(cond, env, varargs)?;
-                    env.pop_scope();
-                    if cv.is_truthy() {
-                        break;
-                    }
-                }
-                Ok(ControlFlow::None)
-            }
+            Stmt::While(cond, body) => self.exec_while_stmt(cond, body, env, varargs),
+            Stmt::Repeat(body, cond) => self.exec_repeat_stmt(body, cond, env, varargs),
             Stmt::NumericFor(name, start, stop, step, body) => {
                 // (frankenredis-7vqyo) Upstream luaV_execute raises these
                 // via luaG_runerror which prepends the script source
@@ -6121,29 +6191,7 @@ impl<'a> LuaState<'a> {
                 Ok(ControlFlow::None)
             }
             Stmt::GenericFor(names, iter_exprs, body) => {
-                // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` anywhere in
-                // the iterator expression list suspends here; on resume the
-                // yielded value(s) complete the iterator triple and the loop
-                // runs. Top-level only; deeper it errors as before.
-                if let Some((prefix, yield_args, remaining, yield_was_last)) =
-                    self.split_direct_yield_exprs(iter_exprs, env, varargs)?
-                {
-                    return self.start_coroutine_yield(
-                        &yield_args,
-                        LuaCoroutineContinuation::GenericFor {
-                            names: names.clone(),
-                            prefix,
-                            remaining,
-                            yield_was_last,
-                            body: body.clone(),
-                        },
-                        false,
-                        env,
-                        varargs,
-                    );
-                }
-                let iter_vals = self.eval_expr_list(iter_exprs, env, varargs)?;
-                self.run_generic_for_from_iter_vals(names, iter_vals, body, env, varargs)
+                self.exec_generic_for_stmt(names, iter_exprs, body, env, varargs)
             }
             Stmt::DoBlock(body) => self.exec_block(body, env, varargs),
             Stmt::FunctionDecl(names, params, is_variadic, body) => {
@@ -12696,6 +12744,14 @@ fn lua_single_match(pat: &[u8], pi: usize, ch: u8) -> bool {
 /// (frankenredis-uqnq6) Matches luaL_error's behavior: luaL_where(L,1) is
 /// "" when the caller of the C-builtin is itself a C frame (pcall).
 fn lua_pattern_validate_named(inv_name: Option<&str>, pat: &[u8]) -> Result<(), String> {
+    // (frankenredis-jdii2) Validate only as far as the matcher will READ. Upstream never sees the
+    // bytes after a NUL, so a malformed tail there is not an error to it: `string.match('abc',
+    // 'a\0[')` answers 'a' on 7.2.4 where fr raised "malformed pattern (missing ']')". Truncating
+    // here rather than at each check keeps the two walks agreeing by construction.
+    let pat = match pat.iter().position(|&b| b == 0) {
+        Some(nul) => &pat[..nul],
+        None => pat,
+    };
     let prefix = if inv_name.is_some() {
         "user_script:1: "
     } else {
@@ -12931,7 +12987,23 @@ fn lua_pat_match(
     // `return`, which left both loops. rustc caught it as "value assigned to
     // `si` is never read".
     'match_pattern: loop {
-        if pi >= pat.len() {
+        // (frankenredis-jdii2) Upstream's matcher is NUL-TERMINATED: `match` switches on `*p` and
+        // `case '\0': return s;` is its "end of pattern" (lstrlib.c:406). It takes `const char *p`
+        // and never a length, so a NUL byte inside a pattern ENDS it -- everything after is never
+        // compiled and never matched. fr walked the whole byte slice, so it matched the NUL as a
+        // literal and then kept going.
+        //
+        // MEASURED on live 7.2.4:
+        //   string.gsub('a\0b', '\0',  'X')  ->  identical to the EMPTY pattern, X at every
+        //                                          position; fr replaced the NUL and answered aXb
+        //   string.match('ab',   'a\0b')      ->  'a'   (pattern is just 'a'); fr answered nil
+        //   string.match('abc',  'a\0[')      ->  'a'   (the malformed tail is never seen);
+        //                                          fr raised "malformed pattern (missing ']')"
+        //
+        // string.find is NOT affected and must not be "fixed": a NUL-bearing pattern has no
+        // SPECIALS before the NUL, so find takes the plain branch and searches the full bytes --
+        // `string.find('a\0b', '\0')` is 2,2 on both engines, and was already so.
+        if pi >= pat.len() || pat[pi] == 0 {
             return Some(si);
         }
 
@@ -16871,6 +16943,53 @@ mod tests {
     /// match, find and gmatch, because those read their captures through `push_captures` and gsub
     /// with a capture-free replacement never reads one. A change that simply stopped erroring
     /// would satisfy the first three assertions and break the last three.
+    /// (frankenredis-jdii2) A NUL byte ENDS a Lua pattern. Upstream's matcher takes `const char *p`
+    /// with no length and `case '\0'` is its "end of pattern" (lstrlib.c:406), so everything after
+    /// a NUL is never compiled and never matched. Every assertion is a row MEASURED against 7.2.4.
+    #[test]
+    fn a_nul_byte_ends_a_lua_pattern_jdii2() {
+        let mut store = Store::new();
+        let run = |store: &mut Store, src: &[u8]| -> String {
+            match eval_script(src, &[], &[], store, 0) {
+                Ok(RespFrame::BulkString(Some(b))) => String::from_utf8_lossy(&b).into_owned(),
+                Ok(other) => format!("{other:?}"),
+                Err(e) => format!("ERR {e}"),
+            }
+        };
+
+        // A pattern that is only a NUL is the EMPTY pattern, so gsub behaves identically to one.
+        // Compared against the empty pattern rather than a literal, because that equivalence IS the
+        // property and it survives a later change to where empty matches land.
+        let nul_pat = run(&mut store, b"return (string.gsub('a\0b', '\0', 'X'))");
+        let empty_pat = run(&mut store, b"return (string.gsub('a\0b', '', 'X'))");
+        assert_eq!(nul_pat, empty_pat, "a NUL-only pattern must behave as the empty pattern");
+
+        // The pattern is truncated at the NUL, so only the prefix matches.
+        assert_eq!(run(&mut store, b"return string.match('ab', 'a\0b')"), "a");
+        assert_eq!(run(&mut store, b"return tostring(string.match('abc', '^\0'))"), "");
+
+        // A MALFORMED tail after the NUL is never seen, so it is not an error. These two would
+        // raise if validation walked past the NUL, which is what fr used to do.
+        assert_eq!(run(&mut store, b"return string.match('abc', 'a\0[')"), "a");
+        assert_eq!(run(&mut store, b"return string.match('abc', 'a\0%')"), "a");
+
+        // CONTROL, and the reason this fix belongs in the matcher walk rather than in the pattern
+        // itself: find takes the PLAIN branch for a NUL-bearing pattern (no SPECIALS precede the
+        // NUL) and searches the full bytes, so it locates the literal NUL. This agreed BEFORE the
+        // fix and must still agree after it.
+        assert_eq!(
+            run(&mut store, b"local a,b = string.find('a\0b', '\0') return tostring(a)..','..tostring(b)"),
+            "2,2"
+        );
+
+        // CONTROL: a NUL in the SUBJECT is ordinary data -- the subject is bounded by length and
+        // only the PATTERN is NUL-terminated.
+        assert_eq!(
+            run(&mut store, b"return string.match('a\0b', 'a.b') == 'a\0b' and 'yes' or 'no'"),
+            "yes"
+        );
+    }
+
     #[test]
     fn an_unfinished_capture_raises_when_read_not_when_compiled_gvex0() {
         let mut store = Store::new();
