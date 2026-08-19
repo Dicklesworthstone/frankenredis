@@ -17138,17 +17138,26 @@ mod tests {
     /// pass the test above and FAIL this one by recursing natively until the process aborts --
     /// strictly worse than the refusal it replaced.
     ///
-    /// IT RUNS ON AN 8 MiB THREAD ON PURPOSE, and that is a fact about the product, not a test
-    /// convenience. `MAX_CALL_DEPTH` is 768 frames at a measured 4352 B each = 3.34 MB, sized
-    /// against the 8 MiB reactor threads `c63b56ef1` configures. Rust's default test thread gets
-    /// 2 MiB, so on the harness's own thread the native stack dies BEFORE the guard can fire and
-    /// the whole test binary aborts with SIGABRT -- which is exactly what happened the first time
-    /// this test ran. Asserting the refusal therefore requires a thread the size production uses;
-    /// on a smaller one this test would be measuring the harness, not the engine.
+    /// IT RUNS ON A SIZED THREAD ON PURPOSE. Rust's default test thread gets 2 MiB, so on the
+    /// harness's own thread the native stack dies BEFORE the guard can fire and the whole test
+    /// binary aborts with SIGABRT -- which is what happened the first time this test ran.
+    ///
+    /// 8 MiB WAS NOT ENOUGH EITHER, and the reason is worth keeping because it caught two people:
+    /// the 4352 B per level that sizes `MAX_CALL_DEPTH` is a RELEASE figure, and 768 x 4352 =
+    /// 3.34 MB does fit 8 MiB. But tests run at opt-level 0, where the same cycle measures
+    /// 19,560 B per level -- 4.5x fatter (call_function 416 -> 2464, eval_expr 816 -> 4104,
+    /// exec_stmt 1264 -> 4112, read from this crate's own debug test binary). At that cost 768
+    /// levels need 14.33 MB, an 8 MiB thread holds 429, and the binary aborted again.
+    ///
+    /// So the thread is sized for the DEBUG cost with headroom, matching the 64 MiB probes
+    /// elsewhere in this file (`thread-stack-size-1tlyh`, `9a4ca2c28`). A depth bound is sized
+    /// for PRODUCTION from release frames -- that part was right and `MAX_CALL_DEPTH` does not
+    /// move -- but the test that PROVES the bound has to fit the profile the test runs in, or the
+    /// bound is unprovable and the suite is unrunnable.
     #[test]
     fn non_tail_recursion_is_still_refused_at_the_bound_ps0le() {
         let probe = std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
+            .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let mut store = Store::new();
                 eval_script(
@@ -17160,7 +17169,7 @@ mod tests {
                 )
                 .expect_err("non-tail recursion must be refused, never abort the process")
             })
-            .expect("spawn the 8 MiB probe thread");
+            .expect("spawn the 64 MiB probe thread");
         let err = probe
             .join()
             .expect("the guard must fire before the stack does");
