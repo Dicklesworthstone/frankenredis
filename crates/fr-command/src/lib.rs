@@ -2511,6 +2511,41 @@ pub fn dispatch_argv(
             "READONLY You can't write against a read only replica.".to_string(),
         ));
     }
+    // (frankenredis-oo3aw follow-up) The rest of `scriptVerifyWriteCommandAllow` (script.c:344):
+    // the disk-error gate at :379 and the min-replicas gate at :387.
+    //
+    // WHY A SECOND COPY EXISTS AT ALL. Upstream wraps every `scriptPrepareForRun` check in
+    // `if (!(script_flags & SCRIPT_FLAG_EVAL_COMPAT_MODE))` (script.c:140), so a body with no
+    // `#!` -- which is nearly every EVAL in the wild -- reaches NONE of them, and upstream
+    // refuses its writes here instead. fr had the prepare half only (`eval` runs that chain
+    // under `script.starts_with(b"#!")`, correctly), so a shebang-less script wrote straight
+    // through an active RDB/AOF disk error and through a failed `min-replicas-to-write` quorum:
+    // the two conditions those settings exist to stop writes on. Measured, not inferred -- with
+    // `stop-writes-on-bgsave-error` biting, a direct SET was refused while
+    // `EVAL "return redis.call('SET',KEYS[1],'v')" 1 k` answered OK.
+    //
+    // CMD_WRITE ONLY. `command_is_write_in_script`, not its may-replicate superset: upstream
+    // returns early at :360 on `!(cmd->flags & CMD_WRITE)`, so PUBLISH from a shebang-less
+    // script passes both of these and is refused only by the read-only-script check above.
+    //
+    // ORDER. Disk before quorum, matching :379 before :387, so a host failing both answers
+    // MISCONF -- the same one upstream answers.
+    //
+    // NOT PORTED: upstream's `SCRIPT_WRITE_DIRTY` early-return at :365 ("if the script already
+    // made a modification to the dataset, we can't fail it on unpredictable error state"). It is
+    // unobservable for these two checks. Both read server state that only the event loop
+    // updates -- `writeCommandsDeniedByDiskError` from the persistence result, the good-replica
+    // count from `refreshGoodSlavesCount` on a replica ack -- and no event loop turn happens
+    // inside a script, which runs atomically. So neither verdict can flip between one inner
+    // write and the next, and the exemption can never be the difference between two answers.
+    if store.script_nesting_level >= 1 && command_is_write_in_script(argv) {
+        if let Some(message) = store.script_inner_disk_write_denial {
+            return Err(CommandError::Custom(message.to_string()));
+        }
+        if !store.good_replicas_ok {
+            return Err(CommandError::Custom(fr_store::NOREPLICAS_ERROR.to_string()));
+        }
+    }
     // (frankenredis-7ymk5) P0 security fix: ACL permissions must be
     // enforced for every dispatched command, not only for those running
     // inside a Lua script. The previous gate scoped this check to
@@ -14143,30 +14178,51 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // The cache lookup needs no `Store` at all, so it can run inside this match against the
     // borrowed bytes; the copy is then paid only on a MISS, where the source is genuinely about
     // to be executed. On the hit path FCALL now copies nothing that scales with the library.
-    let (library, has_no_writes, has_allow_oom) = match store.function_get(func_name) {
-        Some((lib, func)) => {
-            let no_writes = func
-                .flags
-                .iter()
-                .any(|f| f.eq_ignore_ascii_case("no-writes"));
-            // (frankenredis-oo3aw) A function declares allow-oom in its own registered flags
-            // rather than in a shebang, so it is read here alongside no-writes.
-            let allow_oom = func
-                .flags
-                .iter()
-                .any(|f| f.eq_ignore_ascii_case("allow-oom"));
-            // `Ok` = already executed and retained; `Err` = the source to execute once. A Result
-            // rather than two Options so "cached AND a source" and "neither" are not
-            // representable.
-            match lua_eval::fcall_cached_library_callbacks(&lib.code) {
-                Some(callbacks) => (Ok(callbacks), no_writes, allow_oom),
-                None => (Err(lib.code.clone()), no_writes, allow_oom),
+    let (library, has_no_writes, has_allow_oom, has_allow_stale, has_no_cluster) =
+        match store.function_get(func_name) {
+            Some((lib, func)) => {
+                let no_writes = func
+                    .flags
+                    .iter()
+                    .any(|f| f.eq_ignore_ascii_case("no-writes"));
+                // (frankenredis-oo3aw) A function declares allow-oom in its own registered flags
+                // rather than in a shebang, so it is read here alongside no-writes.
+                let allow_oom = func
+                    .flags
+                    .iter()
+                    .any(|f| f.eq_ignore_ascii_case("allow-oom"));
+                // (frankenredis-eh2ct) And the two the prepare chain gained with it. Same source,
+                // same comparison -- a FUNCTION's flags are registered strings where an EVAL's are
+                // shebang tokens, which is the only reason these are read here rather than through
+                // `script_shebang_has_flag`.
+                //
+                // FOUR is where this tuple stops being readable; `allow-cross-slot-keys` is the only
+                // upstream flag left unread, and it is cluster-routing-only. If it ever needs
+                // reading, bundle all five into a struct rather than widening this again.
+                let allow_stale = func
+                    .flags
+                    .iter()
+                    .any(|f| f.eq_ignore_ascii_case("allow-stale"));
+                let no_cluster = func
+                    .flags
+                    .iter()
+                    .any(|f| f.eq_ignore_ascii_case("no-cluster"));
+                // `Ok` = already executed and retained; `Err` = the source to execute once. A Result
+                // rather than two Options so "cached AND a source" and "neither" are not
+                // representable.
+                match lua_eval::fcall_cached_library_callbacks(&lib.code) {
+                    Some(callbacks) => {
+                        (Ok(callbacks), no_writes, allow_oom, allow_stale, no_cluster)
+                    }
+                    None => {
+                        (Err(lib.code.clone()), no_writes, allow_oom, allow_stale, no_cluster)
+                    }
+                }
             }
-        }
-        None => {
-            return Ok(RespFrame::Error("ERR Function not found".to_string()));
-        }
-    };
+            None => {
+                return Ok(RespFrame::Error("ERR Function not found".to_string()));
+            }
+        };
 
     // (frankenredis-ascgr) Upstream functions.c::fcallCommandGeneric
     // line 638-641 uses `getLongLongFromObject` (no _OrReply suffix)
@@ -14190,7 +14246,14 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // it always carries flags -- so unlike EVAL there is no shebang gate here: the prepare-time
     // refusal applies to every FCALL. Checked BEFORE the nesting level is raised, so the refusal
     // path has nothing to unwind.
-    let prepare_refusal = script_prepare_readonly_replica_refusal(store, has_no_writes)
+    // ORDER IS UPSTREAM'S, and identical to the EVAL chain's: no-cluster (script.c:141), stale
+    // (:146), then the `!no-writes` block (:153 onward), then OOM (:191). The two chains exist
+    // because their FLAG SOURCES differ, not because their rules do -- so when one gains an arm
+    // the other gains the same arm in the same place, or a function and a script answer
+    // different errors to the same server state.
+    let prepare_refusal = script_prepare_no_cluster_refusal(store, has_no_cluster)
+        .or_else(|| script_prepare_stale_refusal(store, has_allow_stale))
+        .or_else(|| script_prepare_readonly_replica_refusal(store, has_no_writes))
         .or_else(|| script_prepare_disk_error_refusal(store, has_no_writes))
         .or_else(|| script_prepare_ro_command_refusal(is_ro, has_no_writes))
         .or_else(|| script_prepare_replica_quorum_refusal(store, has_no_writes))
@@ -19661,17 +19724,30 @@ pub fn effective_command_flags(argv: &[Vec<u8>]) -> Option<&'static str> {
     get_command_flags(cmd)
 }
 
-fn command_writes_or_may_replicate_in_readonly_script(argv: &[Vec<u8>]) -> bool {
-    let Some(raw_cmd) = argv.first() else {
-        return false;
-    };
+/// Does this inner command carry `CMD_WRITE`?
+///
+/// Split out of [`command_writes_or_may_replicate_in_readonly_script`] rather than duplicated,
+/// because upstream draws the line between the two in one function and the difference is exactly
+/// one clause: `scriptVerifyWriteCommandAllow` counts may-replicate as a write for the READ-ONLY
+/// SCRIPT check (script.c:350, "we consider may-replicate commands as write commands"), then drops
+/// back to `run_ctx->c->cmd->flags & CMD_WRITE` alone at :360 for every check after it. Writing the
+/// narrow rule as the base and the wide one as `base || may_replicate` keeps that relationship
+/// visible; two independent lists would drift the moment a command's flags changed.
+fn command_is_write_in_script(argv: &[Vec<u8>]) -> bool {
+    argv.first().is_some_and(|raw_cmd| {
+        get_command_flags(raw_cmd)
+            .is_some_and(|flags| flags.split_whitespace().any(|flag| flag == "write"))
+    })
+}
 
-    if get_command_flags(raw_cmd)
-        .is_some_and(|flags| flags.split_whitespace().any(|flag| flag == "write"))
-    {
+fn command_writes_or_may_replicate_in_readonly_script(argv: &[Vec<u8>]) -> bool {
+    if command_is_write_in_script(argv) {
         return true;
     }
 
+    let Some(raw_cmd) = argv.first() else {
+        return false;
+    };
     raw_cmd.eq_ignore_ascii_case(b"PUBLISH") || raw_cmd.eq_ignore_ascii_case(b"SPUBLISH")
 }
 
@@ -26689,7 +26765,19 @@ fn eval_cmd(
     // the arms below assign to it, and an `if let` keeps its scrutinee temporaries alive for the
     // whole body. Binding here ends the borrow at this statement instead.
     let prepare_refusal = if script.starts_with(b"#!") {
-        script_prepare_readonly_replica_refusal(store, script_shebang_has_no_writes_flag(script))
+        // ORDER IS UPSTREAM'S: no-cluster (script.c:141), then stale (:146), then the
+        // `!no-writes` block (:153 onward), then OOM (:191). A script tripping two of these must
+        // read the same one the incumbent answers, and only the order decides which.
+        script_prepare_no_cluster_refusal(store, script_shebang_has_no_cluster_flag(script))
+            .or_else(|| {
+                script_prepare_stale_refusal(store, script_shebang_has_allow_stale_flag(script))
+            })
+            .or_else(|| {
+                script_prepare_readonly_replica_refusal(
+                    store,
+                    script_shebang_has_no_writes_flag(script),
+                )
+            })
             .or_else(|| {
                 script_prepare_disk_error_refusal(
                     store,
@@ -26869,10 +26957,7 @@ fn evalsha_cmd(
 /// `no-cluster`) gate maxmemory / replication / cluster paths that
 /// our single-node runtime doesn't model. (br-frankenredis-r75v)
 fn script_shebang_has_no_writes_flag(script: &[u8]) -> bool {
-    let Some(first_line_end) = script.iter().position(|&b| b == b'\n') else {
-        return script_shebang_line_has_no_writes(script);
-    };
-    script_shebang_line_has_no_writes(&script[..first_line_end])
+    script_shebang_has_flag(script, "no-writes")
 }
 
 /// Mirror upstream eval.c::evalExtractShebangFlags. Returns `Ok(())`
@@ -26928,7 +27013,7 @@ fn script_shebang_invalid_error(script: &[u8]) -> Result<(), String> {
 
 /// Whether a shebang LINE carries `flags=...,<flag>,...`.
 ///
-/// (frankenredis-oo3aw) Extracted from `script_shebang_line_has_no_writes`, which is now a
+/// (frankenredis-oo3aw) Extracted from the old `script_shebang_line_has_no_writes`, which became a
 /// caller, so that `allow-oom` is read by the SAME parser as `no-writes` rather than by a second
 /// one. A security-adjacent gate whose flag is parsed in its own place is how the two drift: the
 /// shebang validator already accepts `allow-oom`, so a divergent parser would be silently wrong
@@ -27090,6 +27175,55 @@ fn script_prepare_ro_command_refusal(ro: bool, no_writes: bool) -> Option<RespFr
     None
 }
 
+/// Upstream `scriptPrepareForRun`'s FIRST refusal (script.c:141):
+///
+///     if ((script_flags & SCRIPT_FLAG_NO_CLUSTER) && server.cluster_enabled) {
+///         addReplyError(caller, "Can not run script on cluster, 'no-cluster' flag is set.");
+///
+/// fr's shebang validator has always ACCEPTED `no-cluster` while nothing read it, on the stated
+/// grounds that a single-node runtime has no cluster path to gate. That stopped being true:
+/// `set_cluster_enabled` (frankenredis-inuwt) made `cluster-enabled yes` a real boot state, so
+/// `store.cluster_enabled` can be set over the wire's lifetime and this condition is reachable.
+/// The flag was a false acceptance -- a script asking not to run on a cluster ran on one.
+///
+/// No RESP code in upstream's literal, so `addReplyError` prepends `-ERR `; spelled with it here
+/// because `RespFrame::Error` prepends only the `-`.
+fn script_prepare_no_cluster_refusal(store: &Store, no_cluster: bool) -> Option<RespFrame> {
+    if no_cluster && store.cluster_enabled {
+        return Some(RespFrame::Error(
+            "ERR Can not run script on cluster, 'no-cluster' flag is set.".to_string(),
+        ));
+    }
+    None
+}
+
+/// Upstream `scriptPrepareForRun`'s SECOND refusal (script.c:146):
+///
+///     if (running_stale && !(script_flags & SCRIPT_FLAG_ALLOW_STALE)) {
+///         addReplyError(caller, "-MASTERDOWN Link with MASTER is down, ...");
+///
+/// THE OUTER TWIN of the per-inner-command stale check in `dispatch_argv`, and not a duplicate of
+/// it: that one refuses a single `redis.call` that lacks `CMD_STALE` (upstream's
+/// `scriptVerifyAllowStale`, script.c:482); this one refuses the WHOLE script before a line runs,
+/// on the shebang flag alone. A script that declares `allow-stale` clears this gate and then has
+/// each inner call judged on its own flag, which is exactly upstream's two-stage shape -- one
+/// gate cannot express it, because the two ask different questions of different subjects.
+///
+/// Reads the same `script_stale_replica` the inner gate reads, so the two cannot disagree about
+/// whether the link is down.
+fn script_prepare_stale_refusal(store: &Store, allow_stale: bool) -> Option<RespFrame> {
+    if !allow_stale && store.script_stale_replica {
+        // Upstream's literal already carries `-MASTERDOWN`, which `addReplyError` leaves alone;
+        // `RespFrame::Error` writes the `-` itself, so the code is spelled without it here.
+        return Some(RespFrame::Error(
+            "MASTERDOWN Link with MASTER is down, replica-serve-stale-data is set to 'no' and \
+             'allow-stale' flag is not set on the script."
+                .to_string(),
+        ));
+    }
+    None
+}
+
 fn script_prepare_readonly_replica_refusal(store: &Store, no_writes: bool) -> Option<RespFrame> {
     if !no_writes && store.is_read_only_replica {
         return Some(RespFrame::Error(
@@ -27122,17 +27256,31 @@ pub fn script_shebang_is_oom_exempt(script: &[u8]) -> bool {
 /// shared `flags=` parser. A script with NO shebang is upstream's EVAL_COMPAT_MODE and carries no
 /// flags at all, so this is false for it by construction -- which is the case the bead reports.
 fn script_shebang_has_allow_oom_flag(script: &[u8]) -> bool {
-    let Some(first_line_end) = script.iter().position(|&b| b == b'\n') else {
-        return script_shebang_line_has_flag(script, "allow-oom");
-    };
-    script_shebang_line_has_flag(&script[..first_line_end], "allow-oom")
+    script_shebang_has_flag(script, "allow-oom")
 }
 
-fn script_shebang_line_has_no_writes(line: &[u8]) -> bool {
-    // The remainder of the line may be empty, whitespace, or `name=...` / `flags=...` tokens
-    // separated by whitespace; the shared parser finds a case-insensitive `flags=` prefix and
-    // checks its csv list.
-    script_shebang_line_has_flag(line, "no-writes")
+/// The whole-script form of [`script_shebang_line_has_flag`]: take the shebang LINE, then ask.
+///
+/// (frankenredis-eh2ct) Factored out when the third and fourth flags arrived. "Up to the first
+/// `\n`, or the whole body when there is none" had been written out once per flag, and a fourth
+/// copy is how one of them ends up splitting differently from its siblings -- the same argument
+/// the `allow-oom` accessor above makes for sharing the `flags=` parser, one level up.
+fn script_shebang_has_flag(script: &[u8], wanted: &str) -> bool {
+    let line = match script.iter().position(|&b| b == b'\n') {
+        Some(end) => &script[..end],
+        None => script,
+    };
+    script_shebang_line_has_flag(line, wanted)
+}
+
+/// Does the shebang declare `allow-stale`? (`SCRIPT_FLAG_ALLOW_STALE`, eval.c scripts_flags_def.)
+fn script_shebang_has_allow_stale_flag(script: &[u8]) -> bool {
+    script_shebang_has_flag(script, "allow-stale")
+}
+
+/// Does the shebang declare `no-cluster`? (`SCRIPT_FLAG_NO_CLUSTER`.)
+fn script_shebang_has_no_cluster_flag(script: &[u8]) -> bool {
+    script_shebang_has_flag(script, "no-cluster")
 }
 
 fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
@@ -41585,6 +41733,104 @@ mod tests {
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
+    }
+
+
+    /// The COMPAT-MODE half of the same two gates -- the half fr was missing entirely.
+    ///
+    /// Upstream wraps every `scriptPrepareForRun` check in
+    /// `if (!(script_flags & SCRIPT_FLAG_EVAL_COMPAT_MODE))` (script.c:140), so the sibling test
+    /// above -- which uses `#!lua` bodies throughout -- exercises a path that a shebang-LESS
+    /// script never takes. Nearly every EVAL in the wild is shebang-less. For those, upstream
+    /// refuses the inner write in `scriptVerifyWriteCommandAllow` (script.c:344) instead, and fr
+    /// had no such gate: the disk check (:379) and the quorum check (:387) existed only in the
+    /// prepare chain, which `eval` correctly runs under `script.starts_with(b"#!")`.
+    #[test]
+    fn compat_mode_script_inner_write_is_gated_by_disk_and_quorum() {
+        const DENIAL: &str = "MISCONF stand-in for the runtime's disk message";
+        // NO SHEBANG. That is the entire point of this test; adding one moves it to the prepare
+        // chain and it stops covering anything the sibling above does not.
+        const BODY: &[u8] = b"redis.call('set','compat_k','v') return 1";
+
+        fn run(store: &mut Store, body: &[u8]) -> RespFrame {
+            dispatch_argv(&[b"EVAL".to_vec(), body.to_vec(), b"0".to_vec()], store, 0)
+                .unwrap_or_else(|e| e.to_resp())
+        }
+
+        // 1. QUORUM. Refused at the inner call, and the write must not have landed.
+        let mut store = Store::new();
+        store.good_replicas_ok = false;
+        match &run(&mut store, BODY) {
+            RespFrame::Error(msg) => assert!(
+                msg.contains("NOREPLICAS Not enough good replicas to write"),
+                "expected the quorum refusal, got {msg}"
+            ),
+            other => panic!("a compat-mode script must not write below quorum, got {other:?}"),
+        }
+        assert_eq!(
+            dispatch_argv(&[b"EXISTS".to_vec(), b"compat_k".to_vec()], &mut store, 0)
+                .expect("EXISTS"),
+            RespFrame::Integer(0),
+            "the refused write must not have landed"
+        );
+
+        // 2. DISK. Same shape, the other condition.
+        let mut store = Store::new();
+        store.script_inner_disk_write_denial = Some(DENIAL);
+        match &run(&mut store, BODY) {
+            RespFrame::Error(msg) => {
+                assert!(msg.contains(DENIAL), "expected the disk denial, got {msg}")
+            }
+            other => panic!("a compat-mode script must not write through a disk error, got {other:?}"),
+        }
+
+        // 3. ORDER. Upstream tests disk at :379 and quorum at :387, so a host failing BOTH
+        //    answers MISCONF. Each is correct alone; only tripping both distinguishes the orders.
+        let mut store = Store::new();
+        store.script_inner_disk_write_denial = Some(DENIAL);
+        store.good_replicas_ok = false;
+        match &run(&mut store, BODY) {
+            RespFrame::Error(msg) => assert!(
+                msg.contains(DENIAL),
+                "disk is checked before quorum (script.c:379 before :387), got {msg}"
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // 4. READS ARE UNAFFECTED. Upstream returns C_OK at :360 for anything without CMD_WRITE,
+        //    so this must not have become a blanket refusal of scripts.
+        let mut store = Store::new();
+        store.script_inner_disk_write_denial = Some(DENIAL);
+        store.good_replicas_ok = false;
+        assert_eq!(
+            run(&mut store, b"redis.call('get','compat_k') return 1"),
+            RespFrame::Integer(1),
+            "a read-only compat script must still run"
+        );
+
+        // 5. CMD_WRITE ONLY, NOT MAY-REPLICATE. Upstream counts may-replicate as a write for the
+        //    READ-ONLY SCRIPT check (script.c:350) and drops back to CMD_WRITE alone at :360, so
+        //    PUBLISH from a shebang-less script passes both of these gates. This is the assertion
+        //    that would fail if the wider predicate had been reused out of convenience.
+        let mut store = Store::new();
+        store.script_inner_disk_write_denial = Some(DENIAL);
+        store.good_replicas_ok = false;
+        let published = run(&mut store, b"redis.call('publish','ch','m') return 1");
+        if let RespFrame::Error(msg) = &published {
+            assert!(
+                !msg.contains(DENIAL) && !msg.contains("NOREPLICAS"),
+                "PUBLISH is may-replicate, not CMD_WRITE -- neither gate may claim it: {msg}"
+            );
+        }
+
+        // 6. DEFAULTS PERMISSIVE. A Store built outside a runtime must behave as it did before.
+        let mut store = Store::new();
+        assert!(store.script_inner_disk_write_denial.is_none(), "safe default is no denial");
+        assert_eq!(
+            run(&mut store, BODY),
+            RespFrame::Integer(1),
+            "an unconstrained server must not refuse anything"
+        );
     }
 
     #[test]

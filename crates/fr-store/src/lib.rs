@@ -6503,6 +6503,19 @@ pub struct Store {
     /// fr-runtime, which owns the persistence state that decides between them. Copying them here
     /// would be the two-renderer drift this crate already owns `NOREPLICAS_ERROR` to prevent.
     pub script_disk_write_denial: Option<&'static str>,
+    /// The same condition as [`Self::script_disk_write_denial`], for the INNER `redis.call` of a
+    /// script that declared no flags -- and it is deliberately NOT the same value.
+    ///
+    /// Upstream keeps two copies of this check and they disagree twice over. The prepare copy
+    /// (script.c:165) is `deny_write_type != DISK_ERROR_TYPE_NONE && !obey_client` and renders the
+    /// SCRIPT wording; the inner copy inside `scriptVerifyWriteCommandAllow` (script.c:379) has NO
+    /// `mustObeyClient` exemption at all and renders the COMMAND wording via
+    /// `writeCommandsGetDiskErrorMessage`. One field cannot express both: it would have to pick a
+    /// wording and an exemption, and be wrong for whichever caller it did not pick.
+    ///
+    /// Read only when `script_nesting_level >= 1` and the inner command carries `CMD_WRITE`.
+    /// `None` is the safe default: nothing to refuse.
+    pub script_inner_disk_write_denial: Option<&'static str>,
     /// (frankenredis-oo3aw follow-up) Are we a STALE replica -- link to the master down and
     /// `replica-serve-stale-data no` -- so that a script's inner command must be refused unless
     /// it carries `CMD_STALE`? Published by the runtime once per dispatch, for the same reason as
@@ -6962,6 +6975,7 @@ impl Default for Store {
             is_read_only_replica: false,
             good_replicas_ok: true,
             script_disk_write_denial: None,
+            script_inner_disk_write_denial: None,
             script_stale_replica: false,
             lua_error_line: 1,
             script_propagation_mode: SCRIPT_PROPAGATE_ALL,
