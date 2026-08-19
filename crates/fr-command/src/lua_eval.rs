@@ -5979,6 +5979,118 @@ impl<'a> LuaState<'a> {
         self.run_generic_for_from_iter_vals(names, iter_vals, body, env, varargs)
     }
 
+    /// (frankenredis-lua-call-depth-ug22x) Extracted from `exec_stmt`'s match, for the same
+    /// reason `exec_while_stmt`, `exec_repeat_stmt` and `exec_generic_for_stmt` were: Rust
+    /// sizes a match frame for its LARGEST arm, so every statement kind was paying for this
+    /// one. It was the biggest arm left inline -- three evaluated LuaValues plus loop state
+    /// and a fast-path helper's temporaries -- and `exec_stmt` is the largest single term in
+    /// the Lua call cycle the recursion budget gate charges.
+    ///
+    /// Body moved VERBATIM; the only edits are the signature and the de-indent, so a reader
+    /// comparing against the previous revision sees no behaviour to re-derive.
+    #[inline(never)]
+    fn exec_numeric_for_stmt(
+        &mut self,
+        name: &Rc<str>,
+        start: &Expr,
+        stop: &Expr,
+        step: &Option<Expr>,
+        body: &Block,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<ControlFlow, String> {
+            // (frankenredis-7vqyo) Upstream luaV_execute raises these
+            // via luaG_runerror which prepends the script source
+            // location. The initial-value variant reads "initial
+            // value" (not "start") in Lua 5.1's lvm.c.
+            let s = self
+                .eval_expr(start, env, varargs)?
+                .to_number()
+                .ok_or("user_script:1: 'for' initial value must be a number")?;
+            let e = self
+                .eval_expr(stop, env, varargs)?
+                .to_number()
+                .ok_or("user_script:1: 'for' limit must be a number")?;
+            let st = match step {
+                Some(expr) => self
+                    .eval_expr(expr, env, varargs)?
+                    .to_number()
+                    .ok_or("user_script:1: 'for' step must be a number")?,
+                None => 1.0,
+            };
+            // (frankenredis-4hhz5) Lua 5.1 allows step=0; the body
+            // either breaks/returns or the loop is infinite (caller's
+            // responsibility, same as `while true do end`). Vendored
+            // does not reject step=0 at the runtime layer.
+            if let Some(result) = self.execute_numeric_for_add_assign_fast_path(
+                name.as_ref(),
+                e,
+                st,
+                body,
+                s,
+                env,
+            ) {
+                return result;
+            }
+            let mut i = s;
+            // (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) ONE
+            // scope for the whole loop, re-armed per iteration, rather than a
+            // push/pop pair per iteration. The old shape cleared the scope and
+            // re-pushed the loop binding every pass, which re-allocated the
+            // binding's `name` String each time; `rearm_loop_scope` truncates
+            // to the loop variable and overwrites its cell instead, reaching
+            // the identical `[loop_var]` state. Cell reuse keeps the same
+            // strong_count == 1 guard as before -- now read off the scope's own
+            // binding, which is the sole owner precisely when nothing captured
+            // it.
+            let mut scope_open = false;
+            loop {
+                self.iterations += 1;
+                if self.iterations > MAX_ITERATIONS {
+                    if scope_open {
+                        env.pop_scope();
+                    }
+                    return Err("script exceeded maximum iteration count".to_string());
+                }
+                if (st > 0.0 && i > e) || (st < 0.0 && i < e) {
+                    break;
+                }
+                if scope_open {
+                    env.rearm_loop_scope(LuaValue::Number(i));
+                } else {
+                    env.push_scope();
+                    env.set_local(name.as_ref(), LuaValue::Number(i));
+                    scope_open = true;
+                }
+                // NOTE the `?` deliberately leaves the scope unpopped on the
+                // error path, exactly as the per-iteration shape did: an error
+                // here unwinds the whole script.
+                let cf = self.exec_numeric_for_body_from(
+                    name.as_ref(),
+                    e,
+                    st,
+                    body,
+                    i,
+                    0,
+                    env,
+                    varargs,
+                )?;
+                match cf {
+                    ControlFlow::Break => break,
+                    ControlFlow::Return(v) => {
+                        env.pop_scope();
+                        return Ok(ControlFlow::Return(v));
+                    }
+                    ControlFlow::None => {}
+                }
+                i += st;
+            }
+            if scope_open {
+                env.pop_scope();
+            }
+            Ok(ControlFlow::None)
+    }
+
     fn exec_stmt(
         &mut self,
         stmt: &Stmt,
@@ -6127,116 +6239,17 @@ impl<'a> LuaState<'a> {
             }
             Stmt::While(cond, body) => self.exec_while_stmt(cond, body, env, varargs),
             Stmt::Repeat(body, cond) => self.exec_repeat_stmt(body, cond, env, varargs),
-            // (frankenredis-lua-call-depth-ug22x) THE LAST BIG ARM STILL INLINE HERE, and the
-            // next frame reduction if anyone wants one. Measured from the shipping ELF at
-            // bb2ccf822: `exec_stmt` allocates `sub $0x4b8,%rsp` = 1208 B, which with its six
-            // pushes and the return address is the 1264 B/level the recursion budget gate
-            // charges it -- the largest single term in the 4352 B Lua call cycle, ahead of
-            // eval_expr's 816.
+            // (frankenredis-lua-call-depth-ug22x) EXTRACTED, and the note that stood here
+            // was WRONG about magnitude. It said this arm was "why" exec_stmt costs 1264 B.
+            // Measured after moving it out: exec_stmt 1264 -> 1136, so NumericFor accounted for
+            // 128 B of it, not the bulk. The cycle went 4352 -> 4224 B/level.
             //
-            // Rust sizes a match frame for its LARGEST arm, so every statement kind pays for
-            // this one. While, Repeat, GenericFor and DoBlock were already moved out to their
-            // own methods by 79e2438e3 for exactly that reason; NumericFor is the one left, at
-            // 92 lines holding three evaluated LuaValues (32 B each) plus loop state and a
-            // fast-path helper's temporaries.
-            //
-            // NOT DONE HERE because it could not be verified this turn: the WIN is a release
-            // build plus recursion_stack_budget_gate.py, but the CORRECTNESS is the fr-command
-            // suite, which is a debug build the host could not afford (load 104, /data down to
-            // 143G from 227G in three ticks). Extracting an interpreter arm unverified is the
-            // coin flip this bead already refused once. The measurement above is the part that
-            // does not need repeating.
+            // Worth keeping anyway -- 128 B/level is real and the arm belongs beside its three
+            // already-extracted siblings -- but the remaining 1136 B is NOT explained, and
+            // "the biggest arm" was a guess from line count that the ELF did not support.
+            // Whoever chases the rest should measure per-arm rather than read lengths.
             Stmt::NumericFor(name, start, stop, step, body) => {
-                // (frankenredis-7vqyo) Upstream luaV_execute raises these
-                // via luaG_runerror which prepends the script source
-                // location. The initial-value variant reads "initial
-                // value" (not "start") in Lua 5.1's lvm.c.
-                let s = self
-                    .eval_expr(start, env, varargs)?
-                    .to_number()
-                    .ok_or("user_script:1: 'for' initial value must be a number")?;
-                let e = self
-                    .eval_expr(stop, env, varargs)?
-                    .to_number()
-                    .ok_or("user_script:1: 'for' limit must be a number")?;
-                let st = match step {
-                    Some(expr) => self
-                        .eval_expr(expr, env, varargs)?
-                        .to_number()
-                        .ok_or("user_script:1: 'for' step must be a number")?,
-                    None => 1.0,
-                };
-                // (frankenredis-4hhz5) Lua 5.1 allows step=0; the body
-                // either breaks/returns or the loop is infinite (caller's
-                // responsibility, same as `while true do end`). Vendored
-                // does not reject step=0 at the runtime layer.
-                if let Some(result) = self.execute_numeric_for_add_assign_fast_path(
-                    name.as_ref(),
-                    e,
-                    st,
-                    body,
-                    s,
-                    env,
-                ) {
-                    return result;
-                }
-                let mut i = s;
-                // (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) ONE
-                // scope for the whole loop, re-armed per iteration, rather than a
-                // push/pop pair per iteration. The old shape cleared the scope and
-                // re-pushed the loop binding every pass, which re-allocated the
-                // binding's `name` String each time; `rearm_loop_scope` truncates
-                // to the loop variable and overwrites its cell instead, reaching
-                // the identical `[loop_var]` state. Cell reuse keeps the same
-                // strong_count == 1 guard as before -- now read off the scope's own
-                // binding, which is the sole owner precisely when nothing captured
-                // it.
-                let mut scope_open = false;
-                loop {
-                    self.iterations += 1;
-                    if self.iterations > MAX_ITERATIONS {
-                        if scope_open {
-                            env.pop_scope();
-                        }
-                        return Err("script exceeded maximum iteration count".to_string());
-                    }
-                    if (st > 0.0 && i > e) || (st < 0.0 && i < e) {
-                        break;
-                    }
-                    if scope_open {
-                        env.rearm_loop_scope(LuaValue::Number(i));
-                    } else {
-                        env.push_scope();
-                        env.set_local(name.as_ref(), LuaValue::Number(i));
-                        scope_open = true;
-                    }
-                    // NOTE the `?` deliberately leaves the scope unpopped on the
-                    // error path, exactly as the per-iteration shape did: an error
-                    // here unwinds the whole script.
-                    let cf = self.exec_numeric_for_body_from(
-                        name.as_ref(),
-                        e,
-                        st,
-                        body,
-                        i,
-                        0,
-                        env,
-                        varargs,
-                    )?;
-                    match cf {
-                        ControlFlow::Break => break,
-                        ControlFlow::Return(v) => {
-                            env.pop_scope();
-                            return Ok(ControlFlow::Return(v));
-                        }
-                        ControlFlow::None => {}
-                    }
-                    i += st;
-                }
-                if scope_open {
-                    env.pop_scope();
-                }
-                Ok(ControlFlow::None)
+                self.exec_numeric_for_stmt(name, start, stop, step, body, env, varargs)
             }
             Stmt::GenericFor(names, iter_exprs, body) => {
                 self.exec_generic_for_stmt(names, iter_exprs, body, env, varargs)
