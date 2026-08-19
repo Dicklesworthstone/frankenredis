@@ -26930,9 +26930,18 @@ fn evalsha_cmd(
     let previous_read_only = store.script_read_only;
     let previous_allow_oom = store.script_allow_oom;
     store.script_read_only = read_only_script || no_writes;
-    // (frankenredis-oo3aw) Derived the same way `no_writes` above is: this arm compiles the
-    // script itself, so there is no pre-computed flag to carry in.
-    store.script_allow_oom = script_shebang_is_oom_exempt(&script);
+    // (frankenredis-oo3aw) `script` exists ONLY inside the cache-MISS arm above -- on a fast-path
+    // HIT the body is deliberately never materialised, which is the whole point of that path
+    // (ledger b748dbc98 measured the old copy-and-hash at 4.5408x Redis). So the exemption is
+    // rebuilt from the two things reachable here: `no_writes`, which the cache DOES carry, and a
+    // first-line scan of the borrowed body. `script_shebang_is_oom_exempt` is exactly
+    // `allow_oom || no_writes`, so this is the same predicate with the half we already know
+    // folded out. The borrow ends before the assignment, which needs `&mut store`.
+    let allow_oom = no_writes
+        || store
+            .script_get(sha1)
+            .is_some_and(script_shebang_has_allow_oom_flag);
+    store.script_allow_oom = allow_oom;
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
     {
@@ -40042,7 +40051,9 @@ mod tests {
                 big,
             ],
             &mut store,
-        );
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
         assert!(
             matches!(out, RespFrame::BulkString(Some(_))),
             "a 2 MiB field is three orders of magnitude inside upstream's ceiling, got {out:?}"
@@ -62111,7 +62122,9 @@ mod tests {
                 b"5".to_vec(),
             ],
             &mut store,
-        );
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             out,
             RespFrame::Error(
@@ -62133,7 +62146,9 @@ mod tests {
                 b"5".to_vec(),
             ],
             &mut store,
-        );
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             out,
             RespFrame::Error(
@@ -62156,7 +62171,9 @@ mod tests {
                 b"ASC".to_vec(),
             ],
             &mut store,
-        );
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             out,
             RespFrame::Error(
@@ -62184,7 +62201,9 @@ mod tests {
                 b"km".to_vec(),
             ],
             &mut store,
-        );
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             out,
             RespFrame::Error(
