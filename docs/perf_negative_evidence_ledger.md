@@ -65906,3 +65906,66 @@ samples per invocation, well under its limit of 24, with no contention flag rais
    lever is real but its reach is now bounded by measurement rather than assumed.
 3. The unmeasured region is 129..1000, where the curve rises from 1.53x to 2.07x. Nothing here
    says it is monotonic.
+
+---
+
+## ANALYSIS — 33832's certified 0.606011x is ALSO a sub-threshold number: all three collection types in its job sit below their listpack limits (frankenredis-33832, frankenredis-i41sx)
+
+The row above certified that zset RESTORE flips from 0.557x (fr slower) at 128 members to 1.535x
+(fr FASTER) at 129, because `zset-max-listpack-entries` is where Redis stops adopting wire bytes
+and starts walking every element into a skiplist and a dict. That finding is not confined to
+zsets, and 33832 is the bead it lands on.
+
+33832 measures "200 keys x 40 members per collection, listpack encodings on both engines". The
+defaults, identical in both engines:
+
+      hash-max-listpack-entries   512    config.c:3215   fr-store:6925
+      set-max-listpack-entries    128    config.c:3217   fr-store:6929
+      zset-max-listpack-entries   128    config.c:3219   fr-store:6931
+
+40 is below ALL THREE. So every collection in that job is in the regime where Redis validates the
+payload and adopts it whole, doing no per-element work, while fr decodes each element -- the same
+regime that produced 0.557x for zsets and that one extra member overturned.
+
+### WHAT THIS DOES AND DOES NOT SAY
+
+It does NOT invalidate 33832's number: 0.606011x with a passing null is what that shape costs, and
+the per-element levers it identifies (`from_unique_str_members` at 2104 instr/op for 40 members)
+are real work in that regime.
+
+It says the number is REGIME-SPECIFIC and the bead does not currently say so. A reader ranking
+work off "RESTORE collection decode is 0.61x" will believe fr is behind on collection RESTORE
+generally, when for zsets that reverses to 1.5-2x AHEAD one element past the threshold, certified.
+
+### THE DECIDING EXPERIMENT, when a window allows a timed run
+
+Re-run 33832's own job at a member count above every threshold -- 600 clears set and zset at 128
+and hash at 512 in one shape -- against the same 40-member baseline in one invocation. Three
+outcomes, all informative:
+
+      flips like zsets did      the deficit is a boundary artifact across all collection types,
+                                and 33832's levers are worth only the sub-threshold share
+      stays behind              the deficit is real per-element cost and the zset flip is
+                                specific to skiplist-vs-packed; 33832's levers matter everywhere
+      splits by type            hash behaves differently from set/zset, which the 512-vs-128
+                                default already hints at and nothing has tested
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement in this row -- runq 28 at the top of this turn, above the limit of 24 the harness's
+own contention guard enforces, so no timed run was started. This is a reading of two config
+tables and one bead's stated job shape against a curve certified in the row above.
+
+### PROVENANCE
+
+      source        main at 0de1fd110; config.c:3215-3219, fr-store/src/lib.rs:6925-6931, and
+                    33832's own job description.
+      host          loadavg 13.00 / 9.17 / 6.75, runq 28, /data 227G. No arms started.
+      disposition   ANALYSIS. No engine source changed.
+
+### RETRY PREDICATE
+
+1. Do not spend on 33832's levers before running the 600-member shape. The levers are real; their
+   REACH is what is unmeasured, and the zset case shows reach can be the whole story.
+2. Run it in ONE invocation against the 40-member baseline. Comparing across sessions is what let
+   a boundary number stand as a general one for this long.
