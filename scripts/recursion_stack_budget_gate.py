@@ -50,9 +50,14 @@ import subprocess
 import sys
 import time
 
-# Rust's default stack for a spawned thread. The main thread gets the OS
-# default (typically 8 MiB); commands do NOT run there.
-DEFAULT_THREAD_STACK = 2 * 1024 * 1024
+# The stack a WORKER thread actually gets. This was Rust's 2 MiB default until
+# c63b56ef1 sized the three spawn sites explicitly at
+# WORKER_THREAD_STACK_SIZE = 8 MiB (fr-server/src/main.rs:79), matching the OS
+# default the main thread gets and upstream relies on. The default here tracks
+# that constant: a gate defaulting to 2 MiB would judge every walker against a
+# stack no fr thread has had since, which fails in the SAFE direction but
+# reports a budget nobody is spending.
+DEFAULT_THREAD_STACK = 8 * 1024 * 1024
 
 # Fraction of a worker stack the recursion at its own limit may consume. The
 # remainder has to hold everything BELOW the walker: the reactor loop, dispatch,
@@ -79,6 +84,40 @@ WALKERS = [
         "cmsgpack.pack",
         1000,
         "cmsgpack_pack_table is inlined into this symbol, so the cycle is value->value",
+    ),
+]
+
+# A recursion whose cycle spans SEVERAL functions. `WALKERS` above proves a cycle
+# is direct by counting a symbol's own self-calls; that test reports UNKNOWN for
+# the interpreter, whose per-level cost is the SUM of the frames it passes
+# through. One Lua call runs call_function, exec_block, exec_stmts, exec_stmt and
+# eval_expr before reaching call_function again, so no single prologue is the
+# answer and the gate said so rather than guessing.
+#
+# EVAL_EXPR_PER_LEVEL is why this is a range and not a number: a nested
+# expression pushes another eval_expr without another Lua call, so the cycle
+# carries it more than once. 3 is the figure that reconciles the summed
+# prologues with the ~6.2 KB/call that frankenredis-lua-call-depth-ug22x
+# measured by removing the bound and finding where the server actually died.
+#
+# (frankenredis-lua-call-depth-ug22x, and the residual named in
+# frankenredis-thread-stack-size-1tlyh: "the interpreter's own call depth,
+# bounded in FRAMES by MAX_CALL_DEPTH rather than in BYTES, is still unpriced".)
+EVAL_EXPR_PER_LEVEL = 3
+
+CYCLES = [
+    (
+        "lua call",
+        [
+            ("::call_function", 1),
+            ("::exec_block", 1),
+            ("::exec_stmts", 1),
+            ("::exec_stmt", 1),
+            ("::eval_expr", EVAL_EXPR_PER_LEVEL),
+        ],
+        512,
+        "MAX_CALL_DEPTH in lua_eval.rs; upstream reaches ~16000, which fr cannot "
+        "afford at this frame cost -- the residual is recorded on ug22x",
     ),
 ]
 
@@ -112,6 +151,54 @@ def symbol_span(elf: str, pattern: str):
             end = table[i + 1][0] if i + 1 < len(table) else None
             return start, end, row[2]
     return None, None, None
+
+
+MIN_PLAUSIBLE_FRAME = 32  # below this it is a thunk or a stub, not a real frame
+
+
+def symbol_span_exact(elf: str, suffix: str):
+    """Span of the symbol whose DEMANGLED name ends with `suffix`.
+
+    `symbol_span` matches a substring and returns the first hit in address
+    order. For a cycle member that is not good enough: `eval_expr` also names
+    closures and thunks, and picking one of those under-reports the frame
+    without any visible error. Requiring an exact demangled suffix, and
+    refusing when more than one symbol matches, makes that failure loud.
+    """
+    rows = []
+    for ln in sh(["nm", "-nC", elf]).splitlines():
+        parts = ln.split(" ", 2)
+        if len(parts) < 3:
+            continue
+        rows.append((parts[0], parts[2].strip()))
+    hits = [i for i, (_a, n) in enumerate(rows) if n.endswith(suffix)]
+    if len(hits) != 1:
+        return None, None, None, len(hits)
+    i = hits[0]
+    start = rows[i][0]
+    end = rows[i + 1][0] if i + 1 < len(rows) else None
+    return start, end, rows[i][1], 1
+
+
+def frame_bytes_exact(elf: str, suffix: str):
+    """Per-frame stack bytes for an exactly-named symbol."""
+    start, end, name, nhits = symbol_span_exact(elf, suffix)
+    if start is None:
+        return None, nhits, None
+    cmd = ["objdump", "-d", f"--start-address=0x{start}"]
+    if end:
+        cmd.append(f"--stop-address=0x{end}")
+    cmd.append(elf)
+    insns = [ln for ln in sh(cmd).splitlines() if INSN_RE.match(ln)]
+    pushes, sub = 0, 0
+    for ln in insns[:PROLOGUE_WINDOW]:
+        m = SUB_RSP_RE.search(ln)
+        if m:
+            sub = int(m.group(1), 16)
+            break
+        if PUSH_RE.search(ln):
+            pushes += 1
+    return 8 + 8 * pushes + sub, 1, name
 
 
 def frame_bytes(elf: str, pattern: str):
@@ -203,6 +290,48 @@ def main() -> int:
     print()
     for (name, per, *_rest, note) in rows:
         print(f"  {name}: {note}")
+    print()
+
+    # ---- multi-function cycles -------------------------------------------
+    # These do NOT get the self-call test: the whole point is that the cycle
+    # leaves each function, so a self-call count of 0 is expected rather than
+    # suspicious. What is checked instead is that every named frame still
+    # EXISTS -- if one is inlined away the sum silently under-reports, which is
+    # the same false pass the WALKERS table refuses.
+    for cname, members, limit, note in CYCLES:
+        per_level = 0
+        missing = []
+        parts = []
+        for suffix, mult in members:
+            human = suffix.lstrip(":")
+            bytes_, nhits, resolved = frame_bytes_exact(args.elf, suffix)
+            if bytes_ is None:
+                missing.append(f"{human} ({nhits} symbols matched, need exactly 1)")
+                continue
+            if bytes_ < MIN_PLAUSIBLE_FRAME:
+                missing.append(f"{human} resolved to {resolved} with only {bytes_} B -- "
+                               f"that is a thunk, not the frame")
+                continue
+            per_level += bytes_ * mult
+            parts.append(f"{human} {bytes_}" + (f" x{mult}" if mult != 1 else ""))
+        if missing:
+            failures.append(
+                f"{cname}: frame(s) {', '.join(missing)} NOT FOUND -- inlined away or "
+                f"renamed, so the summed per-level cost would UNDER-report")
+            continue
+        at_limit = per_level * limit
+        pct = at_limit / args.stack * 100
+        fits = args.stack // per_level
+        verdict = "ok"
+        if at_limit > ceiling:
+            failures.append(
+                f"{cname}: {per_level} B/level x {limit} = {at_limit} B = {pct:.1f} pct "
+                f"of the worker stack, over the {MAX_STACK_FRACTION:.0%} ceiling")
+            verdict = "OVER"
+        print(f"cycle {cname}: {per_level} B/level ({' + '.join(parts)})")
+        print(f"  at limit {limit}: {at_limit} B = {pct:.1f} pct of stack; "
+              f"survives ~{fits} levels  {verdict}")
+        print(f"  {note}")
     print()
 
     for u in unknowns:
