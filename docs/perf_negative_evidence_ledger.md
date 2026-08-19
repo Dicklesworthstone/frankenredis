@@ -64661,3 +64661,61 @@ a property of the measured pair, not a rule: compare the two CIs before choosing
   2. When it comes: three draws, gate at both ends, and quote the WORST of the three per row.
   3. Do NOT quote the normalised figures from draw 3 without the harness's own warning attached.
      They are wider than the raw rows they are meant to clean up.
+
+## 2026-08-19 CrimsonHawk: MEASURED — fr spends 134.7 instructions per matched byte of a LITERAL Lua pattern, and the dose-response's own control cancels to the decimal (`frankenredis-25uop`)
+
+EVIDENCE CLASS: callgrind Ir (retired instruction COUNT), fr ONLY, two rungs of one dose-response,
+2000 ops each. CV was NOT used and no timing verdict is claimed. **No incumbent arm and therefore
+no ratio** — this is fr's own per-byte cost, which is what the lever has to move. Ir is immune to
+load and MHz (`feedback_callgrind_ir_is_immune_to_load_and_mhz`), which is why this number is
+takeable on a host the ratio gate refuses. NO BUILD: the release ELF already carried the code and
+our project's build slot was occupied.
+
+  fr       `target/release/frankenredis`, sha256 `b4729412aa36357e...`
+  host     loadavg 69.49 / 42.15 / 29.39 entering, 69.36 / 43.02 / 29.81 leaving
+           CPU MHz mean 3789 -> 3176 (recorded for the row; Ir does not depend on either)
+
+### THE TWO RUNGS
+
+    rung          instr/op    dispatch    dispatch share
+    luapat_16     22,704.6     2,509.4        11.1 pct
+    luapat_256    55,028.3     2,509.4         4.6 pct
+
+    (55,028.3 - 22,704.6) / (256 - 16) = 134.7 instructions per matched byte
+
+**The dispatch column is the control and it cancels EXACTLY** — 2,509.4 in both rungs, to the
+decimal. The two rungs differ only in how many bytes the matcher walks, so every fixed term (EVAL
+setup, compile-cache lookup, reply conversion, dispatch) is identical by construction and drops out
+of the difference. A dose-response whose fixed term moves is measuring two things; this one is not.
+
+### WHY 134.7 IS A LARGE NUMBER
+
+Upstream's per-byte path for a literal is a `switch (*p)` falling to `default`, `singlematch` (a
+switch plus a byte compare), a quantifier peek, then `s++; p=ep; goto init`. That is a tight loop
+on the order of ten to twenty instructions. fr is paying roughly an order of magnitude more for the
+same byte.
+
+This is the mechanism recorded on `25uop`, now with a size rather than an adjective: the literal
+byte walks the TESTS of six preceding arms — `(`, `)`, `$`, `%N`, `%f`, `%b` — before reaching the
+path that matches it, and three of those arms re-test `pat[pi] == b'%'` independently (visible as
+eight `cmp $0x25` in the dispatch prefix of the shipping ELF).
+
+### WHAT THIS NUMBER IS NOT
+
+  * It is an UPPER BOUND on the matcher's per-byte cost, not the matcher alone. The 16-to-256 delta
+    also carries `string.rep` building 240 more bytes and the longer subject's allocation. That is
+    small against 134.7 but it is not zero, and a third rung that reps without matching would
+    separate them. Not run, so not claimed.
+  * It says nothing about vs-incumbent standing. The wall-clock ratios for these shapes are recorded
+    above as SIZING (0.6425/0.6503/0.6442 raw at 256 across three draws) and remain uncertified —
+    the gate has refused in every window attempted.
+
+### RETRY PREDICATES
+
+  1. This is the before-number. After the cascade-to-`match` lever, re-run the SAME two rungs and
+     quote the new slope. The lever targets only the per-byte term, so `luapat_16` should barely
+     move and `luapat_256` should fall — if both move together, the change did something other than
+     what it claims.
+  2. Add the rep-without-match rung before quoting 134.7 as the matcher's own figure.
+  3. Ir needs no quiet window, so this instrument is available whenever the build slot is not. The
+     wall-clock ratio still needs one.

@@ -589,6 +589,19 @@ SHAPES = {
     # argv must be a literal. sha1 of the exact bytes SCRIPT LOAD is given.
     # The body returns 1 in every rung; only the trailing comment padding grows, so the script
     # the cache key spans differs while the executed work does not.
+    # (frankenredis-25uop) Lua pattern matching over a LITERAL pattern, as a
+    # DOSE-RESPONSE pair: the two rungs differ only in how many bytes the matcher
+    # walks, so (Ir_256 - Ir_16) / 240 is the per-matched-byte cost and every
+    # fixed term -- EVAL setup, compile-cache lookup, reply conversion, string.rep
+    # -- cancels in the difference. That is the number the if-cascade lever has to
+    # move, and Ir is immune to load and MHz, so it does not need the quiet window
+    # a wall-clock ratio does.
+    "luapat_16": (
+        [],
+        ["EVAL", "local s = string.rep('a', 16) return (string.find(s, s))", "0"]),
+    "luapat_256": (
+        [],
+        ["EVAL", "local s = string.rep('a', 256) return (string.find(s, s))", "0"]),
     "evalsha_small": (
         [["SCRIPT", "LOAD", _EVALSHA_BODY_SMALL]],
         ["EVALSHA", _sha1_hex(_EVALSHA_BODY_SMALL), "0"]),
