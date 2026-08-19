@@ -14,11 +14,19 @@ cancel exactly. It does NOT use callgrind_control: this repo's memory records
 per-frame attribution needs a few hundred ops before startup noise stops
 dominating anyway.
 
-BUILT-IN CONTROL: run `get_control` alongside whatever you are measuring. fr
-retires 0.4645x redis's instructions on GET and is FASTER there, so a shape that
-comes out above 1.0x is telling you something route-specific rather than a
-whole-process handicap. A run that reports every shape as slow, control included,
-is measuring the harness.
+BUILT-IN CONTROL: run `get_control` alongside whatever you are measuring. fr is
+FASTER there, so a shape whose ratio is well ABOVE the control's is telling you
+something route-specific rather than a whole-process handicap. A run that reports
+every shape as slow, control included, is measuring the harness.
+
+RUN THE CONTROL, DO NOT QUOTE IT FROM HERE. This paragraph used to state the
+control as 0.4645x with fr at 1341.5 instr/op, and neither reproduces: measured
+2026-08-19 on a plain build at ELF 0db24b71, fr 916.3 vs redis 3377.1 instr/op =
+0.2713x. fr's GET got substantially cheaper in between, so the stale figure was
+1.7x too generous -- and quoting it would have made a shape at 0.4658x look like
+it MATCHED the control when it is in fact nearly twice it. A control's value is a
+property of the ELF and the day, not of the harness; the only safe use of a
+written-down one is to notice it has drifted.
 
 TRAP, measured rather than assumed: the instruction ratio is NOT the throughput
 ratio, and the error is not even in a consistent direction. sinterstore_3src is
@@ -197,6 +205,22 @@ SHAPES = {
     "zrange_withscores": (["ZADD zr2 1 a 2 b 3 c"],
                           ["ZRANGE", "zr2", "0", "-1", "WITHSCORES"]),
     "rpushx_missing": ([], ["RPUSHX", "nosuchlist", "v"]),
+    # (frankenredis-qj6jn) The live RPUSH path, which that bead records as UNMEASURED: every
+    # number on it came from a toggled A/B ELF, and two such ELFs' control arms disagreed by
+    # 1.2 pct. This is the plain shape, so a run of it on an untoggled build is the missing
+    # baseline.
+    #
+    # WHAT IT MEASURES, stated precisely because the obvious reading is wrong. The list GROWS
+    # across the run, so this is NOT "the cost of an RPUSH" -- it is the MARGINAL cost of the
+    # ops between N and 2N, which is what the two-point subtraction returns. That is the
+    # quantity worth having here: the loader pushes onto a list that is already long.
+    #
+    # THE OP COUNT IS PART OF THE SHAPE. A list converts out of the flat listpack at 128
+    # entries, so an N below that puts the two points on OPPOSITE SIDES of a regime boundary
+    # and the difference is a phantom rather than a slope. Run it at >= 2000 so both N and 2N
+    # are past the conversion and the subtraction is within ONE regime. The Packed regime is
+    # not reachable through this harness at all, because it cannot reset the key per op.
+    "rpush_grow": ([], ["RPUSH", "rpk", "vvvvvvvvvvvvvvvv"]),
     "zpopmin_nocount_missing": ([], ["ZPOPMIN", "nosuchzset"]),
     "getset_same": (["SET gsk vvvvvvvvvvvvvvvv"], ["GETSET", "gsk", "vvvvvvvvvvvvvvvv"]),
     "lset_head": (["RPUSH lsk a b c d e f g h"], ["LSET", "lsk", "0", "a"]),
