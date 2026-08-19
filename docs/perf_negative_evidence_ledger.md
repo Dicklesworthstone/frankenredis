@@ -65821,3 +65821,88 @@ against a live incumbent is not, and on this host it currently cannot be certifi
 
 Re-run the same poll after the slot mechanism is enabled. If the gate still never passes, the
 build criterion itself needs revisiting rather than the measurement.
+
+---
+
+## CERTIFIED — the zset RESTORE "deficit" exists ONLY at the listpack threshold: fr is 1.53x FASTER at 129 members and 2.07x faster at 1000 (frankenredis-i41sx, frankenredis-pf1vw)
+
+Two authenticated rows, both `--confirm 3` with every null in band, on the quietest sustained window
+of this shift. Together with the earlier certified 128-member row they settle the shape of the
+curve, and they overturn how this surface has been described.
+
+      members   redis/fr TIME   worst bound   fr is            nulls          status
+      128       0.557334        0.509334      1.79x SLOWER     3/3 in band    certified earlier
+      129       1.534736        1.425759      1.53x FASTER     3/3 in band    certified here
+      1000      2.074518        1.841325      2.07x FASTER     3/3 in band    certified here
+
+`redis/fr` is a TIME ratio: above 1.0 means Redis takes longer, i.e. fr is faster. Worst bound is
+the CI end least favourable to fr, quoted per the replicated-standing convention.
+
+### ONE MEMBER FLIPS IT
+
+128 -> 129 moves the ratio 0.557 -> 1.535, a 2.75x swing across a single element. That is the
+listpack threshold, and it is exactly the regime boundary the earlier rows identified:
+`zset-max-listpack-entries` defaults to 128 in both engines. At or below it Redis validates the
+payload and ADOPTS the wire bytes, doing no per-element work at all, while fr decodes every
+element. One member above it Redis must call `zsetConvert` and walk every entry into a skiplist
+AND a dict, while fr moves from a packed build to an owned one -- a far smaller step, because fr
+was already paying per element.
+
+So the certified 0.557334x is not "the RESTORE ratio". It is the single worst point for fr in the
+entire size range, measured at the exact size that maximises Redis's advantage.
+
+### THIS CORRECTS MY OWN CORRECTION
+
+Three rows above I predicted 129 would move toward fr and "may cross 1.0". Two rows above I
+WITHDREW the crossing half after reading `from_unique_borrowed_pairs_with_limits` and finding fr
+switches representation at the same 128 boundary -- concluding both engines jump, so expect only a
+moderate move.
+
+The source reading was right and the inference from it was wrong. Both engines do jump; what I
+could not read off the source is that Redis's jump is FAR larger. Skiplist-plus-dict per element
+costs more than packed-to-owned, and the measurement puts the difference at 2.75x. The original
+prediction was correct and I talked myself out of it on an argument that was true but not
+decisive.
+
+### WHAT IT MEANS FOR THE BEADS
+
+i41sx and pf1vw both rest on "RESTORE collection decode is a deficit". That is TRUE only for
+collections at or under the listpack threshold. Above it fr is the faster engine by 1.5-2x,
+certified. pf1vw's lever -- keeping the verbatim listpack and indexing it -- therefore targets a
+real gap, but one confined to small collections, and its value should be sized against how much of
+a real workload sits at <=128 members rather than against a headline ratio taken at 128.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The gate is the harness's two-process A/A with `--confirm 3`, requiring EVERY repeat in band. It
+refused four other attempts across this session, and it refused the first try at BOTH points here
+(129 at 1.068320, 1000 at 0.968968/0.967865) before the repeats landed -- so these passes carry
+the weight of its refusals. The contention guard added earlier reported peak runq 7-9 over four
+samples per invocation, well under its limit of 24, with no contention flag raised.
+
+### PROVENANCE
+
+      source        main at 8e8490925.
+      fr ELF        94c3fc97bfab89d9, release, env -u CARGO_TARGET_DIR; both arms self-reported
+                    the SAME sha in every invocation.
+      redis ELF     e837dbb2556cff6b, vendored 7.2.4, provenance check clean against source HEAD.
+      job           129 row: zsets=300 members=129; 1000 row: zsets=60 members=1000; trials=15.
+      pinning       fr_a 8-11, fr_b 12-15, redis 16-19 -- the asymmetry-free sets established
+                    earlier; arms started FRESH for this session, per the arm-age finding.
+      host          thinkstation1. 129 row: loadavg 6.34 -> 6.34, MHz 2913 -> 2554, iowait 0.99
+                    pct both ends. 1000 row: loadavg 7.18 -> 7.18, MHz 2335 -> 2263, iowait 0.99
+                    pct both ends. /data 228G.
+      slot          acquire_build_slot REFUSED again -- "Build slots are disabled. Enable
+                    WORKTREES_ENABLED" -- so the fleet rule remains unenforceable from here. No
+                    foreign benchmark was running; verified by ps before starting and by the
+                    harness's own peak-runq sampling throughout.
+      disposition   CERTIFIED. No engine source changed by this row.
+
+### RETRY PREDICATE
+
+1. Quote these three points together or none of them. Any one alone misdescribes the surface, and
+   128 alone misdescribes it by 2.75x.
+2. Before any further work on pf1vw, size the <=128-member share of a realistic workload. The
+   lever is real but its reach is now bounded by measurement rather than assumed.
+3. The unmeasured region is 129..1000, where the curve rises from 1.53x to 2.07x. Nothing here
+   says it is monotonic.
