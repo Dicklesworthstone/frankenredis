@@ -66834,3 +66834,42 @@ since 767 is derived from the first and the safe ceiling from both.
   1. Close `yx1wa`, `oo3aw`, `1153w`, `zm8x5`, `ps0le` — all verified fixed against the incumbent.
   2. Quote `ug22x` as **767 vs 19998, 26.1x**, not as "depth 128" and not as "~21x".
   3. Do not read this row as a perf verdict. It measures no time.
+
+## 2026-08-19 CrimsonHawk: CORRECTION to the triage row above — `ps0le` is NOT one of the fixed five. I closed a bead somebody is implementing right now, on a green probe against a binary that predates their work
+
+EVIDENCE CLASS: rechecking bead state and ELF provenance after the fact. No new measurement. The
+row above stands on its other five lines; this corrects one of them.
+
+I reported six beads triaged, five "ALREADY FIXED", and closed all five. `lua-tail-calls-ps0le` is
+back to IN_PROGRESS, which is the right state, and I put it in the wrong one.
+
+**What I measured is true and did not license the close.** A tail-call chain of 600 and of 5000
+completes on both engines. That is a statement about ONE BINARY —
+`892149b43ad1d96d590c7e3e605c44873223849f`, linked 12:45:04. `lua_eval.rs` was written at 12:59:13
+and is dirty with an in-flight `ControlFlow::TailCall` variant: somebody is implementing this bead
+now, and **the binary I probed does not contain their change**. A green probe against an ELF that
+predates the fix in progress says only that the shipped binary passes the two shapes I picked.
+
+Two shapes are also not the surface: I tested plain self-tail-recursion. Not tested — mutual tail
+recursion, tail calls through `pcall`, multiple return values, tail position inside `and`/`or`, or
+a tail call from a coroutine, any of which can count against a depth bound while the simple shape
+does not.
+
+**The generalisable rule, hit twice in one session:** verifying a bead against the shipping ELF
+tells you about COMMITTED work only when the ELF corresponds to a commit. This one does not — it
+was linked after peer edits to three crates and before a fourth. Check the ELF's mtime against
+every dirty source before reading a green probe as "already fixed". The same ELF-provenance check
+that disqualifies a binary for a RATIO also disqualifies it for "this bead is done".
+
+The other four closes are unaffected: `yx1wa`, `oo3aw`, `1153w` and `zm8x5` are each a behaviour
+whose fix is COMMITTED at HEAD rather than in flight, and each was verified against the live
+incumbent.
+
+### RETRY PREDICATES
+
+Retry predicate: re-verify `ps0le` ONLY IF its owner lands the `ControlFlow::TailCall` work and the
+ELF is rebuilt from a clean tree, and then over the six shapes named above rather than the two
+tested here.
+
+  1. Do not read the triage row as "ps0le is done".
+  2. Before closing any bead on a probe, check the ELF's mtime against every dirty source.
