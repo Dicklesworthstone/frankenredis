@@ -10886,7 +10886,13 @@ impl<'a> LuaState<'a> {
                 let mut matches: Vec<Vec<LuaValue>> = Vec::new();
                 let mut pos = 0;
                 while pos <= s.len() {
-                    if let Some(m) = lua_pattern_find(&s, &pattern, pos)? {
+                    // (frankenredis-gvex0) LuaCaret::Literal: gmatch is the one function upstream
+                    // does NOT strip a leading `^` for. Through the anchoring spelling fr matched
+                    // the empty pattern at every position -- 4 matches on 'a^b' where 7.2.4 yields
+                    // the single literal caret.
+                    if let Some(m) =
+                        lua_pattern_find_with_caret(&s, &pattern, pos, LuaCaret::Literal)?
+                    {
                         matches.push(lua_match_captures(&s, &m));
                         pos = if m.end == m.start { m.end + 1 } else { m.end };
                     } else {
@@ -10987,6 +10993,17 @@ impl<'a> LuaState<'a> {
                 let mut result = Vec::new();
                 let mut pos = 0;
                 let mut count = 0usize;
+                // (frankenredis-gvex0) Upstream str_gsub (lstrlib.c:650) strips a leading `^` into
+                // an `anchor` flag and ends the loop with `if (anchor) break;` at :674 -- the
+                // pattern is tried ONCE. fr stripped the caret inside lua_pattern_find and kept
+                // looping, so the caret re-anchored at each new position and behaved like "start of
+                // this attempt" instead of "start of the subject".
+                //
+                // MEASURED, and the reason a narrower reading of this defect was wrong: 'aba' with
+                // '^a' agrees on both engines by COINCIDENCE, because position 2 is not where the
+                // previous match ended. 'aaa' is what separates them -- 7.2.4 answers Xaa with 1
+                // substitution, fr answered XXX with 3.
+                let anchored = !pattern.is_empty() && pattern[0] == b'^';
                 while pos <= s.len() {
                     if let Some(limit) = max_n
                         && count >= limit
@@ -11046,6 +11063,9 @@ impl<'a> LuaState<'a> {
                             pos = m.end;
                         }
                     } else {
+                        break;
+                    }
+                    if anchored {
                         break;
                     }
                 }
@@ -13025,13 +13045,37 @@ fn lua_pat_lazy(
     }
 }
 
+/// What a leading `^` means to the caller.
+///
+/// (frankenredis-gvex0) NOT a property of the pattern, which is why it is a parameter. Upstream
+/// strips the caret in `str_find_aux` and `str_gsub` and NOWHERE ELSE: `gmatch_aux` passes its
+/// pattern to `match()` untouched, so a leading `^` falls through to the default single-character
+/// case and matches a literal caret. MEASURED on 7.2.4: `string.gmatch('a^b','^')` yields exactly
+/// ONE match -- the caret in the middle of the subject.
+#[derive(Clone, Copy, PartialEq)]
+enum LuaCaret {
+    /// find, match, gsub: strip it and pin the match to `init`.
+    Anchor,
+    /// gmatch: no stripping, no anchoring, `^` is just a byte.
+    Literal,
+}
+
 /// Top-level pattern match: try matching pattern at each position starting from `init`.
-/// If pattern starts with ^, only try at `init`.
+/// `find`, `match` and `gsub` spelling: a leading `^` anchors.
 fn lua_pattern_find(s: &[u8], pat: &[u8], init: usize) -> Result<Option<LuaPatMatch>, String> {
+    lua_pattern_find_with_caret(s, pat, init, LuaCaret::Anchor)
+}
+
+fn lua_pattern_find_with_caret(
+    s: &[u8],
+    pat: &[u8],
+    init: usize,
+    caret: LuaCaret,
+) -> Result<Option<LuaPatMatch>, String> {
     // A stale fault from an earlier call would poison this one; gsub drives
     // this function in a loop.
     let _ = lua_pattern_error_take();
-    let (anchored, pat_start) = if !pat.is_empty() && pat[0] == b'^' {
+    let (anchored, pat_start) = if caret == LuaCaret::Anchor && !pat.is_empty() && pat[0] == b'^' {
         (true, 1)
     } else {
         (false, 0)
@@ -16575,6 +16619,50 @@ mod tests {
             "Zx|false",
             "replacing __index must redirect method lookup AND orphan string.rep"
         );
+    }
+
+    #[test]
+    fn a_leading_caret_anchors_gsub_once_and_is_a_literal_to_gmatch_gvex0() {
+        // (frankenredis-gvex0) Every assertion is a row MEASURED against live 7.2.4.
+        let mut store = Store::new();
+        let run = |store: &mut Store, src: &[u8]| -> String {
+            match eval_script(src, &[], &[], store, 0) {
+                Ok(RespFrame::BulkString(Some(b))) => String::from_utf8_lossy(&b).into_owned(),
+                Ok(other) => format!("{other:?}"),
+                Err(e) => format!("ERR {e}"),
+            }
+        };
+
+        // THE ROW THAT SEPARATES THE TWO READINGS. fr used to answer XXX/3 here because its caret
+        // re-anchored at each new position, which is "start of this attempt" rather than "start of
+        // the subject". Upstream tries an anchored pattern ONCE.
+        assert_eq!(
+            run(&mut store, b"local r,n = string.gsub('aaa','^a','X') return r..'|'..tostring(n)"),
+            "Xaa|1"
+        );
+        // 'aba' agreed even while fr was wrong -- position 2 is not where the previous match ended.
+        // Kept as the near-miss it is: on its own it certifies nothing.
+        assert_eq!(run(&mut store, b"return (string.gsub('aba','^a','X'))"), "Xba");
+        // A bare caret is an EMPTY anchored pattern: one empty match at the front, then stop.
+        assert_eq!(run(&mut store, b"return (string.gsub('a^b','^','X'))"), "Xa^b");
+        assert_eq!(run(&mut store, b"return (string.gsub('abc','^','X'))"), "Xabc");
+        // Anchored and not matching must still leave the subject alone rather than consume it.
+        assert_eq!(run(&mut store, b"return (string.gsub('baa','^a','X'))"), "baa");
+        // An UNanchored pattern must still replace everywhere, or the break would have eaten gsub.
+        assert_eq!(run(&mut store, b"return (string.gsub('aaa','a','X'))"), "XXX");
+
+        // gmatch is the one function upstream does not strip the caret for, so `^` is a plain byte
+        // and 'a^b' yields the single caret -- not an empty match at every position.
+        assert_eq!(
+            run(
+                &mut store,
+                b"local t = {} for m in string.gmatch('a^b','^') do t[#t+1] = m end return tostring(#t)"
+            ),
+            "1"
+        );
+        // find and match keep anchoring, including from a non-default init.
+        assert_eq!(run(&mut store, b"return tostring(string.find('baa','^a',2))"), "2");
+        assert_eq!(run(&mut store, b"return tostring(string.match('baa','^a',2))"), "a");
     }
 
     #[test]
