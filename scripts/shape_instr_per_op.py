@@ -83,6 +83,31 @@ from _incumbent import (  # noqa: E402  (sys.path set immediately above)
 # is why it stays off permanently below.
 CACHE_SIM = [False]
 
+# The dispatch-share reference this harness prints for comparison.
+#
+# IT IS A MEASUREMENT, NOT A CONSTANT OF NATURE, and it MOVES. Dispatch share is a
+# RATIO -- dispatch instructions over total instructions for the op -- so as levers
+# cut the total, the same absolute dispatch cost reads as a LARGER share. The
+# reference shape (EXISTS on a missing key) read 21.5 pct when this line was
+# written and reads 38.2 pct today, on 1121.2 instr/op with 428.0 of dispatch.
+# Nothing about its dispatch got worse; the denominator shrank.
+#
+# WHY THAT MATTERS ENOUGH TO PIN: this line is printed on every run and is used to
+# pick front-classification candidates. Screening today's shapes against the old
+# 21.5 pct marks routes as stranded that are in fact CHEAPER than the reference --
+# PFADD reads 32.2 pct and is a fully classified route sharing the keyed-values
+# parser, so it looks stranded against 21.5 and is comfortably under 38.2.
+#
+# A SHARE IS ONLY COMPARABLE AGAINST A REFERENCE MEASURED ON THE SAME BINARY.
+# Before using it as a screen, re-measure the reference on yours:
+#     shape_instr_per_op.py <fr_bin> exists_missing 2000 --fr-only
+# (CrimsonHawk, 2026-08-19, ELF 6e4d5a5f24675cfe, fr-only ladder.)
+DISPATCH_SHARE_REFERENCE_PCT = 38.2
+DISPATCH_SHARE_REFERENCE_NOTE = (
+    "EXISTS on a missing key, re-measured 2026-08-19 on ELF 6e4d5a5f24675cfe "
+    "(1121.2 instr/op, 428.0 dispatch)"
+)
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REDIS = os.path.join(ROOT, "legacy_redis_code/redis/src/redis-server")
 
@@ -2835,8 +2860,11 @@ def main() -> int:
               % (100 * frac, fr_ipo * frac, fr_ipo))
         for ir, fn in top:
             print("      %10.1f  %s" % (ir, fn[:66]))
-        print("  compare: a front-classified route (EXISTS on a missing key) is 21.5%;"
-              " 62-66% means the dispatch lever has something to bite on.")
+        print("  compare: a front-classified route is %.1f%% -- %s."
+              % (DISPATCH_SHARE_REFERENCE_PCT, DISPATCH_SHARE_REFERENCE_NOTE))
+        print("  a share is only comparable to a reference measured on the SAME binary:"
+              " share rises as levers cut the total, so an old reference over-reports"
+              " stranding. Re-measure with: exists_missing --fr-only")
     _reap(workdir)
     return 0
 
