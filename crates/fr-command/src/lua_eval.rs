@@ -5007,8 +5007,91 @@ thread_local! {
     /// and because it is a pure function of the source bytes: two threads that build it
     /// independently get equivalent answers.
     static FCALL_LIBRARY_CALLBACKS: std::cell::RefCell<
-        std::collections::HashMap<Vec<u8>, Rc<RegisteredCallbacks>>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
+        std::collections::HashMap<Vec<u8>, Rc<RegisteredCallbacks>, LibraryKeyHasherBuilder>,
+    > = const {
+        std::cell::RefCell::new(std::collections::HashMap::with_hasher(
+            LibraryKeyHasherBuilder,
+        ))
+    };
+}
+
+/// A `BuildHasher` for the library-callback cache that reads a BOUNDED SAMPLE of the key.
+///
+/// (frankenredis-kbyhy) MEASURED, not guessed. After the library body stopped being re-executed
+/// per call, `frame_delta` over the lib1/lib32 pair put the entire residual slope in one frame:
+///
+///     sip::Hasher::write         296.0 instr/op at lib1  ->   5,862.0 at lib32   (19.8x)
+///     whole op                10,929.9                   ->  16,833.8            (+5,903.9)
+///
+/// so 94 pct of the growth across a 32x library was the cache PROBE hashing the whole library to
+/// find an entry it then confirms by equality anyway. The default `SipHash13` reads every byte;
+/// this reads at most 56 -- the length, then head, middle and tail windows -- so the probe is O(1)
+/// in the library.
+///
+/// THIS IS SAFE BECAUSE `Eq` IS UNCHANGED, and that is the whole argument. A weak hash can only
+/// cause a COLLISION, and `HashMap` resolves a collision with the key's `Eq`, which for `Vec<u8>`
+/// is exact. Two different libraries that sample identically land in one bucket and are still told
+/// apart by the full compare -- pinned by
+/// `library_key_hasher_collision_still_keeps_two_libraries_apart_kbyhy`, which constructs exactly
+/// that pair rather than trusting that ordinary keys do not collide. What a weak hash costs is
+/// TIME on a collision, and that is bounded twice over: the map holds at most
+/// `FCALL_LIBRARY_CALLBACK_CACHE_MAX` entries, and a full compare is a `memcmp` -- already only
+/// 519.5 instr/op at lib32 against siphash's 5,862.
+#[derive(Clone, Copy, Default)]
+struct LibraryKeyHasherBuilder;
+
+impl std::hash::BuildHasher for LibraryKeyHasherBuilder {
+    type Hasher = LibraryKeyHasher;
+
+    fn build_hasher(&self) -> LibraryKeyHasher {
+        LibraryKeyHasher {
+            state: 0xcbf2_9ce4_8422_2325,
+        }
+    }
+}
+
+/// FNV-1a over a bounded sample of every slice written to it. (frankenredis-kbyhy)
+struct LibraryKeyHasher {
+    state: u64,
+}
+
+impl LibraryKeyHasher {
+    /// Bytes each of the three windows contributes. A key no longer than three windows is folded
+    /// in FULL, so short libraries keep exact hashing and only long ones are sampled.
+    const WINDOW: usize = 16;
+
+    fn fold_byte(&mut self, byte: u8) {
+        self.state ^= u64::from(byte);
+        self.state = self.state.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+
+    fn fold_bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.fold_byte(byte);
+        }
+    }
+}
+
+impl std::hash::Hasher for LibraryKeyHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        // The LENGTH is always folded, so two libraries of different sizes cannot collide however
+        // their sampled windows line up.
+        for byte in (bytes.len() as u64).to_le_bytes() {
+            self.fold_byte(byte);
+        }
+        if bytes.len() <= Self::WINDOW * 3 {
+            self.fold_bytes(bytes);
+            return;
+        }
+        let mid = bytes.len() / 2 - Self::WINDOW / 2;
+        self.fold_bytes(&bytes[..Self::WINDOW]);
+        self.fold_bytes(&bytes[mid..mid + Self::WINDOW]);
+        self.fold_bytes(&bytes[bytes.len() - Self::WINDOW..]);
+    }
+
+    fn finish(&self) -> u64 {
+        self.state
+    }
 }
 
 /// Retained libraries. Bounded because the key is client-controlled: a client that loads many
@@ -16777,6 +16860,82 @@ pub fn compile_check(script: &[u8]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Two libraries the bounded-sample hasher CANNOT tell apart must still be kept apart.
+    ///
+    /// (frankenredis-kbyhy) `LibraryKeyHasher` reads at most 56 bytes of a key, so a collision is
+    /// not a remote possibility -- it is constructible, and this constructs one: same length, same
+    /// head window, same middle window, same tail window, different bytes in between. The safety
+    /// argument for sampling is that `Eq` is untouched and `HashMap` resolves a collision with it,
+    /// so the ONLY discriminating assertion is that a map keyed this way still returns the right
+    /// value for each. A test that merely checked "two different libraries get different answers"
+    /// would pass on any pair, because ordinary pairs do not collide.
+    #[test]
+    fn library_key_hasher_collision_still_keeps_two_libraries_apart_kbyhy() {
+        use std::hash::BuildHasher;
+
+        let window = super::LibraryKeyHasher::WINDOW;
+        let len = window * 8;
+        let mid = len / 2 - window / 2;
+        let mut a = vec![b'.'; len];
+        for (i, slot) in a[..window].iter_mut().enumerate() {
+            *slot = b'A' + (i as u8 % 26);
+        }
+        for (i, slot) in a[mid..mid + window].iter_mut().enumerate() {
+            *slot = b'a' + (i as u8 % 13);
+        }
+        for (i, slot) in a[len - window..].iter_mut().enumerate() {
+            *slot = b'0' + (i as u8 % 7);
+        }
+        let mut b = a.clone();
+        // The ONLY difference is a byte outside every sampled window.
+        let unsampled = window + 1;
+        assert!(
+            unsampled < mid,
+            "the differing byte must fall outside the middle window"
+        );
+        a[unsampled] = b'x';
+        b[unsampled] = b'y';
+        assert_ne!(a, b, "the two keys must actually differ");
+
+        let builder = super::LibraryKeyHasherBuilder;
+        assert_eq!(
+            builder.hash_one(&a),
+            builder.hash_one(&b),
+            "this fixture is only meaningful if it really is a collision; if the sampling window \
+             changed, rebuild the fixture rather than deleting the test"
+        );
+
+        let mut map: std::collections::HashMap<Vec<u8>, u32, super::LibraryKeyHasherBuilder> =
+            std::collections::HashMap::with_hasher(builder);
+        map.insert(a.clone(), 1);
+        map.insert(b.clone(), 2);
+        assert_eq!(
+            map.len(),
+            2,
+            "a collision must not merge two distinct libraries"
+        );
+        assert_eq!(map.get(a.as_slice()).copied(), Some(1));
+        assert_eq!(map.get(b.as_slice()).copied(), Some(2));
+    }
+
+    /// A key no longer than the three sampling windows is folded in FULL, so short libraries keep
+    /// the collision resistance sampling trades away on long ones. (frankenredis-kbyhy)
+    #[test]
+    fn library_key_hasher_folds_short_keys_in_full_kbyhy() {
+        use std::hash::BuildHasher;
+
+        let builder = super::LibraryKeyHasherBuilder;
+        let short = vec![b'q'; super::LibraryKeyHasher::WINDOW * 3];
+        let mut altered = short.clone();
+        let middle = altered.len() / 2 + 1;
+        altered[middle] = b'r';
+        assert_ne!(
+            builder.hash_one(&short),
+            builder.hash_one(&altered),
+            "a key at or under the sampling threshold must be folded byte for byte"
+        );
+    }
     use fr_protocol::RespFrame;
     use fr_store::Store;
 
