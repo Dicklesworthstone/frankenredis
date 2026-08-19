@@ -10852,7 +10852,9 @@ impl<'a> LuaState<'a> {
                     }
                 } else {
                     // Lua pattern matching
-                    if let Some(m) = lua_pattern_find(&s, &pattern, init)? {
+                    if let Some(m) = lua_pattern_find(&s, &pattern, init)
+                        .map_err(|e| lua_pattern_raise(self.current_invocation_name.as_deref(), e))?
+                    {
                         let mut result = vec![
                             LuaValue::Number((m.start + 1) as f64), // 1-indexed
                             LuaValue::Number(m.end as f64),         // inclusive end
@@ -10897,7 +10899,9 @@ impl<'a> LuaState<'a> {
                 // (frankenredis-vfv8s) Validate pattern eagerly.
                 // (frankenredis-uqnq6) inv_name routes the prefix.
                 lua_pattern_validate_named(self.current_invocation_name.as_deref(), &pattern)?;
-                if let Some(m) = lua_pattern_find(&s, &pattern, init)? {
+                if let Some(m) = lua_pattern_find(&s, &pattern, init)
+                    .map_err(|e| lua_pattern_raise(self.current_invocation_name.as_deref(), e))?
+                {
                     Ok(lua_match_captures(&s, &m))
                 } else {
                     Ok(vec![LuaValue::Nil])
@@ -10924,7 +10928,10 @@ impl<'a> LuaState<'a> {
                     // the empty pattern at every position -- 4 matches on 'a^b' where 7.2.4 yields
                     // the single literal caret.
                     if let Some(m) =
-                        lua_pattern_find_with_caret(&s, &pattern, pos, LuaCaret::Literal)?
+                        lua_pattern_find_with_caret(&s, &pattern, pos, LuaCaret::Literal)
+                            .map_err(|e| {
+                                lua_pattern_raise(self.current_invocation_name.as_deref(), e)
+                            })?
                     {
                         matches.push(lua_match_captures(&s, &m));
                         pos = if m.end == m.start { m.end + 1 } else { m.end };
@@ -11043,7 +11050,9 @@ impl<'a> LuaState<'a> {
                     {
                         break;
                     }
-                    if let Some(m) = lua_pattern_find(&s, &pattern, pos)? {
+                    if let Some(m) = lua_pattern_find(&s, &pattern, pos)
+                        .map_err(|e| lua_pattern_raise(inv_owned.as_deref(), e))?
+                    {
                         result.extend_from_slice(&s[pos..m.start]);
                         // (frankenredis-76y97) Dispatch on the repl
                         // value type per Lua 5.1 spec: string uses %0/%N
@@ -12861,7 +12870,7 @@ fn lua_pat_match(
                 // Position capture
                 let cap_idx = captures.len();
                 if captures.len() >= LUA_MAXCAPTURES {
-                    lua_pattern_error_set("user_script:1: too many captures");
+                    lua_pattern_error_set("too many captures");
                     return None;
                 }
                 captures.push(LuaCapture::Position(si));
@@ -12874,7 +12883,7 @@ fn lua_pat_match(
             // Start substring capture
             let cap_idx = captures.len();
             if captures.len() >= LUA_MAXCAPTURES {
-                lua_pattern_error_set("user_script:1: too many captures");
+                lua_pattern_error_set("too many captures");
                 return None;
             }
             captures.push(LuaCapture::Substring(si, None)); // open capture
@@ -12914,13 +12923,33 @@ fn lua_pat_match(
         // which treated '%1' as the literal char '1'.
         if pi + 1 < pat.len() && pat[pi] == b'%' && (b'1'..=b'9').contains(&pat[pi + 1]) {
             let cap_idx = (pat[pi + 1] - b'0') as usize - 1;
-            // Out-of-range or unclosed → no match (upstream raises
-            // "invalid capture index" at compile-ish time, but for the
-            // common case we just fail the match here).
+            // (frankenredis-gvex0) Upstream `check_capture` (lstrlib.c) RAISES here; it does not
+            // fail the match. The comment this replaces said the error came "at compile-ish time,
+            // but for the common case we just fail the match here", and that is wrong in both
+            // halves -- upstream raises at MATCH time, and failing the match instead is observable.
+            //
+            //     if (l < 0 || l >= ms->level || ms->capture[l].len == CAP_UNFINISHED)
+            //       return luaL_error(ms->L, "invalid capture index");
+            //
+            // MEASURED against live 7.2.4, all four entry points, where fr answered nil or the
+            // unchanged subject and 7.2.4 raised:
+            //     string.match('abc', '(a)%2')          string.find('abc', '(a)%2')
+            //     string.gsub('abc', '(a)%2', 'X')      string.gmatch('abc', '(a)%2')
+            //     string.match('abc', '%1')             string.match('abc', '(a%1)')
+            // The last is the CAP_UNFINISHED arm: a capture may not reference ITSELF while open.
             let cap_bytes: Vec<u8> = match captures.get(cap_idx) {
                 Some(LuaCapture::Substring(start, Some(end))) => s[*start..*end].to_vec(),
-                Some(LuaCapture::Position(pos)) => format!("{}", pos + 1).into_bytes(),
-                _ => return None,
+                // A POSITION capture passes check_capture -- its len is CAP_POSITION, not
+                // CAP_UNFINISHED -- and then never matches, because match_capture compares
+                // `(size_t)(src_end - s) >= len` with len = (size_t)(-2), which no real remainder
+                // reaches. So: no error, and no match. fr rendered the position as decimal and
+                // compared THAT, which made `string.match('11', '()%1')` return 1 where 7.2.4
+                // returns nil.
+                Some(LuaCapture::Position(_)) => return None,
+                _ => {
+                    lua_pattern_error_set("invalid capture index");
+                    return None;
+                }
             };
             let end = si + cap_bytes.len();
             if end > s.len() || &s[si..end] != cap_bytes.as_slice() {
@@ -13097,6 +13126,24 @@ enum LuaCaret {
 /// `find`, `match` and `gsub` spelling: a leading `^` anchors.
 fn lua_pattern_find(s: &[u8], pat: &[u8], init: usize) -> Result<Option<LuaPatMatch>, String> {
     lua_pattern_find_with_caret(s, pat, init, LuaCaret::Anchor)
+}
+
+/// Apply upstream's position prefix to an error RAISED BY THE MATCHER.
+///
+/// (frankenredis-gvex0) The rule is `lua_pattern_validate_named`'s, and it belongs to the CALLER's
+/// frame, not to the matcher: `luaL_error` reports the position of the function one level up, so a
+/// pattern error raised inside a Lua closure carries `user_script:1: ` and the SAME error from
+/// `pcall(string.gsub, s, p, r)` -- where the C function itself is what pcall invoked -- carries
+/// nothing. The matcher cannot see which shape it is in, so it stores the bare phrase and this
+/// applies the prefix.
+///
+/// MEASURED on live 7.2.4: `pcall(string.gsub, 'zazbz', '%1', 'X')` answers a bare
+/// "invalid capture index".
+fn lua_pattern_raise(inv_name: Option<&str>, msg: String) -> String {
+    match inv_name {
+        Some(_) => format!("user_script:1: {msg}"),
+        None => msg,
+    }
 }
 
 fn lua_pattern_find_with_caret(
@@ -14046,7 +14093,17 @@ fn lua_string_format(
                             let s = match &arg {
                                 LuaValue::Str(b) => b.clone(),
                                 LuaValue::Number(n) => {
-                                    if *n == (*n as i64) as f64 && n.is_finite() {
+                                    // NEGATIVE ZERO must not take the integer route:
+                                    // -0.0 as i64 is 0 and 0 as f64 == -0.0 compares TRUE
+                                    // (IEEE754 equality ignores the sign of zero), so the
+                                    // fast path printed "0" where 7.2.4 prints "-0".
+                                    // Falling through reaches lua_number_to_string, which
+                                    // already renders -0 as C's %.14g does -- which is why
+                                    // tostring and concat were correct all along.
+                                    if *n == (*n as i64) as f64
+                                        && n.is_finite()
+                                        && !(*n == 0.0 && n.is_sign_negative())
+                                    {
                                         i64_to_ascii_bytes(*n as i64)
                                     } else {
                                         lua_number_to_string(*n).into_bytes()
@@ -14092,7 +14149,17 @@ fn lua_string_format(
                             let s = match &arg {
                                 LuaValue::Str(b) => b.clone(),
                                 LuaValue::Number(n) => {
-                                    if *n == (*n as i64) as f64 && n.is_finite() {
+                                    // NEGATIVE ZERO must not take the integer route:
+                                    // -0.0 as i64 is 0 and 0 as f64 == -0.0 compares TRUE
+                                    // (IEEE754 equality ignores the sign of zero), so the
+                                    // fast path printed "0" where 7.2.4 prints "-0".
+                                    // Falling through reaches lua_number_to_string, which
+                                    // already renders -0 as C's %.14g does -- which is why
+                                    // tostring and concat were correct all along.
+                                    if *n == (*n as i64) as f64
+                                        && n.is_finite()
+                                        && !(*n == 0.0 && n.is_sign_negative())
+                                    {
                                         i64_to_ascii_bytes(*n as i64)
                                     } else {
                                         lua_number_to_string(*n).into_bytes()
@@ -14324,7 +14391,10 @@ fn lua_fmt_nonfinite(n: f64, upper: bool) -> Option<String> {
 fn lua_fmt_scientific(n: f64, prec: usize, upper: bool) -> String {
     if n == 0.0 {
         let e = if upper { 'E' } else { 'e' };
-        return format!("{:.prec$}{e}+00", 0.0);
+        // Format `n`, not a 0.0 literal: -0.0 == 0.0 is true, so the literal
+        // discarded the sign before any formatter saw it. Rust's {:.prec$}
+        // renders -0.0 as "-0.000000", which is what C's %e emits.
+        return format!("{n:.prec$}{e}+00");
     }
     let abs = n.abs();
     let exp = abs.log10().floor() as i32;
@@ -14337,7 +14407,13 @@ fn lua_fmt_scientific(n: f64, prec: usize, upper: bool) -> String {
 /// Format using %g/%G: use %e if exponent < -4 or >= precision, else %f without trailing zeros.
 fn lua_fmt_g(n: f64, prec: usize, upper: bool) -> String {
     if n == 0.0 {
-        return "0".to_string();
+        // -0.0 == 0.0 in IEEE754, so this shortcut must ask for the sign
+        // explicitly. C's %g prints "-0" for negative zero.
+        return if n.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        };
     }
     let abs = n.abs();
     let exp = abs.log10().floor() as i32;
@@ -27989,19 +28065,43 @@ end
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"ab".to_vec())));
 
-        // Out-of-range index → currently silently fails to match in
-        // fr (upstream raises "invalid capture index" at match time,
-        // which requires threading errors through lua_pat_match — see
-        // bead deferral note). Pin the current behavior; flip the
-        // assertion when the error-threading lands.
-        let frame = eval_script(
+        // (frankenredis-gvex0) FLIPPED, as this block's own note asked for once the error
+        // threading landed. Upstream `check_capture` RAISES on an out-of-range index rather than
+        // failing the match, and the error travels out through lua_pattern_error_set. MEASURED on
+        // live 7.2.4: this exact script answers "invalid capture index" there, and fr answered nil.
+        let err = eval_script(
             b"return string.match('abc', '(abc)%5')",
             &[],
             &[],
             &mut store,
             0,
         )
-        .unwrap();
+        .expect_err("an out-of-range %N must raise, not fail the match");
+        assert_eq!(err, "user_script:1: invalid capture index");
+
+        // The CAP_UNFINISHED arm of the same upstream branch: a capture may not reference ITSELF
+        // while it is still open. A fix that only bounds-checked the index would miss this.
+        let err = eval_script(
+            b"return string.match('abc', '(a%1)')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("a backref to an UNFINISHED capture must raise");
+        assert_eq!(err, "user_script:1: invalid capture index");
+
+        // A POSITION capture is the third arm and behaves differently again: upstream lets it
+        // through check_capture and then never matches it, so this is nil with NO error. fr used to
+        // render the position as decimal and compare that, returning 1 here.
+        let frame = eval_script(
+            b"return string.match('11', '()%1')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("a position backref must not raise");
         assert_eq!(frame, RespFrame::BulkString(None));
 
         // gsub also honors %N in the pattern.
