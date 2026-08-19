@@ -45,6 +45,10 @@ REDIS_CLI = "legacy_redis_code/redis/src/redis-cli"
 # WHICH bytes are expected to agree rather than only that some do.
 SPECIALS = set(b"^$*+?.([%-")
 
+# Cases whose index IS the pattern byte, so a SPECIALS breakdown is meaningful.
+# The others are keyed by case number and must not print one.
+BYTE_INDEXED = {"byte", "byte_close_paren", "byte_close_paren_match", "byte_gsub"}
+
 # name -> Lua body producing "idx:ok:result" comma-joined over 0..255.
 CASES = {
     # the single-byte surface
@@ -66,6 +70,27 @@ CASES = {
     "byte_close_paren_match": (
         'local out={} for i=0,255 do local p=string.char(i)..")" '
         'local ok,r=pcall(string.match,"z"..p.."z",p) '
+        'out[#out+1]=i..":"..tostring(ok)..":"..tostring(r) end '
+        'return table.concat(out,",")'
+    ),
+    # Upstream raises "unfinished capture" only when a capture is READ, not when the
+    # pattern is compiled: add_s calls push_onecapture solely for a %N in the
+    # replacement. So the SAME pattern succeeds with replacement "X" and raises with
+    # "%1". This case varies ONLY the replacement, which is what isolates the timing
+    # from the pattern. fr validates eagerly and raises for both.
+    "capture_read_timing": (
+        'local pats={"(","(a","a("} local reps={"X","%1"} local out={} local n=0 '
+        'for i,p in ipairs(pats) do for j,r in ipairs(reps) do n=n+1 '
+        'local ok,res=pcall(string.gsub,"zazbz",p,r) '
+        'out[#out+1]=n..":"..tostring(ok)..":"..tostring(res) end end '
+        'return table.concat(out,",")'
+    ),
+    # A back-reference to a capture that does not exist. Upstream raises "invalid
+    # capture index"; fr silently fails to match -- the OPPOSITE direction to the
+    # case above, so the two together show fr's validator is not simply stricter.
+    "backref_no_capture": (
+        'local out={} local pats={"%1","%2","a%1"} '
+        'for i,p in ipairs(pats) do local ok,r=pcall(string.gsub,"zazbz",p,"X") '
         'out[#out+1]=i..":"..tostring(ok)..":"..tostring(r) end '
         'return table.concat(out,",")'
     ),
@@ -149,17 +174,27 @@ def main() -> int:
                 return 1
             div = [b for b in common if F[b] != R[b]]
             total_div += len(div)
-            agree_nonspecial = [b for b in common if b not in SPECIALS and b not in div]
-            div_special = [b for b in div if b in SPECIALS]
-            print(f"\n{name}: {len(div)} of {len(common)} bytes diverge")
-            print(f"  divergent AND in SPECIALS      : {len(div_special)}")
-            print(f"  agreeing AND not in SPECIALS   : {len(agree_nonspecial)}")
+            byte_indexed = name in BYTE_INDEXED
+            unit = "bytes" if byte_indexed else "cases"
+            print(f"\n{name}: {len(div)} of {len(common)} {unit} diverge")
+            if byte_indexed:
+                # Only meaningful when the index IS the pattern byte. Printing a
+                # SPECIALS breakdown for an index-keyed case would be a number that
+                # looks like a finding and means nothing.
+                agree_nonspecial = [b for b in common if b not in SPECIALS and b not in div]
+                div_special = [b for b in div if b in SPECIALS]
+                print(f"  divergent AND in SPECIALS      : {len(div_special)}")
+                print(f"  agreeing AND not in SPECIALS   : {len(agree_nonspecial)}")
             for b in div[:8]:
-                ch = chr(b) if 32 <= b < 127 else "."
-                print(f"    byte {b:>3} {ch!r:<4} fr={F[b][:30]:<30} redis={R[b][:30]}")
+                if byte_indexed:
+                    ch = chr(b) if 32 <= b < 127 else "."
+                    label = f"byte {b:>3} {ch!r:<4}"
+                else:
+                    label = f"case {b:>3}      "
+                print(f"    {label} fr={F[b][:30]:<30} redis={R[b][:30]}")
             if len(div) > 8:
                 print(f"    ... and {len(div) - 8} more")
-        print(f"\nTOTAL DIVERGENT BYTES: {total_div}")
+        print(f"\nTOTAL DIVERGENT ROWS: {total_div}")
         return 1 if total_div else 0
     finally:
         for port in (args.fr_port, args.redis_port):
