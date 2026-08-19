@@ -8552,9 +8552,17 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             store.dispatch_client_ctx.resp_protocol_version == 3,
         ))
     } else {
-        Ok(RespFrame::Error(
-            "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
-        ))
+        // (BrownIbis) One rule, two implementations, drifted. Upstream has exactly
+        // ONE wording for this (geo.c:686-689) and this copy differed three ways:
+        // "or" for "and", "must be provided" for "can be specified for", and it
+        // dropped the command name entirely. Not dead code either -- the early
+        // check fires when neither option TOKEN is present, while this branch is
+        // reached when a token parsed but yielded no usable radius/box, so a
+        // client could really see the wrong sentence.
+        Ok(RespFrame::Error(format!(
+            "ERR exactly one of BYRADIUS and BYBOX can be specified for {}",
+            String::from_utf8_lossy(&argv[0])
+        )))
     }
 }
 
@@ -8816,9 +8824,14 @@ fn geosearchstore(
         }
         res
     } else {
-        return Ok(RespFrame::Error(
-            "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
-        ));
+        // Same twin as in `geosearch` above: upstream has one wording for this
+        // (geo.c:686-689) and this copy drifted in three ways. GEOSEARCHSTORE
+        // carries the GEOSEARCH flag upstream (geo.c:871), so it takes the same
+        // sentence, naming itself via argv[0].
+        return Ok(RespFrame::Error(format!(
+            "ERR exactly one of BYRADIUS and BYBOX can be specified for {}",
+            String::from_utf8_lossy(&argv[0])
+        )));
     };
 
     geo_store_results(store, &dest, &results, unit_mult, storedist, now_ms)
