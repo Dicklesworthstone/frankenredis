@@ -1082,6 +1082,26 @@ fn call_is_method() -> bool {
     CURRENT_CALL_IS_METHOD.with(std::cell::Cell::get)
 }
 
+/// Upstream's `strpbrk(p, SPECIALS) == NULL` test from `str_find_aux` (lstrlib.c:503).
+///
+/// (frankenredis-zxtuk) `SPECIALS` is `^$*+?.([%-` and the omissions are load-bearing: `)`, `]` and
+/// `}` are NOT in it, so `string.find(s, ")")` takes the PLAIN branch upstream and never reaches the
+/// matcher -- which is the only reason it does not raise "invalid pattern capture", the way
+/// `string.match(s, ")")` still does on both engines.
+///
+/// The NUL handling is upstream's, not an oversight reproduced for its own sake: `strpbrk` takes a
+/// C string and stops at the first NUL, while the plain search that follows uses the FULL byte
+/// length. So a pattern of `a\0(` is judged special-free on its first byte and then searched for
+/// verbatim, `(` included. MEASURED on 7.2.4: `string.find('a\0(b', 'a\0(')` returns 1, and
+/// `string.find('xa\0(b', 'a\0(')` returns 2.
+fn lua_pattern_has_specials(pattern: &[u8]) -> bool {
+    const SPECIALS: &[u8] = b"^$*+?.([%-";
+    pattern
+        .iter()
+        .take_while(|&&b| b != 0)
+        .any(|b| SPECIALS.contains(b))
+}
+
 /// Upstream `lauxlib.c::luaL_argerror`, including the half that is easy to miss.
 ///
 /// (frankenredis-i18ug) Format a bad-arg error using the AST-callsite
@@ -10756,7 +10776,16 @@ impl<'a> LuaState<'a> {
                     (init_raw as usize).saturating_sub(1)
                 };
                 let init = init.min(s.len());
-                let plain = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
+                // (frankenredis-zxtuk) Upstream takes the plain search when the caller ASKS for it
+                // OR when the pattern contains no special character -- `find && (lua_toboolean(L, 4)
+                // || strpbrk(p, SPECIALS) == NULL)`. fr had only the first half, so a pattern that
+                // is special-free but not literal-safe under the matcher, `)` above all, reached the
+                // matcher and raised where 7.2.4 answers. This is find-only in upstream too: match,
+                // gmatch and gsub have no such branch, and all three DO raise on `)` -- verified on
+                // both engines, which is what pins the branch to this call site rather than to the
+                // pattern compiler.
+                let plain = args.get(3).map(|v| v.is_truthy()).unwrap_or(false)
+                    || !lua_pattern_has_specials(&pattern);
                 // (frankenredis-vfv8s) Validate the pattern eagerly so
                 // malformed inputs raise upstream-shaped errors instead
                 // of silently returning nil. The plain-search path is
@@ -16545,6 +16574,57 @@ mod tests {
             ),
             "Zx|false",
             "replacing __index must redirect method lookup AND orphan string.rep"
+        );
+    }
+
+    #[test]
+    fn string_find_takes_the_plain_branch_when_the_pattern_has_no_specials_zxtuk() {
+        // (frankenredis-zxtuk) Every assertion is a row MEASURED against live 7.2.4.
+        let mut store = Store::new();
+        let run = |store: &mut Store, src: &[u8]| -> String {
+            match eval_script(src, &[], &[], store, 0) {
+                Ok(RespFrame::BulkString(Some(b))) => String::from_utf8_lossy(&b).into_owned(),
+                Ok(other) => format!("{other:?}"),
+                Err(e) => format!("ERR {e}"),
+            }
+        };
+
+        // `)` is absent from SPECIALS, so find takes the plain branch and ANSWERS.
+        assert_eq!(run(&mut store, b"return tostring(string.find('a)b',')'))"), "2");
+        assert_eq!(
+            run(&mut store, b"local a,b = string.find('xx)yy',')') return tostring(a)..','..tostring(b)"),
+            "3,3",
+            "the plain branch returns both bounds, not just the start"
+        );
+        // No match still yields nil rather than the matcher's error.
+        assert_eq!(run(&mut store, b"return tostring(string.find('abc',')',9))"), "nil");
+
+        // FIND-ONLY. match, gmatch and gsub have no such branch upstream and all three raise on the
+        // same pattern -- on BOTH engines. Without these, moving the fix into the pattern compiler
+        // would look equally correct and would break three functions.
+        for src in [
+            b"local ok,e = pcall(function() return string.match('a)b',')') end) return tostring(e)".as_slice(),
+            b"local ok,e = pcall(function() return (string.gsub('a)b',')','Z')) end) return tostring(e)".as_slice(),
+            b"local ok,e = pcall(function() for m in string.gmatch('a)b',')') do end end) return tostring(e)".as_slice(),
+        ] {
+            assert_eq!(
+                run(&mut store, src),
+                "user_script:1: invalid pattern capture",
+                "the plain branch is str_find_aux's alone"
+            );
+        }
+
+        // A pattern that DOES contain a special still goes to the matcher, or the branch would have
+        // swallowed pattern matching whole.
+        assert_eq!(run(&mut store, b"return tostring(string.find('xaaa','a+'))"), "2");
+        assert_eq!(run(&mut store, b"return tostring(string.find('abc','^b'))"), "nil");
+
+        // strpbrk stops at the first NUL while the plain search uses the full length, so this
+        // pattern is judged special-free on its first byte and then matched verbatim, `(` included.
+        assert_eq!(
+            run(&mut store, b"return tostring(string.find('xa\0(b','a\0('))"),
+            "2",
+            "upstream's strpbrk is NUL-terminated; the search that follows is not"
         );
     }
 
