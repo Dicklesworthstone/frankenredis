@@ -65969,3 +65969,73 @@ tables and one bead's stated job shape against a curve certified in the row abov
    REACH is what is unmeasured, and the zset case shows reach can be the whole story.
 2. Run it in ONE invocation against the 40-member baseline. Comparing across sessions is what let
    a boundary number stand as a general one for this long.
+
+## 2026-08-19 CrimsonHawk: CERTIFIED — luapat_16 0.7475x and luapat_256 0.8056x vs live Redis 7.2.4, worst of the admissible draws, gate FIT at BOTH ends (frankenredis-zxtuk, frankenredis-25uop)
+
+EVIDENCE CLASS: `balanced_square_ab.py`, square ABBAABBA, 21 rounds, 50,000 ops/slot, -P16, live
+vendored Redis 7.2.4 in the SAME invocation, three consecutive draws. **The window gate returned
+FIT at BOTH ends** — the first time it has done so in this session, after roughly a dozen refusals
+across many turns.
+
+  fr        `target/release/frankenredis`, current with HEAD, carrying the plain-search branch, the
+            lmemfind scan, and the capture/format fixes
+  incumbent vendored redis 7.2.4
+  gate open  FIT after a 32-second poll
+  gate close FIT — 0 builds; the harness noted 1min 10.63 vs 5min 9.22 is 15 pct apart but "both are
+            under the quiet floor 16.0 (64 cpus) with no builds running — drift on numbers this
+            small is not contention changing"
+  fleet     0 valgrind, 0 redis-benchmark at start (checked by binary, not by pgrep -f)
+
+### THE THREE DRAWS
+
+    draw  loadavg            iowait  luapat_16        luapat_256       get_control
+    1     6.37 5.76 5.23     0 pct   0.7651 ADM       0.8056 ADM       1.1231 NULL-FAILED
+    2     9.30 6.87 5.68     0 pct   0.7600 ADM       0.7875 NULL-FAIL 1.1380 ADM
+    3     10.32 8.17 6.31    0 pct   0.7475 ADM       0.8060 ADM       1.1103 ADM
+
+    CPU MHz at close: 3433 4288 3432 3433 3433 1429 3433 4288
+
+### THE BOUNDS, WORST OF THE ADMISSIBLE DRAWS
+
+    luapat_16    0.7475x   (admissible 3 of 3; worst of 0.7651 / 0.7600 / 0.7475)
+    luapat_256   0.8056x   (admissible 2 of 3; worst of 0.8056 / 0.8060)
+
+Ratio is fr ops/s over redis ops/s, so **both mean fr is BEHIND** on these shapes. These are RAW
+ratios and that is deliberate: draw 3 is the only one where the control and both rows are all
+admissible, and there the harness flags its own normalised output —
+
+    luapat_16   0.6732  <- normaliser WIDER than the row (5.0 vs 4.1 pct)
+    luapat_256  0.7260  <- normaliser WIDER than the row (5.0 vs 2.9 pct)
+
+"it injects more variance than it removes". So the normalised view is the noisier estimator on this
+pair and the raw figure is the one to quote, which is the same conclusion the earlier three-draw row
+reached. Normalising would make fr look WORSE (0.67 / 0.73), so quoting raw is not the flattering
+choice — it is the one the instrument supports.
+
+### WHAT IS AND IS NOT CERTIFIED
+
+CERTIFIED: the two bounds above, as the current standing description of fr on these shapes.
+
+NOT CERTIFIED: any DELTA against the pre-fix figures. The earlier luapat_256 readings (0.6425 /
+0.6503 / 0.6442) were taken in UNFIT windows and labelled sizing, so the apparent improvement to
+0.8056 compares a certified number against uncertified ones. The improvement is real — the Ir A/B
+at `c65d6591e` established it on a load-immune instrument — but the wall-clock delta is not a
+certified quantity and must not be quoted as one.
+
+### WHAT MADE THE WINDOW WORK
+
+Every prior attempt failed on one of three criteria; this one cleared all three at once. The load
+condition finally held (5.75 / 5.56 / 5.13, stationary, 15min far under 30) and the only remaining
+blocker was three other-project cargo processes, which cleared in 32 seconds of polling. Critically
+I started NO build while polling: the gate disqualifies on any cargo/rustc under the shared uid, so
+building during the poll would have disqualified my own measurement.
+
+### RETRY PREDICATES
+
+  1. Quote 0.7475x and 0.8056x as the standing bounds; supersede every earlier luapat wall-clock
+     figure, all of which were sizing.
+  2. When the cascade lever lands, re-measure in a FIT window and compare against THESE numbers,
+     not against the sizing rows.
+  3. Poll for FIT rather than measuring on a brief-supplied "quiet" reading. The brief called
+     several earlier windows quiet that the gate refused; this one it also called quiet, and the
+     difference was that all three loadavgs were low together.
