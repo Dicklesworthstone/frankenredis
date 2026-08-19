@@ -103,6 +103,33 @@ WALKERS = [
 # (frankenredis-lua-call-depth-ug22x, and the residual named in
 # frankenredis-thread-stack-size-1tlyh: "the interpreter's own call depth,
 # bounded in FRAMES by MAX_CALL_DEPTH rather than in BYTES, is still unpriced".)
+def read_usize_const(path, name):
+    """Read `const NAME: usize = N;` out of a Rust source file.
+
+    (frankenredis-lua-call-depth-ug22x) The limit used to be a literal in CYCLES below. That is
+    a stale-reader waiting to happen, and it happened: MAX_CALL_DEPTH moved 512 -> 768 and this
+    gate went on validating 512, reporting a budget nobody was spending -- the third false pass
+    of that shape in this file, after the 64-byte thunk and the 2 MiB stack default. A gate whose
+    inputs are copies of the thing it checks cannot fail when they diverge, which is the one
+    moment it exists for. Missing constants raise rather than default, for the same reason.
+    """
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    m = re.search(r"^const %s: usize = ([0-9_]+);" % re.escape(name), text, re.M)
+    if not m:
+        raise SystemExit(
+            "FAIL — could not read `const %s: usize` from %s. The gate cannot validate a limit "
+            "it cannot find; fix the reader rather than hardcoding the number back." % (name, path)
+        )
+    return int(m.group(1).replace("_", ""))
+
+
+LUA_EVAL = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "crates", "fr-command", "src", "lua_eval.rs",
+)
+MAX_CALL_DEPTH = read_usize_const(LUA_EVAL, "MAX_CALL_DEPTH")
+
 EVAL_EXPR_PER_LEVEL = 3
 
 CYCLES = [
@@ -115,8 +142,9 @@ CYCLES = [
             ("::exec_stmt", 1),
             ("::eval_expr", EVAL_EXPR_PER_LEVEL),
         ],
-        512,
-        "MAX_CALL_DEPTH in lua_eval.rs; upstream reaches ~16000, which fr cannot "
+        MAX_CALL_DEPTH,
+        "MAX_CALL_DEPTH in lua_eval.rs (read from source, not copied); upstream reaches "
+        "~16000, which fr cannot "
         "afford at this frame cost -- the residual is recorded on ug22x",
     ),
 ]
