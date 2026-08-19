@@ -7662,7 +7662,7 @@ impl Store {
         if hit {
             self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
         } else {
-            self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+            self.record_keyspace_miss(key);
         }
         hit
     }
@@ -7688,7 +7688,7 @@ impl Store {
         // borrows all of `self`.)
         if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
-            self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+            self.record_keyspace_miss(key);
             return None;
         }
         match self.entries.get_mut(key) {
@@ -7697,10 +7697,35 @@ impl Store {
                 Some(entry)
             }
             None => {
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 None
             }
         }
+    }
+
+    /// Record a READ-lookup miss: the INFO counter and upstream's `keymiss` notification.
+    ///
+    /// (frankenredis-keymiss-oqhbi) Upstream emits both from the SAME branch of
+    /// `lookupKeyReadWithFlags` -- db.c:131-135 puts `notifyKeyspaceEvent(NOTIFY_KEY_MISS, ...)`
+    /// and `server.stat_keyspace_misses++` on adjacent lines under gates that differ only by
+    /// NONOTIFY vs NOSTATS. So "fr counted a keyspace miss" and "upstream would fire keymiss" are
+    /// the same condition, and funnelling them through one place is what keeps them that way.
+    /// Before this, `m` was accepted by the config parser, round-tripped through CONFIG GET, and
+    /// notified nothing.
+    fn record_keyspace_miss(&mut self, key: &[u8]) {
+        self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+        if self.notify_keyspace_events & NOTIFY_KEY_MISS == 0 {
+            return;
+        }
+        // db 0 fallback for an unprefixed key, exactly as the `del` / `expire` notifiers do.
+        // An early return on `None` would silently drop the notification for those keys, making
+        // the event fire for some and not others.
+        let (db, logical_key): (usize, &[u8]) = match decode_db_key(key) {
+            Some((db, lk)) => (db, lk),
+            None => (0, key),
+        };
+        // `logical_key` borrows the key ARGUMENT, not `self`, so it needs no copy.
+        self.notify_keyspace_event(NOTIFY_KEY_MISS, "keymiss", logical_key, db);
     }
 
     fn lfu_tracking_enabled(&self) -> bool {
@@ -8583,7 +8608,7 @@ impl Store {
                     Ok(Some(value))
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(None)
                 }
             };
@@ -8605,7 +8630,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(None);
             }
             return match self.entries.get_mut(key) {
@@ -8622,7 +8647,7 @@ impl Store {
                     Ok(Some(value))
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(None)
                 }
             };
@@ -8649,7 +8674,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(None);
             }
             match self.entries.get_mut(key) {
@@ -8667,7 +8692,7 @@ impl Store {
                     Ok(Some(value))
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(None)
                 }
             }
@@ -9044,7 +9069,7 @@ impl Store {
                 Some(old)
             }
             None => {
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 None
             }
         };
@@ -9246,7 +9271,7 @@ impl Store {
         };
         if evaluate_expiry(now_ms, deadline).should_evict {
             self.drop_if_expired(key, now_ms);
-            self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+            self.record_keyspace_miss(key);
             return ExpireTimeValue::KeyMissing;
         }
         match deadline {
@@ -9259,7 +9284,7 @@ impl Store {
                     self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                     ExpireTimeValue::NoExpiry
                 } else {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     ExpireTimeValue::KeyMissing
                 }
             }
@@ -9591,7 +9616,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return false;
             }
             match self.entries.get_mut(key) {
@@ -9602,7 +9627,7 @@ impl Store {
                     true
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     false
                 }
             }
@@ -10249,7 +10274,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(0);
             }
             match self.entries.get_mut(key) {
@@ -10263,7 +10288,7 @@ impl Store {
                     Ok(len)
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(0)
                 }
             }
@@ -10322,7 +10347,7 @@ impl Store {
                     && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
                 {
                     self.drop_if_expired(key, now_ms);
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     results.push(None);
                     continue;
                 }
@@ -10336,7 +10361,7 @@ impl Store {
                         results.push(v);
                     }
                     None => {
-                        self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                        self.record_keyspace_miss(key);
                         results.push(None);
                     }
                 }
@@ -10367,7 +10392,7 @@ impl Store {
                     && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
                 {
                     self.drop_if_expired(key, now_ms);
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     results.push(None);
                     continue;
                 }
@@ -10383,7 +10408,7 @@ impl Store {
                         results.push(v);
                     }
                     None => {
-                        self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                        self.record_keyspace_miss(key);
                         results.push(None);
                     }
                 }
@@ -10555,7 +10580,7 @@ impl Store {
                 && evaluate_expiry(now_ms, self.expiry_ms(key.as_slice())).should_evict
             {
                 self.drop_if_expired(key.as_slice(), now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(&key);
                 let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
                 self.internal_entries_insert(key, new_entry);
                 self.dirty = self.dirty.saturating_add(1);
@@ -10571,7 +10596,7 @@ impl Store {
                     (Some(v), Some(lfu))
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(&key);
                     (None, None)
                 }
             };
@@ -10895,7 +10920,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(f(&[]));
             }
             match self.entries.get_mut(key) {
@@ -10913,7 +10938,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(f(&[]))
                 }
             }
@@ -11411,7 +11436,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(false);
             }
             match self.entries.get_mut(key) {
@@ -11425,7 +11450,7 @@ impl Store {
                     read_bit(entry)
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(false)
                 }
             }
@@ -12534,7 +12559,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return None;
             }
             match self.entries.get(key) {
@@ -12543,7 +12568,7 @@ impl Store {
                     entry
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     return None;
                 }
             }
@@ -15811,7 +15836,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(f(None));
             }
             return match self.entries.get_mut(key) {
@@ -15826,7 +15851,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(f(None))
                 }
             };
@@ -16069,7 +16094,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(false);
             }
             return match self.entries.get_mut(key) {
@@ -16084,7 +16109,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(false)
                 }
             };
@@ -16172,7 +16197,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(0);
             }
             return match self.entries.get_mut(key) {
@@ -16187,7 +16212,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(0)
                 }
             };
@@ -16331,7 +16356,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
             }
@@ -16354,7 +16379,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     sink(SmembersScanEvent::Len(0));
                     Ok(())
                 }
@@ -16479,7 +16504,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
             }
@@ -16507,7 +16532,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     sink(SmembersScanEvent::Len(0));
                     Ok(())
                 }
@@ -16608,7 +16633,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(Vec::new());
             }
             return match self.entries.get_mut(key) {
@@ -16623,7 +16648,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(Vec::new())
                 }
             };
@@ -16735,7 +16760,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(fields.iter().map(|_| None).collect());
             }
             return match self.entries.get_mut(key) {
@@ -16753,7 +16778,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(fields.iter().map(|_| None).collect())
                 }
             };
@@ -17238,7 +17263,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(0);
             }
             return match self.entries.get_mut(key) {
@@ -17253,7 +17278,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(0)
                 }
             };
@@ -18623,7 +18648,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(0);
             }
             match self.entries.get_mut(key) {
@@ -18641,7 +18666,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(0)
                 }
             }
@@ -18827,7 +18852,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
             }
@@ -18856,7 +18881,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     sink(SmembersScanEvent::Len(0));
                     Ok(())
                 }
@@ -19154,7 +19179,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(None);
             }
             return match self.entries.get_mut(key) {
@@ -19172,7 +19197,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(None)
                 }
             };
@@ -20735,7 +20760,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
             }
@@ -20755,7 +20780,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     sink(SmembersScanEvent::Len(0));
                     Ok(())
                 }
@@ -20843,7 +20868,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(0);
             }
             match self.entries.get_mut(key) {
@@ -20861,7 +20886,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(0)
                 }
             }
@@ -20944,7 +20969,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(false);
             }
             return match self.entries.get_mut(key) {
@@ -20962,7 +20987,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(false)
                 }
             };
@@ -23685,7 +23710,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(None);
             }
             return match self.entries.get_mut(key) {
@@ -23703,7 +23728,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(None)
                 }
             };
@@ -23790,7 +23815,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(0);
             }
             match self.entries.get_mut(key) {
@@ -23808,7 +23833,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(0)
                 }
             }
@@ -23935,7 +23960,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(None);
             }
             return match self.entries.get_mut(key) {
@@ -23957,7 +23982,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(None)
                 }
             };
@@ -24057,7 +24082,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(None);
             }
             return match self.entries.get_mut(key) {
@@ -24075,7 +24100,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(None)
                 }
             };
@@ -24155,7 +24180,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(None);
             }
             let lfu_decay = self.lfu_decay_time;
@@ -24175,7 +24200,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(None)
                 }
             };
@@ -24348,7 +24373,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
             }
@@ -24362,7 +24387,7 @@ impl Store {
                     entry
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     sink(SmembersScanEvent::Len(0));
                     return Ok(());
                 }
@@ -24476,7 +24501,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
             }
@@ -24490,7 +24515,7 @@ impl Store {
                     entry
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     sink(SmembersScanEvent::Len(0));
                     return Ok(());
                 }
@@ -24813,7 +24838,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 sink(ZRangeWithScoresScanEvent::Len(0));
                 return Ok(());
             }
@@ -24842,7 +24867,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     sink(ZRangeWithScoresScanEvent::Len(0));
                     Ok(())
                 }
@@ -24969,7 +24994,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 sink(ZRangeWithScoresScanEvent::Len(0));
                 return Ok(());
             }
@@ -24998,7 +25023,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     sink(ZRangeWithScoresScanEvent::Len(0));
                     Ok(())
                 }
@@ -25139,7 +25164,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
             }
@@ -25172,7 +25197,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     sink(SmembersScanEvent::Len(0));
                     Ok(())
                 }
@@ -25314,7 +25339,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 sink(SmembersScanEvent::Len(0));
                 return Ok(());
             }
@@ -25342,7 +25367,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     sink(SmembersScanEvent::Len(0));
                     Ok(())
                 }
@@ -25501,14 +25526,14 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(0);
             }
             if score_bound_value(min) > score_bound_value(max) {
                 if self.entries.contains_key(key) {
                     self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                 } else {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                 }
                 return Ok(0);
             }
@@ -25527,7 +25552,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(0)
                 }
             };
@@ -27876,7 +27901,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 return Ok(0);
             }
             return match self.entries.get_mut(key) {
@@ -27894,7 +27919,7 @@ impl Store {
                     }
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     Ok(0)
                 }
             };
@@ -28047,7 +28072,7 @@ impl Store {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                self.record_keyspace_miss(key);
                 sink(XrangeReplyEvent::RecordCount(0));
                 return Ok(());
             }
@@ -28061,7 +28086,7 @@ impl Store {
                     entry
                 }
                 None => {
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     sink(XrangeReplyEvent::RecordCount(0));
                     return Ok(());
                 }
@@ -33046,7 +33071,7 @@ impl Store {
                     && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
                 {
                     self.drop_if_expired(key, now_ms);
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                    self.record_keyspace_miss(key);
                     continue;
                 }
                 match self.entries.get_mut(key) {
@@ -33058,7 +33083,7 @@ impl Store {
                         count += 1;
                     }
                     None => {
-                        self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+                        self.record_keyspace_miss(key);
                     }
                 }
             }
@@ -44012,6 +44037,65 @@ mod tests {
             assert!(borrowed.exists_no_stat(b"c", 0));
             assert!(!borrowed.exists_no_stat(b"vol", 0));
         }
+    }
+
+    #[test]
+    fn keymiss_fires_only_for_read_misses_when_the_m_flag_is_set_oqhbi() {
+        // (frankenredis-keymiss-oqhbi) `keymiss` was the ONLY one of upstream's 44 keyspace
+        // events fr never fired, while the `m` flag was accepted by the parser, round-tripped
+        // through CONFIG GET, and correctly excluded from `A` -- so an operator could configure
+        // it, read it back, and receive nothing forever with no error.
+        //
+        // The first row is the one that exposed the real scope: an earlier attempt wired only
+        // two lookup helpers and this failed instantly, because GET routes through
+        // get_string_bytes. The counter is incremented at 86 sites and they now funnel through
+        // record_keyspace_miss.
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | super::NOTIFY_KEY_MISS;
+
+        assert_eq!(store.get(b"absent", 0).unwrap(), None);
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(b"__keyevent@0__:keymiss".to_vec(), b"absent".to_vec())]
+        );
+
+        // A HIT must not notify -- the row that fails if the call is hung off the lookup rather
+        // than the miss branch.
+        store.set(b"present".to_vec(), b"v".to_vec(), None, 0);
+        let _ = store.drain_keyspace_notifications();
+        assert_eq!(store.get(b"present", 0).unwrap(), Some(b"v".to_vec()));
+        assert!(store.drain_keyspace_notifications().is_empty());
+
+        // Reading an EXPIRED key is a miss and takes a different arm from the plain absent case.
+        store.set(b"gone".to_vec(), b"v".to_vec(), Some(5), 0);
+        let _ = store.drain_keyspace_notifications();
+        assert_eq!(store.get(b"gone", 100).unwrap(), None);
+        assert!(
+            store
+                .drain_keyspace_notifications()
+                .iter()
+                .any(|(chan, _)| chan == b"__keyevent@0__:keymiss"),
+            "an expired-key read must emit keymiss"
+        );
+
+        // A miss reached through a DIFFERENT command family, to prove the funnel is not
+        // GET-specific: 86 call sites converted, and a per-command fix would pass the rows above
+        // and fail this one.
+        let _ = store.drain_keyspace_notifications();
+        assert!(store.hget(b"nohash", b"f", 0).unwrap().is_none());
+        assert!(
+            store
+                .drain_keyspace_notifications()
+                .iter()
+                .any(|(chan, _)| chan == b"__keyevent@0__:keymiss"),
+            "HGET on a missing key must emit keymiss too"
+        );
+
+        // With the flag clear, nothing -- the gate itself.
+        let mut off = Store::new();
+        off.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_GENERIC;
+        assert_eq!(off.get(b"absent", 0).unwrap(), None);
+        assert!(off.drain_keyspace_notifications().is_empty());
     }
 
     #[test]
