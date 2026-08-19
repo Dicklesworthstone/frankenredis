@@ -14142,12 +14142,6 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         }
     };
 
-    if is_ro && !has_no_writes {
-        return Ok(RespFrame::Error(
-            "ERR Can not execute a script with write flag using *_ro command.".to_string(),
-        ));
-    }
-
     // (frankenredis-ascgr) Upstream functions.c::fcallCommandGeneric
     // line 638-641 uses `getLongLongFromObject` (no _OrReply suffix)
     // and emits a bespoke 'Bad number of keys provided' for
@@ -14187,6 +14181,7 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // refusal applies to every FCALL. Checked BEFORE the nesting level is raised, so the refusal
     // path has nothing to unwind.
     let prepare_refusal = script_prepare_readonly_replica_refusal(store, has_no_writes)
+        .or_else(|| script_prepare_ro_command_refusal(is_ro, has_no_writes))
         .or_else(|| script_prepare_oom_refusal(store, store.script_allow_oom));
     if let Some(refusal) = prepare_refusal {
         store.script_read_only = previous_read_only;
@@ -26960,6 +26955,12 @@ fn eval_cmd(
     // whole body. Binding here ends the borrow at this statement instead.
     let prepare_refusal = if script.starts_with(b"#!") {
         script_prepare_readonly_replica_refusal(store, script_shebang_has_no_writes_flag(script))
+            .or_else(|| {
+                script_prepare_ro_command_refusal(
+                    read_only_script,
+                    script_shebang_has_no_writes_flag(script),
+                )
+            })
             .or_else(|| script_prepare_oom_refusal(store, store.script_allow_oom))
     } else {
         None
@@ -27082,6 +27083,7 @@ fn evalsha_cmd(
         .is_some_and(|body| body.starts_with(b"#!"))
     {
         script_prepare_readonly_replica_refusal(store, no_writes)
+            .or_else(|| script_prepare_ro_command_refusal(read_only_script, no_writes))
             .or_else(|| script_prepare_oom_refusal(store, allow_oom))
     } else {
         None
@@ -27269,6 +27271,29 @@ fn script_shebang_line_has_flag(line: &[u8], wanted: &str) -> bool {
 /// published cleared for `applying_master_stream` but NOT for AOF replay, so relying on it alone
 /// would inherit that gap here; this spells the AOF half out rather than assuming the flag covers
 /// it.
+/// Upstream `scriptPrepareForRun`'s third write-flag check (script.c:178-181):
+///
+///     if (ro) {
+///         addReplyError(caller, "Can not execute a script with write flag using *_ro command.");
+///
+/// `ro` is the `_ro` COMMAND variant -- EVAL_RO, EVALSHA_RO, FCALL_RO -- not the script's own
+/// flags. A script that does not declare `no-writes` is write-flagged by contract, so calling it
+/// through a read-only command is refused even if the body never writes.
+///
+/// fr had this for FCALL_RO only, and ordered BEFORE the read-only-replica check rather than
+/// after it. Both orders answer a correct error, which is what makes the difference invisible
+/// until a client trips both conditions at once: on a read-only replica, upstream answers
+/// READONLY and fr answered this. Now it sits where upstream puts it -- after the replica check,
+/// before the OOM one -- and covers all three commands.
+fn script_prepare_ro_command_refusal(ro: bool, no_writes: bool) -> Option<RespFrame> {
+    if ro && !no_writes {
+        return Some(RespFrame::Error(
+            "ERR Can not execute a script with write flag using *_ro command.".to_string(),
+        ));
+    }
+    None
+}
+
 fn script_prepare_readonly_replica_refusal(store: &Store, no_writes: bool) -> Option<RespFrame> {
     if !no_writes && store.is_read_only_replica && !store.must_obey_client {
         return Some(RespFrame::Error(
@@ -41696,6 +41721,80 @@ mod tests {
             xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"0"]),
             250
         );
+    }
+
+    #[test]
+    fn ro_command_variants_refuse_a_write_flagged_script_and_lose_to_the_replica_check() {
+        // Upstream scriptPrepareForRun, script.c:178-181:
+        //
+        //     if (ro) {
+        //         addReplyError(caller,
+        //             "Can not execute a script with write flag using *_ro command.");
+        //
+        // `ro` is the COMMAND variant (EVAL_RO / EVALSHA_RO / FCALL_RO), not the script's own
+        // flags. A script that does not declare `no-writes` is write-flagged BY CONTRACT, so it
+        // is refused through a read-only command even when its body never writes -- the flag is
+        // the promise, the body is not.
+        //
+        // fr had this for FCALL_RO only, and checked it BEFORE the read-only-replica check
+        // instead of after.
+        fn run_ro(store: &mut Store, body: &[u8]) -> RespFrame {
+            dispatch_argv(
+                &[b"EVAL_RO".to_vec(), body.to_vec(), b"0".to_vec()],
+                store,
+                0,
+            )
+            .unwrap_or_else(|e| e.to_resp())
+        }
+
+        // Shebang, no no-writes: refused through the _ro variant.
+        let mut store = Store::new();
+        match &run_ro(&mut store, b"#!lua\nreturn 1") {
+            RespFrame::Error(msg) => assert!(
+                msg.contains("Can not execute a script with write flag using *_ro command"),
+                "expected the _ro refusal, got {msg}"
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // Declaring no-writes is what makes it legal, and the body is unchanged -- which is the
+        // point: the flag decides, not the behaviour.
+        let mut store = Store::new();
+        assert_eq!(
+            run_ro(&mut store, b"#!lua flags=no-writes\nreturn 1"),
+            RespFrame::Integer(1),
+            "a no-writes script must run through _ro"
+        );
+
+        // LEGACY body: EVAL_COMPAT_MODE, so no prepare refusal -- it runs, read-only, exactly as
+        // before. A fix that applied the _ro refusal to every script would break this row and
+        // nothing else.
+        let mut store = Store::new();
+        assert_eq!(
+            run_ro(&mut store, b"return 1"),
+            RespFrame::Integer(1),
+            "a legacy body through _ro must still run"
+        );
+
+        // THE ORDER ROW. On a read-only replica a write-flagged script through _ro trips BOTH
+        // checks. Upstream answers the replica one (:158) because the _ro one is at :178; fr
+        // answered the _ro one. Each error is individually correct, so only tripping both at
+        // once can tell the orders apart.
+        let mut store = Store::new();
+        store.is_read_only_replica = true;
+        match &run_ro(&mut store, b"#!lua\nreturn 1") {
+            RespFrame::Error(msg) => {
+                assert!(
+                    msg.contains("Can not run script with write flag on readonly replica"),
+                    "the replica check must be answered FIRST, got {msg}"
+                );
+                assert!(
+                    !msg.contains("*_ro command"),
+                    "the _ro refusal must not win this race: {msg}"
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     #[test]
