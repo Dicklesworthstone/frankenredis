@@ -64329,3 +64329,84 @@ symbol which cannot be found is not thereby fine.
      are a `#[inline(never)]` shim in a scratch build, or accepting it as unpriced and saying so.
   3. If the reply ceiling is ever raised, re-read all three rows above. The 39.7 pct figure is what
      makes 2000 defensible, and it scales linearly.
+
+---
+
+## HOLD (GATE REFUSED) — zset RESTORE decode could not be authenticated on this host, and the two invocations that ran point the OPPOSITE way from the bead's own cell (frankenredis-i41sx, frankenredis-33832)
+
+`i41sx` is source-complete: `from_unique_borrowed_pairs_with_limits` already selects
+`PackedZSet::from_sorted_unique_pairs_borrowed` after `borrowed_pairs_are_sorted` validates FULL
+adjacent-pair ordering, with the sorting builder retained for legal foreign payloads. The only
+acceptance item left was its measurement — "same-invocation live A/A + Redis row". This is that
+attempt, and it FAILED ITS OWN NULL. Nothing here is certified and no ratio below may be quoted
+as a result.
+
+### WHAT RAN
+
+`collection_reload_headtohead.py --competitive`, which is the authentication mode: three live
+processes in ONE python invocation (fr_a, an fr_b A/A twin, and vendored Redis 7.2.4), arms
+rotated within each sample, running images read from `/proc/<pid>/exe`. Servers pinned to
+symmetric core sets exactly as the harness's own reproduction prescribes — and verified against
+this box's topology rather than copied: `/sys/.../index3/shared_cpu_list` puts cpus 0-7,32-39 in
+one L3, so fr_a on 0-3 and fr_b on 4-7 share it, with Redis on 8-11.
+
+      invocation 1   A/A null 0.947833x  CI [0.860764, 1.057489]   VERDICT HOLD
+      invocation 2   A/A null 0.983004x  CI [0.875551, 1.115833]   VERDICT HOLD
+                     --confirm 3: 2 of 3 nulls outside 0.98..1.02 (1.138648, 0.898835)
+
+The gate is doing exactly what it was built to do. Invocation 2's headline null (0.983004) is
+IN band, and taking it would have been the lucky pass — `--confirm 3` then showed two of its
+three repeats outside. A single in-band null is not evidence.
+
+### WHY IT FAILED: THE WINDOW CLOSED BETWEEN THE BRIEF AND THE RUN
+
+The brief opened with "host quiet (CPU idle 92, load 3.9) — a good window to certify", and that
+was true when written. By the first invocation loadavg was 17.68, by the second 26.99, with three
+foreign `rustc` at 100-200% CPU from other projects in the shared checkout's neighbourhood. The
+A/A null compares two PROCESSES, so it nulls engine and core placement together, and that term is
+what host contention moves. Load was recorded at both ends of both invocations rather than assumed
+from the brief.
+
+### THE SUSPECT, EXPLICITLY NOT A RESULT
+
+Both invocations put `redis/fr` at 0.492120x and 0.535783x — i.e. fr taking roughly TWICE Redis's
+time on isolated zset RESTORE decode. The bead's premise cell reads "zset-only RESTORE decode at
+0.212x fr/Redis", which on this repo's convention is fr ~4.7x AHEAD. Those cannot both describe
+the same quantity, and MossyOrchid's comment on the bead already said "CHECK THE CELL BEFORE ANY
+FURTHER WORK".
+
+Do NOT resolve that by trusting these numbers. Two failed-null invocations agreeing on DIRECTION
+is weak evidence for direction and no evidence for magnitude, and there is a second, duller
+explanation that costs nothing to prefer: the cell came from a whole-job scorecard and this
+harness times isolated RESTORE, so the two may be different shapes rather than a contradiction —
+the same raw-vs-normalised trap already recorded for GEOSEARCH.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The null is the harness's own two-process A/A, reported above; it FAILED, which is why this row
+is a HOLD and not a measurement. No wall-clock ratio from these invocations is quotable. The
+instrument-shape question above is unresolved and is the first thing to settle, because if the
+cell and the harness measure different jobs then no amount of host quiet will reconcile them.
+
+### PROVENANCE
+
+      source        main at 2c3a34639.
+      fr ELF        b4729412aa36357e (release, built from this tree with env -u
+                    CARGO_TARGET_DIR, own target dir); fr_a and fr_b self-reported the SAME sha.
+      redis ELF     e837dbb2556cff6b, vendored 7.2.4, provenance check passed clean against
+                    vendored source HEAD.
+      job           hashes=0 sets=0 zsets=300 members=128, trials=15, DBSIZE 300 on both.
+      host          thinkstation1, 64 logical. loadavg 17.68 / 9.30 / 6.36 at invocation 1 and
+                    26.99 / 12.57 / 7.57 at invocation 2; mean CPU MHz 3598->3543 and
+                    3952->3976. /data 301G free.
+      disposition   HOLD. No engine source changed by this row.
+
+### RETRY PREDICATE
+
+1. Re-run the SAME command on a genuinely quiet host and require `--confirm 3` to pass, not a
+   single in-band null. The command is recorded above verbatim; nothing about it needs inventing.
+2. Before spending that quiet window, settle the instrument-shape question: find what produced
+   the 0.212x cell and confirm whether it times the same job this harness times. If it does not,
+   the disagreement is not a defect and the bead's acceptance row should name which shape it wants.
+3. Do not "fix" i41sx on the strength of the direction seen here. The lever it asks for is
+   already in the tree; what is missing is a number, and this row is the absence of one.
