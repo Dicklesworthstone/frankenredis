@@ -67028,3 +67028,75 @@ previously have.
   1. Treat a bead TITLE as a claim with a timestamp; `br ready` ranks on titles.
   2. Never close on a green probe alone — name the commit, and check the bead is not `in_progress`.
   3. Do not read this row as a perf verdict. It measures no time.
+
+## 2026-08-19 CrimsonHawk: SIZING — `ug22x` is a FRAME-COST problem, not a stack-size one: upstream must fit under 419 B/level to reach 19998 in its own 8 MiB, and fr spends 4320. Also discharges the frame-cost bisect `c63b56ef1` recorded as owed
+
+EVIDENCE CLASS: `scripts/recursion_stack_budget_gate.py` reading per-level cost from the SHIPPING
+ELF's function prologues — `8 + 8*pushes + sub $N,%rsp`. A compile-time constant, so this needs no
+build and no run-to-depth harness, and it is immune to host load. Combined with the bisected depths
+from `a07a5e5c8`. Not a timing measurement; no ratio is claimed.
+
+  ELF `9df0749546b1f5fd4a3853806d35b3766cb6e75c281fd65d12f30bcdb8b150c8`, linked 13:11:32
+  loadavg 11.06 / 10.92 / 12.11, iowait 0 pct, 0 frankenredis builds
+
+### THE DEBT `c63b56ef1` RECORDED IS PAID
+
+That commit sized the worker stacks and said plainly what it had not established: *"NOT PROVEN
+SUFFICIENT ... the only measured facts are that 2 MiB overflows and 64 MiB does not. Bisecting fr's
+real frame cost needs a build."* It listed as owed: *"run the 1000-deep encode on 4, 8 and 16 MiB
+threads and record where it starts to fit, because that number is what says whether upstream's
+limit is safe for fr at all."*
+
+It does not need a build, and the answer is comfortable:
+
+    cjson.encode   288 B/level   x upstream's limit of 1000   =   288,000 B   =   3.4 pct of 8 MiB
+
+So upstream's `CJSON_MAX_DEPTH` of 1000 is safe for fr by a factor of **29**, and the same read puts
+`cjson.decode` at 352 B/level and `cmsgpack.pack` at 400 B/level, both fitting their limits ~21-24x
+over. The narrowest walker on the board has 21x margin. This is the arithmetic behind the `1tlyh`
+close made this turn on the differential probe, and it is the stronger of the two evidences because
+it bounds the whole range rather than the three depths I happened to sample.
+
+### THE REFRAME, WHICH CHANGES WHAT A FIX LOOKS LIKE
+
+Upstream reaches 19998 levels of Lua self-recursion. It runs scripts on its MAIN thread, ~8 MiB —
+the same budget fr's workers now have, by deliberate choice in `c63b56ef1`. Therefore:
+
+    upstream per-level cost MUST be <=  8 MiB / 19998  =  419 B
+    fr per-level cost, measured                        = 4320 B
+    fr is 10.3x fatter per level
+
+**The gap is the frame, not the stack.** Reaching 19998 at fr's current frame needs **82.4 MiB** of
+stack, which is not a number to reach for: it is 10x the incumbent's own budget, and picking it
+would be sizing the stack to fit a defect rather than fixing it.
+
+Where the 4320 B goes, from the same prologue read:
+
+    eval_expr    800 B x3   2400 B   55.6 pct     <- the lever
+    exec_stmt        1136 B          26.3 pct
+    call_function     560 B          13.0 pct
+    exec_block + exec_stmts  224 B    5.2 pct
+
+`eval_expr` appearing three deep per interpreter cycle is more than half the cost on its own. Its
+frame is where a fix starts, and the usual cause of a fat frame in a big `match` is live temporaries
+from cold arms held across the hot path — splitting those behind `#[inline(never)]` is the cheap
+experiment, measurable by re-reading the prologue with no benchmark at all.
+
+**What this does NOT support:** even halving the cycle to 2160 B only reaches ~3880 levels at the
+current stack, against 19998. Frame reduction alone does not close `ug22x`; it narrows a 26.1x gap
+to something nearer 5x. Closing it needs a heap-allocated interpreter stack — the evaluator
+trampolined so depth stops consuming machine frames — and that is a different piece of work from
+any constant.
+
+### RETRY PREDICATES
+
+Retry predicate: re-read the prologues ONLY IF `eval_expr`, `exec_stmt` or `call_function` changes
+shape, since the cycle figure is a sum over exactly those; and reopen the STACK-SIZE question ONLY
+IF a walker's `B@limit` crosses the gate's 50 pct ceiling, which at 21x minimum margin it currently
+does not.
+
+  1. Quote `ug22x` as a **10.3x frame-cost gap**, not a stack shortfall.
+  2. Do not raise `WORKER_THREAD_STACK_SIZE` to chase it — 82.4 MiB is sizing the stack to fit the
+     defect, and the incumbent does the same job in 8.
+  3. `eval_expr` at 55.6 pct of the cycle is the first place to look, and the prologue read scores
+     an attempt without a benchmark.
