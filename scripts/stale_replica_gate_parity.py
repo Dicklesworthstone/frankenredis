@@ -181,12 +181,27 @@ def info_field(conn, section, field):
     return None
 
 
+LIBRARY = ("#!lua name=stalelib\n"
+           "redis.register_function('stalefn', function(keys, args) return 1 end)\n"
+           "redis.register_function{function_name='stalefn_ro', "
+           "callback=function(keys, args) return 1 end, flags={'no-writes'}}\n")
+
+
 def make_stale(engine, binary, port, dead_port, root):
-    """Bring up a replica whose master link is DOWN, with stale reads refused."""
+    """Bring up a replica whose master link is DOWN, with stale reads refused.
+
+    A function library is loaded FIRST, while the server is still a standalone master:
+    FUNCTION LOAD is refused on a replica, and without a loaded library every FCALL row
+    answers "Function not found" from a guard IN FRONT of the stale gate and agrees
+    vacuously. script.c's stale checks are shared by the FCALL path, so leaving that row
+    untested leaves half the surface unmeasured.
+    """
     d = os.path.join(root, engine)
     shutil.rmtree(d, ignore_errors=True)
     proc = start(binary, port, d, f"{engine}-replica")
     c = Conn(port)
+    load = c.cmd("FUNCTION", "LOAD", LIBRARY)
+    print(f"   {engine} FUNCTION LOAD -> {str(load)[:70]!r}")
     c.cmd("CONFIG", "SET", "replica-serve-stale-data", "no")
     # Point at a port nothing listens on: link can never come up, and no master shutdown race.
     c.cmd("REPLICAOF", "127.0.0.1", str(dead_port))
@@ -265,6 +280,8 @@ def main():
             print("   (SCRIPT LOAD did not yield a usable sha on both; skipping the real-sha row)")
         # Shebang scripts: upstream refuses unless the script declares allow-stale.
         extra += [
+            ("fcall REAL fn", ["FCALL", "stalefn", "0"]),
+            ("fcall_ro REAL fn", ["FCALL_RO", "stalefn_ro", "0"]),
             ("eval shebang no flags",
              ["EVAL", "#!lua name=t\nreturn 1", "0"]),
             ("eval shebang allow-stale",
