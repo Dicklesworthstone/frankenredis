@@ -7452,7 +7452,7 @@ fn process_buffered_frames(
             plain_get_read_gate_cache = None;
             output_hard_limit_cache = None;
             plain_write_gate_cache = None;
-                    batch_parser_config = runtime.parser_config();
+            batch_parser_config = runtime.parser_config();
             match runtime.execute_plain_set_owned_or_return(cmd.key, cmd.value, ts) {
                 Ok(response) => {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
@@ -7545,7 +7545,7 @@ fn process_buffered_frames(
                         plain_get_read_gate_cache = None;
                         output_hard_limit_cache = None;
                         plain_write_gate_cache = None;
-                    batch_parser_config = runtime.parser_config();
+                        batch_parser_config = runtime.parser_config();
                         let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
                         let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                         encode_client_reply(&response, client_resp3, &mut conn.write_buf);
@@ -14592,7 +14592,7 @@ fn process_buffered_frames(
                 plain_get_read_gate_cache = None;
                 output_hard_limit_cache = None;
                 plain_write_gate_cache = None;
-                    batch_parser_config = runtime.parser_config();
+                batch_parser_config = runtime.parser_config();
                 match process_argv_frame(
                     token,
                     &argv,
