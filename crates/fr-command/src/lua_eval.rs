@@ -13304,6 +13304,43 @@ fn lua_pattern_error_take() -> Option<String> {
     LUA_PATTERN_ERROR.with(|slot| slot.borrow_mut().take())
 }
 
+/// Deepest GENUINE recursion `lua_pat_match` will take before giving up.
+///
+/// (frankenredis-zm8x5) This was 200, and 200 was reachable. The tail positions became a loop when
+/// this bead was first fixed, so a literal pattern costs no stack and `string.rep('a',300)` matches.
+/// The NON-tail positions still recurse once per repetition, and they still hit the guard:
+///
+///     EVAL "return string.match(string.rep('ab',N), string.rep('a*b',N)) ~= nil" 0
+///     N=200 -> fr :1, redis :1        N=201 -> fr $-1, redis :1
+///
+/// measured against live 7.2.4, diverging EXACTLY at the guard. The failure is a silent NON-MATCH,
+/// not an error, which is the half that makes it dangerous.
+///
+/// THE BUDGET, measured rather than chosen. `lua_pat_match`'s prologue on the shipping ELF is
+/// 8 + 8*6 pushes + sub 120 = 176 BYTES per level, and the symbol makes 3 DIRECT self-calls, so one
+/// level is one frame:
+///
+///     whole 8 MiB worker stack           47,662 levels
+///     MAX_CALL_DEPTH worst case           3,342,336 B (768 x 4352)
+///     stack remaining beneath it          5,046,272 B  ->  28,672 levels
+///
+/// THE MIDDLE LINE IS WHY THIS IS NOT SIZED LIKE `MAX_CALL_DEPTH`: the matcher runs INSIDE a Lua
+/// call stack that is itself bounded at 768 levels, so its budget is what is left UNDER that worst
+/// case, not the whole thread. Sizing against 8 MiB would spend stack another guard is entitled to.
+///
+/// 8192 costs 1,441,792 B -- 28.6 pct of the budget that actually exists beneath a fully-extended
+/// call stack, 17.2 pct of the thread, and 40x the old guard. 16384 would take over half the
+/// remaining stack, which I would not.
+///
+/// RESIDUAL, not implied away: redis 7.2.4 matched this pattern at N = 500, 1000, 2000, 5000, 10000
+/// and 20000 and was alive after every one, so even at 8192 a pattern between 8193 and at least
+/// 20000 repetitions still works there and fails here.
+///
+/// The failure AT the limit is left as a silent `None` deliberately. Upstream emits no error here
+/// at all, so any wording would be invented, and inventing wire text 7.2.4 never sends is its own
+/// defect class. Raising the guard is the part measurement justifies.
+const LUA_PAT_MAX_RECURSION: usize = 8192;
+
 fn lua_pat_match(
     s: &[u8],
     mut si: usize,
@@ -13312,7 +13349,7 @@ fn lua_pat_match(
     captures: &mut Vec<LuaCapture>,
     depth: usize,
 ) -> Option<usize> {
-    if depth > 200 {
+    if depth > LUA_PAT_MAX_RECURSION {
         return None; // prevent stack overflow
     }
     // Upstream expresses the tail positions below as `goto init` rather
