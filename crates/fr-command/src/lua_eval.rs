@@ -8232,13 +8232,17 @@ impl<'a> LuaState<'a> {
                         BinOp::Ge => a >= b,
                         _ => return Err("unsupported comparison operator".to_string()),
                     },
-                    (LuaValue::Str(a), LuaValue::Str(b)) => match op {
-                        BinOp::Lt => a < b,
-                        BinOp::Gt => a > b,
-                        BinOp::Le => a <= b,
-                        BinOp::Ge => a >= b,
-                        _ => return Err("unsupported comparison operator".to_string()),
-                    },
+                    // (frankenredis-u45ul) Collated, not byte-wise -- see `lua_str_collate`.
+                    (LuaValue::Str(a), LuaValue::Str(b)) => {
+                        let ord = lua_str_collate(a, b);
+                        match op {
+                            BinOp::Lt => ord.is_lt(),
+                            BinOp::Gt => ord.is_gt(),
+                            BinOp::Le => ord.is_le(),
+                            BinOp::Ge => ord.is_ge(),
+                            _ => return Err("unsupported comparison operator".to_string()),
+                        }
+                    }
                     _ => {
                         // (frankenredis-7w22v) Lua 5.1 uses two different
                         // phrasings: "attempt to compare A with B" when the
@@ -11477,7 +11481,10 @@ impl<'a> LuaState<'a> {
                                             "attempt to compare two number values".to_string()
                                         })?
                                     }
-                                    (LuaValue::Str(a), LuaValue::Str(b)) => a.cmp(b),
+                                    // (frankenredis-u45ul) table.sort's DEFAULT comparator is
+                                    // `lua_lessthan`, so it collates too. Sorting and comparing
+                                    // must not disagree with each other.
+                                    (LuaValue::Str(a), LuaValue::Str(b)) => lua_str_collate(a, b),
                                     (a, b) => {
                                         return Err(format!(
                                             "attempt to compare {} with {}",
@@ -13282,6 +13289,32 @@ fn lua_pattern_find(s: &[u8], pat: &[u8], init: usize) -> Result<Option<LuaPatMa
 ///
 /// MEASURED on live 7.2.4: `pcall(string.gsub, 'zazbz', '%1', 'X')` answers a bare
 /// "invalid capture index".
+/// Compare two Lua strings the way the incumbent's VM does: by COLLATION, not by bytes.
+///
+/// (frankenredis-u45ul) Lua 5.1 compares strings with `strcoll` (`lvm.c:211`), and redis calls
+/// `setlocale(LC_COLLATE, server.locale_collate)` at startup (`server.c:2613`), so under the
+/// default UTF-8 environment `'a' < 'B'` is TRUE on 7.2.4 and false byte-wise. This affects every
+/// `<`, `>`, `<=`, `>=` on strings and `table.sort`'s default comparator.
+///
+/// It reuses the collator `SORT ... ALPHA` already resolves rather than introducing a second one.
+/// That matters beyond tidiness: two collation sources in one process can disagree, and a script
+/// that sorts with `table.sort` and then compares against a `SORT ALPHA` result would see the
+/// disagreement as data corruption. `active_sort_alpha_collation` is memoised, so this costs a
+/// static read per comparison and not a locale lookup.
+///
+/// Where SORT and Lua legitimately differ: SORT passes `None` when a `STORE` destination is
+/// present, because a stored result must not vary with the server's locale. Lua has no such case --
+/// upstream's VM always calls `strcoll` -- so this always collates.
+fn lua_str_collate(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    let collation = crate::active_sort_alpha_collation();
+    crate::sort_alpha_compare_with_ascii_fast_path(
+        collation.collator.as_ref(),
+        collation.ascii_fast_path,
+        a,
+        b,
+    )
+}
+
 fn lua_pattern_raise(inv_name: Option<&str>, msg: String) -> String {
     match inv_name {
         Some(_) => format!("user_script:1: {msg}"),
@@ -16946,6 +16979,75 @@ mod tests {
     /// (frankenredis-jdii2) A NUL byte ENDS a Lua pattern. Upstream's matcher takes `const char *p`
     /// with no length and `case '\0'` is its "end of pattern" (lstrlib.c:406), so everything after
     /// a NUL is never compiled and never matched. Every assertion is a row MEASURED against 7.2.4.
+    /// (frankenredis-u45ul) Lua's string comparison must agree with the collator `SORT ... ALPHA`
+    /// uses, because upstream drives both from the same `LC_COLLATE`.
+    ///
+    /// Asserted as AGREEMENT with the collator rather than as literal orderings, deliberately. A
+    /// test that hardcoded `'a' < 'B'` would encode this machine's locale and fail under
+    /// `LC_ALL=C`, where `resolve_sort_alpha_collator` correctly returns `None` and both paths fall
+    /// back to bytes. The property that must hold in EVERY locale is that the two agree; the
+    /// specific order is the environment's business.
+    #[test]
+    fn lua_string_comparison_agrees_with_sort_alpha_collation_u45ul() {
+        let mut store = Store::new();
+        let collation = crate::active_sort_alpha_collation();
+        let expect = |a: &str, b: &str| {
+            crate::sort_alpha_compare_with_ascii_fast_path(
+                collation.collator.as_ref(),
+                collation.ascii_fast_path,
+                a.as_bytes(),
+                b.as_bytes(),
+            )
+        };
+
+        // Pairs chosen to straddle the cases where BYTE order and collation disagree: letter case,
+        // a leading underscore, and digits vs letters. Under a collating locale these are exactly
+        // the rows that used to diverge from 7.2.4; under LC_ALL=C they all still agree by
+        // construction, which is why the assertion compares against the collator.
+        for (a, b) in [
+            ("a", "B"),
+            ("B", "a"),
+            ("__index", "fresh"),
+            ("fresh", "__index"),
+            ("abc", "abd"),
+            ("10", "9"),
+            ("A", "A"),
+        ] {
+            let want = expect(a, b);
+            let src = format!(
+                "local lt = tostring('{a}' < '{b}') local le = tostring('{a}' <= '{b}') \
+                 local gt = tostring('{a}' > '{b}') return lt .. ',' .. le .. ',' .. gt"
+            );
+            let got = match eval_script(src.as_bytes(), &[], &[], &mut store, 0) {
+                Ok(RespFrame::BulkString(Some(bytes))) => String::from_utf8_lossy(&bytes).into_owned(),
+                other => panic!("unexpected reply for {a:?} < {b:?}: {other:?}"),
+            };
+            let expected = format!(
+                "{},{},{}",
+                want.is_lt(),
+                want.is_le(),
+                want.is_gt()
+            );
+            assert_eq!(got, expected, "comparing {a:?} with {b:?}");
+        }
+
+        // table.sort's DEFAULT comparator is the same `lua_lessthan`, so a sort and a comparison
+        // must not disagree. This is the assertion that fails if only the operator is wired.
+        let sorted = match eval_script(
+            b"local t = {'B','a','__index','fresh'} table.sort(t) return table.concat(t,',')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        ) {
+            Ok(RespFrame::BulkString(Some(bytes))) => String::from_utf8_lossy(&bytes).into_owned(),
+            other => panic!("unexpected sort reply: {other:?}"),
+        };
+        let mut want: Vec<&str> = vec!["B", "a", "__index", "fresh"];
+        want.sort_by(|x, y| expect(x, y));
+        assert_eq!(sorted, want.join(","), "table.sort must use the same collation");
+    }
+
     #[test]
     fn a_nul_byte_ends_a_lua_pattern_jdii2() {
         let mut store = Store::new();
