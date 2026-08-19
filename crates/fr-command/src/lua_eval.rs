@@ -22501,17 +22501,41 @@ end
         .expect("find over a 400-byte literal pattern");
         assert_eq!(frame, RespFrame::Integer(1), "find must locate it at offset 1");
 
-        // The guard must still REFUSE rather than recurse without limit: this
-        // one backtracks genuinely, and upstream's own matcher has no bound at
-        // all, so fr answering at all is the conservative direction.
-        let frame = eval_script(
+        // The guard must still REFUSE rather than recurse without limit: this one backtracks
+        // genuinely, and upstream's own matcher has no bound at all, so fr answering at all is
+        // the conservative direction.
+        //
+        // TWO FIXES COLLIDED HERE, and the row asserted the wrong side of the collision. This
+        // pattern opens 40 captures; zy8kq then implemented LUA_MAXCAPTURES (32,
+        // deps/lua/src/luaconf.h:633), and upstream's `start_capture` raises "too many captures"
+        // at the 33rd (lstrlib.c:333). So 7.2.4 REFUSES this pattern, and `is_ok()` was pinning
+        // fr to accept something the incumbent rejects -- the assertion failed for the right
+        // reason once both fixes were in the same tree and something finally compiled them.
+        let refused = eval_script(
             b"return string.match(string.rep('a', 40), '^' .. string.rep('(a)', 40) .. '$') == nil",
             &[],
             &[],
             &mut store,
             0,
+        )
+        .expect_err("40 captures is past LUA_MAXCAPTURES, which upstream refuses");
+        assert!(
+            refused.contains("too many captures"),
+            "expected upstream's capture-limit refusal, got {refused}"
         );
-        assert!(frame.is_ok(), "a backtracking pattern must not abort the process");
+
+        // ...and the row's ORIGINAL intent, kept alive rather than lost to the collision: a
+        // pattern that genuinely backtracks INSIDE the capture limit must return an answer
+        // instead of aborting the process. 20 captures is well under 32, so nothing here is
+        // testing the capture limit -- only that deep backtracking is survivable.
+        eval_script(
+            b"return string.match(string.rep('a', 20), '^' .. string.rep('(a)', 20) .. '$') == nil",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("a backtracking pattern inside the capture limit must not abort the process");
     }
 
     /// Upstream's `start_capture` raises "too many captures" once
