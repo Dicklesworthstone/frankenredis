@@ -35540,10 +35540,10 @@ fn drain_replica_stream(
                 // this up -- so it is set here, beside the flag it belongs with, and cleared on
                 // the same two lines. Without it a replica refuses an APPEND its master accepted
                 // whenever the two disagree on proto-max-bulk-len, and keeps the short value.
-                runtime.server.store.must_obey_client = true;
+                runtime.set_must_obey_client(true);
                 let response =
                     runtime.execute_frame_ref(&frame, now_ms.saturating_add(frame_index));
-                runtime.server.store.must_obey_client = false;
+                runtime.set_must_obey_client(false);
                 runtime.server.applying_master_stream = false;
                 if let RespFrame::Error(message) = &response {
                     eprintln!("warn: replica replay command failed for frame {frame:?}: {message}");

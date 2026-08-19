@@ -38061,6 +38061,16 @@ impl Runtime {
         reply
     }
 
+    /// (frankenredis-obeyclient-strlen-qxdyn) Publish the obeyed-client flag from OUTSIDE the
+    /// runtime. `ServerState.store` is private, so fr-server -- which drives the steady-state
+    /// master stream in its own event loop rather than through `with_execution_source` -- had no
+    /// way to reach it and its two assignments never compiled. This is deliberately a narrow
+    /// setter rather than making the store public: the flag lifts client-facing limits, so the
+    /// set of callers that may touch it should stay small and greppable.
+    pub fn set_must_obey_client(&mut self, obeyed: bool) {
+        self.server.store.must_obey_client = obeyed;
+    }
+
     fn with_execution_source<T>(
         &mut self,
         source: ExecutionSource,
