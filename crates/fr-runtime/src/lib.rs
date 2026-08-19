@@ -27437,6 +27437,89 @@ impl Runtime {
     /// non-set→WRONGTYPE), `sscan0_borrow_scan` (no-stat, no-touch), and
     /// `record_plain_zremrange_borrowed_metrics` + `account_plain_borrowed_error_reply`. SCAN is a
     /// plain nested array in RESP2 AND RESP3 (`*2` / `*n`).
+    /// (frankenredis-hwcm1) Zero-frame `_into` fast path for bare `SCAN <cursor>`.
+    ///
+    /// The `FastReply` twin above builds the whole `[cursor, [keys...]]` answer as a RespFrame
+    /// tree and then encodes and drops it. Counted on HEAD, bare `SCAN 0` retired EIGHT
+    /// allocations per op with 4 `RespFrame::encode_into` calls and 4 `drop_glue::<RespFrame>`
+    /// against them -- the reply, not the lookup. This writes the same bytes straight into `out`.
+    ///
+    /// Byte-identical by construction: `*2\r\n`, the cursor as a bulk string, then an array
+    /// header and one bulk per key -- which is exactly what `scan0_reply_from_items` encodes.
+    /// SCAN's reply is an array in RESP3 too, so no `resp3` branch is needed for the shape; the
+    /// flag is threaded only so the helpers agree with their RESP2/RESP3 callers.
+    ///
+    /// Mirrors `execute_plain_sscan0_borrowed_into` for gates, preamble, suppression and the
+    /// metrics tail. It does NOT size anything from a COUNT budget: this bead already rejected
+    /// pre-sizing the result Vec to `count.max(1)` (0.72 pct WORSE, ledger row filed), because
+    /// COUNT is a scan budget rather than a result-size estimate.
+    pub fn execute_plain_scan_borrowed_into(
+        &mut self,
+        cursor_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"SCAN".len()
+            || cursor_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        let cursor = Self::parse_canonical_scan_cursor(cursor_arg)?;
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
+            return None;
+        }
+        let packet_id =
+            self.plain_read_borrowed_preamble("scan", b"SCAN".len() + cursor_arg.len(), now_ms);
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let (next_cursor, keys) = self.server.store.scan_in_db(
+            self.session.selected_db,
+            cursor,
+            None,
+            None,
+            10,
+            now_ms,
+        );
+        if !suppress_reply {
+            out.extend_from_slice(b"*2\r\n");
+            let mut cursor_buf = [0u8; 20];
+            let mut n = next_cursor;
+            let mut i = cursor_buf.len();
+            loop {
+                i -= 1;
+                cursor_buf[i] = b'0' + (n % 10) as u8;
+                n /= 10;
+                if n == 0 {
+                    break;
+                }
+            }
+            fr_protocol::encode_bulk_string_slice(Some(&cursor_buf[i..]), resp3, out);
+            fr_protocol::encode_aggregate_header(keys.len(), false, out);
+            for key in &keys {
+                fr_protocol::encode_bulk_string_slice(Some(key), resp3, out);
+            }
+        }
+        let elapsed_us = self.finish_chained_command(st);
+        self.record_plain_zremrange_borrowed_metrics(
+            "scan",
+            "SCAN",
+            || vec![b"SCAN".to_vec(), cursor_arg.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            // Cannot fail: canonical cursor, no key to mistype, scan_in_db is infallible.
+            false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        Some(())
+    }
+
     pub fn execute_plain_sscan0_borrowed_into(
         &mut self,
         key: &[u8],

@@ -22961,12 +22961,27 @@ fn try_dispatch_floor_classified_action(
             // borrowed-read admission guard refuses. Those declines land on the generic
             // path — which is where every SCAN goes today — so unlike the other floor
             // classes there is no worse-than-status-quo case to protect against here.
+            // (frankenredis-hwcm1) Encode straight into the connection buffer instead of
+            // materialising the `[cursor, [keys...]]` RespFrame tree. Bare `SCAN 0` retired
+            // EIGHT allocations per op, with 4 encode_into calls and 4 RespFrame drops against
+            // them -- the reply, not the lookup. The executor declines only BEFORE it writes
+            // anything (gates, then the canonical cursor parse), so a decline cannot leave a
+            // partial reply in `out` and the generic fallback below still re-processes the
+            // packet byte-exactly.
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) = parse_borrowed_plain_scan_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_scan_borrowed(packet.key, ts, default_read_allowed)
+                && runtime
+                    .execute_plain_scan_borrowed_into(
+                        packet.key,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
