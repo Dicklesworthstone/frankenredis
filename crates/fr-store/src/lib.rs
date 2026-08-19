@@ -32093,15 +32093,10 @@ impl Store {
         now_ms: u64,
     ) -> (u64, Vec<Vec<u8>>) {
         let mut result: Vec<Vec<u8>> = Vec::new();
-        let next_cursor = self.scan_in_db_visit(
-            db,
-            cursor,
-            pattern,
-            type_filter,
-            count,
-            now_ms,
-            |logical| result.push(logical.to_vec()),
-        );
+        let next_cursor =
+            self.scan_in_db_visit(db, cursor, pattern, type_filter, count, now_ms, |logical| {
+                result.push(logical.to_vec())
+            });
         (next_cursor, result)
     }
 
