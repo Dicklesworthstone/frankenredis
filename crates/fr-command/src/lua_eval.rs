@@ -7019,7 +7019,14 @@ impl<'a> LuaState<'a> {
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
             self.call_depth -= 1;
-            return Err("stack overflow".to_string());
+            // (frankenredis-lua-call-depth-ug22x) The `user_script:1: ` prefix is part of the
+            // WIRE TEXT and fr has to write it. Upstream raises this through `luaG_runerror`,
+            // which prepends the chunk source and line, so 7.2.4 sends
+            // `-ERR user_script:1: stack overflow script: <sha>, on @user_script:1.` and fr sent
+            // the same line without the INNER location. fr already spells the prefix out in its
+            // other runtime errors -- the arg-check and compare-type messages both do -- so the
+            // interpreter-raised ones were the exception rather than the rule.
+            return Err("user_script:1: stack overflow".to_string());
         }
         self.lua_frame_kinds.push(false);
         let is_pcall = matches!(intrinsic, RedisIntrinsic::PCall);
@@ -7159,7 +7166,7 @@ impl<'a> LuaState<'a> {
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
             self.call_depth -= 1;
-            return Err("stack overflow".to_string());
+            return Err("user_script:1: stack overflow".to_string());
         }
         self.lua_frame_kinds.push(false);
         // (frankenredis-zsbhn) No `current_invocation_name` write here either —
@@ -8376,7 +8383,7 @@ impl<'a> LuaState<'a> {
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
             self.call_depth -= 1;
-            return Err("stack overflow".to_string());
+            return Err("user_script:1: stack overflow".to_string());
         }
         // (frankenredis-4ovjf) Snapshot the caller's frame kind BEFORE
         // pushing so the bad-callable arms below can decide whether to
@@ -12640,7 +12647,7 @@ fn lua_pat_match(
                 // Position capture
                 let cap_idx = captures.len();
                 if captures.len() >= LUA_MAXCAPTURES {
-                    lua_pattern_error_set("too many captures");
+                    lua_pattern_error_set("user_script:1: too many captures");
                     return None;
                 }
                 captures.push(LuaCapture::Position(si));
@@ -12653,7 +12660,7 @@ fn lua_pat_match(
             // Start substring capture
             let cap_idx = captures.len();
             if captures.len() >= LUA_MAXCAPTURES {
-                lua_pattern_error_set("too many captures");
+                lua_pattern_error_set("user_script:1: too many captures");
                 return None;
             }
             captures.push(LuaCapture::Substring(si, None)); // open capture

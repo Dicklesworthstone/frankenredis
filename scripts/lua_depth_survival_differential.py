@@ -116,6 +116,10 @@ WALKS = {
     # depth, which fr bounds with MAX_CALL_DEPTH while Lua bounds it by stack.
     "recurse": ("local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end "
                 "return f(%d)"),
+    # Pattern captures. Not a stack question at all -- LUA_MAXCAPTURES is a fixed array in the
+    # matcher -- but the same shape: a constant that has to fire at the same COUNT as upstream.
+    "captures": ("local s = string.rep('x', %d) local p = string.rep('(x)', %d) "
+                 "return string.match(s, p)"),
 }
 
 def main():
