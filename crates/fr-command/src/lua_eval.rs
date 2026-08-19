@@ -13370,7 +13370,20 @@ fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Result<Vec<u8>, S
                         LuaCapture::Substring(cs, Some(ce)) => {
                             result.extend_from_slice(&s[*cs..*ce]);
                         }
-                        LuaCapture::Substring(_, None) => {}
+                        LuaCapture::Substring(_, None) => {
+                            // (frankenredis-gvex0) A %N in the replacement READS the
+                            // capture, and upstream's get_onecapture raises on
+                            // CAP_UNFINISHED (lstrlib.c). Silently emitting nothing
+                            // here is the MIRROR of the eager-validation bug this bead
+                            // began with: 4b7fbcabd correctly stopped raising when the
+                            // capture is never read, but this path reads it and must
+                            // still raise. MEASURED on live 7.2.4:
+                            //   string.gsub('zazbz','(','%1') -> unfinished capture
+                            //   fr before this                -> 'zazbz', no error
+                            // Plain message, no location prefix -- that is what the
+                            // incumbent emits and what fr's match path already returns.
+                            return Err("unfinished capture".to_string());
+                        }
                         LuaCapture::Position(pos) => {
                             result.extend_from_slice(format!("{}", pos + 1).as_bytes());
                         }
