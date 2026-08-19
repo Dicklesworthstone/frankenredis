@@ -4700,7 +4700,7 @@ pub(crate) fn parse_register_function_args(
             };
             match key_bytes.as_slice() {
                 b"function_name" => {
-                    if !matches!(value, LuaValue::Str(_)) {
+                    if lua_register_function_string_field(&value).is_none() {
                         return Err(RegisterFunctionArgError::FunctionNameNotString);
                     }
                 }
@@ -4710,7 +4710,7 @@ pub(crate) fn parse_register_function_args(
                     }
                 }
                 b"description" => {
-                    if !matches!(value, LuaValue::Str(_)) {
+                    if lua_register_function_string_field(&value).is_none() {
                         return Err(RegisterFunctionArgError::DescriptionNotString);
                     }
                 }
@@ -4753,7 +4753,7 @@ pub(crate) fn parse_register_function_args(
         if matches!(name_value, LuaValue::Nil) {
             return Err(RegisterFunctionArgError::MissingFunctionName);
         }
-        let LuaValue::Str(name) = name_value else {
+        let Some(name) = lua_register_function_string_field(&name_value) else {
             return Err(RegisterFunctionArgError::FunctionNameNotString);
         };
         let callback = t.get(&LuaValue::Str(b"callback".to_vec()));
@@ -4767,10 +4767,11 @@ pub(crate) fn parse_register_function_args(
         // is the whole point: the text scan in fr_store::function_load can only read them
         // when they are written as literals, so a library that computes them loses its
         // metadata even once the load itself is fixed.
-        let description = match t.get(&LuaValue::Str(b"description".to_vec())) {
-            LuaValue::Str(d) => Some(d),
-            _ => None,
-        };
+        // The coercion matters on BOTH passes: validating the field but extracting only
+        // `LuaValue::Str` would accept `description=1` and then silently register the library
+        // with NO description, which is a quieter wrong answer than the rejection it replaces.
+        let description =
+            lua_register_function_string_field(&t.get(&LuaValue::Str(b"description".to_vec())));
         let mut flags = Vec::new();
         if let LuaValue::Table(ft) = t.get(&LuaValue::Str(b"flags".to_vec())) {
             // Lua arrays are 1-based and dense; stop at the first hole, as `ipairs` does.
@@ -4798,7 +4799,9 @@ pub(crate) fn parse_register_function_args(
     if args.len() != 2 {
         return Err(RegisterFunctionArgError::WrongArgCount(args.len()));
     }
-    let LuaValue::Str(name) = &args[0] else {
+    // Upstream reads the positional name with the SAME `luaGetStringSds` (function_lua.c:359),
+    // so `redis.register_function(1, fn)` registers a function named "1" there too.
+    let Some(name) = lua_register_function_string_field(&args[0]) else {
         return Err(RegisterFunctionArgError::FirstArgNotString);
     };
     if !lua_value_is_callable(&args[1]) {
@@ -4806,10 +4809,34 @@ pub(crate) fn parse_register_function_args(
     }
     // Positional form carries no flags or description, matching upstream.
     Ok(RegisterFunctionSpec {
-        name: name.clone(),
+        name,
         flags: Vec::new(),
         description: None,
     })
+}
+
+/// Read a `redis.register_function` string field the way upstream's `luaGetStringSds` does.
+///
+/// (frankenredis-9hori) Upstream gates these fields on `lua_isstring`, which is TRUE FOR
+/// NUMBERS -- Lua 5.1 coerces them -- and then converts with `lua_tolstring`. So
+/// `description=1` is not a type error upstream, it is the string "1". fr matched
+/// `LuaValue::Str` strictly and REJECTED a library 7.2.4 loads, which is the same false-
+/// rejection direction this bead was opened for.
+///
+/// The coercion has to go through `lua_number_to_string` rather than Rust's `Display`,
+/// because `lua_tolstring` renders with LUAI_NUMFMT = "%.14g": a name of `1` registers as
+/// "1", not "1.0", and 1e20 as "1e+20". Getting that wrong would swap a false rejection for
+/// a wrongly-NAMED function, which FCALL would then miss.
+///
+/// The file already knew this rule for named-argument KEYS -- see the `LuaValue::Number`
+/// arm that routes a numeric key to "unknown argument" rather than "key is not a string" --
+/// and applied it to the keys only, never to the values.
+fn lua_register_function_string_field(value: &LuaValue) -> Option<Vec<u8>> {
+    match value {
+        LuaValue::Str(s) => Some(s.clone()),
+        LuaValue::Number(n) => Some(lua_number_to_string(*n).into_bytes()),
+        _ => None,
+    }
 }
 
 /// Globals for a FUNCTION LOAD body: the ordinary sandbox plus `redis.register_function`.
@@ -16503,10 +16530,28 @@ mod tests {
             )])),
             Err(RegisterFunctionArgError::MissingCallback)
         );
-        // REFUSED — present but wrong type.
+        // ACCEPTED — a NUMBER, because upstream reads this field with `luaGetStringSds`,
+        // whose `lua_isstring` gate is true for numbers and whose `lua_tolstring` renders
+        // them with "%.14g". This assertion used to demand a refusal, which is what made fr
+        // reject a library 7.2.4 loads (frankenredis-9hori). The name must be "1", not
+        // "1.0" — a wrongly-NAMED function is a quieter defect than a refused one, because
+        // FCALL would simply not find it.
         assert_eq!(
             parse_register_function_args(&table_form(&[
                 (b"function_name", LuaValue::Number(1.0)),
+                (b"callback", callback()),
+            ])),
+            Ok(RegisterFunctionSpec {
+                name: b"1".to_vec(),
+                flags: Vec::new(),
+                description: None,
+            })
+        );
+        // REFUSED — present but a type `lua_isstring` does NOT accept. Numbers coerce;
+        // booleans, nil, tables and functions do not, so the refusal path stays covered.
+        assert_eq!(
+            parse_register_function_args(&table_form(&[
+                (b"function_name", LuaValue::Bool(true)),
                 (b"callback", callback()),
             ])),
             Err(RegisterFunctionArgError::FunctionNameNotString)
@@ -16533,9 +16578,19 @@ mod tests {
                 "positional arity {n} must be refused"
             );
         }
-        // REFUSED — right arity, wrong types.
+        // ACCEPTED — the POSITIONAL name coerces too: upstream reads it with the same
+        // `luaGetStringSds` (function_lua.c:359), not a stricter check.
         assert_eq!(
             parse_register_function_args(&[LuaValue::Number(1.0), callback()]),
+            Ok(RegisterFunctionSpec {
+                name: b"1".to_vec(),
+                flags: Vec::new(),
+                description: None,
+            })
+        );
+        // REFUSED — right arity, wrong types.
+        assert_eq!(
+            parse_register_function_args(&[LuaValue::Bool(true), callback()]),
             Err(RegisterFunctionArgError::FirstArgNotString)
         );
         assert_eq!(
@@ -16602,12 +16657,27 @@ mod tests {
             ])),
             Err(RegisterFunctionArgError::UnknownArgument)
         );
-        // REFUSED — `description` present but not a string.
+        // ACCEPTED — `description` coerces, and the coerced text must reach the SPEC.
+        // Validating the field but extracting only `LuaValue::Str` would load the library
+        // with no description at all, which is a quieter wrong answer than the rejection.
         assert_eq!(
             parse_register_function_args(&table_form(&[
                 (b"function_name", LuaValue::Str(b"n".to_vec())),
                 (b"callback", callback()),
                 (b"description", LuaValue::Number(1.0)),
+            ])),
+            Ok(RegisterFunctionSpec {
+                name: b"n".to_vec(),
+                flags: Vec::new(),
+                description: Some(b"1".to_vec()),
+            })
+        );
+        // REFUSED — `description` present but not a string OR a number.
+        assert_eq!(
+            parse_register_function_args(&table_form(&[
+                (b"function_name", LuaValue::Str(b"n".to_vec())),
+                (b"callback", callback()),
+                (b"description", LuaValue::Bool(true)),
             ])),
             Err(RegisterFunctionArgError::DescriptionNotString)
         );
