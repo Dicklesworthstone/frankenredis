@@ -65194,3 +65194,87 @@ so the netted figures cross runs even though the raw ratios above do not. The ra
      toward 1.0x; luapatsp_256 must again not move.
   2. Re-take the wall-clock luapat rows, which now describe a version of fr that no longer exists.
   3. A certified bound still needs a window with zero cargo/rustc under the shared uid.
+
+---
+
+## CERTIFIED — zset-only RESTORE decode is 0.557334x redis/fr (fr ~1.79x SLOWER), all three nulls in band; and the scorecard's 0.212x cell is STALE, not a contradiction (frankenredis-i41sx, frankenredis-xvq1a)
+
+Fourth attempt, and the first to authenticate. `collection_reload_headtohead.py --competitive
+--confirm 3` returned **COMPETITIVE ROW: all 3 nulls within 0.98..1.02**, which is the verdict the
+three previous HOLD rows above could not get.
+
+      A/A null (two processes)   median 0.989773   CI [0.867390, 1.037351]   all 3 in band
+      A/B redis/fr               median 0.557334   CI [0.509334, 0.583925]
+
+### THE NUMBER, WITH THE UNFAVOURABLE END NAMED
+
+`redis/fr` is a TIME ratio: below 1.0 means Redis is faster. Reporting both ends rather than
+picking one, because "worst bound" is ambiguous when the subject is a DEFICIT and this ledger has
+already been bitten once by a ratio whose polarity was assumed:
+
+      0.509334   least favourable to fr   fr 1.96x slower than Redis
+      0.557334   median                   fr 1.79x slower
+      0.583925   most favourable to fr    fr 1.71x slower
+
+Quote **0.509334** when a single conservative number is wanted; it is the end that does not
+understate the deficit.
+
+### WHAT IT SETTLES
+
+The scorecard cell reads `0.212x fr/redis` THROUGHPUT for this shape. For a FIXED job, throughput
+fr/redis is the reciprocal of time fr/redis, i.e. exactly this `redis/fr` quantity -- so the two
+are directly comparable, and 0.212 versus 0.557 is not a polarity problem and not a contradiction.
+It is AGE. That cell comes from an artifact dated 20260620; fr has taken roughly 2.6x on zset
+RESTORE decode since, moving from ~21% of Redis's throughput to ~56%.
+
+NOT CLAIMED: that this reproduces the scorecard's job. Its shape is unrecorded here, and mine is
+300 zsets x 128 members. What is claimed is a certified number for THIS shape, and that the
+deficit direction the bead rests on is real -- fr is still the slower engine on it.
+
+### HOW THE NULL WAS FINALLY MADE TO PASS, WHICH IS THE REUSABLE PART
+
+Two distinct arm asymmetries had to go, and each was identified by a two-invocation swap rather
+than by argument:
+
+1. CORE PLACEMENT (recorded in the row above): with the docstring's 0-3 / 4-7 pinning the null was
+   systematically HIGH (1.241, 1.095, 1.096); swapping the arms inverted it to 0.953, proving the
+   bias followed the cores. Fixed by 8-11 / 12-15 with redis on 16-19.
+2. ARM AGE: on that corrected pinning the null was still systematically LOW (0.890, 0.909, 0.926)
+   while the two fr processes had served three prior measurement runs. RESTARTING both arms from
+   the current ELF put the very next null at 1.004144 and the confirm-3 median at 0.989773. The
+   servers accumulate state -- allocator arenas and page-cache residency -- and two arms of
+   different ages are not twins any more than two arms on different cores are.
+
+So the operating rule for this harness: fresh arms, symmetric high cores, quiet host. Each is
+necessary; the three previous HOLDs each had exactly one of them wrong.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+The gate is the harness's own two-process A/A with `--confirm 3`, which requires EVERY repeat in
+band rather than one lucky draw -- the same gate that refused the three earlier attempts, so its
+PASS here carries the weight its refusals did. The one-process drift null read 1.125842, which is
+diagnostic only and is not the gate, as the harness documents.
+
+### PROVENANCE
+
+      source        main at 4e07ad2e1 for the build; HEAD had moved to 6bf2f6dc4 by write-up.
+      fr ELF        fe4ffe4838cc82a1, release, env -u CARGO_TARGET_DIR, own target dir. fr_a and
+                    fr_b self-reported the SAME sha; both arms were restarted from THIS file after
+                    a peer rebuild replaced the previous ELF mid-window (the harness caught that
+                    itself, refusing to read a `(deleted)` /proc/PID/exe).
+      redis ELF     e837dbb2556cff6b, vendored 7.2.4, provenance check clean against source HEAD.
+      job           zsets=300 members=128, hashes=0 sets=0, trials=15, DBSIZE 300 both arms.
+      pinning       fr_a 8-11, fr_b 12-15, redis 16-19.
+      host          thinkstation1. loadavg 11.05 / 8.80 / 6.60 at start and unchanged at end;
+                    mean CPU MHz 2875 -> 2633; iowait 0% at both ends by vmstat.
+      disposition   CERTIFIED. No engine source changed by this row.
+
+### RETRY PREDICATE
+
+1. This supersedes the "magnitude is open" language in the HOLD rows above for the zset-only
+   shape. The collection-heavy shape keeps xvq1a's separate 0.48-0.52.
+2. Before certifying anything with this harness again: restart the arms, use 8-11 / 12-15 / 16-19,
+   and confirm the host is quiet. A single in-band null still means nothing -- `--confirm 3` is
+   what separated this row from the three HOLDs.
+3. The scorecard cell should be re-dated or re-measured rather than trusted; it is two months old
+   and understates fr by roughly 2.6x on this shape.
