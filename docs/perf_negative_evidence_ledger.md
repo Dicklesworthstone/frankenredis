@@ -64719,3 +64719,68 @@ eight `cmp $0x25` in the dispatch prefix of the shipping ELF).
   2. Add the rep-without-match rung before quoting 134.7 as the matcher's own figure.
   3. Ir needs no quiet window, so this instrument is available whenever the build slot is not. The
      wall-clock ratio still needs one.
+
+## 2026-08-19 CrimsonHawk: SIZING, live incumbent arm — Redis spends 46.1 instructions per matched byte where fr spends 134.7, so the cascade lever's headroom is 2.92x on ONE term and its ceiling on this shape is 1.18x, not 1.0x (frankenredis-25uop)
+
+EVIDENCE CLASS: callgrind Ir (retired instruction COUNT), fr and a LIVE vendored Redis 7.2.4 in the
+SAME invocation, slope method across N and 2N, 2000 ops. CV was NOT used. No build: our project's
+build slot was in flight and I did not start a second.
+
+  fr        target/release/frankenredis, sha256 b4729412aa36357e...
+  incumbent redis-server sha d2c8a4b9, harness-verified against vendored source HEAD, clean;
+            bench ELF sha256 e837dbb2556cff6b... re-verified after each arm
+
+**Claim class: SIZING, on the harness's own verdict.** It printed "WINDOW: UNFIT for ratio" at both
+rungs — 4 cargo/rustc processes and a 1min-vs-5min loadavg 49 pct apart — and "this run is SIZING,
+not certified". Ir is immune to load and MHz, which is why the numbers below are stable and why the
+instrument is usable here at all; that immunity is NOT a licence to relabel the run, and one draw in
+a window the gate refuses stays sizing.
+
+  per-arm  fr    loadavg 16.97/32.60/29.94 then 16.49/32.24/29.84; CPU MHz mean 2270 -> 2151
+           redis loadavg 16.97/32.60/29.94 then 15.97/31.87/29.74; CPU MHz mean 2237 -> 2383
+
+### THE FOUR NUMBERS
+
+    rung          fr instr/op    redis instr/op    fr/redis
+    luapat_16        22,704.6         17,601.5      1.2903x
+    luapat_256       55,028.3         28,670.8      1.9230x
+
+    per matched byte    fr  (55,028.3 - 22,704.6) / 240 = 134.7
+                     redis  (28,670.8 - 17,601.5) / 240 =  46.1
+                     ratio                                 2.92x
+
+### WHAT THIS SETTLES THAT THE WALL-CLOCK ROWS COULD NOT
+
+The throughput rows above (0.6425 / 0.6503 / 0.6442 raw at 256) say fr is behind. They cannot say
+WHERE, because a wall-clock ratio folds every term together. The two-rung Ir pair separates them,
+and the separation is clean:
+
+  * a FIXED term — 1.2903x at 16 bytes, where the match is a rounding error. That is EVAL setup,
+    compile-cache lookup and reply conversion. The cascade lever cannot touch it.
+  * a PER-BYTE term — 2.92x. That is the lever's entire target.
+
+**So the lever's ceiling on this shape is a 1.18x instruction ratio, not 1.0x.** If the per-byte cost
+were closed to upstream's exactly, luapat_256 would fall to 22,704.6 + 240 x 46.1 = 33,768 instr/op,
+i.e. 1.178x against Redis rather than 1.923x. Reading "2.92x headroom" as "fr reaches parity" is
+reading the wrong term — the same intercept-versus-command confusion frankenredis-eh2ct records, one
+level down.
+
+### WHAT IS STILL AN UPPER BOUND
+
+Both slopes carry string.rep building 240 more bytes and the longer subject's allocation, on their
+own engine. So 134.7 and 46.1 are upper bounds on each side's MATCHER cost, and 2.92x is a ratio of
+upper bounds rather than a measured ratio of matcher costs. luapat_rep16 / luapat_rep256 are now
+registered in shape_instr_per_op.py for exactly this subtraction:
+
+    matcher-only per byte = ((luapat_256 - luapat_16) - (luapat_rep256 - luapat_rep16)) / 240
+
+taken per arm. Until that runs, quote 2.92x with the words "upper bound" attached.
+
+### RETRY PREDICATES
+
+  1. Run the two rep rungs on BOTH arms and re-derive. The subtraction is per-engine: fr's
+     string.rep and Redis's are not the same cost, so it cannot be cancelled by inspection.
+  2. Then land the cascade lever and re-run all four. luapat_16 must barely move; if it moves, the
+     change touched the fixed term and is not the lever it claims to be.
+  3. The wall-clock ratio still needs a FIT window. This row does not substitute for it — it
+     explains it.

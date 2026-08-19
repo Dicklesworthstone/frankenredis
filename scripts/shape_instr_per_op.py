@@ -602,6 +602,18 @@ SHAPES = {
     "luapat_256": (
         [],
         ["EVAL", "local s = string.rep('a', 256) return (string.find(s, s))", "0"]),
+    # The SUBTRACTION rungs for the pair above. Identical scripts with the match
+    # removed, so their own 16->256 delta is exactly the cost the luapat delta
+    # carries that is NOT matching: string.rep building the bytes and the longer
+    # subject's allocation. Matcher-only per-byte cost is therefore
+    #   ((luapat_256 - luapat_16) - (luapat_rep256 - luapat_rep16)) / 240
+    # Without these, the luapat slope is an UPPER BOUND and must be quoted as one.
+    "luapat_rep16": (
+        [],
+        ["EVAL", "local s = string.rep('a', 16) return #s", "0"]),
+    "luapat_rep256": (
+        [],
+        ["EVAL", "local s = string.rep('a', 256) return #s", "0"]),
     "evalsha_small": (
         [["SCRIPT", "LOAD", _EVALSHA_BODY_SMALL]],
         ["EVALSHA", _sha1_hex(_EVALSHA_BODY_SMALL), "0"]),
