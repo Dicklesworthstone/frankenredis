@@ -1825,7 +1825,7 @@ A vendored Redis 7.2.4 source tree under `legacy_redis_code/redis/`, fully built
 
 ### What does the `CHANGELOG.md` look like?
 
-Organized by date-bounded development phases (Phase 1–11) from foundation through current state, with thematic capability sections, live-linked representative commits, and a version timeline table. There are no tagged releases; the changelog is the version spine.
+Organized by date-bounded development phases (Phase 1–15 plus the 2026-08-18/19 repo-janitor docs reorganization) from foundation through current state, with thematic capability sections, live-linked representative commits, and a version timeline table. There are no tagged releases; the changelog is the version spine.
 
 ---
 
@@ -1834,7 +1834,7 @@ Organized by date-bounded development phases (Phase 1–11) from foundation thro
 ```
 frankenredis/
 ├── AGENTS.md                                    # multi-agent build doctrine
-├── CHANGELOG.md                                 # 11 phases, 2,389 commits across 79 days
+├── CHANGELOG.md                                 # 15 phases + janitor wave, through 2026-08-19
 ├── README.md                                    # (this file)
 ├── docs/planning/                               # design spec, porting plan, parity + threat matrices
 │

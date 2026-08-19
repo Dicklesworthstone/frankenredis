@@ -4,20 +4,162 @@ All notable changes to FrankenRedis are documented in this file.
 
 FrankenRedis is a clean-room Rust reimplementation of Redis targeting full drop-in replacement parity
 with deterministic latency, mathematical rigor, and memory safety. This project has no tagged releases
-or GitHub Releases; the changelog is organized by date-bounded development phases derived from the
-linear commit history on `main`. Workspace version: **0.1.0**.
+or GitHub Releases (`git for-each-ref refs/tags` and `gh release list -R Dicklesworthstone/frankenredis`
+are both empty as of 2026-08-19); the changelog is organized by date-bounded development phases derived
+from the linear commit history on `main`. Workspace version: **0.1.0**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenredis>
 
+Scope window: project inception on 2026-02-13 through HEAD on 2026-08-19.
+This 2026-08-19 refresh covers the previously undocumented window **2026-05-17 through 2026-08-19**
+(Phases 12–15 plus the repo-janitor docs reorganization). Phases 1–11 are unchanged.
+Representative commits in each phase are live-linked to GitHub.
+
 ---
 
-## [Unreleased] -- development on `main` (as of 2026-05-16)
+## [Unreleased] -- development on `main` (as of 2026-08-19)
 
-2354 commits across 78 active development days. 13-crate Cargo workspace (`fr-protocol`,
-`fr-command`, `fr-store`, `fr-expire`, `fr-persist`, `fr-repl`, `fr-config`, `fr-conformance`,
-`fr-runtime`, `fr-eventloop`, `fr-server`, `fr-bench`, `fr-sentinel`). 241 Redis base commands
-with zero stubs. 4,975 conformance fixture cases across 43 fixture families. Throughput within
-single-command parity range of Redis 7.2.4 after the April optimization sweep. No tags, no releases.
+8,115 non-merge commits on `main` from 2026-02-13 through 2026-08-19; **5,729** of those landed after
+the previous changelog snapshot (2026-05-16). 13-crate Cargo workspace (`fr-protocol`, `fr-command`,
+`fr-store`, `fr-expire`, `fr-persist`, `fr-repl`, `fr-config`, `fr-conformance`, `fr-runtime`,
+`fr-eventloop`, `fr-server`, `fr-bench`, `fr-sentinel`). No tags, no GitHub Releases.
+
+The May 2026 snapshot (2,354 commits / 78 days / 241 commands / 4,975 fixture cases) is preserved as
+the close of Phase 11. Work since then is a measured-vs-Redis 7.2.4 performance campaign layered on
+continuing differential-probe parity, not a version bump.
+
+Closed beads in this window: 1,732 (of 3,284 closed overall). Tracker: `.beads/issues.jsonl`.
+
+---
+
+## Repo-janitor docs reorganization (2026-08-18 .. 2026-08-19)
+
+Planning/parity documents that used to live at the repo root (`FEATURE_PARITY.md`,
+`PLAN_TO_PORT_REDIS_TO_RUST.md`, `EXHAUSTIVE_LEGACY_ANALYSIS.md`, `TEST_LOG_SCHEMA_V1.md`, and
+siblings) now live under [`docs/planning/`](docs/planning/). Force-added `perf.data` profiles were
+untracked from `artifacts/`.
+
+- Drop PID-redirect junk and house planning docs
+  ([0f27b5d](https://github.com/Dicklesworthstone/frankenredis/commit/0f27b5ddd7f94e412bbb97fb81ee8aca3a6e4889))
+- Untrack force-added `perf.data` profiles under `artifacts/`
+  ([edc70b2](https://github.com/Dicklesworthstone/frankenredis/commit/edc70b2d0ec0ca39f10887ae5d833edd6c03652f))
+
+---
+
+## Phase 15 -- Front-classified dispatch, shared-nothing collapse, failover/script gates (2026-08-01 .. 2026-08-19)
+
+August is split between a shared-nothing reactor that collapses adjacent same-key writes, a
+front-classified dispatch floor that skips generic argv parsing for the hottest read family, and a
+parity-tail week (18–19 Aug) that closed failover/script/MISCONF wording against vendored Redis 7.2.4.
+~1,900 non-merge commits; 425 beads closed in August.
+
+### Shared-nothing write collapse and INFO surface
+
+Adjacent same-key `INCR`/`SET`/`ZADD`/`HSET`/`SADD` runs fuse into one store call. `INFO` grows real
+Server/CPU/Persistence/Replication/Clients sections (11 of 13; the remaining gap is ledgered, not
+claimed). A per-command histogram on the reactor fast path was measured and **rejected** at 2.68–3.20×
+cost.
+
+- Fuse adjacent same-key `INCR` runs; collapse same-key plain `SET` to the final value
+  ([a2dd3e0](https://github.com/Dicklesworthstone/frankenredis/commit/a2dd3e0f4491f0d369a0e15c8f86e2602450152f))
+- Serve `INFO` Server, CPU, Persistence and Replication
+  ([3c8ea74](https://github.com/Dicklesworthstone/frankenredis/commit/3c8ea741bd7cf071dab9eb0b25db63f92723fdaa))
+- Serve `INFO` Clients from per-reactor published counters
+  ([8f482ec](https://github.com/Dicklesworthstone/frankenredis/commit/8f482ece40b4835967cd8aacb76db5553a3858c3))
+- Reject per-command histogram recording on the reactor fast path
+  ([d462989](https://github.com/Dicklesworthstone/frankenredis/commit/d46298982b14bbddeea15eeee66c38f64bcbc1de))
+
+### Front-classified dispatch floor
+
+Hot commands are classified before generic dispatch. Measured vs an A/A null in the same invocation:
+`GETDEL` 1.5552× (null 0.9952), `HMGET` 1.8144× / −76.1% instructions (null 1.0222), `SSCAN` −75.0%
+instructions, `HGETALL` −83.1%, `LPOS RANK` −83.0%, `ZRANGEBYLEX` −80.0%.
+
+- Front-classify `GETDEL` and `DECRBY`
+  ([9813ed3](https://github.com/Dicklesworthstone/frankenredis/commit/9813ed36fadaa8aa08b942344facfae1413d59cc))
+- Front-classify `HMGET`
+  ([db40302](https://github.com/Dicklesworthstone/frankenredis/commit/db40302c84574ca04acbc9a36881c488afe9ca90))
+- Front-classify cursor-0 `SCAN` family and `HEXISTS`/`HSTRLEN`
+  ([d7872e6](https://github.com/Dicklesworthstone/frankenredis/commit/d7872e6ee4548fb8007761ea4ab1e01fd73d46f4))
+- Front-classify hash-read family and `ZRANGE WITHSCORES`
+  ([ad576b2](https://github.com/Dicklesworthstone/frankenredis/commit/ad576b295afc02b96d7470d8ee1a961d9e9a83fa))
+
+### Parity tail (18–19 Aug): failover, MISCONF, script gates
+
+- `FAILOVER FORCE` without timeout **and** target is a refusal, not a no-op (`eh2ct`)
+  ([a1b7913](https://github.com/Dicklesworthstone/frankenredis/commit/a1b79138d14b7f67241e90cc4503ae4d233f8013))
+- `MISCONF` write denial requires configured save points — `save ''` must serve writes (`frankenredis-misconf-saveparams-q05rl`)
+  ([47e73c2](https://github.com/Dicklesworthstone/frankenredis/commit/47e73c2341193711789e2401968a4fb3a831fc77))
+- Script `MISCONF` wording for a blocked script matches upstream, not the command wording
+  ([0bf8925](https://github.com/Dicklesworthstone/frankenredis/commit/0bf89259a94841310fe834c81abf47b07a2491f4))
+
+---
+
+## Phase 14 -- Packed encodings, Lua/cjson integer paths, set algebra (2026-07-01 .. 2026-07-31)
+
+July (~1,024 non-merge commits) attacks encoding-aware hot paths: bulk integer set algebra becomes
+sort-merge instead of O(k·n), RESP integer parsing gets a SWAR 8-digit Lemire fold, Lua pattern/cjson
+paths stop allocating per-iteration, and Lua scripting is attested byte-exact vs Redis 7.2.4 on 53/54
+library/API rows (the remaining `cjson` object key-order diff is WONTFIX). 265 beads closed in July.
+
+- Bulk integer `SADD` sort-merge O(k·n)→O(n+k log k) — 2.60× interleaved, byte-identical
+  ([bf21fe1](https://github.com/Dicklesworthstone/frankenredis/commit/bf21fe1f52ddf4652c78ec82f84d9b3bc01da4f7))
+- Bulk integer `SREM` retain-filter — 3.11×, byte-identical
+  ([55609a2](https://github.com/Dicklesworthstone/frankenredis/commit/55609a2478a899a8faa62fb9574b03cbea1adc38))
+- Branchless intset probe on the last two skewed `SINTER`/`SDIFF` membership sites
+  ([0f510b6](https://github.com/Dicklesworthstone/frankenredis/commit/0f510b69e22a8e90a45d5a7ea5a0039454a43252))
+- SWAR 8-digit integer parsing (Lemire fold) — 2.04×/8-digits, 1.36× on 18-digit, byte-exact
+  ([28df2e4](https://github.com/Dicklesworthstone/frankenredis/commit/28df2e4be8ac0a92fe7d4636c01bc4d65809cadf))
+- Lua `cjson.encode` renders into one buffer, not `Vec<String>`+join
+  ([16589c2](https://github.com/Dicklesworthstone/frankenredis/commit/16589c2223c23cc808a8499aeb6110f06f0e6a0d))
+- Reuse the captures buffer across start positions in `lua_pattern_find`
+  ([b2c5f67](https://github.com/Dicklesworthstone/frankenredis/commit/b2c5f678c55cca9a281dd6c062ac0032bbab4810))
+- Integer fast path in `lua_number_to_string`, skipping Dragon
+  ([ac5e54c](https://github.com/Dicklesworthstone/frankenredis/commit/ac5e54c3c49341a05976d52d1a549036454b7678))
+- Lua scripting library/API byte-exact vs Redis 7.2.4 (53/54)
+  ([8e648ff](https://github.com/Dicklesworthstone/frankenredis/commit/8e648ff792f48fe2d0367e30309e6580bddc3b4a))
+
+---
+
+## Phase 13 -- Borrowed read/write fast paths and allocator default (2026-06-08 .. 2026-06-30)
+
+June is the largest month in the gap (~2,306 non-merge commits; 778 beads closed). The pattern is
+borrowed dispatch that skips generic command/runtime ownership on the hottest reads and writes,
+measured against Redis 7.2.4 with byte-exact replies. `mimalloc` becomes the default server allocator.
+
+- Enable `mimalloc` by default
+  ([0501a71](https://github.com/Dicklesworthstone/frankenredis/commit/0501a7126f00f468a8ee86c2d09040108d196423))
+- `ZCOUNT` borrowed read fast path (0.5×→1.20×, skips ~30% generic dispatch)
+  ([631b872](https://github.com/Dicklesworthstone/frankenredis/commit/631b8728acd7735c9cab2c2ce006794bac35dd1f))
+- `set_plain_borrowed` no-TTL expiry-guard — ~1.41× on the hottest store-write
+  ([4038f4d](https://github.com/Dicklesworthstone/frankenredis/commit/4038f4d31ef9886dd36da6148305578a02f19a49))
+- `XADD` borrowed fast path — 0.37×→0.715× (~1.9×), byte-exact
+  ([d18b2dc](https://github.com/Dicklesworthstone/frankenredis/commit/d18b2dc5f9b86a90e4d5c6c7827cd11a80e403a4))
+- `GEOADD` borrowed fast path — 0.36×→0.909× (2.5×), byte-exact
+  ([76ce886](https://github.com/Dicklesworthstone/frankenredis/commit/76ce886934a49633abaaa8b3006acabafdc225bf))
+
+---
+
+## Phase 12 -- RESP3 wire types, Sentinel CLI, COMMAND/DEBUG fidelity (2026-05-17 .. 2026-06-07)
+
+The first two weeks after Phase 11 close RESP3 types that the May probe sweeps had filed but not yet
+landed: `RespFrame::Verbatim` for `CLIENT LIST`/`INFO`, `RespFrame::Attribute` and real RESP3 types
+under `DEBUG PROTOCOL` + `HELLO 3`, Lua booleans honoring `setresp(3)`, and `COMMAND` listing only
+top-level names. Sentinel becomes a first-class `--sentinel` CLI mode. Regression gates pin COMMAND
+introspection and RESP3 wire-type fidelity.
+
+- `RespFrame::Verbatim` for RESP3 verbatim strings (`frankenredis-0qrly`)
+  ([171d904](https://github.com/Dicklesworthstone/frankenredis/commit/171d904798d16b480450b09243659b0a3bce816a))
+- `CLIENT LIST`/`INFO` and `INFO` emit Verbatim under RESP3
+  ([a2bddc7](https://github.com/Dicklesworthstone/frankenredis/commit/a2bddc71db67ae53854ceec52642983d07f0bb6f))
+- `--sentinel` CLI flag for Sentinel mode (`frankenredis-zy8qv`)
+  ([8beea00](https://github.com/Dicklesworthstone/frankenredis/commit/8beea0064204d88e4d1727f62c1d85d6c86e2e8b))
+- `COMMAND` / bare `COMMAND INFO` list top-level commands only (`frankenredis-d309r`)
+  ([9427028](https://github.com/Dicklesworthstone/frankenredis/commit/9427028081dd867bd1bb5592ea7ca09a427c9e99))
+- `DEBUG PROTOCOL` emits real RESP3 types under `HELLO 3` (`frankenredis-nxw4z`)
+  ([281fdfb](https://github.com/Dicklesworthstone/frankenredis/commit/281fdfb70861b0a969f2fc6ebe5d1f1cad10491f))
+- Lua boolean returns honor RESP3 under `setresp(3)` (`frankenredis-0gz4g`)
+  ([02ee0ec](https://github.com/Dicklesworthstone/frankenredis/commit/02ee0ec3caf5fbe74e668f4bba01255d214e1165))
 
 ---
 
@@ -1210,7 +1352,7 @@ from the pending-entries list; `XPENDING IDLE` (Redis 6.2+).
 
 ---
 
-## Timeline Summary
+## Version Timeline
 
 | Date Range | Phase | Headline |
 |---|---|---|
@@ -1225,3 +1367,8 @@ from the pending-entries list; `XPENDING IDLE` (Redis 6.2+).
 | 2026-04-01 .. 2026-04-15 | 9  | Throughput recovery (1.3% → 79–99% of Redis on p1, 31% on p16) via lazy threat digests + ACL short-circuit + HashMap store; Phase 2 final optimization sweep |
 | 2026-04-16 .. 2026-04-30 | 10 | New `fr-sentinel` crate (monitoring + failover); RDB upstream encoding parity (LZF, compact type tags, FUNCTION DUMP envelope); live-oracle differential harness across most domains; DEBUG subsystem expansion; RESP3 Map emission |
 | 2026-05-01 .. 2026-05-16 | 11 | Differential probe sweeps close the parity tail: Lua metamethod completion, sandbox-surface fill-in, lexer/parser wording match, stream exclusive bounds, `CONFIG` realignment to vendored 7.2.4, encoding-promotion stickiness |
+| 2026-05-17 .. 2026-06-07 | 12 | RESP3 `Verbatim`/`Attribute`/`Bool`, Sentinel `--sentinel` CLI, `COMMAND` top-level listing, `DEBUG PROTOCOL` under `HELLO 3` |
+| 2026-06-08 .. 2026-06-30 | 13 | Borrowed read/write fast paths (`ZCOUNT`, SET no-TTL, `XADD`, `GEOADD`); `mimalloc` default allocator |
+| 2026-07-01 .. 2026-07-31 | 14 | Packed integer set algebra, SWAR integer parse, Lua/cjson integer paths; Lua library/API 53/54 byte-exact vs 7.2.4 |
+| 2026-08-01 .. 2026-08-19 | 15 | Shared-nothing same-key collapse, front-classified dispatch floor, `INFO` sections, failover/`MISCONF`/script wording |
+| 2026-08-18 .. 2026-08-19 | janitor | Planning docs moved to `docs/planning/`; untrack force-added `perf.data` |
