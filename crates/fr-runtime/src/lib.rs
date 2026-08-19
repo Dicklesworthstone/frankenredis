@@ -38197,6 +38197,28 @@ impl Runtime {
         if !self.command_subject_to_disk_write_denial(argv, special_command) {
             return None;
         }
+        // (frankenredis-miscobey-2160s) An OBEYED source is never answered with MISCONF.
+        // Upstream server.c:4026-4035 splits this branch on `obey_client` -- the AOF client or
+        // the master link -- and in that arm either panics or logs and APPLIES the write. What
+        // it never does is refuse it and carry on, because the write has already happened
+        // somewhere else: refusing it here drops data the master still holds, and the refusal
+        // goes to a link nobody reads, so the divergence is silent. The AOF case is worse still
+        // -- a load after a failed BGSAVE would refuse its own replay and the dataset would not
+        // come back.
+        //
+        // The same two sources are exempted by `reject_write_on_readonly_replica` a few lines
+        // below, for the same reason and under the same names.
+        //
+        // DELIBERATE DEVIATION: upstream's DEFAULT for an obeyed non-PING write is serverPanic
+        // (`repl-ignore-disk-write-error` defaults to no); this takes upstream's other arm,
+        // log-and-apply. Crashing a replica over a LOCAL disk error is a larger operational
+        // hazard than is justified here, and applying is strictly better than the silent drop
+        // this replaces. If fr ever models that directive, the panic arm belongs here.
+        if self.server.applying_master_stream
+            || !matches!(self.execution_source, ExecutionSource::Client)
+        {
+            return None;
+        }
         let denial = self.active_disk_write_denial()?;
         let reply = RespFrame::Error(denial.error_message().to_string());
         self.record_threat_event(ThreatEventInput {
