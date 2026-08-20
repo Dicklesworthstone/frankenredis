@@ -26384,3 +26384,102 @@ this work. They are FLAKY, not caused by the candidate — two runs on the rever
 then zero. Filed separately.
 
 Host state: `kernel.perf_event_paranoid` 4->1 for the runs and RESTORED to 4; verified.
+
+## SCAN vs live Redis 7.2.4 — the LANDED encode lever MEASURED at 0.4686x worst bound; the 0.80x throughput row is NOT closed (frankenredis-hwcm1)
+
+Claim class: COMPETITIVE. Campaign output: yes.
+
+FrankenRedis/Redis 7.2.4 = 0.4686x worst bound (scan_match) and 0.3905x worst bound
+(scan_zero). The vendored redis-server arm RAN side-by-side with the fr arm inside the same
+invocation of the harness, so this is a live-incumbent ratio, not a self-speedup.
+
+MEASURED 2026-08-20 (FoggyElm), both engines live under callgrind in the SAME invocation,
+HARNESS `scripts/shape_instr_per_op.py <bin> <shape> 2000` (N/2N differenced, so process
+startup cancels). CONVENTION: fr instructions per op DIVIDED BY Redis 7.2.4's. BELOW 1.0 =
+fr AHEAD. Lower is better.
+
+  shape        fr instr/op      redis instr/op    WORST bound   median    n draws
+  scan_match   3025.4-3087.2    6587.8-7074.4     0.4686x       0.4442x   11
+  scan_zero    2158.4-2280.2    5764.0-5935.2     0.3905x       0.3852x    9
+
+WORST bound = the largest fr/redis ratio over every draw taken, per the standing
+worst-bound convention. Even the worst draw has fr retiring 2.13x FEWER instructions than
+the incumbent on scan_match and 2.56x fewer on scan_zero.
+
+SAME-INVOCATION A/A NULL, run rather than asserted. `shape_instr_per_op.py` was pointed at a
+BYTE-IDENTICAL COPY of the vendored redis-server (sha256 e837dbb2... on both paths, verified),
+so the harness launched the incumbent as BOTH its candidate arm and its reference arm inside
+ONE invocation of exactly the scan_match workload the A/B rows use. Any harness-side or
+arm-order bias therefore lands on both arms and must cancel to 1.0:
+
+  A/A NULL    n=10  median 0.994500  bootstrap 95% median CI [0.978300, 1.011300]  (straddles 1.0)
+  A/B EFFECT  scan_match  n=11  median 0.444200  bootstrap 95% median CI [0.443100, 0.446200]
+  A/B EFFECT  scan_zero   n= 9  median 0.385200  bootstrap 95% median CI [0.377200, 0.390300]
+
+THE GATE IS THE BOOTSTRAP MEDIAN CI, and it is what decides this verdict: both effect CIs lie
+entirely below the null CI's lower bound (0.978300), clearing it by more than 2.1x, so the
+result is a real difference in retired instructions and not arm-order or harness bias. The A/A
+median sits 0.55% from unity, inside the 2% gross-bias guard.
+
+CV IS PROVENANCE ONLY and did not influence this verdict; it is not a gate here. The decision
+rests on the bootstrap median CIs above and on the worst-bound table.
+
+PER-ARM REPLICATE SPREAD, reported as telemetry rather than as a gate: fr arm max/min = 1.0204
+(scan_match), 1.0564 (scan_zero); redis arm max/min = 1.0739, 1.0297. The INCUMBENT arm is the
+noisier one on scan_match, which matches this bead's own prior note that the redis arm is not
+load-immune.
+
+WINDOW, stated rather than glossed: of the 11 scan_match draws, exactly ONE was taken in a
+harness-declared FIT window (load 15.07/17.33/11.95, MHz 3123..4114, builds 0) and it read
+0.4277x -- the BEST draw, i.e. contention moved the number AGAINST fr, so quoting the worst
+UNFIT draw is the conservative choice. The remaining 10 scan_match draws and all 9 scan_zero
+draws were UNFIT (fleet at loadavg 60-77, 3+ concurrent builds). No scan_zero draw is FIT.
+iowait was 0.00-0.10% on every arm. callgrind Ir is deterministic and immune to clock and
+load in the counting sense; the residual spread above is the incumbent's own event-loop
+scheduling, not the instrument.
+
+PROVENANCE. fr base commit caea5edabd1a24a6987845dec24551289216e488, built LOCALLY
+(`RCH_CARGO_WRAPPER_BYPASS=1`, `env -u CARGO_TARGET_DIR`, this repo's own target/).
+  fr    bench_elf_sha256 = 5c29720bfdc9228a28b29e3f76915518d6285081d6831a0bbec641863ff5e046
+  redis bench_elf_sha256 = e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+        (harness re-verified the vendored redis-server against its own source HEAD, clean)
+
+  CAVEAT ON THOSE SHAS, stated rather than glossed, exactly as the lua_rediscall_loop entry
+  above states it: `shape_instr_per_op.py` computes each arm's sha256 over the exact ELF it
+  is about to execute and RE-VERIFIES it after that arm returns, printing both. It is not a
+  /proc/self/exe self-report from inside the process, which callgrind makes impossible --
+  /proc/<pid>/exe under callgrind resolves to callgrind-amd64-linux, not to the engine. The
+  harness says so in its own output. Both arms were additionally symbol-checked.
+  Symbol-verified: `nm -C` finds `scan_opts_borrowed_into` in the fr ELF, so the binary
+  provably carries the lever this row is about.
+  DISCLOSED: the working tree carried ONE uncommitted peer hunk at build time
+  (crates/fr-command/src/lib.rs, frankenredis-3bda1's script stale-replica gate; `git diff`
+  sha256 c49bad57697de3a2...). SCAN does not execute a script prepare gate, so it cannot
+  reach that code; it is disclosed because it perturbs fr-command codegen layout and this
+  row's ABSOLUTE fr figure is therefore not bit-reconstructable from the base commit alone.
+  The RATIO is unaffected in sign or magnitude at this distance from 1.0.
+
+WHAT THIS CLOSES. This bead's named lever -- front-classify SCAN and stop materialising the
+`[cursor, [keys...]]` RespFrame tree -- is LANDED and now MEASURED against the incumbent.
+The bead's own opening attribution was 8,954 instr/op on ELF 67b94f0c with the generic
+owned-argv path at ~15.5%; scan_match is now 3,025-3,087 instr/op, a 2.9x reduction on fr's
+own axis, and 0.4686x of the incumbent at the worst bound.
+
+WHAT THIS DOES **NOT** CLOSE, and the reason this row is not a close-out. The 0.80x in this
+bead's TITLE is a redis-benchmark THROUGHPUT (rps) ratio, not an instruction ratio. An
+engine can retire 2.1x fewer instructions and still lose on rps -- IPC, syscall count and
+fr's separate writer thread all sit between the two axes, and this repo has a standing note
+that fr's writer thread breaks per-op syscall comparison. NO rps arm was run here: at
+loadavg 60-77 a throughput ratio is a contention artifact, which is exactly the error this
+campaign has banked before. So the honest state is:
+
+  * INSTRUCTION axis: measured, fr ahead, worst bound 0.4686x / 0.3905x. Done.
+  * THROUGHPUT axis: UNRE-MEASURED since the 0.80x row. Still open.
+
+RETRY PREDICATE for whoever takes the remaining half: re-run the bead's own redis-benchmark
+pair (`-n 20000 -c 1 -P 16`, both engines, same invocation, fixture-controlled keyspace --
+the original row's db was AMBIENT, loaded from whatever dump.rdb sat in the repo root, which
+that comment already flags) in a window with zero fleet builds. If 0.80x reproduces while
+instructions sit at 0.44x, the gap is NOT work volume and the next lever is on the syscall /
+write-path axis, not the dispatch or encode path. Do not re-file the encode lever: it is
+done and this row is the evidence.
