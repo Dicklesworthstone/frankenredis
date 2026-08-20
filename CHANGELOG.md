@@ -30,6 +30,15 @@ continuing differential-probe parity, not a version bump.
 
 Closed beads in this window: 1,732 (of 3,284 closed overall). Tracker: `.beads/issues.jsonl`.
 
+### Delivered capability
+
+- Phases 12–15: RESP3/Sentinel/COMMAND, borrowed fast paths + mimalloc, packed set algebra/Lua, shared-nothing dispatch/failover.
+- Planning docs now live under `docs/planning/`; force-added `perf.data` profiles untracked.
+
+### Closed workstreams
+
+- 1,732 beads closed in this window. Tracker: [`.beads/issues.jsonl`](https://github.com/Dicklesworthstone/frankenredis/blob/main/.beads/issues.jsonl).
+
 ---
 
 ## Repo-janitor docs reorganization (2026-08-18 .. 2026-08-19)
