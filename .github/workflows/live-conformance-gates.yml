@@ -16,21 +16,44 @@ on:
 jobs:
   live-conformance-gates:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     env:
       LIVE_RUN_ID: ci-live
       ADV_RUN_ID: ci-adv
       RAPTORQ_RUN_ID: ci-raptorq
       FORENSICS_ROOT: artifacts/failure_forensics
+      REDIS_724_COMMIT: d2c8a4b91e8c0e6aefd1f5bc0bf582cddbe046b7
+      REDIS_724_ROOT: .ci/redis-7.2.4
+      REDIS_724_SERVER: .ci/redis-7.2.4/src/redis-server
+      REDIS_724_CLI: .ci/redis-7.2.4/src/redis-cli
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Redis
+      - name: Checkout Redis 7.2.4 Oracle
+        uses: actions/checkout@v4
+        with:
+          repository: redis/redis
+          ref: d2c8a4b91e8c0e6aefd1f5bc0bf582cddbe046b7
+          path: .ci/redis-7.2.4
+          fetch-depth: 1
+
+      - name: Install Oracle Build and Test Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y redis-server
+          sudo apt-get install -y build-essential tcl
+
+      - name: Build and Verify Pinned Redis 7.2.4 Oracle
+        run: |
+          set -euo pipefail
+          test "$(git -C "${REDIS_724_ROOT}" rev-parse HEAD)" = "${REDIS_724_COMMIT}"
+          make -C "${REDIS_724_ROOT}" -j2 BUILD_TLS=no
+          test -x "${REDIS_724_SERVER}"
+          test -x "${REDIS_724_CLI}"
+          mkdir -p legacy_redis_code
+          ln -s "../${REDIS_724_ROOT}" legacy_redis_code/redis
+          "${REDIS_724_SERVER}" --version
 
       - name: Install Rust Nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -38,8 +61,8 @@ jobs:
       - name: Cache Rust Build Artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Start Redis Server
-        run: redis-server --save "" --appendonly no --daemonize yes
+      - name: Start Pinned Redis 7.2.4 Server
+        run: "${REDIS_724_SERVER}" --save "" --appendonly no --daemonize yes
 
       - name: Prepare Failure Forensics Directories
         run: mkdir -p "${FORENSICS_ROOT}/${LIVE_RUN_ID}"
@@ -53,74 +76,57 @@ jobs:
       - name: G2 - Run Unit and Property Baseline
         run: cargo test --workspace -- --nocapture
 
-      - name: G3+G5 - Run Live Oracle Differential Suites
+      - name: G3+G5 - Run Live Oracle Differential Parity Matrix
         run: |
           ./scripts/run_live_oracle_diff.sh \
             --host 127.0.0.1 \
             --port 6379 \
+            --matrix parity \
             --output-root artifacts/e2e_orchestrator \
             --run-id "${LIVE_RUN_ID}"
 
+      - name: G3+G5 - Upstream Redis 7.2.4 Tcl Fidelity
+        run: |
+          cargo build -p fr-server
+          python3 scripts/upstream_redis_tcl_fidelity.py \
+            --upstream "${REDIS_724_ROOT}" \
+            --fr target/debug/frankenredis \
+            --report "${FORENSICS_ROOT}/${LIVE_RUN_ID}/upstream_redis_tcl_fidelity.json" \
+            | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/upstream_redis_tcl_fidelity.log"
+
       - name: G3+G5 - Lua String Differential Sweep
         # Byte-exhaustive reply comparison of fr's Lua string library against the
-        # vendored incumbent: ~900 comparisons across 12 cases, run as ONE EVAL per
-        # engine so the whole sweep is a couple of round trips.
+        # pinned Redis 7.2.4 incumbent: ~900 comparisons across 12 cases, run as ONE
+        # EVAL per engine so the whole sweep is a couple of round trips.
         #
-        # A DEBUG binary is correct here on purpose -- this gate compares REPLIES,
-        # never timings, so it needs no release build and is unaffected by runner
-        # contention. It starts its own fr and redis on private ports and shuts both
-        # down in a finally block, so it does not touch the 6379 server above.
-        #
-        # Exit code means a NEW divergence: rows listed in EXPECTED_DIVERGENCES are
-        # printed with their reason but do not fail, and an expectation that has
-        # stopped firing fails the gate so a stale entry cannot mask a regression of
-        # its own row.
+        # The local-oracle symlink created above intentionally satisfies this older
+        # harness's legacy_redis_code/redis path contract while keeping the CI oracle
+        # provenance fixed to REDIS_724_COMMIT.
         run: |
           cargo build -p fr-server
           python3 scripts/lua_string_differential_sweep.py target/debug/frankenredis \
             | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/lua_string_sweep.log"
 
       - name: G3+G5 - Client-Path Protocol Parity
-        # Byte-exact comparison of fr's CLIENT protocol contract against the vendored
-        # incumbent over real TCP sockets: 45 adversarial vectors, one fresh connection
-        # each, comparing reply bytes AND whether the connection was closed.
-        #
-        # This exists because protocol_negative.json does NOT cover this surface
-        # (frankenredis-vqiki). That fixture drives Runtime::execute_bytes, an INTERNAL
-        # link reached by replication and AOF replay, and all 22 of its expectations
-        # differ from what a client receives -- a client sending `$-2` gets
-        # "unknown command", not "invalid bulk length". A fixture written from the
-        # implementation cannot detect the implementation being wrong, so the incumbent
-        # is the oracle here and fr's own answers are never the expectation.
-        #
-        # A DEBUG binary is correct on purpose, as above: this compares REPLIES, never
-        # timings. It starts its own fr and redis on private ports (28871/28872) and
-        # terminates both in a finally block, so it does not touch the 6379 server.
+        # Byte-exact comparison of fr's CLIENT protocol contract against pinned Redis
+        # 7.2.4 over real TCP sockets: 45 adversarial vectors, one fresh connection each,
+        # comparing reply bytes AND whether the connection was closed.
         run: |
           cargo build -p fr-server
           python3 scripts/protocol_client_parity.py \
             --fr target/debug/frankenredis \
-            --redis "$(command -v redis-server)" \
+            --redis "${REDIS_724_SERVER}" \
             --json "${FORENSICS_ROOT}/${LIVE_RUN_ID}/protocol_client_parity.json" \
             | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/protocol_client_parity.log"
 
       - name: G3+G5 - Capability Bead Parity Triage
-        # Runs each CLOSED capability bead's own shape against the live incumbent, so the
-        # eight beads closed on 2026-08-19 have a regression check they did not previously
-        # have -- their fixes were pinned by unit tests, never by a live-oracle differential.
-        #
-        # Exit 1 means a bead believed fixed has started diverging again. Beads listed in
-        # KNOWN_LIVE (currently lua-call-depth-ug22x) are expected to diverge and do not fail
-        # the gate; one of them AGREEING is reported as STALE-EXPECT, because good news that
-        # can hide is how a stale expectation masks a regression of its own row.
-        #
-        # Debug binary on purpose: this compares REPLIES, never timings. Private ports
-        # 28911/28912, so it does not touch the 6379 server this job already started.
+        # Closed capability beads are probed against the same pinned incumbent so an
+        # Ubuntu package update cannot silently change the compatibility target.
         run: |
           cargo build -p fr-server
           python3 scripts/bead_parity_triage.py \
             --fr target/debug/frankenredis \
-            --redis "$(command -v redis-server)" \
+            --redis "${REDIS_724_SERVER}" \
             | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/bead_parity_triage.log"
 
       - name: G7 - Enforce Coverage/Flake Budgets
@@ -218,6 +224,12 @@ jobs:
               Path(f"artifacts/adversarial_triage/{adv_run_id}/repro.lock"),
               Path(f"artifacts/durability/raptorq_runs/{raptorq_run_id}/report.json"),
               Path(f"artifacts/durability/raptorq_runs/{raptorq_run_id}/artifacts.ndjson"),
+              forensics_root / "upstream_redis_tcl_fidelity.json",
+              forensics_root / "upstream_redis_tcl_fidelity.log",
+              forensics_root / "lua_string_sweep.log",
+              forensics_root / "protocol_client_parity.json",
+              forensics_root / "protocol_client_parity.log",
+              forensics_root / "bead_parity_triage.log",
               forensics_root / "optimization_gate_stdout.log",
               forensics_root / "user_journey_corpus_report.json",
               forensics_root / "phase2c_packet_dirs.txt",
