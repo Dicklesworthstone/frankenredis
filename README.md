@@ -12,7 +12,7 @@
   <img alt="Unsafe forbidden" src="https://img.shields.io/badge/unsafe-forbidden-success">
 </p>
 
-> **FrankenRedis is a memory-safe, clean-room Rust reimplementation of Redis 7.2.4 with strict drop-in protocol parity, a first-class strict/hardened compatibility split, a Sentinel state machine, and a 4,975-case differential conformance harness that diffs every reply against vendored Redis on every CI run.**
+> **FrankenRedis is a memory-safe, clean-room Rust reimplementation of Redis 7.2.4 with strict drop-in protocol parity, a first-class strict/hardened compatibility split, a Sentinel state machine, a 4,975-case bespoke differential conformance corpus, pinned live Redis 7.2.4 oracle gates, and direct execution of Redis 7.2.4's own unmodified Tcl test suite against FrankenRedis.**
 
 ---
 
@@ -29,17 +29,18 @@ Redis is the de facto in-memory data store, but the canonical implementation is 
 
 ### The solution
 
-FrankenRedis ships a Rust workspace whose crates each own one job (`fr-protocol`, `fr-command`, `fr-store`, `fr-persist`, `fr-repl`, `fr-sentinel`, `fr-runtime`, …) and a `frankenredis` binary that speaks RESP2/3 on the wire. Every component is `#![forbid(unsafe_code)]`. Every command goes through a strict-vs-hardened policy gate. Every divergence from vendored Redis 7.2.4 is either closed by a code change or filed as a tracked parity bead, gated by a differential conformance suite that runs the same fixtures against both servers and diffs the wire bytes.
+FrankenRedis ships a Rust workspace whose crates each own one job (`fr-protocol`, `fr-command`, `fr-store`, `fr-persist`, `fr-repl`, `fr-sentinel`, `fr-runtime`, …) and a `frankenredis` binary that speaks RESP2/3 on the wire. Every component is `#![forbid(unsafe_code)]`. Every command goes through a strict-vs-hardened policy gate. Every divergence from vendored Redis 7.2.4 is either closed by a code change or filed as a tracked parity bead, with evidence from bespoke differential fixtures, live Redis-oracle probes, interoperability gates, and Redis's own upstream Tcl tests.
 
 ### Why use FrankenRedis?
 
 | You want… | FrankenRedis gives you |
 |---|---|
 | **A memory-safe Redis** | `#![forbid(unsafe_code)]` across 12 of 13 crates (parser, data engine, command dispatch, persistence, replication, sentinel, etc.); `fr-runtime` uses `#![deny(unsafe_code)]` with three audited `unsafe` blocks for `libc::waitpid` in BGSAVE/BGREWRITEAOF child-process supervision |
-| **Drop-in protocol parity with Redis 7.2.4** | 241 Redis 7.2.4 commands plus three Redis 7.4 hash-field TTL commands implemented (zero stubs), 4,975 differential conformance cases run against the vendored Redis binary on every CI gate |
+| **Drop-in protocol parity with Redis 7.2.4** | 241 Redis 7.2.4 commands plus three Redis 7.4 hash-field TTL commands implemented (zero stubs), a 4,975-case bespoke differential corpus, pinned Redis 7.2.4 live-oracle gates, and Redis 7.2.4's own unmodified Tcl tests executed against FrankenRedis |
+| **Upstream fidelity evidence, not just home-grown tests** | A fast hard gate runs 72 selected upstream Redis 7.2.4 Tcl assertions; a dedicated full-suite workflow runs every default unit returned by Redis 7.2.4 `runtest --list-tests` in external-server mode, preserving upstream's own `external:skip` annotations and emitting machine-readable evidence |
 | **A compatibility/security policy split** | `Mode::Strict` (byte-exact replies, no defensive repairs) vs `Mode::Hardened` (preserves contract, adds fail-closed guards for malformed/adversarial input) |
 | **A Sentinel state machine** | The `fr-sentinel` crate implements `__sentinel__:hello` discovery, quorum-based S_DOWN/O_DOWN, epoch leader election, and a 7-state failover machine, matching the conceptual model of Redis Sentinel. Currently exposed as a library and via `SENTINEL` command dispatch. |
-| **Live differential parity testing** | The `fr-conformance` harness spawns vendored `redis-server`, executes the same fixture against both, and diffs replies byte-for-byte across 43 fixture families covering every command domain |
+| **Live differential parity testing** | The `fr-conformance` harness runs fixtures against FrankenRedis and a pinned Redis 7.2.4 oracle and diffs replies byte-for-byte across 43 fixture families covering every command domain |
 | **Reproducible benchmarks and a regression gate** | `fr-bench` + checked-in baseline JSON under `baselines/` + `scripts/benchmark_gate.sh` with tunable p99/throughput thresholds |
 | **A clean architectural model to read or embed** | 13 small focused crates with explicit boundaries; the data engine, RESP codec, RDB codec, replication FSM, and Lua evaluator are each usable independently |
 
@@ -98,7 +99,7 @@ The replica issues `PSYNC` / `FULLRESYNC` against the primary, streams the RDB s
 | **ACL** | Full lifecycle. | `SETUSER`/`GETUSER`/`DELUSER`/`LIST`/`USERS`/`WHOAMI`/`CAT`/`GENPASS`/`LOG`/`SAVE`/`LOAD`/`DRYRUN`/`HELP`; per-command `+cmd`/`-cmd`, per-category `+@cat`/`-@cat`, `allcommands`/`nocommands`/`allkeys`/`allchannels`/`reset`, key pattern `~pattern`, channel pattern `&pattern`; deny-first precedence enforced at dispatch. |
 | **Pub/Sub** | Cross-client delivery. | SUBSCRIBE/UNSUBSCRIBE/PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH/PUBSUB plus shard variants SSUBSCRIBE/SUNSUBSCRIBE/SPUBLISH; subscription-mode command restriction; deterministic unsubscribe-all ordering. Keyspace notifications via `CONFIG SET notify-keyspace-events`. |
 | **Blocking ops** | Real socket-level blocking. | BLPOP/BRPOP/BLMOVE/BLMPOP/BRPOPLPUSH/BZPOPMIN/BZPOPMAX/BZMPOP/XREAD BLOCK/XREADGROUP BLOCK/WAIT/WAITAOF/CLIENT PAUSE with deadline tracking and session swap-out in the mio loop. |
-| **Conformance** | 4,975 fixture cases across 43 families, run differentially. | The `fr-conformance` harness can run a fixture against the FrankenRedis runtime in-process *and* against a live vendored `redis-server` over TCP, then diff replies byte-for-byte. `fr_p2c_*` packet suites cover event-loop, dispatch, ACL, replication, cluster, expire/evict, and TLS journeys. |
+| **Conformance** | Bespoke differential + upstream Redis tests. | 4,975 fixture cases across 43 bespoke families; a pinned Redis 7.2.4 live-oracle parity matrix; a 72-assertion upstream Tcl hard gate; and a dedicated workflow that runs every default Redis 7.2.4 `runtest` unit against FrankenRedis in external-server mode and records pass/skip/ignore/error counts plus exact unit completion. |
 | **Fuzzing** | 33 `cargo-fuzz` targets. | Parser (RESP, inline), command parse, RDB encode/decode/structured, AOF decoder/manifest, store bitops/HLL/scan/stream-groups, runtime execute_bytes/sequence/eventloop validators, Lua eval, function restore, PSYNC reply, MIGRATE/DUMP, client tracking, keyspace events, glob match, config file, TLS config, ACL rules, sentinel parsers. |
 | **Benchmarks** | Checked-in baselines + regression gate. | `crates/fr-bench` issues 8 standard workloads (SET/GET/INCR/LPUSH/LPOP/HSET/HGET/MIXED), records HdrHistogram p50/p95/p99/p999, normalizes to `frankenredis_baseline/v1` JSON, and `scripts/benchmark_gate.sh` compares candidate runs against the checked-in baselines with tunable thresholds. |
 
@@ -180,7 +181,9 @@ The mode is enforced at the `Runtime::execute_frame` boundary, not as a sprinkli
 
 ### 3. Differential conformance against the real oracle
 
-There is one source of truth for command behavior: a vendored Redis 7.2.4 binary checked out under `legacy_redis_code/redis`. The `fr-conformance` harness runs every fixture against both FrankenRedis and the live `redis-server`, captures the wire bytes, and diffs them. If you can't write a fixture that the vendored binary produces a known reply for, the behavior isn't allowed to land.
+There is one behavioral target: Redis 7.2.4. FrankenRedis checks it through several independent evidence classes instead of trusting one home-grown suite. The bespoke `fr-conformance` corpus runs the same fixtures against FrankenRedis and a pinned Redis 7.2.4 oracle and diffs the observable replies. Targeted Python gates probe interop, persistence, replication, RESP behavior, scripting, fuzzed command sequences, and other surfaces. On top of that, FrankenRedis now runs **Redis 7.2.4's own unmodified Tcl tests** through upstream's native external-server mode.
+
+The upstream lane is intentionally separate from the bespoke corpus. `scripts/upstream_redis_tcl_fidelity.py` is a fast hard gate over selected assertions, while `scripts/upstream_redis_tcl_full.py` enumerates every default unit from Redis 7.2.4 `runtest --list-tests`, requires every unit to complete exactly once, preserves upstream `external:skip` decisions, rejects vacuous/partial runs, and emits structured evidence. This gives us an answer to two different questions: “does our differential model think we match?” and “what does Redis's own test suite say when pointed at FrankenRedis?”
 
 A repeating "probe sweep" workflow uses adversarial command sequences to find new divergences, files each one as a beads issue, and closes them one at a time. This pattern is visible across hundreds of commits tagged `(frankenredis-<slug>)`.
 
@@ -860,7 +863,8 @@ Every fixture in `fr-conformance` is some variation of this: argv in, expected r
 
 - **Rust nightly** (the workspace uses Rust 2024 edition; the pin lives in `rust-toolchain.toml`).
 - **A C toolchain** if you want to also build the vendored Redis under `legacy_redis_code/redis/` for differential testing.
-- **`redis-server`** on your `PATH` if you want to run live differential conformance gates without using the vendored copy.
+- **Tcl 8.5+** if you want to run Redis 7.2.4's upstream Tcl tests directly against FrankenRedis.
+- **`redis-server`** on your `PATH` if you want to run ad-hoc live differential gates without the pinned vendored copy.
 
 ### From source
 
@@ -1227,7 +1231,7 @@ Now trace each request:
 
 ## Conformance harness
 
-The `fr-conformance` crate is the single source of truth for parity.
+FrankenRedis deliberately uses multiple independent fidelity layers. The 4,975-case corpus is strong bespoke differential coverage; it is **not** presented as a substitute for upstream Redis's own tests.
 
 ```bash
 # Run the in-process conformance suite (FrankenRedis runtime vs declared expectations)
@@ -1239,12 +1243,24 @@ cargo test -p fr-conformance -- --nocapture
 cargo run -p fr-conformance --bin live_oracle_diff -- \
     command crates/fr-conformance/fixtures/core_zset.json 127.0.0.1 6390
 
-# Orchestrate the canonical matrix profile across the standard suites.
-# --matrix accepts `baseline` (default), `parity`, or `all`.
+# Orchestrate the broader Redis-vs-FrankenRedis parity matrix.
 cargo run -p fr-conformance --bin live_oracle_orchestrator -- --matrix parity
 ```
 
-### What's inside
+### Redis 7.2.4's own upstream Tcl tests
+
+The repository now runs the **unmodified upstream Redis 7.2.4 test harness itself** against FrankenRedis. CI checks out Redis at the exact release commit `d2c8a4b91e8c0e6aefd1f5bc0bf582cddbe046b7`, builds its test-support binaries, and uses upstream's native external-server support (`runtest --host/--port`).
+
+There are two upstream lanes:
+
+- `scripts/upstream_redis_tcl_fidelity.py`: a fast, blocking anti-vacuity gate over 72 selected client-visible assertions spanning strings, integer arithmetic, keyspace semantics, transactions, and protocol behavior.
+- `scripts/upstream_redis_tcl_full.py`: the complete default external-mode lane. It obtains the unit inventory from `runtest --list-tests`, schedules every listed unit, requires each one to complete exactly once, preserves Redis's own `external:skip` decisions, detects early FrankenRedis exits/timeouts/partial runs, and emits a structured JSON report plus the raw Tcl log.
+
+The dedicated workflow is `.github/workflows/upstream-redis-7.2.4-full.yml`. It runs on relevant changes to `main`, nightly, and manually. Automatic runs publish the full evidence even while remaining incompatibilities are being closed; release candidates are required by `AGENTS.md` to dispatch the workflow with **`enforce=true`**, making the complete upstream verdict blocking.
+
+Redis also ships separate `runtest-cluster`, `runtest-sentinel`, and `runtest-moduleapi` entrypoints. Those are different evidence classes: cluster/Sentinel own multi-process topologies, while module API tests build and load native Redis C modules. They are not silently counted as passing external-server tests.
+
+### What's inside the bespoke corpus
 
 ```
 crates/fr-conformance/fixtures/
@@ -1274,9 +1290,9 @@ Total: **4,975 cases across 43 fixtures**. Each case carries an `argv`, a `now_m
 
 ### Differential testing
 
-The harness can spawn vendored `redis-server`, execute the same case on both runtimes via TCP, and compare RESP frames byte-for-byte. Field-ordering canonicalization keeps RESP3 Map/Set replies stable across runs. An exemption audit file (`live_oracle_audit_exemptions.json`, schema `live_oracle_audit_exemptions/v2`) lists the small number of fixtures intentionally **excluded from the live-oracle matrix** because they require specialized harnesses (multi-client blocking, dedicated replication-handshake harness, dedicated persist-replay path, TLS-enabled oracle); each exemption records its replacement coverage.
+The harness can execute the same case on both FrankenRedis and a live Redis 7.2.4 oracle and compare RESP frames byte-for-byte. Field-ordering canonicalization keeps RESP3 Map/Set replies stable across runs. An exemption audit file (`live_oracle_audit_exemptions.json`, schema `live_oracle_audit_exemptions/v2`) lists fixtures intentionally excluded from a particular live-oracle matrix because they require specialized harnesses (multi-client blocking, dedicated replication-handshake harness, dedicated persist-replay path, TLS-enabled oracle); each exemption records its replacement coverage.
 
-CI runs the full live conformance suite on every push to `main` (`.github/workflows/live-conformance-gates.yml`).
+The main conformance workflow pins the oracle to Redis 7.2.4 and runs the broad `parity` matrix. The separate complete-upstream workflow runs Redis's own default Tcl suite and preserves its report as release evidence.
 
 ---
 
@@ -1289,7 +1305,7 @@ CI runs the full live conformance suite on every push to `main` (`.github/workfl
 | Wire protocol | `fuzz_resp_parser`, `fuzz_resp_roundtrip`, `fuzz_resp_configured_sequences`, `fuzz_inline_parser`, `fuzz_command_parse`, `fuzz_command_parse_advanced`, `fuzz_command_option_parsers` |
 | RDB | `fuzz_rdb_encode_round_trip`, `fuzz_rdb_decoder`, `fuzz_rdb_structured` |
 | AOF | `fuzz_aof_decoder`, `fuzz_aof_manifest_parser` |
-| Data structures | `fuzz_store_bitops`, `fuzz_store_hll`, `fuzz_store_scan_family`, `fuzz_store_stream_groups`, `fuzz_keyspace_events` |
+| Data structures | `fuzz_store_bitops`, `fuzz_store_hll`, `fuzz_store_scan_family`, `fuzz_keyspace_events` |
 | Runtime + VM | `fuzz_runtime_sequence`, `fuzz_runtime_execute_bytes`, `fuzz_differential_runtime`, `fuzz_eventloop_validators` |
 | Scripting | `fuzz_lua_eval`, `fuzz_function_restore` |
 | Replication + protocol | `fuzz_psync_reply`, `fuzz_migrate_request`, `fuzz_dump_restore`, `fuzz_client_tracking` |
@@ -1566,7 +1582,7 @@ In strict mode, the default decision for every threat class is `FailClosed` with
 | Memory safety | `#![forbid(unsafe_code)]` | manual | manual | manual | runtime + GC | manual |
 | Drop-in protocol parity goal | Redis 7.2.4 byte-exact | (oracle) | Redis fork | RESP-compatible subset | RESP-compatible subset | Redis fork |
 | Threading model | single-threaded mio loop | single-threaded | multi-threaded | multi-threaded shared-nothing | multi-threaded | single-threaded |
-| Differential test against canonical Redis | **yes (live diff in CI)** | n/a | no | no | no | implicit |
+| Differential test against canonical Redis | **yes (live diff in CI + upstream Tcl)** | n/a | no | no | no | implicit |
 | First-class strict/hardened mode split | **yes** | no | no | no | no | no |
 | Built-in Sentinel | **yes (`fr-sentinel`)** | yes (external binary) | yes | no (Raft built-in) | no | yes |
 | Cluster sharding | not yet | yes | yes | yes | partial | yes |
@@ -1586,6 +1602,7 @@ Honest list of what FrankenRedis does *not* do today. The roadmap below tracks c
 - **Hash-field TTL coverage is partial.** `HEXPIRE`, `HTTL`, and `HPERSIST` are exposed as Redis 7.4 forward-compatibility commands; the millisecond and absolute-time variants remain outside the current command surface.
 - **Maxmemory eviction samples randomly, not into a sorted pool.** `sampled_eviction_candidate_keys` randomly samples up to `sample_limit` keys (default 5, matching upstream's `maxmemory-samples`), then picks the best LRU/LFU/TTL candidate from that sample. Upstream merges samples into a sorted `EVPOOL_SIZE = 16` pool across eviction rounds; FrankenRedis samples fresh each round.
 - **RaptorQ-everywhere durability sidecar is not started.** The doctrine is named in `AGENTS.md`; no crate dependency or implementation exists yet.
+- **The complete upstream Redis Tcl lane is evidence, not a blanket claim that every Redis test category is green.** The full external-mode workflow publishes its actual pass/skip/ignore/error counts. Separate upstream cluster, Sentinel, and module-API runners require topology/ABI-specific treatment and are not folded into the external-server count.
 - **No tagged releases.** Workspace version is `0.1.0` everywhere; the project is pre-1.0 and `main` is the only branch with guarantees.
 
 ---
@@ -1682,24 +1699,11 @@ The CHANGELOG's Phase 11 section is largely the output of this workflow. The met
 
 ### What runs in CI
 
-`.github/workflows/live-conformance-gates.yml` is the source of truth. The actual workflow runs `ubuntu-latest`, installs Redis via apt-get plus Rust nightly via `dtolnay/rust-toolchain@nightly`, and then drives these gates in order:
+`.github/workflows/live-conformance-gates.yml` is the main fast conformance workflow. It pins the behavioral oracle to the exact Redis 7.2.4 release SHA, builds that source, and drives formatting/lints/workspace tests, the broad live-oracle `parity` matrix, the 72-assertion upstream Tcl hard gate, protocol/Lua/bead parity probes, coverage/flake budgets, adversarial triage, schema gates, benchmark gating when requested, and failure-forensics artifacts.
 
-- **G1 — Verify Formatting:** `cargo fmt --check`.
-- **G1 — Verify Lints:** `cargo clippy --workspace --all-targets -- -D warnings`.
-- **G2 — Unit and Property Baseline:** `cargo test --workspace` plus property-test sweeps.
-- **G3 + G5 — Live Oracle Differential Suites:** the CI step shells out to `./scripts/run_live_oracle_diff.sh` which drives the `live_oracle_orchestrator` binary (`cargo run -p fr-conformance --bin live_oracle_orchestrator`) against the already-running `redis-server` on 127.0.0.1:6379. Every fixture under `crates/fr-conformance/fixtures/` is diffed reply-by-reply. Fail if a divergence appears that isn't already in `live_oracle_audit_exemptions.json`.
-- **G7 — Coverage / Flake Budgets:** `scripts/check_coverage_flake_budget.sh`.
-- **G4 — Adversarial Triage:** run the adversarial corpus against both servers and classify any divergences.
-- **G6 — Optimization Gate:** `phase2c_schema_gate --optimization-gate`.
-- **G6 — Benchmark Regression Gate** *(opt-in via the `run_benchmark_gate` workflow_dispatch input)*: `scripts/benchmark_gate.sh` against checked-in baselines.
-- **G7 — User Workflow Corpus Gate:** the `user_journey_corpus_gate` binary.
-- **G7 — Packet Schema Gate:** `phase2c_schema_gate` against the extraction packets in `artifacts/phase2c/`.
-- **G8 — RaptorQ Artifact Gate:** verify the durability-artifact schema (the framework is wired even though the RaptorQ sidecar itself is still on the roadmap).
-- **G7 — Failure Forensics Index:** any failed gate above contributes to a forensics bundle under `artifacts/failure_forensics/<run-id>/`.
+`.github/workflows/upstream-redis-7.2.4-full.yml` is the complete upstream-test workflow. It checks out and verifies the exact Redis 7.2.4 source, builds Redis's test-support binaries, builds FrankenRedis, and then runs every default unit from Redis's own `runtest --list-tests` against FrankenRedis in external-server mode. It publishes the raw Tcl log and structured report on relevant pushes, nightly, and on manual dispatch. **Release candidates must run this workflow with `enforce=true`; see `AGENTS.md`.**
 
-Each major stage (live oracle, adversarial triage, raptorq, failure forensics, benchmark regression) uploads its artifact bundle so a reviewer can inspect the full reply / argv / digest log without re-running CI locally.
-
-A PR cannot merge to `main` unless the gates pass and there are no new exemption entries.
+The two workflows answer different questions and neither number should be inflated into the other: the bespoke differential corpus measures FrankenRedis's explicit parity model, while the upstream Tcl lane asks Redis's own tests directly.
 
 ---
 
@@ -1785,7 +1789,7 @@ The combination of AOF (`appendfsync everysec`) and periodic RDB (`save 3600 1`)
 
 ### Is FrankenRedis production-ready?
 
-No. The workspace is `0.1.0` and there are no tagged releases. The pieces that are implemented are exercised by 4,975 differential conformance cases and 33 fuzz targets, but you should not yet stake a production system on it without your own validation, particularly around sharding (which doesn't exist yet) and TLS (which is configured but not wire-terminated).
+No. The workspace is `0.1.0` and there are no tagged releases. The implemented surface is exercised by a 4,975-case bespoke differential corpus, pinned live Redis 7.2.4 oracle gates, Redis 7.2.4's own upstream Tcl tests, and 33 fuzz targets, but the complete upstream external-mode report must still be read as evidence rather than a blanket compatibility certificate. In particular, multi-node sharding does not exist yet, wire TLS is delegated to the operational layer, and separate upstream cluster/Sentinel/module-API test runners require their own topology/ABI-specific treatment.
 
 ### Does it speak the regular Redis protocol?
 
@@ -1821,7 +1825,7 @@ Measured against vendored Redis 7.2.4 running side-by-side in the same invocatio
 
 ### Where does the parity bar come from?
 
-A vendored Redis 7.2.4 source tree under `legacy_redis_code/redis/`, fully built and used as the live oracle by the conformance harness. When you see `(frankenredis-<slug>)` in a commit message, that's a beads issue ID, usually filed by a differential probe sweep that found a divergence against this oracle.
+Redis 7.2.4 itself. The pinned source tree is used in two complementary ways: as a live behavioral oracle for FrankenRedis's bespoke differential suites, and as the source of the unmodified upstream Tcl tests run directly against FrankenRedis through Redis's external-server harness. The complete upstream workflow verifies the exact 7.2.4 release SHA before running. When you see `(frankenredis-<slug>)` in a commit message, that's a beads issue ID, usually filed by a differential probe sweep that found a divergence against this oracle.
 
 ### What does the `CHANGELOG.md` look like?
 
@@ -1833,7 +1837,7 @@ Organized by date-bounded development phases (Phase 1–15 plus the 2026-08-18/1
 
 ```
 frankenredis/
-├── AGENTS.md                                    # multi-agent build doctrine
+├── AGENTS.md                                    # multi-agent + release-fidelity doctrine
 ├── CHANGELOG.md                                 # 15 phases + janitor wave, through 2026-08-19
 ├── README.md                                    # (this file)
 ├── docs/planning/                               # design spec, porting plan, parity + threat matrices
@@ -1856,20 +1860,21 @@ frankenredis/
 │   ├── fr-conformance/                          # differential conformance + orchestrators
 │   └── fr-sentinel/                             # Sentinel reimplementation
 │
-├── legacy_redis_code/redis/                     # vendored Redis 7.2.4 (oracle)
+├── legacy_redis_code/redis/                     # local/pinned Redis 7.2.4 oracle checkout
 ├── baselines/                                   # checked-in baseline JSON
 ├── artifacts/                                   # optimization proofs, schema gates, durability notes
 ├── fuzz/                                        # 33 cargo-fuzz targets
-├── scripts/                                     # baseline / gate / triage scripts
+├── scripts/                                     # differential + upstream-Tcl runners
 ├── docs/                                        # THREAT_MODEL.md
-└── .github/workflows/live-conformance-gates.yml # CI: live differential conformance
+├── .github/workflows/live-conformance-gates.yml # fast live-oracle + selected upstream Tcl CI
+└── .github/workflows/upstream-redis-7.2.4-full.yml # complete default upstream Tcl lane
 ```
 
 ---
 
 ## Validation commands
 
-The set of commands a contributor runs before sending a PR. If `rch` is available, all of these can be transparently offloaded to remote workers; otherwise they run locally.
+The set of commands a contributor runs before sending a PR. If `rch` is available, all Cargo invocations should follow the fail-closed conventions in `AGENTS.md`.
 
 ```bash
 # Formatting + lints + workspace check
@@ -1890,11 +1895,14 @@ rch exec -- cargo bench
 ./scripts/benchmark_gate.sh                      # gates a candidate run
 ```
 
+For release candidates, the complete upstream Redis 7.2.4 external-mode Tcl workflow is additionally mandatory. Dispatch `.github/workflows/upstream-redis-7.2.4-full.yml` with `enforce=true` and inspect its `report.json`/raw Tcl log; the exact release requirements are documented in `AGENTS.md`.
+
 ---
 
 ## Key documents
 
-- [`AGENTS.md`](AGENTS.md) — multi-agent build/coordination conventions
+- [`AGENTS.md`](AGENTS.md) — multi-agent build/coordination conventions and mandatory release-fidelity procedure
+- [`scripts/README.md`](scripts/README.md) — fidelity layers, upstream Tcl runners, and differential gate taxonomy
 - [`CHANGELOG.md`](CHANGELOG.md) — date-bounded phase history
 - [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) — per-feature parity matrix
 - [`docs/planning/COMPREHENSIVE_SPEC_FOR_FRANKENREDIS_V1.md`](docs/planning/COMPREHENSIVE_SPEC_FOR_FRANKENREDIS_V1.md) — design spec
@@ -1912,7 +1920,7 @@ Pointers to the literature and to related projects whose decisions FrankenRedis 
 
 ### Redis itself
 
-- **Redis source tree.** [`redis/redis`](https://github.com/redis/redis). The 7.2.4 source is vendored under `legacy_redis_code/redis/` as the live conformance oracle. Every behavioral question in this project terminates in "what does this file say?".
+- **Redis source tree.** [`redis/redis`](https://github.com/redis/redis). Redis 7.2.4 is the pinned compatibility target and behavioral oracle. Its own Tcl tests are also executed directly against FrankenRedis through upstream's external-server harness.
 - **Redis Streams design note.** Antirez (Salvatore Sanfilippo), *"Streams: A new general purpose data structure in Redis"* (2017). The radix-tree-of-listpacks layout and the consumer-group model originated here.
 - **Salvatore Sanfilippo, *"Redis Latency Diagnosis"*.** The documented methodology that informs the `LATENCY` / `SLOWLOG` surface and the latency-monitor budget.
 
@@ -1962,6 +1970,8 @@ Numbers behind the "clean-room reimplementation" claim:
 | Active development days | 79 |
 | Conformance fixture cases | 4,975 |
 | Conformance fixture families | 43 |
+| Upstream Redis Tcl fast hard gate | 72 selected assertions |
+| Complete upstream Redis Tcl lane | every default Redis 7.2.4 `runtest --list-tests` unit, external mode |
 | `cargo-fuzz` targets | 33 |
 | Redis 7.2.4 base commands implemented | 241 |
 | Distinct command-name dispatch arms in `fr-command` | 231 |
@@ -2000,7 +2010,8 @@ Numbers behind the "clean-room reimplementation" claim:
 | **SDS** | Simple Dynamic String. Redis's string type. FrankenRedis stores the equivalent as `Vec<u8>` with promotion metadata on the wrapping `Entry`. |
 | **skiplist** | Probabilistic ordered data structure Redis uses for the ordered side of large sorted sets. FrankenRedis uses a `BTreeMap` instead with equivalent observable complexity. |
 | **threat class** | One of eight categories in `fr-config::ThreatClass` describing what kind of misbehavior a request represents. Drives the policy decision in hardened mode. |
-| **vendored Redis** | A full upstream Redis 7.2.4 source tree checked into `legacy_redis_code/redis/`, built and used as the live oracle by the conformance harness. |
+| **upstream Tcl lane** | Redis 7.2.4's own unmodified default `runtest` suite executed against FrankenRedis through upstream's external-server mode. |
+| **vendored Redis** | The pinned Redis 7.2.4 source/binary used as the canonical live behavioral oracle by the conformance harness. |
 | **ziplist** | Legacy Redis compact encoding for small collections. Replaced by listpack in Redis 7.x and not emitted by FrankenRedis. |
 
 ---
