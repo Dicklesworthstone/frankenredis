@@ -67281,3 +67281,65 @@ rows returns to REFUSED on fr, which the harness reports per row.
   2. The no-shebang EVAL/EVALSHA gap is real and filed separately, since it is the reverse of
      what that bead's title says.
   3. Do not read this row as a perf verdict. It measures no time.
+
+## 2026-08-20 CrimsonHawk: ADDENDUM to the stale-replica reproduction — a SHADOWED NAME degraded the comparison to "is this any error", which hid a fourth divergence I had already built the probe to find
+
+EVIDENCE CLASS: re-running `scripts/stale_replica_gate_parity.py` after fixing its own comparison.
+Verdicts, not timings. Host was BUSY and deliberately not treated as a measurement window — runq 17,
+CPU idle 66 pct, loadavg 17.47 / 16.77 / 10.41, iowait 0 pct — which does not bear on a reply
+comparison. No build; 0 frankenredis builds running.
+
+### THE DEFECT
+
+`main()` assigned a local for its control leg:
+
+    refused = lambda r: isinstance(r, str) and r.startswith("ERR>")
+
+which **shadowed the module-level `refused()`** — the one that tests specifically for MASTERDOWN —
+for every row comparison below it. The comparison silently degraded from *"is this the staleness
+refusal"* to *"is this any error at all"*, so two engines refusing **for different reasons** counted
+as agreement.
+
+It is the same family as the borrowed-predicate row earlier: a name that means one thing to the
+control and another to the rows. Here it was worse, because the two definitions were both mine and
+both in one function.
+
+### WHAT IT HID, AFTER I HAD ALREADY BUILT THE PROBE TO FIND IT
+
+Last run I added a real `FUNCTION LOAD` so FCALL would stop answering "Function not found" from a
+guard in front of the gate. It then reported AGREE — and the underlying replies were:
+
+    fcall (REAL fn)   redis  READONLY Can not run script with write flag on readonly replica
+                      fr     MASTERDOWN Link with MASTER is down, ...
+
+Both refuse; the **error CODE differs**, and a client branching on the code gets a different answer.
+Upstream tests the read-only-replica condition BEFORE staleness for a write-capable script
+(`script.c:159`), fr tests staleness first. So the fix needs upstream's ORDER, not merely the
+presence of a check.
+
+**I did the work to reach the gate and then could not see the result.** Fixing the vacuous row and
+fixing the comparison are two different repairs, and doing only the first bought nothing.
+
+### A THIRD REPORTING LEVEL, ADDED SO WORDING CANNOT HIDE INSIDE A PASS
+
+Class comparison is deliberately tolerant — `TIME` returns the clock and must not read as
+divergent. But both engines can answer MASTERDOWN with DIFFERENT TEXT:
+
+    fcall_ro   redis  "...replica-serve-stale-data is set to 'no'."          (shared.masterdownerr)
+               fr     "...is set to 'no' and 'allow-stale' flag is not set"  (the shebang wording)
+
+Upstream carries BOTH strings and picks by whether the script has a shebang; fr uses the long one
+everywhere. Agreeing rows whose bytes differ now print as `NOTE`, not as a pass.
+
+Final tally: **26/30 agree, 1 wording mismatch, 4 divergent** — `eval`, `eval_ro`, `evalsha` (fr
+serves where the incumbent refuses) and `fcall` (different refusal code).
+
+### RETRY PREDICATES
+
+Retry predicate: re-run ONLY IF the script entry path or the stale gate changes; and treat any row
+that flips from `NOTE` to `AGREE` as a wording fix worth confirming rather than as noise.
+
+  1. A comparison helper must not share a name with a looser local — grep for reassignment of any
+     predicate before trusting a table of AGREEs.
+  2. Reaching the code under test and being able to SEE the result are separate repairs.
+  3. Do not read this row as a perf verdict. It measures no time.
