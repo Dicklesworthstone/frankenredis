@@ -258,6 +258,37 @@ cargo test -p fr-conformance
 | `fr-runtime` | Server assembly, integration paths |
 | `fr-conformance` | Differential testing against legacy Redis, golden output matching |
 
+### Upstream Redis 7.2.4 Fidelity — MANDATORY FOR RELEASES
+
+FrankenRedis has two first-class upstream-Tcl lanes in addition to its bespoke differential corpus:
+
+- `scripts/upstream_redis_tcl_fidelity.py` is the fast hard gate: a curated, anti-vacuous set of unmodified Redis 7.2.4 Tcl assertions run against FrankenRedis through Redis's own `runtest --host/--port` external-server mode.
+- `scripts/upstream_redis_tcl_full.py` is the complete external-mode lane: it enumerates **every default unit returned by Redis 7.2.4 `runtest --list-tests`**, runs the unmodified upstream suite against FrankenRedis, preserves Redis's own `external:skip` decisions, and emits a machine-readable report plus the raw Tcl log.
+
+**Every release candidate MUST run the complete upstream suite, not merely the curated fast lane or the bespoke 4,975-case corpus.** The canonical CI workflow is `.github/workflows/upstream-redis-7.2.4-full.yml`. For a release candidate, dispatch that workflow with **`enforce=true`** so the upstream verdict is blocking.
+
+A release is not allowed to ship merely because the workflow produced artifacts. Before tagging or publishing a release, the release agent MUST verify all of the following from `artifacts/upstream_redis_tcl_full/report.json` and the raw log:
+
+1. The Redis source revision is exactly `d2c8a4b91e8c0e6aefd1f5bc0bf582cddbe046b7` (Redis 7.2.4).
+2. `anti_vacuity_ok` is true.
+3. `completed_unit_count == expected_unit_count`; there are no missing, duplicate, or unexpected test units.
+4. FrankenRedis did not exit early and the upstream harness did not time out or fail infrastructurally.
+5. The complete-suite verdict is green when `enforce=true`. Any failing upstream assertion is a release blocker unless the user explicitly accepts it for that release and the limitation is documented; **do not weaken the harness, invent a skip, or convert a failure into an exemption simply to get a green release.**
+
+Redis's separate `runtest-cluster`, `runtest-sentinel`, and `runtest-moduleapi` entrypoints are not equivalent external-server fidelity suites: cluster/Sentinel own multi-process topologies and module API tests compile/load native Redis C modules. Do not count them as silently passing or silently skipped. If a future release claims those surfaces, test them with an appropriate topology/ABI harness and state the evidence class explicitly.
+
+For a manual local reproduction after building the exact Redis 7.2.4 source tree and FrankenRedis:
+
+```bash
+python3 scripts/upstream_redis_tcl_full.py \
+  --upstream legacy_redis_code/redis \
+  --fr target/debug/frankenredis \
+  --report artifacts/upstream_redis_tcl_full/report.json \
+  --log artifacts/upstream_redis_tcl_full/runtest.log
+```
+
+**Release evidence must distinguish these categories:** command implementation coverage, bespoke differential cases, live-oracle matrices, curated upstream Tcl assertions, and the complete upstream external-mode suite are complementary evidence, not interchangeable numbers.
+
 ---
 
 ## Third-Party Library Usage
