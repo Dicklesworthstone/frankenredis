@@ -67431,3 +67431,93 @@ it belongs on the same bead rather than a new one.
   2. Do not reorder checks inside fr's script engine to chase it; the governing code runs earlier.
   3. Do not read this row as a perf verdict. It measures no time, and the host could not have
      supported one.
+
+## 2026-08-20 TanMarsh: DIAGNOSIS — the PING/MISCONF master-vs-replica split is a FAST-PATH BYPASS, not a replica-specific denial, and "add PING to the gate" is a NO-OP (frankenredis-i2qq5)
+
+Source-only; no build and no measurement (host at iowait 68.5 pct, loadavg 141, idle 12.6 pct,
+kernel flush threads in D-state -- any number taken now would be a contention artifact). This row
+exists to stop the obvious fix being applied at the wrong layer.
+
+### THE HYPOTHESIS ON THE BEAD, AND WHY IT IS BACKWARDS
+
+The bead reasons: "fr denies PING on a replica but not on a master, which suggests the PING denial
+is wired to a replica-specific path rather than to the disk-error gate itself... 'add PING to the
+gate' may double-deny on the replica side."
+
+The denial is NOT replica-specific. It is already role-agnostic and already covers PING:
+
+      fn command_subject_to_disk_write_denial(...) -> bool {          fr-runtime:38488
+          if argv.first().is_some_and(|c| eq_ascii_token(c, b"PING")) { return true; }
+          self.command_requires_replica_write_quorum(argv, special_command)
+      }
+
+So adding PING to that gate would change nothing, and it would NOT double-deny -- the replica
+already reaches it and the master never does.
+
+### WHAT ACTUALLY SPLITS THE TWO ROLES
+
+`plain_borrowed_default_key_read_allows` (fr-runtime:16184) is the shared gate every borrowed
+fast path consults, and it contains:
+
+      || !matches!(self.server.replication_runtime_state.role, ReplicationRoleState::Master)
+
+MASTER   -> gate returns true  -> `execute_plain_ping_borrowed_into` writes `+PONG` and returns
+                                  `Some(())`. The dispatch chain, and therefore
+                                  `reject_due_to_disk_write_error`, is never entered.
+REPLICA  -> gate returns false -> the helper returns `None`, main.rs:7722 falls back to the full
+                                  parse, the chain runs, and the disk gate answers MISCONF.
+
+That is exactly the measured table. The asymmetry is the FAST PATH being master-only; the denial
+was never role-dependent.
+
+### ONLY THE RDB HALF LEAKS, AND THE GATE ALREADY SHOWS THE FIX'S SHAPE
+
+`active_disk_write_denial` returns `Rdb` or `Aof`. The `Aof` arm requires `aof_path.is_some()`, and
+that same gate ALREADY declines on `self.server.aof_path.is_some()` -- so an AOF disk error forces
+the slow path today and is answered correctly. Only the RDB arm leaks, which is precisely what the
+harness induces.
+
+That is also the fix's shape, sitting two lines above the defect: the gate already declines on
+`maxmemory_bytes != 0` and on `aof_path.is_some()` -- server-state conditions the generic path must
+handle. The RDB denial belongs in that same list. One term, in one shared gate, and every borrowed
+fast path inherits it.
+
+### THE BUG IS WIDER THAN THE BEAD'S TABLE, AND A GATE-ONLY FIX WOULD NOT CLOSE IT
+
+Two OTHER PING fast paths answer `+PONG` without consulting any gate at all:
+
+      main.rs:4017   dispatch_shared_nothing_frames_impl   writes b"+PONG\r\n" directly
+      main.rs:6839   the sharded-pool loop                  writes b"+PONG\r\n" directly
+
+Neither calls `execute_plain_ping_borrowed_into`, so neither can decline. main.rs:7722 -- the
+default path -- is the well-behaved one: it asks the helper and falls back when it returns `None`.
+
+The harness starts both roles with identical flags (`--port --dir --save "900 1"`, no thread or
+partition options), so it exercises only the default path and could only ever see the master/replica
+split. Under `FR_SHARED_NOTHING_PARTITIONS` or the sharded pool a REPLICA would answer PONG too, and
+the bead's "replica agrees" row would flip. Anyone fixing this should either route those two sites
+through the helper or extend the harness to the other modes before believing it is closed.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timings and no null: every claim here is a source fact from the vendored tree and this repo, and
+the measured rows it explains are CrimsonHawk's (5b7c8c10a), taken against a shared
+`target/release/frankenredis` that names no commit -- disqualifying for a ratio, adequate for a
+verdict, and already labelled as such on the bead.
+
+### PROVENANCE
+
+      source        fr-runtime/src/lib.rs:16184, :38488, :38502; fr-server/src/main.rs:4017,
+                    :6839, :7715-7735; server.c:4024-4025.
+      host          loadavg 141.14/68.57/33.89, iowait 68.5 pct, idle 12.6 pct, /data 196G.
+                    NO build and NO measurement taken this turn, deliberately.
+      disposition   DIAGNOSIS ONLY. No engine source changed -- `fr-runtime/src/lib.rs` is under
+                    another agent's exclusive lease until 17:34Z and I did not touch it.
+
+### RETRY PREDICATE
+
+1. Do not "add PING to the disk-write denial gate". It is already there; the change is inert.
+2. Fix it in `plain_borrowed_default_key_read_allows`, beside the existing `aof_path.is_some()`
+   term, so every borrowed fast path inherits the decline.
+3. Before closing, either route main.rs:4017 and :6839 through `execute_plain_ping_borrowed_into`
+   or prove by measurement that those modes do not leak. The current harness cannot see them.
