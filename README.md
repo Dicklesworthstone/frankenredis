@@ -1305,7 +1305,7 @@ The main conformance workflow pins the oracle to Redis 7.2.4 and runs the broad 
 | Wire protocol | `fuzz_resp_parser`, `fuzz_resp_roundtrip`, `fuzz_resp_configured_sequences`, `fuzz_inline_parser`, `fuzz_command_parse`, `fuzz_command_parse_advanced`, `fuzz_command_option_parsers` |
 | RDB | `fuzz_rdb_encode_round_trip`, `fuzz_rdb_decoder`, `fuzz_rdb_structured` |
 | AOF | `fuzz_aof_decoder`, `fuzz_aof_manifest_parser` |
-| Data structures | `fuzz_store_bitops`, `fuzz_store_hll`, `fuzz_store_scan_family`, `fuzz_keyspace_events` |
+| Data structures | `fuzz_store_bitops`, `fuzz_store_hll`, `fuzz_store_scan_family`, `fuzz_store_stream_groups`, `fuzz_keyspace_events` |
 | Runtime + VM | `fuzz_runtime_sequence`, `fuzz_runtime_execute_bytes`, `fuzz_differential_runtime`, `fuzz_eventloop_validators` |
 | Scripting | `fuzz_lua_eval`, `fuzz_function_restore` |
 | Replication + protocol | `fuzz_psync_reply`, `fuzz_migrate_request`, `fuzz_dump_restore`, `fuzz_client_tracking` |
@@ -1464,6 +1464,7 @@ Both decoders accept vendored Redis 7.2.4 files unmodified. Handy for forensic t
 ### Drive the runtime without owning a socket
 
 ```toml
+# Cargo.toml
 [dependencies]
 fr-runtime = { path = "../frankenredis/crates/fr-runtime" }
 fr-config  = { path = "../frankenredis/crates/fr-config" }
