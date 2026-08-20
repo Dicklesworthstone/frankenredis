@@ -44,6 +44,45 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# CARGO_TARGET_DIR is exported HOST-WIDE to this path, so a BARE `cargo` command in
+# this repo silently writes there instead of into ./target. It reached 125G and took
+# /data from 229G to 150G in minutes, with 12386 files landing in ten of them. The
+# floor check below cannot catch that: by the time free space moves, the writes have
+# already happened, and they are attributed to no project.
+BANNED_TARGET_DIRS = ("/data/tmp/cargo-target",)
+
+
+def target_dir_verdict(env=None, repo=None):
+    """Is the AMBIENT environment safe for a bare `cargo` in this repo?
+
+    Returns (ok, message). This cannot verify the command you are about to type --
+    nothing can -- so it answers the question it CAN: would a bare cargo from this
+    shell write somewhere it must not? A "clear to build" issued while the ambient
+    CARGO_TARGET_DIR points at the shared dir is a go-ahead for exactly the accident.
+    """
+    env = os.environ if env is None else env
+    repo_root = REPO if repo is None else repo
+    raw = env.get("CARGO_TARGET_DIR")
+    if not raw:
+        return True, "CARGO_TARGET_DIR unset -- cargo writes this repo's own target/"
+    resolved = os.path.realpath(os.path.expanduser(raw))
+    for banned in BANNED_TARGET_DIRS:
+        b = os.path.realpath(banned)
+        if resolved == b or resolved.startswith(b + os.sep):
+            return False, (
+                "CARGO_TARGET_DIR=%s is the BANNED shared dir. A bare cargo here "
+                "writes there. Prefix EVERY cargo invocation in this repo -- build, "
+                "check, clippy, test, bench -- with:\n"
+                "      env -u CARGO_TARGET_DIR cargo <...>" % raw)
+    if not resolved.startswith(os.path.realpath(repo_root) + os.sep):
+        return False, (
+            "CARGO_TARGET_DIR=%s points OUTSIDE this repo (%s). That is not the "
+            "banned dir, but it still is not this project's target/, so its output "
+            "is attributed to nobody. Prefix with env -u CARGO_TARGET_DIR."
+            % (raw, repo_root))
+    return True, "CARGO_TARGET_DIR=%s is inside this repo" % raw
+
+
 # A wrapper shell, not a compiler. These carry the pattern we search for.
 WRAPPER_MARKERS = ("zsh -c", "bash -c", "shell-snapshots")
 
@@ -144,6 +183,51 @@ SELF_TEST_CASES = [
 ]
 
 
+# (banned-target-dir guard) value -> is the ambient env SAFE for a bare cargo?
+# The sibling case is the one a careless implementation fails: a bare
+# startswith(banned) with no separator blocks /data/tmp/cargo-target-other, which is
+# a DIFFERENT directory and perfectly fine.
+TARGET_DIR_CASES = [
+    (None, True),
+    ("/data/tmp/cargo-target", False),
+    ("/data/tmp/cargo-target/", False),
+    ("/data/tmp/cargo-target/release", False),
+    ("/data/tmp/cargo-target-other", False),   # outside the repo, so still refused
+    ("/tmp/somewhere-else", False),
+    (REPO + "/target", True),
+    (REPO + "/target/release", True),
+]
+
+
+def target_dir_self_test():
+    bad = []
+    for value, want in TARGET_DIR_CASES:
+        env = {} if value is None else {"CARGO_TARGET_DIR": value}
+        got, _ = target_dir_verdict(env=env)
+        if got != want:
+            bad.append((value, want, got))
+    for value, want, got in bad:
+        print("TARGET-DIR MISMATCH expected=%s got=%s :: %r" % (want, got, value))
+    print("target-dir: %d/%d correct" % (len(TARGET_DIR_CASES) - len(bad),
+                                         len(TARGET_DIR_CASES)))
+    if bad:
+        return 1
+
+    # Mutation: the naive check an author reaches for first -- exact string equality
+    # against the banned path. It must MISS the subdirectory cases, or the
+    # separator-aware containment above is decoration.
+    naive = lambda v: not (v is not None and v.rstrip("/") == "/data/tmp/cargo-target")
+    caught = [v for v, want in TARGET_DIR_CASES
+              if v is not None and naive(v) != want]
+    if not caught:
+        print("VACUOUS: exact-equality passes the whole corpus, so containment is "
+              "untested. Add a case under the banned dir.")
+        return 1
+    print("target-dir mutation (exact equality instead of containment): CAUGHT on "
+          "%d case(s)" % len(caught))
+    return 0
+
+
 def self_test():
     crates = our_crates()
     bad = [(cmd, want, owns(cmd, crates))
@@ -167,7 +251,7 @@ def self_test():
         return 1
     print("mutation (substring instead of exact -p): CAUGHT on %d case(s)"
           % len(caught))
-    return 0
+    return target_dir_self_test()
 
 
 def main():
@@ -218,7 +302,14 @@ def main():
               "statvfs says %.1fG, which is BELOW it. df -h rounds UP; every stale "
               "go-ahead this session arrived as \"59G\"." % (shown, args.floor_gb, gb))
 
+    tgt_ok, tgt_msg = target_dir_verdict()
+    if tgt_ok:
+        print("target dir: %s" % tgt_msg)
+
     blocked = []
+    if not tgt_ok:
+        blocked.append("CARGO_TARGET_DIR is unsafe for a bare cargo")
+        print("\n" + tgt_msg + "\n")
     if gb < args.floor_gb:
         blocked.append("only %.1fG free, below the %.0fG floor" % (gb, args.floor_gb))
     if len(ours) >= args.budget:
