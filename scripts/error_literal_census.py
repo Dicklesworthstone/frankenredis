@@ -60,7 +60,8 @@ ACCEPTED_ABSENT = {
         "without the !CLIENT_MULTI half would REGRESS SUBSCRIBE inside MULTI.",
     "PSUBSCRIBE isn't allowed for a DENY BLOCKING client":
         "same as SUBSCRIBE above; pubsub.c:568 carries the identical !CLIENT_MULTI exemption",
-    "There was an error trying to save the ACLs.": "fr does not implement ACL SAVE to file",
+    "There was an error trying to save the ACLs. Please check the server logs for more "
+    "information": "fr does not implement ACL SAVE to file",
     "Error purging dirty pages": "jemalloc-specific MEMORY PURGE path; fr uses mimalloc",
     "TESTFAILED dense/sparse disagree": "DEBUG-only PFSELFTEST path",
     "TESTFAILED sparse encoding not used": "DEBUG-only PFSELFTEST path",
@@ -117,6 +118,33 @@ ACCEPTED_ABSENT = {
         "fr implements no REPLCONF rdb-filter-only, so SLAVE_REQ_RDB_MASK is never set",
     "Missing rdb-filter-only values":
         "same: the argument this parses is never accepted",
+    # -- C NEEDS A `default:`; RUST DOES NOT. Both of these are the unreachable arm of a switch
+    #    over a closed set, kept by upstream against a future caller that forgets a case. Rust's
+    #    match is exhaustive over the same set, so there is no arm for them to live in -- the
+    #    condition is a compile error here rather than a runtime reply. Verified reachable by
+    #    NOBODY rather than assumed: all six `georadiusGeneric` callers pass exactly one of
+    #    RADIUS_COORDS / RADIUS_MEMBER / GEOSEARCH (geo.c:848-871), and db.c's arm is the
+    #    `default:` of a switch over OBJ_* in COPY's object duplication.
+    "Unknown georadius search type":
+        "upstream's own defensive else; every georadiusGeneric caller sets one of the three "
+        "search-type flags, so the branch is unreachable in the incumbent too",
+    "unknown type object":
+        "the `default:` of COPY's switch over OBJ_*; fr matches its type enum exhaustively",
+    # -- DEBUG subcommands whose FAILURE path fr has no way to reach. Each is the error arm of a
+    #    subcommand fr answers unconditionally: DEBUG RELOAD calls `request_debug_reload()` and
+    #    returns OK without inspecting a result, DEBUG LOADAOF is an explicit no-op returning OK,
+    #    DEBUG RESTART is not implemented at all. The gap is that fr's DEBUG persistence surface
+    #    cannot REPORT failure, which is worth more than the strings: when reload becomes an
+    #    inline fallible call, all three come back at once.
+    "Error trying to load the RDB dump, check server logs.":
+        "fr's DEBUG RELOAD requests a reload and returns OK; there is no result to test",
+    "Error trying to load the AOF files, check server logs.":
+        "fr's DEBUG LOADAOF is a documented no-op returning OK",
+    "failed to restart the server. Check server logs.":
+        "fr implements neither DEBUG RESTART nor DEBUG CRASH-AND-RECOVER",
+    "OOM in dictTryExpand":
+        "DEBUG POPULATE's pre-expand. Same class as ALLOC_FAILURE below: Rust aborts on "
+        "allocation failure rather than replying, so there is no site to answer from",
 }
 
 # Literals whose absence says nothing because they describe a C allocation failure: Rust aborts
@@ -297,8 +325,21 @@ def self_test():
         "only error-reply constructions may contribute a prefix"
     )
 
+    # 7. INERT EXEMPTIONS. An ACCEPTED_ABSENT key that matches no upstream literal suppresses
+    #    nothing while reading like a decision. Detection is set membership, so what is asserted
+    #    here is that the comparison is against the FULL literal and not a prefix of it -- which is
+    #    exactly how the ACL entry went inert.
+    upstream_keys = {"There was an error trying to save the ACLs. Please check the server logs "
+                     "for more information"}
+    truncated = "There was an error trying to save the ACLs."
+    assert truncated not in upstream_keys, "a truncated key must NOT be treated as a match"
+    assert any(k.startswith(truncated) for k in upstream_keys), (
+        "precondition: it really is a prefix of the real literal, which is why it looked right"
+    )
+
     print("PASS error_literal_census self-test: substring masking, code prefixes, comment "
-          "stripping, C concatenation, Rust line continuations, composed prefixes")
+          "stripping, C concatenation, Rust line continuations, composed prefixes, "
+          "inert exemptions")
     return 0
 
 
@@ -347,12 +388,26 @@ def main():
 
     missing = sorted(l for l in upstream if not present(l) and l not in ACCEPTED_ABSENT)
     stale = sorted(l for l in ACCEPTED_ABSENT if present(l))
+    # AN EXEMPTION THAT MATCHES NO UPSTREAM LITERAL IS INERT, and inert is indistinguishable from
+    # working: it suppresses nothing, the literal stays on the backlog, and the entry reads like a
+    # decision that was made. One was -- "There was an error trying to save the ACLs." was written
+    # without upstream's trailing " Please check the server logs for more information", so it
+    # exempted nothing for as long as it sat here. `stale` below catches the opposite failure (an
+    # entry fr LATER gained); this catches an entry that never applied to begin with.
+    inert = sorted(l for l in ACCEPTED_ABSENT if l not in upstream)
 
     print("upstream: %d distinct error literals (>= %d chars, no format specifiers)"
           % (len(upstream), MIN_LEN))
     print("fr:       %d chars of code scanned (comments stripped)" % len(fr))
 
     rc = 0
+    if inert:
+        print("\nFAIL — %d ACCEPTED_ABSENT entr(ies) match no upstream literal, so they exempt\n"
+              "nothing. Fix the key or delete the entry:" % len(inert))
+        for l in inert:
+            print("    %s" % l[:100])
+        print()
+        rc = 1
     if missing:
         print("\nFAIL — %d literal(s) the incumbent can send and fr never does:" % len(missing))
         for l in missing:
