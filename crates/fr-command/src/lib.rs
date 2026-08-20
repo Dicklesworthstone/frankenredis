@@ -26798,7 +26798,13 @@ fn eval_cmd(
             })
             .or_else(|| script_prepare_oom_refusal(store, store.script_allow_oom))
     } else {
-        None
+        // (frankenredis-3bda1) EVAL_COMPAT_MODE still has ONE gate, and fr had none: a stale
+        // replica must refuse a no-shebang script outright. MEASURED live, replica with its
+        // master link down and replica-serve-stale-data no -- 7.2.4 answers MASTERDOWN to EVAL,
+        // EVAL_RO and EVALSHA alike while fr served `1`. The shebang rows agreed in the same run,
+        // so fr was right for the modern form and wrong only for the legacy one, which is the
+        // overwhelmingly common one.
+        script_prepare_stale_compat_refusal(store)
     };
     if let Some(refusal) = prepare_refusal {
         store.script_read_only = previous_read_only;
@@ -26923,7 +26929,10 @@ fn evalsha_cmd(
             .or_else(|| script_prepare_replica_quorum_refusal(store, no_writes))
             .or_else(|| script_prepare_oom_refusal(store, allow_oom))
     } else {
-        None
+        // (frankenredis-3bda1) Same compat-mode gate as EVAL. The bead's `evalsha (REAL sha)` row
+        // is this one: a cached no-shebang body reached the engine on a stale replica because
+        // this arm was `None`.
+        script_prepare_stale_compat_refusal(store)
     };
     if let Some(refusal) = prepare_refusal {
         store.script_read_only = previous_read_only;
@@ -27218,6 +27227,44 @@ fn script_prepare_stale_refusal(store: &Store, allow_stale: bool) -> Option<Resp
         return Some(RespFrame::Error(
             "MASTERDOWN Link with MASTER is down, replica-serve-stale-data is set to 'no' and \
              'allow-stale' flag is not set on the script."
+                .to_string(),
+        ));
+    }
+    None
+}
+
+/// Upstream `scriptPrepareForRun`'s EVAL_COMPAT_MODE arm (script.c:200-205), the `else` half of
+/// the branch whose `if` half `script_prepare_stale_refusal` implements:
+///
+///     } else {
+///         /* Special handling for backwards compatibility (no shebang eval[sha]) mode */
+///         if (running_stale) {
+///             addReplyErrorObject(caller, shared.masterdownerr);
+///             return C_ERR;
+///         }
+///     }
+///
+/// UNCONDITIONAL, and that is the whole difference from the shebang twin: a body with no `#!`
+/// carries NO FLAGS AT ALL, so there is no `allow-stale` to opt out with and nothing to pass in.
+/// A signature taking an `allow_stale` argument would be a lie about what upstream can express.
+///
+/// THE WORDING IS A DIFFERENT UPSTREAM STRING, not a paraphrase of the shebang one. This arm
+/// replies `shared.masterdownerr` (server.c:1859-1860) -- "Link with MASTER is down AND
+/// replica-serve-stale-data is set to 'no'." -- while the shebang arm inlines a longer literal
+/// ending "...is set to 'no' and 'allow-stale' flag is not set on the script." Upstream really
+/// does answer a stale EVAL and a stale `#!lua` EVAL with different text, so collapsing the two
+/// helpers onto one string would break parity in whichever direction it collapsed.
+///
+/// fr renders `shared.masterdownerr` in TWO places now: fr-runtime's command-level stale gate and
+/// here. One upstream string with two renderers is the drift shape recorded on
+/// `frankenredis-fnukn`; hoisting it to a shared constant needs a change in fr-runtime, which is
+/// under another agent's lease as this lands. Whoever holds both files next should hoist it.
+fn script_prepare_stale_compat_refusal(store: &Store) -> Option<RespFrame> {
+    if store.script_stale_replica {
+        // Upstream's literal already carries `-MASTERDOWN`, which `addReplyErrorObject` leaves
+        // alone; `RespFrame::Error` writes the `-` itself, so the code is spelled without it.
+        return Some(RespFrame::Error(
+            "MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'."
                 .to_string(),
         ));
     }
@@ -41667,6 +41714,123 @@ mod tests {
         );
     }
 
+    /// A stale replica must refuse a NO-SHEBANG script outright, before a line of it runs.
+    ///
+    /// (frankenredis-3bda1) MEASURED live by CrimsonHawk's `scripts/stale_replica_gate_parity.py`
+    /// against vendored 7.2.4 on a replica with its master link down and
+    /// `replica-serve-stale-data no`: 7.2.4 answers MASTERDOWN to EVAL, EVAL_RO and EVALSHA of a
+    /// real cached sha, and fr served `1` for all three. Plain GET and DBSIZE were refused by both
+    /// in the same run, so the stale state was real and the command-level gate was reachable --
+    /// the hole was script-shaped.
+    ///
+    /// UPSTREAM HAS TWO ARMS AND fr HAD ONLY ONE. `scriptPrepareForRun` splits on
+    /// EVAL_COMPAT_MODE: a `#!` body is refused unless it declares `allow-stale` (script.c:146),
+    /// and a body WITHOUT a shebang is refused unconditionally (script.c:200), because it carries
+    /// no flags and so has nothing to opt out with. fr implemented the shebang arm and left the
+    /// compat arm empty -- so it was correct for the modern form and wrong for the legacy one,
+    /// which is the overwhelmingly common one.
+    ///
+    /// THE WORDING IS A DIFFERENT UPSTREAM STRING for each arm; see
+    /// `script_prepare_stale_compat_refusal`. Both are asserted here so a future collapse onto one
+    /// literal fails rather than silently picking a side.
+    ///
+    /// THE ALLOW-STALE ROW IS THE DISCRIMINATING NEGATIVE: a fix that refuses every script on a
+    /// stale replica passes the first three assertions and breaks a script upstream serves.
+    #[test]
+    fn a_stale_replica_refuses_a_no_shebang_script_before_it_runs_3bda1() {
+        const COMPAT: &str = "MASTERDOWN Link with MASTER is down and replica-serve-stale-data \
+                              is set to 'no'.";
+        const SHEBANG: &str = "'allow-stale' flag is not set on the script";
+
+        // EVAL, no shebang: refused with the compat literal.
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+        store.script_stale_replica = true;
+        let reply = dispatch_argv(
+            &[b"EVAL".to_vec(), b"return 1".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
+        assert_eq!(
+            reply,
+            RespFrame::Error(COMPAT.to_string()),
+            "a no-shebang EVAL on a stale replica must be refused before it runs"
+        );
+
+        // EVALSHA of a REAL cached sha, no shebang: the same refusal. This is the bead's third
+        // row, and it takes a different prepare path from EVAL.
+        let load = dispatch_argv(
+            &[b"SCRIPT".to_vec(), b"LOAD".to_vec(), b"return 1".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
+        let RespFrame::BulkString(Some(sha)) = load else {
+            panic!("SCRIPT LOAD must return a sha, got {load:?}");
+        };
+        let reply = dispatch_argv(
+            &[b"EVALSHA".to_vec(), sha.clone(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
+        assert_eq!(
+            reply,
+            RespFrame::Error(COMPAT.to_string()),
+            "a no-shebang EVALSHA on a stale replica must be refused too"
+        );
+
+        // A SHEBANG body with no flags is refused by the OTHER arm, with the OTHER wording.
+        let reply = dispatch_argv(
+            &[
+                b"EVAL".to_vec(),
+                b"#!lua\nreturn 1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
+        let RespFrame::Error(msg) = &reply else {
+            panic!("a flagless shebang script must be refused while stale, got {reply:?}");
+        };
+        assert!(
+            msg.contains(SHEBANG),
+            "the shebang arm has its own upstream wording, got {msg}"
+        );
+
+        // ...and `allow-stale` is SERVED. The over-correction fails here.
+        let reply = dispatch_argv(
+            &[
+                b"EVAL".to_vec(),
+                b"#!lua flags=allow-stale\nreturn 1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
+        assert_eq!(
+            reply,
+            RespFrame::Integer(1),
+            "a script declaring allow-stale must still run on a stale replica"
+        );
+
+        // Not stale: the legacy form works, so the gate is not simply always-on.
+        let mut store = Store::new();
+        assert!(!store.script_stale_replica, "the safe default is not-stale");
+        assert_eq!(
+            dispatch_argv(
+                &[b"EVAL".to_vec(), b"return 1".to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|e| e.to_resp()),
+            RespFrame::Integer(1)
+        );
+    }
+
     #[test]
     fn a_stale_replica_refuses_a_scripts_inner_command_unless_it_is_cmd_stale() {
         // Upstream `scriptVerifyAllowStale` (script.c:482), run per INNER command at
@@ -41682,11 +41846,22 @@ mod tests {
                 .unwrap_or_else(|e| e.to_resp())
         }
 
+        // (frankenredis-3bda1) THE STALE ROWS NOW CARRY `#!lua flags=allow-stale`, and that is a
+        // correction rather than an accommodation. They used a NO-SHEBANG body, which upstream
+        // never lets reach an inner call on a stale replica at all: `scriptPrepareForRun`'s
+        // EVAL_COMPAT_MODE arm (script.c:200) refuses the whole script with `masterdownerr` before
+        // a line runs. fr had no such gate, so the no-shebang body reached the inner check and
+        // this test passed for exactly as long as the outer gate was missing. `allow-stale` is
+        // the only shape that clears the outer gate, so it is the only shape whose INNER
+        // behaviour upstream defines -- which is what this test is about.
+        const ALLOW_STALE: &[u8] = b"#!lua flags=allow-stale\n";
+
         // A non-stale command inside a script on a stale replica is refused.
         let mut store = Store::new();
         store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
         store.script_stale_replica = true;
-        match &run_script(&mut store, b"return redis.call('get','k')") {
+        let body = [ALLOW_STALE, b"return redis.call('get','k')"].concat();
+        match &run_script(&mut store, &body) {
             RespFrame::Error(msg) => assert!(
                 msg.contains("Can not execute the command on a stale replica"),
                 "expected the stale refusal, got {msg}"
@@ -41699,8 +41874,9 @@ mod tests {
         // upstream refuses only commands that lack the flag.
         let mut store = Store::new();
         store.script_stale_replica = true;
+        let body = [ALLOW_STALE, b"return redis.call('echo','hi')"].concat();
         assert_eq!(
-            run_script(&mut store, b"return redis.call('echo','hi')"),
+            run_script(&mut store, &body),
             RespFrame::BulkString(Some(b"hi".to_vec())),
             "ECHO carries CMD_STALE, so a stale replica must still serve it"
         );
@@ -41714,17 +41890,30 @@ mod tests {
             RespFrame::BulkString(Some(b"v".to_vec()))
         );
 
-        // ORDER: upstream runs the stale check at scriptCall:534, BEFORE the read-only write
-        // check at :542. A write from a script on a stale read-only replica trips both, and must
-        // read the stale one. Fifth ordering pair on this bead.
+        // ORDER: a write from a script on a stale read-only replica trips the stale rule and the
+        // read-only rule together, and must read the STALE one. That property is unchanged; where
+        // it is DECIDED moved.
+        //
+        // (frankenredis-3bda1) It used to be decided by the two INNER checks (scriptCall:534
+        // stale, :542 read-only) because fr let a no-shebang script reach them. Upstream never
+        // does: the compat arm of `scriptPrepareForRun` refuses the whole script with
+        // `masterdownerr` first, so the answer is the OUTER stale refusal and the inner pair is
+        // not reached at all. The assertion follows the decision to where upstream makes it.
+        //
+        // The inner ordering pair is in fact unreachable upstream for EITHER shape: to reach the
+        // inner read-only check a script must clear the OUTER read-only check, which needs
+        // `no-writes` -- and a `no-writes` script calling SET is refused by the no-writes rule
+        // before either. So there is no script that reaches both inner checks with a write, and a
+        // test asserting their relative order was testing fr's missing gate, not upstream's
+        // behaviour.
         let mut store = Store::new();
         store.script_stale_replica = true;
         store.is_read_only_replica = true;
         match &run_script(&mut store, b"return redis.call('set','x','1')") {
             RespFrame::Error(msg) => {
                 assert!(
-                    msg.contains("stale replica"),
-                    "the stale check must be answered FIRST, got {msg}"
+                    msg.starts_with("MASTERDOWN"),
+                    "the stale refusal must be answered FIRST, got {msg}"
                 );
                 assert!(
                     !msg.contains("read only replica"),
