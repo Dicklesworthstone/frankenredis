@@ -259,8 +259,13 @@ def main():
         g_fr = probe(args.base_port + 1, ["GET", "k"])
         print(f"CONTROL GET   redis {str(g_redis)[:60]!r}")
         print(f"CONTROL GET   fr    {str(g_fr)[:60]!r}")
-        refused = lambda r: isinstance(r, str) and r.startswith("ERR>")
-        if not (refused(g_redis) and refused(g_fr)):
+        # NOT named `refused`: that would SHADOW the module-level refused() for the rest of
+        # this function, and the row comparison below would silently degrade from "is this the
+        # staleness refusal" to "is this any error at all". It did, and it hid a real
+        # divergence -- FCALL is refused by BOTH engines but for DIFFERENT reasons (upstream
+        # READONLY, fr MASTERDOWN), which an any-error test reports as agreement.
+        is_error = lambda r: isinstance(r, str) and r.startswith("ERR>")
+        if not (is_error(g_redis) and is_error(g_fr)):
             print("INCONCLUSIVE: a plain GET was NOT refused, so the replica is not stale and "
                   "every row below is vacuous.")
             return 2
@@ -302,14 +307,32 @@ def main():
         mb = probe(args.base_port + 1, argv)
         rows.append((name, argv, ma, mb, refused(ma) == refused(mb)))
 
+        # Class agreement is the headline question (served vs refused) and it is deliberately
+        # tolerant of values that move between calls. But two engines can both answer
+        # MASTERDOWN with DIFFERENT TEXT -- upstream's shared.masterdownerr is short, while its
+        # shebang path adds "and 'allow-stale' flag is not set on the script". A class-only
+        # report would hide that, so wording mismatches inside an agreeing row are surfaced as
+        # NOTEs rather than silently folded into the pass.
+        wording = [r for r in rows if r[4] and isinstance(r[2], str) and isinstance(r[3], str)
+                   and r[2] != r[3] and refused(r[2])]
         div = [r for r in rows if not r[4]]
         for name, argv, a, b, same in rows:
             tag = "AGREE  " if same else "DIVERGE"
             print(f"{tag} {name}")
-            served = lambda r: "REFUSED" if refused(r) else "served"
+            def served(r):
+                if refused(r):
+                    return "MASTERDOWN"
+                return "OTHER-ERR" if isinstance(r, str) and r.startswith("ERR>") else "served"
             print(f"        redis {served(a):8s} {str(a)[:70]!r}")
             print(f"        fr    {served(b):8s} {str(b)[:70]!r}")
+        for name, argv, a, b, _ in wording:
+            print(f"NOTE    {name} -- same class, DIFFERENT wording")
+            print(f"        redis  {str(a)[:96]!r}")
+            print(f"        fr     {str(b)[:96]!r}")
         print(f"\n{len(rows) - len(div)}/{len(rows)} commands agree on a STALE replica")
+        if wording:
+            print(f"{len(wording)} agreeing row(s) differ in WORDING: "
+                  f"{', '.join(r[0] for r in wording)}")
         if div:
             print(f"{len(div)} DIVERGENT: {', '.join(r[0] for r in div)}")
             return 1
