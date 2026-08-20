@@ -19508,6 +19508,134 @@ pub fn command_is_noscript(argv: &[Vec<u8>]) -> bool {
 /// runs pre-dispatch, so returning true here lets dispatch produce that same error instead of
 /// masking it with MASTERDOWN.
 #[must_use]
+/// The command-level flags a SCRIPT command actually carries, rebuilt from the script's own
+/// declared flags. (frankenredis-3bda1)
+///
+/// Upstream `scriptFlagsToCmdFlags` (script.c:111):
+///
+///     cmd_flags &= ~(CMD_STALE | CMD_DENYOOM | CMD_WRITE);
+///     if (!(script_flags & (ALLOW_OOM | NO_WRITES))) cmd_flags |= CMD_DENYOOM;
+///     if (!(script_flags & NO_WRITES))               cmd_flags |= CMD_WRITE;
+///     if (script_flags & ALLOW_STALE)                cmd_flags |= CMD_STALE;
+///     cmd_flags &= ~CMD_MAY_REPLICATE;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScriptCommandFlags {
+    pub stale: bool,
+    pub write: bool,
+    pub denyoom: bool,
+}
+
+/// Rebuild a script command's STALE/WRITE/DENYOOM from the script's declared flags, or `None` to
+/// mean "use the command table unchanged". (frankenredis-3bda1)
+///
+/// THIS IS A MECHANISM fr DID NOT HAVE, not a check it was missing, and that distinction is the
+/// whole finding. `EVAL`, `EVALSHA`, `FCALL` and `FCALL_RO` are all declared STALE in the command
+/// table, so reading the table serves every one of them on a stale replica. Upstream never reads
+/// the table for these: `evalGetCommandFlags` (eval.c:382) and `fcallGetCommandFlags`
+/// (functions.c:611) ERASE the three flags and rebuild them from what the script declared, BEFORE
+/// `processCommand`'s gates run. The table is not what decides.
+///
+/// MEASURED, two functions in ONE library on ONE stale replica drawing two DIFFERENT upstream
+/// answers while fr gave one answer for both (`caea5edab`, and the ledger row at `4d4dd3ae8`):
+///
+///     fcall     write-capable fn   redis  READONLY You can't write against a read only replica.
+///     fcall_ro  no-writes fn       redis  MASTERDOWN ...replica-serve-stale-data is set to 'no'.
+///
+/// Both fall straight out of the rebuild. A function registered with no flags gets `write` set and
+/// `stale` cleared, so the read-only-replica gate fires first; a `no-writes` function gets `write`
+/// cleared and `stale` still cleared -- it did not declare `allow-stale` -- so it is not a write
+/// and the stale gate answers instead. Neither answer is a string the script engine produces,
+/// which is why the script-level checks could never explain them.
+///
+/// RETURNING `None` IS UPSTREAM'S "leave cmd_flags alone", and it has four distinct causes worth
+/// keeping separate rather than collapsing:
+///   * not a script command at all;
+///   * `EVALSHA` whose argument is not 40 bytes, or names a sha we do not hold -- upstream returns
+///     the flags unchanged and lets the later NOSCRIPT refusal speak (eval.c:386, :395);
+///   * `FCALL` naming a function we do not hold (functions.c:613);
+///   * EVAL_COMPAT_MODE -- a body with NO shebang. Upstream explicitly returns cmd_flags unchanged
+///     for it (eval.c:400), so a legacy script keeps the table's STALE and is NOT refused by the
+///     command gate. Its stale refusal comes from `scriptPrepareForRun`'s compat arm instead,
+///     which is what `80a8cba87` implemented. The two mechanisms are complementary, and a fix that
+///     rebuilt flags for compat scripts too would double-refuse them at the wrong layer with the
+///     wrong wording.
+pub fn script_effective_command_flags(
+    argv: &[Vec<u8>],
+    store: &Store,
+) -> Option<ScriptCommandFlags> {
+    let name = argv.first()?;
+    let arg1 = argv.get(1)?;
+
+    // A FUNCTION's flags come from its registration, and a function is never in compat mode --
+    // `functions.c:611` calls the rebuild unconditionally once the name resolves.
+    if name.eq_ignore_ascii_case(b"FCALL") || name.eq_ignore_ascii_case(b"FCALL_RO") {
+        let func_name = std::str::from_utf8(arg1).ok()?;
+        let (_, func) = store.function_get(func_name)?;
+        let no_writes = func
+            .flags
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("no-writes"));
+        let allow_oom = func
+            .flags
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("allow-oom"));
+        let allow_stale = func
+            .flags
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("allow-stale"));
+        return Some(rebuild_script_command_flags(no_writes, allow_oom, allow_stale));
+    }
+
+    let is_evalsha =
+        name.eq_ignore_ascii_case(b"EVALSHA") || name.eq_ignore_ascii_case(b"EVALSHA_RO");
+    let is_eval = name.eq_ignore_ascii_case(b"EVAL") || name.eq_ignore_ascii_case(b"EVAL_RO");
+    if !is_eval && !is_evalsha {
+        return None;
+    }
+
+    // The BODY is what carries the shebang. For EVALSHA it must be resolved through the cache, and
+    // upstream refuses to guess: a non-40-byte argument or an unknown sha leaves the flags alone.
+    let body: &[u8] = if is_evalsha {
+        if arg1.len() != 40 {
+            return None;
+        }
+        store.script_get(arg1)?
+    } else {
+        arg1
+    };
+
+    // EVAL_COMPAT_MODE: no shebang, so upstream returns the table's flags untouched.
+    if !body.starts_with(b"#!") {
+        return None;
+    }
+
+    Some(rebuild_script_command_flags(
+        script_shebang_has_no_writes_flag(body),
+        script_shebang_has_allow_oom_flag(body),
+        script_shebang_has_allow_stale_flag(body),
+    ))
+}
+
+/// The flag algebra itself, kept separate from resolving WHICH script so the two can be tested
+/// apart. (frankenredis-3bda1)
+fn rebuild_script_command_flags(
+    no_writes: bool,
+    allow_oom: bool,
+    allow_stale: bool,
+) -> ScriptCommandFlags {
+    ScriptCommandFlags {
+        // `if (script_flags & ALLOW_STALE) cmd_flags |= CMD_STALE;` -- and nothing else can set
+        // it, because the three flags were cleared first. A script that does not declare
+        // allow-stale is NOT stale-safe however the command table describes EVAL/FCALL.
+        stale: allow_stale,
+        // `if (!(script_flags & NO_WRITES)) cmd_flags |= CMD_WRITE;`
+        write: !no_writes,
+        // `if (!(script_flags & (ALLOW_OOM | NO_WRITES))) cmd_flags |= CMD_DENYOOM;` -- no-writes
+        // implies allow-oom, which is why it appears in both terms.
+        denyoom: !(allow_oom || no_writes),
+    }
+}
+
 pub fn command_is_stale(argv: &[Vec<u8>]) -> bool {
     let Some(parent) = argv.first() else {
         return false;
@@ -41736,6 +41864,170 @@ mod tests {
     ///
     /// THE ALLOW-STALE ROW IS THE DISCRIMINATING NEGATIVE: a fix that refuses every script on a
     /// stale replica passes the first three assertions and breaks a script upstream serves.
+    /// The flag ALGEBRA, isolated from resolving which script. (frankenredis-3bda1)
+    ///
+    /// Upstream `scriptFlagsToCmdFlags` (script.c:111) clears STALE/DENYOOM/WRITE and rebuilds:
+    /// STALE only if `allow-stale`; WRITE unless `no-writes`; DENYOOM unless `allow-oom` OR
+    /// `no-writes`. The `no-writes` row of DENYOOM is the one a hand-written port drops --
+    /// upstream spells it in both terms because no-writes IMPLIES allow-oom.
+    #[test]
+    fn script_command_flag_algebra_matches_scriptflagstocmdflags_3bda1() {
+        use super::rebuild_script_command_flags as rebuild;
+
+        // no flags at all: a write, denyoom, not stale. This is the `fcall` row.
+        assert_eq!(
+            rebuild(false, false, false),
+            super::ScriptCommandFlags { stale: false, write: true, denyoom: true }
+        );
+        // no-writes: not a write, and NOT denyoom -- no-writes implies allow-oom. This is the
+        // `fcall_ro` row, and it is why upstream answers it with the stale gate rather than the
+        // read-only-replica gate.
+        assert_eq!(
+            rebuild(true, false, false),
+            super::ScriptCommandFlags { stale: false, write: false, denyoom: false }
+        );
+        // allow-oom alone clears denyoom but leaves it a write.
+        assert_eq!(
+            rebuild(false, true, false),
+            super::ScriptCommandFlags { stale: false, write: true, denyoom: false }
+        );
+        // allow-stale is the ONLY way STALE comes back, whatever the command table says.
+        assert_eq!(
+            rebuild(false, false, true),
+            super::ScriptCommandFlags { stale: true, write: true, denyoom: true }
+        );
+        assert_eq!(
+            rebuild(true, false, true),
+            super::ScriptCommandFlags { stale: true, write: false, denyoom: false }
+        );
+    }
+
+    /// Resolution: which script, and the four distinct ways upstream says "leave the table alone".
+    /// (frankenredis-3bda1)
+    #[test]
+    fn script_effective_command_flags_resolves_and_declines_like_upstream_3bda1() {
+        let mut store = Store::new();
+
+        let argv = |parts: &[&[u8]]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.to_vec()).collect()
+        };
+
+        // NOT a script command -> None (use the table).
+        assert_eq!(
+            super::script_effective_command_flags(&argv(&[b"GET", b"k"]), &store),
+            None
+        );
+
+        // EVAL_COMPAT_MODE: a body with NO shebang. Upstream returns cmd_flags UNCHANGED
+        // (eval.c:400), so the table's STALE stands and the command gate does not refuse it --
+        // its refusal comes from scriptPrepareForRun's compat arm instead. A fix that rebuilt
+        // flags here too would refuse it at the wrong layer with the wrong wording.
+        assert_eq!(
+            super::script_effective_command_flags(&argv(&[b"EVAL", b"return 1", b"0"]), &store),
+            None,
+            "a no-shebang EVAL must keep the table's flags"
+        );
+
+        // A SHEBANG body is rebuilt from what it declares.
+        assert_eq!(
+            super::script_effective_command_flags(
+                &argv(&[b"EVAL", b"#!lua\nreturn 1", b"0"]),
+                &store
+            ),
+            Some(super::ScriptCommandFlags { stale: false, write: true, denyoom: true })
+        );
+        assert_eq!(
+            super::script_effective_command_flags(
+                &argv(&[b"EVAL", b"#!lua flags=allow-stale,no-writes\nreturn 1", b"0"]),
+                &store
+            ),
+            Some(super::ScriptCommandFlags { stale: true, write: false, denyoom: false })
+        );
+
+        // EVALSHA with a non-40-byte argument -> None (eval.c:386), and an unknown 40-byte sha
+        // -> None (eval.c:395). Upstream lets the later NOSCRIPT refusal speak rather than guess.
+        assert_eq!(
+            super::script_effective_command_flags(&argv(&[b"EVALSHA", b"abc", b"0"]), &store),
+            None
+        );
+        assert_eq!(
+            super::script_effective_command_flags(
+                &argv(&[b"EVALSHA", &[b'0'; 40], b"0"]),
+                &store
+            ),
+            None
+        );
+
+        // A KNOWN sha resolves to its body and is rebuilt from the body's shebang.
+        let load = dispatch_argv(
+            &[
+                b"SCRIPT".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua flags=no-writes\nreturn 1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
+        let RespFrame::BulkString(Some(sha)) = load else {
+            panic!("SCRIPT LOAD must return a sha, got {load:?}");
+        };
+        assert_eq!(
+            super::script_effective_command_flags(
+                &[b"EVALSHA".to_vec(), sha.clone(), b"0".to_vec()],
+                &store
+            ),
+            Some(super::ScriptCommandFlags { stale: false, write: false, denyoom: false }),
+            "a cached shebang body must be rebuilt, not read from the table"
+        );
+
+        // FCALL naming a function we do not hold -> None (functions.c:613).
+        assert_eq!(
+            super::script_effective_command_flags(&argv(&[b"FCALL", b"nope", b"0"]), &store),
+            None
+        );
+
+        // THE TWO MEASURED ROWS. One library, two functions, two different answers -- which is
+        // the observation the whole mechanism was found from.
+        dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=flagslib\n\
+                  redis.register_function('wfn', function() return 1 end)\n\
+                  redis.register_function{function_name='rofn', callback=function() return 1 end, flags={'no-writes'}}"
+                    .to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
+
+        assert_eq!(
+            super::script_effective_command_flags(&argv(&[b"FCALL", b"wfn", b"0"]), &store),
+            Some(super::ScriptCommandFlags { stale: false, write: true, denyoom: true }),
+            "a flagless function is a WRITE and not stale-safe, so the read-only-replica gate \
+             answers it -- upstream says READONLY here"
+        );
+        assert_eq!(
+            super::script_effective_command_flags(&argv(&[b"FCALL_RO", b"rofn", b"0"]), &store),
+            Some(super::ScriptCommandFlags { stale: false, write: false, denyoom: false }),
+            "a no-writes function is NOT a write, so the stale gate answers it instead -- \
+             upstream says MASTERDOWN here"
+        );
+
+        // Both are declared STALE in the command table, which is exactly why reading the table
+        // served both and neither upstream answer could be reproduced.
+        assert!(
+            super::command_is_stale(&argv(&[b"FCALL", b"wfn", b"0"])),
+            "the TABLE says stale for FCALL"
+        );
+        assert!(
+            super::command_is_stale(&argv(&[b"FCALL_RO", b"rofn", b"0"])),
+            "the TABLE says stale for FCALL_RO too -- the table is not what decides"
+        );
+    }
+
     #[test]
     fn a_stale_replica_refuses_a_no_shebang_script_before_it_runs_3bda1() {
         const COMPAT: &str = "MASTERDOWN Link with MASTER is down and replica-serve-stale-data \
