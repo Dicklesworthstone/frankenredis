@@ -67343,3 +67343,91 @@ that flips from `NOTE` to `AGREE` as a wording fix worth confirming rather than 
      predicate before trusting a table of AGREEs.
   2. Reaching the code under test and being able to SEE the result are separate repairs.
   3. Do not read this row as a perf verdict. It measures no time.
+
+## 2026-08-20 CrimsonHawk: SOURCE FINDING — the remaining FCALL divergence is not a missing check, it is a missing MECHANISM: upstream RECOMPUTES a script command's WRITE/STALE/DENYOOM flags from the script's own declared flags before any gate runs, and fr does not. This also corrects guidance I put on the bead myself
+
+EVIDENCE CLASS: reading vendored 7.2.4 and fr, plus the measured rows already banked at
+`caea5edab`. No build, no probe, no server started — the host is IO-saturated (iowait 64 pct, CPU
+idle 6, runq 99, 4 processes in D-state, 13 remote builds) and this turn deliberately touches
+nothing that would contend. Per-arm figures recorded because the brief asks, not because anything
+here depends on them: loadavg 105.36 / 57.29 / 29.59 at the brief, 141.14 / 68.57 / 33.89 at my own
+check. Nothing is timed.
+
+### THE OBSERVATION THAT DID NOT FIT
+
+After `80a8cba87` fixed the no-shebang arm, one row still diverged and one agreed only by class:
+
+    fcall     (write-capable fn)   redis  READONLY You can't write against a read only replica.
+                                   fr     MASTERDOWN ... 'allow-stale' flag is not set on the script
+    fcall_ro  (no-writes fn)       redis  MASTERDOWN ...replica-serve-stale-data is set to 'no'.
+                                   fr     MASTERDOWN ... 'allow-stale' flag is not set on the script
+
+Two different upstream answers for two functions in the same library on the same stale replica, and
+fr gives one answer for both. Neither upstream answer is the string `script.c:147` would produce,
+so the divergence cannot be explained by the script-engine checks at all — which is what I had
+assumed, and had written onto the bead.
+
+### THE MECHANISM
+
+`script.c:111`, reached through `fcallGetCommandFlags` (functions.c:611) and
+`evalGetCommandFlags` (eval.c:382):
+
+    uint64_t scriptFlagsToCmdFlags(uint64_t cmd_flags, uint64_t script_flags) {
+        cmd_flags &= ~(CMD_STALE | CMD_DENYOOM | CMD_WRITE);
+        if (!(script_flags & (SCRIPT_FLAG_ALLOW_OOM | SCRIPT_FLAG_NO_WRITES))) cmd_flags |= CMD_DENYOOM;
+        if (!(script_flags & SCRIPT_FLAG_NO_WRITES))                           cmd_flags |= CMD_WRITE;
+        if (script_flags & SCRIPT_FLAG_ALLOW_STALE)                            cmd_flags |= CMD_STALE;
+        cmd_flags &= ~CMD_MAY_REPLICATE;
+
+**A shebang script's command-level flags are not the command table's flags.** They are erased and
+rebuilt from what the script declared, before `processCommand`'s gates run. Both observations fall
+straight out:
+
+  * `stalefn`, registered with no flags -> `CMD_WRITE` set, `CMD_STALE` cleared. The read-only
+    replica gate fires first and answers `shared.roslaveerr`.
+  * `stalefn_ro`, registered `no-writes` -> `CMD_WRITE` cleared, `CMD_STALE` still cleared because
+    it did not declare `allow-stale`. Not a write, so the stale gate fires and answers
+    `shared.masterdownerr`, the SHORT string.
+
+FCALL and FCALL_RO are both `STALE` in the command table, so the table alone would have served both.
+The table is not what decides.
+
+### I HAD THIS WRONG ON THE BEAD, IN PRINT
+
+My comment on `3bda1` told the implementer:
+
+> upstream's sequence inside the shebang branch is readonly-replica, then disk error, then `*_ro`
+> mismatch, then good-replicas, and the stale check sits ABOVE all of them at script.c:147
+
+That describes the order of checks *inside* `scriptPrepareForRun`, and for an ordinary client those
+checks are largely unreachable for a shebang script: to reach `script.c:147` at all, the command
+gate must have passed, which requires `CMD_STALE`, which requires the script to declare
+`allow-stale` — and then `!(script_flags & ALLOW_STALE)` is false and the branch cannot fire.
+**I read the inner function and reported its order as the governing rule, without checking what ran
+before it.** The correction matters because an implementer following my note would have reordered
+checks inside the engine and still produced neither upstream answer.
+
+### WHAT fr HAS, AND WHAT IT IS MISSING
+
+fr already has `script_prepare_stale_refusal(store, allow_stale)` (fr-command/src/lib.rs:27223),
+applied on both the FCALL path (:14255) and the EVAL path (:26773), and it correctly extracts
+`no_writes` / `allow_oom` / `allow_stale` / `no_cluster` when loading a library (:14181). So the
+flags are PARSED. What is absent is the step that lets them govern the ordinary command gates.
+
+**Predicted and not yet measured, from the same function:** `CMD_DENYOOM` is granted unless the
+script declares `allow-oom` or `no-writes`. If fr does not recompute it either, then over
+`maxmemory` a plain writable script should be refused by the OOM gate and fr may serve it. That is
+one probe once the host is quiet; I am recording it as a prediction rather than a finding, because
+I have not run it.
+
+### RETRY PREDICATES
+
+Retry predicate: re-derive ONLY IF `scriptFlagsToCmdFlags` changes upstream; and treat the OOM
+prediction above as OPEN until probed — if a writable no-flag script is served over `maxmemory`
+where the incumbent refuses it, that is the same missing mechanism showing up on a third gate, and
+it belongs on the same bead rather than a new one.
+
+  1. Quote the remaining `3bda1` gap as **a missing flag-recomputation step**, not a missing check.
+  2. Do not reorder checks inside fr's script engine to chase it; the governing code runs earlier.
+  3. Do not read this row as a perf verdict. It measures no time, and the host could not have
+     supported one.
