@@ -8,9 +8,10 @@ ignored by upstream's own tags_acceptable logic; every default test unit must st
 scheduled and complete exactly once, so an empty/partial run cannot look green.
 
 The process exit status is Redis's real suite verdict, strengthened with anti-vacuity checks:
-wrong upstream revision, missing units, duplicate units, an early FrankenRedis exit, or zero
-executed assertions are harness failures. A JSON report records pass/skip/ignore/error counts
-and the exact units completed.
+wrong upstream revision, a preoccupied port, missing units, duplicate units, an early
+FrankenRedis exit, or zero executed assertions are harness failures. A JSON report records
+pass/skip/ignore/error counts, the skip/ignore records emitted by upstream, and the exact
+units completed.
 """
 
 from __future__ import annotations
@@ -73,6 +74,17 @@ def resp_ping(port: int) -> bool:
         return False
 
 
+def assert_port_unoccupied(port: int) -> None:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+            pass
+    except OSError:
+        return
+    raise RuntimeError(
+        f"refusing to start on occupied port {port}; a stale server could capture the upstream test run"
+    )
+
+
 def wait_ready(proc: subprocess.Popen[bytes], port: int) -> None:
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
@@ -131,6 +143,8 @@ def parse_report(output: str, expected_units: list[str], exit_code: int, server_
         "duplicate_units": duplicate_units,
         "unexpected_units": unexpected_units,
         "completed_units": completed,
+        "skips": skipped,
+        "ignores": ignored,
         "errors": errors,
     }
 
@@ -151,6 +165,7 @@ def main() -> int:
         expected_units = list_units(upstream)
         if not args.fr.is_file():
             raise RuntimeError(f"FrankenRedis binary not found: {args.fr}")
+        assert_port_unoccupied(args.port)
 
         print(f"Redis 7.2.4 default upstream units: {len(expected_units)}")
         print("Running the complete upstream suite in external-server mode; upstream external:skip tags remain authoritative.")
