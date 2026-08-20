@@ -1,0 +1,129 @@
+name: Upstream Redis 7.2.4 Full Tcl
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "crates/**"
+      - "scripts/upstream_redis_tcl_full.py"
+      - ".github/workflows/upstream-redis-7.2.4-full.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      enforce:
+        description: Fail the workflow if the complete upstream external-mode suite is not green
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  upstream-redis-7-2-4-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      REDIS_724_COMMIT: d2c8a4b91e8c0e6aefd1f5bc0bf582cddbe046b7
+      REDIS_724_ROOT: .ci/redis-7.2.4
+      REPORT_DIR: artifacts/upstream_redis_tcl_full
+
+    steps:
+      - name: Checkout FrankenRedis
+        uses: actions/checkout@v4
+
+      - name: Checkout exact Redis 7.2.4 tests
+        uses: actions/checkout@v4
+        with:
+          repository: redis/redis
+          ref: d2c8a4b91e8c0e6aefd1f5bc0bf582cddbe046b7
+          path: .ci/redis-7.2.4
+          fetch-depth: 1
+
+      - name: Verify upstream test provenance
+        run: |
+          set -euo pipefail
+          test "$(git -C "${REDIS_724_ROOT}" rev-parse HEAD)" = "${REDIS_724_COMMIT}"
+          test -f "${REDIS_724_ROOT}/tests/test_helper.tcl"
+          test -x "${REDIS_724_ROOT}/runtest"
+          "${REDIS_724_ROOT}/runtest" --list-tests | tee /tmp/redis-724-test-units.txt
+          test -s /tmp/redis-724-test-units.txt
+
+      - name: Install Tcl and Rust nightly
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tcl
+
+      - name: Install Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Rust Build Artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build FrankenRedis
+        run: cargo build -p fr-server
+
+      - name: Run every upstream Redis 7.2.4 default Tcl unit in external mode
+        id: upstream-full
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p "${REPORT_DIR}"
+          python3 scripts/upstream_redis_tcl_full.py \
+            --upstream "${REDIS_724_ROOT}" \
+            --fr target/debug/frankenredis \
+            --report "${REPORT_DIR}/report.json" \
+            --log "${REPORT_DIR}/runtest.log" \
+            --timeout 12600 \
+            2>&1 | tee "${REPORT_DIR}/runner.log"
+
+      - name: Publish upstream-suite summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report_path = Path(os.environ["REPORT_DIR"]) / "report.json"
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          lines = ["## Redis 7.2.4 complete upstream Tcl suite", ""]
+          if not report_path.is_file():
+              lines += ["The runner did not produce a report. This is a harness failure.", ""]
+          else:
+              r = json.loads(report_path.read_text())
+              lines += [
+                  f"- Redis commit: `{r['redis_commit']}`",
+                  f"- Upstream units completed: **{r['completed_unit_count']}/{r['expected_unit_count']}**",
+                  f"- Passed assertions: **{r['passed_assertion_count']}**",
+                  f"- Upstream skips: **{r['skipped_assertion_count']}**",
+                  f"- Upstream ignores: **{r['ignored_assertion_count']}**",
+                  f"- Errors: **{r['error_count']}**",
+                  f"- Upstream suite exit code: **{r['suite_exit_code']}**",
+                  f"- Anti-vacuity checks: **{'PASS' if r['anti_vacuity_ok'] else 'FAIL'}**",
+                  f"- Overall complete-suite verdict: **{'PASS' if r['suite_passed'] else 'FAIL'}**",
+                  "",
+                  "`external:skip` decisions come from Redis 7.2.4's own unmodified test annotations; FrankenRedis maintains no shadow skip list.",
+              ]
+          summary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload complete upstream Tcl evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-redis-7.2.4-full-${{ github.run_id }}
+          path: artifacts/upstream_redis_tcl_full
+          if-no-files-found: warn
+
+      - name: Enforce complete upstream suite when requested
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.enforce
+        env:
+          UPSTREAM_FULL_OUTCOME: ${{ steps.upstream-full.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "${UPSTREAM_FULL_OUTCOME}" != "success" ]; then
+            echo "Complete upstream Redis 7.2.4 Tcl suite is not green." >&2
+            exit 1
+          fi
