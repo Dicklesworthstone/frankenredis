@@ -67521,3 +67521,76 @@ verdict, and already labelled as such on the bead.
    term, so every borrowed fast path inherits the decline.
 3. Before closing, either route main.rs:4017 and :6839 through `execute_plain_ping_borrowed_into`
    or prove by measurement that those modes do not leak. The current harness cannot see them.
+
+## 2026-08-20 CrimsonHawk: PREDICTION SETTLED — the OOM half is REFUTED (fr refuses everything the incumbent refuses, 9/9 on class), but the missing flag-recomputation shows up on this gate too as a WORDING split, and it makes upstream's script-engine OOM branch unreachable the same way its stale branch is
+
+EVIDENCE CLASS: `probe_script_oom.py`, both engines started from their own binaries, `maxmemory 1`
+with `noeviction`, one fresh connection per row. Verdicts, not timings — nothing here depends on
+load, which is as well: host busy, runq 65, CPU idle 18, loadavg 73.90 / 57.65 / 49.34 at the brief
+and 70.74 / 58.00 / 49.63 at my own check, iowait 0 pct. A frankenredis build was in flight, so no
+build was started and no timed run attempted.
+
+  fr        `target/release/frankenredis` — SHARED and rebuilt by peers; names no commit.
+  incumbent `legacy_redis_code/redis/src/redis-server`, Redis 7.2.4
+
+### THE PREDICTION, AND HALF OF IT WAS WRONG
+
+I recorded this last turn as OPEN, explicitly not a finding:
+
+> the same function grants `CMD_DENYOOM` unless the script declares `allow-oom` or `no-writes`, so
+> over `maxmemory` a plain writable script **may be served** by fr where the incumbent refuses it.
+
+**It is not served.** 9 of 9 rows agree on whether the command was refused. fr admits nothing the
+incumbent refuses, and serves everything it serves — including `#!lua flags=no-writes`, which both
+run, so upstream's "NO_WRITES implies ALLOW_OOM" holds in fr as well. The control (a plain `SET`
+refused with OOM on both) confirms the state was really induced.
+
+### WHAT IS REAL IS THE SAME SPLIT AS THE STALE GATE
+
+Two rows refuse with DIFFERENT TEXT, and they are exactly the two the mechanism predicts:
+
+    row                     redis 7.2.4                        fr
+    eval shebang no flags   OOM command not allowed when       OOM allow-oom flag is not set on
+                            used memory > 'maxmemory'.         the script, can not run it ...
+    fcall no-flag fn        (same, the COMMAND-gate string)    (same, the SCRIPT-ENGINE string)
+
+Upstream refuses at the ordinary command gate, because `scriptFlagsToCmdFlags` granted
+`CMD_DENYOOM` before the gate ran. fr refuses inside the script engine with `script.c:191`'s own
+message. Same outcome, different wording, and the reason is the missing recomputation — now
+observed on a **third** gate after stale and read-only-replica.
+
+### THE GENERALISATION, WHICH IS THE USEFUL PART
+
+Upstream's script-engine OOM check is
+
+    if (!client_allow_oom && server.pre_command_oom_state && server.maxmemory &&
+        !(script_flags & (SCRIPT_FLAG_ALLOW_OOM|SCRIPT_FLAG_NO_WRITES)))
+
+and the command gate is granted `CMD_DENYOOM` under the SAME condition,
+`!(script_flags & (ALLOW_OOM|NO_WRITES))`. So for a shebang script reaching that branch requires
+the command gate to have passed, which requires the condition to be FALSE — and then the branch's
+own condition is false too. **`script.c:191` cannot fire for an ordinary client**, exactly as
+`script.c:147` cannot.
+
+So the pattern now has two instances and one rule: **upstream's script-engine STALE and OOM checks
+are effectively dead for ordinary clients; they exist for callers that bypass command-flag
+recomputation. fr has implemented precisely those dead branches while missing the live mechanism.**
+That is why fr's answers are self-consistent and still wrong: every refusal carries the internal
+wording, because the internal check is the only one fr has.
+
+This makes the fix cheaper to describe than it looked. It is not "add OOM handling" or "add stale
+handling" — both already exist and both work. It is: recompute WRITE/STALE/DENYOOM from the
+script's declared flags before the ordinary gates, and let the existing gates answer. The internal
+branches can then stay exactly as they are, becoming as rarely-taken in fr as they are upstream.
+
+### RETRY PREDICATES
+
+Retry predicate: re-run ONLY IF `scriptFlagsToCmdFlags`, fr's script entry, or the OOM gate changes;
+and treat any row moving from CLASS-OK to DIVERGE as an admission change rather than a wording one,
+which is the more serious direction and is what the class column exists to separate.
+
+  1. The OOM prediction is CLOSED and was wrong about admission; do not carry it forward as an
+     open risk.
+  2. Quote the remaining `3bda1` work as one missing recomputation affecting three gates, of which
+     two are wording-only and one (read-only replica vs stale on FCALL) changes the error code.
+  3. Do not read this row as a perf verdict. It measures no time.
