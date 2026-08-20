@@ -5,16 +5,20 @@ collapsed into one number: bespoke differential fixtures, targeted live-oracle p
 cross-version persistence/replication gates, fuzzers, and Redis's own upstream Tcl tests
 catch different failure classes.
 
-The compatibility target for V1 is Redis 7.2.4. CI now builds the official 7.2.4 source at
+The compatibility target for V1 is Redis 7.2.4. CI builds the official 7.2.4 source at
 commit `d2c8a4b91e8c0e6aefd1f5bc0bf582cddbe046b7` and verifies that exact SHA before using the
-binary as an oracle.
+tree as an oracle or upstream-test source.
 
 ## Upstream Redis Tcl tests
 
-`scripts/upstream_redis_tcl_fidelity.py` runs a curated set of **unmodified Redis 7.2.4 Tcl
-assertions** against a live FrankenRedis server through Redis's own `runtest` harness in
-external-server mode. The initial gate selects 72 client-visible tests across strings,
-integer arithmetic, keyspace semantics, transactions, and protocol behavior.
+There are now two upstream-test lanes, both executing the **unmodified Redis 7.2.4 Tcl
+tests themselves** through Redis's own `runtest` external-server mechanism.
+
+### Fast blocking upstream slice
+
+`scripts/upstream_redis_tcl_fidelity.py` runs 72 selected client-visible assertions across
+strings, integer arithmetic, keyspace semantics, transactions, and protocol behavior on
+every main conformance run.
 
 This lane is deliberately anti-vacuous: it fails if the upstream checkout is not the exact
 7.2.4 release commit, if a selected test disappears or is skipped, if it executes more than
@@ -28,10 +32,42 @@ python3 scripts/upstream_redis_tcl_fidelity.py \
   --report /tmp/upstream-redis-tcl.json
 ```
 
-This is **not** a claim that the complete upstream Redis test suite passes. The selected set
-intentionally avoids tests whose contract is Redis's internal object encoding, process
-layout, allocator behavior, or multi-node topology rather than the supported client-visible
-surface. The set should grow monotonically as additional upstream tests are certified.
+### Complete upstream external-mode suite
+
+`scripts/upstream_redis_tcl_full.py` asks the pinned Redis 7.2.4 harness for its complete
+default unit list (`runtest --list-tests`) and then runs that entire suite against one live
+FrankenRedis process with `--host`/`--port`. There is **no FrankenRedis-maintained skip
+list**. Redis's own `external:skip` tags remain authoritative, exactly as they are in the
+upstream harness.
+
+The full runner strengthens the upstream exit status with anti-vacuity checks: every default
+unit returned by `--list-tests` must complete exactly once, at least one upstream assertion
+must actually pass, the target port must be unoccupied before launch, the upstream Git SHA
+must be exactly 7.2.4, and FrankenRedis must remain alive for the run. Its JSON report records
+completed units, pass/skip/ignore/error counts and records, missing/duplicate/unexpected
+units, and the upstream suite exit code; the raw upstream log is retained alongside it.
+
+```sh
+python3 scripts/upstream_redis_tcl_full.py \
+  --upstream legacy_redis_code/redis \
+  --fr target/debug/frankenredis \
+  --report /tmp/upstream-redis-tcl-full.json \
+  --log /tmp/upstream-redis-tcl-full.log
+```
+
+`.github/workflows/upstream-redis-7.2.4-full.yml` executes the complete lane on relevant
+pushes to `main`, nightly, and on demand. The workflow checks out the exact Redis 7.2.4
+release commit, builds its test helper binaries (`redis-cli`, `redis-benchmark`, etc.), runs
+every default upstream test unit in external mode, publishes a GitHub step summary, and
+uploads the complete evidence bundle. Until the initial incompatibility set has been closed
+or explicitly baselined, automatic runs are observational rather than branch-blocking;
+`workflow_dispatch` exposes an `enforce=true` switch that makes the full upstream verdict a
+hard failure immediately.
+
+Accordingly, do not claim that the complete upstream suite is green unless a recorded full
+run says so. The important distinction is now explicit: the repository **runs the complete
+upstream external-mode suite**, while the smaller 72-test lane is the current always-blocking
+upstream gate.
 
 ## Consolidated differential parity runner
 
