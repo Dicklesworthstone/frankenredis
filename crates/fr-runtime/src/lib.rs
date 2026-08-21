@@ -4546,6 +4546,17 @@ pub struct ServerState {
     pub aof_rewrite_start_time_sec: Option<u64>,
     /// Whether an AOF rewrite is pending because another background child is active.
     pub aof_rewrite_scheduled: bool,
+    /// Upstream `server.rdb_bgsave_scheduled` (rdb.c:3660) -- the RDB twin of
+    /// [`Self::aof_rewrite_scheduled`], honoured from the same place by
+    /// [`Self::maybe_run_scheduled_bgsave`].
+    ///
+    /// (frankenredis-eh2ct) fr PARSED `BGSAVE SCHEDULE`, validated it, and dropped it: the option
+    /// was a no-op and the deferred save never happened. The flag is what makes it mean
+    /// something. Without it, porting upstream's "Use BGSAVE SCHEDULE in order to schedule a
+    /// BGSAVE whenever possible" wording would advertise a feature fr does not have -- worse than
+    /// the wrong message, because the message would be telling the truth about the incumbent and
+    /// a lie about this server.
+    pub rdb_bgsave_scheduled: bool,
     /// Path for RDB persistence file (used by SAVE/BGSAVE).
     rdb_path: Option<std::path::PathBuf>,
     /// Path for the main redis.conf configuration file (used by CONFIG REWRITE).
@@ -4719,6 +4730,7 @@ impl Default for ServerState {
             aof_rewrite_pid: None,
             aof_rewrite_start_time_sec: None,
             aof_rewrite_scheduled: false,
+            rdb_bgsave_scheduled: false,
             rdb_path: None,
             config_file_path: None,
             acl_file_path: None,
@@ -9432,6 +9444,7 @@ impl Runtime {
             }
         }
         self.maybe_run_scheduled_aof_rewrite(now_ms);
+        self.maybe_run_scheduled_bgsave(now_ms);
     }
 
     /// Wait for child processes to finish (useful for tests).
@@ -9457,6 +9470,20 @@ impl Runtime {
             }
         }
         self.maybe_run_scheduled_aof_rewrite(0);
+        self.maybe_run_scheduled_bgsave(0);
+    }
+
+    /// The RDB twin of [`Self::maybe_run_scheduled_aof_rewrite`], called from the same two
+    /// places. (frankenredis-eh2ct)
+    fn maybe_run_scheduled_bgsave(&mut self, now_ms: u64) {
+        if !self.server.rdb_bgsave_scheduled
+            || self.server.rdb_bgsave_pid.is_some()
+            || self.server.aof_rewrite_pid.is_some()
+        {
+            return;
+        }
+        self.server.rdb_bgsave_scheduled = false;
+        let _ = self.spawn_rdb_bgsave(now_ms);
     }
 
     fn maybe_run_scheduled_aof_rewrite(&mut self, now_ms: u64) {
@@ -46531,12 +46558,50 @@ impl Runtime {
                 return CommandError::SyntaxError.to_resp();
             }
         }
+        // (frankenredis-eh2ct) Upstream's THREE-WAY admission (rdb.c:3656-3667), where fr had one
+        // branch covering two different situations:
+        //
+        //     if (server.child_type == CHILD_TYPE_RDB)     -> "Background save already in progress"
+        //     else if (hasActiveChildProcess() || in_exec) -> schedule, else the AOF-child error
+        //     else                                         -> fork
+        //
+        // fr answered "Background save already in progress" for an AOF REWRITE child too. That is
+        // a different situation with a different remedy, which is why upstream words it
+        // differently and names the remedy in the message.
+        let schedule = argv.len() == 2; // validated to be SCHEDULE above
+        if self.server.rdb_bgsave_pid.is_some() {
+            return RespFrame::Error("ERR Background save already in progress".to_string());
+        }
+        if self.server.aof_rewrite_pid.is_some() {
+            if schedule {
+                self.server.rdb_bgsave_scheduled = true;
+                return RespFrame::SimpleString("Background saving scheduled".to_string());
+            }
+            return RespFrame::Error(
+                "ERR Another child process is active (AOF?): can't BGSAVE right now. Use BGSAVE \
+                 SCHEDULE in order to schedule a BGSAVE whenever possible."
+                    .to_string(),
+            );
+        }
+        // NOT PORTED, and named rather than left silent: upstream ALSO schedules when
+        // `server.in_exec`, even without the SCHEDULE keyword, because forking mid-EXEC would
+        // snapshot a half-applied transaction. fr publishes no in-exec signal on this path, so
+        // BGSAVE inside MULTI still forks immediately. That is a separate bead -- it needs the
+        // signal, not another branch here.
+        self.spawn_rdb_bgsave(now_ms)
+    }
+
+    /// Fork the RDB child and record the resulting state.
+    ///
+    /// (frankenredis-eh2ct) Split out of `handle_bgsave_command` so a SCHEDULED save can be
+    /// started by [`Self::maybe_run_scheduled_bgsave`] once the child that blocked it is reaped --
+    /// upstream starts it from `serverCron`, which is the same position in the loop. The body is
+    /// moved verbatim; the admission checks now live at the caller, because the scheduled path
+    /// has already passed them.
+    #[allow(unsafe_code)]
+    fn spawn_rdb_bgsave(&mut self, now_ms: u64) -> RespFrame {
         #[cfg(unix)]
         unsafe {
-            if self.server.rdb_bgsave_pid.is_some() || self.server.aof_rewrite_pid.is_some() {
-                return RespFrame::Error("ERR Background save already in progress".to_string());
-            }
-
             match libc::fork() {
                 -1 => {
                     self.server.store.record_bgsave_status(false);
@@ -46860,6 +46925,29 @@ impl Runtime {
         if argv.len() != 1 {
             return CommandError::WrongArity("BGREWRITEAOF").to_resp();
         }
+        // (frankenredis-eh2ct) Upstream `bgrewriteaofCommand` (aof.c:2495-2508) admits in three
+        // ways and fr admitted in none: it went straight to the rewrite. So a BGREWRITEAOF while
+        // an AOF child was already running started a SECOND one, and one issued while an RDB
+        // bgsave was forked ran concurrently with it instead of waiting.
+        //
+        // The scheduling half already existed and was reachable from exactly one place:
+        // `CONFIG SET appendonly yes` sets `aof_rewrite_scheduled` when a child is active
+        // (upstream's `startAppendOnly`), and `maybe_run_scheduled_aof_rewrite` drains it. The
+        // COMMAND never used it. This wires the command to the machinery already here.
+        //
+        // Placed on the COMMAND rather than in `handle_bgrewriteaof_requested`, because the
+        // scheduler calls that one and must not re-run an admission it has already satisfied.
+        if self.server.aof_rewrite_pid.is_some() {
+            return RespFrame::Error(
+                "ERR Background append only file rewriting already in progress".to_string(),
+            );
+        }
+        if self.server.rdb_bgsave_pid.is_some() {
+            self.server.aof_rewrite_scheduled = true;
+            return RespFrame::SimpleString(
+                "Background append only file rewriting scheduled".to_string(),
+            );
+        }
         self.handle_bgrewriteaof_requested(now_ms)
     }
 
@@ -46878,7 +46966,15 @@ impl Runtime {
         if self.rewrite_aof_manifest(now_ms).is_err() {
             self.server.aof_rewrite_scheduled = false;
             self.server.store.record_aof_bgrewrite_status(false);
-            return RespFrame::Error("ERR error rewriting AOF file".to_string());
+            // (frankenredis-eh2ct) Upstream's wording (aof.c:2507). "ERR error rewriting AOF
+            // file" was fr's own invention and appears nowhere in Redis; the test that pinned it
+            // asserted fr's behaviour with no upstream line cited, which is how an invented
+            // string survives. Updated with the incumbent's, not regenerated to go green.
+            return RespFrame::Error(
+                "ERR Can't execute an AOF background rewriting. Please check the server logs for \
+                 more information."
+                    .to_string(),
+            );
         }
         self.server.aof_rewrite_scheduled = false;
         self.server.replication_ack_state.local_fsync_offset =
@@ -74059,6 +74155,97 @@ mod tests {
         assert!(info.contains("rdb_last_bgsave_status:err\r\n"), "{info}");
     }
 
+
+    /// BGSAVE and BGREWRITEAOF must admit each other the way upstream does.
+    ///
+    /// (frankenredis-eh2ct) Three defects in one family, all found through error literals the
+    /// incumbent can send and fr never did:
+    ///
+    ///   * fr answered "Background save already in progress" when the active child was an AOF
+    ///     REWRITE -- a different situation, which upstream words differently (rdb.c:3663) and
+    ///     for which it names a remedy.
+    ///   * `BGSAVE SCHEDULE` was parsed, validated and DROPPED. The option did nothing.
+    ///   * `BGREWRITEAOF` had no admission at all: it went straight to the rewrite, so a second
+    ///     one started while the first was running, and one issued during a bgsave ran
+    ///     concurrently with it.
+    ///
+    /// The pids are set directly rather than by forking. A real fork would make this test depend
+    /// on child scheduling, and what is under test is the ADMISSION decision, which is a pure
+    /// function of those two fields.
+    #[test]
+    fn bgsave_and_bgrewriteaof_admit_each_other_like_upstream_eh2ct() {
+        // An AOF-rewrite child blocks a plain BGSAVE, with the AOF-specific wording.
+        let mut rt = Runtime::default_strict();
+        rt.server.aof_rewrite_pid = Some(424242);
+        let reply = rt.execute_frame(command(&[b"BGSAVE"]), 1);
+        let RespFrame::Error(msg) = &reply else {
+            panic!("a BGSAVE behind an AOF child must be refused, got {reply:?}");
+        };
+        assert!(
+            msg.contains("Another child process is active (AOF?)"),
+            "an AOF child is not a bgsave in progress: {msg}"
+        );
+        assert!(
+            msg.contains("Use BGSAVE SCHEDULE"),
+            "upstream names the remedy in this message: {msg}"
+        );
+
+        // ...and the remedy it names must WORK, which is the half that makes the wording honest.
+        let mut rt = Runtime::default_strict();
+        rt.server.aof_rewrite_pid = Some(424242);
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGSAVE", b"SCHEDULE"]), 1),
+            RespFrame::SimpleString("Background saving scheduled".to_string())
+        );
+        assert!(
+            rt.server.rdb_bgsave_scheduled,
+            "SCHEDULE must set the flag, not just answer as though it had"
+        );
+
+        // An RDB child still reports the bgsave wording, unchanged.
+        let mut rt = Runtime::default_strict();
+        rt.server.rdb_bgsave_pid = Some(424242);
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGSAVE"]), 1),
+            RespFrame::Error("ERR Background save already in progress".to_string())
+        );
+
+        // BGREWRITEAOF behind its OWN child is refused rather than started twice.
+        let mut rt = Runtime::default_strict();
+        rt.server.aof_rewrite_pid = Some(424242);
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1),
+            RespFrame::Error(
+                "ERR Background append only file rewriting already in progress".to_string()
+            )
+        );
+
+        // BGREWRITEAOF behind an RDB child SCHEDULES, using the flag that already existed and
+        // that only `CONFIG SET appendonly yes` had ever set.
+        let mut rt = Runtime::default_strict();
+        rt.server.rdb_bgsave_pid = Some(424242);
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1),
+            RespFrame::SimpleString(
+                "Background append only file rewriting scheduled".to_string()
+            )
+        );
+        assert!(rt.server.aof_rewrite_scheduled, "the schedule flag must be set");
+
+        // NOT A BLANKET REFUSAL: with no child at all, both commands still run. This is the row
+        // an over-eager admission fails.
+        let mut rt = Runtime::default_strict();
+        let dir = std::env::temp_dir().join("fr_runtime_bgsave_admission_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        rt.set_rdb_path(dir.clone());
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGSAVE"]), 1),
+            RespFrame::SimpleString("Background saving started".to_string())
+        );
+        rt.wait_for_child_processes();
+    }
+
+
     #[test]
     fn save_failure_updates_aof_last_write_status() {
         // (frankenredis-oe6qt) Force an unwritable appendonlydir by pointing the
@@ -74439,7 +74626,11 @@ mod tests {
 
         assert_eq!(
             rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1),
-            RespFrame::Error("ERR error rewriting AOF file".to_string())
+            RespFrame::Error(
+                "ERR Can't execute an AOF background rewriting. Please check the server logs \
+                 for more information."
+                    .to_string()
+            )
         );
 
         let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 2);
