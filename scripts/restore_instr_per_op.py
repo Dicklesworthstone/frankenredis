@@ -33,7 +33,7 @@ not grow across the run and the slope is decode work rather than insertion growt
     serverCron contaminant (~3 pct), so quote fr-side deltas with more confidence
     than the ratio.
 
-Usage: restore_instr_per_op.py <fr_bin> <members> <ops>
+Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list]
 """
 from __future__ import annotations
 
@@ -113,7 +113,31 @@ def total_ir(path):
     return total
 
 
-def run(binary, tag, port, members, ops, workdir):
+def seed_command(kind, members):
+    """The command that builds the source container, by container type.
+
+    (frankenredis-gvm6z) LIST was added because the retained-listpack-span lever
+    decodes RDB QUICKLIST_2 nodes -- `decode_retained_listpack_spans` is reached
+    from the LIST arm of the RESTORE payload walk, NOT from the hash arm this
+    harness originally drove. Certifying that lever against a hash workload would
+    have measured a path it does not touch and reported "no change" as if it were
+    a verdict on the lever.
+    """
+    if kind == "hash":
+        fields = []
+        for i in range(members):
+            fields += ["f%04d" % i, "v%04d" % i]
+        return resp("HSET", "src", *fields)
+    if kind == "list":
+        # Short string elements: this is the listpack (QUICKLIST_2 type 2) regime,
+        # which is the one the span lever decodes. Letter-leading on purpose --
+        # a digit-leading payload takes the derivation-guard path and measures a
+        # different frame (frankenredis-qj6jn).
+        return resp("RPUSH", "src", *["v%04d" % i for i in range(members)])
+    raise SystemExit("unknown container type %r (want hash|list)" % kind)
+
+
+def run(binary, tag, port, members, ops, workdir, kind="hash"):
     out = os.path.join(workdir, "cg.%s.out" % tag)
     argv = ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out,
             "--collect-systime=no", binary, "--port", str(port), "--save", "",
@@ -139,10 +163,7 @@ def run(binary, tag, port, members, ops, workdir):
             raise RuntimeError("%s never became ready under callgrind" % tag)
         buf = b""
 
-        fields = []
-        for i in range(members):
-            fields += ["f%04d" % i, "v%04d" % i]
-        sock.sendall(resp("HSET", "src", *fields))
+        sock.sendall(seed_command(kind, members))
         _, buf = read_reply(sock, buf)
         # Take the payload from the engine under test, so each arm restores a
         # payload its own DUMP produced rather than one translated between them.
@@ -187,10 +208,15 @@ def main():
     # (cross-project check) This harness divides every ratio by the vendored binary;
     # verify it IS its source before printing a denominator.
     require_incumbent(REDIS, os.path.join(ROOT, "legacy_redis_code/redis"))
-    if len(sys.argv) != 4:
+    argv = [a for a in sys.argv[1:] if not a.startswith("--")]
+    kind = "hash"
+    for a in sys.argv[1:]:
+        if a.startswith("--type="):
+            kind = a.split("=", 1)[1]
+    if len(argv) != 3:
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
         return 2
-    fr_bin, members, ops = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+    fr_bin, members, ops = argv[0], int(argv[1]), int(argv[2])
     # Resolve the binary BEFORE anything chdirs: these run the engine with
     # cwd set to a workdir, so a relative path like target/release/frankenredis
     # becomes "command not found" (rc=127) rather than an obvious error.
@@ -207,8 +233,8 @@ def main():
     with tempfile.TemporaryDirectory(dir="/data/tmp") as workdir:
         results = {}
         for name, binary in (("fr", fr_bin), ("redis", REDIS)):
-            a, plen = run(binary, name + ".n", port, members, ops, workdir)
-            b, _ = run(binary, name + ".2n", port + 1, members, ops * 2, workdir)
+            a, plen = run(binary, name + ".n", port, members, ops, workdir, kind)
+            b, _ = run(binary, name + ".2n", port + 1, members, ops * 2, workdir, kind)
             results[name] = (b - a) / ops
             print("  %-6s Ir(N)=%-14d Ir(2N)=%-14d -> %10.1f instr/op  (payload %d B)"
                   % (name, a, b, results[name], plen))
