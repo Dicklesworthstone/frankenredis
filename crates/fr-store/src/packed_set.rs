@@ -3493,7 +3493,9 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use fr_persist::listpack::ListpackValueSpan;
+use fr_persist::listpack::{
+    ListpackValueSpan, RetainedListpackValueSpan, decode_retained_listpack_spans,
+};
 
 /// Storage for a list: a packed buffer while small, promoting to a chunked COW
 /// deque (which keeps O(1) ends for large lists, redis's quicklist regime) past
@@ -3537,7 +3539,8 @@ enum ListChunk {
     },
     Listpack {
         bytes: Arc<Vec<u8>>,
-        entries: Arc<Vec<ListpackValueSpan>>,
+        entries: Arc<Vec<RetainedListpackValueSpan>>,
+        integer_bytes: Arc<Vec<u8>>,
     },
 }
 
@@ -3564,10 +3567,15 @@ impl ListChunk {
         }
     }
 
-    fn from_listpack(bytes: Vec<u8>, entries: Vec<ListpackValueSpan>) -> Self {
+    fn from_listpack(
+        bytes: Vec<u8>,
+        entries: Vec<RetainedListpackValueSpan>,
+        integer_bytes: Vec<u8>,
+    ) -> Self {
         Self::Listpack {
             bytes: Arc::new(bytes),
             entries: Arc::new(entries),
+            integer_bytes: Arc::new(integer_bytes),
         }
     }
 
@@ -3597,9 +3605,13 @@ impl ListChunk {
                     elems.get(idx).map(Vec::as_slice)
                 }
             }
-            Self::Listpack { bytes, entries } => {
-                entries.get(idx).map(|entry| entry.as_bytes(bytes))
-            }
+            Self::Listpack {
+                bytes,
+                entries,
+                integer_bytes,
+            } => entries
+                .get(idx)
+                .map(|entry| entry.as_bytes(bytes, integer_bytes)),
         }
     }
 
@@ -3626,11 +3638,16 @@ impl ListChunk {
     /// queue the head and tail are different chunks once a list spans more than one. The
     /// single-chunk alternating case is measured in this lever's ledger row.
     fn pop_front_owned(&mut self) -> Option<Vec<u8>> {
-        if let Self::Listpack { bytes, entries } = self {
+        if let Self::Listpack {
+            bytes,
+            entries,
+            integer_bytes,
+        } = self
+        {
             let elems: Vec<Vec<u8>> = entries
                 .iter()
                 .rev()
-                .map(|entry| entry.as_bytes(bytes).to_vec())
+                .map(|entry| entry.as_bytes(bytes, integer_bytes).to_vec())
                 .collect();
             *self = Self::Owned {
                 elems: Arc::new(elems),
@@ -3657,10 +3674,15 @@ impl ListChunk {
     }
 
     fn make_mut(&mut self) -> &mut Vec<Vec<u8>> {
-        if let Self::Listpack { bytes, entries } = self {
+        if let Self::Listpack {
+            bytes,
+            entries,
+            integer_bytes,
+        } = self
+        {
             let elems = entries
                 .iter()
-                .map(|entry| entry.as_bytes(bytes).to_vec())
+                .map(|entry| entry.as_bytes(bytes, integer_bytes).to_vec())
                 .collect();
             *self = Self::from_vec(elems);
         }
@@ -3712,9 +3734,10 @@ impl ListChunk {
             elems.iter().map(Vec::as_slice).collect()
         };
         if let Some(blob) = fr_persist::encode_listpack_strings_blob(&slices)
-            && let Ok(spans) = fr_persist::listpack::decode_value_spans(&blob)
+            && let Ok(spans) = decode_retained_listpack_spans(&blob)
         {
-            *self = Self::from_listpack(blob, spans);
+            let (entries, integer_bytes) = spans.into_parts();
+            *self = Self::from_listpack(blob, entries, integer_bytes);
         }
     }
 
@@ -3731,7 +3754,7 @@ impl ListChunk {
                 }
                 quicklist_packed_node_accepts_local(elems.len(), *lp_bytes, elem.len(), fill)
             }
-            Self::Listpack { bytes, entries } => quicklist_packed_node_accepts_local(
+            Self::Listpack { bytes, entries, .. } => quicklist_packed_node_accepts_local(
                 entries.len(),
                 bytes.len() as u64,
                 elem.len(),
@@ -3755,10 +3778,15 @@ impl ListChunk {
     }
 
     fn push_back_owned_impl(&mut self, elem: Vec<u8>, added: u64) {
-        if let Self::Listpack { bytes, entries } = self {
+        if let Self::Listpack {
+            bytes,
+            entries,
+            integer_bytes,
+        } = self
+        {
             let elems = entries
                 .iter()
-                .map(|entry| entry.as_bytes(bytes).to_vec())
+                .map(|entry| entry.as_bytes(bytes, integer_bytes).to_vec())
                 .collect();
             *self = Self::from_vec(elems);
         }
@@ -3798,10 +3826,15 @@ impl ListChunk {
     }
 
     fn push_front_owned_impl(&mut self, elem: Vec<u8>, added: u64) {
-        if let Self::Listpack { bytes, entries } = self {
+        if let Self::Listpack {
+            bytes,
+            entries,
+            integer_bytes,
+        } = self
+        {
             let elems = entries
                 .iter()
-                .map(|entry| entry.as_bytes(bytes).to_vec())
+                .map(|entry| entry.as_bytes(bytes, integer_bytes).to_vec())
                 .collect();
             *self = Self::from_vec(elems);
         }
@@ -3837,8 +3870,13 @@ impl ListChunk {
                     ListChunkIter::Owned(elems.iter())
                 }
             }
-            Self::Listpack { bytes, entries } => ListChunkIter::Listpack {
+            Self::Listpack {
                 bytes,
+                entries,
+                integer_bytes,
+            } => ListChunkIter::Listpack {
+                bytes,
+                integer_bytes,
                 entries: entries.iter(),
             },
         }
@@ -3858,10 +3896,15 @@ impl ListChunk {
                     ListChunkIter::Owned(elems[start..].iter())
                 }
             }
-            Self::Listpack { bytes, entries } => {
+            Self::Listpack {
+                bytes,
+                entries,
+                integer_bytes,
+            } => {
                 let start = start.min(entries.len());
                 ListChunkIter::Listpack {
                     bytes,
+                    integer_bytes,
                     entries: entries[start..].iter(),
                 }
             }
@@ -3881,8 +3924,13 @@ impl ListChunk {
                     ListChunkRevIter::OwnedRev(elems.iter().rev())
                 }
             }
-            Self::Listpack { bytes, entries } => ListChunkRevIter::Listpack {
+            Self::Listpack {
                 bytes,
+                entries,
+                integer_bytes,
+            } => ListChunkRevIter::Listpack {
+                bytes,
+                integer_bytes,
                 entries: entries.iter().rev(),
             },
         }
@@ -3935,7 +3983,8 @@ struct ChunkedList {
 
 pub(crate) struct RetainedListpackChunk<'a> {
     pub(crate) bytes: &'a [u8],
-    pub(crate) entries: &'a [ListpackValueSpan],
+    pub(crate) entries: &'a [RetainedListpackValueSpan],
+    pub(crate) integer_bytes: &'a [u8],
 }
 
 pub(crate) struct QuicklistPackedNode<'a> {
@@ -4261,7 +4310,8 @@ pub(crate) enum RestoredListNode {
     Plain(Vec<u8>),
     Listpack {
         bytes: Vec<u8>,
-        entries: Vec<ListpackValueSpan>,
+        entries: Vec<RetainedListpackValueSpan>,
+        integer_bytes: Vec<u8>,
     },
 }
 
@@ -4304,7 +4354,11 @@ impl ChunkedList {
                         plain_chunk = Vec::with_capacity(LIST_CHUNK_TARGET);
                     }
                 }
-                RestoredListNode::Listpack { bytes, entries } => {
+                RestoredListNode::Listpack {
+                    bytes,
+                    entries,
+                    integer_bytes,
+                } => {
                     flush_restore_plain_chunk(&mut out, &mut plain_chunk);
                     // The decoded spans are still hot here; summing now avoids a
                     // second traversal of `bytes` through the chunk iterator.
@@ -4366,8 +4420,9 @@ impl ChunkedList {
                         // letter-leading list never reaches it and pays nothing.
                         if derivable
                             && span.is_string_encoded()
-                            && matches!(span.first_byte(&bytes), Some(b) if b.is_ascii_digit() || b == b'-')
-                            && list_lp_int_scan_first(span.as_bytes(&bytes)).is_some()
+                            && matches!(span.first_byte(&bytes, &integer_bytes), Some(b) if b.is_ascii_digit() || b == b'-')
+                            && list_lp_int_scan_first(span.as_bytes(&bytes, &integer_bytes))
+                                .is_some()
                         {
                             derivable = false;
                         }
@@ -4377,7 +4432,7 @@ impl ChunkedList {
                     } else {
                         let mut walked = 0u64;
                         for span in &entries {
-                            walked += list_lp_entry_bytes(span.as_bytes(&bytes));
+                            walked += list_lp_entry_bytes(span.as_bytes(&bytes, &integer_bytes));
                         }
                         walked
                     };
@@ -4388,14 +4443,14 @@ impl ChunkedList {
                         chunk_enc,
                         entries
                             .iter()
-                            .map(|span| list_lp_entry_bytes(span.as_bytes(&bytes)))
+                            .map(|span| list_lp_entry_bytes(span.as_bytes(&bytes, &integer_bytes)))
                             .sum::<u64>(),
                         "derived chunk total must equal the per-entry walk"
                     );
                     enc_total += chunk_enc;
                     out.len += entries.len();
                     out.chunks
-                        .push_back(ListChunk::from_listpack(bytes, entries));
+                        .push_back(ListChunk::from_listpack(bytes, entries, integer_bytes));
                 }
             }
         }
@@ -4457,7 +4512,8 @@ enum ListChunkIter<'a> {
     OwnedRev(std::iter::Rev<std::slice::Iter<'a, Vec<u8>>>),
     Listpack {
         bytes: &'a [u8],
-        entries: std::slice::Iter<'a, ListpackValueSpan>,
+        integer_bytes: &'a [u8],
+        entries: std::slice::Iter<'a, RetainedListpackValueSpan>,
     },
 }
 
@@ -4475,7 +4531,13 @@ impl<'a> Iterator for ListChunkIter<'a> {
         match self {
             Self::Owned(iter) => iter.next().map(Vec::as_slice),
             Self::OwnedRev(iter) => iter.next().map(Vec::as_slice),
-            Self::Listpack { bytes, entries } => entries.next().map(|entry| entry.as_bytes(bytes)),
+            Self::Listpack {
+                bytes,
+                integer_bytes,
+                entries,
+            } => entries
+                .next()
+                .map(|entry| entry.as_bytes(bytes, integer_bytes)),
         }
     }
 }
@@ -4508,7 +4570,8 @@ enum ListChunkRevIter<'a> {
     OwnedRev(std::iter::Rev<std::slice::Iter<'a, Vec<u8>>>),
     Listpack {
         bytes: &'a [u8],
-        entries: std::iter::Rev<std::slice::Iter<'a, ListpackValueSpan>>,
+        integer_bytes: &'a [u8],
+        entries: std::iter::Rev<std::slice::Iter<'a, RetainedListpackValueSpan>>,
     },
 }
 
@@ -4519,7 +4582,13 @@ impl<'a> Iterator for ListChunkRevIter<'a> {
         match self {
             Self::Owned(iter) => iter.next().map(Vec::as_slice),
             Self::OwnedRev(iter) => iter.next().map(Vec::as_slice),
-            Self::Listpack { bytes, entries } => entries.next().map(|entry| entry.as_bytes(bytes)),
+            Self::Listpack {
+                bytes,
+                integer_bytes,
+                entries,
+            } => entries
+                .next()
+                .map(|entry| entry.as_bytes(bytes, integer_bytes)),
         }
     }
 }
@@ -5642,9 +5711,13 @@ impl ListValue {
                                 }
                             }
                         }
-                        ListChunk::Listpack { bytes, entries } => {
+                        ListChunk::Listpack {
+                            bytes,
+                            entries,
+                            integer_bytes,
+                        } => {
                             for span in entries.iter() {
-                                f(span.as_bytes(bytes));
+                                f(span.as_bytes(bytes, integer_bytes));
                             }
                         }
                     }
@@ -5660,10 +5733,15 @@ impl ListValue {
         let mut chunks = Vec::with_capacity(list.chunks.len());
         for chunk in &list.chunks {
             match chunk {
-                ListChunk::Listpack { bytes, entries } if !entries.is_empty() => {
+                ListChunk::Listpack {
+                    bytes,
+                    entries,
+                    integer_bytes,
+                } if !entries.is_empty() => {
                     chunks.push(RetainedListpackChunk {
                         bytes: bytes.as_slice(),
                         entries: entries.as_slice(),
+                        integer_bytes: integer_bytes.as_slice(),
                     });
                 }
                 _ => return None,
@@ -5761,7 +5839,7 @@ impl ListValue {
             // (frankenredis-qj6jn) `first_len` used to feed the maximal-packing refusal removed
             // below; nothing reads it now, so it is no longer computed.
             let (bytes, entries_len) = match chunk {
-                ListChunk::Listpack { bytes, entries } if !entries.is_empty() => {
+                ListChunk::Listpack { bytes, entries, .. } if !entries.is_empty() => {
                     (Cow::Borrowed(bytes.as_slice()), entries.len())
                 }
                 ListChunk::Owned {
@@ -7091,6 +7169,7 @@ mod tests {
         PACKED_STREAM_NODE_MAX_ENTRIES, PackedList, PackedStrMap, PackedStrSet, PackedStreamFields,
         PackedStreamLog, PackedZSet, read_varint_impl, write_varint, zset_cmp,
     };
+    use fr_persist::listpack::{RetainedListpackValueSpan, decode_retained_listpack_spans};
 
     /// (frankenredis-33832) The fused single-pass tier/budget loop in the two RESTORE
     /// bulk builders must choose the SAME tier as the two-walk form it replaced.
@@ -8385,14 +8464,20 @@ mod tests {
                         ListChunk::Listpack {
                             bytes: source_bytes,
                             entries: source_entries,
+                            integer_bytes: source_integer_bytes,
                         },
                         ListChunk::Listpack {
                             bytes: copy_bytes,
                             entries: copy_entries,
+                            integer_bytes: copy_integer_bytes,
                         },
                     ) => {
                         assert!(std::sync::Arc::ptr_eq(source_bytes, copy_bytes));
                         assert!(std::sync::Arc::ptr_eq(source_entries, copy_entries));
+                        assert!(std::sync::Arc::ptr_eq(
+                            source_integer_bytes,
+                            copy_integer_bytes
+                        ));
                     }
                     _ => {
                         unreachable!("untouched tail chunks must retain shared representation");
@@ -9368,9 +9453,71 @@ mod tests {
     }
 
     fn listpack_node(bytes: Vec<u8>) -> super::RestoredListNode {
-        let entries =
-            fr_persist::listpack::decode_value_spans(&bytes).expect("test listpack must decode");
-        super::RestoredListNode::Listpack { bytes, entries }
+        let spans = decode_retained_listpack_spans(&bytes).expect("test listpack must decode");
+        let (entries, integer_bytes) = spans.into_parts();
+        super::RestoredListNode::Listpack {
+            bytes,
+            entries,
+            integer_bytes,
+        }
+    }
+
+    #[test]
+    fn restored_listpack_keeps_compact_spans_and_integer_arena_gvm6z() {
+        let values: Vec<&[u8]> = vec![
+            b"alpha",
+            b"-17",
+            b"-9223372036854775808",
+            b"9223372036854775807",
+            b"omega",
+        ];
+        let blob = crate::encode_listpack_strings(&values).expect("fixture encodes");
+        let original_payload_len = blob.len();
+        let value = ListValue::from_restored_quicklist2_nodes(vec![listpack_node(blob)]);
+
+        assert!(
+            matches!(&value.repr, ListRepr::Deque(_)),
+            "a restored node must retain its listpack representation"
+        );
+        let ListRepr::Deque(chunks) = &value.repr else {
+            return;
+        };
+        assert!(
+            matches!(chunks.chunks.front(), Some(ListChunk::Listpack { .. })),
+            "the restored node must remain a retained listpack chunk"
+        );
+        let Some(ListChunk::Listpack {
+            bytes,
+            entries,
+            integer_bytes,
+        }) = chunks.chunks.front()
+        else {
+            return;
+        };
+        assert_eq!(
+            bytes.len(),
+            original_payload_len,
+            "decimal bytes must not extend payload"
+        );
+        assert_eq!(
+            integer_bytes.as_slice(),
+            b"-17-92233720368547758089223372036854775807"
+        );
+        assert!(
+            std::mem::size_of::<RetainedListpackValueSpan>() <= 12,
+            "retained span is {} bytes",
+            std::mem::size_of::<RetainedListpackValueSpan>()
+        );
+        let got: Vec<&[u8]> = value.iter().collect();
+        assert_eq!(
+            got, values,
+            "list reads must borrow the retained decimal arena"
+        );
+        assert_eq!(
+            entries.len(),
+            values.len(),
+            "one compact span per list element"
+        );
     }
 
     fn assert_fused_totals_match_rewalk(
@@ -9399,7 +9546,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// (frankenredis-qj6jn) PINS LEVER 1's GUARD, which nothing pinned before.
     ///
     /// `2904626f5` claimed the c92f6 fixture above was a ready-made mutation test for the

@@ -35644,12 +35644,15 @@ impl Store {
                             let (listpack, consumed) =
                                 decode_rdb_string(payload, cursor, data_end)?;
                             cursor += consumed;
-                            let entries = fr_persist::listpack::decode_value_spans(&listpack)
-                                .map_err(|_| StoreError::InvalidDumpPayload)?;
-                            if !entries.is_empty() {
+                            let spans =
+                                fr_persist::listpack::decode_retained_listpack_spans(&listpack)
+                                    .map_err(|_| StoreError::InvalidDumpPayload)?;
+                            if !spans.is_empty() {
+                                let (entries, integer_bytes) = spans.into_parts();
                                 nodes.push(RestoredListNode::Listpack {
                                     bytes: listpack,
                                     entries,
+                                    integer_bytes,
                                 });
                             }
                         }
@@ -36599,7 +36602,7 @@ fn retained_quicklist2_chunks_match_dump_rules(
         let mut packed_bytes = LISTPACK_FRAME_OVERHEAD;
         let mut first_entry_bytes = None;
         for (index, entry) in chunk.entries.iter().enumerate() {
-            let item = entry.as_bytes(chunk.bytes);
+            let item = entry.as_bytes(chunk.bytes, chunk.integer_bytes);
             if quicklist_plain_node_required(item, list_max_listpack_size) {
                 return false;
             }
