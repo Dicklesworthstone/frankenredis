@@ -211,3 +211,92 @@ def assert_seed(reply, expected_int, label, exit_code=1):
         print(f"SEED FAILED [{label}]: got {reply!r}, expected {want!r}")
         sys.exit(exit_code)
     return reply
+
+
+class _ChunkedSocket:
+    """Minimal socket double for the reader validity checks below."""
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+        self.sent = []
+
+    def recv(self, _size):
+        return self.chunks.pop(0) if self.chunks else b""
+
+    def sendall(self, data):
+        self.sent.append(data)
+
+
+def _legacy_single_recv(sock):
+    """The pre-tesrb read shape, retained only to prove the counterfactual."""
+    return sock.recv(1 << 20)
+
+
+def _expect_seed_failure(check, *args):
+    try:
+        check(*args)
+    except SystemExit as exc:
+        return exc.code == 1
+    return False
+
+
+def _self_test() -> int:
+    """Plant replies the pre-tesrb reader would falsely compare as equal.
+
+    Each pair shares its first TCP delivery and differs only in a later frame
+    tail. A legacy ``recv()`` once returns the shared prefix on both sides, so a
+    differential gate passes. The real primitive must collect enough bytes for
+    the reply boundary, at which point the deliberately wrong reply is visible.
+    The second case covers commands such as SSUBSCRIBE that have a known count
+    of reply frames rather than one aggregate reply.
+    """
+    failures = []
+
+    prefix = b"$65540\r\n" + b"x" * 65536
+    oracle = prefix + b"good\r\n"
+    wrong = prefix + b"FAIL\r\n"
+    legacy_oracle = _legacy_single_recv(_ChunkedSocket([prefix, b"good\r\n"]))
+    legacy_wrong = _legacy_single_recv(_ChunkedSocket([prefix, b"FAIL\r\n"]))
+    if legacy_oracle != legacy_wrong:
+        failures.append("test setup: legacy single receive did not share a prefix")
+    observed_oracle = read_frame(_ChunkedSocket([prefix, b"good\r\n"]))
+    observed_wrong = read_frame(_ChunkedSocket([prefix, b"FAIL\r\n"]))
+    if observed_oracle != oracle or observed_wrong != wrong:
+        failures.append("single-frame reader did not return the complete planted replies")
+    elif observed_oracle == observed_wrong:
+        failures.append("single-frame reader did not catch the planted wrong reply")
+
+    first = b">3\r\n+ssubscribe\r\n$2\r\ns1\r\n:1\r\n"
+    second_oracle = b">3\r\n+smessage\r\n$2\r\ns1\r\n$4\r\ngood\r\n"
+    second_wrong = b">3\r\n+smessage\r\n$2\r\ns1\r\n$4\r\nFAIL\r\n"
+    legacy_first_oracle = _legacy_single_recv(_ChunkedSocket([first, second_oracle]))
+    legacy_first_wrong = _legacy_single_recv(_ChunkedSocket([first, second_wrong]))
+    if legacy_first_oracle != legacy_first_wrong:
+        failures.append("test setup: first confirmation is not shared")
+    multi_oracle_sock = _ChunkedSocket([first, second_oracle])
+    multi_wrong_sock = _ChunkedSocket([first, second_wrong])
+    observed_oracle = cmd_n(multi_oracle_sock, 2, "SSUBSCRIBE", "s1")
+    observed_wrong = cmd_n(multi_wrong_sock, 2, "SSUBSCRIBE", "s1")
+    if observed_oracle != first + second_oracle or observed_wrong != first + second_wrong:
+        failures.append("known-count reader did not return both planted reply frames")
+    elif observed_oracle == observed_wrong:
+        failures.append("known-count reader did not catch the planted wrong reply")
+    if not multi_oracle_sock.sent or not multi_wrong_sock.sent:
+        failures.append("known-count reader did not send its command")
+
+    if not _expect_seed_failure(assert_seed, b":0\r\n", 1, "planted seed"):
+        failures.append("assert_seed accepted a deliberately wrong reply")
+    if not _expect_seed_failure(assert_ok, b":1\r\n", "planted OK seed"):
+        failures.append("assert_ok accepted a deliberately wrong reply")
+
+    if failures:
+        print("SELF-TEST FAIL:")
+        for failure in failures:
+            print(f"  {failure}")
+        return 1
+    print("SELF-TEST PASS: complete-frame, known-count, and seed gates catch planted wrong replies")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_self_test() if "--self-test" in sys.argv else 0)
