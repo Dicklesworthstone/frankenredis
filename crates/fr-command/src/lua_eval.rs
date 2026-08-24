@@ -3406,12 +3406,14 @@ fn resolve_lua_local_slots(stmts: &mut Block) {
 /// (frankenredis-lua-call-depth-ug22x) 768, raised from 512 once 79e2438e3 cut the per-level
 /// cost. The arithmetic, so the next person can redo it rather than trust it:
 ///
+/// ```text
 ///     cycle cost      4352 B/level   call_function 416 + exec_block 96 + exec_stmts 128
 ///                                    + exec_stmt 1264 + eval_expr 816 x3, read from the
 ///                                    shipping ELF's prologues by recursion_stack_budget_gate.py
 ///     worker stack    8 MiB          WORKER_THREAD_STACK_SIZE, fr-server/src/main.rs:79
 ///     absolute cap    1928 levels    8 MiB / 4352 B
 ///     41 pct margin   790 levels     the convention the reply-walk bound uses
+/// ```
 ///
 /// 768 rather than 790: it is under the convention at 39.8 pct, and a power of two is a number
 /// someone can recognise as chosen rather than fitted. The margin is not decoration -- a Lua
@@ -5068,8 +5070,10 @@ thread_local! {
 /// (frankenredis-kbyhy) MEASURED, not guessed. After the library body stopped being re-executed
 /// per call, `frame_delta` over the lib1/lib32 pair put the entire residual slope in one frame:
 ///
+/// ```text
 ///     sip::Hasher::write         296.0 instr/op at lib1  ->   5,862.0 at lib32   (19.8x)
 ///     whole op                10,929.9                   ->  16,833.8            (+5,903.9)
+/// ```
 ///
 /// so 94 pct of the growth across a 32x library was the cache PROBE hashing the whole library to
 /// find an entry it then confirms by equality anyway. The default `SipHash13` reads every byte;
@@ -13657,8 +13661,10 @@ fn lua_pattern_error_take() -> Option<String> {
 /// this bead was first fixed, so a literal pattern costs no stack and `string.rep('a',300)` matches.
 /// The NON-tail positions still recurse once per repetition, and they still hit the guard:
 ///
+/// ```text
 ///     EVAL "return string.match(string.rep('ab',N), string.rep('a*b',N)) ~= nil" 0
 ///     N=200 -> fr :1, redis :1        N=201 -> fr $-1, redis :1
+/// ```
 ///
 /// measured against live 7.2.4, diverging EXACTLY at the guard. The failure is a silent NON-MATCH,
 /// not an error, which is the half that makes it dangerous.
@@ -13667,9 +13673,11 @@ fn lua_pattern_error_take() -> Option<String> {
 /// 8 + 8*6 pushes + sub 120 = 176 BYTES per level, and the symbol makes 3 DIRECT self-calls, so one
 /// level is one frame:
 ///
+/// ```text
 ///     whole 8 MiB worker stack           47,662 levels
 ///     MAX_CALL_DEPTH worst case           3,342,336 B (768 x 4352)
 ///     stack remaining beneath it          5,046,272 B  ->  28,672 levels
+/// ```
 ///
 /// THE MIDDLE LINE IS WHY THIS IS NOT SIZED LIKE `MAX_CALL_DEPTH`: the matcher runs INSIDE a Lua
 /// call stack that is itself bounded at 768 levels, so its budget is what is left UNDER that worst
@@ -14453,9 +14461,11 @@ fn resp_to_lua(frame: &RespFrame, resp3: bool) -> LuaValue {
 /// 7.2.4 with `scripts/lua_depth_survival_differential.py reply`, both engines
 /// side by side on the same script:
 ///
+/// ```text
 ///     depth   2000    4000    7000    7990    8000
 ///     redis   OK      OK      OK      OK      refuses (~7995 delivered)
 ///     fr      OK      refused refused refused refused      <- at the old 2000
+/// ```
 ///
 /// So upstream's real ceiling is ~7995 levels, essentially `LUAI_MAXCSTACK`, and
 /// the old bound refused everything from 2001 up — replies Redis returns. That is
