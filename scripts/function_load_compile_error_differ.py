@@ -67,6 +67,27 @@ CASES = [
 ]
 
 
+def _record_mismatch(fails, label, oracle, fr):
+    if oracle != fr:
+        fails.append(f"{label}: redis={oracle!r} fr={fr!r}")
+
+
+def _self_test():
+    """A wrong FUNCTION LOAD compile-error reply must fail this gate."""
+    fails = []
+    _record_mismatch(
+        fails,
+        "planted_wrong_compile_line",
+        b"-ERR Error compiling function: user_function:3: syntax error\r\n",
+        b"-ERR Error compiling function: user_function:1: syntax error\r\n",
+    )
+    if len(fails) != 1 or "planted_wrong_compile_line" not in fails[0]:
+        print(f"SELF-TEST FAIL: planted FUNCTION LOAD mismatch was not reported: {fails!r}")
+        return 1
+    print("SELF-TEST PASS: FUNCTION LOAD gate catches a planted wrong reply")
+    return 0
+
+
 def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
@@ -76,8 +97,7 @@ def main():
     fails = []
     for label, argv in CASES:
         ro, rf = cmd(od, *argv), cmd(fr, *argv)
-        if ro != rf:
-            fails.append(f"{label}: redis={ro!r} fr={rf!r}")
+        _record_mismatch(fails, label, ro, rf)
     print("=" * 60)
     if fails:
         print(f"FAIL — {len(fails)} FUNCTION LOAD divergence(s) vs redis 7.2.4:")
@@ -91,4 +111,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(_self_test() if "--self-test" in sys.argv else main())
