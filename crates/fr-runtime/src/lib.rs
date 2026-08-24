@@ -45719,6 +45719,30 @@ impl Runtime {
         if is_literal {
             return pattern.as_bytes() == parameter.as_bytes();
         }
+        // (frankenredis-e6c9t lever B) `*` matches every parameter, so ASK the glob engine
+        // nothing. `CONFIG GET *` is what monitoring clients actually send, and it reaches
+        // this predicate once per candidate: MEASURED at 242.00 calls/op, every one of them
+        // returning true, costing `glob_match_inner` 54,210 instr/op plus `glob_match`
+        // 7,986 -- 62,196 instr/op, ~16 pct of the whole command, to re-derive a constant.
+        //
+        // This is the all-match half of the hoist that already took `is_literal` out of the
+        // loop; `is_literal` was lifted and the all-match case was not.
+        //
+        // THE EMPTY PARAMETER IS NOT A MATCH, and I did not get that right by reasoning --
+        // `config_pattern_literal_fast_path_agrees_with_glob_e6c9t` drives `("*", "")` and
+        // caught an earlier version of this returning `true`. `glob_match` answers `false`
+        // there deliberately (frankenredis-z9dc3): an empty string matches only an empty
+        // pattern in that matcher, because `*` matching an empty key is handled by the
+        // `is_star` shortcut in KEYS/SCAN rather than by the glob engine. So the exact
+        // equivalent of `glob_match(b"*", x)` is `!x.is_empty()`, not `true`.
+        //
+        // Deliberately NOT threaded through the ~40 call sites as a second flag. A one-byte
+        // pattern compare is a few instructions against a call into the glob engine, and
+        // widening this predicate's signature is the shape this repo has measured at
+        // +8-16 instr/op per added parameter on hot dispatch paths.
+        if pattern.as_bytes() == b"*" {
+            return !parameter.is_empty();
+        }
         glob_match(pattern.as_bytes(), parameter.as_bytes())
     }
 
