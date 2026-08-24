@@ -229,17 +229,32 @@ def probe(port, argv):
         c.close()
 
 
+def require_executable(label, path):
+    if path.is_file() and os.access(path, os.X_OK):
+        return True
+    print(f"HARNESS FAILURE: {label} executable not found at {path}")
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--fr", type=Path, default=FR_DEFAULT)
     ap.add_argument("--redis", type=Path, default=REDIS_DEFAULT)
     ap.add_argument("--base-port", type=int, default=29101)
+    ap.add_argument("--planted-negative", action="store_true",
+                    help="verify that an absent server executable fails setup")
     args = ap.parse_args()
 
-    for label, path in (("fr", args.fr), ("redis", args.redis)):
-        if not path.exists():
-            print(f"SKIP: {label} binary not built at {path}")
+    if args.planted_negative:
+        missing = Path(tempfile.gettempdir()) / "stalegate_planted_missing_server"
+        if require_executable("planted negative", missing):
+            print("HARNESS FAILURE: planted negative unexpectedly found an executable")
             return 0
+        print("PLANTED NEGATIVE DETECTED: absent server executable fails setup")
+        return 1
+    for label, path in (("fr", args.fr), ("redis", args.redis)):
+        if not require_executable(label, path):
+            return 2
 
     root = tempfile.mkdtemp(prefix="stalegate_")
     dead = args.base_port + 50

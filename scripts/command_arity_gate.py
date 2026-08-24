@@ -112,7 +112,19 @@ def compare(label: str, inc: dict[str, int], fr: dict[str, int]) -> int:
     extra = sorted(set(fr) - set(inc))
     if extra:
         print(f"  {len(extra)} in fr and NOT upstream: {', '.join(extra[:10])}")
-    return len(mismatches)
+    return len(mismatches) + len(missing) + len(extra)
+
+
+def _self_test() -> int:
+    """An omitted command or wrong arity must make the real gate fail."""
+    if compare("planted missing", {"get": -2, "set": -3}, {"get": -2}) != 1:
+        print("SELF-TEST FAIL: planted missing command was not counted")
+        return 1
+    if compare("planted wrong arity", {"get": -2}, {"get": 2}) != 1:
+        print("SELF-TEST FAIL: planted wrong arity was not counted")
+        return 1
+    print("SELF-TEST PASS: arity gate catches planted missing and wrong commands")
+    return 0
 
 
 def main() -> int:
@@ -137,4 +149,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_self_test() if "--self-test" in sys.argv else main())

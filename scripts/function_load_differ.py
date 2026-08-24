@@ -7,7 +7,7 @@ sandbox whose global table exposes only the declared set, so a load-time runtime
 error — or a read of an undeclared global — fails the load before anything registers.
 
 Both arms run in ONE invocation against two live servers. Usage:
-    function_load_differ.py <redis_port> <fr_port>
+    function_load_differ.py [<redis_port> <fr_port>] | --planted-negative
 Exit 0 = arms agree on every row, 1 = at least one divergence, 2 = a CONTROL row diverged,
 which means the harness is not measuring what it claims and no row from it may be quoted.
 
@@ -237,13 +237,13 @@ CASES = [
 ROUND_TRIP_CASES = [
     ("rt_name_local",
      "local n = '%s'\nredis.register_function(n, function(k,a) return 41 end)",
-     "name from a local"),
+     "name from a local", "OK 41"),
     ("rt_name_concat",
      "local n = '%s' .. ''\nredis.register_function(n, function(k,a) return 41 end)",
-     "name computed at load time"),
+     "name computed at load time", "OK 41"),
     ("rt_callback_local",
      "local cb = function(k,a) return 41 end\nredis.register_function('%s', cb)",
-     "callback from a local"),
+     "callback from a local", "OK 41"),
     # (frankenredis-luaresp2map, regression case for d15b2e455) The ONLY case here that
     # returns something other than an integer, and the only one that exercises the reply
     # CONVERSION rather than just the registration. `{map=...}` becomes RespFrame::Map, which
@@ -254,10 +254,10 @@ ROUND_TRIP_CASES = [
     # path -- which is exactly where the conversion was missing.
     ("rt_map_reply",
      "local cb = function(k,a) return { map = { f = 41 } } end\nredis.register_function('%s', cb)",
-     "map reply through the executing path"),
+     "map reply through the executing path", "[b'f', b'41']"),
     ("rt_CONTROL_literal",
      "redis.register_function('%s', function(k,a) return 41 end)",
-     "CONTROL: everything literal"),
+     "CONTROL: everything literal", "OK 41"),
 ]
 
 
@@ -287,7 +287,7 @@ def require_round_trip_reply(label, reply, expected, invalid_steps):
         invalid_steps.append((label, reply, expected))
 
 
-def round_trip(conn, lib, fname, body):
+def round_trip(conn, lib, fname, body, expected_fcall):
     """Load, call, survive a reload, and survive its own DUMP/RESTORE.
 
     Returns a list of (step, classified reply). Each engine round-trips ITS OWN dump: the payload
@@ -300,7 +300,6 @@ def round_trip(conn, lib, fname, body):
     c = Conn(conn.port)
     out = []
     invalid_steps = []
-    c.cmd("FUNCTION", "FLUSH")
     src = (SHEBANG % lib) + (body % fname)
 
     def record(label, *args):
@@ -318,14 +317,14 @@ def round_trip(conn, lib, fname, body):
     load_reply = record("load", "FUNCTION", "LOAD", "REPLACE", src)
     require_round_trip_reply("load", load_reply, f"OK {lib}", invalid_steps)
     fcall_reply = record("fcall", "FCALL", fname, "0")
-    require_round_trip_reply("fcall", fcall_reply, "OK 41", invalid_steps)
+    require_round_trip_reply("fcall", fcall_reply, expected_fcall, invalid_steps)
 
     # seam 2: the registration must survive a reload. DEBUG RELOAD round-trips the dataset
     # through RDB in-process, which is the same path a restart takes.
     reload_reply = record("reload", "DEBUG", "RELOAD")
     require_round_trip_reply("reload", reload_reply, "OK OK", invalid_steps)
     fcall_after_reload = record("fcall_after_reload", "FCALL", fname, "0")
-    require_round_trip_reply("fcall_after_reload", fcall_after_reload, "OK 41", invalid_steps)
+    require_round_trip_reply("fcall_after_reload", fcall_after_reload, expected_fcall, invalid_steps)
 
     # seam 3: the library must come back from its own FUNCTION DUMP.
     try:
@@ -346,7 +345,7 @@ def round_trip(conn, lib, fname, body):
     restore_reply = record("restore", "FUNCTION", "RESTORE", dumped)
     require_round_trip_reply("restore", restore_reply, "OK OK", invalid_steps)
     fcall_after_restore = record("fcall_after_restore", "FCALL", fname, "0")
-    require_round_trip_reply("fcall_after_restore", fcall_after_restore, "OK 41", invalid_steps)
+    require_round_trip_reply("fcall_after_restore", fcall_after_restore, expected_fcall, invalid_steps)
     return out, invalid_steps
 
 
@@ -364,10 +363,10 @@ def run_round_trips(redis, fr):
     divergences = 0
     control_failures = 0
     invalid_steps = []
-    for i, (name, body, _desc) in enumerate(ROUND_TRIP_CASES):
+    for i, (name, body, _desc, expected_fcall) in enumerate(ROUND_TRIP_CASES):
         lib, fname = f"rtlib{i}", f"rtfn{i}"
-        r_steps, r_invalid = round_trip(redis, lib, fname, body)
-        f_steps, f_invalid = round_trip(fr, lib, fname, body)
+        r_steps, r_invalid = round_trip(redis, lib, fname, body, expected_fcall)
+        f_steps, f_invalid = round_trip(fr, lib, fname, body, expected_fcall)
         invalid_steps.extend(("redis", name, *entry) for entry in r_invalid)
         invalid_steps.extend(("fr", name, *entry) for entry in f_invalid)
         for (step, r_reply), (_, f_reply) in zip(r_steps, f_steps):
