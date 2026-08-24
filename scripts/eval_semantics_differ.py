@@ -259,6 +259,31 @@ def _normalize_error(reply):
     return reply[:1] == b"-"
 
 
+def _same_cache_reply(oracle, fr):
+    """Compare cache-sequence replies, allowing only source-location error drift."""
+    if oracle == fr:
+        return True
+    if oracle[:1] == b"-" and fr[:1] == b"-":
+        return oracle[1:].split(b" ", 1)[0] == fr[1:].split(b" ", 1)[0]
+    return False
+
+
+def _self_test():
+    """A deliberately wrong Lua reply must make the real comparison reject it."""
+    failures = []
+    if _same_cache_reply(b":1\r\n", b":2\r\n"):
+        failures.append("integer reply mismatch was accepted")
+    if _same_cache_reply(b"-ERR one\r\n", b"-WRONGTYPE two\r\n"):
+        failures.append("different Redis error codes were accepted")
+    if not _same_cache_reply(b"-ERR user_script:1: one\r\n", b"-ERR user_script:9: two\r\n"):
+        failures.append("allowed Lua source-location error drift was rejected")
+    if failures:
+        print("SELF-TEST FAIL: " + "; ".join(failures))
+        return 1
+    print("SELF-TEST PASS: Lua reply and error-code mismatches are caught")
+    return 0
+
+
 def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else ORACLE_DEFAULT
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else FR_DEFAULT
@@ -288,10 +313,7 @@ def main():
             ro = _norm(send(o, *args))
             rf = _norm(send(f, *args))
             cache_steps += 1
-            same = ro == rf
-            if not same and ro[0] == "-" and rf[0] == "-":
-                # both errors: compare the leading error code word
-                same = ro[1].split(" ", 1)[0] == rf[1].split(" ", 1)[0]
+            same = _same_cache_reply(ro, rf)
             if not same:
                 div += 1
                 print(f"DIVERGE(cache) {args!r}\n  oracle: {ro!r}\n  fr    : {rf!r}")
@@ -306,4 +328,4 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_self_test() if "--self-test" in sys.argv else main())
