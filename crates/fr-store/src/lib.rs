@@ -61092,10 +61092,7 @@ mod tests {
                 verbatim.object_encoding(b"l", 1),
                 "n={n} w={w}: OBJECT ENCODING diverged"
             );
-            assert_eq!(
-                rebuilt.dirty, verbatim.dirty,
-                "n={n} w={w}: dirty diverged"
-            );
+            assert_eq!(rebuilt.dirty, verbatim.dirty, "n={n} w={w}: dirty diverged");
         }
     }
 
