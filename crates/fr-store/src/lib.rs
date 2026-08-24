@@ -35983,15 +35983,41 @@ impl Store {
             RDB_TYPE_HASH_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                // Zero-copy span build (see hash_from_listpack_spans): avoids the N
-                // transient owned Vec<u8> that decode_listpack_strings allocates only
-                // for the builder to copy into the hash's arena and drop.
-                let (hash, max_element_len) = hash_from_listpack_spans(&listpack)?;
-                if hash.is_empty() {
-                    return Err(StoreError::InvalidDumpPayload);
+                // (frankenredis-33832) The compact RDB payload is already the target
+                // representation for a fresh, threshold-fitting hash. Keep its one
+                // allocation plus the bounded span/index sidecar instead of decoding
+                // every field and value only to copy them into PackedStrMap's arena.
+                // `try_from_rdb_listpack` performs the structural, threshold, and
+                // duplicate checks needed for that representation; its `Err(blob)`
+                // is the normal rebuild fallback for duplicate fields or a live
+                // threshold promotion, which must retain the established RESTORE
+                // semantics.
+                match HashFieldMap::try_from_rdb_listpack(
+                    listpack,
+                    self.hash_max_listpack_entries,
+                    self.hash_max_listpack_value,
+                )
+                .map_err(|_| StoreError::InvalidDumpPayload)?
+                {
+                    Ok(hash) => {
+                        // The retaining constructor has already established that every
+                        // element fits the live limit, so the post-build refresh needs
+                        // no second scan.
+                        restored_max_element_len = Some(0);
+                        Value::Hash(Box::new(hash))
+                    }
+                    Err(listpack) => {
+                        // Zero-copy span build: avoids the N transient owned Vec<u8>
+                        // that decode_listpack_strings allocates only for the builder
+                        // to copy into the hash's arena and drop.
+                        let (hash, max_element_len) = hash_from_listpack_spans(&listpack)?;
+                        if hash.is_empty() {
+                            return Err(StoreError::InvalidDumpPayload);
+                        }
+                        restored_max_element_len = Some(max_element_len);
+                        Value::Hash(Box::new(hash))
+                    }
                 }
-                restored_max_element_len = Some(max_element_len);
-                Value::Hash(Box::new(hash))
             }
             RDB_TYPE_HASH_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -76035,6 +76061,10 @@ mod tests {
         dst.hash_max_listpack_value = 20;
         dst.restore_key(b"h", 0, &payload, false, 100).unwrap();
         assert_eq!(dst.object_encoding(b"h", 100), Some("listpack"));
+        assert!(matches!(
+            &dst.entries.get(b"h" as &[u8]).expect("restored key").value,
+            Value::Hash(map) if matches!(map.as_ref(), HashFieldMap::Listpack(_))
+        ));
     }
 
     /// The entry-count threshold must still promote on its own, with every element
