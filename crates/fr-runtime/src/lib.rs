@@ -15127,7 +15127,13 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        // `processCommand` applies the RDB/AOF disk-error gate to PING even
+        // though PING is otherwise read-only. Keep that exceptional command
+        // rule here: a denied PING must fall through to
+        // `reject_due_to_disk_write_error` for the canonical MISCONF reply.
+        if self.active_disk_write_denial().is_some()
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
             return None;
         }
 
@@ -52131,6 +52137,28 @@ mod tests {
             "MULTI PING must defer to generic (queue)"
         );
         assert!(tx_out.is_empty());
+    }
+
+    #[test]
+    fn plain_ping_borrowed_defers_to_misconf_gate() {
+        let mut runtime = Runtime::default_strict();
+        runtime.set_rdb_path(std::path::PathBuf::from("dump.rdb"));
+        runtime.server.store.stat_rdb_last_bgsave_ok = false;
+
+        let mut out = Vec::new();
+        assert!(
+            runtime
+                .execute_plain_ping_borrowed_into(None, 1, false, &mut out)
+                .is_none(),
+            "PING must not bypass the disk-error gate"
+        );
+        assert!(out.is_empty());
+
+        let reply = runtime.execute_frame(command(&[b"PING"]), 1);
+        assert!(
+            matches!(&reply, RespFrame::Error(message) if message.starts_with("MISCONF")),
+            "the generic PING gate owns the canonical MISCONF reply: {reply:?}"
+        );
     }
 
     #[test]

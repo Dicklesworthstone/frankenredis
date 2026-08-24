@@ -4015,14 +4015,22 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
         }
 
         if let Some(packet) = parse_borrowed_plain_ping_packet(unparsed, &parser_config) {
-            if let Some(message) = packet.message {
-                fr_protocol::encode_bulk_string_slice(
-                    Some(message),
-                    false,
+            let client_resp3 = connection.session.resp_protocol_version() == 3;
+            if runtime
+                .execute_plain_ping_borrowed_into(
+                    packet.message,
+                    ts,
+                    client_resp3,
                     &mut connection.write_buf,
-                );
-            } else {
-                connection.write_buf.extend_from_slice(b"+PONG\r\n");
+                )
+                .is_none()
+            {
+                let mut argv = vec![RespFrame::BulkString(Some(b"PING".to_vec()))];
+                if let Some(message) = packet.message {
+                    argv.push(RespFrame::BulkString(Some(message.to_vec())));
+                }
+                let reply = runtime.execute_frame(RespFrame::Array(Some(argv)), ts);
+                encode_client_reply(&reply, client_resp3, &mut connection.write_buf);
             }
             consumed_total += packet.consumed;
             continue;
@@ -6837,13 +6845,19 @@ fn dispatch_sharded_set_get_frames(
 
         let unparsed = &conn.read_buf[consumed_total..];
         if let Some(packet) = parse_borrowed_plain_ping_packet(unparsed, &parser_config) {
-            let response = if let Some(message) = packet.message {
-                let mut response = Vec::new();
-                fr_protocol::encode_bulk_string_slice(Some(message), false, &mut response);
-                response
-            } else {
-                b"+PONG\r\n".to_vec()
-            };
+            let client_resp3 = conn.session.resp_protocol_version() == 3;
+            let mut response = Vec::new();
+            if runtime
+                .execute_plain_ping_borrowed_into(packet.message, ts, client_resp3, &mut response)
+                .is_none()
+            {
+                let mut argv = vec![RespFrame::BulkString(Some(b"PING".to_vec()))];
+                if let Some(message) = packet.message {
+                    argv.push(RespFrame::BulkString(Some(message.to_vec())));
+                }
+                let reply = runtime.execute_frame(RespFrame::Array(Some(argv)), ts);
+                encode_client_reply(&reply, client_resp3, &mut response);
+            }
             if !conn
                 .sharded_replies
                 .complete_local(response, &mut conn.write_buf)
