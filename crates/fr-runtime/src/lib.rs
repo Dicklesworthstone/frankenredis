@@ -27255,12 +27255,14 @@ impl Runtime {
         let keys_start = out.len();
         let mut returned = 0usize;
         let next_cursor = self.server.store.scan_in_db_visit(
-            db,
-            cursor,
-            pattern,
-            type_filter,
-            count,
-            now_ms,
+            fr_store::ScanQuery {
+                db,
+                cursor,
+                pattern,
+                type_filter,
+                count,
+                now_ms,
+            },
             |logical| {
                 returned += 1;
                 if !suppress_reply {
@@ -27665,12 +27667,22 @@ impl Runtime {
         let next_cursor =
             self.server
                 .store
-                .scan_in_db_visit(db, cursor, None, None, 10, now_ms, |logical| {
-                    count += 1;
-                    if !suppress_reply {
-                        fr_protocol::encode_bulk_string_slice(Some(logical), resp3, out);
-                    }
-                });
+                .scan_in_db_visit(
+                    fr_store::ScanQuery {
+                        db,
+                        cursor,
+                        pattern: None,
+                        type_filter: None,
+                        count: 10,
+                        now_ms,
+                    },
+                    |logical| {
+                        count += 1;
+                        if !suppress_reply {
+                            fr_protocol::encode_bulk_string_slice(Some(logical), resp3, out);
+                        }
+                    },
+                );
         if !suppress_reply {
             let keys_len = out.len() - keys_start;
             out.extend_from_slice(b"*2\r\n");

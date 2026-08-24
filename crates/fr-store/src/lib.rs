@@ -4620,6 +4620,35 @@ struct Entry {
 
 const _: () = assert!(std::mem::size_of::<Entry>() <= 48);
 
+/// Everything that identifies ONE `SCAN` batch: which database, where to resume,
+/// what to match, and how much to do.
+///
+/// These six values always travel together — every caller supplies all of them and
+/// none of them means anything without the others — but they were being passed
+/// positionally, which pushed `scan_in_db_visit` to eight parameters and made
+/// `cargo clippy -p fr-store -- -D warnings` fail on committed `main`.
+///
+/// Arity was the symptom. The readability cost is the real one: the call site for
+/// `RANDOMKEY`-style paging read `scan_in_db_visit(db, cursor, None, None, 10, now_ms, ..)`,
+/// where nothing at the call site says which `None` is the glob and which is the
+/// type filter, and `10` could be a count or a cursor. Naming the fields fixes the
+/// lint and that at the same time.
+#[derive(Debug, Clone, Copy)]
+pub struct ScanQuery<'a> {
+    /// Logical database index to scan.
+    pub db: usize,
+    /// Opaque resume cursor; 0 begins a fresh scan.
+    pub cursor: u64,
+    /// `MATCH` glob applied to the LOGICAL key, or `None` for all keys.
+    pub pattern: Option<&'a [u8]>,
+    /// `TYPE` filter, or `None` for all types.
+    pub type_filter: Option<&'a [u8]>,
+    /// `COUNT` hint — the batch size the walk aims for.
+    pub count: usize,
+    /// Clock for the expiry reap the walk performs first.
+    pub now_ms: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 struct RandomKeySlotIndex {
     keys: Vec<StoreKey>,
@@ -31993,16 +32022,15 @@ impl Store {
     /// resume cache is pushed under `&mut self`, so keeping a borrow of
     /// `ordered_keys` alive for it would conflict. It costs one copy, and only
     /// when the batch fills.
-    pub fn scan_in_db_visit<F: FnMut(&[u8])>(
-        &mut self,
-        db: usize,
-        cursor: u64,
-        pattern: Option<&[u8]>,
-        type_filter: Option<&[u8]>,
-        count: usize,
-        now_ms: u64,
-        mut visit: F,
-    ) -> u64 {
+    pub fn scan_in_db_visit<F: FnMut(&[u8])>(&mut self, query: ScanQuery<'_>, mut visit: F) -> u64 {
+        let ScanQuery {
+            db,
+            cursor,
+            pattern,
+            type_filter,
+            count,
+            now_ms,
+        } = query;
         // Reap due volatile keys — identical eviction set to keys_in_db /
         // keys_matching_in_db (drop_if_expired is a no-op on non-volatile keys).
         self.expire_volatile_keys_in_db(db, now_ms);
@@ -32221,10 +32249,17 @@ impl Store {
         now_ms: u64,
     ) -> (u64, Vec<Vec<u8>>) {
         let mut result: Vec<Vec<u8>> = Vec::new();
-        let next_cursor =
-            self.scan_in_db_visit(db, cursor, pattern, type_filter, count, now_ms, |logical| {
-                result.push(logical.to_vec())
-            });
+        let next_cursor = self.scan_in_db_visit(
+            ScanQuery {
+                db,
+                cursor,
+                pattern,
+                type_filter,
+                count,
+                now_ms,
+            },
+            |logical| result.push(logical.to_vec()),
+        );
         (next_cursor, result)
     }
 
