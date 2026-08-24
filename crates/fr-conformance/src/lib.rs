@@ -2186,6 +2186,64 @@ fn live_oracle_frames_match(
 fn conformance_case_frame_matches_expected(case: &ConformanceCase, actual: &RespFrame) -> bool {
     frame_matches_expected(actual, &case.expect)
         || fixture_acl_cat_command_set_matches(case, actual, &case.expect)
+        || fixture_keyspace_scan_set_matches(case, actual, &case.expect)
+}
+
+/// Keyspace `SCAN` returns its keys in an order NO fixture can pin, so this suite
+/// compares the returned key SET and the cursor, not the sequence.
+///
+/// (frankenredis-uhthd step 2) Measured, not assumed, on both engines:
+///
+///   * Redis 7.2.4 seeds its dict hash from random bytes at startup. Three fresh
+///     servers, identical inserts, `SCAN 0 COUNT 100` -> three different orders.
+///   * fr now does the same (`KeyDict` carries a randomly-seeded hasher, which is
+///     the hash-flooding defence). Two runs of the SAME fr binary on the SAME
+///     fixture produce different orders.
+///
+/// So an exact-sequence expectation is not a stricter test than this one; it is a
+/// test of the hash seed, and it would fail on the next run for either engine.
+/// Redis documents SCAN's order as unspecified for exactly this reason.
+///
+/// This deliberately still compares the CURSOR exactly and the key set exactly --
+/// it relaxes ORDER only. A scan that dropped or invented a key still fails here,
+/// and `live_redis_core_scan_matches_runtime` independently holds fr's replies
+/// against a live 7.2.4 on the same corpus. The ordering-free properties Redis
+/// actually promises (a present-throughout key is returned at least once, no
+/// duplicate in a rehash-free window, termination) are covered against a live
+/// server by `scripts/scan_guarantee_differ.py`.
+fn fixture_keyspace_scan_set_matches(
+    case: &ConformanceCase,
+    actual: &RespFrame,
+    expected: &ExpectedFrame,
+) -> bool {
+    if !case
+        .argv
+        .first()
+        .is_some_and(|cmd| cmd.eq_ignore_ascii_case("scan"))
+    {
+        return false;
+    }
+    let expected = expected_to_frame(expected);
+    let (RespFrame::Array(Some(actual_items)), RespFrame::Array(Some(expected_items))) =
+        (actual, &expected)
+    else {
+        return false;
+    };
+    // A SCAN reply is exactly [cursor, [keys...]]; anything else is not this shape
+    // and must fall through to the exact comparison rather than be waved through.
+    if actual_items.len() != 2 || expected_items.len() != 2 {
+        return false;
+    }
+    if actual_items[0] != expected_items[0] {
+        return false;
+    }
+    let (Some(actual_keys), Some(expected_keys)) = (
+        canonical_flat_bulk_set(&actual_items[1]),
+        canonical_flat_bulk_set(&expected_items[1]),
+    ) else {
+        return false;
+    };
+    actual_keys == expected_keys
 }
 
 fn fixture_acl_cat_command_set_matches(

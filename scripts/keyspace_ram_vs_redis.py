@@ -134,6 +134,20 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+def running_elf_sha256(pid):
+    """SHA-256 of the image the process ACTUALLY loaded, via /proc/<pid>/exe.
+
+    Not the path the harness was handed. The two differ exactly when it matters: a
+    build that FAILED leaves the PREVIOUS binary at the same path, so hashing the
+    path reports a candidate SHA for what is really the control ELF. That happened
+    in this campaign -- a failed build plus a `cp` produced a "measurement"
+    byte-identical to the control, caught only because the numbers looked
+    suspiciously exact. Reading the SHA out of the running process makes that
+    unrepresentable, and it is the provenance class the ledger's KEEP rows require.
+    """
+    return sha256_file(f"/proc/{pid}/exe")
+
+
 class Server:
     def __init__(self, label, binary, port, workdir):
         self.label = label
@@ -205,6 +219,7 @@ def main():
             rows[srv.label] = {
                 "port": srv.port,
                 "pid": srv.proc.pid,
+                "running_elf_sha256": running_elf_sha256(srv.proc.pid),
                 "empty_rss": empty_rss,
                 "loaded_rss": loaded_rss,
                 "delta_rss": loaded_rss - empty_rss,
@@ -234,8 +249,13 @@ def main():
         prov = {
             "host": platform.node(),
             "keys": args.keys,
-            "fr_elf_sha256": sha256_file(args.fr),
-            "redis_elf_sha256": sha256_file(args.redis),
+            # Self-reported from inside the running processes (/proc/<pid>/exe),
+            # not hashed from the paths passed in. See `running_elf_sha256`.
+            "fr_elf_sha256_running": rows["fr_a"]["running_elf_sha256"],
+            "fr_b_elf_sha256_running": rows["fr_b"]["running_elf_sha256"],
+            "redis_elf_sha256_running": rows["redis"]["running_elf_sha256"],
+            "fr_elf_sha256_on_disk": sha256_file(args.fr),
+            "redis_elf_sha256_on_disk": sha256_file(args.redis),
             "redis_version": subprocess.run(
                 [args.redis, "--version"], capture_output=True, text=True
             ).stdout.strip(),

@@ -4672,7 +4672,23 @@ impl Default for ServerState {
             maxmemory_bytes: 0,
             maxmemory_not_counted_bytes: 0,
             maxmemory_eviction_sample_limit: 5,
-            maxmemory_eviction_max_cycles: 4,
+            // (frankenredis-uhthd) 4 was a workaround for O(n) candidate selection,
+            // not a policy. Each cycle evicted at most one key and cost a full
+            // keyspace walk, so a bigger budget multiplied an O(n) operation; the
+            // consequence was that any pressure needing more than four evictions
+            // left the loop `Running`, which sets `over_maxmemory_live` and REFUSES
+            // THE WRITE. Measured against live Redis 7.2.4 at `--maxmemory 100mb
+            // --maxmemory-policy allkeys-lru`: redis evicted 143,334 keys and never
+            // errored; fr evicted 450 and then answered `-OOM`.
+            //
+            // Selection is O(1) now (`KeyDict::random_sample`), so the budget can
+            // express what upstream actually does -- free until under the limit --
+            // while still bounding the work one command may do, which is what keeps
+            // a single-threaded event loop responsive. Upstream bounds the same loop
+            // by TIME via `maxmemory-eviction-tenacity`; a cycle cap is the same
+            // idea with a cheaper check, and the loop still exits early the moment
+            // pressure clears or no candidate can be found.
+            maxmemory_eviction_max_cycles: 1000,
             eviction_safety_gate: EvictionSafetyGateState::default(),
             last_eviction_loop: None,
             active_expire_db_cursor: 0,
@@ -42747,7 +42763,50 @@ impl Runtime {
         // returned only once even when multiple patterns (or repeats
         // of the same pattern) match it. Track seen keys
         // case-insensitively to mirror that. (frankenredis-8xgpr)
-        let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        // (frankenredis-e6c9t) foldhash, NOT the std default. This set is probed once per
+        // emitted pair, and `CONFIG GET *` emits ~200 of them: COUNTED at 201.00 lookups/op
+        // on this shape, driving 421.00 `hash_one` calls and a large share of the 1,140.00
+        // SipHash rounds/op the route spends. `std::collections::HashSet` uses SipHash-1-3,
+        // a keyed cryptographic hash, to answer "have I already emitted this config name" --
+        // where the keys are the server's OWN parameter names out of a static table, never
+        // attacker-supplied.
+        //
+        // This crate already uses `foldhash::quality::RandomState` for exactly this job
+        // (`ConfigStaticParamIndex`, `pubsub_outbox`); the set was simply missed. It stays
+        // randomly seeded, so the flooding resistance that matters for a keyspace-facing map
+        // is unchanged -- and nothing here is keyspace-facing anyway.
+        //
+        // Membership semantics are hasher-independent, and `seen` is only ever `contains`ed
+        // and `insert`ed -- never iterated -- so the emitted reply cannot change.
+        //
+        // (frankenredis-e6c9t lever D) PRE-SIZED. Starting from zero, the set doubles its
+        // way up to the ~195 names a `CONFIG GET *` emits, and every doubling rehashes
+        // everything already inserted: MEASURED at 15,330 instr/op in
+        // `RawTable::reserve_rehash`, 6.0 pct of the command, spent moving entries between
+        // tables that are all discarded at the end of the call.
+        //
+        // `CONFIG_STATIC_PARAMS.len()` is the right bound and not a guess: the reply is that
+        // table plus a fixed handful of dynamic names, so this over-reserves slightly and
+        // never under-reserves into a rehash.
+        //
+        // RESERVED ONLY FOR A GLOB, and that is measured rather than tidiness. Reserving
+        // unconditionally cost the LITERAL arm +216 instr/op (7,141.3 -> 7,357.3, +3.0 pct)
+        // for a table it fills one entry of -- a real regression on `CONFIG GET <name>`,
+        // which is what ordinary clients send, to speed up the wildcard that monitoring
+        // sends. Scanning the patterns for a metacharacter is a few bytes of work on a
+        // one- or two-element argv and lets the literal keep its empty-set allocation.
+        let wants_many = argv[2..]
+            .iter()
+            .any(|p| p.iter().any(|b| matches!(b, b'*' | b'?' | b'[')));
+        let mut seen: std::collections::HashSet<Vec<u8>, foldhash::quality::RandomState> =
+            if wants_many {
+                std::collections::HashSet::with_capacity_and_hasher(
+                    CONFIG_STATIC_PARAMS.len(),
+                    foldhash::quality::RandomState::default(),
+                )
+            } else {
+                std::collections::HashSet::default()
+            };
         // Redis 7+ supports multiple patterns: CONFIG GET pattern1 pattern2 ...
         for arg in &argv[2..] {
             let raw_pattern = match std::str::from_utf8(arg) {
@@ -45686,6 +45745,30 @@ impl Runtime {
     fn config_pattern_matches_known(pattern: &str, is_literal: bool, parameter: &str) -> bool {
         if is_literal {
             return pattern.as_bytes() == parameter.as_bytes();
+        }
+        // (frankenredis-e6c9t lever B) `*` matches every parameter, so ASK the glob engine
+        // nothing. `CONFIG GET *` is what monitoring clients actually send, and it reaches
+        // this predicate once per candidate: MEASURED at 242.00 calls/op, every one of them
+        // returning true, costing `glob_match_inner` 54,210 instr/op plus `glob_match`
+        // 7,986 -- 62,196 instr/op, ~16 pct of the whole command, to re-derive a constant.
+        //
+        // This is the all-match half of the hoist that already took `is_literal` out of the
+        // loop; `is_literal` was lifted and the all-match case was not.
+        //
+        // THE EMPTY PARAMETER IS NOT A MATCH, and I did not get that right by reasoning --
+        // `config_pattern_literal_fast_path_agrees_with_glob_e6c9t` drives `("*", "")` and
+        // caught an earlier version of this returning `true`. `glob_match` answers `false`
+        // there deliberately (frankenredis-z9dc3): an empty string matches only an empty
+        // pattern in that matcher, because `*` matching an empty key is handled by the
+        // `is_star` shortcut in KEYS/SCAN rather than by the glob engine. So the exact
+        // equivalent of `glob_match(b"*", x)` is `!x.is_empty()`, not `true`.
+        //
+        // Deliberately NOT threaded through the ~40 call sites as a second flag. A one-byte
+        // pattern compare is a few instructions against a call into the glob engine, and
+        // widening this predicate's signature is the shape this repo has measured at
+        // +8-16 instr/op per added parameter on hot dispatch paths.
+        if pattern.as_bytes() == b"*" {
+            return !parameter.is_empty();
         }
         glob_match(pattern.as_bytes(), parameter.as_bytes())
     }
@@ -50239,20 +50322,14 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
-            RdbValue::ListQuicklist2Packed(ref nodes) => {
-                let mut items = Vec::new();
-                for node in nodes {
-                    let spans = fr_persist::listpack::decode_value_spans(node)
-                        .map_err(|_| PersistError::InvalidFrame)?;
-                    for span in spans {
-                        items.push(span.as_bytes(node).to_vec());
-                    }
-                }
-                // (frankenredis-listrdbmove) The spans were already `to_vec`'d into owned
-                // `items`; MOVE them in (rpush_owned) instead of `rpush(&items)` re-cloning
-                // every element. Byte-identical.
+            RdbValue::ListQuicklist2Packed(nodes) => {
+                // (frankenredis-qj6jn) This arm used to decode every span and `to_vec` it --
+                // one heap allocation per list element -- and rebuild the list through
+                // `rpush_owned`. Upstream installs the saved listpack AS the quicklist node
+                // (`quicklistAppendListpack`), which is what fr's own RESTORE path already
+                // does with the identical payload bytes. Hand the blobs to that constructor.
                 store
-                    .rpush_owned(&key, items, now_ms)
+                    .load_rdb_quicklist2_packed_list(&key, nodes, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
@@ -61730,15 +61807,36 @@ mod tests {
                 RespFrame::BulkString(Some(b"shared".to_vec())),
             ]))
         );
+        // (frankenredis-uhthd) Compare the SCAN key SET, not the sequence. SCAN now walks
+        // a reverse-binary cursor over a randomly-seeded hash table, so the order is
+        // nondeterministic ACROSS PROCESSES by design -- exactly as it is in Redis 7.2.4,
+        // where three fresh servers give three different orders on identical data. Pinning
+        // a sequence here made this test pass or fail on the hash seed. The cursor (0, i.e.
+        // the scan completed) and the key set are the parts that are actually specified.
+        let scan_reply = rt.execute_frame(command(&[b"SCAN", b"0"]), 6);
+        let RespFrame::Array(Some(scan_parts)) = &scan_reply else {
+            panic!("SCAN must reply with an array, got {scan_reply:?}")
+        };
         assert_eq!(
-            rt.execute_frame(command(&[b"SCAN", b"0"]), 6),
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"0".to_vec())),
-                RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(b"other".to_vec())),
-                    RespFrame::BulkString(Some(b"shared".to_vec())),
-                ])),
-            ]))
+            scan_parts[0],
+            RespFrame::BulkString(Some(b"0".to_vec())),
+            "a complete SCAN must return cursor 0"
+        );
+        let RespFrame::Array(Some(scan_keys)) = &scan_parts[1] else {
+            panic!("SCAN must reply with a key array, got {:?}", scan_parts[1])
+        };
+        let mut got: Vec<Vec<u8>> = scan_keys
+            .iter()
+            .map(|f| match f {
+                RespFrame::BulkString(Some(b)) => b.clone(),
+                other => panic!("SCAN key must be a bulk string, got {other:?}"),
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![b"other".to_vec(), b"shared".to_vec()],
+            "SELECT must scope SCAN to the selected db"
         );
 
         assert_eq!(
@@ -62302,13 +62400,39 @@ mod tests {
             RespFrame::Error("ERR invalid cursor".to_string())
         );
 
-        let empty_scan = RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(b"0".to_vec())),
-            RespFrame::Array(Some(Vec::new())),
-        ]));
-        assert_eq!(rt.execute_frame(command(&[b"SCAN", b"-1"]), 2), empty_scan);
-        assert_eq!(rt.execute_frame(command(&[b"SCAN", b"+1"]), 3), empty_scan);
-        assert_eq!(rt.execute_frame(command(&[b"SCAN", b"01"]), 4), empty_scan);
+        // (frankenredis-uhthd) What is SPECIFIED here is that these three cursor spellings
+        // are ACCEPTED -- unlike "abc" above -- and that the scan terminates. It is NOT that
+        // the reply is empty.
+        //
+        // This used to assert an empty reply, which held while SCAN walked a sorted index.
+        // Under a reverse-binary cursor an out-of-range cursor is masked to a bucket and the
+        // scan proceeds from there, returning whatever lives in the remaining buckets.
+        // Redis 7.2.4 does exactly the same thing, and whether the answer comes back empty
+        // is SEED LUCK, not contract: measured on a live 7.2.4, a one-key db returns
+        // `(0, [])` for all three of these (the key is not in the masked bucket), while an
+        // eight-key db returns `(0, [key:1, key:3])` for `SCAN 999999`. Pinning "empty"
+        // would be pinning which bucket one key happened to land in.
+        for cursor in [b"-1".as_slice(), b"+1", b"01"] {
+            let reply = rt.execute_frame(command(&[b"SCAN", cursor]), 2);
+            let RespFrame::Array(Some(parts)) = &reply else {
+                panic!("SCAN {cursor:?} must be accepted and reply with an array, got {reply:?}")
+            };
+            assert_eq!(
+                parts[0],
+                RespFrame::BulkString(Some(b"0".to_vec())),
+                "SCAN {cursor:?} must terminate on this keyspace"
+            );
+            let RespFrame::Array(Some(keys)) = &parts[1] else {
+                panic!("SCAN {cursor:?} must reply with a key array, got {:?}", parts[1])
+            };
+            for key in keys {
+                assert_eq!(
+                    key,
+                    &RespFrame::BulkString(Some(b"k".to_vec())),
+                    "SCAN {cursor:?} returned a key that is not in the keyspace"
+                );
+            }
+        }
     }
 
     #[test]
@@ -71445,6 +71569,71 @@ mod tests {
         );
     }
 
+    /// (frankenredis-qj6jn) DEBUG RELOAD round-trips a quicklist through
+    /// `encode_rdb` → `decode_rdb_prefix` → `apply_rdb_entries_to_store`, and the load half
+    /// now installs the saved listpack blobs verbatim instead of decoding every element into
+    /// its own `Vec<u8>` and rebuilding the container.
+    ///
+    /// The four assertions are chosen so that each one would catch a different way the
+    /// verbatim path could be wrong: LRANGE catches content and ORDER (a reversed chunk, a
+    /// dropped node), LLEN catches a silently truncated node, OBJECT ENCODING catches a
+    /// listpack/quicklist flip, and DUMP catches a change of NODE BOUNDARIES — which nothing
+    /// else here would see, because a re-chunked list reads identically through every
+    /// command and only differs on the wire.
+    ///
+    /// Both regimes are covered on purpose: 200×40 bytes crosses `list-max-listpack-size`
+    /// and so travels as QUICKLIST_2 (the arm under change), while the 5-element list stays
+    /// a listpack and must be untouched by any of it.
+    #[test]
+    fn debug_reload_keeps_a_quicklist_byte_identical_qj6jn() {
+        let mut rt = Runtime::default_strict();
+        rt.set_enable_debug_command("yes");
+
+        for i in 0..200u32 {
+            let mut value = format!("elem{i:05}:").into_bytes();
+            value.resize(40, b'q');
+            rt.execute_frame(command(&[b"RPUSH", b"big", &value]), 0);
+        }
+        for m in [b"a".as_slice(), b"b", b"c", b"d", b"e"] {
+            rt.execute_frame(command(&[b"RPUSH", b"small", m]), 0);
+        }
+
+        let snapshot = |rt: &mut Runtime, ts: u64| {
+            let mut out = Vec::new();
+            for key in [b"big".as_slice(), b"small"] {
+                out.push(rt.execute_frame(command(&[b"LRANGE", key, b"0", b"-1"]), ts));
+                out.push(rt.execute_frame(command(&[b"LLEN", key]), ts));
+                out.push(rt.execute_frame(command(&[b"OBJECT", b"ENCODING", key]), ts));
+                out.push(rt.execute_frame(command(&[b"DUMP", key]), ts));
+            }
+            out
+        };
+
+        let before = snapshot(&mut rt, 1);
+        assert_eq!(
+            before[2],
+            RespFrame::BulkString(Some(b"quicklist".to_vec())),
+            "precondition: the 200x40 list must be a quicklist, or this test never reaches \
+             the QUICKLIST_2 arm it exists to cover"
+        );
+        assert_eq!(
+            before[6],
+            RespFrame::BulkString(Some(b"listpack".to_vec())),
+            "precondition: the 5-element list must still be a listpack"
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"RELOAD"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            snapshot(&mut rt, 3),
+            before,
+            "DEBUG RELOAD changed an observable property of a list"
+        );
+    }
+
     #[test]
     fn debug_reload_preserves_function_libraries_with_rdb_path_i0yd6() {
         // (frankenredis-i0yd6) The branch that was ACTUALLY broken. The sibling test
@@ -73778,9 +73967,15 @@ mod tests {
             loaded_manifest
                 .base_rdb_entries
                 .iter()
+                // (frankenredis-qj6jn) ...and a QUICKLIST_2 list decodes as its verbatim
+                // node blobs for the same reason. Accept either spelling: what this
+                // assertion is about is that the db-2 list reached the base RDB at all.
                 .any(|entry| entry.db == 2
                     && entry.key == b"db2:list"
-                    && matches!(entry.value, RdbValue::List(_))),
+                    && matches!(
+                        entry.value,
+                        RdbValue::List(_) | RdbValue::ListQuicklist2Packed(_)
+                    )),
             "SAVE manifest base RDB must include DB 2 list, got {:?}",
             loaded_manifest.base_rdb_entries
         );
@@ -80518,15 +80713,18 @@ user bob reset off nopass +@all
             b"26",
             b"1000",
         ] {
-            let mut fast = Runtime::default_strict();
-            let mut generic = Runtime::default_strict();
-            seed(&mut fast);
-            seed(&mut generic);
+            // (frankenredis-uhthd) ONE runtime: two Stores draw independent hash seeds and
+            // enumerate SCAN in different orders by design, so a cross-instance comparison
+            // tested the seed rather than the fast path. Same store, same inputs, and SCAN
+            // is a read so the two calls cannot interfere.
+            let mut rt = Runtime::default_strict();
+            seed(&mut rt);
+            let digest_before = rt.server.store.state_digest();
 
-            let fast_reply = fast
+            let fast_reply = rt
                 .execute_plain_scan_borrowed(cursor, 20, None)
                 .unwrap_or_else(|| panic!("canonical cursor {cursor:?} must be served"));
-            let generic_reply = generic.execute_frame(command(&[b"SCAN", cursor]), 20);
+            let generic_reply = rt.execute_frame(command(&[b"SCAN", cursor]), 20);
 
             assert_eq!(
                 fast_reply,
@@ -80534,8 +80732,8 @@ user bob reset off nopass +@all
                 "cursor {cursor:?}: fast path must reproduce the generic reply exactly"
             );
             assert_eq!(
-                fast.server.store.state_digest(),
-                generic.server.store.state_digest(),
+                rt.server.store.state_digest(),
+                digest_before,
                 "cursor {cursor:?}: SCAN is a read and must not mutate"
             );
         }
@@ -80674,24 +80872,33 @@ user bob reset off nopass +@all
             (b"type", b"string"),
         ] {
             for cursor in [b"0".as_slice(), b"7"] {
-                let mut fast = Runtime::default_strict();
-                let mut generic = Runtime::default_strict();
-                seed(&mut fast);
-                seed(&mut generic);
+                // (frankenredis-uhthd) ONE runtime, not two. This used to build a
+                // separate `fast` and `generic` Runtime, seed both identically and compare
+                // their replies. That was sound while SCAN returned keys in SORTED order --
+                // deterministic across instances -- and stopped being sound when the
+                // keyspace moved to a reverse-binary cursor over a randomly-seeded hash
+                // table: two Stores draw different seeds, so they legitimately enumerate in
+                // different orders and the comparison fails on the SEED, not on the fast
+                // path. Running both against the SAME store is what the test actually means
+                // and is strictly stronger, since the inputs are now identical by
+                // construction. SCAN is a read, so the two calls cannot interfere.
+                let mut rt = Runtime::default_strict();
+                seed(&mut rt);
+                let digest_before = rt.server.store.state_digest();
 
-                let fast_reply = fast
+                let fast_reply = rt
                     .execute_plain_scan_opt_borrowed(cursor, kw, val, 20, None)
                     .unwrap_or_else(|| panic!("SCAN {cursor:?} {kw:?} {val:?} must be served"));
                 let generic_reply =
-                    generic.execute_frame(command(&[b"SCAN", cursor, kw, val]), 20);
+                    rt.execute_frame(command(&[b"SCAN", cursor, kw, val]), 20);
 
                 assert_eq!(
                     fast_reply, generic_reply,
                     "SCAN {cursor:?} {kw:?} {val:?}: must reproduce the generic exactly"
                 );
                 assert_eq!(
-                    fast.server.store.state_digest(),
-                    generic.server.store.state_digest(),
+                    rt.server.store.state_digest(),
+                    digest_before,
                     "SCAN {cursor:?} {kw:?} {val:?}: must not mutate"
                 );
             }
@@ -80867,26 +81074,35 @@ user bob reset off nopass +@all
             (b"TYPE", b"list", b"TYPE", b"string"),
         ] {
             for cursor in [b"0".as_slice(), b"9"] {
-                let mut fast = Runtime::default_strict();
-                let mut generic = Runtime::default_strict();
-                seed(&mut fast);
-                seed(&mut generic);
+                // (frankenredis-uhthd) ONE runtime, not two. This used to build a
+                // separate `fast` and `generic` Runtime, seed both identically and compare
+                // their replies. That was sound while SCAN returned keys in SORTED order --
+                // deterministic across instances -- and stopped being sound when the
+                // keyspace moved to a reverse-binary cursor over a randomly-seeded hash
+                // table: two Stores draw different seeds, so they legitimately enumerate in
+                // different orders and the comparison fails on the SEED, not on the fast
+                // path. Running both against the SAME store is what the test actually means
+                // and is strictly stronger, since the inputs are now identical by
+                // construction. SCAN is a read, so the two calls cannot interfere.
+                let mut rt = Runtime::default_strict();
+                seed(&mut rt);
+                let digest_before = rt.server.store.state_digest();
 
-                let fast_reply = fast
+                let fast_reply = rt
                     .execute_plain_scan_opt2_borrowed(cursor, k1, v1, k2, v2, 20, None)
                     .unwrap_or_else(|| {
                         panic!("SCAN {cursor:?} {k1:?} {v1:?} {k2:?} {v2:?} must be served")
                     });
                 let generic_reply =
-                    generic.execute_frame(command(&[b"SCAN", cursor, k1, v1, k2, v2]), 20);
+                    rt.execute_frame(command(&[b"SCAN", cursor, k1, v1, k2, v2]), 20);
 
                 assert_eq!(
                     fast_reply, generic_reply,
                     "SCAN {cursor:?} {k1:?} {v1:?} {k2:?} {v2:?} must match the generic"
                 );
                 assert_eq!(
-                    fast.server.store.state_digest(),
-                    generic.server.store.state_digest(),
+                    rt.server.store.state_digest(),
+                    digest_before,
                     "SCAN is a read and must not mutate"
                 );
             }
@@ -80913,13 +81129,13 @@ user bob reset off nopass +@all
 
         // The shared helper must give the SAME answer at arity 4 and arity 6 for the option
         // it has in common — that equivalence is the whole reason it is shared.
-        let mut a4 = Runtime::default_strict();
-        let mut a6 = Runtime::default_strict();
-        seed(&mut a4);
-        seed(&mut a6);
+        // (frankenredis-uhthd) ONE runtime: two Stores draw independent hash seeds and so
+        // enumerate SCAN in different orders by design. See the note above.
+        let mut rt = Runtime::default_strict();
+        seed(&mut rt);
         assert_eq!(
-            a4.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20, None),
-            a6.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20, None),
+            rt.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20, None),
+            rt.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20, None),
             "a repeated identical option must equal the single-option result"
         );
     }
@@ -80950,22 +81166,31 @@ user bob reset off nopass +@all
             (b"COUNT", b"1", b"COUNT", b"2", b"COUNT", b"100"),
         ] {
             for cursor in [b"0".as_slice(), b"11"] {
-                let mut fast = Runtime::default_strict();
-                let mut generic = Runtime::default_strict();
-                seed(&mut fast);
-                seed(&mut generic);
-                let fast_reply = fast
+                // (frankenredis-uhthd) ONE runtime, not two. This used to build a
+                // separate `fast` and `generic` Runtime, seed both identically and compare
+                // their replies. That was sound while SCAN returned keys in SORTED order --
+                // deterministic across instances -- and stopped being sound when the
+                // keyspace moved to a reverse-binary cursor over a randomly-seeded hash
+                // table: two Stores draw different seeds, so they legitimately enumerate in
+                // different orders and the comparison fails on the SEED, not on the fast
+                // path. Running both against the SAME store is what the test actually means
+                // and is strictly stronger, since the inputs are now identical by
+                // construction. SCAN is a read, so the two calls cannot interfere.
+                let mut rt = Runtime::default_strict();
+                seed(&mut rt);
+                let digest_before = rt.server.store.state_digest();
+                let fast_reply = rt
                     .execute_plain_scan_opt3_borrowed(cursor, k1, v1, k2, v2, k3, v3, 20, None)
                     .unwrap_or_else(|| panic!("SCAN {cursor:?} {k1:?}.. must be served"));
-                let generic_reply = generic
-                    .execute_frame(command(&[b"SCAN", cursor, k1, v1, k2, v2, k3, v3]), 20);
+                let generic_reply =
+                    rt.execute_frame(command(&[b"SCAN", cursor, k1, v1, k2, v2, k3, v3]), 20);
                 assert_eq!(
                     fast_reply, generic_reply,
                     "SCAN {cursor:?} {k1:?} {v1:?} {k2:?} {v2:?} {k3:?} {v3:?} must match"
                 );
                 assert_eq!(
-                    fast.server.store.state_digest(),
-                    generic.server.store.state_digest(),
+                    rt.server.store.state_digest(),
+                    digest_before,
                     "SCAN is a read and must not mutate"
                 );
             }
@@ -80991,17 +81216,16 @@ user bob reset off nopass +@all
 
         // Cross-wrapper agreement: the three wrappers share one impl, so a redundant
         // repetition must not change the answer.
-        let mut a = Runtime::default_strict();
-        let mut b = Runtime::default_strict();
-        let mut c = Runtime::default_strict();
-        seed(&mut a);
-        seed(&mut b);
-        seed(&mut c);
-        let one = a.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20, None);
-        let two = b.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20, None);
-        let three = c.execute_plain_scan_opt3_borrowed(
-            b"0", b"COUNT", b"100", b"COUNT", b"100", b"COUNT", b"100", 20,
-            None,
+        // (frankenredis-uhthd) ONE runtime for all three wrappers: separate Stores draw
+        // independent hash seeds and enumerate SCAN in different orders by design, so
+        // comparing across instances tested the seed rather than the wrappers.
+        let mut rt = Runtime::default_strict();
+        seed(&mut rt);
+        let one = rt.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20, None);
+        let two =
+            rt.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20, None);
+        let three = rt.execute_plain_scan_opt3_borrowed(
+            b"0", b"COUNT", b"100", b"COUNT", b"100", b"COUNT", b"100", 20, None,
         );
         assert!(one.is_some(), "the one-option form must be served");
         assert_eq!(one, two, "arity-4 and arity-6 wrappers must agree");

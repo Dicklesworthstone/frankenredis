@@ -1,9 +1,9 @@
 //! `KeyDict` — a redis-dict-class chaining hash table in 100% safe Rust.
-//! (frankenredis-uhthd, step 1)
+//! (frankenredis-uhthd) **This IS `Store::entries`.**
 //!
 //! ## Why this exists
 //!
-//! fr's keyspace is a `hashbrown::HashMap<Arc<[u8]>, Entry>`. hashbrown is
+//! fr's keyspace was a `hashbrown::HashMap<Box<[u8]>, Entry>`. hashbrown is
 //! open-addressing, which gives compact storage but provides **neither** of the
 //! two capabilities a Redis keyspace needs natively:
 //!
@@ -24,12 +24,15 @@
 //! (no refcount header, no `Arc` sharing), so that when it replaces `entries` it
 //! also deletes `ordered_keys` + `random_key_slots` wholesale.
 //!
-//! ## Status
+//! ## Status: WIRED
 //!
-//! Step 1 = this self-contained, exhaustively-tested primitive (NOT yet wired
-//! into `Store`). Step 2 = swap it in for `entries`, route SCAN through
-//! [`KeyDict::scan`] and RANDOMKEY through [`KeyDict::random_sample`], and delete
-//! the side indices. Grows at load factor 1 and shrinks under ~10% fill
+//! `Store::entries` is a `KeyDict`. Keyspace SCAN runs through [`KeyDict::scan`]
+//! and RANDOMKEY through [`KeyDict::random_sample`], and `ordered_keys`,
+//! `random_key_slots` and the two SCAN resume caches are deleted. Measured against
+//! a live Redis 7.2.4 in one invocation, 1M keys, A/A null 0.9995:
+//! **248.1 -> 145.4 bytes/key, 3.0005x -> 1.7612x.**
+//!
+//! Grows at load factor 1 and shrinks under ~10% fill
 //! ([`maybe_shrink`](KeyDict::maybe_shrink), Redis's HASHTABLE_MIN_FILL policy) so a
 //! keyspace that spikes large then sheds its keys returns the bucket memory — the
 //! reverse-binary cursor keeps its no-missed-key guarantee across both grow and
@@ -78,6 +81,12 @@ pub struct KeyDict<V> {
     /// Head node index per bucket, or [`NIL`]. One `u32` per bucket, not one
     /// `Option<usize>` — see [`NIL`].
     buckets: Vec<u32>,
+    /// A lossy 64-way fingerprint of the first byte of every key in each hash
+    /// bucket. SCAN MATCH with a literal prefix can skip buckets whose bit is
+    /// absent while retaining the normal reverse-binary cursor. A collision is
+    /// only a false positive (the caller still checks the complete glob), never
+    /// a missed key.
+    first_byte_bits: Vec<u64>,
     /// Arena of key/value cells. Removed cells become `None` and their slot is
     /// pushed into `free`, so high-churn workloads do not allocate a fresh node
     /// per insert. This removes the pass226 `Box<Node>` allocation penalty while
@@ -98,6 +107,45 @@ pub struct KeyDict<V> {
 impl<V> Default for KeyDict<V> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// (uhthd) Equality is by CONTENT, deliberately not by layout.
+///
+/// Two dicts holding the same keys almost never share a bucket layout: each carries
+/// its own randomly-seeded hasher, so the same key lands in different buckets and
+/// the arenas are ordered by insertion history. A derived `PartialEq` would compare
+/// those and report "not equal" for two keyspaces that are observably identical --
+/// which is exactly what the `Store` equality assertions in the test suite mean to
+/// check.
+///
+/// This is O(n) probes rather than an O(n) memcmp, which is the price of the
+/// randomised seeding that defeats hash flooding.
+impl<V: PartialEq> PartialEq for KeyDict<V> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.count != other.count {
+            return false;
+        }
+        self.iter()
+            .all(|(key, value)| other.get(key).is_some_and(|theirs| theirs == value))
+    }
+}
+
+impl<V: Eq> Eq for KeyDict<V> {}
+
+/// (uhthd) `Store` derives `Debug`, so the keyspace has to be printable. This
+/// deliberately prints a SUMMARY rather than the entries: a `Store` debug-print of a
+/// million-key keyspace would be unusable, and `Entry` values can hold whole
+/// collections. The counts are what anyone reading a `Store` dump actually wants
+/// from this field.
+impl<V> std::fmt::Debug for KeyDict<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyDict")
+            .field("len", &self.count)
+            .field("buckets", &self.buckets.len())
+            .field("arena_slots", &self.nodes.len())
+            .field("free_slots", &self.free.len())
+            .finish()
     }
 }
 
@@ -127,6 +175,7 @@ impl<V> KeyDict<V> {
         let buckets = vec![NIL; n];
         Self {
             buckets,
+            first_byte_bits: vec![0; n],
             nodes: Vec::with_capacity(capacity),
             free: Vec::new(),
             mask: (n as u64) - 1,
@@ -137,6 +186,13 @@ impl<V> KeyDict<V> {
 
     /// Reserve room for at least `additional` more inserts without resizing the
     /// bucket table or growing the live-node arena.
+    ///
+    /// (uhthd) Together with `bucket_count`, `storage_slots` and `capacity` this is
+    /// the sizing/observability surface: `capacity` is read by `Store`'s
+    /// flush-releases-capacity assertions and the other three by this module's own
+    /// growth, churn and presized-build tests. None is on a production path, so a
+    /// lib-only build sees them as unused.
+    #[allow(dead_code)]
     pub fn reserve(&mut self, additional: usize) {
         let needed = self.count.saturating_add(additional);
         if needed > self.buckets.len() {
@@ -158,6 +214,7 @@ impl<V> KeyDict<V> {
 
     /// Number of buckets (power of two). Exposed for tests / sizing.
     #[inline]
+    #[allow(dead_code)]
     pub fn bucket_count(&self) -> usize {
         self.buckets.len()
     }
@@ -165,6 +222,7 @@ impl<V> KeyDict<V> {
     /// Number of arena slots allocated for nodes, including free slots retained
     /// for reuse. Exposed for the churn guard; not part of Redis-visible state.
     #[inline]
+    #[allow(dead_code)]
     pub fn storage_slots(&self) -> usize {
         self.nodes.len()
     }
@@ -179,6 +237,30 @@ impl<V> KeyDict<V> {
     #[inline]
     fn bucket_of(&self, hash: u32) -> usize {
         (u64::from(hash) & self.mask) as usize
+    }
+
+    #[inline]
+    fn first_byte_bit(key: &[u8]) -> u64 {
+        1_u64 << usize::from(key.first().copied().unwrap_or_default() & 63)
+    }
+
+    fn rebuild_first_byte_bits(&mut self) {
+        for bucket in 0..self.buckets.len() {
+            self.rebuild_first_byte_bits_for_bucket(bucket);
+        }
+    }
+
+    fn rebuild_first_byte_bits_for_bucket(&mut self, bucket: usize) {
+        let mut bits = 0;
+        let mut node = self.buckets[bucket];
+        while node != NIL {
+            let current = self.nodes[node as usize]
+                .as_ref()
+                .expect("bucket chain points at live node");
+            bits |= Self::first_byte_bit(&current.key);
+            node = current.next;
+        }
+        self.first_byte_bits[bucket] = bits;
     }
 
     /// Take a free arena slot or push a new one, returning its index.
@@ -274,6 +356,7 @@ impl<V> KeyDict<V> {
     /// asserts this reaches exactly 0 after a flush — a bucket-derived figure could
     /// not, since the table keeps its four-slot floor.
     #[inline]
+    #[allow(dead_code)]
     pub fn capacity(&self) -> usize {
         self.nodes.capacity()
     }
@@ -308,6 +391,7 @@ impl<V> KeyDict<V> {
                 node.next = self.buckets[b];
                 self.buckets[b] = idx as u32;
             }
+            self.rebuild_first_byte_bits();
         }
         self.nodes.shrink_to_fit();
         let target = Self::bucket_count_for_capacity(self.count);
@@ -315,6 +399,7 @@ impl<V> KeyDict<V> {
             self.resize_buckets(target);
         }
         self.buckets.shrink_to_fit();
+        self.first_byte_bits.shrink_to_fit();
     }
 
     /// Insert `key`/`value`, returning the previous value if the key existed.
@@ -352,6 +437,12 @@ impl<V> KeyDict<V> {
             next: head,
         });
         self.buckets[b] = idx;
+        self.first_byte_bits[b] |= Self::first_byte_bit(
+            &self.nodes[idx as usize]
+                .as_ref()
+                .expect("fresh node is live")
+                .key,
+        );
         self.count += 1;
         if self.count > self.buckets.len() {
             self.grow();
@@ -384,6 +475,7 @@ impl<V> KeyDict<V> {
                 }
                 self.free.push(cur);
                 self.count -= 1;
+                self.rebuild_first_byte_bits_for_bucket(b);
                 self.maybe_shrink();
                 return Some(removed.value);
             }
@@ -451,12 +543,15 @@ impl<V> KeyDict<V> {
             }
         }
         self.buckets = buckets;
+        self.first_byte_bits = vec![0; new_len];
         self.mask = new_mask;
+        self.rebuild_first_byte_bits();
     }
 
     /// Remove all entries (keeps the allocated bucket array, like `HashMap::clear`).
     pub fn clear(&mut self) {
         self.buckets.fill(NIL);
+        self.first_byte_bits.fill(0);
         self.nodes.clear();
         self.free.clear();
         self.count = 0;
@@ -500,6 +595,43 @@ impl<V> KeyDict<V> {
                 node = n.next;
             }
             // Reverse-binary increment within the current mask.
+            v |= !self.mask;
+            v = reverse_bits_u64(v);
+            v = v.wrapping_add(1);
+            v = reverse_bits_u64(v);
+            if v == 0 || emitted >= count.max(1) {
+                return v;
+            }
+        }
+    }
+
+    /// The same reverse-binary SCAN as [`Self::scan`], except hash buckets that
+    /// cannot contain `first_byte` are skipped. The fingerprint has deliberate
+    /// 64-way collisions, so it only rules buckets out; every candidate is still
+    /// emitted for the caller's full MATCH validation.
+    pub fn scan_first_byte<F: FnMut(&[u8], &V)>(
+        &self,
+        cursor: u64,
+        count: usize,
+        first_byte: u8,
+        mut emit: F,
+    ) -> u64 {
+        let wanted = Self::first_byte_bit(&[first_byte]);
+        let mut v = cursor;
+        let mut emitted = 0usize;
+        loop {
+            let b = (v & self.mask) as usize;
+            if self.first_byte_bits[b] & wanted != 0 {
+                let mut node = self.buckets[b];
+                while node != NIL {
+                    let n = self.nodes[node as usize]
+                        .as_ref()
+                        .expect("bucket chain points at live node");
+                    emit(&n.key, &n.value);
+                    emitted += 1;
+                    node = n.next;
+                }
+            }
             v |= !self.mask;
             v = reverse_bits_u64(v);
             v = v.wrapping_add(1);
@@ -616,6 +748,89 @@ mod tests {
     /// either structure (RSS only grows, so the two deltas are clean and additive —
     /// no allocator-retention confound). Run:
     ///   cargo test -p fr-store keydict_vs_side_index_ram_uhthd -- --ignored --nocapture
+    /// (frankenredis-uhthd) WHERE THE REMAINING BYTES/KEY GO.
+    ///
+    /// The wired keyspace measures ~149.5 B/key against Redis 7.2.4's ~82.6. Three
+    /// candidate levers were each worth "about 15 B/key" by arithmetic -- a key
+    /// arena, an inline small value, a denser node -- which is not a basis for
+    /// choosing between them. This attributes real resident bytes to components so
+    /// the next lever is picked on measurement.
+    ///
+    /// It has already earned its place twice: it priced `frankenredis-hwcm1`'s SCAN
+    /// prefilter at 8.4 B/key (one `u64` per bucket at load factor ~1, which nobody
+    /// had costed in bytes/key), and it is what exposed the key-arena rejection --
+    /// see the REJECT row, and note the trap below.
+    ///
+    /// **`key BYTES` is PAYLOAD, not footprint.** It sums `k.len()`, so per-key
+    /// allocator overhead lands in UNACCOUNTED and arena capacity slack would not
+    /// appear at all. Reading UNACCOUNTED as "what an arena would save" is exactly
+    /// the mistake that made the arena look like a 21.7 B/key win in-process while
+    /// it measured a 6.5 B/key LOSS against a live server.
+    #[test]
+    #[ignore = "RSS attribution; run explicitly with --ignored --nocapture"]
+    fn keydict_byte_attribution_uhthd() {
+        use std::mem::size_of;
+
+        fn rss_bytes() -> usize {
+            let s = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+            let pages: usize = s
+                .split_whitespace()
+                .nth(1)
+                .and_then(|f| f.parse().ok())
+                .unwrap_or(0);
+            pages * 4096
+        }
+
+        // A 48-byte payload stands in for `Store`'s `Entry`.
+        #[derive(Clone)]
+        struct FortyEight([u64; 6]);
+
+        let n = 1_000_000usize;
+        let r0 = rss_bytes();
+        let mut kd: KeyDict<FortyEight> = KeyDict::new();
+        for i in 0..n {
+            // Same shape DEBUG POPULATE uses: key:N
+            kd.insert(
+                format!("key:{i}").into_bytes().into_boxed_slice(),
+                FortyEight([0; 6]),
+            );
+        }
+        let r1 = rss_bytes();
+        let resident = r1 - r0;
+
+        let node = size_of::<Option<Node<FortyEight>>>();
+        let nodes_bytes = kd.nodes.capacity() * node;
+        let buckets_bytes = kd.buckets.capacity() * size_of::<u32>();
+        let free_bytes = kd.free.capacity() * size_of::<u32>();
+        // (frankenredis-hwcm1) One u64 per BUCKET for the SCAN first-byte prefilter.
+        // Counted explicitly because at load factor ~1 that is 8 bytes per KEY --
+        // the same order as the levers this attribution ranks.
+        let first_byte_bits_bytes = kd.first_byte_bits.capacity() * size_of::<u64>();
+        let key_bytes: usize = kd.iter().map(|(k, _)| k.len()).sum();
+        let accounted =
+            nodes_bytes + buckets_bytes + free_bytes + first_byte_bits_bytes + key_bytes;
+
+        let per = |b: usize| b as f64 / n as f64;
+        println!(
+            "KeyDict byte attribution (N={n}, 48-byte value, key:N keys)\n  resident            {:8.1} B/key  ({:.1} MB)\n  node arena          {:8.1} B/key  (cap {} x {} B/node)\n  bucket table        {:8.1} B/key  (cap {})\n  free list           {:8.1} B/key\n  SCAN first-byte     {:8.1} B/key  (hwcm1 prefilter, 8 B/bucket)\n  key PAYLOAD         {:8.1} B/key  (k.len() only -- NOT footprint)\n  accounted           {:8.1} B/key\n  UNACCOUNTED         {:8.1} B/key  <- per-allocation overhead on {} key blocks",
+            per(resident),
+            resident as f64 / 1e6,
+            per(nodes_bytes),
+            kd.nodes.capacity(),
+            node,
+            per(buckets_bytes),
+            kd.buckets.capacity(),
+            per(free_bytes),
+            per(first_byte_bits_bytes),
+            per(key_bytes),
+            per(accounted),
+            per(resident.saturating_sub(accounted)),
+            n,
+        );
+        std::hint::black_box(&kd);
+        assert!(resident > 0, "no resident growth measured");
+    }
+
     #[test]
     #[ignore = "RSS benchmark; run explicitly with --ignored --nocapture"]
     fn keydict_vs_side_index_ram_uhthd() {
@@ -704,7 +919,9 @@ mod tests {
     fn node_layout_is_compact_uhthd() {
         use std::mem::size_of;
 
-        /// Stand-in for `Store`'s `Entry`, which is pinned at <= 48 bytes.
+        /// Stand-in for `Store`'s `Entry`, which is pinned at <= 48 bytes. The
+        /// payload exists to give the type its size; nothing reads it.
+        #[allow(dead_code)]
         struct FortyEight([u64; 6]);
         assert_eq!(size_of::<FortyEight>(), 48);
 
@@ -899,6 +1116,41 @@ mod tests {
         assert_eq!(d.remove(b"a"), None);
         assert_eq!(d.len(), 1);
         assert!(!d.contains_key(b"a"));
+    }
+
+    #[test]
+    fn scan_first_byte_skips_irrelevant_buckets_without_missing_prefix_keys_hwcm1() {
+        let mut dict: KeyDict<u32> = KeyDict::with_capacity(10_128);
+        for i in 0..10_000 {
+            dict.insert(format!("x-noise:{i:05}").into_bytes().into_boxed_slice(), i);
+        }
+        for i in 0..128 {
+            dict.insert(
+                format!("p-match:{i:03}").into_bytes().into_boxed_slice(),
+                10_000 + i,
+            );
+        }
+
+        let mut cursor = 0;
+        let mut seen = Vec::new();
+        let mut examined = 0usize;
+        loop {
+            cursor = dict.scan_first_byte(cursor, 11, b'p', |key, value| {
+                examined += 1;
+                if key.starts_with(b"p-match:") {
+                    seen.push(*value);
+                }
+            });
+            if cursor == 0 {
+                break;
+            }
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, (10_000..10_128).collect::<Vec<_>>());
+        assert!(
+            examined < 1_024,
+            "must skip almost all x-noise buckets, examined {examined} keys"
+        );
     }
 
     #[test]
