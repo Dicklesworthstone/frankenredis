@@ -1003,6 +1003,17 @@ SHAPES = {
     "pexpiretime_base": (["SET pxk v"], ["PEXPIRETIME", "pxk"]),
     "unwatch_base": ([], ["UNWATCH"]),
     "xread_one": (["XADD xrd 1-1 f v"], ["XREAD", "COUNT", "1", "STREAMS", "xrd", "0"]),
+    # The explicit-id history form is read-only once the setup creates a pending entry,
+    # so the same PEL is read on every measured operation. The floor arm intentionally
+    # excludes `>`/NOACK/blocking/multi-key forms.
+    "xreadgroup_history": (
+        [
+            "XADD xrgh 1-1 f v",
+            "XGROUP CREATE xrgh xrgg 0",
+            "XREADGROUP GROUP xrgg c COUNT 1 STREAMS xrgh >",
+        ],
+        ["XREADGROUP", "GROUP", "xrgg", "c", "COUNT", "1", "STREAMS", "xrgh", "0"],
+    ),
     "xrevrange_base": (["XADD xrv 1-1 f v"], ["XREVRANGE", "xrv", "+", "-"]),
     "zdiff_2": (["ZADD zd1 1 a 2 b", "ZADD zd2 1 b"], ["ZDIFF", "2", "zd1", "zd2"]),
     "zinter_2src": (["ZADD zia 1 a 2 b", "ZADD zib 1 a"], ["ZINTER", "2", "zia", "zib"]),

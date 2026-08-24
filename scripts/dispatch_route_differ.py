@@ -1090,6 +1090,31 @@ CASES = [
     ("xread", "count", "1", "streams", "xr:one", "0"),
     ("XrEaD", "CoUnT", "1", "StReAmS", "xr:one", "0"),
 
+    # (frankenredis-iqicb) XREADGROUP history is the same stranded-route shape as
+    # XREAD: a parser and borrowed executor existed in the cascade, but no floor row
+    # reached them. Claim only the two parser arities. The *9 multi-key spelling is
+    # deliberately claimed by arity then declined by the parser, so it must stay in
+    # this differential corpus; otherwise deleting the COUNT discriminator is silent.
+    ("XADD", "xrg:one", "1-1", "f", "v"),
+    ("XADD", "xrg:two", "2-2", "g", "w"),
+    ("XGROUP", "CREATE", "xrg:one", "xrg:g", "0"),
+    ("XGROUP", "CREATE", "xrg:two", "xrg:g", "0"),
+    ("XREADGROUP", "GROUP", "xrg:g", "c", "STREAMS", "xrg:one", ">"),
+    ("XREADGROUP", "GROUP", "xrg:g", "c", "STREAMS", "xrg:two", ">"),
+    # Claimed parser forms: bare *7 and COUNT *9 history reads.
+    ("XREADGROUP", "GROUP", "xrg:g", "c", "STREAMS", "xrg:one", "0"),
+    ("XREADGROUP", "GROUP", "xrg:g", "c", "COUNT", "1", "STREAMS", "xrg:one", "0"),
+    # *9 multi-key is not history: it must decline the floor parser to generic.
+    ("XREADGROUP", "GROUP", "xrg:g", "c", "STREAMS", "xrg:one", "xrg:two", "0", "0"),
+    # `>` has the claimed arity but is not a history read; the executor declines it.
+    ("XREADGROUP", "GROUP", "xrg:g", "c", "STREAMS", "xrg:one", ">"),
+    # NOACK is unclaimed at *8. BLOCK shares COUNT's *9 width and must decline the
+    # history parser before generic dispatch.
+    ("XREADGROUP", "GROUP", "xrg:g", "c", "NOACK", "STREAMS", "xrg:one", "0"),
+    ("XREADGROUP", "GROUP", "xrg:g", "c", "BLOCK", "0", "STREAMS", "xrg:one", "0"),
+    ("XREADGROUP", "GROUP", "xrg:g", "c", "COUNT", "bad", "STREAMS", "xrg:one", "0"),
+    ("xreadgroup", "group", "xrg:g", "c", "count", "1", "streams", "xrg:one", "0"),
+
 ]
 
 def executing_image(conn):
