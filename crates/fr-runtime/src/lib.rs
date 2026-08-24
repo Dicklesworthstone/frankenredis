@@ -42778,8 +42778,35 @@ impl Runtime {
         //
         // Membership semantics are hasher-independent, and `seen` is only ever `contains`ed
         // and `insert`ed -- never iterated -- so the emitted reply cannot change.
+        //
+        // (frankenredis-e6c9t lever D) PRE-SIZED. Starting from zero, the set doubles its
+        // way up to the ~195 names a `CONFIG GET *` emits, and every doubling rehashes
+        // everything already inserted: MEASURED at 15,330 instr/op in
+        // `RawTable::reserve_rehash`, 6.0 pct of the command, spent moving entries between
+        // tables that are all discarded at the end of the call.
+        //
+        // `CONFIG_STATIC_PARAMS.len()` is the right bound and not a guess: the reply is that
+        // table plus a fixed handful of dynamic names, so this over-reserves slightly and
+        // never under-reserves into a rehash.
+        //
+        // RESERVED ONLY FOR A GLOB, and that is measured rather than tidiness. Reserving
+        // unconditionally cost the LITERAL arm +216 instr/op (7,141.3 -> 7,357.3, +3.0 pct)
+        // for a table it fills one entry of -- a real regression on `CONFIG GET <name>`,
+        // which is what ordinary clients send, to speed up the wildcard that monitoring
+        // sends. Scanning the patterns for a metacharacter is a few bytes of work on a
+        // one- or two-element argv and lets the literal keep its empty-set allocation.
+        let wants_many = argv[2..]
+            .iter()
+            .any(|p| p.iter().any(|b| matches!(b, b'*' | b'?' | b'[')));
         let mut seen: std::collections::HashSet<Vec<u8>, foldhash::quality::RandomState> =
-            std::collections::HashSet::default();
+            if wants_many {
+                std::collections::HashSet::with_capacity_and_hasher(
+                    CONFIG_STATIC_PARAMS.len(),
+                    foldhash::quality::RandomState::default(),
+                )
+            } else {
+                std::collections::HashSet::default()
+            };
         // Redis 7+ supports multiple patterns: CONFIG GET pattern1 pattern2 ...
         for arg in &argv[2..] {
             let raw_pattern = match std::str::from_utf8(arg) {
