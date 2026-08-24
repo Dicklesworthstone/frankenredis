@@ -33622,6 +33622,46 @@ impl Store {
         };
 
         let sample_limit = sample_limit.max(1);
+
+        // (frankenredis-uhthd) O(1) BUCKET SAMPLING FOR THE allkeys-* POLICIES.
+        //
+        // Everything below this block draws random INDICES and then walks
+        // `entries.iter().enumerate()` until the largest of them is reached. With
+        // `sample_limit` uniform draws over n keys the expected stopping point is
+        // ~n·s/(s+1), so ONE eviction costs O(n) -- measured at a fixed eviction
+        // count, 4x the keyspace cost 3.46x the time. That is why
+        // `maxmemory_eviction_max_cycles` had to be 4, and a 4-key budget is why fr
+        // answered `-OOM` under allkeys-lru where Redis 7.2.4 kept serving.
+        //
+        // `KeyDict::random_sample` picks a random BUCKET and a random element of its
+        // chain, which is what Redis's `dictGetRandomKey` does and what fr could not
+        // do while the keyspace was a hashbrown map. Same mild short-chain bias as
+        // upstream, which is fine for eviction sampling -- these are candidates for a
+        // scorer, not a uniformity guarantee.
+        //
+        // Only the allkeys-* policies take it. A volatile-* policy samples a SUBSET
+        // that can be an arbitrarily small fraction of the keyspace, where rejection
+        // sampling degrades without bound; those keep the exact walk below, which is
+        // correct and no slower than it was.
+        if OPT && !volatile_only && eligible_len > sample_limit {
+            let (entries, rng_seed) = (&self.entries, &mut self.rng_seed);
+            let mut next_rand = || {
+                *rng_seed = rng_seed.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
+                *rng_seed
+            };
+            let mut sampled: Vec<Vec<u8>> = Vec::with_capacity(sample_limit);
+            // Duplicates are possible across draws and are harmless: the scorer
+            // picks a minimum, so seeing the same candidate twice cannot change
+            // which key is evicted. Redis's own sampler has the same property.
+            for _ in 0..sample_limit {
+                let Some((key, _)) = entries.random_sample(&mut next_rand) else {
+                    break;
+                };
+                sampled.push(key.to_vec());
+            }
+            return sampled;
+        }
+
         if eligible_len <= sample_limit {
             // Same as before: every eligible key, in iteration order.
             return self
@@ -45552,37 +45592,53 @@ mod tests {
         assert_eq!(big_result.bytes_to_free_after, 0);
     }
 
-    /// (frankenredis-uhthd) WHY THE 4-CYCLE CAP CANNOT SIMPLY BE RAISED.
+    /// (frankenredis-uhthd) CANDIDATE SELECTION MUST NOT SCALE WITH THE KEYSPACE.
     ///
-    /// `sampled_eviction_candidate_keys_impl` draws `sample_limit` random indices
-    /// and then walks `entries.iter().enumerate()` until the LARGEST of them is
-    /// reached. With 5 uniform draws over n keys the expected stopping point is
-    /// ~5n/6, so ONE eviction costs O(n) -- and the cap is what has been hiding
-    /// that. Raising the budget to fix the `-OOM` divergence would multiply an
-    /// O(n) operation by the new budget on every write under pressure.
+    /// This test previously asserted the OPPOSITE, and its failure message said to
+    /// replace it if selection ever became sub-linear. It has.
     ///
-    /// This measures the scaling instead of asserting it from source. A fixed
-    /// eviction count is run at n and 4n; O(1) sampling would be flat, O(n)
-    /// sampling grows with n. The assertion is deliberately loose (a wall-clock
-    /// ratio on a shared host is noisy) -- it only has to separate "flat" from
-    /// "grows", which a 4x input change makes unambiguous.
+    /// The history matters because it is why the eviction budget was four. The old
+    /// sampler drew `sample_limit` random indices and walked
+    /// `entries.iter().enumerate()` until the largest was reached -- with 5 uniform
+    /// draws over n keys the expected stop is ~5n/6, so ONE eviction cost O(n).
+    /// Measured then, at a FIXED eviction count: 4x the keyspace cost **3.46x** the
+    /// time. A budget above four would therefore have multiplied an O(n) operation
+    /// on every write under pressure, so the cap stayed at four -- and a four-key
+    /// budget is what made fr answer `-OOM` where Redis kept serving.
+    ///
+    /// `KeyDict::random_sample` picks a random bucket, so the cost is now
+    /// independent of n and the budget is free to express upstream's "free until
+    /// under the limit". The same measurement now reads ~1.1x.
+    ///
+    /// The eviction count is held FIXED while the keyspace grows, or the work would
+    /// scale for the trivial reason that more keys need freeing. The bound is loose
+    /// (a shared host makes wall-clock noisy) and only has to separate "flat" from
+    /// "grows with n", which a 4x input change makes unambiguous: linear would be
+    /// ~4x and was measured at 3.46x.
     #[test]
-    fn eviction_candidate_sampling_is_linear_in_keyspace_uhthd() {
+    fn eviction_candidate_sampling_does_not_scale_with_keyspace_uhthd() {
         fn evict_cost(n: usize) -> std::time::Duration {
             let mut store = Store::new();
             store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
             for idx in 0..n {
-                store.set(format!("evict:{idx:08}").into_bytes(), vec![b'v'; 64], None, 0);
+                store.set(
+                    format!("evict:{idx:08}").into_bytes(),
+                    vec![b'v'; 64],
+                    None,
+                    0,
+                );
             }
-            // A limit just under current usage so a FIXED number of evictions runs
-            // regardless of n -- otherwise the work would scale for the trivial
-            // reason that more keys need freeing.
             let usage = store.estimate_memory_usage_bytes();
             let per_key = usage / n;
             let limit = usage - (per_key * 64);
             let start = std::time::Instant::now();
             let r = store.run_bounded_eviction_loop(
-                0, limit, 0, 5, 64, EvictionSafetyGateState::default(),
+                0,
+                limit,
+                0,
+                5,
+                64,
+                EvictionSafetyGateState::default(),
             );
             let elapsed = start.elapsed();
             assert!(r.evicted_keys > 0, "no eviction ran at n={n}");
@@ -45592,15 +45648,13 @@ mod tests {
         let small = evict_cost(5_000);
         let large = evict_cost(20_000);
         let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
-        println!(
-            "same eviction count, 4x the keyspace: {:?} -> {:?} ({ratio:.2}x)",
-            small, large
-        );
+        println!("same eviction count, 4x the keyspace: {small:?} -> {large:?} ({ratio:.2}x)");
         assert!(
-            ratio > 2.0,
-            "sampling looks sub-linear ({ratio:.2}x for 4x the keys) -- if candidate \
-             selection became O(1), the eviction budget can be raised and this test \
-             should be replaced by one pinning that"
+            ratio < 2.5,
+            "eviction candidate selection looks LINEAR again ({ratio:.2}x for 4x the \
+             keys; the O(n) walk measured 3.46x and O(1) bucket sampling ~1.1x). A \
+             regression here silently reintroduces the -OOM defect, because the \
+             eviction budget is sized on selection being cheap."
         );
     }
 
@@ -63136,22 +63190,94 @@ mod tests {
             s
         };
 
-        // Equivalence: on the SAME store (one HashMap instance has a fixed
-        // iteration order; two instances would each pick a random RandomState
-        // seed and differ), resetting the deterministic RNG between calls, the
-        // new and old paths produce the same sample set. Covers the sampling
-        // branch (eligible > limit) and the take-all branch.
+        // (frankenredis-uhthd) THE allkeys BRANCH IS NO LONGER SAMPLE-IDENTICAL TO
+        // `old_sample`, DELIBERATELY, so this no longer asserts that it is.
+        //
+        // `old_sample` replicates the index-walk: materialise every eligible key,
+        // then pick distinct random INDICES into that materialised order. The
+        // allkeys path now draws random BUCKETS from the table
+        // (`KeyDict::random_sample`, what upstream's `dictGetRandomKey` does),
+        // because the walk cost O(n) per evicted key and that is what forced the
+        // four-key eviction budget behind the `-OOM` divergence.
+        //
+        // WHICH keys a sampler offers was never a contract -- they are candidates
+        // fed to a scorer, and upstream's own sampler has the same short-chain bias.
+        // What IS a contract is asserted here instead, and each clause is one a
+        // plausibly-broken bucket sampler fails:
+        //
+        //   * bounded    -- never more than `sample_limit` candidates;
+        //   * live       -- every candidate is actually present in the keyspace
+        //                   (a stale or off-by-one bucket read returns a name that
+        //                   is not there);
+        //   * covering   -- repeated draws reach a wide spread of the keyspace. A
+        //                   sampler wedged on one bucket, or one that ignored its
+        //                   RNG, returns valid live keys forever and would satisfy
+        //                   the first two clauses while making LRU eviction pick
+        //                   the same victim every time.
         for &sl in &[1usize, 5, 10, 64] {
             let mut s = build(3000);
-            let seed = s.rng_seed;
-            let mut ob = old_sample(&mut s, false, sl);
-            s.rng_seed = seed;
-            let mut na = s.sampled_eviction_candidate_keys(false, sl);
-            na.sort();
-            ob.sort();
-            assert_eq!(na, ob, "sampling mismatch at sample_limit={sl}");
+            let got = s.sampled_eviction_candidate_keys(false, sl);
+            assert!(
+                got.len() <= sl,
+                "sampler returned {} candidates for sample_limit={sl}",
+                got.len()
+            );
+            assert!(
+                !got.is_empty(),
+                "sampler returned nothing at sample_limit={sl}"
+            );
+            for key in &got {
+                assert!(
+                    s.entries.contains_key(key.as_slice()),
+                    "sampler offered a key not in the keyspace: {:?}",
+                    String::from_utf8_lossy(key)
+                );
+            }
         }
         {
+            // Coverage: 400 draws of 10 from 3,000 keys must touch a large slice of
+            // the keyspace. A single-bucket or RNG-ignoring sampler collapses to a
+            // handful of distinct names and fails here.
+            let mut s = build(3000);
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..400 {
+                for key in s.sampled_eviction_candidate_keys(false, 10) {
+                    seen.insert(key);
+                }
+            }
+            assert!(
+                seen.len() > 1_000,
+                "eviction sampling reached only {} of 3000 keys over 400 draws; \
+                 it is not sampling the keyspace",
+                seen.len()
+            );
+        }
+        // The VOLATILE branch still uses the index walk, so its equivalence with
+        // `old_sample` survives untouched and is kept as the control: if that
+        // assertion ever fails, the walk itself regressed rather than the new
+        // bucket path.
+        {
+            let mut s = Store::new();
+            for i in 0..3000 {
+                s.set(
+                    format!("k{i:06}").into_bytes(),
+                    b"v".to_vec(),
+                    Some(10_000_000),
+                    0,
+                );
+            }
+            let seed = s.rng_seed;
+            let mut ob = old_sample(&mut s, true, 10);
+            s.rng_seed = seed;
+            let mut na = s.sampled_eviction_candidate_keys(true, 10);
+            na.sort();
+            ob.sort();
+            assert_eq!(na, ob, "volatile sampling must still match the index walk");
+        }
+        {
+            // Take-all branch (eligible <= limit) is unchanged: the bucket fast path
+            // requires `eligible_len > sample_limit`, so this still goes through the
+            // walk and must still be sample-identical.
             let mut s = build(3);
             let seed = s.rng_seed;
             let mut ob = old_sample(&mut s, false, 10);

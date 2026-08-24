@@ -4672,7 +4672,23 @@ impl Default for ServerState {
             maxmemory_bytes: 0,
             maxmemory_not_counted_bytes: 0,
             maxmemory_eviction_sample_limit: 5,
-            maxmemory_eviction_max_cycles: 4,
+            // (frankenredis-uhthd) 4 was a workaround for O(n) candidate selection,
+            // not a policy. Each cycle evicted at most one key and cost a full
+            // keyspace walk, so a bigger budget multiplied an O(n) operation; the
+            // consequence was that any pressure needing more than four evictions
+            // left the loop `Running`, which sets `over_maxmemory_live` and REFUSES
+            // THE WRITE. Measured against live Redis 7.2.4 at `--maxmemory 100mb
+            // --maxmemory-policy allkeys-lru`: redis evicted 143,334 keys and never
+            // errored; fr evicted 450 and then answered `-OOM`.
+            //
+            // Selection is O(1) now (`KeyDict::random_sample`), so the budget can
+            // express what upstream actually does -- free until under the limit --
+            // while still bounding the work one command may do, which is what keeps
+            // a single-threaded event loop responsive. Upstream bounds the same loop
+            // by TIME via `maxmemory-eviction-tenacity`; a cycle cap is the same
+            // idea with a cheaper check, and the loop still exits early the moment
+            // pressure clears or no candidate can be found.
+            maxmemory_eviction_max_cycles: 1000,
             eviction_safety_gate: EvictionSafetyGateState::default(),
             last_eviction_loop: None,
             active_expire_db_cursor: 0,
