@@ -6753,11 +6753,13 @@ fn handle_sharded_set_get_readable(
         runtime.note_read_event();
     }
     let output_before = conn.write_buf.len();
+    let parser_config = runtime.parser_config();
     dispatch_sharded_set_get_frames(
         token,
         conn,
+        runtime,
         pool,
-        runtime.parser_config(),
+        parser_config,
         closing_tokens,
         deferred_tokens,
         ts,
@@ -6790,6 +6792,12 @@ fn handle_sharded_set_get_readable(
 fn dispatch_sharded_set_get_frames(
     token: Token,
     conn: &mut ClientConnection,
+    // (frankenredis-uhthd, drive-by build fix) `9c3309870` added a PING fast path to
+    // this function that calls `runtime.execute_plain_ping_borrowed_into(..)`, but
+    // this function had no `runtime` -- it takes a shard `pool`. Committed `main`
+    // did not compile for `fr-server` as a result. Threading the runtime in is what
+    // that block was written against; both call sites already hold one.
+    runtime: &mut Runtime,
     pool: &ShardedSetGetPool,
     parser_config: ParserConfig,
     closing_tokens: &mut TokenSet,
@@ -7030,11 +7038,13 @@ fn process_deferred_sharded_set_get_clients(
             continue;
         }
         let output_before = conn.write_buf.len();
+        let parser_config = runtime.parser_config();
         dispatch_sharded_set_get_frames(
             token,
             conn,
+            runtime,
             pool,
-            runtime.parser_config(),
+            parser_config,
             closing_tokens,
             deferred_tokens,
             ts,

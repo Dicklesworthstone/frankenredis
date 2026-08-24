@@ -1,9 +1,9 @@
 //! `KeyDict` — a redis-dict-class chaining hash table in 100% safe Rust.
-//! (frankenredis-uhthd, step 1)
+//! (frankenredis-uhthd) **This IS `Store::entries`.**
 //!
 //! ## Why this exists
 //!
-//! fr's keyspace is a `hashbrown::HashMap<Arc<[u8]>, Entry>`. hashbrown is
+//! fr's keyspace was a `hashbrown::HashMap<Box<[u8]>, Entry>`. hashbrown is
 //! open-addressing, which gives compact storage but provides **neither** of the
 //! two capabilities a Redis keyspace needs natively:
 //!
@@ -24,12 +24,15 @@
 //! (no refcount header, no `Arc` sharing), so that when it replaces `entries` it
 //! also deletes `ordered_keys` + `random_key_slots` wholesale.
 //!
-//! ## Status
+//! ## Status: WIRED
 //!
-//! Step 1 = this self-contained, exhaustively-tested primitive (NOT yet wired
-//! into `Store`). Step 2 = swap it in for `entries`, route SCAN through
-//! [`KeyDict::scan`] and RANDOMKEY through [`KeyDict::random_sample`], and delete
-//! the side indices. Grows at load factor 1 and shrinks under ~10% fill
+//! `Store::entries` is a `KeyDict`. Keyspace SCAN runs through [`KeyDict::scan`]
+//! and RANDOMKEY through [`KeyDict::random_sample`], and `ordered_keys`,
+//! `random_key_slots` and the two SCAN resume caches are deleted. Measured against
+//! a live Redis 7.2.4 in one invocation, 1M keys, A/A null 0.9995:
+//! **248.1 -> 145.4 bytes/key, 3.0005x -> 1.7612x.**
+//!
+//! Grows at load factor 1 and shrinks under ~10% fill
 //! ([`maybe_shrink`](KeyDict::maybe_shrink), Redis's HASHTABLE_MIN_FILL policy) so a
 //! keyspace that spikes large then sheds its keys returns the bucket memory — the
 //! reverse-binary cursor keeps its no-missed-key guarantee across both grow and
@@ -101,6 +104,45 @@ impl<V> Default for KeyDict<V> {
     }
 }
 
+/// (uhthd) Equality is by CONTENT, deliberately not by layout.
+///
+/// Two dicts holding the same keys almost never share a bucket layout: each carries
+/// its own randomly-seeded hasher, so the same key lands in different buckets and
+/// the arenas are ordered by insertion history. A derived `PartialEq` would compare
+/// those and report "not equal" for two keyspaces that are observably identical --
+/// which is exactly what the `Store` equality assertions in the test suite mean to
+/// check.
+///
+/// This is O(n) probes rather than an O(n) memcmp, which is the price of the
+/// randomised seeding that defeats hash flooding.
+impl<V: PartialEq> PartialEq for KeyDict<V> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.count != other.count {
+            return false;
+        }
+        self.iter()
+            .all(|(key, value)| other.get(key).is_some_and(|theirs| theirs == value))
+    }
+}
+
+impl<V: Eq> Eq for KeyDict<V> {}
+
+/// (uhthd) `Store` derives `Debug`, so the keyspace has to be printable. This
+/// deliberately prints a SUMMARY rather than the entries: a `Store` debug-print of a
+/// million-key keyspace would be unusable, and `Entry` values can hold whole
+/// collections. The counts are what anyone reading a `Store` dump actually wants
+/// from this field.
+impl<V> std::fmt::Debug for KeyDict<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyDict")
+            .field("len", &self.count)
+            .field("buckets", &self.buckets.len())
+            .field("arena_slots", &self.nodes.len())
+            .field("free_slots", &self.free.len())
+            .finish()
+    }
+}
+
 /// Reverse all 64 bits of `v` (MSB<->LSB). The cursor advance below works in the
 /// reversed-bit domain so that the walk is robust to the table doubling.
 #[inline]
@@ -137,6 +179,13 @@ impl<V> KeyDict<V> {
 
     /// Reserve room for at least `additional` more inserts without resizing the
     /// bucket table or growing the live-node arena.
+    ///
+    /// (uhthd) Together with `bucket_count`, `storage_slots` and `capacity` this is
+    /// the sizing/observability surface: `capacity` is read by `Store`'s
+    /// flush-releases-capacity assertions and the other three by this module's own
+    /// growth, churn and presized-build tests. None is on a production path, so a
+    /// lib-only build sees them as unused.
+    #[allow(dead_code)]
     pub fn reserve(&mut self, additional: usize) {
         let needed = self.count.saturating_add(additional);
         if needed > self.buckets.len() {
@@ -158,6 +207,7 @@ impl<V> KeyDict<V> {
 
     /// Number of buckets (power of two). Exposed for tests / sizing.
     #[inline]
+    #[allow(dead_code)]
     pub fn bucket_count(&self) -> usize {
         self.buckets.len()
     }
@@ -165,6 +215,7 @@ impl<V> KeyDict<V> {
     /// Number of arena slots allocated for nodes, including free slots retained
     /// for reuse. Exposed for the churn guard; not part of Redis-visible state.
     #[inline]
+    #[allow(dead_code)]
     pub fn storage_slots(&self) -> usize {
         self.nodes.len()
     }
@@ -274,6 +325,7 @@ impl<V> KeyDict<V> {
     /// asserts this reaches exactly 0 after a flush — a bucket-derived figure could
     /// not, since the table keeps its four-slot floor.
     #[inline]
+    #[allow(dead_code)]
     pub fn capacity(&self) -> usize {
         self.nodes.capacity()
     }
@@ -704,7 +756,9 @@ mod tests {
     fn node_layout_is_compact_uhthd() {
         use std::mem::size_of;
 
-        /// Stand-in for `Store`'s `Entry`, which is pinned at <= 48 bytes.
+        /// Stand-in for `Store`'s `Entry`, which is pinned at <= 48 bytes. The
+        /// payload exists to give the type its size; nothing reads it.
+        #[allow(dead_code)]
         struct FortyEight([u64; 6]);
         assert_eq!(size_of::<FortyEight>(), 48);
 
