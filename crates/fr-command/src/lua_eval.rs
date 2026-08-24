@@ -13237,23 +13237,71 @@ fn lua_class_match(class: u8, ch: u8) -> bool {
     }
 }
 
-/// Check if a byte matches a single pattern element at position `pi` in pattern.
-/// Returns the number of pattern bytes consumed.
-fn lua_single_match(pat: &[u8], pi: usize, ch: u8) -> bool {
-    if pi >= pat.len() {
-        return false;
+/// One decoded matcher state. The general matcher selects this state once per
+/// pattern element, then a quantified run consumes subject bytes without
+/// repeatedly decoding the same pattern byte.
+///
+/// `%b`/`%f`/`%N` and captures remain in `lua_pat_match`: they have stateful
+/// semantics, rather than the independent-byte semantics represented here.
+enum LuaPatternState<'a> {
+    Literal(u8),
+    Any,
+    Class(u8),
+    Set { pat: &'a [u8], start: usize },
+}
+
+impl LuaPatternState<'_> {
+    fn matches(&self, ch: u8) -> bool {
+        match self {
+            Self::Literal(expected) => ch == *expected,
+            Self::Any => true,
+            Self::Class(class) => lua_class_match(*class, ch),
+            Self::Set { pat, start } => lua_set_match(pat, *start, ch),
+        }
     }
-    match pat[pi] {
-        b'.' => true,
-        b'%' => {
-            if pi + 1 < pat.len() {
-                lua_class_match(pat[pi + 1], ch)
-            } else {
-                false
+
+    /// Consume a greedy quantified run. The state dispatch is outside the
+    /// byte loop, which is the common `a+`/`%d*` matcher path.
+    fn greedy_end(&self, s: &[u8], start: usize) -> usize {
+        match self {
+            Self::Literal(expected) => s[start..]
+                .iter()
+                .position(|&ch| ch != *expected)
+                .map_or(s.len(), |offset| start + offset),
+            Self::Any => s.len(),
+            Self::Class(class) => {
+                let mut end = start;
+                while end < s.len() && lua_class_match(*class, s[end]) {
+                    end += 1;
+                }
+                end
+            }
+            Self::Set {
+                pat,
+                start: pattern_start,
+            } => {
+                let mut end = start;
+                while end < s.len() && lua_set_match(pat, *pattern_start, s[end]) {
+                    end += 1;
+                }
+                end
             }
         }
-        b'[' => lua_set_match(pat, pi, ch),
-        c => c == ch,
+    }
+}
+
+/// Decode the stateless element at `pi` once. Pattern validation has already
+/// rejected malformed `%` and `[` forms before this matcher is entered.
+fn lua_pattern_state(pat: &[u8], pi: usize) -> (LuaPatternState<'_>, usize) {
+    match pat[pi] {
+        b'.' => (LuaPatternState::Any, pi + 1),
+        b'%' if pi + 1 < pat.len() => (LuaPatternState::Class(pat[pi + 1]), pi + 2),
+        b'%' => (LuaPatternState::Literal(b'%'), pi + 1),
+        b'[' => (
+            LuaPatternState::Set { pat, start: pi },
+            pi + lua_pattern_element_len(pat, pi),
+        ),
+        literal => (LuaPatternState::Literal(literal), pi + 1),
     }
 }
 
@@ -13630,7 +13678,7 @@ fn lua_pat_match(
         // upstream lstrlib.c::match_capture compares the N-th captured
         // substring's bytes against s starting at si. The capture must
         // already be closed (Substring(start, Some(end)) or Position).
-        // fr previously fell through to lua_single_match → lua_class_match
+        // fr previously fell through to the generic byte matcher → lua_class_match
         // which treated '%1' as the literal char '1'.
         if pi + 1 < pat.len() && pat[pi] == b'%' && (b'1'..=b'9').contains(&pat[pi + 1]) {
             let cap_idx = (pat[pi + 1] - b'0') as usize - 1;
@@ -13720,31 +13768,42 @@ fn lua_pat_match(
             return None;
         }
 
-        let elem_len = lua_pattern_element_len(pat, pi);
-        let after_elem = pi + elem_len;
+        // The ordinary matcher path is a small state machine: decode the
+        // element once, then use that state for the quantifier and byte match.
+        // This is deliberately below the capture/%N/%f/%b arms above, whose
+        // stateful behavior cannot be represented as an independent byte test.
+        let (element, after_elem) = lua_pattern_state(pat, pi);
 
         // Check for quantifier after element
         if after_elem < pat.len() {
             match pat[after_elem] {
                 b'*' => {
                     // Greedy 0+
-                    return lua_pat_greedy(s, si, pat, pi, after_elem + 1, captures, depth);
+                    return lua_pat_greedy(s, si, &element, pat, after_elem + 1, captures, depth);
                 }
                 b'+' => {
                     // Greedy 1+
-                    if si < s.len() && lua_single_match(pat, pi, s[si]) {
-                        return lua_pat_greedy(s, si + 1, pat, pi, after_elem + 1, captures, depth);
+                    if si < s.len() && element.matches(s[si]) {
+                        return lua_pat_greedy(
+                            s,
+                            si + 1,
+                            &element,
+                            pat,
+                            after_elem + 1,
+                            captures,
+                            depth,
+                        );
                     }
                     return None;
                 }
                 b'-' => {
                     // Lazy 0+
-                    return lua_pat_lazy(s, si, pat, pi, after_elem + 1, captures, depth);
+                    return lua_pat_lazy(s, si, &element, pat, after_elem + 1, captures, depth);
                 }
                 b'?' => {
                     // Optional
                     if si < s.len()
-                        && lua_single_match(pat, pi, s[si])
+                        && element.matches(s[si])
                         && let Some(end) =
                             lua_pat_match(s, si + 1, pat, after_elem + 1, captures, depth + 1)
                     {
@@ -13758,7 +13817,7 @@ fn lua_pat_match(
         }
 
         // No quantifier: match single element
-        if si < s.len() && lua_single_match(pat, pi, s[si]) {
+        if si < s.len() && element.matches(s[si]) {
             si += 1;
             pi = after_elem;
             continue 'match_pattern;
@@ -13772,25 +13831,22 @@ fn lua_pat_match(
 fn lua_pat_greedy(
     s: &[u8],
     si: usize,
+    element: &LuaPatternState<'_>,
     pat: &[u8],
-    elem_pi: usize,
     rest_pi: usize,
     captures: &mut Vec<LuaCapture>,
     depth: usize,
 ) -> Option<usize> {
-    let mut count = 0;
-    while si + count < s.len() && lua_single_match(pat, elem_pi, s[si + count]) {
-        count += 1;
-    }
+    let mut end = element.greedy_end(s, si);
     // Try from longest match down
     loop {
-        if let Some(end) = lua_pat_match(s, si + count, pat, rest_pi, captures, depth + 1) {
-            return Some(end);
+        if let Some(match_end) = lua_pat_match(s, end, pat, rest_pi, captures, depth + 1) {
+            return Some(match_end);
         }
-        if count == 0 {
+        if end == si {
             break;
         }
-        count -= 1;
+        end -= 1;
     }
     None
 }
@@ -13799,8 +13855,8 @@ fn lua_pat_greedy(
 fn lua_pat_lazy(
     s: &[u8],
     si: usize,
+    element: &LuaPatternState<'_>,
     pat: &[u8],
-    elem_pi: usize,
     rest_pi: usize,
     captures: &mut Vec<LuaCapture>,
     depth: usize,
@@ -13810,7 +13866,7 @@ fn lua_pat_lazy(
         if let Some(end) = lua_pat_match(s, pos, pat, rest_pi, captures, depth + 1) {
             return Some(end);
         }
-        if pos < s.len() && lua_single_match(pat, elem_pi, s[pos]) {
+        if pos < s.len() && element.matches(s[pos]) {
             pos += 1;
         } else {
             return None;
@@ -29369,6 +29425,41 @@ end
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"M,M,xyMyx".to_vec())));
+    }
+
+    #[test]
+    fn lua_pattern_state_machine_preserves_quantified_byte_classes_25uop() {
+        // The state machine decodes an ordinary matcher element once before
+        // consuming a quantified run. These rows cover each stateless state
+        // (literal, dot, class, and set) plus a negative no-match control.
+        let mut store = Store::new();
+        let cases: &[(&[u8], RespFrame)] = &[
+            (
+                b"return string.match('aaaaab', 'a+')",
+                RespFrame::BulkString(Some(b"aaaaa".to_vec())),
+            ),
+            (
+                b"return string.match('ab123cd', '%d+')",
+                RespFrame::BulkString(Some(b"123".to_vec())),
+            ),
+            (
+                b"return string.match('abc123', '[a-z]+')",
+                RespFrame::BulkString(Some(b"abc".to_vec())),
+            ),
+            (
+                b"return string.match('abcd', '.+')",
+                RespFrame::BulkString(Some(b"abcd".to_vec())),
+            ),
+            (
+                b"return string.match('bbbb', 'a+')",
+                RespFrame::BulkString(None),
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0)
+                .unwrap_or_else(|err| panic!("{}: {err}", String::from_utf8_lossy(body)));
+            assert_eq!(frame, *expected, "body={}", String::from_utf8_lossy(body));
+        }
     }
 
     #[test]
