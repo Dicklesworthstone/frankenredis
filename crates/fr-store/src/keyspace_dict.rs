@@ -81,6 +81,12 @@ pub struct KeyDict<V> {
     /// Head node index per bucket, or [`NIL`]. One `u32` per bucket, not one
     /// `Option<usize>` — see [`NIL`].
     buckets: Vec<u32>,
+    /// A lossy 64-way fingerprint of the first byte of every key in each hash
+    /// bucket. SCAN MATCH with a literal prefix can skip buckets whose bit is
+    /// absent while retaining the normal reverse-binary cursor. A collision is
+    /// only a false positive (the caller still checks the complete glob), never
+    /// a missed key.
+    first_byte_bits: Vec<u64>,
     /// Arena of key/value cells. Removed cells become `None` and their slot is
     /// pushed into `free`, so high-churn workloads do not allocate a fresh node
     /// per insert. This removes the pass226 `Box<Node>` allocation penalty while
@@ -169,6 +175,7 @@ impl<V> KeyDict<V> {
         let buckets = vec![NIL; n];
         Self {
             buckets,
+            first_byte_bits: vec![0; n],
             nodes: Vec::with_capacity(capacity),
             free: Vec::new(),
             mask: (n as u64) - 1,
@@ -230,6 +237,30 @@ impl<V> KeyDict<V> {
     #[inline]
     fn bucket_of(&self, hash: u32) -> usize {
         (u64::from(hash) & self.mask) as usize
+    }
+
+    #[inline]
+    fn first_byte_bit(key: &[u8]) -> u64 {
+        1_u64 << usize::from(key.first().copied().unwrap_or_default() & 63)
+    }
+
+    fn rebuild_first_byte_bits(&mut self) {
+        for bucket in 0..self.buckets.len() {
+            self.rebuild_first_byte_bits_for_bucket(bucket);
+        }
+    }
+
+    fn rebuild_first_byte_bits_for_bucket(&mut self, bucket: usize) {
+        let mut bits = 0;
+        let mut node = self.buckets[bucket];
+        while node != NIL {
+            let current = self.nodes[node as usize]
+                .as_ref()
+                .expect("bucket chain points at live node");
+            bits |= Self::first_byte_bit(&current.key);
+            node = current.next;
+        }
+        self.first_byte_bits[bucket] = bits;
     }
 
     /// Take a free arena slot or push a new one, returning its index.
@@ -360,6 +391,7 @@ impl<V> KeyDict<V> {
                 node.next = self.buckets[b];
                 self.buckets[b] = idx as u32;
             }
+            self.rebuild_first_byte_bits();
         }
         self.nodes.shrink_to_fit();
         let target = Self::bucket_count_for_capacity(self.count);
@@ -367,6 +399,7 @@ impl<V> KeyDict<V> {
             self.resize_buckets(target);
         }
         self.buckets.shrink_to_fit();
+        self.first_byte_bits.shrink_to_fit();
     }
 
     /// Insert `key`/`value`, returning the previous value if the key existed.
@@ -404,6 +437,12 @@ impl<V> KeyDict<V> {
             next: head,
         });
         self.buckets[b] = idx;
+        self.first_byte_bits[b] |= Self::first_byte_bit(
+            &self.nodes[idx as usize]
+                .as_ref()
+                .expect("fresh node is live")
+                .key,
+        );
         self.count += 1;
         if self.count > self.buckets.len() {
             self.grow();
@@ -436,6 +475,7 @@ impl<V> KeyDict<V> {
                 }
                 self.free.push(cur);
                 self.count -= 1;
+                self.rebuild_first_byte_bits_for_bucket(b);
                 self.maybe_shrink();
                 return Some(removed.value);
             }
@@ -503,12 +543,15 @@ impl<V> KeyDict<V> {
             }
         }
         self.buckets = buckets;
+        self.first_byte_bits = vec![0; new_len];
         self.mask = new_mask;
+        self.rebuild_first_byte_bits();
     }
 
     /// Remove all entries (keeps the allocated bucket array, like `HashMap::clear`).
     pub fn clear(&mut self) {
         self.buckets.fill(NIL);
+        self.first_byte_bits.fill(0);
         self.nodes.clear();
         self.free.clear();
         self.count = 0;
@@ -552,6 +595,43 @@ impl<V> KeyDict<V> {
                 node = n.next;
             }
             // Reverse-binary increment within the current mask.
+            v |= !self.mask;
+            v = reverse_bits_u64(v);
+            v = v.wrapping_add(1);
+            v = reverse_bits_u64(v);
+            if v == 0 || emitted >= count.max(1) {
+                return v;
+            }
+        }
+    }
+
+    /// The same reverse-binary SCAN as [`Self::scan`], except hash buckets that
+    /// cannot contain `first_byte` are skipped. The fingerprint has deliberate
+    /// 64-way collisions, so it only rules buckets out; every candidate is still
+    /// emitted for the caller's full MATCH validation.
+    pub fn scan_first_byte<F: FnMut(&[u8], &V)>(
+        &self,
+        cursor: u64,
+        count: usize,
+        first_byte: u8,
+        mut emit: F,
+    ) -> u64 {
+        let wanted = Self::first_byte_bit(&[first_byte]);
+        let mut v = cursor;
+        let mut emitted = 0usize;
+        loop {
+            let b = (v & self.mask) as usize;
+            if self.first_byte_bits[b] & wanted != 0 {
+                let mut node = self.buckets[b];
+                while node != NIL {
+                    let n = self.nodes[node as usize]
+                        .as_ref()
+                        .expect("bucket chain points at live node");
+                    emit(&n.key, &n.value);
+                    emitted += 1;
+                    node = n.next;
+                }
+            }
             v |= !self.mask;
             v = reverse_bits_u64(v);
             v = v.wrapping_add(1);
@@ -953,6 +1033,41 @@ mod tests {
         assert_eq!(d.remove(b"a"), None);
         assert_eq!(d.len(), 1);
         assert!(!d.contains_key(b"a"));
+    }
+
+    #[test]
+    fn scan_first_byte_skips_irrelevant_buckets_without_missing_prefix_keys_hwcm1() {
+        let mut dict: KeyDict<u32> = KeyDict::with_capacity(10_128);
+        for i in 0..10_000 {
+            dict.insert(format!("x-noise:{i:05}").into_bytes().into_boxed_slice(), i);
+        }
+        for i in 0..128 {
+            dict.insert(
+                format!("p-match:{i:03}").into_bytes().into_boxed_slice(),
+                10_000 + i,
+            );
+        }
+
+        let mut cursor = 0;
+        let mut seen = Vec::new();
+        let mut examined = 0usize;
+        loop {
+            cursor = dict.scan_first_byte(cursor, 11, b'p', |key, value| {
+                examined += 1;
+                if key.starts_with(b"p-match:") {
+                    seen.push(*value);
+                }
+            });
+            if cursor == 0 {
+                break;
+            }
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, (10_000..10_128).collect::<Vec<_>>());
+        assert!(
+            examined < 1_024,
+            "must skip almost all x-noise buckets, examined {examined} keys"
+        );
     }
 
     #[test]

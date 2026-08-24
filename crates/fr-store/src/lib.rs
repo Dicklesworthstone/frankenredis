@@ -31842,6 +31842,13 @@ impl Store {
         let batch = count.max(1);
         let is_star = pattern.is_none() || pattern == Some(b"*".as_slice());
         let prepared_glob = pattern.map(glob_prepare);
+        // The physical bytes of DB 0 are the logical key bytes, so a literal
+        // prefix can safely reject KeyDict buckets whose first-byte fingerprint
+        // cannot contain a match. DB-encoded keys deliberately retain the normal
+        // walk: their physical first byte names the database, not the user key.
+        let prefix_first_byte = (db == 0)
+            .then(|| pattern.and_then(|p| glob_literal_prefix(p).first().copied()))
+            .flatten();
         let db_prefix = encode_db_key(db, b"");
 
         // Shared reborrow so the scan closure can consult `self` (expiry) while
@@ -31849,7 +31856,7 @@ impl Store {
         // taking the reborrow explicitly keeps that obvious rather than relying on
         // the closure capture inference.
         let this: &Self = self;
-        this.entries.scan(cursor, batch, |physical, entry| {
+        let mut scan_entry = |physical: &[u8], entry: &Entry| {
             // DB membership. Keys are db-encoded in one global table, so a scan of
             // db N still traverses other DBs' keys and rejects them here. That is
             // the same cost profile the previous global side index had.
@@ -31893,7 +31900,13 @@ impl Store {
                 }
             }
             visit(logical);
-        })
+        };
+        match prefix_first_byte {
+            Some(first_byte) => this
+                .entries
+                .scan_first_byte(cursor, batch, first_byte, &mut scan_entry),
+            None => this.entries.scan(cursor, batch, &mut scan_entry),
+        }
     }
 
     /// SCAN one batch, returning the matched logical keys owned.
