@@ -45865,6 +45865,138 @@ mod tests {
         assert_eq!(result.bytes_to_free_after, 0);
     }
 
+    /// (frankenredis-uhthd) DIAGNOSTIC for the measured `-OOM` divergence: with
+    /// `--maxmemory 100mb --maxmemory-policy allkeys-lru` and a 1M pipelined SET
+    /// load, fr began refusing writes after ~943k keys having evicted only 450,
+    /// while live Redis 7.2.4 on the identical load accepted every write and
+    /// evicted 143,334.
+    ///
+    /// Two causes were possible and they call for opposite fixes, so this
+    /// separates them instead of guessing:
+    ///   (a) ACCOUNTING -- keys are removed but the counted usage does not fall,
+    ///       so `bytes_to_free` never reaches 0 no matter how long the loop runs;
+    ///   (b) BUDGET -- usage falls correctly, but the loop's cycle cap stops it
+    ///       before it gets under the limit.
+    ///
+    /// The discriminator is `bytes_freed` against `evicted_keys` at the PRODUCTION
+    /// bounds (sample_limit 5, max_cycles 4 -- `Runtime::new`), compared with the
+    /// same store given a large budget.
+    #[test]
+    fn eviction_loop_gives_up_before_clearing_pressure_uhthd() {
+        fn build() -> Store {
+            let mut store = Store::new();
+            store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
+            for idx in 0..2_000 {
+                store.set(format!("evict:{idx:06}").into_bytes(), vec![b'v'; 64], None, 0);
+            }
+            store
+        }
+
+        // A limit that needs MANY evictions to reach, which is the situation the
+        // production load hit and the one a 4-cycle cap cannot serve.
+        let mut probe = build();
+        let full = probe.estimate_memory_usage_bytes();
+        let limit = full / 2;
+
+        // Arm 1: production bounds.
+        let mut prod = build();
+        let prod_result =
+            prod.run_bounded_eviction_loop(0, limit, 0, 5, 4, EvictionSafetyGateState::default());
+
+        // Arm 2: same store, same limit, generous budget.
+        let mut big = build();
+        let big_result =
+            big.run_bounded_eviction_loop(0, limit, 0, 5, 100_000, EvictionSafetyGateState::default());
+
+        println!(
+            "usage={full} limit={limit}\n  max_cycles=4      {:?} evicted={} bytes_freed={} left={}\n  max_cycles=100k   {:?} evicted={} bytes_freed={} left={}",
+            prod_result.status, prod_result.evicted_keys, prod_result.bytes_freed,
+            prod_result.bytes_to_free_after,
+            big_result.status, big_result.evicted_keys, big_result.bytes_freed,
+            big_result.bytes_to_free_after,
+        );
+
+        // (a) is REFUTED: the accounting is exact, so a larger budget can help.
+        assert!(
+            prod_result.bytes_freed > 0,
+            "ACCOUNTING BUG: {} keys evicted freed 0 counted bytes; no budget could help",
+            prod_result.evicted_keys
+        );
+        assert_eq!(
+            prod_result.bytes_freed,
+            prod_result.evicted_keys * (full / 2_000),
+            "counted usage must fall by exactly one entry per evicted key"
+        );
+
+        // (b) is CONFIRMED: identical store, identical limit, only the budget
+        // differs, and only the generous budget clears the pressure. These two
+        // assertions state the loop's CONTRACT and stay true after the production
+        // default is retuned -- both budgets are passed explicitly here.
+        assert_ne!(
+            prod_result.status,
+            EvictionLoopStatus::Ok,
+            "a 4-cycle budget cleared pressure needing ~1000 evictions; repro is stale"
+        );
+        assert_eq!(
+            big_result.status,
+            EvictionLoopStatus::Ok,
+            "a generous budget still could not clear the pressure, so the cap is not the whole story"
+        );
+        assert_eq!(big_result.bytes_to_free_after, 0);
+    }
+
+    /// (frankenredis-uhthd) WHY THE 4-CYCLE CAP CANNOT SIMPLY BE RAISED.
+    ///
+    /// `sampled_eviction_candidate_keys_impl` draws `sample_limit` random indices
+    /// and then walks `entries.iter().enumerate()` until the LARGEST of them is
+    /// reached. With 5 uniform draws over n keys the expected stopping point is
+    /// ~5n/6, so ONE eviction costs O(n) -- and the cap is what has been hiding
+    /// that. Raising the budget to fix the `-OOM` divergence would multiply an
+    /// O(n) operation by the new budget on every write under pressure.
+    ///
+    /// This measures the scaling instead of asserting it from source. A fixed
+    /// eviction count is run at n and 4n; O(1) sampling would be flat, O(n)
+    /// sampling grows with n. The assertion is deliberately loose (a wall-clock
+    /// ratio on a shared host is noisy) -- it only has to separate "flat" from
+    /// "grows", which a 4x input change makes unambiguous.
+    #[test]
+    fn eviction_candidate_sampling_is_linear_in_keyspace_uhthd() {
+        fn evict_cost(n: usize) -> std::time::Duration {
+            let mut store = Store::new();
+            store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
+            for idx in 0..n {
+                store.set(format!("evict:{idx:08}").into_bytes(), vec![b'v'; 64], None, 0);
+            }
+            // A limit just under current usage so a FIXED number of evictions runs
+            // regardless of n -- otherwise the work would scale for the trivial
+            // reason that more keys need freeing.
+            let usage = store.estimate_memory_usage_bytes();
+            let per_key = usage / n;
+            let limit = usage - (per_key * 64);
+            let start = std::time::Instant::now();
+            let r = store.run_bounded_eviction_loop(
+                0, limit, 0, 5, 64, EvictionSafetyGateState::default(),
+            );
+            let elapsed = start.elapsed();
+            assert!(r.evicted_keys > 0, "no eviction ran at n={n}");
+            elapsed
+        }
+
+        let small = evict_cost(5_000);
+        let large = evict_cost(20_000);
+        let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
+        println!(
+            "same eviction count, 4x the keyspace: {:?} -> {:?} ({ratio:.2}x)",
+            small, large
+        );
+        assert!(
+            ratio > 2.0,
+            "sampling looks sub-linear ({ratio:.2}x for 4x the keys) -- if candidate \
+             selection became O(1), the eviction budget can be raised and this test \
+             should be replaced by one pinning that"
+        );
+    }
+
     #[test]
     fn fr_p2c_008_u013_safety_gate_suppresses_eviction() {
         let mut store = Store::new();
