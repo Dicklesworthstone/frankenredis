@@ -15313,6 +15313,51 @@ impl Store {
         Ok(())
     }
 
+    /// Install a unique, threshold-fitting RDB hash listpack without rebuilding
+    /// its field/value payload into the mutable packed arena.
+    ///
+    /// Returns `Ok(None)` only when the key is fresh, LFU accounting is inactive,
+    /// and the listpack can retain RDB-load semantics directly. Duplicate fields,
+    /// a value that must promote under the live configuration, and any observable
+    /// LFU case deliberately return the unchanged blob in `Ok(Some(_))` so the
+    /// caller uses the established `hset_borrowed_many` path instead.
+    pub fn load_hash_listpack_verbatim(
+        &mut self,
+        key: &[u8],
+        listpack: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if self.lfu_tracking_enabled() {
+            return Ok(Some(listpack));
+        }
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if self.entries.contains_key(key) {
+            return Ok(Some(listpack));
+        }
+        let map = match HashFieldMap::try_from_rdb_listpack(
+            listpack,
+            self.hash_max_listpack_entries,
+            self.hash_max_listpack_value,
+        )
+        .map_err(|_| StoreError::InvalidDumpPayload)?
+        {
+            Ok(map) => map,
+            Err(listpack) => return Ok(Some(listpack)),
+        };
+        let count = map.len() as u64;
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
+        let entry = self.internal_entry(key, || Value::Hash(Box::new(map)), now_ms);
+        entry.touch_lru(now_ms);
+        entry.modification_count = entry.modification_count.wrapping_add(count);
+        Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(count);
+        Ok(None)
+    }
+
     /// (frankenredis-hsetcmdbulk) Borrowed-input bulk HSET for the COMMAND path
     /// (`HSET key f v [f v ...]`), returning the number of NEW fields (the HSET
     /// reply). The per-field command loop re-pays the keyspace setup

@@ -50328,16 +50328,26 @@ fn apply_rdb_entries_to_store(
             // the last value wins, whereas Store::restore_key rejects the payload.
             // Routing this through hash_from_listpack_spans would have quietly
             // turned a loadable RDB into a rejected one.
-            RdbValue::HashListpack(ref blob) => {
-                let spans = fr_persist::listpack::decode_value_spans(blob)
-                    .map_err(|_| PersistError::InvalidFrame)?;
-                if !spans.len().is_multiple_of(2) {
-                    return Err(PersistError::InvalidFrame);
+            RdbValue::HashListpack(blob) => {
+                // Retain a unique small hash's RDB listpack and build only its
+                // bounded field index. The store hands the unchanged blob back
+                // for every case where this would alter existing RDB-load
+                // semantics (duplicates, live-threshold promotion, LFU, or an
+                // existing target); those remain on the established rebuild path.
+                if let Some(blob) = store
+                    .load_hash_listpack_verbatim(&key, blob, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?
+                {
+                    let spans = fr_persist::listpack::decode_value_spans(&blob)
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                    if !spans.len().is_multiple_of(2) {
+                        return Err(PersistError::InvalidFrame);
+                    }
+                    let pairs: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(&blob)).collect();
+                    store
+                        .hset_borrowed_many(&key, &pairs, now_ms)
+                        .map_err(|_| PersistError::InvalidFrame)?;
                 }
-                let pairs: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(blob)).collect();
-                store
-                    .hset_borrowed_many(&key, &pairs, now_ms)
-                    .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
                         &key,
@@ -62501,6 +62511,55 @@ mod tests {
             matches!(entry.value, RdbValue::Hash(_)),
             "expected plain Hash, got {:?}",
             entry.value
+        );
+    }
+
+    #[test]
+    fn rdb_v11_hash_listpack_load_reads_then_materializes_on_hset_qj6jn() {
+        let blob = fr_persist::encode_listpack_strings_blob(&[
+            b"alpha".as_slice(),
+            b"one".as_slice(),
+            b"beta".as_slice(),
+            b"2".as_slice(),
+        ])
+        .expect("compact hash fixture encodes");
+        let encoded = fr_persist::encode_rdb(
+            &[RdbEntry {
+                db: 0,
+                key: b"hash".to_vec(),
+                value: RdbValue::HashListpack(blob),
+                expire_ms: None,
+            }],
+            &[],
+        );
+        assert_eq!(&encoded[..9], b"REDIS0011", "fixture must be RDB v11");
+        let (entries, _) = fr_persist::decode_rdb(&encoded).expect("RDB v11 decodes");
+
+        let mut rt = Runtime::default_strict();
+        super::apply_rdb_entries_to_store(&mut rt.server.store, entries, 0)
+            .expect("RDB hash listpack applies");
+        assert_eq!(
+            rt.execute_frame(command(&[b"HGET", b"hash", b"alpha"]), 0),
+            RespFrame::BulkString(Some(b"one".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"HGET", b"hash", b"missing"]), 0),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"HSET", b"hash", b"alpha", b"replaced", b"gamma", b"3"]),
+                1,
+            ),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"HGET", b"hash", b"alpha"]), 2),
+            RespFrame::BulkString(Some(b"replaced".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"HLEN", b"hash"]), 2),
+            RespFrame::Integer(3)
         );
     }
 
