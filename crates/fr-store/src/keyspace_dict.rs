@@ -244,6 +244,79 @@ impl<V> KeyDict<V> {
         self.get(key).is_some()
     }
 
+    /// Borrow the STORED key bytes alongside the value.
+    ///
+    /// (uhthd) The `Store` wiring needs this because several side maps
+    /// (`expiry_deadlines`, `hash_field_expires`, `volatile_keys`) are keyed by the
+    /// canonical key rather than by the caller's argv slice, and the caller's slice
+    /// is a borrow of a network buffer that does not outlive the command. Returning
+    /// the dict's own copy is what lets those maps be built without re-deriving the
+    /// key from the request. Mirrors `HashMap::get_key_value`.
+    pub fn get_key_value(&self, key: &[u8]) -> Option<(&[u8], &V)> {
+        let h = self.hash_key(key);
+        let mut cur = self.buckets[self.bucket_of(h)];
+        while cur != NIL {
+            let node = self.nodes[cur as usize]
+                .as_ref()
+                .expect("bucket chain points at live node");
+            if node.hash == h && *node.key == *key {
+                return Some((&node.key, &node.value));
+            }
+            cur = node.next;
+        }
+        None
+    }
+
+    /// Node-arena slots reserved, the analogue of `HashMap::capacity`.
+    ///
+    /// (uhthd) Reported off the ARENA and not off the bucket array because it is the
+    /// arena that holds the keys and values, and because `release_empty_keyspace_capacity`
+    /// asserts this reaches exactly 0 after a flush — a bucket-derived figure could
+    /// not, since the table keeps its four-slot floor.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.nodes.capacity()
+    }
+
+    /// Release memory the live entries do not need: compact the arena, shrink the
+    /// bucket table to the smallest power of two that still holds `count`, and hand
+    /// back both Vecs' spare capacity.
+    ///
+    /// (uhthd) `Store::release_empty_keyspace_capacity` runs this after a flush and
+    /// asserts `capacity() == 0`, so a plain `Vec::shrink_to_fit` on `nodes` is NOT
+    /// enough: removal leaves `None` holes and `nodes.len()` stays at the high-water
+    /// mark, so `shrink_to_fit` would only drop capacity BEYOND that mark and a
+    /// flushed keyspace would keep its whole arena forever. The holes are therefore
+    /// compacted out first.
+    ///
+    /// Compaction RENUMBERS nodes, which invalidates every bucket head and `next`
+    /// link, so the bucket table is rebuilt from the surviving nodes rather than
+    /// patched — the same rehash `resize_buckets` performs, and equally safe for the
+    /// reverse-binary cursor, which derives everything from `hash & mask`.
+    pub fn shrink_to_fit(&mut self) {
+        if !self.free.is_empty() {
+            self.nodes.retain(|slot| slot.is_some());
+            self.free.clear();
+            self.free.shrink_to_fit();
+            debug_assert_eq!(self.nodes.len(), self.count);
+            // Every index moved, so relink from scratch rather than patching.
+            let mask = self.mask;
+            self.buckets.fill(NIL);
+            for (idx, node) in self.nodes.iter_mut().enumerate() {
+                let node = node.as_mut().expect("holes were just compacted out");
+                let b = (u64::from(node.hash) & mask) as usize;
+                node.next = self.buckets[b];
+                self.buckets[b] = idx as u32;
+            }
+        }
+        self.nodes.shrink_to_fit();
+        let target = Self::bucket_count_for_capacity(self.count);
+        if target < self.buckets.len() {
+            self.resize_buckets(target);
+        }
+        self.buckets.shrink_to_fit();
+    }
+
     /// Insert `key`/`value`, returning the previous value if the key existed.
     /// The key bytes are owned once (`Box<[u8]>`), with no `Arc` header.
     pub fn insert(&mut self, key: Box<[u8]>, value: V) -> Option<V> {
@@ -677,6 +750,118 @@ mod tests {
         for i in n..n + 500 {
             assert_eq!(d.get(format!("key:{i:08}").as_bytes()), None);
         }
+    }
+
+    /// (uhthd) `Store::release_empty_keyspace_capacity` asserts `capacity() == 0`
+    /// after a flush, so this pins the property that assertion depends on — AND the
+    /// case that makes it non-trivial.
+    ///
+    /// The negative case is the churned dict: `remove` leaves a `None` hole and
+    /// `nodes.len()` stays at the high-water mark, so an implementation that only
+    /// called `Vec::shrink_to_fit` would drop capacity beyond the mark and leave a
+    /// flushed keyspace holding its entire arena forever. Building 5,000 keys,
+    /// deleting them all, and demanding 0 is exactly that mistake's shape.
+    #[test]
+    fn shrink_to_fit_releases_a_flushed_keyspace_uhthd() {
+        let mut d: KeyDict<u64> = KeyDict::with_capacity(5_000);
+        for i in 0..5_000u64 {
+            d.insert(format!("key:{i}").into_bytes().into_boxed_slice(), i);
+        }
+        assert!(d.capacity() >= 5_000);
+
+        // Remove one at a time (the churn path that leaves holes), not clear().
+        for i in 0..5_000u64 {
+            assert_eq!(d.remove(format!("key:{i}").as_bytes()), Some(i));
+        }
+        assert_eq!(d.len(), 0);
+        d.shrink_to_fit();
+        assert_eq!(d.capacity(), 0, "a flushed keyspace must release its arena");
+
+        // And the dict is still usable afterwards.
+        d.insert(k("after"), 7);
+        assert_eq!(d.get(b"after"), Some(&7));
+    }
+
+    /// (uhthd) Compaction RENUMBERS every node, which invalidates every bucket head
+    /// and `next` link. This is the test that a half-done implementation fails: it
+    /// shrinks a dict that is still HOLDING data behind holes, then demands that
+    /// every survivor is still reachable by lookup, by iteration, and by a full
+    /// SCAN. Forgetting to rebuild the bucket table leaves survivors linked by stale
+    /// indices — lookups miss, or worse, return a neighbour.
+    #[test]
+    fn shrink_to_fit_preserves_every_surviving_key_uhthd() {
+        let mut d: KeyDict<u64> = KeyDict::new();
+        for i in 0..4_000u64 {
+            d.insert(format!("key:{i}").into_bytes().into_boxed_slice(), i);
+        }
+        // Punch holes: drop every third key, so `free` is non-empty and the arena
+        // is fragmented rather than merely over-allocated.
+        let mut survivors: Vec<u64> = Vec::new();
+        for i in 0..4_000u64 {
+            if i % 3 == 0 {
+                assert_eq!(d.remove(format!("key:{i}").as_bytes()), Some(i));
+            } else {
+                survivors.push(i);
+            }
+        }
+        assert_eq!(d.len(), survivors.len());
+
+        d.shrink_to_fit();
+
+        assert_eq!(d.len(), survivors.len(), "shrink must not lose entries");
+        for &i in &survivors {
+            assert_eq!(
+                d.get(format!("key:{i}").as_bytes()),
+                Some(&i),
+                "key {i} unreachable after compaction"
+            );
+        }
+        for i in (0..4_000u64).filter(|i| i % 3 == 0) {
+            assert_eq!(
+                d.get(format!("key:{i}").as_bytes()),
+                None,
+                "removed key {i} came back after compaction"
+            );
+        }
+        // Iteration and a full SCAN must both see exactly the survivors.
+        let mut iterated: Vec<u64> = d.iter().map(|(_, v)| *v).collect();
+        iterated.sort_unstable();
+        assert_eq!(iterated, survivors);
+
+        let mut scanned: Vec<u64> = Vec::new();
+        let mut cursor = 0u64;
+        loop {
+            cursor = d.scan(cursor, 32, |_, v| scanned.push(*v));
+            if cursor == 0 {
+                break;
+            }
+        }
+        scanned.sort_unstable();
+        scanned.dedup();
+        assert_eq!(scanned, survivors, "SCAN must still reach every survivor");
+    }
+
+    /// (uhthd) `get_key_value` must hand back the dict's OWN key bytes, not the
+    /// lookup slice — that is the whole reason the `Store` wiring needs it, since
+    /// the lookup slice borrows a network buffer that does not outlive the command.
+    /// Probing with a separately-allocated equal slice and asserting the returned
+    /// bytes are equal but at a DIFFERENT address is what distinguishes a real
+    /// implementation from one that echoes its argument back.
+    #[test]
+    fn get_key_value_returns_the_stored_key_not_the_probe_uhthd() {
+        let mut d: KeyDict<u32> = KeyDict::new();
+        d.insert(k("alpha"), 1);
+
+        let probe: Vec<u8> = b"alpha".to_vec();
+        let (stored, value) = d.get_key_value(&probe).expect("present");
+        assert_eq!(stored, b"alpha");
+        assert_eq!(value, &1);
+        assert_ne!(
+            stored.as_ptr(),
+            probe.as_ptr(),
+            "must return the dict's own key, not the caller's slice"
+        );
+        assert_eq!(d.get_key_value(b"absent"), None);
     }
 
     // Small deterministic LCG so tests are reproducible without rand crates and
