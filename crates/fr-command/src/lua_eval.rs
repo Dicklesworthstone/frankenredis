@@ -3432,6 +3432,10 @@ fn resolve_lua_local_slots(stmts: &mut Block) {
 /// nesting, so what this bound still governs is NON-tail recursion, which is where the residual
 /// gap described above lives.
 const MAX_CALL_DEPTH: usize = 768;
+/// Lua 5.1's observed non-tail call ceiling is 19,998.  Heap-backed
+/// continuations match that capability without letting a hostile script grow
+/// the interpreter heap without bound.
+const MAX_HEAP_CALL_CONTINUATIONS: usize = 19_998;
 const MAX_ITERATIONS: u64 = 1_000_000;
 const LUA_EXACT_INTEGER_LIMIT: i128 = 1_i128 << 53;
 const LUA_YIELD_SENTINEL: &str = "__frankenredis_lua_coroutine_yield__";
@@ -3490,6 +3494,19 @@ enum ControlFlow {
 struct TailCall {
     callee: LuaValue,
     args: Vec<LuaValue>,
+    /// Callers that have evaluated the left side of `return lhs + f(...)`.
+    /// Unlike a Rust call frame these live in a Vec owned by the trampoline,
+    /// so a non-tail recursive Lua call does not consume the worker stack.
+    continuations: Vec<NonTailCallFrame>,
+}
+
+/// The completed portion of a non-tail binary return.  The vector containing
+/// these frames is the interpreter's heap stack; `call_function` pops it once
+/// the deferred callee has produced its first result.
+#[derive(Debug)]
+struct NonTailCallFrame {
+    left: LuaValue,
+    op: BinOp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6410,11 +6427,64 @@ impl<'a> LuaState<'a> {
                         return Ok(ControlFlow::TailCall(Box::new(TailCall {
                             callee: func,
                             args: arg_vals,
+                            continuations: Vec::new(),
                         })));
                     }
                     return Ok(ControlFlow::Return(self.invoke_call_expr(
                         func_expr, &func, arg_vals, call_args, env, varargs,
                     )?));
+                }
+                // (frankenredis-ug22x) A direct call on the right of an
+                // arithmetic return is non-tail: its caller still has to add
+                // the result.  Preserve that completed left operand in the
+                // call transfer instead of nesting `call_function` on the
+                // Rust stack.  Each recurrence adds one small heap frame to
+                // the trampoline's Vec, which is released as results unwind.
+                //
+                // This intentionally covers the arithmetic forms first.  They
+                // are the recursive shape that exposed the 10x frame gap, and
+                // `eval_binop` applies their ordinary Lua number coercion when
+                // the deferred call returns.  Metamethod-bearing forms retain
+                // the existing evaluator path below until they have an equally
+                // complete continuation representation.
+                if let [Expr::BinOp(left, op, right)] = exprs.as_slice()
+                    && matches!(right.as_ref(), Expr::Call(_, _))
+                    && matches!(
+                        op,
+                        BinOp::Add
+                            | BinOp::Sub
+                            | BinOp::Mul
+                            | BinOp::Div
+                            | BinOp::Mod
+                            | BinOp::Pow
+                    )
+                {
+                    let left_value = self.eval_expr(left, env, varargs)?;
+                    if left_value.to_number().is_some() {
+                        let Expr::Call(func_expr, call_args) = right.as_ref() else {
+                            unreachable!("right is constrained by the pattern above");
+                        };
+                        let func = self.eval_expr(func_expr, env, varargs)?;
+                        let arg_vals = self.eval_call_args(call_args, env, varargs)?;
+                        if matches!(func, LuaValue::Function(_)) {
+                            return Ok(ControlFlow::TailCall(Box::new(TailCall {
+                                callee: func,
+                                args: arg_vals,
+                                continuations: vec![NonTailCallFrame {
+                                    left: left_value,
+                                    op: op.clone(),
+                                }],
+                            })));
+                        }
+                        let right_value = self
+                            .invoke_call_expr(func_expr, &func, arg_vals, call_args, env, varargs)?
+                            .into_iter()
+                            .next()
+                            .unwrap_or(LuaValue::Nil);
+                        return Ok(ControlFlow::Return(vec![
+                            self.eval_binop(&left_value, op, &right_value)?,
+                        ]));
+                    }
                 }
                 let vals = self.eval_expr_list(exprs, env, varargs)?;
                 Ok(ControlFlow::Return(vals))
@@ -7964,8 +8034,12 @@ impl<'a> LuaState<'a> {
         env: &mut Env,
         varargs: &mut Vec<LuaValue>,
     ) -> Result<Vec<LuaValue>, String> {
-        let TailCall { callee, mut args } = tail;
-        self.call_function(&callee, &mut args, env, varargs)
+        let TailCall {
+            callee,
+            mut args,
+            continuations,
+        } = tail;
+        self.call_function_with_continuations(&callee, &mut args, env, varargs, continuations)
     }
 
     fn invoke_call_expr(
@@ -9141,7 +9215,18 @@ impl<'a> LuaState<'a> {
         func: &LuaValue,
         args: &mut [LuaValue],
         env: &mut Env,
-        _varargs: &mut Vec<LuaValue>,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<Vec<LuaValue>, String> {
+        self.call_function_with_continuations(func, args, env, varargs, Vec::new())
+    }
+
+    fn call_function_with_continuations(
+        &mut self,
+        func: &LuaValue,
+        args: &mut [LuaValue],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+        continuations: Vec<NonTailCallFrame>,
     ) -> Result<Vec<LuaValue>, String> {
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
@@ -9178,7 +9263,13 @@ impl<'a> LuaState<'a> {
             new_args.extend_from_slice(args);
             self.call_depth -= 1;
             self.lua_frame_kinds.pop();
-            return self.call_function(&callable, &mut new_args, env, _varargs);
+            return self.call_function_with_continuations(
+                &callable,
+                &mut new_args,
+                env,
+                varargs,
+                continuations,
+            );
         }
         let result = match func {
             LuaValue::RustFunction(name) => self.call_builtin(name, args, env),
@@ -9213,6 +9304,7 @@ impl<'a> LuaState<'a> {
             LuaValue::Function(entry_func) => {
                 let mut tail_owner: Option<LuaValue> = None;
                 let mut tail_args: Vec<LuaValue> = Vec::new();
+                let mut continuations = continuations;
                 let mut first = true;
                 loop {
                     let lua_func: &LuaFunc = match tail_owner.as_ref() {
@@ -9238,9 +9330,25 @@ impl<'a> LuaState<'a> {
                     }
                     first = false;
                     break match result {
-                        Ok(ControlFlow::Return(vals)) => Ok(vals),
+                        Ok(ControlFlow::Return(mut vals)) => {
+                            while let Some(frame) = continuations.pop() {
+                                let right = vals.into_iter().next().unwrap_or(LuaValue::Nil);
+                                vals = vec![self.eval_binop(&frame.left, &frame.op, &right)?];
+                            }
+                            Ok(vals)
+                        }
                         Ok(ControlFlow::TailCall(tail)) => {
-                            let TailCall { callee, args } = *tail;
+                            let TailCall {
+                                callee,
+                                args,
+                                continuations: deferred,
+                            } = *tail;
+                            if continuations.len().saturating_add(deferred.len())
+                                > MAX_HEAP_CALL_CONTINUATIONS
+                            {
+                                return Err("user_script:1: stack overflow".to_string());
+                            }
+                            continuations.extend(deferred);
                             tail_owner = Some(callee);
                             tail_args = args;
                             continue;
@@ -17186,49 +17294,35 @@ mod tests {
         assert_eq!(out, RespFrame::BulkString(Some(b"b".to_vec())));
     }
 
-    /// NON-tail recursion must STILL be bounded, and this is the discriminating negative case.
-    ///
-    /// (frankenredis-lua-tail-calls-ps0le) `return 1 + f(n-1)` needs the caller's frame to add to
-    /// the result, so Lua does not treat it as a tail call and it must keep costing a frame here.
-    /// A fix that merely stopped charging `call_depth` for every `return f(...)`-shaped call would
-    /// pass the test above and FAIL this one by recursing natively until the process aborts --
-    /// strictly worse than the refusal it replaced.
-    ///
-    /// IT RUNS ON A SIZED THREAD ON PURPOSE. Rust's default test thread gets 2 MiB, so on the
-    /// harness's own thread the native stack dies BEFORE the guard can fire and the whole test
-    /// binary aborts with SIGABRT -- which is what happened the first time this test ran.
-    ///
-    /// 8 MiB WAS NOT ENOUGH EITHER, and the reason is worth keeping because it caught two people:
-    /// the 4352 B per level that sizes `MAX_CALL_DEPTH` is a RELEASE figure, and 768 x 4352 =
-    /// 3.34 MB does fit 8 MiB. But tests run at opt-level 0, where the same cycle measures
-    /// 19,560 B per level -- 4.5x fatter (call_function 416 -> 2464, eval_expr 816 -> 4104,
-    /// exec_stmt 1264 -> 4112, read from this crate's own debug test binary). At that cost 768
-    /// levels need 14.33 MB, an 8 MiB thread holds 429, and the binary aborted again.
-    ///
-    /// So the thread is sized for the DEBUG cost with headroom, matching the 64 MiB probes
-    /// elsewhere in this file (`thread-stack-size-1tlyh`, `9a4ca2c28`). A depth bound is sized
-    /// for PRODUCTION from release frames -- that part was right and `MAX_CALL_DEPTH` does not
-    /// move -- but the test that PROVES the bound has to fit the profile the test runs in, or the
-    /// bound is unprovable and the suite is unrunnable.
+    /// A non-tail recursive return needs a caller frame for the pending add,
+    /// but that frame belongs on the interpreter heap rather than the Rust
+    /// worker stack.  This depth is deliberately beyond both MAX_CALL_DEPTH
+    /// and the old native-stack ceiling.
     #[test]
-    fn non_tail_recursion_is_still_refused_at_the_bound_ps0le() {
-        let probe = std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let mut store = Store::new();
-                eval_script(
-                    b"local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f(20000)",
-                    &[],
-                    &[],
-                    &mut store,
-                    0,
-                )
-                .expect_err("non-tail recursion must be refused, never abort the process")
-            })
-            .expect("spawn the 64 MiB probe thread");
-        let err = probe
-            .join()
-            .expect("the guard must fire before the stack does");
+    fn non_tail_arithmetic_recursion_uses_heap_continuations_ug22x() {
+        let mut store = Store::new();
+        let out = eval_script(
+            b"local function f(n) if n == 0 then return 0 end return 1 + f(n - 1) end return f(19998)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("heap-backed non-tail frames must reach the incumbent boundary");
+        assert_eq!(out, RespFrame::Integer(19_998));
+    }
+
+    /// The heap stack retains the incumbent's finite non-tail ceiling instead
+    /// of replacing one process-abort hazard with an unbounded allocation.
+    #[test]
+    fn non_tail_recursion_is_refused_at_the_heap_bound_ug22x() {
+        let mut store = Store::new();
+        let script = format!(
+            "local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f({})",
+            super::MAX_HEAP_CALL_CONTINUATIONS + 1
+        );
+        let err = eval_script(script.as_bytes(), &[], &[], &mut store, 0)
+            .expect_err("non-tail recursion must be refused without growing the Rust stack");
         assert!(
             err.contains("stack overflow"),
             "expected upstream's stack-overflow wording, got {err}"
@@ -23588,44 +23682,10 @@ end
 
     #[test]
     fn deep_lua_recursion_refuses_with_the_incumbents_wording_5h2lu() {
-        // fr refuses deep Lua recursion earlier than 7.2.4 does -- see the derivation on
-        // MAX_CALL_DEPTH -- and that gap cannot be closed by moving a constant. What it CAN do,
-        // and what this pins, is refuse with the message the incumbent uses instead of one that
-        // appears nowhere in Redis: `luaD_growCI` raises `luaG_runerror(L, "stack overflow")`
-        // (ldo.c:170-175), while fr answered "script exceeded maximum call depth".
-        //
-        // Nothing else pinned the old string -- three emission sites, no test, no fixture -- which
-        // is exactly why it survived: an invented error nobody asserts on reads as correct forever.
-        // The 64 MiB thread is a TEST-PROFILE accommodation, the same one
-        // `lua_reply_walk_bounds_nesting_like_upstream_luareplytoredisreply` already carries: this
-        // workspace defines no [profile.test], so tests run at opt-level 0 where the evaluator's
-        // frames are far fatter than in the shipping binary. MEASURED here rather than assumed --
-        // without it this test aborts the whole test binary with a real stack overflow before the
-        // depth guard can fire, which is how it first ran. That is a statement about opt-level 0
-        // on a 2 MiB test thread, NOT about production, where workers get 8 MiB (c63b56ef1).
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
         let mut store = Store::new();
-
-        // CONTROL, and it is the half that catches an over-eager fix: a recursion comfortably
-        // inside the bound must still RUN. DERIVED from MAX_CALL_DEPTH rather than written as a
-        // literal -- this said `f(100)` against a bound of 128, and its partner said `f(500)`
-        // against the same 128, so raising the bound to the measured 512 left the "past the
-        // bound" half asserting a refusal that could no longer happen. Both ends now move with
-        // the constant, which is what makes this a bound test rather than a depth-500 test.
-        // (frankenredis-lua-tail-calls-ps0le) BOTH PROBES ARE NON-TAIL NOW -- `return 1 + f(n-1)`,
-        // not `return f(n-1)` -- and the change is a correction, not an accommodation. This test
-        // asserted that `return f(n-1)` past the bound is REFUSED. That shape is a TAIL CALL, and
-        // Lua 5.1 gives tail calls a reused frame, so 7.2.4 answers 0 for it at 600, 5000 and
-        // 50000 alike (measured live on that bead). The assertion was therefore pinning fr's
-        // DIVERGENCE from the incumbent as if it were the contract, and it went green for exactly
-        // as long as fr had the bug. `MAX_CALL_DEPTH` governs non-tail recursion; both halves now
-        // probe what it governs. This is the second time on this project that a test has encoded
-        // an assumption a later fix invalidated without touching a line the test names.
         let inside = format!(
             "local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f({})",
-            super::MAX_CALL_DEPTH / 4
+            super::MAX_HEAP_CALL_CONTINUATIONS
         );
         let ok = eval_script(
             inside.as_bytes(),
@@ -23637,13 +23697,13 @@ end
         .expect("a recursion inside the bound must still run");
         assert_eq!(
             ok,
-            RespFrame::Integer((super::MAX_CALL_DEPTH / 4) as i64),
+            RespFrame::Integer(super::MAX_HEAP_CALL_CONTINUATIONS as i64),
             "the non-tail control sums 1 per level, so it returns the depth it was given"
         );
 
         let past = format!(
             "local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f({})",
-            super::MAX_CALL_DEPTH + 100
+            super::MAX_HEAP_CALL_CONTINUATIONS + 1
         );
         let err = eval_script(
             past.as_bytes(),
@@ -23661,10 +23721,6 @@ end
             !err.contains("maximum call depth"),
             "the invented string must be gone: {err}"
         );
-            })
-            .expect("spawn a test thread with headroom")
-            .join()
-            .expect("the depth guard must fire instead of overflowing the stack");
     }
 
     #[test]
