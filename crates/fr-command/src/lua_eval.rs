@@ -62,13 +62,15 @@ use crate::{CommandError, SCRIPT_NOSCRIPT_ERROR, dispatch_argv, parse_i64_arg};
 // upvalue cells — registers a `Weak` handle in a thread-local registry. At the
 // end of each `eval_script` (success, error, OR panic-unwind, via the
 // `LuaGcScope` Drop guard) we sweep the slice of the registry allocated by that
-// eval and CLEAR each still-live object's contents: emptying a table inner /
-// setting a cell to `Nil` severs the internal back-edge, the strong counts
-// collapse to zero, and the memory is reclaimed. The sweep runs only after the
+// eval and clears each still-live object's contents unless it remains reachable
+// from a shared template: emptying a table inner / setting a cell to `Nil`
+// severs the internal back-edge, the strong counts collapse to zero, and the
+// memory is reclaimed. A value stored in the shared string metatable is one
+// such long-lived root, so its reachable graph must survive the sweep just as
+// it does in Redis's server-wide lua_State. The sweep runs only after the
 // script's return value has been serialized to an owned `RespFrame` and the
-// `LuaState` has dropped, so live results and non-cyclic data are unaffected
-// (their `Weak`s simply fail to upgrade). The registry holds only `Weak`s, so
-// it never itself keeps a Lua object alive.
+// `LuaState` has dropped. The registries hold only `Weak`s, so they never
+// themselves keep a Lua object alive.
 
 enum LuaGcHandle {
     Table(Weak<RefCell<LuaTableInner>>),
@@ -213,11 +215,125 @@ fn lua_gc_sweep_and_drain_prefix(mark: usize) {
 /// Clear each still-live registered object, severing the back-edge that keeps its cycle alive.
 /// Shared by the eval-end sweep and the FCALL library-cache eviction sweep so the two cannot
 /// disagree about what "breaking a cycle" means. (frankenredis-kbyhy)
+#[derive(Default)]
+struct LuaGcReachable {
+    tables: HashSet<usize>,
+    cells: HashSet<usize>,
+}
+
+impl LuaGcReachable {
+    fn visit_value(&mut self, value: &LuaValue) {
+        match value {
+            LuaValue::Table(table) => self.visit_table(table),
+            LuaValue::Function(function) => self.visit_function(function),
+            LuaValue::Userdata(LuaUserdata::Proxy(proxy)) => {
+                if let Some(metatable) = &proxy.metatable {
+                    self.visit_table(metatable);
+                }
+            }
+            LuaValue::Coroutine(coroutine) | LuaValue::WrappedCoroutine(coroutine) => {
+                let (function, env, varargs) = {
+                    let inner = coroutine.inner.borrow();
+                    (inner.func.clone(), inner.env.clone(), inner.varargs.clone())
+                };
+                self.visit_function(&function);
+                self.visit_env(&env);
+                for value in &varargs {
+                    self.visit_value(value);
+                }
+            }
+            LuaValue::Nil
+            | LuaValue::Bool(_)
+            | LuaValue::Number(_)
+            | LuaValue::Str(_)
+            | LuaValue::RustFunction(_)
+            | LuaValue::Userdata(LuaUserdata::CjsonNull) => {}
+        }
+    }
+
+    fn visit_table(&mut self, table: &LuaTable) {
+        let address = Rc::as_ptr(&table.inner) as usize;
+        if !self.tables.insert(address) {
+            return;
+        }
+        let (array, string_values, other_entries, metatable) = {
+            let inner = table.inner.borrow();
+            (
+                inner.array.clone(),
+                inner.string_hash.values().cloned().collect::<Vec<_>>(),
+                inner.other_hash.clone(),
+                inner.metatable.clone(),
+            )
+        };
+        for value in array.iter().chain(string_values.iter()) {
+            self.visit_value(value);
+        }
+        for (key, value) in &other_entries {
+            self.visit_value(key);
+            self.visit_value(value);
+        }
+        if let Some(metatable) = &metatable {
+            self.visit_table(metatable);
+        }
+    }
+
+    fn visit_function(&mut self, function: &LuaFunc) {
+        if let Some(captured) = &function.captured_env {
+            for scope in captured {
+                for (_, cell) in scope {
+                    self.visit_cell(cell);
+                }
+            }
+        }
+        if let Some(env_table) = function.env_table.borrow().clone() {
+            self.visit_table(&env_table);
+        }
+    }
+
+    fn visit_env(&mut self, env: &Option<Env>) {
+        let Some(env) = env else {
+            return;
+        };
+        for scope in &env.scopes {
+            for binding in &scope.locals {
+                self.visit_cell(&binding.cell);
+            }
+        }
+        if let Some(global_env) = &env.global_env {
+            self.visit_table(global_env);
+        }
+    }
+
+    fn visit_cell(&mut self, cell: &LuaCell) {
+        let address = Rc::as_ptr(cell) as usize;
+        if self.cells.insert(address) {
+            let value = cell.borrow().clone();
+            self.visit_value(&value);
+        }
+    }
+}
+
+fn lua_gc_shared_reachable() -> LuaGcReachable {
+    let mut reachable = LuaGcReachable::default();
+    // Standard-library templates are recursively read-only before a script can observe them. The
+    // shared string metatable is the one mutable cross-EVAL root, so it alone can retain a table
+    // allocated by a completed EVAL. Walking only it avoids turning every EVAL teardown into a
+    // traversal of every standard-library table.
+    if let Some(metatable) = LUA_STRING_METATABLE.with(|cell| cell.borrow().clone()) {
+        reachable.visit_table(&metatable);
+    }
+    reachable
+}
+
 fn lua_gc_break_cycles<'h>(handles: impl Iterator<Item = &'h LuaGcHandle>) {
+    let reachable = lua_gc_shared_reachable();
     for handle in handles {
         match handle {
             LuaGcHandle::Table(weak) => {
                 if let Some(inner) = weak.upgrade() {
+                    if reachable.tables.contains(&(Rc::as_ptr(&inner) as usize)) {
+                        continue;
+                    }
                     // try_borrow_mut is defensive: post-teardown nothing
                     // should hold a live borrow, and a contended borrow
                     // must never panic during cleanup.
@@ -234,10 +350,13 @@ fn lua_gc_break_cycles<'h>(handles: impl Iterator<Item = &'h LuaGcHandle>) {
                 }
             }
             LuaGcHandle::Cell(weak) => {
-                if let Some(cell) = weak.upgrade()
-                    && let Ok(mut slot) = cell.try_borrow_mut()
-                {
-                    *slot = LuaValue::Nil;
+                if let Some(cell) = weak.upgrade() {
+                    if reachable.cells.contains(&(Rc::as_ptr(&cell) as usize)) {
+                        continue;
+                    }
+                    if let Ok(mut slot) = cell.try_borrow_mut() {
+                        *slot = LuaValue::Nil;
+                    }
                 }
             }
         }
@@ -645,17 +764,16 @@ impl LuaTable {
         // Bump site 5 of 5 (see LUA_TABLE_FIELD_EPOCH): same address-reuse
         // argument as `new()`.
         bump_lua_field_epoch();
-        Self {
-            inner: Rc::new(RefCell::new(LuaTableInner {
-                array: Vec::new(),
-                string_hash: LuaMap::default(),
-                other_hash: Vec::new(),
-                other_keys: HashSet::new(),
-                metatable: None,
-                shared_template: true,
-                readonly: false,
-            })),
-        }
+        let inner = Rc::new(RefCell::new(LuaTableInner {
+            array: Vec::new(),
+            string_hash: LuaMap::default(),
+            other_hash: Vec::new(),
+            other_keys: HashSet::new(),
+            metatable: None,
+            shared_template: true,
+            readonly: false,
+        }));
+        Self { inner }
     }
 
     fn get(&self, key: &LuaValue) -> LuaValue {
@@ -17950,9 +18068,7 @@ mod tests {
         );
 
         // Method lookup runs THROUGH __index, so replacing it redirects every string method and
-        // orphans the ones the string table used to serve. Both halves in one script: fr's
-        // end-of-eval cycle breaking clears a table stored across evals, which is a separate defect
-        // and would make a two-script version fail for an unrelated reason.
+        // orphans the ones the string table used to serve.
         assert_eq!(
             run(
                 &mut store,
@@ -17962,6 +18078,15 @@ mod tests {
             ),
             "Zx|false",
             "replacing __index must redirect method lookup AND orphan string.rep"
+        );
+
+        // The replacement table is reachable from the shared string metatable, so it and the
+        // function it owns must survive the EVAL-boundary cycle sweep. Before wh9mn the table
+        // object survived but the sweep emptied its contents, making this second EVAL see nil.
+        assert_eq!(
+            run(&mut store, b"return type(('x').zap) .. '|' .. ('x'):zap()"),
+            "function|Zx",
+            "a table retained by the shared string metatable must keep its entries across EVALs"
         );
     }
 
