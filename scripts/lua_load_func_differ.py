@@ -55,6 +55,22 @@ SCRIPTS = [
 ]
 
 
+def _record_mismatch(diffs, label, oracle, fr):
+    if oracle != fr:
+        diffs.append((label, oracle, fr))
+
+
+def _self_test():
+    """A wrong dynamic-load reply must be recorded by the live predicate."""
+    diffs = []
+    _record_mismatch(diffs, "planted", b":42\r\n", b":41\r\n")
+    if diffs != [("planted", b":42\r\n", b":41\r\n")]:
+        print(f"SELF-TEST FAIL: planted mismatch was not recorded: {diffs!r}")
+        return 1
+    print("SELF-TEST PASS: load(func) gate catches a planted wrong reply")
+    return 0
+
+
 def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
@@ -62,9 +78,12 @@ def main():
     diffs = 0
     for sc in SCRIPTS:
         ro, rf = cmd(od, "EVAL", sc, "0"), cmd(fr, "EVAL", sc, "0")
-        if ro != rf:
+        mismatch = []
+        _record_mismatch(mismatch, sc, ro, rf)
+        if mismatch:
             diffs += 1
-            print(f"DIFF {sc[:55]!r}...\n  redis={ro!r}\n  fr   ={rf!r}")
+            _, oracle, fr_reply = mismatch[0]
+            print(f"DIFF {sc[:55]!r}...\n  redis={oracle!r}\n  fr   ={fr_reply!r}")
     if diffs:
         print(f"\nFAIL — {diffs} load(func) divergence(s) vs redis 7.2.4")
         sys.exit(1)
@@ -72,4 +91,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(_self_test() if "--self-test" in sys.argv else main())

@@ -66,6 +66,22 @@ CASES = [
 ]
 
 
+def _record_mismatch(fails, label, oracle, fr):
+    if oracle != fr:
+        fails.append(f"{label}: redis={oracle!r} fr={fr!r}")
+
+
+def _self_test():
+    """A wrong continuation result must be reported by the live predicate."""
+    fails = []
+    _record_mismatch(fails, "planted_yield_result", b"$3\r\n1:3\r\n", b"$3\r\n1:4\r\n")
+    if len(fails) != 1 or "planted_yield_result" not in fails[0]:
+        print(f"SELF-TEST FAIL: planted coroutine mismatch was not reported: {fails!r}")
+        return 1
+    print("SELF-TEST PASS: coroutine gate catches a planted wrong reply")
+    return 0
+
+
 def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
@@ -73,8 +89,7 @@ def main():
         fails = []
         for label, script in CASES:
             ro, rf = ev(od, script), ev(fr, script)
-            if ro != rf:
-                fails.append(f"{label}: redis={ro!r} fr={rf!r}")
+            _record_mismatch(fails, label, ro, rf)
         print("=" * 60)
         if fails:
             print(f"FAIL — {len(fails)} coroutine divergence(s) vs redis 7.2.4:")
@@ -88,4 +103,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(_self_test() if "--self-test" in sys.argv else main())

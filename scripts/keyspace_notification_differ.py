@@ -71,15 +71,15 @@ def parse_events(blob):
 def open_pair(port):
     sub = conn(port)
     send(sub, "CONFIG", "SET", "notify-keyspace-events", "KEA")
-    recv_reply(sub)
+    expect_status(recv_reply(sub), "CONFIG SET notify-keyspace-events")
     send(sub, "FLUSHALL")
-    recv_reply(sub)
+    expect_status(recv_reply(sub), "subscriber FLUSHALL")
     send(sub, "PSUBSCRIBE", "__keyevent@0__:*")
-    recv_reply(sub)
+    expect_psubscribe(recv_reply(sub), "__keyevent@0__:*")
     drain_events(sub)
     cmdc = conn(port)
     send(cmdc, "FLUSHALL")
-    recv_reply(cmdc)
+    expect_status(recv_reply(cmdc), "command FLUSHALL")
     drain_events(sub)
     return sub, cmdc
 
@@ -122,31 +122,60 @@ BATTERY = [
 def run_battery(port):
     sub, cmdc = open_pair(port)
     per_cmd = []
-    for argv in BATTERY:
-        send(cmdc, *argv)
-        recv_reply(cmdc)
-        per_cmd.append(parse_events(drain_events(sub)))
-    return per_cmd
+    try:
+        for argv in BATTERY:
+            send(cmdc, *argv)
+            recv_reply(cmdc)
+            per_cmd.append(parse_events(drain_events(sub)))
+        if not any(per_cmd):
+            raise SystemExit(
+                "SETUP FAILED: captured zero keyspace events; subscription or notification setup was skipped"
+            )
+        return per_cmd
+    finally:
+        sub.close()
+        cmdc.close()
+
+
+def expect_status(reply, label):
+    if reply != b"+OK\r\n":
+        raise SystemExit(f"SETUP FAILED [{label}]: got {reply!r}, expected b'+OK\\r\\n'")
+
+
+def expect_psubscribe(reply, pattern):
+    pattern = pattern.encode()
+    expected = b"*3\r\n$10\r\npsubscribe\r\n$%d\r\n%s\r\n:1\r\n" % (len(pattern), pattern)
+    if reply != expected:
+        raise SystemExit(f"SETUP FAILED [PSUBSCRIBE {pattern}]: got {reply!r}, expected {expected!r}")
+
+
+def compare_events(label, oracle, fr):
+    """Return one when the gate's ordered event comparison detects a mismatch."""
+    if oracle == fr:
+        return 0
+    print(f"{label}\n  redis={oracle}\n  fr   ={fr}")
+    return 1
 
 
 def main():
+    if sys.argv[1:] == ["--planted-negative"]:
+        return compare_events("PLANTED NEGATIVE detected", [(b"__keyevent@0__:set", b"k")], [])
     oport = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fport = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     oracle = run_battery(oport)
     fr = run_battery(fport)
     diffs = 0
     for argv, oe, fe in zip(BATTERY, oracle, fr):
-        if oe != fe:
-            diffs += 1
-            print(f"DIFF [{' '.join(argv)}]\n  redis={oe}\n  fr   ={fe}")
+        diffs += compare_events(f"DIFF [{' '.join(argv)}]", oe, fe)
     if diffs:
         print(f"\nFAIL — {diffs} command(s) with divergent keyspace notifications")
-        sys.exit(1)
+        return 1
     print(
         f"PASS — keyspace notifications byte-exact vs redis 7.2.4 "
         f"({len(BATTERY)} mutating commands)"
     )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

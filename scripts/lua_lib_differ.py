@@ -5,6 +5,7 @@ error_reply, redis.call/pcall error propagation, KEYS/ARGV, and RESP<->Lua type
 conversion corner cases. Each EVAL is run on both servers; reply compared.
 """
 import argparse
+import json
 import socket
 import sys
 
@@ -169,6 +170,27 @@ def run_case(c, case):
     return c.cmd("EVAL", script, str(numkeys), *rest)
 
 
+def _same_reply(label, oracle, fr):
+    if label.startswith("cjson_encode") and isinstance(oracle, str) and isinstance(fr, str):
+        try:
+            return json.loads(oracle) == json.loads(fr)
+        except Exception:
+            pass
+    return oracle == fr
+
+
+def _self_test():
+    """A wrong Lua-library result must be rejected by the gate's comparator."""
+    if _same_reply("bit_band", ":8", ":9"):
+        print("SELF-TEST FAIL: planted scalar mismatch was accepted")
+        return 1
+    if not _same_reply("cjson_encode_obj", '{"a":1,"b":2}', '{"b":2,"a":1}'):
+        print("SELF-TEST FAIL: documented JSON map-order normalization regressed")
+        return 1
+    print("SELF-TEST PASS: Lua-library gate catches a planted wrong reply")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--oracle", type=int, default=16399)
@@ -189,22 +211,7 @@ def main():
             rf = run_case(f, case)
         except Exception as e:
             rf = ("EXC", str(e))
-        # KNOWN WONTFIX (dict-hash-order class): cjson.encode of a Lua table
-        # with multiple string keys emits keys in TABLE ITERATION ORDER. redis
-        # embeds Lua 5.1 (internal hash order via lua_next); fr has its own Lua
-        # whose tables are a Rust HashMap iterated in SORTED order for
-        # determinism (see fr-command lua_eval.rs cjson_encode_sorts_string_hash_keys).
-        # Reproducing Lua 5.1's exact hash traversal is a full table-internals
-        # port — out of scope. Compare such objects order-independently so the
-        # gate still catches value/escaping/number bugs.
-        if label.startswith("cjson_encode") and isinstance(ro, str) and isinstance(rf, str):
-            import json as _json
-            try:
-                if _json.loads(ro) == _json.loads(rf):
-                    continue
-            except Exception:
-                pass
-        if ro != rf:
+        if not _same_reply(label, ro, rf):
             diffs += 1
             print(f"DIFF [{label}] {case[1]!r}")
             print(f"   oracle: {ro!r}")
@@ -216,4 +223,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(_self_test() if "--self-test" in sys.argv else main())

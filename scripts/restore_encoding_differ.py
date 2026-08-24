@@ -24,79 +24,76 @@ SETUP:
 Exit status: 0 = byte-exact, 1 = at least one divergence (details printed).
 """
 import argparse
-import socket
-import sys
 
-
-class Conn:
-    def __init__(self, port):
-        self.s = socket.create_connection(("127.0.0.1", port), timeout=5)
-        self.buf = b""
-
-    def cmd(self, *args):
-        out = b"*%d\r\n" % len(args)
-        for a in args:
-            a = a if isinstance(a, bytes) else str(a).encode()
-            out += b"$%d\r\n%s\r\n" % (len(a), a)
-        self.s.sendall(out)
-        return self._read()
-
-    def _read(self):
-        while b"\r\n" not in self.buf:
-            self.buf += self.s.recv(65536)
-        line, self.buf = self.buf.split(b"\r\n", 1)
-        t, rest = line[:1], line[1:]
-        if t in (b"+", b"-", b":"):
-            return line
-        if t == b"$":
-            n = int(rest)
-            if n < 0:
-                return b"$-1"
-            while len(self.buf) < n + 2:
-                self.buf += self.s.recv(65536)
-            d = self.buf[:n]
-            self.buf = self.buf[n + 2:]
-            return d
-        if t == b"*":
-            n = int(rest)
-            if n < 0:
-                return line
-            return line + b"|" + b"|".join(self._read() for _ in range(n))
-        return line
+from _respread import assert_ok, assert_seed, cmd, conn
 
 
 def build(c):
     """Populate one value per (type x encoding-side-of-boundary)."""
-    c.cmd("FLUSHALL")
-    c.cmd("RPUSH", "Lsmall", "a", "b", "c")
-    c.cmd("RPUSH", "Lbig", *[f"elem{i:05}" for i in range(200)])
-    c.cmd("RPUSH", "Lbigval", "x" * 128)  # value-length forces quicklist
-    c.cmd("SADD", "Sint", "1", "2", "3")  # intset
-    c.cmd("SADD", "Sintbig", *[str(i) for i in range(600)])  # intset -> hashtable
-    c.cmd("SADD", "Slp", "a", "b", "c")  # listpack
-    c.cmd("SADD", "Sbig", *[f"m{i}" for i in range(200)])  # listpack -> hashtable
-    c.cmd("HSET", "Hsmall", "a", "1", "b", "2")
+    assert_ok(cmd(c, "FLUSHALL"), "FLUSHALL")
+    assert_seed(cmd(c, "RPUSH", "Lsmall", "a", "b", "c"), 3, "RPUSH Lsmall")
+    assert_seed(cmd(c, "RPUSH", "Lbig", *[f"elem{i:05}" for i in range(200)]), 200, "RPUSH Lbig")
+    assert_seed(cmd(c, "RPUSH", "Lbigval", "x" * 128), 1, "RPUSH Lbigval")
+    assert_seed(cmd(c, "SADD", "Sint", "1", "2", "3"), 3, "SADD Sint")
+    assert_seed(cmd(c, "SADD", "Sintbig", *[str(i) for i in range(600)]), 600, "SADD Sintbig")
+    assert_seed(cmd(c, "SADD", "Slp", "a", "b", "c"), 3, "SADD Slp")
+    assert_seed(cmd(c, "SADD", "Sbig", *[f"m{i}" for i in range(200)]), 200, "SADD Sbig")
+    assert_seed(cmd(c, "HSET", "Hsmall", "a", "1", "b", "2"), 2, "HSET Hsmall")
     for i in range(200):
-        c.cmd("HSET", "Hbig", f"f{i}", f"v{i}")
-    c.cmd("ZADD", "Zsmall", "1", "a", "2", "b")
+        assert_seed(cmd(c, "HSET", "Hbig", f"f{i}", f"v{i}"), 1, f"HSET Hbig f{i}")
+    assert_seed(cmd(c, "ZADD", "Zsmall", "1", "a", "2", "b"), 2, "ZADD Zsmall")
     for i in range(200):
-        c.cmd("ZADD", "Zbig", i, f"m{i}")
-    c.cmd("SET", "Sint64", "12345")  # int encoding
-    c.cmd("SET", "Sembstr", "hello")  # embstr
-    c.cmd("SET", "Sraw", "x" * 64)  # raw
+        assert_seed(cmd(c, "ZADD", "Zbig", i, f"m{i}"), 1, f"ZADD Zbig m{i}")
+    assert_ok(cmd(c, "SET", "Sint64", "12345"), "SET Sint64")
+    assert_ok(cmd(c, "SET", "Sembstr", "hello"), "SET Sembstr")
+    assert_ok(cmd(c, "SET", "Sraw", "x" * 64), "SET Sraw")
+    assert_seed(cmd(c, "DBSIZE"), len(KEYS), "restore-encoding fixture key count")
 
 
 KEYS = ["Lsmall", "Lbig", "Lbigval", "Sint", "Sintbig", "Slp", "Sbig",
         "Hsmall", "Hbig", "Zsmall", "Zbig", "Sint64", "Sembstr", "Sraw"]
 
 
+def dump_payload(reply, label):
+    """Extract a non-null bulk payload without masking a failed DUMP seed."""
+    if not reply.startswith(b"$"):
+        raise SystemExit(f"SEED FAILED [{label} DUMP]: expected bulk payload, got {reply!r}")
+    header_end = reply.find(b"\r\n")
+    try:
+        length = int(reply[1:header_end])
+    except ValueError as exc:
+        raise SystemExit(f"SEED FAILED [{label} DUMP]: malformed bulk reply {reply!r}") from exc
+    payload = reply[header_end + 2:-2]
+    if length < 0 or len(payload) != length:
+        raise SystemExit(
+            f"SEED FAILED [{label} DUMP]: expected {length} payload bytes, got {len(payload)}"
+        )
+    return payload
+
+
+def record_diff(label, oracle, fr):
+    """Return one precisely when this gate's byte-level comparison detects a mismatch."""
+    if oracle == fr:
+        return 0
+    print(f"{label}: oracle={oracle!r} fr={fr!r}")
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--oracle", type=int, default=16399)
     ap.add_argument("--fr", type=int, default=16400)
+    ap.add_argument(
+        "--planted-negative",
+        action="store_true",
+        help="prove the same comparison path rejects a deliberately wrong encoding reply",
+    )
     args = ap.parse_args()
-    o = Conn(args.oracle)
-    f = Conn(args.fr)
+    if args.planted_negative:
+        return record_diff("PLANTED NEGATIVE detected", b"$8\r\nlistpack\r\n", b"$9\r\nhashtable\r\n")
+
+    o = conn(args.oracle)
+    f = conn(args.fr)
     build(o)
     build(f)
 
@@ -104,34 +101,30 @@ def main():
     try:
         for k in KEYS:
             # Original-encoding parity.
-            oo, of = o.cmd("OBJECT", "ENCODING", k), f.cmd("OBJECT", "ENCODING", k)
-            if oo != of:
-                diffs += 1
-                print(f"ORIG-ENC DIVERGE {k}: oracle={oo!r} fr={of!r}")
+            oo, of = cmd(o, "OBJECT", "ENCODING", k), cmd(f, "OBJECT", "ENCODING", k)
+            diffs += record_diff(f"ORIG-ENC DIVERGE {k}", oo, of)
             # DUMP + RESTORE on each server, then compare the RESTORE'd encoding.
-            for c in (o, f):
-                payload = c.cmd("DUMP", k)
-                c.cmd("DEL", k + "_r")
-                resp = c.cmd("RESTORE", k + "_r", "0", payload)
-                if not resp.startswith(b"+OK"):
-                    print(f"RESTORE failed for {k}: {resp!r}")
-            eo, ef = o.cmd("OBJECT", "ENCODING", k + "_r"), f.cmd("OBJECT", "ENCODING", k + "_r")
-            if eo != ef:
-                diffs += 1
-                print(f"RESTORE-ENC DIVERGE {k}: oracle={eo!r} fr={ef!r}")
+            for engine, c in (("redis", o), ("fr", f)):
+                payload = dump_payload(cmd(c, "DUMP", k), f"{engine} {k}")
+                assert_seed(cmd(c, "DEL", k + "_r"), 0, f"{engine} DEL {k}_r")
+                assert_ok(cmd(c, "RESTORE", k + "_r", "0", payload), f"{engine} RESTORE {k}")
+            eo, ef = cmd(o, "OBJECT", "ENCODING", k + "_r"), cmd(f, "OBJECT", "ENCODING", k + "_r")
+            diffs += record_diff(f"RESTORE-ENC DIVERGE {k}", eo, ef)
     finally:
         for c in (o, f):
             try:
-                c.cmd("FLUSHALL")
+                cmd(c, "FLUSHALL")
             except Exception:
                 pass
+            c.close()
 
     if diffs:
         print(f"\nFAIL: {diffs} encoding divergence(s) (original and/or post-RESTORE)")
-        sys.exit(1)
+        return 1
     print("OK: OBJECT ENCODING byte-exact for original AND post-RESTORE values "
           "vs redis 7.2.4 (list/set/intset/hash/zset/string across encoding boundaries)")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

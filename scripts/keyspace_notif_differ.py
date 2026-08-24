@@ -16,7 +16,6 @@ Usage: keyspace_notif_differ.py [--oracle 16399] [--fr 16400] [--iters 3000] [--
 import argparse
 import random
 import socket
-import sys
 import time
 
 
@@ -83,6 +82,9 @@ class Conn:
             out += b"$%d\r\n%s\r\n" % (len(a), a)
         self.s.sendall(out)
         return self._parse()
+
+    def close(self):
+        self.s.close()
 
     # Quiet-period budgets for the drain below. The loop can only conclude "no more
     # frames are coming" by waiting, so this timeout is paid on EVERY drain — twice
@@ -161,6 +163,28 @@ class _Incomplete(Exception):
     pass
 
 
+def expect_status(reply, expected, label):
+    if reply != ("status", expected):
+        raise SystemExit(f"SETUP FAILED [{label}]: got {reply!r}, expected status {expected!r}")
+
+
+def expect_psubscribe(reply, pattern):
+    expected = (
+        "array",
+        [("bulk", b"psubscribe"), ("bulk", pattern.encode()), ("int", 1)],
+    )
+    if reply != expected:
+        raise SystemExit(f"SETUP FAILED [PSUBSCRIBE {pattern}]: got {reply!r}, expected {expected!r}")
+
+
+def compare_notifications(label, oracle, fr):
+    """Return one when the gate's sorted notification comparison detects a mismatch."""
+    if oracle == fr:
+        return 0
+    print(f"{label}: redis={oracle!r} fr={fr!r}")
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--oracle", type=int, default=16399)
@@ -168,28 +192,41 @@ def main():
     ap.add_argument("--iters", type=int, default=3000)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--db", type=int, default=0, help="DB to exercise (catches db-prefix leaks)")
+    ap.add_argument(
+        "--planted-negative",
+        action="store_true",
+        help="prove the same notification comparison rejects a deliberately missing event",
+    )
     args = ap.parse_args()
+    if args.planted_negative:
+        return compare_notifications(
+            "PLANTED NEGATIVE detected", [(b"__keyevent@0__:set", b"k")], []
+        )
 
-    rng = random.Random(args.seed)
+    rng = random.Random(args.seed)  # nosec B311 -- deterministic seed is required for a reproducible differential-fuzzer schedule.
     op, fp = Conn(args.oracle), Conn(args.fr)
     os_, fs_ = Conn(args.oracle), Conn(args.fr)  # subscriber connections
     for c in (op, fp):
-        c.cmd("FLUSHALL")
-        c.cmd("CONFIG", "SET", "notify-keyspace-events", "KEA")
+        expect_status(c.cmd("FLUSHALL"), b"OK", "FLUSHALL")
+        expect_status(c.cmd("CONFIG", "SET", "notify-keyspace-events", "KEA"), b"OK", "CONFIG SET notify-keyspace-events")
         if args.db:
-            c.cmd("SELECT", str(args.db))
+            expect_status(c.cmd("SELECT", str(args.db)), b"OK", f"SELECT {args.db}")
     for c in (os_, fs_):
-        c.cmd("PSUBSCRIBE", "__key*@%d__:*" % args.db)
+        pattern = "__key*@%d__:*" % args.db
+        expect_psubscribe(c.cmd("PSUBSCRIBE", pattern), pattern)
         time.sleep(0.05)
         c.drain_pmessages()  # clear the subscribe confirmation
 
     keys = ["k1", "k2", "k3"]
 
+    def pick(options):
+        return options[rng.randrange(len(options))]
+
     def k():
-        return rng.choice(keys)
+        return pick(keys)
 
     def v():
-        return rng.choice(["x", "1", "10", "-3", "ab", "yyy"])
+        return pick(["x", "1", "10", "-3", "ab", "yyy"])
 
     log = []
     ops = [
@@ -229,17 +266,17 @@ def main():
         # ── broadened event-edge coverage ──
         lambda: ("DECR", k()),
         lambda: ("DECRBY", k(), str(rng.randint(-5, 5))),
-        lambda: ("INCRBYFLOAT", k(), rng.choice(["1", "2.5", "-1"])),
+        lambda: ("INCRBYFLOAT", k(), pick(["1", "2.5", "-1"])),
         lambda: ("SETNX", k(), v()),
         lambda: ("MSET", k(), v(), k(), v()),
         lambda: ("SETBIT", k(), str(rng.randint(0, 20)), str(rng.randint(0, 1))),
-        lambda: ("GETEX", k()) + rng.choice([(), ("PERSIST",), ("EX", "100"), ("EXAT", "1")]),
-        lambda: ("EXPIRE", k(), "500", rng.choice(["NX", "XX", "GT", "LT"])),
+        lambda: ("GETEX", k()) + pick([(), ("PERSIST",), ("EX", "100"), ("EXAT", "1")]),
+        lambda: ("EXPIRE", k(), "500", pick(["NX", "XX", "GT", "LT"])),
         lambda: ("PEXPIRE", k(), "500000"),
         lambda: ("EXPIREAT", k(), "9999999999"),
         lambda: ("RENAMENX", k(), k()),
         lambda: ("COPY", k(), k()),
-        lambda: ("ZADD", k(), rng.choice(["GT", "LT", "NX", "XX"]), str(rng.randint(-3, 3)), v()),
+        lambda: ("ZADD", k(), pick(["GT", "LT", "NX", "XX"]), str(rng.randint(-3, 3)), v()),
         lambda: ("ZADD", k(), "INCR", "1", v()),
         lambda: ("ZRANGESTORE", k(), k(), "0", "-1"),
         lambda: ("ZREMRANGEBYRANK", k(), "0", "0"),
@@ -250,7 +287,7 @@ def main():
         # SPOP excluded: random member removal desyncs set state → downstream
         # event false positives (its own "spop" event payload is just the key).
         lambda: ("SUNIONSTORE", k(), k(), k()),
-        lambda: ("LMOVE", k(), k(), rng.choice(["LEFT", "RIGHT"]), rng.choice(["LEFT", "RIGHT"])),
+        lambda: ("LMOVE", k(), k(), pick(["LEFT", "RIGHT"]), pick(["LEFT", "RIGHT"])),
         lambda: ("SORT", k(), "STORE", k()),
         lambda: ("BITFIELD", k(), "SET", "u8", "0", str(rng.randint(0, 255))),
     ]
@@ -263,8 +300,9 @@ def main():
             except Exception:
                 pass
 
+    observed_events = 0
     for it in range(args.iters):
-        opv = tuple(str(x) for x in rng.choice(ops)())
+        opv = tuple(str(x) for x in pick(ops)())
         op.cmd(*opv)
         fp.cmd(*opv)
         # Async pmessages can arrive slightly after the command reply. Give both
@@ -278,6 +316,7 @@ def main():
             time.sleep(0.05)
             oe = sorted(oe + os_.drain_pmessages())
             fe = sorted(fe + fs_.drain_pmessages())
+        observed_events += len(oe) + len(fe)
         log.append(" ".join(opv) + "  => O:%d F:%d events" % (len(oe), len(fe)))
         if oe != fe:
             print("=== KEYSPACE-EVENT DIVERGENCE at iter %d ===" % it)
@@ -289,11 +328,17 @@ def main():
             for line in log[-30:]:
                 print("  " + line)
             cleanup()
-            sys.exit(1)
+            return 1
 
     cleanup()
+    for c in (op, fp, os_, fs_):
+        c.close()
+    if observed_events == 0:
+        print("SETUP FAILED: captured zero keyspace events; subscription or notification setup was skipped")
+        return 1
     print("OK: %d iters, seed %d — no keyspace-notification divergence" % (args.iters, args.seed))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

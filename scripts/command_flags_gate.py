@@ -29,6 +29,7 @@ sentinel mode, which fr is not.
 Exit 0 = every flag fr models agrees on every shared command, 1 = at least one disagrees.
 """
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -70,6 +71,31 @@ def fr_flags() -> dict[str, set[str]]:
                 r'\(\s*"([a-z0-9_|-]+)"\s*,\s*(-?\d+)\s*,\s*"([^"]*)"', text[start:end])}
 
 
+def mismatching_rows(inc, fr):
+    rows, missing, extra = [], Counter(), Counter()
+    for name in sorted(set(inc) & set(fr)):
+        miss, ext = inc[name] - fr[name], fr[name] - inc[name]
+        if miss or ext:
+            rows.append((name, sorted(miss), sorted(ext)))
+            missing.update(miss)
+            extra.update(ext)
+    return rows, missing, extra
+
+
+def _self_test() -> int:
+    """A deliberately wrong command flag must produce a mismatch row."""
+    rows, missing, extra = mismatching_rows(
+        {"get": {"readonly"}, "set": {"write"}},
+        {"get": {"readonly"}, "set": {"readonly"}},
+    )
+    if rows != [("set", ["write"], ["readonly"])] or missing != Counter({"write": 1}) \
+            or extra != Counter({"readonly": 1}):
+        print(f"SELF-TEST FAIL: planted flag mismatch was not reported: {rows!r}")
+        return 1
+    print("SELF-TEST PASS: command-flags gate catches a planted wrong flag")
+    return 0
+
+
 def main() -> int:
     inc, fr = incumbent_flags(), fr_flags()
     if not inc or not fr:
@@ -78,13 +104,7 @@ def main() -> int:
         return 2
 
     shared = sorted(set(inc) & set(fr))
-    rows, missing, extra = [], Counter(), Counter()
-    for name in shared:
-        miss, ext = inc[name] - fr[name], fr[name] - inc[name]
-        if miss or ext:
-            rows.append((name, sorted(miss), sorted(ext)))
-            missing.update(miss)
-            extra.update(ext)
+    rows, missing, extra = mismatching_rows(inc, fr)
 
     print(f"compared {len(shared)} commands on the "
           f"{len(set().union(*inc.values()) if inc else set())} flags fr models")
@@ -103,4 +123,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_self_test() if "--self-test" in sys.argv else main())

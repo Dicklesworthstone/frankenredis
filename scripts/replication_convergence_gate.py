@@ -69,6 +69,13 @@ def free_port():
     s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
 
 
+def require_binary(path, label):
+    if os.path.isfile(path) and os.access(path, os.X_OK):
+        return True
+    print(f"FAIL: {label} executable not found at {path}")
+    return False
+
+
 def wait_up(port, tries=60):
     for _ in range(tries):
         try:
@@ -260,13 +267,21 @@ def main():
                     os.path.join(os.path.dirname(__file__), "..",
                                  "legacy_redis_code/redis/src/redis-server")))
     ap.add_argument("--seeds", type=int, default=2)
+    ap.add_argument("--planted-negative", action="store_true",
+                    help="verify that an absent executable fails gate setup")
     args = ap.parse_args()
     fr = os.path.abspath(args.bin); redis = os.path.abspath(args.redis_bin)
-    if not os.path.exists(fr):
-        print(f"SKIP: fr binary not found at {fr} (build with: cargo build --release -p fr-server)")
-        return 0
-    if not os.path.exists(redis):
-        print(f"SKIP: redis-server not found at {redis}"); return 0
+    if args.planted_negative:
+        missing = os.path.join(tempfile.gettempdir(), "fr_repl_gate_planted_missing_server")
+        if require_binary(missing, "planted negative"):
+            print("FAIL: planted negative unexpectedly found an executable")
+            return 0
+        print("PLANTED NEGATIVE DETECTED: absent server executable fails setup")
+        return 1
+    if not require_binary(fr, "frankenredis"):
+        return 2
+    if not require_binary(redis, "redis-server"):
+        return 2
 
     rdir = tempfile.mkdtemp(prefix="fr_repl_gate_")
     os.makedirs(os.path.join(rdir, "a_r"), exist_ok=True)

@@ -19,9 +19,9 @@ are skipped — their presence is covered by the behavior differs.
 Usage: command_coverage_gate.py <oracle_port> <fr_port>
 Exit 0 if fr covers every Redis command + listed subcommand, else 1.
 """
-import socket
 import sys
-import time
+
+from _respread import cmd, conn
 
 DANGER = {
     "shutdown", "quit", "debug", "reset", "failover", "subscribe", "unsubscribe",
@@ -57,19 +57,47 @@ SUBCOMMANDS = {
 
 
 def one(port, args):
+    s = None
     try:
-        s = socket.create_connection(("127.0.0.1", port), timeout=3)
-        s.settimeout(2.0)
-        o = b"*%d\r\n" % len(args)
-        for x in args:
-            xb = x.encode() if isinstance(x, str) else x
-            o += b"$%d\r\n%s\r\n" % (len(xb), xb)
-        s.sendall(o)
-        d = s.recv(65536)
-        s.close()
-        return d
+        s = conn(port, timeout=3)
+        return cmd(s, *args)
     except OSError:
         return b"__CONNERR__"
+    finally:
+        if s is not None:
+            s.close()
+
+
+def _is_missing(fr_reply, oracle_reply, marker):
+    return marker in fr_reply.lower() and marker not in oracle_reply.lower()
+
+
+def _self_test():
+    """A deliberately unknown command reply must remain a coverage failure."""
+    failures = []
+    if not _is_missing(
+        b"-ERR unknown command 'GET'\r\n",
+        b"-ERR wrong number of arguments for 'get' command\r\n",
+        b"unknown command",
+    ):
+        failures.append("planted unknown top-level command was not caught")
+    if not _is_missing(
+        b"-ERR unknown subcommand 'LIST'\r\n",
+        b"-ERR wrong number of arguments for 'command|list' command\r\n",
+        b"unknown subcommand",
+    ):
+        failures.append("planted unknown subcommand was not caught")
+    if _is_missing(
+        b"-ERR unknown command 'GET'\r\n",
+        b"-ERR unknown command 'GET'\r\n",
+        b"unknown command",
+    ):
+        failures.append("oracle's own unknown-command response was misreported")
+    if failures:
+        print("SELF-TEST FAIL: " + "; ".join(failures))
+        return 1
+    print("SELF-TEST PASS: command and subcommand coverage catch planted wrong replies")
+    return 0
 
 
 def main():
@@ -94,7 +122,7 @@ def main():
             continue
         rf = one(fport, [n])
         ro = one(oport, [n])
-        if b"unknown command" in rf[:64].lower() and b"unknown command" not in ro[:64].lower():
+        if _is_missing(rf[:64], ro[:64], b"unknown command"):
             missing_cmds.append(n)
 
     missing_subs = []
@@ -102,7 +130,7 @@ def main():
         for sub in subs:
             rf = one(fport, [cont, sub])
             ro = one(oport, [cont, sub])
-            if b"unknown subcommand" in rf.lower() and b"unknown subcommand" not in ro.lower():
+            if _is_missing(rf, ro, b"unknown subcommand"):
                 missing_subs.append("%s %s" % (cont, sub))
 
     nsub = sum(len(v) for v in SUBCOMMANDS.values())
@@ -122,4 +150,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(_self_test() if "--self-test" in sys.argv else main())
