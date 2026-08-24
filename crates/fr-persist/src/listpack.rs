@@ -250,6 +250,87 @@ impl ListpackValueSpan {
     }
 }
 
+/// A compact listpack entry retained by a list quicklist node.
+///
+/// Unlike [`ListpackValueSpan`], integer decimal bytes live in the companion
+/// arena returned by [`decode_retained_listpack_spans`].  The arena must remain
+/// coupled to these spans: list nodes keep their decoded index after the decode
+/// call returns, so a decode-local buffer would dangle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetainedListpackValueSpan {
+    String(Range<u32>),
+    Integer(Range<u32>),
+}
+
+const _: () = assert!(
+    std::mem::size_of::<RetainedListpackValueSpan>() <= 12,
+    "retained listpack spans must stay compact (frankenredis-gvm6z)"
+);
+
+impl RetainedListpackValueSpan {
+    #[must_use]
+    #[inline]
+    pub fn as_bytes<'a>(&self, listpack: &'a [u8], integer_bytes: &'a [u8]) -> &'a [u8] {
+        let range = match self {
+            Self::String(range) => return &listpack[range.start as usize..range.end as usize],
+            Self::Integer(range) => range,
+        };
+        &integer_bytes[range.start as usize..range.end as usize]
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn byte_len(&self) -> usize {
+        match self {
+            Self::String(range) | Self::Integer(range) => (range.end - range.start) as usize,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn first_byte(&self, listpack: &[u8], integer_bytes: &[u8]) -> Option<u8> {
+        self.as_bytes(listpack, integer_bytes).first().copied()
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn is_string_encoded(&self) -> bool {
+        matches!(self, Self::String(_))
+    }
+}
+
+/// Decoded spans and the separately retained decimal bytes for integer entries.
+///
+/// Keeping the arena beside the spans preserves the listpack payload's exact
+/// length, which is part of the quicklist fill policy, while making the common
+/// string span 12 bytes rather than the generic decoder's 32-byte enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedListpackSpans {
+    entries: Vec<RetainedListpackValueSpan>,
+    integer_bytes: Vec<u8>,
+}
+
+impl RetainedListpackSpans {
+    #[must_use]
+    pub fn entries(&self) -> &[RetainedListpackValueSpan] {
+        &self.entries
+    }
+
+    #[must_use]
+    pub fn integer_bytes(&self) -> &[u8] {
+        &self.integer_bytes
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn into_parts(self) -> (Vec<RetainedListpackValueSpan>, Vec<u8>) {
+        (self.entries, self.integer_bytes)
+    }
+}
+
 /// Decoder failure modes. Narrow set — callers either succeed or reject.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListpackError {
@@ -1131,6 +1212,60 @@ pub fn decode_string_ranges_if_all_strings(
         return Err(ListpackError::ElementCountMismatch);
     }
     Ok(Some(ranges))
+}
+
+/// Decode a listpack directly into the representation retained by a quicklist
+/// node.
+///
+/// String entries keep ranges into the original payload. Integer entries are
+/// rendered once into a side arena owned by the returned value. The caller must
+/// retain that arena with the spans; extending `data` instead would change the
+/// payload length used by the quicklist fill policy.
+pub fn decode_retained_listpack_spans(data: &[u8]) -> Result<RetainedListpackSpans, ListpackError> {
+    let (total_bytes, num_elements) = parse_header(data)?;
+    let end = (total_bytes as usize) - 1;
+    let mut cursor = LISTPACK_HEADER_SIZE;
+    let capacity = if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN {
+        usize::from(num_elements)
+    } else {
+        0
+    };
+    let mut entries = Vec::with_capacity(capacity);
+    let mut integer_bytes = Vec::new();
+
+    while cursor < end {
+        let (raw, consumed) = decode_entry_raw(data, cursor)?;
+        let entry = match raw {
+            RawListpackValue::String(range) => {
+                RetainedListpackValueSpan::String(narrow_span(range.start, range.end)?)
+            }
+            RawListpackValue::Integer(value) => {
+                let start = integer_bytes.len();
+                let mut scratch = [0_u8; 20];
+                let digits_start = crate::decimal_i64_into(&mut scratch, value);
+                integer_bytes.extend_from_slice(&scratch[digits_start..]);
+                let end = integer_bytes.len();
+                RetainedListpackValueSpan::Integer(narrow_span(start, end)?)
+            }
+        };
+        entries.push(entry);
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+    }
+    if cursor != end {
+        return Err(ListpackError::MissingTerminator);
+    }
+    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && entries.len() != usize::from(num_elements) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    Ok(RetainedListpackSpans {
+        entries,
+        integer_bytes,
+    })
 }
 
 /// Return Redis-observable values while retaining string payload ranges.
@@ -2290,6 +2425,50 @@ mod tests {
         println!(
             "ListpackValueSpan = {} bytes",
             std::mem::size_of::<ListpackValueSpan>()
+        );
+    }
+
+    #[test]
+    fn retained_listpack_spans_keep_integer_arena_with_compact_string_entries_gvm6z() {
+        let blob = crate::encode_listpack_strings_blob(&[
+            b"alpha".as_slice(),
+            b"-17".as_slice(),
+            b"-9223372036854775808".as_slice(),
+            b"9223372036854775807".as_slice(),
+            b"omega".as_slice(),
+        ])
+        .expect("fixture encodes");
+        let retained = decode_retained_listpack_spans(&blob).expect("fixture decodes");
+        let generic = decode_value_spans(&blob).expect("generic decoder accepts fixture");
+
+        assert!(
+            std::mem::size_of::<RetainedListpackValueSpan>() <= 12,
+            "retained span is {} bytes",
+            std::mem::size_of::<RetainedListpackValueSpan>()
+        );
+        assert_eq!(retained.entries().len(), generic.len());
+        let values: Vec<&[u8]> = retained
+            .entries()
+            .iter()
+            .map(|span| span.as_bytes(&blob, retained.integer_bytes()))
+            .collect();
+        let expected: Vec<&[u8]> = generic.iter().map(|span| span.as_bytes(&blob)).collect();
+        assert_eq!(values, expected, "retained and generic decoders diverged");
+        assert_eq!(
+            retained.integer_bytes(),
+            b"-17-92233720368547758089223372036854775807"
+        );
+        assert!(retained.entries()[0].is_string_encoded());
+        assert!(!retained.entries()[1].is_string_encoded());
+        assert_eq!(
+            retained.entries()[2].byte_len(),
+            20,
+            "i64::MIN must retain every decimal digit"
+        );
+        assert_eq!(
+            retained.entries()[3].byte_len(),
+            19,
+            "i64::MAX must retain every decimal digit"
         );
     }
 

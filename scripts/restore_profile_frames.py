@@ -10,7 +10,7 @@ arbitrary bytes.
 Load-immune, like every instruction-count instrument here: no quiet window, no core
 pinning. Verified while the host sat at loadavg 36.
 
-    restore_profile_frames.py <fr_binary> <members> <ops>
+    restore_profile_frames.py <fr_binary> <members> <ops> [--type=hash|list]
     callgrind_annotate --threshold=60 <printed dump path>
 
 WHAT IT ESTABLISHED, 2026-08-16, 128-field hash, 300 ops, ELF 2d5a352c (self cost,
@@ -73,11 +73,22 @@ def read_reply(sock, buf):
     raise RuntimeError("unexpected reply tag %r" % tag)
 
 
+KIND = "hash"
+OP = "restore"
+
+
 def main():
-    if len(sys.argv) != 4:
+    global KIND, OP
+    for a in sys.argv[1:]:
+        if a.startswith("--type="):
+            KIND = a.split("=", 1)[1]
+        if a.startswith("--op="):
+            OP = a.split("=", 1)[1]
+    argv = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if len(argv) != 3:
         print("usage: restore_profile_frames.py <fr_binary> <members> <ops>", file=sys.stderr)
         return 2
-    fr, members, ops = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+    fr, members, ops = argv[0], int(argv[1]), int(argv[2])
     # Resolve the binary BEFORE anything chdirs: these run the engine with
     # cwd set to a workdir, so a relative path like target/release/frankenredis
     # becomes "command not found" (rc=127) rather than an obvious error.
@@ -97,7 +108,9 @@ def main():
 
     proc = subprocess.Popen(
         ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out, fr,
-         "--port", str(port), "--save", "", "--appendonly", "no", "--dir", work],
+         "--port", str(port), "--save", "", "--appendonly", "no", "--dir", work,
+         # DEBUG RELOAD needs the debug command admitted (--op=reload).
+         "--enable-debug-command", "yes"],
         cwd=work, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     sock = None
     try:
@@ -118,17 +131,30 @@ def main():
             raise RuntimeError("server never became ready under callgrind")
 
         buf = b""
-        fields = []
-        for i in range(members):
-            fields += ["f%04d" % i, "v%04d" % i]
-        sock.sendall(resp("HSET", "src", *fields))
+        # (frankenredis-gvm6z) Container type matters: the retained-listpack-span
+        # path is reached from the LIST arm of the RESTORE payload walk, not the
+        # hash arm. Profiling a hash workload to reason about that lever profiles a
+        # path it never executes.
+        if KIND == "list":
+            sock.sendall(resp("RPUSH", "src", *["v%04d" % i for i in range(members)]))
+        else:
+            fields = []
+            for i in range(members):
+                fields += ["f%04d" % i, "v%04d" % i]
+            sock.sendall(resp("HSET", "src", *fields))
         _, buf = read_reply(sock, buf)
         sock.sendall(resp("DUMP", "src"))
         payload, buf = read_reply(sock, buf)
         if not payload:
             raise RuntimeError("empty DUMP")
 
-        one = resp("RESTORE", "dst", "0", payload, "REPLACE")
+        # (frankenredis-qj6jn) `--op=reload` profiles DEBUG RELOAD (save+load of
+        # the whole db), which is a different route from single-key RESTORE and the
+        # one the 3.31x figure names.
+        if OP == "reload":
+            one = resp("DEBUG", "RELOAD")
+        else:
+            one = resp("RESTORE", "dst", "0", payload, "REPLACE")
         sock.sendall(one * ops)
         done = 0
         while done < ops:

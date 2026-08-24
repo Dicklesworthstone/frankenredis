@@ -67594,3 +67594,130 @@ which is the more serious direction and is what the class column exists to separ
   2. Quote the remaining `3bda1` work as one missing recomputation affecting three gates, of which
      two are wording-only and one (read-only replica vs stale on FCALL) changes the error code.
   3. Do not read this row as a perf verdict. It measures no time.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-24 VioletHeron: REJECT — KeyDict KEY ARENA measured a LOSS against a live server while my own in-process instrument reported the opposite sign
+
+Claim class: COMPETITIVE — fr against the LIVE vendored redis 7.2.4 arm in the SAME
+invocation of `scripts/keyspace_ram_vs_redis.py`, with an fr/fr A/A null.
+Campaign output: yes. The LEVER is rejected and reverted, but the ROW is campaign
+output: it publishes a vs-incumbent ratio and re-prices `frankenredis-uhthd` at
+1.8112x on this HEAD. Do not read "the lever lost" as "the measurement does not
+count" — it is the same class of number either way.
+
+### THE LEVER
+
+Replace `Node::key: Box<[u8]>` (a 16-byte fat pointer plus its own heap block) with a
+shared byte arena: `keys: Vec<u8>` in the dict, `key_off: NonZeroU64` + `key_len: u32`
+in the node. `NonZeroU64` keeps the niche that makes `Option<Node<V>>` the same size as
+`Node<V>`, and `u64` rather than `u32` avoids capping live key BYTES at 4 GiB. Removal
+marks bytes garbage; compaction rewrites the arena and every offset once garbage
+outweighs live bytes, bounding waste at 2x.
+
+### THE MEASUREMENT, AND THE CONTROL THAT MATTERED
+
+Re-measured with the ELF SHA-256 SELF-REPORTED from inside each running process
+(`/proc/<pid>/exe`), not hashed from the path the harness was handed:
+
+    build                             fr_a    fr_b   redis   fr/redis   A/A null
+    HEAD (hwcm1 prefilter, no arena)  149.6   149.7   82.6    1.8112x    0.9991
+    HEAD + key arena                  153.9   155.9   82.6    1.8865x    0.9874
+
+    +4.3 to +6.3 B/key. Worst bound 1.8112x -> 1.8865x. Both nulls resolve an
+    effect this size (the candidate's 1.26 pct spread is looser than the control's
+    0.09, and is quoted rather than smoothed).
+
+    scripts/keyspace_ram_vs_redis.py --keys 1000000, host thinkstation1,
+    builds on rch remote, measurement local.
+    control ELF, self-reported by the running process, sha256
+      f376347df403c50db80792e0ef5347f2c4dca5fc82ccb086a8e4b46e932a4729
+    arena ELF, self-reported by the running process, sha256
+      912a08ee86150d9162a5824a7d2dcc45fe19e54c69dfa71ffff6dbb346d5ab90
+    incumbent: vendored redis 7.2.4, LIVE arm in the SAME invocation,
+    self-reported by the running process, sha256
+      e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+### WHAT GATES THIS VERDICT, AND WHAT DOES NOT
+
+This is a MEMORY verdict, not a timing one, and the statistics are stated rather
+than borrowed from the timing contract. Each arm contributes ONE deterministic
+`/proc/<pid>/status` VmRSS reading after an identical load; there is no per-op
+distribution to bootstrap, so no bootstrap median-CI gate is claimed and none is
+implied — the replication is the fr_a/fr_b A/A null, run in the same invocation
+and quoted above at 0.9991 (control) and 0.9874 (candidate). The decision rule is
+the worst-bound ratio against those nulls: a 4.2 pct effect against a 1.26 pct
+worst null.
+
+CV is provenance only and did not influence this decision. No coefficient of
+variation was computed or consulted anywhere in reaching it.
+
+**THE HARNESS NOW SELF-REPORTS, AND THAT IS NOT BOOKKEEPING.** It hashed the PATH
+before. A build that fails leaves the PREVIOUS binary at that path, so hashing the
+path reports a candidate SHA for what is really the control ELF -- which is exactly
+the phantom this pass produced once (below). Reading `/proc/<pid>/exe` makes that
+class of error unrepresentable rather than merely noticed.
+
+**THE FIRST CONTROL I REACHED FOR WAS STALE AND WOULD HAVE INVERTED THE VERDICT.** The
+standing keyspace figure was 145.4 B/key, taken before `hwcm1`'s SCAN prefilter landed.
+Measured against THAT, the arena reads +10.6 and I would have blamed my own lever for
+8.4 B/key of somebody else's. Re-measure the control on the SAME HEAD as the candidate,
+in a repo where peers land levers on the same struct hourly.
+
+### WHY THE IN-PROCESS INSTRUMENT SAID THE OPPOSITE
+
+`keydict_byte_attribution_uhthd` read 116.7 -> 95.0 B/key, a 21.7 win, on the same
+change that lost 6.5 against a live server. Two independent reasons, both mine:
+
+1. **It sums `k.len()`, which is PAYLOAD, not footprint.** Per-key allocator overhead
+   therefore lands in UNACCOUNTED, and arena capacity slack does not appear at all.
+   `Vec` doubling on ~9.9 MB of key bytes reserves ~16 MB: **+6.1 B/key**, invisible to
+   the instrument and almost exactly the loss.
+2. **The 18.7 B/key of "allocator overhead" it attributed to key blocks did not come
+   back when those blocks went away.** That is the load-bearing negative result here.
+
+### THE MECHANISM, AND WHAT WOULD HAVE TO CHANGE FOR A RETRY
+
+`Store::internal_entries_insert` allocates a `Box<[u8]>` per new key
+(`store_key_from_slice`) and hands it to the dict. With the arena the dict COPIES those
+bytes and the box is dropped immediately — so the keyspace pays for the arena AND for a
+freed block that mimalloc retains rather than returning. The arena cannot win while the
+CALLER still allocates; it only moves the bytes and adds a second copy.
+
+I had that half built (`insert` taking `&[u8]`, dropping the caller's allocation
+entirely) and could not measure it: a peer's in-flight `RetainedListpackChunk` refactor
+sat uncompilable across `packed_set.rs`, `fr-persist/listpack.rs` and four hunks of my
+working `lib.rs`, so neither the working tree nor a clean-overlay build of both files
+would link. `insert` was widened to `impl AsRef<[u8]>` to confine the change to one
+file, which preserves the RAM story but not the caller-side allocation.
+
+### RETRY PREDICATE
+
+Reopen ONLY IF the caller-side key allocation is removed in the SAME change --
+`KeyDict::insert` borrowing AND `Store::internal_entries_insert` no longer calling
+`store_key_from_slice` -- so the per-key heap block is gone from BOTH sides. Until
+that lands, the arena adds a copy without removing an allocation and must lose; the
+measurement above is what that costs.
+
+Three further conditions on any such retry:
+
+1. The arena must grow in FIXED CHUNKS, never by doubling. On a key arena the
+   doubling slack is per-key memory: +6.1 B/key measured here, which alone exceeds
+   the win. A 1 MiB chunk caps it at one chunk for any keyspace size. Untested --
+   the build never linked.
+2. Re-measure the CONTROL on the same HEAD as the candidate. If the control is older
+   than the candidate's HEAD the verdict is void: this pass's first control predated
+   `hwcm1` and would have charged this lever 8.4 B/key that belongs to another.
+3. Do NOT quote `UNACCOUNTED` from `keydict_byte_attribution_uhthd` as the expected
+   saving. It is an upper bound on per-allocation overhead, not a prediction of what
+   removing the allocation returns to RSS -- when the blocks went away here, 18.7
+   B/key did not come back. Reopen on a measured whole-process delta only.
+
+### WHAT STANDS
+
+The attribution instrument itself is kept (it priced `hwcm1`'s prefilter at 8.4 B/key,
+which nobody had costed in bytes/key) with its PAYLOAD-not-footprint caveat written into
+the doc comment so the next reader cannot repeat mistake (1).
+
+Keyspace stands at **1.8112x** vs live Redis 7.2.4 on this HEAD — up from 1.7612x
+because of the prefilter's 8.4 B/key, not because of anything in this row.

@@ -87,6 +87,22 @@ fn canonicalise_decoded_set(value: &RdbValue) -> RdbValue {
                     .collect(),
             )
         }
+        // (frankenredis-qj6jn) A list written as QUICKLIST_2 now decodes as its VERBATIM
+        // listpack node blobs -- upstream's own shape, which the store installs directly
+        // instead of rebuilding element by element. Same precedent as the two above: decode
+        // the blobs back to the `List` spelling the generator produced, so every element is
+        // still compared by the arms below and only the variant stops being load-bearing.
+        RdbValue::ListQuicklist2Packed(nodes) => {
+            let mut items = Vec::new();
+            for node in nodes {
+                let spans = fr_persist::listpack::decode_value_spans(node)
+                    .expect("a blob we just encoded must decode");
+                for span in spans {
+                    items.push(span.as_bytes(node).to_vec());
+                }
+            }
+            RdbValue::List(items)
+        }
         other => other.clone(),
     }
 }
@@ -374,7 +390,11 @@ fn unit_rdb_list_roundtrip() {
     let encoded = encode_rdb(std::slice::from_ref(&entry), &[]);
     let (decoded, _) = decode_rdb(&encoded).unwrap();
     assert_eq!(decoded.len(), 1);
-    assert!(matches!(&decoded[0].value, RdbValue::List(items) if items.len() == 3));
+    // (frankenredis-qj6jn) QUICKLIST_2 decodes to its verbatim node blobs; canonicalise to
+    // the element spelling before asking about cardinality.
+    assert!(
+        matches!(canonicalise_decoded_set(&decoded[0].value), RdbValue::List(items) if items.len() == 3)
+    );
     assert_eq!(decoded[0].expire_ms, Some(1700000000000));
 }
 
