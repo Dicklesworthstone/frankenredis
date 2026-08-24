@@ -61746,15 +61746,36 @@ mod tests {
                 RespFrame::BulkString(Some(b"shared".to_vec())),
             ]))
         );
+        // (frankenredis-uhthd) Compare the SCAN key SET, not the sequence. SCAN now walks
+        // a reverse-binary cursor over a randomly-seeded hash table, so the order is
+        // nondeterministic ACROSS PROCESSES by design -- exactly as it is in Redis 7.2.4,
+        // where three fresh servers give three different orders on identical data. Pinning
+        // a sequence here made this test pass or fail on the hash seed. The cursor (0, i.e.
+        // the scan completed) and the key set are the parts that are actually specified.
+        let scan_reply = rt.execute_frame(command(&[b"SCAN", b"0"]), 6);
+        let RespFrame::Array(Some(scan_parts)) = &scan_reply else {
+            panic!("SCAN must reply with an array, got {scan_reply:?}")
+        };
         assert_eq!(
-            rt.execute_frame(command(&[b"SCAN", b"0"]), 6),
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"0".to_vec())),
-                RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(b"other".to_vec())),
-                    RespFrame::BulkString(Some(b"shared".to_vec())),
-                ])),
-            ]))
+            scan_parts[0],
+            RespFrame::BulkString(Some(b"0".to_vec())),
+            "a complete SCAN must return cursor 0"
+        );
+        let RespFrame::Array(Some(scan_keys)) = &scan_parts[1] else {
+            panic!("SCAN must reply with a key array, got {:?}", scan_parts[1])
+        };
+        let mut got: Vec<Vec<u8>> = scan_keys
+            .iter()
+            .map(|f| match f {
+                RespFrame::BulkString(Some(b)) => b.clone(),
+                other => panic!("SCAN key must be a bulk string, got {other:?}"),
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![b"other".to_vec(), b"shared".to_vec()],
+            "SELECT must scope SCAN to the selected db"
         );
 
         assert_eq!(
@@ -62318,13 +62339,39 @@ mod tests {
             RespFrame::Error("ERR invalid cursor".to_string())
         );
 
-        let empty_scan = RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(b"0".to_vec())),
-            RespFrame::Array(Some(Vec::new())),
-        ]));
-        assert_eq!(rt.execute_frame(command(&[b"SCAN", b"-1"]), 2), empty_scan);
-        assert_eq!(rt.execute_frame(command(&[b"SCAN", b"+1"]), 3), empty_scan);
-        assert_eq!(rt.execute_frame(command(&[b"SCAN", b"01"]), 4), empty_scan);
+        // (frankenredis-uhthd) What is SPECIFIED here is that these three cursor spellings
+        // are ACCEPTED -- unlike "abc" above -- and that the scan terminates. It is NOT that
+        // the reply is empty.
+        //
+        // This used to assert an empty reply, which held while SCAN walked a sorted index.
+        // Under a reverse-binary cursor an out-of-range cursor is masked to a bucket and the
+        // scan proceeds from there, returning whatever lives in the remaining buckets.
+        // Redis 7.2.4 does exactly the same thing, and whether the answer comes back empty
+        // is SEED LUCK, not contract: measured on a live 7.2.4, a one-key db returns
+        // `(0, [])` for all three of these (the key is not in the masked bucket), while an
+        // eight-key db returns `(0, [key:1, key:3])` for `SCAN 999999`. Pinning "empty"
+        // would be pinning which bucket one key happened to land in.
+        for cursor in [b"-1".as_slice(), b"+1", b"01"] {
+            let reply = rt.execute_frame(command(&[b"SCAN", cursor]), 2);
+            let RespFrame::Array(Some(parts)) = &reply else {
+                panic!("SCAN {cursor:?} must be accepted and reply with an array, got {reply:?}")
+            };
+            assert_eq!(
+                parts[0],
+                RespFrame::BulkString(Some(b"0".to_vec())),
+                "SCAN {cursor:?} must terminate on this keyspace"
+            );
+            let RespFrame::Array(Some(keys)) = &parts[1] else {
+                panic!("SCAN {cursor:?} must reply with a key array, got {:?}", parts[1])
+            };
+            for key in keys {
+                assert_eq!(
+                    key,
+                    &RespFrame::BulkString(Some(b"k".to_vec())),
+                    "SCAN {cursor:?} returned a key that is not in the keyspace"
+                );
+            }
+        }
     }
 
     #[test]
@@ -80534,15 +80581,18 @@ user bob reset off nopass +@all
             b"26",
             b"1000",
         ] {
-            let mut fast = Runtime::default_strict();
-            let mut generic = Runtime::default_strict();
-            seed(&mut fast);
-            seed(&mut generic);
+            // (frankenredis-uhthd) ONE runtime: two Stores draw independent hash seeds and
+            // enumerate SCAN in different orders by design, so a cross-instance comparison
+            // tested the seed rather than the fast path. Same store, same inputs, and SCAN
+            // is a read so the two calls cannot interfere.
+            let mut rt = Runtime::default_strict();
+            seed(&mut rt);
+            let digest_before = rt.server.store.state_digest();
 
-            let fast_reply = fast
+            let fast_reply = rt
                 .execute_plain_scan_borrowed(cursor, 20, None)
                 .unwrap_or_else(|| panic!("canonical cursor {cursor:?} must be served"));
-            let generic_reply = generic.execute_frame(command(&[b"SCAN", cursor]), 20);
+            let generic_reply = rt.execute_frame(command(&[b"SCAN", cursor]), 20);
 
             assert_eq!(
                 fast_reply,
@@ -80550,8 +80600,8 @@ user bob reset off nopass +@all
                 "cursor {cursor:?}: fast path must reproduce the generic reply exactly"
             );
             assert_eq!(
-                fast.server.store.state_digest(),
-                generic.server.store.state_digest(),
+                rt.server.store.state_digest(),
+                digest_before,
                 "cursor {cursor:?}: SCAN is a read and must not mutate"
             );
         }
@@ -80690,24 +80740,33 @@ user bob reset off nopass +@all
             (b"type", b"string"),
         ] {
             for cursor in [b"0".as_slice(), b"7"] {
-                let mut fast = Runtime::default_strict();
-                let mut generic = Runtime::default_strict();
-                seed(&mut fast);
-                seed(&mut generic);
+                // (frankenredis-uhthd) ONE runtime, not two. This used to build a
+                // separate `fast` and `generic` Runtime, seed both identically and compare
+                // their replies. That was sound while SCAN returned keys in SORTED order --
+                // deterministic across instances -- and stopped being sound when the
+                // keyspace moved to a reverse-binary cursor over a randomly-seeded hash
+                // table: two Stores draw different seeds, so they legitimately enumerate in
+                // different orders and the comparison fails on the SEED, not on the fast
+                // path. Running both against the SAME store is what the test actually means
+                // and is strictly stronger, since the inputs are now identical by
+                // construction. SCAN is a read, so the two calls cannot interfere.
+                let mut rt = Runtime::default_strict();
+                seed(&mut rt);
+                let digest_before = rt.server.store.state_digest();
 
-                let fast_reply = fast
+                let fast_reply = rt
                     .execute_plain_scan_opt_borrowed(cursor, kw, val, 20, None)
                     .unwrap_or_else(|| panic!("SCAN {cursor:?} {kw:?} {val:?} must be served"));
                 let generic_reply =
-                    generic.execute_frame(command(&[b"SCAN", cursor, kw, val]), 20);
+                    rt.execute_frame(command(&[b"SCAN", cursor, kw, val]), 20);
 
                 assert_eq!(
                     fast_reply, generic_reply,
                     "SCAN {cursor:?} {kw:?} {val:?}: must reproduce the generic exactly"
                 );
                 assert_eq!(
-                    fast.server.store.state_digest(),
-                    generic.server.store.state_digest(),
+                    rt.server.store.state_digest(),
+                    digest_before,
                     "SCAN {cursor:?} {kw:?} {val:?}: must not mutate"
                 );
             }
@@ -80883,26 +80942,35 @@ user bob reset off nopass +@all
             (b"TYPE", b"list", b"TYPE", b"string"),
         ] {
             for cursor in [b"0".as_slice(), b"9"] {
-                let mut fast = Runtime::default_strict();
-                let mut generic = Runtime::default_strict();
-                seed(&mut fast);
-                seed(&mut generic);
+                // (frankenredis-uhthd) ONE runtime, not two. This used to build a
+                // separate `fast` and `generic` Runtime, seed both identically and compare
+                // their replies. That was sound while SCAN returned keys in SORTED order --
+                // deterministic across instances -- and stopped being sound when the
+                // keyspace moved to a reverse-binary cursor over a randomly-seeded hash
+                // table: two Stores draw different seeds, so they legitimately enumerate in
+                // different orders and the comparison fails on the SEED, not on the fast
+                // path. Running both against the SAME store is what the test actually means
+                // and is strictly stronger, since the inputs are now identical by
+                // construction. SCAN is a read, so the two calls cannot interfere.
+                let mut rt = Runtime::default_strict();
+                seed(&mut rt);
+                let digest_before = rt.server.store.state_digest();
 
-                let fast_reply = fast
+                let fast_reply = rt
                     .execute_plain_scan_opt2_borrowed(cursor, k1, v1, k2, v2, 20, None)
                     .unwrap_or_else(|| {
                         panic!("SCAN {cursor:?} {k1:?} {v1:?} {k2:?} {v2:?} must be served")
                     });
                 let generic_reply =
-                    generic.execute_frame(command(&[b"SCAN", cursor, k1, v1, k2, v2]), 20);
+                    rt.execute_frame(command(&[b"SCAN", cursor, k1, v1, k2, v2]), 20);
 
                 assert_eq!(
                     fast_reply, generic_reply,
                     "SCAN {cursor:?} {k1:?} {v1:?} {k2:?} {v2:?} must match the generic"
                 );
                 assert_eq!(
-                    fast.server.store.state_digest(),
-                    generic.server.store.state_digest(),
+                    rt.server.store.state_digest(),
+                    digest_before,
                     "SCAN is a read and must not mutate"
                 );
             }
@@ -80929,13 +80997,13 @@ user bob reset off nopass +@all
 
         // The shared helper must give the SAME answer at arity 4 and arity 6 for the option
         // it has in common — that equivalence is the whole reason it is shared.
-        let mut a4 = Runtime::default_strict();
-        let mut a6 = Runtime::default_strict();
-        seed(&mut a4);
-        seed(&mut a6);
+        // (frankenredis-uhthd) ONE runtime: two Stores draw independent hash seeds and so
+        // enumerate SCAN in different orders by design. See the note above.
+        let mut rt = Runtime::default_strict();
+        seed(&mut rt);
         assert_eq!(
-            a4.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20, None),
-            a6.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20, None),
+            rt.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20, None),
+            rt.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20, None),
             "a repeated identical option must equal the single-option result"
         );
     }
@@ -80966,22 +81034,31 @@ user bob reset off nopass +@all
             (b"COUNT", b"1", b"COUNT", b"2", b"COUNT", b"100"),
         ] {
             for cursor in [b"0".as_slice(), b"11"] {
-                let mut fast = Runtime::default_strict();
-                let mut generic = Runtime::default_strict();
-                seed(&mut fast);
-                seed(&mut generic);
-                let fast_reply = fast
+                // (frankenredis-uhthd) ONE runtime, not two. This used to build a
+                // separate `fast` and `generic` Runtime, seed both identically and compare
+                // their replies. That was sound while SCAN returned keys in SORTED order --
+                // deterministic across instances -- and stopped being sound when the
+                // keyspace moved to a reverse-binary cursor over a randomly-seeded hash
+                // table: two Stores draw different seeds, so they legitimately enumerate in
+                // different orders and the comparison fails on the SEED, not on the fast
+                // path. Running both against the SAME store is what the test actually means
+                // and is strictly stronger, since the inputs are now identical by
+                // construction. SCAN is a read, so the two calls cannot interfere.
+                let mut rt = Runtime::default_strict();
+                seed(&mut rt);
+                let digest_before = rt.server.store.state_digest();
+                let fast_reply = rt
                     .execute_plain_scan_opt3_borrowed(cursor, k1, v1, k2, v2, k3, v3, 20, None)
                     .unwrap_or_else(|| panic!("SCAN {cursor:?} {k1:?}.. must be served"));
-                let generic_reply = generic
-                    .execute_frame(command(&[b"SCAN", cursor, k1, v1, k2, v2, k3, v3]), 20);
+                let generic_reply =
+                    rt.execute_frame(command(&[b"SCAN", cursor, k1, v1, k2, v2, k3, v3]), 20);
                 assert_eq!(
                     fast_reply, generic_reply,
                     "SCAN {cursor:?} {k1:?} {v1:?} {k2:?} {v2:?} {k3:?} {v3:?} must match"
                 );
                 assert_eq!(
-                    fast.server.store.state_digest(),
-                    generic.server.store.state_digest(),
+                    rt.server.store.state_digest(),
+                    digest_before,
                     "SCAN is a read and must not mutate"
                 );
             }
@@ -81007,17 +81084,16 @@ user bob reset off nopass +@all
 
         // Cross-wrapper agreement: the three wrappers share one impl, so a redundant
         // repetition must not change the answer.
-        let mut a = Runtime::default_strict();
-        let mut b = Runtime::default_strict();
-        let mut c = Runtime::default_strict();
-        seed(&mut a);
-        seed(&mut b);
-        seed(&mut c);
-        let one = a.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20, None);
-        let two = b.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20, None);
-        let three = c.execute_plain_scan_opt3_borrowed(
-            b"0", b"COUNT", b"100", b"COUNT", b"100", b"COUNT", b"100", 20,
-            None,
+        // (frankenredis-uhthd) ONE runtime for all three wrappers: separate Stores draw
+        // independent hash seeds and enumerate SCAN in different orders by design, so
+        // comparing across instances tested the seed rather than the wrappers.
+        let mut rt = Runtime::default_strict();
+        seed(&mut rt);
+        let one = rt.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20, None);
+        let two =
+            rt.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20, None);
+        let three = rt.execute_plain_scan_opt3_borrowed(
+            b"0", b"COUNT", b"100", b"COUNT", b"100", b"COUNT", b"100", 20, None,
         );
         assert!(one.is_some(), "the one-option form must be served");
         assert_eq!(one, two, "arity-4 and arity-6 wrappers must agree");
