@@ -50322,20 +50322,14 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
-            RdbValue::ListQuicklist2Packed(ref nodes) => {
-                let mut items = Vec::new();
-                for node in nodes {
-                    let spans = fr_persist::listpack::decode_value_spans(node)
-                        .map_err(|_| PersistError::InvalidFrame)?;
-                    for span in spans {
-                        items.push(span.as_bytes(node).to_vec());
-                    }
-                }
-                // (frankenredis-listrdbmove) The spans were already `to_vec`'d into owned
-                // `items`; MOVE them in (rpush_owned) instead of `rpush(&items)` re-cloning
-                // every element. Byte-identical.
+            RdbValue::ListQuicklist2Packed(nodes) => {
+                // (frankenredis-qj6jn) This arm used to decode every span and `to_vec` it --
+                // one heap allocation per list element -- and rebuild the list through
+                // `rpush_owned`. Upstream installs the saved listpack AS the quicklist node
+                // (`quicklistAppendListpack`), which is what fr's own RESTORE path already
+                // does with the identical payload bytes. Hand the blobs to that constructor.
                 store
-                    .rpush_owned(&key, items, now_ms)
+                    .load_rdb_quicklist2_packed_list(&key, nodes, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
@@ -71575,6 +71569,71 @@ mod tests {
         );
     }
 
+    /// (frankenredis-qj6jn) DEBUG RELOAD round-trips a quicklist through
+    /// `encode_rdb` → `decode_rdb_prefix` → `apply_rdb_entries_to_store`, and the load half
+    /// now installs the saved listpack blobs verbatim instead of decoding every element into
+    /// its own `Vec<u8>` and rebuilding the container.
+    ///
+    /// The four assertions are chosen so that each one would catch a different way the
+    /// verbatim path could be wrong: LRANGE catches content and ORDER (a reversed chunk, a
+    /// dropped node), LLEN catches a silently truncated node, OBJECT ENCODING catches a
+    /// listpack/quicklist flip, and DUMP catches a change of NODE BOUNDARIES — which nothing
+    /// else here would see, because a re-chunked list reads identically through every
+    /// command and only differs on the wire.
+    ///
+    /// Both regimes are covered on purpose: 200×40 bytes crosses `list-max-listpack-size`
+    /// and so travels as QUICKLIST_2 (the arm under change), while the 5-element list stays
+    /// a listpack and must be untouched by any of it.
+    #[test]
+    fn debug_reload_keeps_a_quicklist_byte_identical_qj6jn() {
+        let mut rt = Runtime::default_strict();
+        rt.set_enable_debug_command("yes");
+
+        for i in 0..200u32 {
+            let mut value = format!("elem{i:05}:").into_bytes();
+            value.resize(40, b'q');
+            rt.execute_frame(command(&[b"RPUSH", b"big", &value]), 0);
+        }
+        for m in [b"a".as_slice(), b"b", b"c", b"d", b"e"] {
+            rt.execute_frame(command(&[b"RPUSH", b"small", m]), 0);
+        }
+
+        let snapshot = |rt: &mut Runtime, ts: u64| {
+            let mut out = Vec::new();
+            for key in [b"big".as_slice(), b"small"] {
+                out.push(rt.execute_frame(command(&[b"LRANGE", key, b"0", b"-1"]), ts));
+                out.push(rt.execute_frame(command(&[b"LLEN", key]), ts));
+                out.push(rt.execute_frame(command(&[b"OBJECT", b"ENCODING", key]), ts));
+                out.push(rt.execute_frame(command(&[b"DUMP", key]), ts));
+            }
+            out
+        };
+
+        let before = snapshot(&mut rt, 1);
+        assert_eq!(
+            before[2],
+            RespFrame::BulkString(Some(b"quicklist".to_vec())),
+            "precondition: the 200x40 list must be a quicklist, or this test never reaches \
+             the QUICKLIST_2 arm it exists to cover"
+        );
+        assert_eq!(
+            before[6],
+            RespFrame::BulkString(Some(b"listpack".to_vec())),
+            "precondition: the 5-element list must still be a listpack"
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"RELOAD"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            snapshot(&mut rt, 3),
+            before,
+            "DEBUG RELOAD changed an observable property of a list"
+        );
+    }
+
     #[test]
     fn debug_reload_preserves_function_libraries_with_rdb_path_i0yd6() {
         // (frankenredis-i0yd6) The branch that was ACTUALLY broken. The sibling test
@@ -73908,9 +73967,15 @@ mod tests {
             loaded_manifest
                 .base_rdb_entries
                 .iter()
+                // (frankenredis-qj6jn) ...and a QUICKLIST_2 list decodes as its verbatim
+                // node blobs for the same reason. Accept either spelling: what this
+                // assertion is about is that the db-2 list reached the base RDB at all.
                 .any(|entry| entry.db == 2
                     && entry.key == b"db2:list"
-                    && matches!(entry.value, RdbValue::List(_))),
+                    && matches!(
+                        entry.value,
+                        RdbValue::List(_) | RdbValue::ListQuicklist2Packed(_)
+                    )),
             "SAVE manifest base RDB must include DB 2 list, got {:?}",
             loaded_manifest.base_rdb_entries
         );

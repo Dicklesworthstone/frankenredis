@@ -1312,9 +1312,18 @@ pub struct RdbStreamMetadata {
 pub enum RdbValue {
     String(Vec<u8>),
     List(Vec<Vec<u8>>),
-    /// Encode-only fast path for lists that already hold Redis-shaped
-    /// QUICKLIST_2 PACKED listpack nodes in memory. Decoding still returns
-    /// `List`, so load/apply paths keep a single canonical semantic shape.
+    /// A list carried as Redis-shaped QUICKLIST_2 PACKED listpack node blobs,
+    /// verbatim, in both directions.
+    ///
+    /// (frankenredis-qj6jn) This began as an encode-only fast path for lists
+    /// that already held such nodes in memory, and DECODING returned `List` --
+    /// every element as its own owned `Vec<u8>`. Upstream does not do that:
+    /// `rdbLoadObject` installs the saved listpack AS the quicklist node
+    /// (`quicklistAppendListpack`). Decoding now returns this variant for an
+    /// all-PACKED payload so the store can install the blobs through the same
+    /// retained-span constructor `RESTORE` uses. A payload containing any PLAIN
+    /// node (container 1) still decodes to `List`, because a plain node carries
+    /// a bare element with no listpack to retain.
     ListQuicklist2Packed(Vec<Vec<u8>>),
     Set(Vec<Vec<u8>>),
     /// A canonical, sorted intset decoded from `RDB_TYPE_SET_INTSET`.
@@ -4354,6 +4363,23 @@ pub fn canonicalise_rdb_value(value: &RdbValue) -> RdbValue {
                     .collect(),
             )
         }
+        // (frankenredis-qj6jn) Same job for the list's node blobs. QUICKLIST_2 decodes to
+        // the verbatim listpack nodes so the store can install them the way upstream does;
+        // a caller comparing CONTENT wants the elements those nodes spell, in order, which
+        // is what the pre-qj6jn decoder returned. A node that does not parse is left alone
+        // rather than silently dropped — canonicalisation must not hide a malformed blob.
+        RdbValue::ListQuicklist2Packed(nodes) => {
+            let mut items = Vec::new();
+            for node in nodes {
+                let Ok(spans) = listpack::decode_value_spans(node) else {
+                    return value.clone();
+                };
+                for span in spans {
+                    items.push(span.as_bytes(node).to_vec());
+                }
+            }
+            RdbValue::List(items)
+        }
         other => other.clone(),
     }
 }
@@ -5032,8 +5058,32 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                         let (node_count, consumed) =
                             rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let mut items =
+                        // (frankenredis-qj6jn) Collect the nodes as the payload SPELLS them
+                        // -- container tag plus verbatim blob -- and decide the shape once,
+                        // after the whole value has been read.
+                        //
+                        // Upstream's `rdbLoadObject` never decodes a PACKED node here: it
+                        // validates the listpack and calls `quicklistAppendListpack(o->ptr,
+                        // lp)`, installing the SAVED BLOB as the quicklist node. fr used to
+                        // decode every entry into an owned `Vec<u8>` -- one heap allocation
+                        // per list element -- and then hand those to `rpush_owned`, which
+                        // rebuilt a container the payload already described. On a
+                        // 200-element list that is 200 allocations and a full re-encode to
+                        // reproduce what was already on disk.
+                        //
+                        // An all-PACKED payload is therefore returned VERBATIM as
+                        // `ListQuicklist2Packed`; the store installs it through the same
+                        // retained-span constructor `RESTORE` already uses, which is the
+                        // one function upstream uses for both routes. Listpack structural
+                        // validation is not skipped, only MOVED: it happens where the spans
+                        // are decoded, and a corrupt blob still fails the load.
+                        //
+                        // A PLAIN node (container 1, upstream's oversized-element node) has
+                        // no listpack to retain, so ANY plain node sends the whole value
+                        // down the original element path unchanged.
+                        let mut nodes: Vec<(usize, Vec<u8>)> =
                             Vec::with_capacity(node_count.min(RDB_COLLECTION_PRESIZE_CAP));
+                        let mut all_packed = true;
                         for _ in 0..node_count {
                             let (container, consumed) = rdb_decode_length(&data[cursor..])
                                 .ok_or(PersistError::InvalidFrame)?;
@@ -5042,28 +5092,39 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                                 .ok_or(PersistError::InvalidFrame)?;
                             cursor += consumed;
                             match container {
-                                1 => {
+                                1 => all_packed = false,
+                                2 => {}
+                                _ => return Err(PersistError::InvalidFrame),
+                            }
+                            nodes.push((container, node_blob));
+                        }
+                        if all_packed && !nodes.is_empty() {
+                            RdbValue::ListQuicklist2Packed(
+                                nodes.into_iter().map(|(_, blob)| blob).collect(),
+                            )
+                        } else {
+                            let mut items = Vec::with_capacity(nodes.len());
+                            for (container, node_blob) in nodes {
+                                if container == 1 {
                                     // PLAIN: the blob is the element itself.
                                     items.push(node_blob);
-                                }
-                                2 => {
+                                } else {
                                     // PACKED: the blob is a listpack. Move each
                                     // decoded entry's payload out with `into_bytes`
                                     // (the iterator yields owned entries) rather than
                                     // `to_bytes`, which cloned the string payload and
                                     // dropped the original — one wasted alloc+copy+free
                                     // per packed list element on the quicklist2 decode
-                                    // (RESTORE / DEBUG RELOAD) path. Byte-identical.
+                                    // path. Byte-identical.
                                     for entry in listpack::decode_listpack(&node_blob)
                                         .map_err(|_| PersistError::InvalidFrame)?
                                     {
                                         items.push(entry.into_bytes());
                                     }
                                 }
-                                _ => return Err(PersistError::InvalidFrame),
                             }
+                            RdbValue::List(items)
                         }
-                        RdbValue::List(items)
                     }
                     RDB_TYPE_LIST_ZIPLIST => {
                         // Legacy single-ziplist list (redis ≤ 6.2).
@@ -9400,11 +9461,56 @@ mod tests {
         let bytes = finalize_rdb_blob(&mut blob);
 
         let (entries, _) = decode_rdb(&bytes).expect("decode list_quicklist_2 packed");
+        // (frankenredis-qj6jn) An all-PACKED payload decodes to the VERBATIM node blobs,
+        // the way upstream's `quicklistAppendListpack` keeps them, rather than to one owned
+        // `Vec<u8>` per element. The assertion is byte-level on purpose: "the decoder
+        // returned the same bytes the payload carried" is the whole property, and an
+        // element-list assertion would pass just as well for a decode-and-re-encode.
+        match &entries[0].value {
+            RdbValue::ListQuicklist2Packed(nodes) => {
+                assert_eq!(nodes, &vec![lp.clone()], "node blob must be verbatim");
+            }
+            other => panic!("expected RdbValue::ListQuicklist2Packed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rdb_quicklist_2_with_any_plain_node_keeps_the_element_shape_qj6jn() {
+        // (frankenredis-qj6jn) A PLAIN node carries a bare element, not a listpack, so it
+        // has nothing to retain. One plain node anywhere in the payload must send the WHOLE
+        // value down the original element path — including the packed nodes beside it,
+        // whose entries then have to be decoded to keep the list's order intact.
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_LIST_QUICKLIST_2);
+        rdb_encode_string(&mut blob, b"lq_mixed");
+        rdb_encode_length(&mut blob, 3);
+        // node 1: PACKED listpack of "a","b"
+        rdb_encode_length(&mut blob, 2);
+        append_rdb_wrapped_string(&mut blob, &build_listpack_for_test(&[b"a", b"b"]));
+        // node 2: PLAIN element
+        rdb_encode_length(&mut blob, 1);
+        rdb_encode_string(&mut blob, b"BIG");
+        // node 3: PACKED listpack of "c"
+        rdb_encode_length(&mut blob, 2);
+        append_rdb_wrapped_string(&mut blob, &build_listpack_for_test(&[b"c"]));
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        let (entries, _) = decode_rdb(&bytes).expect("decode mixed quicklist_2");
         match &entries[0].value {
             RdbValue::List(items) => {
-                assert_eq!(items, &vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+                assert_eq!(
+                    items,
+                    &vec![
+                        b"a".to_vec(),
+                        b"b".to_vec(),
+                        b"BIG".to_vec(),
+                        b"c".to_vec()
+                    ],
+                    "a mixed payload must keep every element in payload order"
+                );
             }
-            other => panic!("expected RdbValue::List, got {other:?}"),
+            other => panic!("expected RdbValue::List for a mixed payload, got {other:?}"),
         }
     }
 
@@ -9554,6 +9660,19 @@ mod tests {
                     match super::canonicalise_rdb_value(&entries[0].value) {
                         RdbValue::Hash(fields) => fields.len(),
                         _ => panic!("seed {name}: hash listpack blob did not decode: {blob:?}"),
+                    },
+                ),
+                // ...and an all-PACKED RDB_TYPE_LIST_QUICKLIST_2 decodes to the verbatim
+                // node blobs, which is still a list for this check. Cardinality comes from
+                // decoding those blobs, so a seed whose element count drifted still fails.
+                // The `compact_quicklist2_mixed` seed keeps taking the `List` arm above —
+                // its PLAIN node sends the whole value down the element path.
+                // (frankenredis-qj6jn)
+                RdbValue::ListQuicklist2Packed(nodes) => (
+                    "List",
+                    match super::canonicalise_rdb_value(&entries[0].value) {
+                        RdbValue::List(items) => items.len(),
+                        _ => panic!("seed {name}: quicklist2 node blobs did not decode: {nodes:?}"),
                     },
                 ),
                 RdbValue::SortedSet(members) => ("SortedSet", members.len()),
@@ -10407,7 +10526,10 @@ mod tests {
 
         super::write_rdb_file(&path, &entries, &[("redis-ver", "7.0.0")]).expect("write");
         let (loaded, aux) = super::read_rdb_file(&path).expect("read");
-        assert_eq!(loaded, entries);
+        // (frankenredis-qj6jn) The list comes back as its verbatim QUICKLIST_2 node blobs;
+        // canonicalise to the element spelling, the same way the other round-trip tests in
+        // this module already do for the encoding-shaped decode variants.
+        assert_eq!(canonicalise_rdb_entries(loaded), entries);
         assert_eq!(aux.get("redis-ver").map(String::as_str), Some("7.0.0"));
 
         let _ = std::fs::remove_file(&path);
@@ -10891,6 +11013,12 @@ mod tests {
                 // pairs so the comparison still tests every field and value and
                 // only the variant stops being load-bearing.
                 if matches!(&entry.value, RdbValue::HashListpack(_)) {
+                    entry.value = super::canonicalise_rdb_value(&entry.value);
+                }
+                // (frankenredis-qj6jn) And for a list written as QUICKLIST_2, which now
+                // decodes as its verbatim node blobs for the same reason: the store installs
+                // them the way upstream does instead of rebuilding from elements.
+                if matches!(&entry.value, RdbValue::ListQuicklist2Packed(_)) {
                     entry.value = super::canonicalise_rdb_value(&entry.value);
                 }
                 match &mut entry.value {

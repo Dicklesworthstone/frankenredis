@@ -18316,6 +18316,78 @@ impl Store {
         }
     }
 
+    /// (frankenredis-qj6jn) Install an RDB `QUICKLIST_2` all-PACKED payload the way upstream
+    /// does: keep the saved listpack blobs and attach them as the list's nodes.
+    ///
+    /// Upstream's `rdbLoadObject` reads each node's blob, validates it, and calls
+    /// `quicklistAppendListpack(o->ptr, lp)` — the blob IS the node. It never walks the
+    /// entries. fr's RDB-FILE loader did the opposite: it decoded every entry into an owned
+    /// `Vec<u8>` (one heap allocation per element) and handed the vector to
+    /// [`Self::rpush_owned`], which then rebuilt a container the payload already described,
+    /// re-deriving chunk boundaries and re-summing every entry's encoded length.
+    ///
+    /// fr's OWN `RESTORE` path has done it upstream's way since `7e1180ff9`
+    /// ([`ListValue::from_restored_quicklist2_nodes`] over retained spans, `ListChunk::Listpack`
+    /// holding the blob verbatim) — and `RESTORE` and RDB-load consume the identical payload
+    /// bytes, decoded by the identical upstream function. Only the two fr routes had drifted.
+    /// This is that constructor, reached from the file loader.
+    ///
+    /// Structural validation is not skipped, only MOVED: `decode_retained_listpack_spans`
+    /// rejects a malformed blob here instead of `decode_listpack` rejecting it in fr-persist,
+    /// and an empty node is dropped exactly as `restore_dump_payload` drops it (upstream:
+    /// "Silently skip empty ziplists").
+    ///
+    /// The degenerate case — a key that already exists, i.e. a duplicate key inside one RDB —
+    /// keeps the element path, so its append semantics are literally unchanged.
+    pub fn load_rdb_quicklist2_packed_list(
+        &mut self,
+        key: &[u8],
+        nodes: Vec<Vec<u8>>,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if self.entries.contains_key(key) {
+            let mut items = Vec::new();
+            for blob in &nodes {
+                let spans = fr_persist::listpack::decode_retained_listpack_spans(blob)
+                    .map_err(|_| StoreError::InvalidDumpPayload)?;
+                let (entries, integer_bytes) = spans.into_parts();
+                for span in &entries {
+                    items.push(span.as_bytes(blob, &integer_bytes).to_vec());
+                }
+            }
+            return self.rpush_owned(key, items, now_ms);
+        }
+
+        let mut restored = Vec::with_capacity(nodes.len());
+        for blob in nodes {
+            let spans = fr_persist::listpack::decode_retained_listpack_spans(&blob)
+                .map_err(|_| StoreError::InvalidDumpPayload)?;
+            if spans.is_empty() {
+                continue;
+            }
+            let (entries, integer_bytes) = spans.into_parts();
+            restored.push(RestoredListNode::Listpack {
+                bytes: blob,
+                entries,
+                integer_bytes,
+            });
+        }
+        let list = ListValue::from_restored_quicklist2_nodes(restored);
+        if list.is_empty() {
+            return Err(StoreError::InvalidDumpPayload);
+        }
+        let len = list.len();
+        self.internal_entries_insert(
+            key.to_vec(),
+            Entry::new(Value::List(Box::new(list)), now_ms),
+        );
+        self.dirty = self.dirty.saturating_add(len as u64);
+        Ok(len)
+    }
+
     pub fn lpop(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         self.lpop_impl::<true>(key, now_ms)
     }
@@ -60953,6 +61025,135 @@ mod tests {
             );
             assert_eq!(borrowed.dirty, owned.dirty, "n={n} w={w}: dirty diverged");
         }
+    }
+
+    /// (frankenredis-qj6jn) The RDB-load QUICKLIST_2 arm keeps the saved listpack blobs
+    /// instead of decoding every element and rebuilding the list. The observable list must
+    /// be indistinguishable from the one the element path built.
+    ///
+    /// The blobs are not hand-written: they are taken from a list built by the ELEMENT path
+    /// via `quicklist_packed_node_blobs`, which is the same call the RDB SAVE side makes. So
+    /// this is the real save-shape → load-shape round trip, and DUMP equality is a strong
+    /// assertion here — it pins the NODE BOUNDARIES, the one thing a verbatim load could
+    /// silently change relative to a rebuild that re-chunks at its own granularity.
+    #[test]
+    fn rdb_quicklist2_verbatim_load_matches_the_element_path_qj6jn() {
+        fn shape(n: usize, w: usize) -> Vec<Vec<u8>> {
+            (0..n)
+                .map(|i| {
+                    if i % 3 == 0 {
+                        format!("{}", i * 7 + 1).into_bytes()
+                    } else {
+                        let mut e = format!("elem{i:05}:").into_bytes();
+                        e.resize(w.max(e.len()), b'q');
+                        e
+                    }
+                })
+                .collect()
+        }
+
+        for (n, w) in [(1usize, 4), (8, 8), (128, 8), (200, 40), (600, 8), (40, 96)] {
+            let items = shape(n, w);
+
+            // The element path — what the loader used to do for every list.
+            let mut rebuilt = Store::new();
+            rebuilt.rpush_owned(b"l", items.clone(), 0).unwrap();
+
+            let fill = rebuilt.list_max_listpack_size;
+            let Some(nodes) = ({
+                let Value::List(l) = &rebuilt.entries.get(b"l".as_slice()).unwrap().value else {
+                    panic!("n={n} w={w}: list vanished");
+                };
+                l.quicklist_packed_node_blobs(fill)
+            }) else {
+                // A shape whose nodes do not fit the current fill is saved as the plain
+                // RDB_TYPE_LIST, so it never reaches the verbatim arm.
+                continue;
+            };
+
+            let mut verbatim = Store::new();
+            let loaded = verbatim
+                .load_rdb_quicklist2_packed_list(b"l", nodes, 0)
+                .unwrap_or_else(|e| panic!("n={n} w={w}: verbatim load failed: {e:?}"));
+
+            assert_eq!(loaded, n, "n={n} w={w}: length");
+            assert_eq!(
+                rebuilt.lrange(b"l", 0, -1, 1).unwrap(),
+                verbatim.lrange(b"l", 0, -1, 1).unwrap(),
+                "n={n} w={w}: LRANGE diverged"
+            );
+            assert_eq!(
+                rebuilt.dump_key(b"l", 1),
+                verbatim.dump_key(b"l", 1),
+                "n={n} w={w}: DUMP payload diverged (node boundaries moved)"
+            );
+            assert_eq!(
+                rebuilt.object_encoding(b"l", 1),
+                verbatim.object_encoding(b"l", 1),
+                "n={n} w={w}: OBJECT ENCODING diverged"
+            );
+            assert_eq!(
+                rebuilt.dirty, verbatim.dirty,
+                "n={n} w={w}: dirty diverged"
+            );
+        }
+    }
+
+    /// (frankenredis-qj6jn) The two shapes the verbatim arm must NOT take: a duplicate key
+    /// inside one RDB keeps the append semantics of the element path, and a blob that is not
+    /// a listpack is still rejected — the structural check moved into the store, it did not
+    /// disappear.
+    #[test]
+    fn rdb_quicklist2_verbatim_load_appends_and_rejects_qj6jn() {
+        // Both halves have to be big enough to BE quicklists: a small list is stored
+        // packed and has no quicklist nodes to hand over, so `quicklist_packed_node_blobs`
+        // rightly returns `None` for it and such a list never reaches the verbatim arm.
+        let half = |base: u32| -> Vec<Vec<u8>> {
+            (base..base + 200)
+                .map(|i| {
+                    let mut e = format!("elem{i:05}:").into_bytes();
+                    e.resize(40, b'q');
+                    e
+                })
+                .collect()
+        };
+        let first = half(0);
+        let second = half(200);
+
+        let mut expected = Store::new();
+        expected.rpush_owned(b"l", first.clone(), 0).unwrap();
+        expected.rpush_owned(b"l", second.clone(), 0).unwrap();
+
+        let nodes_for = |items: Vec<Vec<u8>>| {
+            let mut s = Store::new();
+            s.rpush_owned(b"l", items, 0).unwrap();
+            let fill = s.list_max_listpack_size;
+            let Value::List(l) = &s.entries.get(b"l".as_slice()).unwrap().value else {
+                panic!("list vanished");
+            };
+            l.quicklist_packed_node_blobs(fill)
+                .expect("a 200x40 list must be a quicklist with packed nodes")
+        };
+
+        let mut got = Store::new();
+        got.load_rdb_quicklist2_packed_list(b"l", nodes_for(first), 0)
+            .unwrap();
+        got.load_rdb_quicklist2_packed_list(b"l", nodes_for(second), 0)
+            .unwrap();
+
+        assert_eq!(
+            expected.lrange(b"l", 0, -1, 1).unwrap(),
+            got.lrange(b"l", 0, -1, 1).unwrap(),
+            "a duplicate key in one RDB must append exactly as the element path did"
+        );
+        assert_eq!(expected.dump_key(b"l", 1), got.dump_key(b"l", 1));
+
+        let mut bad = Store::new();
+        assert!(
+            bad.load_rdb_quicklist2_packed_list(b"l", vec![b"not a listpack".to_vec()], 0)
+                .is_err(),
+            "a malformed node blob must still be rejected"
+        );
     }
 
     // (CrimsonHawk) SWAR 8-digit parse (Lemire multiply-fold) matches scalar over a broad exhaustive
