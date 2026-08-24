@@ -18,30 +18,27 @@ Both phases check DIGEST after full sync AND after a batch of online writes
 
 Both servers launched with --enable-debug-command. Self-orchestrating.
 
-Usage: replication_cross_compat_gate.py <redis-server-bin> <fr-bin> [base_port]
+Usage: replication_cross_compat_gate.py [--planted-negative] <redis-server-bin> <fr-bin> [base_port]
 """
-import socket, sys, time, subprocess
+import argparse
+import subprocess
+import time
 
-REDIS_BIN = sys.argv[1] if len(sys.argv) > 1 else "legacy_redis_code/redis/src/redis-server"
-FR_BIN = sys.argv[2] if len(sys.argv) > 2 else "/tmp/fr_repl"
-BASE = int(sys.argv[3]) if len(sys.argv) > 3 else 29821
+from _respread import assert_ok, assert_seed, cmd, conn
 
 
-def enc(a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    return o
+DEFAULT_REDIS_BIN = "legacy_redis_code/redis/src/redis-server"
+DEFAULT_FR_BIN = "/tmp/fr_repl"
+DEFAULT_BASE = 29821
 
 
 def q(port, a):
-    s = socket.create_connection(("127.0.0.1", port))
-    s.sendall(enc(a))
-    time.sleep(0.04)
-    d = s.recv(8000)
-    s.close()
-    return d
+    """One fresh connection, but never a one-recv partial RESP reply."""
+    s = conn(port)
+    try:
+        return cmd(s, *a)
+    finally:
+        s.close()
 
 
 def wait_up(port, deadline=8):
@@ -50,7 +47,7 @@ def wait_up(port, deadline=8):
         try:
             if b"PONG" in q(port, ["PING"]):
                 return True
-        except Exception:
+        except (OSError, ValueError):
             time.sleep(0.1)
     return False
 
@@ -61,8 +58,8 @@ def wait_link_up(port, deadline=10):
         try:
             if b"master_link_status:up" in q(port, ["INFO", "replication"]):
                 return True
-        except Exception:
-            pass
+        except (OSError, ValueError):
+            continue
         time.sleep(0.2)
     return False
 
@@ -82,75 +79,133 @@ def digests_converge(p_master, p_replica, deadline=6):
 
 
 SEED = [
-    ["SET", "s", "hi"], ["RPUSH", "l", *[str(i) for i in range(50)]],
-    ["HSET", "h", *sum([[f"f{i}", str(i)] for i in range(300)], [])],
-    ["ZADD", "z", *sum([[str(i * 1.5), f"m{i}"] for i in range(300)], [])],
-    ["SADD", "st", *[f"m{i}" for i in range(300)]], ["XADD", "x", "1-1", "f", "v"],
+    ("SET s", ["SET", "s", "hi"], b"+OK\r\n"),
+    ("RPUSH l", ["RPUSH", "l", *[str(i) for i in range(50)]], b":50\r\n"),
+    ("HSET h", ["HSET", "h", *[value for i in range(300) for value in (f"f{i}", str(i))]], b":300\r\n"),
+    ("ZADD z", ["ZADD", "z", *[value for i in range(300) for value in (str(i * 1.5), f"m{i}")]], b":300\r\n"),
+    ("SADD st", ["SADD", "st", *[f"m{i}" for i in range(300)]], b":300\r\n"),
+    ("XADD x", ["XADD", "x", "1-1", "f", "v"], b"$3\r\n1-1\r\n"),
 ]
 ONLINE = [
-    ["SET", "on", "v"], ["INCR", "c"], ["INCR", "c"], ["LPUSH", "ol", "a", "b"],
-    ["EXPIRE", "on", "100000"], ["ZADD", "oz", "5", "m"], ["HSET", "oh", "f", "v"],
-    ["SADD", "os", "x"], ["DEL", "s"],
+    ("SET on", ["SET", "on", "v"], b"+OK\r\n"),
+    ("INCR c first", ["INCR", "c"], b":1\r\n"),
+    ("INCR c second", ["INCR", "c"], b":2\r\n"),
+    ("LPUSH ol", ["LPUSH", "ol", "a", "b"], b":2\r\n"),
+    ("EXPIRE on", ["EXPIRE", "on", "100000"], b":1\r\n"),
+    ("ZADD oz", ["ZADD", "oz", "5", "m"], b":1\r\n"),
+    ("HSET oh", ["HSET", "oh", "f", "v"], b":1\r\n"),
+    ("SADD os", ["SADD", "os", "x"], b":1\r\n"),
+    ("DEL s", ["DEL", "s"], b":1\r\n"),
 ]
 
 
-def main():
+def assert_reply(reply, expected, label):
+    """Fail closed when a seed/write did not actually take effect."""
+    if expected == b"+OK\r\n":
+        return assert_ok(reply, label)
+    if expected.startswith(b":"):
+        return assert_seed(reply, int(expected[1:-2]), label)
+    if reply != expected:
+        raise SystemExit(
+            f"SEED FAILED [{label}]: got {reply!r}, expected {expected!r}")
+    return reply
+
+
+def apply_checked(port, writes, phase):
+    for label, command, expected in writes:
+        assert_reply(q(port, command), expected, f"{phase} {label}")
+
+
+def mismatches(expected, actual):
+    """The gate predicate, isolated so the planted negative exercises it."""
+    return expected != actual
+
+
+def planted_negative():
+    """Must fail: a differing full digest reply cannot pass this gate."""
+    oracle = b"$40\r\n0123456789abcdef0123456789abcdef01234567\r\n"
+    wrong = b"$40\r\n0123456789abcdef0123456789abcdef01234568\r\n"
+    if not mismatches(oracle, wrong):
+        print("PLANTED NEGATIVE MISSED: unequal replication digests compared equal")
+        return 0
+    print("PLANTED NEGATIVE DETECTED: unequal replication digest replies fail the gate")
+    return 1
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("redis_bin", nargs="?", default=DEFAULT_REDIS_BIN)
+    parser.add_argument("fr_bin", nargs="?", default=DEFAULT_FR_BIN)
+    parser.add_argument("base_port", nargs="?", type=int, default=DEFAULT_BASE)
+    parser.add_argument(
+        "--planted-negative",
+        action="store_true",
+        help="prove this gate rejects a deliberately different complete digest reply",
+    )
+    return parser.parse_args()
+
+
+def main(args):
+    if args.planted_negative:
+        return planted_negative()
+
+    redis_bin, fr_bin, base = args.redis_bin, args.fr_bin, args.base_port
     procs = []
     failures = []
     try:
         # ---- phase 1: fr master, redis replica ----
-        procs.append(subprocess.Popen([FR_BIN, "--port", str(BASE), "--enable-debug-command", "yes"],
+        procs.append(subprocess.Popen([fr_bin, "--port", str(base), "--enable-debug-command", "yes"],
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        assert wait_up(BASE), "fr master did not start"
-        q(BASE, ["FLUSHALL"])
-        for c in SEED:
-            q(BASE, c)
+        if not wait_up(base):
+            raise SystemExit("fr master did not start")
+        assert_ok(q(base, ["FLUSHALL"]), "fr master FLUSHALL")
+        apply_checked(base, SEED, "fr master seed")
         procs.append(subprocess.Popen(
-            [REDIS_BIN, "--port", str(BASE + 1), "--replicaof", "127.0.0.1", str(BASE),
+            [redis_bin, "--port", str(base + 1), "--replicaof", "127.0.0.1", str(base),
              "--save", "", "--enable-debug-command", "yes"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        assert wait_up(BASE + 1), "redis replica did not start"
-        if not wait_link_up(BASE + 1):
+        if not wait_up(base + 1):
+            raise SystemExit("redis replica did not start")
+        if not wait_link_up(base + 1):
             failures.append(("fr-master<-redis-replica", "link never came up", ""))
         else:
-            ok, (dm, dr) = digests_converge(BASE, BASE + 1)
+            ok, (dm, dr) = digests_converge(base, base + 1)
             if not ok:
                 failures.append(("fr-master<-redis-replica full-sync", dm, dr))
-            for c in ONLINE:
-                q(BASE, c)
-            ok, (dm, dr) = digests_converge(BASE, BASE + 1)
+            apply_checked(base, ONLINE, "fr master online")
+            ok, (dm, dr) = digests_converge(base, base + 1)
             if not ok:
                 failures.append(("fr-master<-redis-replica online", dm, dr))
             # WAIT durability-ack: fr master must report the 1 connected replica
             # acknowledging the latest write offset (clients gate write durability
             # on this). WAIT 1 <timeout> -> :1 once the redis replica ACKs.
-            q(BASE, ["SET", "wait_probe", "v"])
-            w = q(BASE, ["WAIT", "1", "2000"]).strip()
+            assert_ok(q(base, ["SET", "wait_probe", "v"]), "fr master WAIT probe")
+            w = q(base, ["WAIT", "1", "2000"]).strip()
             if w != b":1":
                 failures.append(("fr-master WAIT 1 (replica ack)", b":1", w))
 
         # ---- phase 2: redis master, fr replica ----
         procs.append(subprocess.Popen(
-            [REDIS_BIN, "--port", str(BASE + 2), "--save", "", "--enable-debug-command", "yes"],
+            [redis_bin, "--port", str(base + 2), "--save", "", "--enable-debug-command", "yes"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        assert wait_up(BASE + 2), "redis master did not start"
-        q(BASE + 2, ["FLUSHALL"])
-        for c in SEED:
-            q(BASE + 2, c)
+        if not wait_up(base + 2):
+            raise SystemExit("redis master did not start")
+        assert_ok(q(base + 2, ["FLUSHALL"]), "redis master FLUSHALL")
+        apply_checked(base + 2, SEED, "redis master seed")
         procs.append(subprocess.Popen(
-            [FR_BIN, "--port", str(BASE + 3), "--replicaof", "127.0.0.1", str(BASE + 2),
+            [fr_bin, "--port", str(base + 3), "--replicaof", "127.0.0.1", str(base + 2),
              "--enable-debug-command", "yes"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        assert wait_up(BASE + 3), "fr replica did not start"
-        if not wait_link_up(BASE + 3):
+        if not wait_up(base + 3):
+            raise SystemExit("fr replica did not start")
+        if not wait_link_up(base + 3):
             failures.append(("redis-master<-fr-replica", "link never came up", ""))
         else:
-            ok, (dm, dr) = digests_converge(BASE + 2, BASE + 3)
+            ok, (dm, dr) = digests_converge(base + 2, base + 3)
             if not ok:
                 failures.append(("redis-master<-fr-replica full-sync", dm, dr))
-            for c in ONLINE:
-                q(BASE + 2, c)
-            ok, (dm, dr) = digests_converge(BASE + 2, BASE + 3)
+            apply_checked(base + 2, ONLINE, "redis master online")
+            ok, (dm, dr) = digests_converge(base + 2, base + 3)
             if not ok:
                 failures.append(("redis-master<-fr-replica online", dm, dr))
     finally:
@@ -160,18 +215,19 @@ def main():
         for p in procs:
             try:
                 p.kill()
-            except Exception:
-                pass
+            except ProcessLookupError:
+                continue
 
     print("=" * 60)
     if failures:
         print(f"FAIL - {len(failures)} replication divergence(s):")
         for phase, m, r in failures:
             print(f"  [{phase}]\n    master={m}\n    replica={r}")
-        sys.exit(1)
+        return 1
     print("PASS - replication wire-compatible fr <-> redis 7.2.4 both roles"
           " (full PSYNC resync + online propagation + WAIT replica-ack,"
           " DEBUG DIGEST identical)")
+    return 0
 
 
-main()
+raise SystemExit(main(parse_args()))
