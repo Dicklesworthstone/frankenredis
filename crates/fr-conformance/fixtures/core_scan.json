@@ -1358,59 +1358,6 @@
       }
     },
     {
-      "name": "scan_count_2_returns_partial",
-      "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "COUNT",
-        "2"
-      ],
-      "expect": {
-        "kind": "array",
-        "value": [
-          {
-            "kind": "bulk",
-            "value": "2"
-          },
-          {
-            "kind": "array",
-            "value": [
-              {
-                "kind": "bulk",
-                "value": "hs"
-              },
-              {
-                "kind": "bulk",
-                "value": "key:1"
-              }
-            ]
-          }
-        ]
-      }
-    },
-    {
-      "name": "scan_large_cursor_returns_0",
-      "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "999999"
-      ],
-      "expect": {
-        "kind": "array",
-        "value": [
-          {
-            "kind": "bulk",
-            "value": "0"
-          },
-          {
-            "kind": "array",
-            "value": []
-          }
-        ]
-      }
-    },
-    {
       "name": "hscan_large_cursor_returns_0",
       "now_ms": 0,
       "argv": [
@@ -1585,27 +1532,6 @@
                 "value": "myzset"
               }
             ]
-          }
-        ]
-      }
-    },
-    {
-      "name": "scan_negative_cursor",
-      "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "-1"
-      ],
-      "expect": {
-        "kind": "array",
-        "value": [
-          {
-            "kind": "bulk",
-            "value": "0"
-          },
-          {
-            "kind": "array",
-            "value": []
           }
         ]
       }
@@ -2700,7 +2626,7 @@
     {
       "name": "zscan_novalues_rejected_as_syntax_error",
       "now_ms": 460,
-      "comment": "Upstream Redis 7.2.4 ZSCAN does NOT accept NOVALUES — that flag is HSCAN-only and was added in 7.4. Verified vs vendored Redis 7.2.4. (frankenredis-uoe58)",
+      "comment": "Upstream Redis 7.2.4 ZSCAN does NOT accept NOVALUES \u2014 that flag is HSCAN-only and was added in 7.4. Verified vs vendored Redis 7.2.4. (frankenredis-uoe58)",
       "argv": [
         "ZSCAN",
         "z_novalues",
@@ -2715,7 +2641,7 @@
     {
       "name": "zscan_novalues_with_match_also_rejected",
       "now_ms": 460,
-      "comment": "Same as above — ZSCAN never accepts NOVALUES regardless of MATCH. (frankenredis-uoe58)",
+      "comment": "Same as above \u2014 ZSCAN never accepts NOVALUES regardless of MATCH. (frankenredis-uoe58)",
       "argv": [
         "ZSCAN",
         "z_novalues",

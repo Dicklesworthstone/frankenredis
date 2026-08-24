@@ -5,10 +5,11 @@
 // hashtable past the threshold. SMEMBERS/SSCAN/SPOP output is unchanged.
 mod packed_set;
 // (frankenredis-uhthd, step 1) Redis-dict-class chaining hash table with native
-// reverse-binary cursor SCAN + O(1) random sampling. Not yet wired into `Store`;
-// when it replaces `entries` it deletes `ordered_keys` + `random_key_slots`.
-#[allow(dead_code)]
+// reverse-binary cursor SCAN + O(1) random sampling. WIRED as `Store::entries`
+// (frankenredis-uhthd step 2); it serves SCAN and RANDOMKEY itself, which is what
+// let `ordered_keys` and `random_key_slots` be deleted.
 mod keyspace_dict;
+use keyspace_dict::KeyDict;
 #[cfg(any(test, feature = "bench-reference"))]
 #[doc(hidden)]
 pub use packed_set::PackedStreamLogBTreeReference;
@@ -4620,22 +4621,42 @@ struct Entry {
 
 const _: () = assert!(std::mem::size_of::<Entry>() <= 48);
 
-#[derive(Debug, Clone, Default)]
-struct RandomKeySlotIndex {
-    keys: Vec<StoreKey>,
-    dirty: bool,
-}
+/// How many global random draws RANDOMKEY makes before abandoning rejection
+/// sampling and counting the target db exactly.
+///
+/// (frankenredis-uhthd) Keys live in ONE db-encoded table, so a global sample can
+/// land in the wrong db. On the normal single-db server the first draw hits; this
+/// bounds the pathological case where the target db holds a tiny slice of the
+/// keyspace, after which an exact O(n) count keeps the draw uniform.
+const RANDOMKEY_REJECTION_DRAWS: usize = 64;
 
-impl RandomKeySlotIndex {
-    fn mark_dirty(&mut self) {
-        self.keys.clear();
-        self.dirty = true;
-    }
-
-    fn reset(&mut self) {
-        self.keys.clear();
-        self.dirty = false;
-    }
+/// Everything that identifies ONE `SCAN` batch: which database, where to resume,
+/// what to match, and how much to do.
+///
+/// These six values always travel together — every caller supplies all of them and
+/// none of them means anything without the others — but they were being passed
+/// positionally, which pushed `scan_in_db_visit` to eight parameters and made
+/// `cargo clippy -p fr-store -- -D warnings` fail on committed `main`.
+///
+/// Arity was the symptom. The readability cost is the real one: the call site for
+/// `RANDOMKEY`-style paging read `scan_in_db_visit(db, cursor, None, None, 10, now_ms, ..)`,
+/// where nothing at the call site says which `None` is the glob and which is the
+/// type filter, and `10` could be a count or a cursor. Naming the fields fixes the
+/// lint and that at the same time.
+#[derive(Debug, Clone, Copy)]
+pub struct ScanQuery<'a> {
+    /// Logical database index to scan.
+    pub db: usize,
+    /// Opaque resume cursor; 0 begins a fresh scan.
+    pub cursor: u64,
+    /// `MATCH` glob applied to the LOGICAL key, or `None` for all keys.
+    pub pattern: Option<&'a [u8]>,
+    /// `TYPE` filter, or `None` for all types.
+    pub type_filter: Option<&'a [u8]>,
+    /// `COUNT` hint — the batch size the walk aims for.
+    pub count: usize,
+    /// Clock for the expiry reap the walk performs first.
+    pub now_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -6121,32 +6142,6 @@ pub struct ScriptPropagationRecord {
 /// scans beyond this many interleaved cursors fall back to the skip walk.
 const SCAN_CACHE_LRU_CAP: usize = 8;
 
-/// (frankenredis-3e92e) Cached SCAN resume point enabling an O(log N + batch)
-/// in-order continuation instead of an O(cursor) `skip` re-walk.
-#[derive(Debug, Clone)]
-struct ScanResume {
-    /// The cursor value this cache lets the caller resume FROM (i.e. the
-    /// `next_cursor` returned by the previous batch).
-    next_cursor: u64,
-    /// The last key EXAMINED by the previous batch (at position `next_cursor-1`).
-    last_key: Vec<u8>,
-    /// Keyspace generation when the cache was written; the fast path is taken
-    /// only if it still matches (no structural mutation since).
-    generation: u64,
-}
-
-/// (frankenredis-n9am7) Resume point for the db-scoped cursor SCAN (`scan_in_db`):
-/// lets call N+1 jump past the last key call N returned in O(log n) instead of
-/// re-materialising + re-sorting the whole DB. `sig` disambiguates concurrent
-/// SCAN streams over the same DB but different MATCH/TYPE.
-#[derive(Debug, Clone)]
-struct DbScanResume {
-    next_cursor: u64,
-    db: usize,
-    sig: u64,
-    last_key: Vec<u8>,
-}
-
 /// (frankenredis e3y73) Resume point for ZSCAN. The cursor into a zset is a
 /// positional rank index, which is NOT deletion-safe: a mid-scan ZREM of an
 /// already-returned member shifts every later member down one rank, so the
@@ -6227,14 +6222,20 @@ pub struct Store {
     // persistent keys should not pay an `Arc` header and atomic refcount just in
     // case a rare side index is materialized. `Box<[u8]>` hashes/orders via `[u8]`,
     // so bucket placement and every borrowed `&[u8]` lookup are byte-identical.
-    entries: HashMap<StoreKey, Entry, foldhash::quality::RandomState>,
+    // (frankenredis-uhthd step 2) A `KeyDict`, not a `HashMap`. Redis's dict gives
+    // the keyspace two capabilities hashbrown does not expose in safe Rust: a
+    // reverse-binary cursor SCAN over the table itself, and O(1) random-bucket
+    // sampling for RANDOMKEY and eviction. fr used to buy those with FULL-KEYSPACE
+    // side indices -- a second owned copy of every key in `ordered_keys` and a
+    // per-db vector in `random_key_slots` -- which is where the measured 3.0005x
+    // RSS gap against Redis 7.2.4 lived. Serving both from the main table deletes
+    // them outright.
+    entries: KeyDict<Entry>,
     // (frankenredis-uhthd) It is now a lazy side index: write-heavy keyspaces keep
     // it empty, and ordered consumers rebuild it from `entries` only when needed.
     // `Box<[u8]>` orders/hashes via `[u8]` (lexicographic), identical to the
     // prior `Vec<u8>`, so SCAN/KEYS order and every `&[u8]` range/lookup are
     // byte-for-byte unchanged once materialized.
-    ordered_keys: BTreeSet<StoreKey>,
-    ordered_keys_dirty: bool,
     /// (frankenredis-3e92e) Monotonic counter bumped on every STRUCTURAL
     /// keyspace mutation (key insert / remove / flush). Used to validate the
     /// SCAN resume cache: a cached resume point is only trusted when the
@@ -6254,8 +6255,6 @@ pub struct Store {
     /// the O(N²/batch) skip. Behavior is unchanged: on any cursor/generation
     /// mismatch (out-of-order resume, >cap concurrent scans, or an intervening
     /// structural mutation) it falls back to the skip path.
-    scan_cache: Vec<ScanResume>,
-    db_scan_cache: Vec<DbScanResume>,
     zscan_cache: Vec<ZScanResume>,
     hscan_cache: Vec<CollectionScanResume>,
     sscan_cache: Vec<CollectionScanResume>,
@@ -6264,7 +6263,6 @@ pub struct Store {
     /// its per-db vector is rebuilt lazily only when a caller actually asks for
     /// RANDOMKEY. Write-heavy workloads no longer keep one side-index key per key
     /// resident solely for a rare command. (frankenredis-uhthd)
-    random_key_slots: Vec<RandomKeySlotIndex>,
     /// Absolute expiry deadlines for keys that currently carry a TTL. This is
     /// Redis's `db->expires` shape: persistent keys pay zero bytes in `Entry`,
     /// while volatile keys pay in the expiry side dictionary only when needed.
@@ -6882,16 +6880,11 @@ pub fn read_total_system_memory_bytes() -> Option<usize> {
 impl Default for Store {
     fn default() -> Self {
         Self {
-            entries: HashMap::default(),
-            ordered_keys: BTreeSet::new(),
-            ordered_keys_dirty: true,
+            entries: KeyDict::new(),
             keyspace_generation: 0,
-            scan_cache: Vec::new(),
-            db_scan_cache: Vec::new(),
             zscan_cache: Vec::new(),
             hscan_cache: Vec::new(),
             sscan_cache: Vec::new(),
-            random_key_slots: vec![RandomKeySlotIndex::default(); DEFAULT_NUM_DATABASES],
             expiry_deadlines: HashMap::default(),
             volatile_keys: BTreeSet::new(),
             volatile_keys_dirty: false,
@@ -7344,43 +7337,29 @@ impl Store {
         fr_sentinel::consensus::apply_o_down_result(master, &odown, now_ms);
     }
 
-    fn mark_ordered_keys_dirty(&mut self) {
-        if self.ordered_keys_dirty {
-            return;
-        }
-        self.ordered_keys.clear();
-        self.ordered_keys_dirty = true;
-    }
-
-    fn rebuild_ordered_keys_if_dirty(&mut self) {
-        if !self.ordered_keys_dirty {
-            return;
-        }
-        self.ordered_keys.clear();
-        self.ordered_keys.extend(self.entries.keys().cloned());
-        self.ordered_keys_dirty = false;
-    }
-
+    /// Physical keys of one db, in sorted order, built ON DEMAND.
+    ///
+    /// (frankenredis-uhthd step 2) This used to read a permanently-maintained
+    /// `BTreeSet` side index. Sorting here instead trades O(n log n) on the few
+    /// callers that need order (KEYS, SWAPDB, snapshots) for NOT keeping a second
+    /// owned copy of every key in the keyspace forever. Every caller is already
+    /// O(n) or worse, so the asymptotics of the callers are unchanged and the
+    /// returned bytes are identical.
     fn ordered_physical_keys_in_db(&mut self, db: usize) -> Vec<Vec<u8>> {
-        self.rebuild_ordered_keys_if_dirty();
-        if db == 0 {
-            return self
-                .ordered_keys
-                .iter()
+        let mut keys: Vec<&[u8]> = if db == 0 {
+            self.entries
+                .keys()
                 .filter(|key| decode_db_key(key).is_none())
-                .map(|k| k.to_vec())
-                .collect();
-        }
-
-        let prefix = encode_db_key(db, b"");
-        self.ordered_keys
-            .range::<[u8], _>((
-                std::ops::Bound::Included(prefix.as_slice()),
-                std::ops::Bound::Unbounded,
-            ))
-            .take_while(|key| key.starts_with(&prefix))
-            .map(|k| k.to_vec())
-            .collect()
+                .collect()
+        } else {
+            let prefix = encode_db_key(db, b"");
+            self.entries
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .collect()
+        };
+        keys.sort_unstable();
+        keys.into_iter().map(<[u8]>::to_vec).collect()
     }
 
     #[must_use]
@@ -10438,7 +10417,7 @@ impl Store {
                     results.push(None);
                     continue;
                 }
-                match self.entries.get_mut(*key) {
+                match self.entries.get_mut(key) {
                     Some(entry) => {
                         self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                         let v = entry.value.string_owned();
@@ -10483,7 +10462,7 @@ impl Store {
                     results.push(None);
                     continue;
                 }
-                match self.entries.get_mut(*key) {
+                match self.entries.get_mut(key) {
                     Some(entry) => {
                         self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                         let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
@@ -10504,12 +10483,12 @@ impl Store {
                     results.push(None);
                     continue;
                 }
-                let rand_sample = if self.entries.contains_key(*key) {
+                let rand_sample = if self.entries.contains_key(key) {
                     self.next_rand()
                 } else {
                     0
                 };
-                let val = match self.entries.get_mut(*key) {
+                let val = match self.entries.get_mut(key) {
                     Some(entry) => {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                         let v = entry.value.string_owned();
@@ -13301,31 +13280,18 @@ impl Store {
 
     #[must_use]
     pub fn keys_matching(&mut self, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
-        self.rebuild_ordered_keys_if_dirty();
-        // (frankenredis-2wgom) Range-prune by the pattern's literal prefix when
-        // one exists: fr's keyspace is an ORDERED BTreeSet, so a prefix glob
-        // (`user:*`, an exact key, ...) touches only O(log n + matches) keys
-        // instead of glob-matching all n — an asymmetry redis's unordered
-        // hashtable cannot exploit. Correctness is identical: `glob_match` still
-        // filters every candidate; the range only skips keys that provably
-        // cannot match (they don't carry the required literal prefix).
-        let lit = glob_literal_prefix(pattern);
-        let candidates: Vec<Vec<u8>> = if lit.is_empty() {
-            self.ordered_keys.iter().map(|k| k.to_vec()).collect()
-        } else if let Some(end) = prefix_range_end(lit) {
-            self.ordered_keys
-                .range::<[u8], _>((
-                    std::ops::Bound::Included(lit),
-                    std::ops::Bound::Excluded(end.as_slice()),
-                ))
-                .map(|k| k.to_vec())
-                .collect()
-        } else {
-            self.ordered_keys
-                .range::<[u8], _>((std::ops::Bound::Included(lit), std::ops::Bound::Unbounded))
-                .map(|k| k.to_vec())
-                .collect()
-        };
+        // (frankenredis-uhthd step 2) THE LITERAL-PREFIX RANGE PRUNE IS GONE, ON
+        // PURPOSE. `frankenredis-2wgom` exploited fr's ordered `BTreeSet` keyspace
+        // to touch O(log n + matches) keys for a prefix glob instead of globbing
+        // all n -- an asymmetry Redis's unordered hashtable cannot match. That
+        // prune was real and it is forfeited here, because the side index it read
+        // is what cost a second owned copy of every key.
+        //
+        // KEYS is O(n) in Redis and is documented as a debugging command; the
+        // keyspace RAM it was buying back is paid on EVERY key of EVERY workload.
+        // The trade is deliberate and correctness-neutral: `glob_match` filtered
+        // every candidate before and still does, so the returned set is identical.
+        let candidates: Vec<Vec<u8>> = self.entries.keys().map(<[u8]>::to_vec).collect();
         // (perf) The reap loop is dead when nothing can expire (`expires_count == 0`): each
         // `drop_if_expired` degrades to a discarded `contains_key`, O(candidates) waste on a
         // no-TTL DB. Skip it (byte-identical — no eviction with no TTL). Same CrimsonHawk guard.
@@ -13371,7 +13337,6 @@ impl Store {
 
     #[must_use]
     pub fn keys_matching_in_db(&mut self, db: usize, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
-        self.rebuild_ordered_keys_if_dirty();
         // (frankenredis-2wgom) Range-prune by the pattern's literal prefix. The
         // prefix applies to the LOGICAL key, so the candidate PHYSICAL range is
         // `encode_db_key(db, lit) ..`; the db-membership filter (db-0: not
@@ -13396,14 +13361,19 @@ impl Store {
             // (ordered_keys is physical/logical sorted), so the final sort is
             // dropped. Byte-identical replies + identical eviction side effects.
             self.expire_volatile_keys_in_db(db, now_ms);
-            self.rebuild_ordered_keys_if_dirty();
             let is_star = pattern == b"*";
             // (cc_fr) Classify the glob ONCE for the whole full-DB walk (byte-identical to
             // per-key `glob_match`); `is_star` still short-circuits before it.
             let pg = glob_prepare(pattern);
+            // (frankenredis-uhthd step 2) Walk the table, then sort. The ordered
+            // side index that made this walk pre-sorted is gone, so the sort is
+            // back -- and KEYS output stays sorted, which is what the previous
+            // behaviour promised and several fixtures pin. Redis's own KEYS is
+            // unordered, so keeping the sort is a superset guarantee, not a
+            // divergence.
             let mut result: Vec<Vec<u8>> = Vec::new();
             if db == 0 {
-                for key in self.ordered_keys.iter() {
+                for key in self.entries.keys() {
                     if decode_db_key(key).is_some() {
                         continue;
                     }
@@ -13411,19 +13381,16 @@ impl Store {
                 }
             } else {
                 let prefix = encode_db_key(db, b"");
-                for key in self
-                    .ordered_keys
-                    .range::<[u8], _>((
-                        std::ops::Bound::Included(prefix.as_slice()),
-                        std::ops::Bound::Unbounded,
-                    ))
-                    .take_while(|key| key.starts_with(&prefix))
-                {
+                for key in self.entries.keys().filter(|k| k.starts_with(&prefix)) {
                     Self::push_logical_key_if_match(&mut result, key, &pg, is_star);
                 }
             }
+            result.sort_unstable();
             return result;
         }
+        // (frankenredis-uhthd step 2) The ordered range-prune is forfeited with the
+        // side index (see `keys_matching`); candidates are now every key of the db,
+        // filtered by the same literal prefix the range used to encode.
         let candidates: Vec<Vec<u8>> = {
             let lower = encode_db_key(db, lit);
             let db_prefix = encode_db_key(db, b"");
@@ -13434,25 +13401,11 @@ impl Store {
                     key.starts_with(&db_prefix)
                 }
             };
-            if let Some(end) = prefix_range_end(&lower) {
-                self.ordered_keys
-                    .range::<[u8], _>((
-                        std::ops::Bound::Included(lower.as_slice()),
-                        std::ops::Bound::Excluded(end.as_slice()),
-                    ))
-                    .filter(|k| in_db(k))
-                    .map(|k| k.to_vec())
-                    .collect()
-            } else {
-                self.ordered_keys
-                    .range::<[u8], _>((
-                        std::ops::Bound::Included(lower.as_slice()),
-                        std::ops::Bound::Unbounded,
-                    ))
-                    .filter(|k| in_db(k))
-                    .map(|k| k.to_vec())
-                    .collect()
-            }
+            self.entries
+                .keys()
+                .filter(|k| in_db(k) && k.starts_with(lower.as_slice()))
+                .map(<[u8]>::to_vec)
+                .collect()
         };
 
         // (perf) Skip the reap loop when nothing can expire (`expires_count == 0`) — each
@@ -13469,10 +13422,9 @@ impl Store {
         let pg = glob_prepare(pattern);
         // (perf) The `contains_key` filter exists ONLY to drop candidates the reap loop above
         // evicted. On the no-TTL fast path that loop is skipped (`expires_count == 0`) and the
-        // candidates come from the freshly-synced `ordered_keys` index (⊆ `entries`), so every
-        // one is still present — the re-probe is always true. Skip it there; this completes the
-        // no-TTL guard so a range KEYS over a no-TTL DB does ZERO redundant keyspace probes
-        // (was 2·|candidates|: the reap probe + this one). Byte-identical.
+        // candidates were read straight out of `entries` moments ago, so every one is still
+        // present — the re-probe is always true. Skip it there; this completes the no-TTL guard
+        // so a range KEYS over a no-TTL DB does ZERO redundant keyspace probes. Byte-identical.
         let no_ttl = self.expires_count == 0;
         let mut result: Vec<Vec<u8>> = candidates
             .into_iter()
@@ -13757,52 +13709,6 @@ impl Store {
         })
     }
 
-    /// Mark one DB's RANDOMKEY sample vector stale. The vector is a cache, not
-    /// canonical state: inserts/deletes only clear it and the next
-    /// RANDOMKEY rebuilds it from `entries`. This keeps the write-hot keyspace
-    /// from paying a resident side index for workloads that never call RANDOMKEY.
-    /// (frankenredis-uhthd)
-    fn mark_random_key_index_dirty(&mut self, db: usize) {
-        if db >= self.database_count {
-            return;
-        }
-        if db >= self.random_key_slots.len() {
-            self.random_key_slots
-                .resize_with(db + 1, RandomKeySlotIndex::default);
-        }
-        if let Some(index) = self.random_key_slots.get_mut(db) {
-            index.mark_dirty();
-        }
-    }
-
-    fn rebuild_random_key_index_if_dirty(&mut self, db: usize) {
-        let Some(index) = self.random_key_slots.get(db) else {
-            return;
-        };
-        if !index.dirty {
-            return;
-        }
-
-        let keys: Vec<StoreKey> = self
-            .entries
-            .keys()
-            .filter(|key| physical_key_belongs_to_db(key.as_ref(), db))
-            .cloned()
-            .collect();
-
-        if let Some(index) = self.random_key_slots.get_mut(db) {
-            index.keys = keys;
-            index.dirty = false;
-        }
-    }
-
-    fn clear_random_key_index(&mut self, db: usize) {
-        if let Some(index) = self.random_key_slots.get_mut(db) {
-            index.reset();
-            index.keys.shrink_to_fit();
-        }
-    }
-
     fn mark_volatile_keys_dirty(&mut self) {
         self.volatile_keys_dirty = true;
     }
@@ -13836,8 +13742,12 @@ impl Store {
                     let Some((canonical_key, _)) = self.entries.get_key_value(key) else {
                         return;
                     };
-                    self.expiry_deadlines
-                        .insert(canonical_key.clone(), deadline);
+                    // (uhthd) `KeyDict::get_key_value` hands back the table's own
+                    // `&[u8]`, not a `Box<[u8]>` to clone. `expiry_deadlines` owns its
+                    // keys, so materialise one here -- the same single allocation the
+                    // `Box<[u8]>` clone made.
+                    let canonical_key = store_key_from_slice(canonical_key);
+                    self.expiry_deadlines.insert(canonical_key, deadline);
                 }
             }
             None => {
@@ -13992,8 +13902,6 @@ impl Store {
         // value is replaced in place below, keeping the existing boxed key.
         let canonical_key: Option<StoreKey> = if is_new_key {
             let canonical_key = store_key_from_slice(key.as_slice());
-            self.mark_ordered_keys_dirty();
-            self.mark_random_key_index_dirty(db);
             // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
             // resume points.
             self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
@@ -14018,7 +13926,7 @@ impl Store {
                 || {
                     self.entries
                         .get_key_value(key.as_slice())
-                        .map(|(key, _)| key.clone())
+                        .map(|(key, _)| store_key_from_slice(key))
                 },
                 |canonical_key| Some(canonical_key.clone()),
             )
@@ -14156,18 +14064,12 @@ impl Store {
         let old_expiry = self.expiry_ms(key);
         if let Some(entry) = self.entries.remove(key) {
             self.invalidate_write_side_caches(key);
-            self.mark_ordered_keys_dirty();
             // (cc_fr) `old_expiry` came from `expiry_ms` == `expiry_deadlines.get(key)`, so
             // is_none() means the key is absent from the map — skip the foldhash probe on the
             // no-TTL removal (the common case). Byte-identical: an absent key's remove is a no-op.
             if old_expiry.is_some() {
                 self.expiry_deadlines.remove(key);
             }
-            // RANDOMKEY's per-db vector is a lazy cache; dropping any key in the
-            // DB invalidates the cache and the next RANDOMKEY rebuilds it from
-            // the canonical `entries` map.
-            let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
-            self.mark_random_key_index_dirty(db);
             // (frankenredis-sszgp) Only a key that HAD a TTL was ever in `volatile_keys`
             // (`volatile_keys ⊆ expiry_deadlines.keys()` when clean; `forget_volatile_key`
             // early-returns when dirty), so on the common no-TTL key removal (DEL/GETDEL/expiry of
@@ -14182,6 +14084,7 @@ impl Store {
             // resume points.
             self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
             self.update_expiry_deadline(old_expiry, None);
+            let db = decode_db_key(key).map_or(0, |(db, _)| db);
             if db < self.database_count {
                 self.db_key_counts[db] = self.db_key_counts[db].saturating_sub(1);
             }
@@ -14679,19 +14582,15 @@ impl Store {
         self.stream_last_ids.clear();
         self.stream_entries_added.clear();
         self.stream_max_deleted_ids.clear();
-        // (frankenredis-ss2k0) ordered_keys backs KEYS/SCAN/RANDOMKEY;
-        // failing to clear it left ghost names visible after FLUSHALL
-        // even though entries.is_empty() == true. hash_field_expires
-        // similarly survived as orphan TTLs without their parent
-        // hashes, breaking HTTL/HEXPIRETIME on subsequent re-creates.
-        self.ordered_keys.clear();
-        self.ordered_keys_dirty = true;
+        // (frankenredis-ss2k0) hash_field_expires survived FLUSHALL as orphan TTLs
+        // without their parent hashes, breaking HTTL/HEXPIRETIME on re-create. The
+        // ordered/RANDOMKEY side indices that also had to be cleared here are gone
+        // (frankenredis-uhthd step 2): KEYS/SCAN/RANDOMKEY read `entries` itself,
+        // so clearing that cannot leave ghost names behind.
         self.expiry_deadlines.clear();
         // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
         // resume points.
         self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
-        self.scan_cache.clear();
-        self.db_scan_cache.clear();
         self.zscan_cache.clear();
         self.hscan_cache.clear();
         self.sscan_cache.clear();
@@ -14717,9 +14616,6 @@ impl Store {
         self.expires_count = 0;
         self.db_key_counts.fill(0);
         self.db_expires_counts.fill(0);
-        for index in &mut self.random_key_slots {
-            index.reset();
-        }
         self.release_empty_keyspace_capacity();
         self.dirty = self.dirty.saturating_add(1);
     }
@@ -14733,10 +14629,6 @@ impl Store {
         self.stream_entries_added.shrink_to_fit();
         self.stream_max_deleted_ids.shrink_to_fit();
         self.expiry_deadlines.shrink_to_fit();
-        self.scan_cache.clear();
-        self.scan_cache.shrink_to_fit();
-        self.db_scan_cache.clear();
-        self.db_scan_cache.shrink_to_fit();
         self.zscan_cache.clear();
         self.zscan_cache.shrink_to_fit();
         self.hscan_cache.clear();
@@ -14747,9 +14639,6 @@ impl Store {
         self.clear_dump_payload_cache();
         self.dump_payload_cache.shrink_to_fit();
         self.mem_estimate_cache.borrow_mut().shrink_to_fit();
-        for index in &mut self.random_key_slots {
-            index.keys.shrink_to_fit();
-        }
     }
 
     pub fn flush_prefix(&mut self, prefix: &[u8]) -> u64 {
@@ -14793,7 +14682,6 @@ impl Store {
             self.stream_entries_added.remove(key.as_slice());
             self.stream_max_deleted_ids.remove(key.as_slice());
         }
-        self.clear_random_key_index(db);
         if self.entries.is_empty() {
             self.release_empty_keyspace_capacity();
         }
@@ -14809,22 +14697,17 @@ impl Store {
             self.dirty = self.dirty.saturating_add(1);
             return 0;
         }
-        self.rebuild_ordered_keys_if_dirty();
-
-        // (frankenredis-x8kef) Gather each side via an ordered_keys prefix-range
-        // walk (O(log n + matches)) instead of scanning the whole keyspace twice.
-        // Byte-identical: range [p, prefix_end(p)) then a starts_with guard is
-        // exactly the keys `starts_with(p)` would have kept (the guard covers the
-        // no-upper-bound case where prefix_end overflows).
+        // (frankenredis-uhthd step 2) `frankenredis-x8kef` gathered each side via an
+        // ordered prefix-range walk, O(log n + matches). That index is gone, so this
+        // is a full keyspace filter again. SWAPDB-class prefix moves are rare and
+        // already O(matches) in the work they do afterwards; the keyspace RAM the
+        // index cost was paid on every key of every workload. Identical key set:
+        // the range was only ever a way to reach `starts_with(p)` faster.
         let prefix_keys = |this: &Self, p: &[u8]| -> Vec<Vec<u8>> {
-            let hi = match prefix_range_end(p) {
-                Some(e) => std::ops::Bound::Excluded(e),
-                None => std::ops::Bound::Unbounded,
-            };
-            this.ordered_keys
-                .range::<[u8], _>((std::ops::Bound::Included(p), hi.as_ref().map(Vec::as_slice)))
-                .take_while(|k| k.starts_with(p))
-                .map(|k| k.to_vec())
+            this.entries
+                .keys()
+                .filter(|k| k.starts_with(p))
+                .map(<[u8]>::to_vec)
                 .collect()
         };
         let left_keys: Vec<Vec<u8>> = prefix_keys(self, left_prefix);
@@ -15311,6 +15194,51 @@ impl Store {
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(count);
         Ok(())
+    }
+
+    /// Install a unique, threshold-fitting RDB hash listpack without rebuilding
+    /// its field/value payload into the mutable packed arena.
+    ///
+    /// Returns `Ok(None)` only when the key is fresh, LFU accounting is inactive,
+    /// and the listpack can retain RDB-load semantics directly. Duplicate fields,
+    /// a value that must promote under the live configuration, and any observable
+    /// LFU case deliberately return the unchanged blob in `Ok(Some(_))` so the
+    /// caller uses the established `hset_borrowed_many` path instead.
+    pub fn load_hash_listpack_verbatim(
+        &mut self,
+        key: &[u8],
+        listpack: Vec<u8>,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if self.lfu_tracking_enabled() {
+            return Ok(Some(listpack));
+        }
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if self.entries.contains_key(key) {
+            return Ok(Some(listpack));
+        }
+        let map = match HashFieldMap::try_from_rdb_listpack(
+            listpack,
+            self.hash_max_listpack_entries,
+            self.hash_max_listpack_value,
+        )
+        .map_err(|_| StoreError::InvalidDumpPayload)?
+        {
+            Ok(map) => map,
+            Err(listpack) => return Ok(Some(listpack)),
+        };
+        let count = map.len() as u64;
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
+        let entry = self.internal_entry(key, || Value::Hash(Box::new(map)), now_ms);
+        entry.touch_lru(now_ms);
+        entry.modification_count = entry.modification_count.wrapping_add(count);
+        Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(count);
+        Ok(None)
     }
 
     /// (frankenredis-hsetcmdbulk) Borrowed-input bulk HSET for the COMMAND path
@@ -21179,7 +21107,7 @@ impl Store {
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != min_idx)
-                    .filter_map(|(_, key)| match &self.entries.get(*key)?.value {
+                    .filter_map(|(_, key)| match &self.entries.get(key)?.value {
                         Value::Set(s) => Some(s.as_ref()),
                         _ => None,
                     })
@@ -21222,7 +21150,7 @@ impl Store {
                     if i == min_idx || res.is_empty() {
                         continue;
                     }
-                    if let Some(s) = self.entries.get(*key).and_then(|e| match &e.value {
+                    if let Some(s) = self.entries.get(key).and_then(|e| match &e.value {
                         Value::Set(s) => Some(s),
                         _ => None,
                     }) {
@@ -21279,7 +21207,7 @@ impl Store {
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != min_idx)
-                    .filter_map(|(_, key)| match &self.entries.get(*key)?.value {
+                    .filter_map(|(_, key)| match &self.entries.get(key)?.value {
                         Value::Set(s) => Some(s.as_ref()),
                         _ => None,
                     })
@@ -21324,7 +21252,7 @@ impl Store {
                     if i == min_idx || res.is_empty() {
                         continue;
                     }
-                    if let Some(s) = self.entries.get(*key).and_then(|e| match &e.value {
+                    if let Some(s) = self.entries.get(key).and_then(|e| match &e.value {
                         Value::Set(s) => Some(s),
                         _ => None,
                     }) {
@@ -21367,7 +21295,7 @@ impl Store {
         let mut has_empty = false;
 
         for (i, key) in keys.iter().enumerate() {
-            match self.entries.get(*key) {
+            match self.entries.get(key) {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
                         if s.len() < min_card {
@@ -21386,13 +21314,13 @@ impl Store {
         if has_empty {
             // Touch existing sets to emulate Redis behavior.
             for key in keys {
-                if self.entries.contains_key(*key) {
+                if self.entries.contains_key(key) {
                     let rand_sample = if lfu_tracking_enabled {
                         self.next_rand()
                     } else {
                         0
                     };
-                    if let Some(entry) = self.entries.get_mut(*key)
+                    if let Some(entry) = self.entries.get_mut(key)
                         && let Value::Set(_) = &entry.value
                     {
                         if lfu_tracking_enabled {
@@ -21425,7 +21353,7 @@ impl Store {
             } else {
                 0
             };
-            if let Some(entry) = self.entries.get_mut(*key)
+            if let Some(entry) = self.entries.get_mut(key)
                 && let Value::Set(_) = &entry.value
             {
                 if lfu_tracking_enabled {
@@ -21503,7 +21431,7 @@ impl Store {
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != min_idx)
-                    .filter_map(|(_, key)| match &self.entries.get(*key)?.value {
+                    .filter_map(|(_, key)| match &self.entries.get(key)?.value {
                         Value::Set(s) => Some(s.as_ref()),
                         _ => None,
                     })
@@ -21547,7 +21475,7 @@ impl Store {
                     if i == min_idx || res.is_empty() {
                         continue;
                     }
-                    if let Some(s) = self.entries.get(*key).and_then(|e| match &e.value {
+                    if let Some(s) = self.entries.get(key).and_then(|e| match &e.value {
                         Value::Set(s) => Some(s),
                         _ => None,
                     }) {
@@ -21594,7 +21522,7 @@ impl Store {
         let mut has_empty = false;
 
         for (i, key) in keys.iter().enumerate() {
-            match self.entries.get(*key) {
+            match self.entries.get(key) {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
                         if s.len() < min_card {
@@ -21612,13 +21540,13 @@ impl Store {
 
         if has_empty {
             for key in keys {
-                if self.entries.contains_key(*key) {
+                if self.entries.contains_key(key) {
                     let rand_sample = if lfu_tracking_enabled {
                         self.next_rand()
                     } else {
                         0
                     };
-                    if let Some(entry) = self.entries.get_mut(*key)
+                    if let Some(entry) = self.entries.get_mut(key)
                         && let Value::Set(_) = &entry.value
                     {
                         if lfu_tracking_enabled {
@@ -21658,7 +21586,7 @@ impl Store {
             } else {
                 0
             };
-            let Some(entry) = self.entries.get_mut(*key) else {
+            let Some(entry) = self.entries.get_mut(key) else {
                 continue;
             };
             match &entry.value {
@@ -21731,7 +21659,7 @@ impl Store {
 
         // (frankenredis-sintercard-resolve-once) Resolve every OTHER set's
         // reference a SINGLE time instead of re-hashing its keyspace key inside
-        // the per-member loop. The prior body called `self.entries.get(*key)`
+        // the per-member loop. The prior body called `self.entries.get(key)`
         // for every (member, other-key) pair — M*K keyspace dict lookups (key
         // hashing + bucket probe + Box deref) layered on top of the unavoidable
         // M*K set-membership probes. Redis holds direct robj pointers to the
@@ -21745,7 +21673,7 @@ impl Store {
             if i == min_idx {
                 continue;
             }
-            match self.entries.get(*key) {
+            match self.entries.get(key) {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => other_sets.push(s.as_ref()),
                     _ => return Err(StoreError::WrongType),
@@ -21908,13 +21836,13 @@ impl Store {
         let mut max_card = 0;
         let mut base_idx = None;
         for (i, key) in keys.iter().enumerate() {
-            if self.entries.contains_key(*key) {
+            if self.entries.contains_key(key) {
                 let rand_sample = if lfu_tracking_enabled {
                     self.next_rand()
                 } else {
                     0
                 };
-                if let Some(entry) = self.entries.get_mut(*key) {
+                if let Some(entry) = self.entries.get_mut(key) {
                     match &entry.value {
                         Value::Set(s) => {
                             let len = s.len();
@@ -21950,7 +21878,7 @@ impl Store {
             if i == base_idx {
                 continue;
             }
-            if let Some(entry) = self.entries.get(*key)
+            if let Some(entry) = self.entries.get(key)
                 && let Value::Set(s) = &entry.value
             {
                 result.union_with(s, max_intset_entries);
@@ -22051,14 +21979,14 @@ impl Store {
         }
         for key in keys.iter().skip(1) {
             let rand_sample = if lfu_tracking_enabled {
-                if !self.entries.contains_key(*key) {
+                if !self.entries.contains_key(key) {
                     continue;
                 }
                 self.next_rand()
             } else {
                 0
             };
-            if let Some(entry) = self.entries.get_mut(*key) {
+            if let Some(entry) = self.entries.get_mut(key) {
                 match &entry.value {
                     Value::Set(_) => {
                         if lfu_tracking_enabled {
@@ -22100,7 +22028,7 @@ impl Store {
                 let other_sets: Vec<&SetValue> = keys
                     .iter()
                     .skip(1)
-                    .filter_map(|key| match &self.entries.get(*key)?.value {
+                    .filter_map(|key| match &self.entries.get(key)?.value {
                         Value::Set(s) => Some(s.as_ref()),
                         _ => None,
                     })
@@ -22125,7 +22053,7 @@ impl Store {
                     if res.is_empty() {
                         break;
                     }
-                    if let Some(s) = self.entries.get(*key).and_then(|e| match &e.value {
+                    if let Some(s) = self.entries.get(key).and_then(|e| match &e.value {
                         Value::Set(s) => Some(s),
                         _ => None,
                     }) {
@@ -23572,7 +23500,7 @@ impl Store {
             .iter()
             .map(|key| {
                 self.entries
-                    .get(*key)
+                    .get(key)
                     .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
             })
             .collect();
@@ -23619,7 +23547,7 @@ impl Store {
             .iter()
             .map(|key| {
                 self.entries
-                    .get(*key)
+                    .get(key)
                     .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
             })
             .collect();
@@ -23696,7 +23624,7 @@ impl Store {
                 .iter()
                 .map(|key| {
                     self.entries
-                        .get(*key)
+                        .get(key)
                         .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
                         .ok_or(StoreError::WrongType)
                 })
@@ -31534,12 +31462,12 @@ impl Store {
 
         if has_empty {
             for key in keys {
-                let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(*key) {
+                let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
                     self.next_rand()
                 } else {
                     0
                 };
-                if let Some(entry) = self.entries.get_mut(*key)
+                if let Some(entry) = self.entries.get_mut(key)
                     && matches!(entry.value, Value::SortedSet(_) | Value::Set(_))
                 {
                     if lfu_tracking_enabled {
@@ -31603,7 +31531,7 @@ impl Store {
                 .iter()
                 .map(|key| {
                     self.entries
-                        .get(*key)
+                        .get(key)
                         .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
                         .ok_or(StoreError::WrongType)
                 })
@@ -31745,20 +31673,55 @@ impl Store {
         }
 
         self.expire_volatile_keys_in_db(db, now_ms);
-        self.rebuild_random_key_index_if_dirty(db);
-
-        let len = self
-            .random_key_slots
-            .get(db)
-            .map_or(0, |index| index.keys.len());
-        if len == 0 {
+        if self.entries.is_empty() {
             return None;
         }
-        let idx = (self.next_rand() as usize) % len;
-        let physical = self.random_key_slots.get(db)?.keys.get(idx)?.as_ref();
-        decode_db_key(physical)
-            .map(|(_, logical)| logical.to_vec())
-            .or_else(|| Some(physical.to_vec()))
+
+        // (frankenredis-uhthd step 2) O(1) random-bucket sampling off the table,
+        // where this used to rebuild a per-db `Vec<StoreKey>` holding a second
+        // owned copy of every key in the db.
+        //
+        // Keys are db-encoded in ONE global table, so a global sample has to be
+        // rejected when it lands in another db. Rejection sampling is exactly
+        // uniform over the target db when it succeeds, and on the overwhelmingly
+        // common single-db server it succeeds on the first draw.
+        let (entries, rng_seed) = (&self.entries, &mut self.rng_seed);
+        let mut next_rand = || {
+            *rng_seed = rng_seed.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
+            *rng_seed
+        };
+        for _ in 0..RANDOMKEY_REJECTION_DRAWS {
+            let (physical, _) = entries.random_sample(&mut next_rand)?;
+            if physical_key_belongs_to_db(physical, db) {
+                return Some(
+                    decode_db_key(physical)
+                        .map_or_else(|| physical.to_vec(), |(_, logical)| logical.to_vec()),
+                );
+            }
+        }
+
+        // Fallback for a db holding a small fraction of the keyspace, where
+        // rejection can miss many times in a row. Counting then indexing is O(n),
+        // but it keeps the draw EXACTLY uniform rather than biasing toward
+        // whichever key iteration happens to reach first -- and it is O(n) only in
+        // the case the old code paid O(n) on unconditionally, without keeping the
+        // index afterwards.
+        let n = entries
+            .keys()
+            .filter(|k| physical_key_belongs_to_db(k, db))
+            .count();
+        if n == 0 {
+            return None;
+        }
+        let idx = (next_rand() as usize) % n;
+        let physical = entries
+            .keys()
+            .filter(|k| physical_key_belongs_to_db(k, db))
+            .nth(idx)?;
+        Some(
+            decode_db_key(physical)
+                .map_or_else(|| physical.to_vec(), |(_, logical)| logical.to_vec()),
+        )
     }
 
     /// Return up to `count` keys that hash to the given cluster slot.
@@ -31787,9 +31750,15 @@ impl Store {
             .count()
     }
 
-    /// SCAN cursor-based iteration.
+    /// SCAN cursor-based iteration over db 0.
     /// Returns (next_cursor, keys). Cursor 0 means start / complete.
-    /// This uses a simple sorted-keys approach for determinism.
+    ///
+    /// (frankenredis-uhthd step 2) Now a thin delegation to `scan_in_db_visit`, so
+    /// there is ONE keyspace walk to be correct about. It used to be a second,
+    /// independent implementation over the sorted side index with its own resume
+    /// cache and its own literal-prefix range prune -- both of which depended on
+    /// the ordered index that is gone, and neither of which any production caller
+    /// reached: every server-side SCAN goes through `scan_in_db_visit`.
     #[must_use]
     pub fn scan(
         &mut self,
@@ -31798,125 +31767,7 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> (u64, Vec<Vec<u8>>) {
-        self.rebuild_ordered_keys_if_dirty();
-        let start = cursor as usize;
-        let batch_size = count.max(1);
-
-        let total_keys = self.entries.len();
-        if start >= total_keys {
-            return (0, Vec::new());
-        }
-
-        // (frankenredis-3e92e) Fast resume: if this cursor continues the
-        // previously-returned batch AND the keyspace has not structurally changed
-        // since, position `start` is exactly the key after the cached last key, so
-        // we jump there with `range((Excluded(last), Unbounded))` in O(log N)
-        // rather than re-walking `start` keys from the front. On any mismatch we
-        // fall back to the original `skip(start)` walk (identical output).
-        // Find this scan's own cached resume point (matched by cursor +
-        // generation) among the interleaved scans, and TAKE it — the scan is
-        // about to advance past it, and a fresh point is re-inserted below.
-        let resume_key: Option<Vec<u8>> = if start > 0 {
-            let cur_gen = self.keyspace_generation;
-            self.scan_cache
-                .iter()
-                .position(|c| c.next_cursor == cursor && c.generation == cur_gen)
-                .map(|idx| self.scan_cache.remove(idx).last_key)
-        } else {
-            None
-        };
-
-        // (frankenredis-9cg1c) When MATCH carries a literal prefix, restrict the
-        // walk to that prefix's key range. fr's keyspace is an ORDERED BTreeSet,
-        // so `SCAN ... MATCH user:* ...` examines only O(log n + matches) keys in
-        // total instead of every key — the same asymmetry KEYS exploits (2wgom),
-        // which redis's unordered dict cannot. glob_match still filters every
-        // candidate within the range, so the matched set and order are
-        // byte-identical to the full-keyspace walk.
-        let lit = pattern.map(glob_literal_prefix).filter(|l| !l.is_empty());
-        let prefix_end: Option<Vec<u8>> = lit.and_then(prefix_range_end);
-        let (pos, result, last_examined) = if let Some(lit) = lit {
-            let end_bound = match &prefix_end {
-                Some(e) => std::ops::Bound::Excluded(e.as_slice()),
-                None => std::ops::Bound::Unbounded,
-            };
-            // The pruned cursor counts keys examined WITHIN the prefix range, so a
-            // cache hit jumps past `last_key` (O(log n)) while a cache miss /
-            // cleared cache falls back to skip(start) over the SAME prefix range —
-            // both land on the next unexamined key, identical to the full-walk
-            // skip fallback's robustness guarantee.
-            match &resume_key {
-                Some(k) => self.scan_walk(
-                    self.ordered_keys
-                        .range::<[u8], _>((std::ops::Bound::Excluded(k.as_slice()), end_bound)),
-                    start,
-                    batch_size,
-                    pattern,
-                    now_ms,
-                ),
-                None => self.scan_walk(
-                    self.ordered_keys
-                        .range::<[u8], _>((std::ops::Bound::Included(lit), end_bound))
-                        .skip(start),
-                    start,
-                    batch_size,
-                    pattern,
-                    now_ms,
-                ),
-            }
-        } else {
-            match &resume_key {
-                Some(k) => self.scan_walk(
-                    self.ordered_keys.range::<[u8], _>((
-                        std::ops::Bound::Excluded(k.as_slice()),
-                        std::ops::Bound::Unbounded,
-                    )),
-                    start,
-                    batch_size,
-                    pattern,
-                    now_ms,
-                ),
-                None => self.scan_walk(
-                    self.ordered_keys.iter().skip(start),
-                    start,
-                    batch_size,
-                    pattern,
-                    now_ms,
-                ),
-            }
-        };
-
-        // Prefix-pruned walk completes (cursor 0) when its bounded range is
-        // exhausted — i.e. it examined fewer than a full batch this call. The
-        // full-keyspace walk keeps its original global-position completion, so
-        // that path's cursor sequence is byte-for-byte unchanged.
-        let next_cursor = if lit.is_some() {
-            if pos.saturating_sub(start) < batch_size {
-                0
-            } else {
-                pos as u64
-            }
-        } else if pos >= total_keys {
-            0
-        } else {
-            pos as u64
-        };
-        // Re-insert this scan's advanced resume point for its next in-order call.
-        // (When the scan completes, next_cursor == 0 and the consumed entry was
-        // already removed above, so nothing is re-added.)
-        if next_cursor != 0
-            && let Some(last_key) = last_examined
-        {
-            self.scan_cache.push(ScanResume {
-                next_cursor,
-                last_key,
-                generation: self.keyspace_generation,
-            });
-            if self.scan_cache.len() > SCAN_CACHE_LRU_CAP {
-                self.scan_cache.remove(0); // evict the oldest in-flight scan
-            }
-        }
-        (next_cursor, result)
+        self.scan_in_db(0, cursor, pattern, None, count, now_ms)
     }
 
     /// (frankenredis-n9am7) Cursor-resumed, DB-scoped SCAN for the real SCAN
@@ -31948,150 +31799,66 @@ impl Store {
     /// resume cache is pushed under `&mut self`, so keeping a borrow of
     /// `ordered_keys` alive for it would conflict. It costs one copy, and only
     /// when the batch fills.
-    pub fn scan_in_db_visit<F: FnMut(&[u8])>(
-        &mut self,
-        db: usize,
-        cursor: u64,
-        pattern: Option<&[u8]>,
-        type_filter: Option<&[u8]>,
-        count: usize,
-        now_ms: u64,
-        mut visit: F,
-    ) -> u64 {
-        // Reap due volatile keys — identical eviction set to keys_in_db /
+    pub fn scan_in_db_visit<F: FnMut(&[u8])>(&mut self, query: ScanQuery<'_>, mut visit: F) -> u64 {
+        let ScanQuery {
+            db,
+            cursor,
+            pattern,
+            type_filter,
+            count,
+            now_ms,
+        } = query;
+        // Reap due volatile keys first — identical eviction set to keys_in_db /
         // keys_matching_in_db (drop_if_expired is a no-op on non-volatile keys).
+        // Doing it up front is what lets the walk below skip a per-key liveness
+        // test: every key `KeyDict::scan` hands back is present in the table by
+        // construction, and every expired one in THIS db is already gone.
         self.expire_volatile_keys_in_db(db, now_ms);
-        self.rebuild_ordered_keys_if_dirty();
 
+        // (frankenredis-uhthd step 2) THE CURSOR IS REDIS'S, NOT A POSITION.
+        //
+        // This used to walk a sorted `BTreeSet` side index with a positional
+        // cursor plus an LRU of resume keys. That gave fr a STRONGER ordering
+        // guarantee than Redis makes — and paid for it with a second owned copy of
+        // every key in the keyspace, which is where the 3.0005x RSS gap lived.
+        //
+        // Redis's SCAN order is not merely "unspecified" in the docs; it is not
+        // reproducible even between two runs of the same 7.2.4 binary on the same
+        // data, because the dict hash function is seeded from random bytes at
+        // startup (measured: three fresh servers, identical inserts, three
+        // different orders). So no caller could ever have depended on matching
+        // Redis's order, and the sorted order was fr's own invention.
+        //
+        // What Redis DOES promise is the reverse-binary cursor contract, and that
+        // is now served directly by the table: a key present for the whole scan is
+        // returned at least once even across a rehash, and the scan terminates.
+        // `scripts/scan_guarantee_differ.py` holds fr to exactly that contract
+        // against a live 7.2.4 on the same schedule.
+        //
+        // COUNT is a WORK BUDGET, matching Redis: it bounds elements TRAVERSED,
+        // not elements returned, so a batch may return fewer than COUNT (or none)
+        // and still hand back a non-zero cursor. The old code treated it as a
+        // matched-key budget, which is why it needed the resume LRU at all.
         let batch = count.max(1);
-        let start = cursor as usize;
-
-        // Stream signature: same (db, pattern, type) => same key sequence, so the
-        // resume cache never crosses streams.
-        let sig = {
-            fn mix(h: &mut u64, b: &[u8]) {
-                for &x in b {
-                    *h ^= u64::from(x);
-                    *h = h.wrapping_mul(0x0000_0100_0000_01b3);
-                }
-                *h ^= 0xff;
-                *h = h.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-            match pattern {
-                Some(p) => mix(&mut h, p),
-                None => h ^= 0x01,
-            }
-            match type_filter {
-                Some(t) => mix(&mut h, t),
-                None => h ^= 0x02,
-            }
-            h
-        };
-
-        // DB physical range (mirror keys_matching_in_db): a logical literal prefix
-        // maps to the physical range encode_db_key(db, lit)..; the in-DB filter
-        // keeps it exact even when the byte range bleeds past the DB.
-        let lit = pattern.map(glob_literal_prefix).filter(|l| !l.is_empty());
         let is_star = pattern.is_none() || pattern == Some(b"*".as_slice());
-        let db_prefix = encode_db_key(db, b"");
-        // (frankenredis-hwcm1) BORROWED where it can be. On db 0 keys are stored
-        // unprefixed, so `encode_db_key(0, l)` is `l.to_vec()` -- a copy of a slice
-        // that already exists and outlives this walk, since `l` points into the
-        // caller's MATCH pattern. Callgrind attributed one of the two remaining
-        // allocations on scan_match to exactly this call, the other to
-        // `prefix_range_end` below (which genuinely builds a new byte string).
-        //
-        // The `None` arm borrows `db_prefix` rather than cloning it. That clone was
-        // free on db 0, where `db_prefix` is empty, but not on any other db.
-        let lower: Cow<'_, [u8]> = match lit {
-            Some(l) if db == 0 => Cow::Borrowed(l),
-            Some(l) => Cow::Owned(encode_db_key(db, l)),
-            None => Cow::Borrowed(db_prefix.as_slice()),
-        };
-        let upper: Option<Vec<u8>> = match lit {
-            // (frankenredis-hwcm1) Reuse `lower` instead of encoding the SAME
-            // (db, literal) a second time. In this arm `lower` IS
-            // `encode_db_key(db, l)` — the line above builds it from the identical
-            // inputs — so the range end is byte-identical either way, and the
-            // second encode was one allocation plus one copy per SCAN.
-            //
-            // Callgrind counted the duplication rather than my inferring it:
-            // `encode_db_key` ran 8,000 times over 4,000 SCANs, exactly 2 per op,
-            // on a shape whose reply is a cursor plus one key.
-            Some(_) => prefix_range_end(lower.as_ref()),
-            None if db == 0 => None,
-            None => prefix_range_end(&db_prefix),
-        };
-
-        // Resume past the previous batch's last key (cache hit), else skip the
-        // first `start` matched keys from the range start (cache miss / first).
-        //
-        // (frankenredis SCAN-guarantee fix) The resume is matched by
-        // (cursor, db, sig) ONLY — deliberately NOT by keyspace generation.
-        // Resuming from `Bound::Excluded(last_key)` over the ordered keyspace is
-        // deletion-SAFE: it always returns the keys strictly greater than the
-        // last key already returned, regardless of what was inserted or deleted
-        // before that point. Gating on generation forced a mutation (e.g. the
-        // canonical SCAN + DEL loop, which bumps `keyspace_generation` every
-        // batch) onto the positional `skip(start)` fallback below, which is NOT
-        // deletion-safe: deleting an already-returned key shifts every later key
-        // down one position, so `skip(start)` steps over a key that was present
-        // for the whole iteration — violating Redis's SCAN guarantee that a key
-        // present from start to end is returned at least once. Resume-by-key has
-        // no such hole. (The `db`/`sig` checks still keep interleaved SCAN
-        // streams over different DB/MATCH/TYPE from crossing.)
-        let resume_key: Option<Vec<u8>> = if start > 0 {
-            self.db_scan_cache
-                .iter()
-                .position(|c| c.next_cursor == cursor && c.db == db && c.sig == sig)
-                .map(|i| self.db_scan_cache.remove(i).last_key)
-        } else {
-            None
-        };
-        let mut to_skip = if resume_key.is_none() { start } else { 0 };
-
-        let lo_bound = match &resume_key {
-            Some(k) => std::ops::Bound::Excluded(k.as_slice()),
-            None => std::ops::Bound::Included(lower.as_ref()),
-        };
-        let hi_bound = match &upper {
-            Some(e) => std::ops::Bound::Excluded(e.as_slice()),
-            None => std::ops::Bound::Unbounded,
-        };
-
-        // Classify the MATCH pattern ONCE, not once per key: `glob_match` re-ran
-        // `literal_glob_shape` on every candidate (7.3% self on a 20k-key SCAN MATCH). Byte-identical
-        // (`PreparedGlob::matches` == `glob_match`); measured 1.7–2.3x on the per-key match for the
-        // prefix/suffix shapes that dominate SCAN. (cc_fr)
         let prepared_glob = pattern.map(glob_prepare);
-        // (frankenredis-hwcm1) NOT pre-sized to `batch`, and that is deliberate —
-        // I tried it and MEASURED IT AS A LOSS. `Vec::with_capacity(batch)` does
-        // remove the `RawVec::grow_one` that callgrind showed once per SCAN, but
-        // COUNT is a SCAN BUDGET, not a result-size estimate: at `COUNT 100` with
-        // one matching key it allocates 100 slots to hold 1. The trade came out
-        // `__rust_alloc` 12,003 -> 16,003 over 4,000 ops with total Ir unchanged
-        // (35,815,172 -> 35,791,601, -0.07%), so the upfront allocation cost as
-        // much as the growth it avoided. Growing from empty is correct here.
-        // (frankenredis-hwcm1) A COUNTER, not a Vec. The comment above about not
-        // pre-sizing to `batch` still applies to the owning wrapper, which does
-        // grow a Vec; what is gone here is the Vec itself.
-        let mut produced = 0usize;
-        let mut last_key: Option<Vec<u8>> = None;
-        let mut has_more = false;
-        for physical in self.ordered_keys.range::<[u8], _>((lo_bound, hi_bound)) {
-            let physical: &[u8] = physical.as_ref();
-            // DB membership.
+        let db_prefix = encode_db_key(db, b"");
+
+        // Shared reborrow so the scan closure can consult `self` (expiry) while
+        // `self.entries` is itself borrowed by the walk. Both are shared borrows;
+        // taking the reborrow explicitly keeps that obvious rather than relying on
+        // the closure capture inference.
+        let this: &Self = self;
+        this.entries.scan(cursor, batch, |physical, entry| {
+            // DB membership. Keys are db-encoded in one global table, so a scan of
+            // db N still traverses other DBs' keys and rejects them here. That is
+            // the same cost profile the previous global side index had.
             if db == 0 {
                 if decode_db_key(physical).is_some() {
-                    continue;
+                    return;
                 }
             } else if !physical.starts_with(db_prefix.as_slice()) {
-                continue;
-            }
-            // Live (volatile already reaped above; non-volatile never expire).
-            if !self.entries.contains_key(physical) {
-                continue;
+                return;
             }
             let logical = decode_db_key(physical).map(|(_, l)| l).unwrap_or(physical);
             // Glob (skipped for the `*` / no-pattern all-keys fast path).
@@ -32099,64 +31866,34 @@ impl Store {
                 && let Some(pg) = prepared_glob.as_ref()
                 && !pg.matches(logical)
             {
-                continue;
+                return;
             }
-            // TYPE filter.
-            if let Some(t) = type_filter
-                && !self
-                    .peek_value_type(physical, now_ms)
-                    .is_some_and(|vt| vt.as_str().as_bytes().eq_ignore_ascii_case(t))
-            {
-                continue;
-            }
-            // A matched candidate.
-            if to_skip > 0 {
-                to_skip -= 1;
-                continue;
-            }
-            if produced < batch {
-                visit(logical);
-                produced += 1;
-                // (frankenredis-hwcm1) Copy the resume key ONCE, when the batch
-                // fills -- not on every push. `last_key` is read in exactly one
-                // place: the `next_cursor != 0` block below, which is reachable
-                // only after `has_more` is set, which happens only after the
-                // batch is FULL. So every copy taken before `result.len() ==
-                // batch` is written, overwritten and dropped without ever being
-                // read, and on a batch that never fills -- the bare `SCAN 0`
-                // shape, where the range exhausts first -- every one of them is
-                // dead, because `next_cursor` is 0 and the block is skipped.
-                //
-                // The key kept is unchanged: the batch-th returned key, which is
-                // what the resume contract in the comment above requires.
-                // COUNT 10 over a 5-key db goes from 5 allocations to 0, and a
-                // full batch from `batch` to 1.
-                if produced == batch {
-                    last_key = Some(physical.to_vec());
+            // TYPE filter. The entry is already in hand, so this reads the value
+            // discriminant directly instead of re-probing the table through
+            // `peek_value_type`. The expiry half of that helper is still needed:
+            // the reap above only covers THIS db, and a key can carry a deadline
+            // that passed between the reap and here.
+            if let Some(t) = type_filter {
+                let vt = match &entry.value {
+                    Value::String(_) | Value::Integer(_) => ValueType::String,
+                    Value::Hash(_) => ValueType::Hash,
+                    Value::List(_) => ValueType::List,
+                    Value::Set(_) => ValueType::Set,
+                    Value::SortedSet(_) => ValueType::ZSet,
+                    Value::Stream(_) => ValueType::Stream,
+                };
+                if !vt.as_str().as_bytes().eq_ignore_ascii_case(t) {
+                    return;
                 }
-                continue;
+                if this
+                    .expiry_ms(physical)
+                    .is_some_and(|deadline| now_ms > deadline)
+                {
+                    return;
+                }
             }
-            // One match beyond the batch => more remain; stop without returning it
-            // (next call resumes from `last_key`, the batch-th returned key).
-            has_more = true;
-            break;
-        }
-
-        let next_cursor = if has_more { cursor + batch as u64 } else { 0 };
-        if next_cursor != 0
-            && let Some(last) = last_key
-        {
-            self.db_scan_cache.push(DbScanResume {
-                next_cursor,
-                db,
-                sig,
-                last_key: last,
-            });
-            if self.db_scan_cache.len() > SCAN_CACHE_LRU_CAP {
-                self.db_scan_cache.remove(0);
-            }
-        }
-        next_cursor
+            visit(logical);
+        })
     }
 
     /// SCAN one batch, returning the matched logical keys owned.
@@ -32176,66 +31913,19 @@ impl Store {
         now_ms: u64,
     ) -> (u64, Vec<Vec<u8>>) {
         let mut result: Vec<Vec<u8>> = Vec::new();
-        let next_cursor =
-            self.scan_in_db_visit(db, cursor, pattern, type_filter, count, now_ms, |logical| {
-                result.push(logical.to_vec())
-            });
+        let next_cursor = self.scan_in_db_visit(
+            ScanQuery {
+                db,
+                cursor,
+                pattern,
+                type_filter,
+                count,
+                now_ms,
+            },
+            |logical| result.push(logical.to_vec()),
+        );
         (next_cursor, result)
     }
-
-    /// (frankenredis-3e92e) Shared SCAN batch walk over a pre-positioned key
-    /// iterator. Returns `(new_pos, matched_keys, last_examined_key)`. The walk
-    /// (expiry skip + glob filter + batch cap) is byte-for-byte the original
-    /// loop; only the iterator's starting point differs between the fast
-    /// `range` resume and the `skip` fallback.
-    fn scan_walk<'a>(
-        &'a self,
-        keys: impl Iterator<Item = &'a StoreKey>,
-        start: usize,
-        batch_size: usize,
-        pattern: Option<&[u8]>,
-        now_ms: u64,
-    ) -> (usize, Vec<Vec<u8>>, Option<Vec<u8>>) {
-        let mut pos = start;
-        let mut processed = 0;
-        let mut result = Vec::new();
-        let mut last_examined: Option<&'a StoreKey> = None;
-        for key in keys {
-            let Some(_entry) = self.entries.get(key.as_ref()) else {
-                continue;
-            };
-            pos += 1;
-            processed += 1;
-            last_examined = Some(key);
-            // (CrimsonHawk) Gate the per-key expiry PEEK on `expires_count != 0`:
-            // `expiry_ms` foldhash-hashes each scanned key + probes the deadline map,
-            // wasted on every element of a SCAN batch over a keyspace with no TTLs.
-            // Byte-identical — with no expiry no key evicts, so `should_evict` is
-            // already false and no key is skipped for expiry.
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key.as_ref())).should_evict
-            {
-                if processed >= batch_size {
-                    break;
-                }
-                continue;
-            }
-            if let Some(pat) = pattern
-                && !glob_match(pat, key.as_ref())
-            {
-                if processed >= batch_size {
-                    break;
-                }
-                continue;
-            }
-            result.push(key.to_vec());
-            if processed >= batch_size {
-                break;
-            }
-        }
-        (pos, result, last_examined.map(|k| k.to_vec()))
-    }
-
     /// HSCAN: cursor-based iteration over hash fields.
     #[allow(clippy::type_complexity)]
     pub fn hscan(
@@ -35938,15 +35628,41 @@ impl Store {
             RDB_TYPE_HASH_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                // Zero-copy span build (see hash_from_listpack_spans): avoids the N
-                // transient owned Vec<u8> that decode_listpack_strings allocates only
-                // for the builder to copy into the hash's arena and drop.
-                let (hash, max_element_len) = hash_from_listpack_spans(&listpack)?;
-                if hash.is_empty() {
-                    return Err(StoreError::InvalidDumpPayload);
+                // (frankenredis-33832) The compact RDB payload is already the target
+                // representation for a fresh, threshold-fitting hash. Keep its one
+                // allocation plus the bounded span/index sidecar instead of decoding
+                // every field and value only to copy them into PackedStrMap's arena.
+                // `try_from_rdb_listpack` performs the structural, threshold, and
+                // duplicate checks needed for that representation; its `Err(blob)`
+                // is the normal rebuild fallback for duplicate fields or a live
+                // threshold promotion, which must retain the established RESTORE
+                // semantics.
+                match HashFieldMap::try_from_rdb_listpack(
+                    listpack,
+                    self.hash_max_listpack_entries,
+                    self.hash_max_listpack_value,
+                )
+                .map_err(|_| StoreError::InvalidDumpPayload)?
+                {
+                    Ok(hash) => {
+                        // The retaining constructor has already established that every
+                        // element fits the live limit, so the post-build refresh needs
+                        // no second scan.
+                        restored_max_element_len = Some(0);
+                        Value::Hash(Box::new(hash))
+                    }
+                    Err(listpack) => {
+                        // Zero-copy span build: avoids the N transient owned Vec<u8>
+                        // that decode_listpack_strings allocates only for the builder
+                        // to copy into the hash's arena and drop.
+                        let (hash, max_element_len) = hash_from_listpack_spans(&listpack)?;
+                        if hash.is_empty() {
+                            return Err(StoreError::InvalidDumpPayload);
+                        }
+                        restored_max_element_len = Some(max_element_len);
+                        Value::Hash(Box::new(hash))
+                    }
                 }
-                restored_max_element_len = Some(max_element_len);
-                Value::Hash(Box::new(hash))
             }
             RDB_TYPE_HASH_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -36201,12 +35917,16 @@ impl Store {
     /// Return all key names in the store (sorted for determinism).
     #[must_use]
     pub fn all_keys(&self) -> Vec<Vec<u8>> {
-        if !self.ordered_keys_dirty {
-            return self.ordered_keys.iter().map(|k| k.to_vec()).collect();
-        }
-        let mut keys: Vec<Vec<u8>> = self.entries.keys().map(|k| k.to_vec()).collect();
+        // (frankenredis-uhthd step 2) Always sorted from the table itself; there is
+        // no ordered side index to consult any more.
+        //
+        // Snapshot writers ultimately need owned key bytes, but they do not need
+        // an owned copy while ordering the keyspace. Sorting references avoids
+        // moving every key allocation through the sort before cloning it once for
+        // the returned snapshot.
+        let mut keys: Vec<&[u8]> = self.entries.keys().collect();
         keys.sort();
-        keys
+        keys.into_iter().map(|key| key.to_vec()).collect()
     }
 
     /// Drop stale TTL-bearing keys before snapshot serialization.
@@ -36268,7 +35988,7 @@ impl Store {
             .entries
             .keys()
             .map(|physical| {
-                let (db, logical) = decode_db_key(physical).unwrap_or((0, &physical[..]));
+                let (db, logical) = decode_db_key(physical).unwrap_or((0, physical));
                 (db, logical.to_vec(), physical.to_vec())
             })
             .collect();
@@ -41855,23 +41575,6 @@ fn glob_literal_prefix(pattern: &[u8]) -> &[u8] {
     }
     &pattern[..i]
 }
-
-/// (frankenredis-2wgom) Exclusive upper bound for the `BTreeSet` range that
-/// selects exactly the keys having `prefix` as a prefix: increment the last byte
-/// below `0xFF`, dropping trailing `0xFF`s. `None` means an all-`0xFF` (or empty)
-/// prefix, i.e. the range is unbounded above (`prefix..`).
-fn prefix_range_end(prefix: &[u8]) -> Option<Vec<u8>> {
-    let mut end = prefix.to_vec();
-    while let Some(last) = end.last_mut() {
-        if *last < 0xFF {
-            *last += 1;
-            return Some(end);
-        }
-        end.pop();
-    }
-    None
-}
-
 /// SCAN-family (`SCAN`/`HSCAN`/`SSCAN`/`ZSCAN`) MATCH filter with redis's
 /// no-filter shortcut: an exact single `*` (or an absent pattern) matches EVERY
 /// element — including the empty member/field/key — WITHOUT invoking the glob
@@ -44487,48 +44190,45 @@ mod tests {
         assert_eq!(store.randomkey_in_db(0, 0), Some(b"db0".to_vec()));
     }
 
-    // (frankenredis-uhthd) RANDOMKEY's per-db vector is lazy now. Inserts and
-    // deletes should only mark it dirty; the vector must be empty until the
-    // first RANDOMKEY call rebuilds it from canonical live entries.
+    /// (frankenredis-uhthd step 2) RANDOMKEY samples the TABLE now -- there is no
+    /// per-db vector, lazy or otherwise, so there is no cache-freshness state left
+    /// to assert. What replaces those assertions is the invariant the cache existed
+    /// to protect, tested directly and more strictly than before:
+    ///
+    ///   * every live key must be REACHABLE as a sample, and
+    ///   * a DELETED key must never be returned.
+    ///
+    /// The second is the negative case. A stale index -- the exact bug the
+    /// dirty-flag machinery guarded against -- hands back names that are gone, and
+    /// 200k draws over a keyspace with a third of its keys removed will surface one
+    /// immediately.
     #[test]
-    fn random_key_index_rebuilds_lazily_and_reaches_live_keys_uhthd() {
+    fn randomkey_samples_only_live_keys_and_reaches_all_of_them_uhthd() {
         let mut store = Store::new();
-        for i in 0..5000 {
+        for i in 0..5_000 {
             store.set(format!("k{i:05}").into_bytes(), b"v".to_vec(), None, 0);
         }
-        assert!(
-            store.random_key_slots[0].dirty,
-            "new keys must dirty the lazy RANDOMKEY cache"
-        );
-        assert!(
-            store.random_key_slots[0].keys.is_empty(),
-            "write-only workloads must not keep RANDOMKEY Arc clones resident"
-        );
 
-        assert!(store.randomkey(0).is_some());
-        assert!(!store.random_key_slots[0].dirty);
-        assert_eq!(store.random_key_slots[0].keys.len(), store.entries.len());
-
-        // Delete a scattered third to exercise dirtying after structural churn.
-        for i in (0..5000).step_by(3) {
-            store.del(&[format!("k{i:05}").into_bytes()], 0);
+        // Delete a scattered third, so a stale view would be densely wrong.
+        let mut deleted = std::collections::HashSet::new();
+        for i in (0..5_000).step_by(3) {
+            let key = format!("k{i:05}").into_bytes();
+            store.del(std::slice::from_ref(&key), 0);
+            deleted.insert(key);
         }
-        assert!(store.random_key_slots[0].dirty);
-        assert!(
-            store.random_key_slots[0].keys.is_empty(),
-            "deletes must drop stale RANDOMKEY Arc clones immediately"
-        );
+        assert_eq!(store.entries.len(), 5_000 - deleted.len());
 
-        assert!(store.randomkey(0).is_some());
-        assert!(!store.random_key_slots[0].dirty);
-        assert_eq!(store.random_key_slots[0].keys.len(), store.entries.len());
-
-        // Invariant: every live key is reachable as a RANDOMKEY sample.
         let mut seen = std::collections::HashSet::new();
         for _ in 0..200_000 {
-            if let Some(k) = store.randomkey(0) {
-                seen.insert(k);
-            }
+            let Some(k) = store.randomkey(0) else {
+                panic!("RANDOMKEY returned None on a non-empty keyspace")
+            };
+            assert!(
+                !deleted.contains(&k),
+                "RANDOMKEY returned a DELETED key: {:?}",
+                String::from_utf8_lossy(&k)
+            );
+            seen.insert(k);
         }
         assert_eq!(
             seen.len(),
@@ -45759,6 +45459,138 @@ mod tests {
         assert_eq!(result.bytes_to_free_after, 0);
     }
 
+    /// (frankenredis-uhthd) DIAGNOSTIC for the measured `-OOM` divergence: with
+    /// `--maxmemory 100mb --maxmemory-policy allkeys-lru` and a 1M pipelined SET
+    /// load, fr began refusing writes after ~943k keys having evicted only 450,
+    /// while live Redis 7.2.4 on the identical load accepted every write and
+    /// evicted 143,334.
+    ///
+    /// Two causes were possible and they call for opposite fixes, so this
+    /// separates them instead of guessing:
+    ///   (a) ACCOUNTING -- keys are removed but the counted usage does not fall,
+    ///       so `bytes_to_free` never reaches 0 no matter how long the loop runs;
+    ///   (b) BUDGET -- usage falls correctly, but the loop's cycle cap stops it
+    ///       before it gets under the limit.
+    ///
+    /// The discriminator is `bytes_freed` against `evicted_keys` at the PRODUCTION
+    /// bounds (sample_limit 5, max_cycles 4 -- `Runtime::new`), compared with the
+    /// same store given a large budget.
+    #[test]
+    fn eviction_loop_gives_up_before_clearing_pressure_uhthd() {
+        fn build() -> Store {
+            let mut store = Store::new();
+            store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
+            for idx in 0..2_000 {
+                store.set(format!("evict:{idx:06}").into_bytes(), vec![b'v'; 64], None, 0);
+            }
+            store
+        }
+
+        // A limit that needs MANY evictions to reach, which is the situation the
+        // production load hit and the one a 4-cycle cap cannot serve.
+        let probe = build();
+        let full = probe.estimate_memory_usage_bytes();
+        let limit = full / 2;
+
+        // Arm 1: production bounds.
+        let mut prod = build();
+        let prod_result =
+            prod.run_bounded_eviction_loop(0, limit, 0, 5, 4, EvictionSafetyGateState::default());
+
+        // Arm 2: same store, same limit, generous budget.
+        let mut big = build();
+        let big_result =
+            big.run_bounded_eviction_loop(0, limit, 0, 5, 100_000, EvictionSafetyGateState::default());
+
+        println!(
+            "usage={full} limit={limit}\n  max_cycles=4      {:?} evicted={} bytes_freed={} left={}\n  max_cycles=100k   {:?} evicted={} bytes_freed={} left={}",
+            prod_result.status, prod_result.evicted_keys, prod_result.bytes_freed,
+            prod_result.bytes_to_free_after,
+            big_result.status, big_result.evicted_keys, big_result.bytes_freed,
+            big_result.bytes_to_free_after,
+        );
+
+        // (a) is REFUTED: the accounting is exact, so a larger budget can help.
+        assert!(
+            prod_result.bytes_freed > 0,
+            "ACCOUNTING BUG: {} keys evicted freed 0 counted bytes; no budget could help",
+            prod_result.evicted_keys
+        );
+        assert_eq!(
+            prod_result.bytes_freed,
+            prod_result.evicted_keys * (full / 2_000),
+            "counted usage must fall by exactly one entry per evicted key"
+        );
+
+        // (b) is CONFIRMED: identical store, identical limit, only the budget
+        // differs, and only the generous budget clears the pressure. These two
+        // assertions state the loop's CONTRACT and stay true after the production
+        // default is retuned -- both budgets are passed explicitly here.
+        assert_ne!(
+            prod_result.status,
+            EvictionLoopStatus::Ok,
+            "a 4-cycle budget cleared pressure needing ~1000 evictions; repro is stale"
+        );
+        assert_eq!(
+            big_result.status,
+            EvictionLoopStatus::Ok,
+            "a generous budget still could not clear the pressure, so the cap is not the whole story"
+        );
+        assert_eq!(big_result.bytes_to_free_after, 0);
+    }
+
+    /// (frankenredis-uhthd) WHY THE 4-CYCLE CAP CANNOT SIMPLY BE RAISED.
+    ///
+    /// `sampled_eviction_candidate_keys_impl` draws `sample_limit` random indices
+    /// and then walks `entries.iter().enumerate()` until the LARGEST of them is
+    /// reached. With 5 uniform draws over n keys the expected stopping point is
+    /// ~5n/6, so ONE eviction costs O(n) -- and the cap is what has been hiding
+    /// that. Raising the budget to fix the `-OOM` divergence would multiply an
+    /// O(n) operation by the new budget on every write under pressure.
+    ///
+    /// This measures the scaling instead of asserting it from source. A fixed
+    /// eviction count is run at n and 4n; O(1) sampling would be flat, O(n)
+    /// sampling grows with n. The assertion is deliberately loose (a wall-clock
+    /// ratio on a shared host is noisy) -- it only has to separate "flat" from
+    /// "grows", which a 4x input change makes unambiguous.
+    #[test]
+    fn eviction_candidate_sampling_is_linear_in_keyspace_uhthd() {
+        fn evict_cost(n: usize) -> std::time::Duration {
+            let mut store = Store::new();
+            store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
+            for idx in 0..n {
+                store.set(format!("evict:{idx:08}").into_bytes(), vec![b'v'; 64], None, 0);
+            }
+            // A limit just under current usage so a FIXED number of evictions runs
+            // regardless of n -- otherwise the work would scale for the trivial
+            // reason that more keys need freeing.
+            let usage = store.estimate_memory_usage_bytes();
+            let per_key = usage / n;
+            let limit = usage - (per_key * 64);
+            let start = std::time::Instant::now();
+            let r = store.run_bounded_eviction_loop(
+                0, limit, 0, 5, 64, EvictionSafetyGateState::default(),
+            );
+            let elapsed = start.elapsed();
+            assert!(r.evicted_keys > 0, "no eviction ran at n={n}");
+            elapsed
+        }
+
+        let small = evict_cost(5_000);
+        let large = evict_cost(20_000);
+        let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
+        println!(
+            "same eviction count, 4x the keyspace: {:?} -> {:?} ({ratio:.2}x)",
+            small, large
+        );
+        assert!(
+            ratio > 2.0,
+            "sampling looks sub-linear ({ratio:.2}x for 4x the keys) -- if candidate \
+             selection became O(1), the eviction budget can be raised and this test \
+             should be replaced by one pinning that"
+        );
+    }
+
     #[test]
     fn fr_p2c_008_u013_safety_gate_suppresses_eviction() {
         let mut store = Store::new();
@@ -46944,14 +46776,14 @@ mod tests {
         // this replica has never seen, so it needs the exemption just as much.
         assert_eq!(
             store
-                .append(b"fresh", &vec![b'x'; 64], 0)
+                .append(b"fresh", &[b'x'; 64], 0)
                 .expect("the create path is obeyed too"),
             64
         );
 
         store.must_obey_client = false;
         assert!(
-            store.append(b"k2", &vec![b'y'; 64], 0).is_err(),
+            store.append(b"k2", &[b'y'; 64], 0).is_err(),
             "the cap must come back when the obeyed source ends"
         );
     }
@@ -53533,20 +53365,14 @@ mod tests {
         assert!(store.randomkey(0).is_some());
         let before_entries = store.entries.capacity();
         let before_expiry_deadlines = store.expiry_deadlines.capacity();
-        let before_random_slots = store.random_key_slots[0].keys.capacity();
-        let before_scan_cache = store.scan_cache.capacity();
         assert!(before_entries > 0);
         assert!(before_expiry_deadlines > 0);
-        assert!(before_random_slots > 0);
-        assert!(before_scan_cache > 0);
 
         store.flushdb();
 
         assert!(store.is_empty());
         assert_eq!(store.entries.capacity(), 0);
         assert_eq!(store.expiry_deadlines.capacity(), 0);
-        assert_eq!(store.random_key_slots[0].keys.capacity(), 0);
-        assert_eq!(store.scan_cache.capacity(), 0);
     }
 
     #[test]
@@ -53560,17 +53386,14 @@ mod tests {
         assert!(store.randomkey_in_db(3, 0).is_some());
         let before_entries = store.entries.capacity();
         let before_expiry_deadlines = store.expiry_deadlines.capacity();
-        let before_random_slots = store.random_key_slots[3].keys.capacity();
         assert!(before_entries > 0);
         assert!(before_expiry_deadlines > 0);
-        assert!(before_random_slots > 0);
 
         assert_eq!(store.flush_database(3), 4096);
 
         assert!(store.is_empty());
         assert_eq!(store.entries.capacity(), 0);
         assert_eq!(store.expiry_deadlines.capacity(), 0);
-        assert_eq!(store.random_key_slots[3].keys.capacity(), 0);
     }
 
     #[test]
@@ -53596,53 +53419,68 @@ mod tests {
 
         // All visible state is empty.
         assert!(store.is_empty());
-        assert!(store.ordered_keys.is_empty(), "ordered_keys must be empty");
         assert!(
             store.hash_field_expires.is_empty(),
             "hash_field_expires must be empty after flush"
         );
 
-        // KEYS/SCAN/RANDOMKEY surface contracts: nothing to enumerate.
+        // (frankenredis-uhthd step 2) The original ghost-name bug was a side index
+        // surviving the flush. There is no side index left to inspect, so this
+        // asserts the SYMPTOM directly on all three surfaces that showed it --
+        // which is the stronger check: any future source of ghost names fails here,
+        // not just the one field the old assertion named.
         assert_eq!(
             store.keys_matching(b"*", 0),
             Vec::<Vec<u8>>::new(),
             "KEYS * after flush must be empty"
         );
+        assert_eq!(store.scan(0, None, 100, 0), (0, Vec::new()), "SCAN after flush must be empty");
+        assert_eq!(store.randomkey(0), None, "RANDOMKEY after flush must be None");
     }
 
+    /// (frankenredis-uhthd step 2) There is no ordered side index to defer any
+    /// more -- KEYS builds its order on demand from the table. What must still hold
+    /// is the OUTPUT contract those tests were really protecting, so both are
+    /// replaced by assertions on ordering itself, including after churn.
+    ///
+    /// The negative case is the shuffled insert order: keys are written in an order
+    /// that is neither sorted nor reverse-sorted, so an implementation that simply
+    /// forwarded the table's iteration order (which is hash order) fails.
     #[test]
-    fn write_hot_keyspace_defers_ordered_key_index_until_ordered_read_uhthd() {
+    fn keys_and_all_keys_stay_sorted_without_an_ordered_index_uhthd() {
         let mut store = Store::new();
-        for i in 0..128_u32 {
+        // Deliberately not in sorted order.
+        for i in [7_u32, 0, 13, 4, 11, 2, 9, 5] {
             store.set(format!("k:{i:03}").into_bytes(), b"v".to_vec(), None, 0);
         }
+        let expect: Vec<Vec<u8>> = {
+            let mut v: Vec<Vec<u8>> = [7_u32, 0, 13, 4, 11, 2, 9, 5]
+                .iter()
+                .map(|i| format!("k:{i:03}").into_bytes())
+                .collect();
+            v.sort();
+            v
+        };
 
-        assert!(
-            store.ordered_keys.is_empty(),
-            "SET-only keyspaces must not keep the sorted side index resident"
-        );
-        assert!(store.ordered_keys_dirty);
-        assert_eq!(store.all_keys().len(), 128);
-        assert!(
-            store.ordered_keys.is_empty(),
-            "snapshot-style all_keys must stay non-resident when the index is dirty"
-        );
+        assert_eq!(store.keys_matching_in_db(0, b"k:*", 0), expect);
+        assert_eq!(store.keys_matching(b"*", 0), expect);
+        assert_eq!(store.all_keys(), expect);
 
-        let keys = store.keys_matching_in_db(0, b"k:*", 0);
-        assert_eq!(keys.len(), 128);
-        assert_eq!(
-            store.ordered_keys.len(),
-            store.entries.len(),
-            "ordered commands must rebuild the sorted index exactly once"
-        );
-        assert!(!store.ordered_keys_dirty);
-
-        store.set(b"k:new".to_vec(), b"v".to_vec(), None, 0);
-        assert!(
-            store.ordered_keys.is_empty(),
-            "the next structural write drops the ordered side index again"
-        );
-        assert!(store.ordered_keys_dirty);
+        // And after churn, which is where a stale cached ordering would show.
+        store.del(&[b"k:004".to_vec()], 0);
+        store.set(b"k:001".to_vec(), b"v".to_vec(), None, 0);
+        let expect2: Vec<Vec<u8>> = {
+            let mut v: Vec<Vec<u8>> = expect
+                .iter()
+                .filter(|k| k.as_slice() != b"k:004")
+                .cloned()
+                .collect();
+            v.push(b"k:001".to_vec());
+            v.sort();
+            v
+        };
+        assert_eq!(store.keys_matching(b"*", 0), expect2);
+        assert_eq!(store.all_keys(), expect2);
     }
 
     #[test]
@@ -64510,333 +64348,168 @@ mod tests {
     }
 
     // (frankenredis-3e92e) Frozen fingerprint of the full-SCAN key sequence.
-    const SCANLIN_GOLDEN: u64 = 0x1c26_adeb_28a1_0c87;
-
-    // (frankenredis-3e92e) SCAN resume fast-path: a full scan with the resume
-    // cache enabled must return the EXACT same key sequence as with the cache
-    // disabled (the old O(N²/batch) skip walk) — across COUNT sizes and patterns,
-    // and it must stay correct across an intervening keyspace mutation (the
-    // generation guard forces a fallback). Pinned by a golden fingerprint; plus a
-    // Score microbench of full-scan-to-completion old (cache off) vs new.
+    /// (frankenredis-uhthd step 2) THE SCAN-ORDER GOLDEN IS RETIRED, NOT REGENERATED.
+    ///
+    /// `SCANLIN_GOLDEN` was an FNV fingerprint of the full-scan key SEQUENCE, and
+    /// four tests around it asserted that the SCAN RESUME CACHE was a pure
+    /// optimisation (cache-on must equal cache-off). Both quantities ceased to
+    /// exist, for the same reason, and neither was re-frozen:
+    ///
+    ///   * There is no resume cache. The reverse-binary cursor IS the resume point
+    ///     -- which is exactly why Redis needs no such cache. "Cache-on vs
+    ///     cache-off" has no meaning when there is only one path.
+    ///   * A SEQUENCE fingerprint is no longer well-defined. `KeyDict` seeds its
+    ///     hasher randomly per process (that seeding is the hash-flooding defence),
+    ///     so SCAN order legitimately differs between two runs of the SAME binary on
+    ///     the SAME data -- precisely as it does between two runs of Redis 7.2.4,
+    ///     measured. Freezing a new constant would pin a number that changes on the
+    ///     next run.
+    ///
+    /// The two tests below assert what the fingerprint was standing in for, in an
+    /// order-independent form. Cross-engine agreement on the same contract is
+    /// covered by `scripts/scan_guarantee_differ.py` against a live 7.2.4.
     #[test]
-    fn scan_resume_cache_isomorphic_and_faster_scanlin() {
+    fn full_scan_returns_every_present_key_exactly_once_uhthd() {
         use super::{Store, encode_db_key};
 
-        // Drive a full SCAN to completion; `disable_cache` clears the resume
-        // cache before each call to reproduce the old skip-only behavior.
-        fn full_scan(
-            store: &mut Store,
-            pattern: Option<&[u8]>,
-            count: usize,
-            disable_cache: bool,
-        ) -> Vec<Vec<u8>> {
-            let mut all = Vec::new();
-            let mut cursor = 0u64;
-            for _ in 0..1_000_000 {
-                if disable_cache {
-                    store.scan_cache.clear();
-                }
-                let (next, batch) = store.scan(cursor, pattern, count, 0);
-                all.extend(batch);
-                if next == 0 {
-                    break;
-                }
-                cursor = next;
-            }
-            all
-        }
-
-        let mut st: u64 = 0x1234_5678_9ABC_DEF0;
-        let mut next = || {
-            st ^= st << 13;
-            st ^= st >> 7;
-            st ^= st << 17;
-            st
-        };
-        let mut golden: u64 = 0xcbf2_9ce4_8422_2325;
-        let fnv = |g: &mut u64, b: &[u8]| {
-            for &byte in b {
-                *g ^= u64::from(byte);
-                *g = g.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        };
-
-        for _ in 0..120 {
-            let nkeys = (next() % 400) as usize;
-            let mut store = Store::new();
-            for _ in 0..nkeys {
-                let klen = 1 + (next() % 8) as usize;
-                let key: Vec<u8> = (0..klen)
-                    .map(|_| b"abc:xyz_0123"[(next() % 12) as usize])
-                    .collect();
-                store.set(encode_db_key(0, &key), b"v".to_vec(), None, 0);
-            }
-            let pat: Option<&[u8]> = match next() % 3 {
-                0 => None,
-                1 => Some(b"a*"),
-                _ => Some(b"*1*"),
-            };
-            let count = 1 + (next() % 20) as usize;
-            // Cache-on (new) and cache-off (old) full scans must be identical.
-            let with_cache = full_scan(&mut store, pat, count, false);
-            let without_cache = full_scan(&mut store, pat, count, true);
-            assert_eq!(
-                with_cache, without_cache,
-                "SCAN cache-on vs cache-off diverged (nkeys={nkeys} count={count} pat={pat:?})"
-            );
-            for k in &with_cache {
-                fnv(&mut golden, k);
-            }
-            fnv(&mut golden, &[0xFF]);
-        }
-
-        // Mutation mid-scan: the generation guard forces the fast path to fall
-        // back, so cache-on reproduces cache-off EXACTLY even when the keyspace
-        // changes between calls (fr's position cursor is intentionally not
-        // mutation-stable — the point is that the cache changes nothing).
-        {
-            let build = || {
-                let mut s = Store::new();
-                for i in 0..500u32 {
-                    s.set(
-                        encode_db_key(0, format!("k{i:04}").as_bytes()),
-                        b"v".to_vec(),
-                        None,
-                        0,
-                    );
-                }
-                s
-            };
-            let run = |store: &mut Store, disable_cache: bool| -> Vec<Vec<u8>> {
-                let mut out = Vec::new();
-                let mut cursor = 0u64;
-                let mut step = 0;
-                loop {
-                    if disable_cache {
-                        store.scan_cache.clear();
-                    }
-                    let (nextc, batch) = store.scan(cursor, None, 7, 0);
-                    out.extend(batch);
-                    step += 1;
-                    if step == 3 {
-                        store.set(encode_db_key(0, b"zzz_new"), b"v".to_vec(), None, 0);
-                        store.del(&[encode_db_key(0, b"k0001")], 0);
-                    }
-                    if nextc == 0 || step > 100_000 {
-                        break;
-                    }
-                    cursor = nextc;
-                }
-                out
-            };
-            let mut s_on = build();
-            let mut s_off = build();
-            assert_eq!(
-                run(&mut s_on, false),
-                run(&mut s_off, true),
-                "scan-under-mutation: cache-on diverged from cache-off"
-            );
-        }
-
-        assert_eq!(
-            golden, SCANLIN_GOLDEN,
-            "SCAN sequence fingerprint changed: {golden:#018x} (golden {SCANLIN_GOLDEN:#018x})"
-        );
-
-        if cfg!(debug_assertions) {
-            return;
-        }
-        // Score: full SCAN to completion of a 20k keyspace at COUNT 10 — the
-        // O(N²/batch) skip walk vs the O(N) resume cache.
         let mut store = Store::new();
-        for i in 0..20_000u32 {
+        for i in 0..2_000u32 {
             store.set(
-                encode_db_key(0, format!("key:{i:06}").as_bytes()),
+                encode_db_key(0, format!("k{i:04}").as_bytes()),
                 b"v".to_vec(),
                 None,
                 0,
             );
         }
-        let reps = 6;
-        let t0 = std::time::Instant::now();
-        let mut acc = 0usize;
-        for _ in 0..reps {
-            acc = acc.wrapping_add(full_scan(&mut store, None, 10, true).len());
-        }
-        let old_ns = t0.elapsed().as_nanos().max(1);
-        std::hint::black_box(acc);
-        let t1 = std::time::Instant::now();
-        let mut acc2 = 0usize;
-        for _ in 0..reps {
-            acc2 = acc2.wrapping_add(full_scan(&mut store, None, 10, false).len());
-        }
-        let new_ns = t1.elapsed().as_nanos().max(1);
-        std::hint::black_box(acc2);
-        assert_eq!(acc, acc2, "old/new returned different totals");
-        let score = old_ns as f64 / new_ns as f64;
-        eprintln!(
-            "SCANLIN full scan 20k @ COUNT 10: old={old_ns}ns new={new_ns}ns score={score:.2}x"
-        );
-        assert!(
-            score >= 2.0 || !ratio_gate_enforced(),
-            "resume-cache SCAN must be >=2.0x; got {score:.2}x"
-        );
-    }
+        let expected: std::collections::HashSet<Vec<u8>> = (0..2_000u32)
+            .map(|i| format!("k{i:04}").into_bytes())
+            .collect();
 
-    // (frankenredis-n9am7) scan_in_db drives the real SCAN command. A full
-    // iteration must equal the ground-truth (all live, glob+TYPE-matched logical
-    // keys in the DB, sorted) for every db / pattern / type / count, and a deep
-    // resumed call must be O(log n + count) vs the old materialise-all-and-sort.
-    #[test]
-    fn scan_in_db_isomorphic_and_faster_scandb() {
-        use super::{Store, ValueType, encode_db_key, glob_match};
-
-        fn drive(
-            store: &mut Store,
-            db: usize,
-            pat: Option<&[u8]>,
-            tf: Option<&[u8]>,
-            count: usize,
-        ) -> Vec<Vec<u8>> {
-            let mut all = Vec::new();
+        for count in [1usize, 7, 64, 1000] {
+            let mut seen: Vec<Vec<u8>> = Vec::new();
             let mut cursor = 0u64;
+            let mut steps = 0u32;
             loop {
-                let (next, batch) = store.scan_in_db(db, cursor, pat, tf, count, 0);
-                all.extend(batch);
+                let (next, batch) = store.scan(cursor, None, count, 0);
+                seen.extend(batch);
+                steps += 1;
+                assert!(steps < 100_000, "SCAN did not terminate at COUNT {count}");
                 if next == 0 {
                     break;
                 }
                 cursor = next;
             }
-            all
+            let unique: std::collections::HashSet<Vec<u8>> = seen.iter().cloned().collect();
+            assert_eq!(unique, expected, "COUNT {count}: key SET differs");
+            assert_eq!(
+                seen.len(),
+                unique.len(),
+                "COUNT {count}: a rehash-free full scan returned duplicates"
+            );
         }
-
-        // Ground truth: live keys in `db` matching glob+type, in sorted logical order.
-        fn ground_truth(
-            store: &Store,
-            db: usize,
-            pat: Option<&[u8]>,
-            tf: Option<&[u8]>,
-        ) -> Vec<Vec<u8>> {
-            let mut v: Vec<Vec<u8>> = store
-                .all_keys()
-                .into_iter()
-                .filter_map(|physical| {
-                    let physical: &[u8] = physical.as_slice();
-                    let (kdb, logical) = match super::decode_db_key(physical) {
-                        Some((d, l)) => (d, l.to_vec()),
-                        None => (0, physical.to_vec()),
-                    };
-                    if kdb != db {
-                        return None;
-                    }
-                    if let Some(p) = pat
-                        && p != b"*"
-                        && !glob_match(p, &logical)
-                    {
-                        return None;
-                    }
-                    if let Some(t) = tf
-                        && !store
-                            .peek_value_type(physical, 0)
-                            .is_some_and(|vt| vt.as_str().as_bytes().eq_ignore_ascii_case(t))
-                    {
-                        return None;
-                    }
-                    Some(logical)
-                })
-                .collect();
-            v.sort();
-            v
-        }
-
-        let mut st: u64 = 0x0bad_c0de_1234_5678;
-        let mut rng = || {
-            st ^= st << 13;
-            st ^= st >> 7;
-            st ^= st << 17;
-            st
-        };
-        for _ in 0..50 {
-            let mut store = Store::new();
-            let n = (rng() % 400) as usize;
-            for _ in 0..n {
-                let db = (rng() % 3) as usize; // dbs 0,1,2
-                let klen = 1 + (rng() % 7) as usize;
-                let key: Vec<u8> = (0..klen)
-                    .map(|_| b"ab:_019xyz"[(rng() % 10) as usize])
-                    .collect();
-                let phys = encode_db_key(db, &key);
-                match rng() % 3 {
-                    0 => store.set(phys, b"v".to_vec(), None, 0),
-                    1 => {
-                        store.rpush(&phys, &[b"e".to_vec()], 0).ok();
-                    }
-                    _ => {
-                        store.sadd(&phys, &[b"m".to_vec()], 0).ok();
-                    }
-                }
-            }
-            for db in 0..3usize {
-                for pat in [
-                    None,
-                    Some(&b"a*"[..]),
-                    Some(&b"*1*"[..]),
-                    Some(&b"ab:*"[..]),
-                ] {
-                    for tf in [None, Some(&b"string"[..]), Some(&b"list"[..])] {
-                        let count = 1 + (rng() % 11) as usize;
-                        let mut got = drive(&mut store, db, pat, tf, count);
-                        got.sort();
-                        let want = ground_truth(&store, db, pat, tf);
-                        assert_eq!(
-                            got, want,
-                            "scan_in_db diverged db={db} pat={pat:?} tf={tf:?} count={count}"
-                        );
-                    }
-                }
-            }
-        }
-
-        // A/B: 200k keys in db 0. A deep resumed scan_in_db call is O(log n+count);
-        // the old behaviour re-materialised + sorted ALL keys every call.
-        let mut store = Store::new();
-        for i in 0..200_000u32 {
-            store.set(format!("k{i:08}").into_bytes(), b"v".to_vec(), None, 0);
-        }
-        // Warm the resume cache up to a deep cursor.
-        let mut cursor = 0u64;
-        for _ in 0..1000 {
-            let (next, _) = store.scan_in_db(0, cursor, None, None, 10, 0);
-            cursor = next;
-        }
-        let t0 = std::time::Instant::now();
-        let (_n2, _b2) = store.scan_in_db(0, cursor, None, None, 10, 0);
-        let new_ns = t0.elapsed().as_nanos().max(1);
-
-        // Old: materialise every logical key + sort + page (one SCAN call's cost).
-        let t1 = std::time::Instant::now();
-        let mut allk = store.all_keys();
-        allk.sort();
-        let _page: Vec<Vec<u8>> = allk
-            .iter()
-            .skip(cursor as usize)
-            .take(10)
-            .cloned()
-            .collect();
-        let old_ns = t1.elapsed().as_nanos().max(1);
-        std::hint::black_box((&allk, _page, _n2, _b2));
-        println!(
-            "scan_in_db deep-call A/B (200k keys, cursor={cursor}): old(materialize+sort all)={old_ns}ns new(resume)={new_ns}ns ratio={:.0}x",
-            old_ns as f64 / new_ns as f64
-        );
-        let _ = ValueType::String;
-        assert!(
-            old_ns as f64 / new_ns as f64 > 2.0 || cfg!(debug_assertions),
-            "expected >2x"
-        );
     }
 
+    /// (frankenredis-uhthd step 2) Replaces three `core_scan.json` cases that were
+    /// removed because the quantity they pinned does not exist in EITHER engine any
+    /// more -- and two of which were WRONG against live Redis 7.2.4:
+    ///
+    ///   `scan_large_cursor_returns_0`  expected `SCAN 999999` -> (0, [])
+    ///   `scan_negative_cursor`         expected `SCAN -1`     -> (0, [])
+    ///
+    /// Live 7.2.4 on the same 8-key keyspace returns `(0, [key:1, key:3])` for BOTH.
+    /// An out-of-range cursor is masked to a bucket and the scan proceeds from
+    /// there, so it returns whatever lives in the remaining buckets -- never
+    /// necessarily empty. WHICH keys is a function of the random hash seed, so it
+    /// cannot be pinned; what can be, and is asserted here, is that the scan
+    /// TERMINATES from such a cursor and never invents a key.
+    ///
+    /// `scan_count_2_returns_partial` pinned cursor `2` with two named keys. Under a
+    /// reverse-binary cursor both the value and the batch contents depend on bucket
+    /// occupancy, and Redis itself returned THREE keys with cursor 2 for the same
+    /// command -- COUNT is a work budget, not a result-size limit, in both engines.
+    /// The property worth keeping is completeness across the loop, which
+    /// `full_scan_returns_every_present_key_exactly_once_uhthd` covers at COUNT 1.
+    #[test]
+    fn out_of_range_scan_cursor_terminates_and_invents_nothing_uhthd() {
+        use super::Store;
+
+        let mut store = Store::new();
+        let live: std::collections::HashSet<Vec<u8>> = ["key:1", "key:2", "key:3", "hs", "myset"]
+            .iter()
+            .map(|k| k.as_bytes().to_vec())
+            .collect();
+        for k in &live {
+            store.set(k.clone(), b"v".to_vec(), None, 0);
+        }
+
+        for cursor in [999_999u64, u64::MAX, u64::MAX - 1, 1 << 40] {
+            let (next, batch) = store.scan(cursor, None, 10, 0);
+            assert_eq!(
+                next, 0,
+                "SCAN from out-of-range cursor {cursor} must terminate, got cursor {next}"
+            );
+            for key in &batch {
+                assert!(
+                    live.contains(key),
+                    "SCAN from cursor {cursor} invented key {:?}",
+                    String::from_utf8_lossy(key)
+                );
+            }
+        }
+    }
+
+    /// (frankenredis-uhthd step 2) The mutation half: a key present for the WHOLE
+    /// scan must come back even though the table is written to mid-scan, which is
+    /// the one guarantee Redis actually makes.
+    ///
+    /// The deletion is the negative case. Removing `k0001` after step 3 is exactly
+    /// what breaks a POSITIONAL resume -- every later key shifts down one slot and
+    /// the walk steps over one. The scheme this replaced needed bespoke
+    /// resume-by-key logic to avoid that hole; the reverse-binary cursor does not,
+    /// and this test is what proves it.
+    #[test]
+    fn scan_under_mutation_keeps_every_present_throughout_key_uhthd() {
+        use super::{Store, encode_db_key};
+
+        let mut store = Store::new();
+        for i in 0..2_000u32 {
+            store.set(
+                encode_db_key(0, format!("k{i:04}").as_bytes()),
+                b"v".to_vec(),
+                None,
+                0,
+            );
+        }
+        let present_throughout: std::collections::HashSet<Vec<u8>> = (0..2_000u32)
+            .map(|i| format!("k{i:04}").into_bytes())
+            .filter(|k| k.as_slice() != b"k0001")
+            .collect();
+
+        let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut cursor = 0u64;
+        let mut step = 0u32;
+        loop {
+            let (next, batch) = store.scan(cursor, None, 7, 0);
+            seen.extend(batch);
+            step += 1;
+            if step == 3 {
+                store.set(encode_db_key(0, b"zzz_new"), b"v".to_vec(), None, 0);
+                store.del(&[encode_db_key(0, b"k0001")], 0);
+            }
+            assert!(step < 100_000, "SCAN under mutation did not terminate");
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+
+        let missing = present_throughout.difference(&seen).count();
+        assert_eq!(
+            missing,
+            0,
+            "SCAN dropped {missing} keys that were present for the whole scan"
+        );
+    }
     // (frankenredis SCAN-guarantee) Redis guarantees a full SCAN iteration returns
     // every key present from start to end AT LEAST once, even if OTHER keys are
     // deleted mid-scan. The canonical use — SCAN a batch, DEL keys in it, repeat —
@@ -65013,221 +64686,6 @@ mod tests {
             "expected >2x"
         );
     }
-
-    // (frankenredis-3e92e) Correctness gate for the SCAN resume cache's
-    // generation guard: it must bump on every STRUCTURAL keyspace mutation
-    // (insert / remove / flushdb) but NOT on a value-only update (so the cache
-    // survives non-structural writes), and a flush+readd mid-scan must leave
-    // cache-on byte-identical to cache-off.
-    #[test]
-    fn scan_cache_generation_guard_correct_scanlin2() {
-        use super::{Store, encode_db_key};
-
-        // (a) generation bumps only on structural keyspace changes.
-        let mut s = Store::new();
-        let g0 = s.keyspace_generation;
-        s.set(encode_db_key(0, b"k1"), b"v".to_vec(), None, 0);
-        assert_ne!(
-            s.keyspace_generation, g0,
-            "new-key insert must bump generation"
-        );
-        let g1 = s.keyspace_generation;
-        // Value-only overwrite of an existing key: key membership is unchanged, so
-        // the resume cache stays valid — the generation must NOT bump.
-        s.set(encode_db_key(0, b"k1"), b"v2".to_vec(), None, 0);
-        assert_eq!(
-            s.keyspace_generation, g1,
-            "in-place value update must NOT bump generation"
-        );
-        s.del(&[encode_db_key(0, b"k1")], 0);
-        assert_ne!(s.keyspace_generation, g1, "remove must bump generation");
-        let g2 = s.keyspace_generation;
-        s.set(encode_db_key(0, b"k2"), b"v".to_vec(), None, 0);
-        s.flushdb();
-        assert_ne!(s.keyspace_generation, g2, "flushdb must bump generation");
-
-        // (b) flush + readd of a DIFFERENT keyspace mid-scan: the stale cached
-        // last-key would mis-resume if the generation guard failed; cache-on must
-        // reproduce cache-off exactly.
-        let run = |disable_cache: bool| -> Vec<Vec<u8>> {
-            let mut store = Store::new();
-            for i in 0..200u32 {
-                store.set(
-                    encode_db_key(0, format!("a{i:04}").as_bytes()),
-                    b"v".to_vec(),
-                    None,
-                    0,
-                );
-            }
-            let mut out = Vec::new();
-            let mut cursor = 0u64;
-            let mut step = 0;
-            loop {
-                if disable_cache {
-                    store.scan_cache.clear();
-                }
-                let (next, batch) = store.scan(cursor, None, 7, 0);
-                out.extend(batch);
-                step += 1;
-                if step == 4 {
-                    store.flushdb();
-                    for i in 0..150u32 {
-                        store.set(
-                            encode_db_key(0, format!("b{i:04}").as_bytes()),
-                            b"v".to_vec(),
-                            None,
-                            0,
-                        );
-                    }
-                }
-                if next == 0 || step > 100_000 {
-                    break;
-                }
-                cursor = next;
-            }
-            out
-        };
-        assert_eq!(
-            run(false),
-            run(true),
-            "flush+readd mid-scan: cache-on diverged from cache-off"
-        );
-    }
-
-    // (frankenredis-4kuqc) The SCAN resume cache is a small LRU, not a single
-    // slot, so several CONCURRENT (interleaved) scans each keep their own resume
-    // point and stay O(N). Correctness gate: K interleaved full scans return the
-    // exact same keys under the LRU, a single-slot, and no cache. Plus a Score
-    // microbench: K interleaved full scans with the LRU vs a single slot (which
-    // thrashes back to the O(N^2/batch) skip when scans interleave).
-    #[test]
-    fn scan_cache_lru_concurrent_isomorphic_and_faster_scanlru() {
-        use super::Store;
-        use super::encode_db_key;
-
-        // mode: 0 = LRU (cap 8), 1 = single-slot (cap 1), 2 = no cache.
-        fn interleaved(store: &mut Store, k: usize, count: usize, mode: u8) -> Vec<Vec<Vec<u8>>> {
-            let mut cursors = vec![0u64; k];
-            let mut done = vec![false; k];
-            let mut results = vec![Vec::new(); k];
-            let mut guard = 0;
-            loop {
-                let mut all_done = true;
-                for i in 0..k {
-                    if done[i] {
-                        continue;
-                    }
-                    all_done = false;
-                    match mode {
-                        2 => store.scan_cache.clear(),
-                        1 => {
-                            while store.scan_cache.len() > 1 {
-                                store.scan_cache.remove(0);
-                            }
-                        }
-                        _ => {}
-                    }
-                    let (next, batch) = store.scan(cursors[i], None, count, 0);
-                    results[i].extend(batch);
-                    if next == 0 {
-                        done[i] = true;
-                    } else {
-                        cursors[i] = next;
-                    }
-                }
-                guard += 1;
-                if all_done || guard > 10_000_000 {
-                    break;
-                }
-            }
-            results
-        }
-
-        // Correctness: every mode returns identical per-scan results, and each
-        // scan returns the full keyspace exactly once (sorted order).
-        {
-            let mut store = Store::new();
-            for i in 0..500u32 {
-                store.set(
-                    encode_db_key(0, format!("k{i:04}").as_bytes()),
-                    b"v".to_vec(),
-                    None,
-                    0,
-                );
-            }
-            let all = store.all_keys();
-            for &count in &[1usize, 3, 7, 16] {
-                let lru = interleaved(&mut store, 5, count, 0);
-                let single = interleaved(&mut store, 5, count, 1);
-                let off = interleaved(&mut store, 5, count, 2);
-                for i in 0..5 {
-                    assert_eq!(
-                        lru[i], single[i],
-                        "LRU vs single-slot diverged scan={i} count={count}"
-                    );
-                    assert_eq!(
-                        lru[i], off[i],
-                        "LRU vs no-cache diverged scan={i} count={count}"
-                    );
-                    assert_eq!(
-                        lru[i], all,
-                        "scan {i} did not return the full keyspace count={count}"
-                    );
-                }
-            }
-        }
-
-        if cfg!(debug_assertions) {
-            return;
-        }
-        // Score: 4 interleaved full scans of a 12k keyspace at COUNT 10 — a single
-        // slot thrashes (every interleaved call mismatches, falling back to the
-        // O(N^2/batch) skip), the LRU keeps all four O(N).
-        let mut store = Store::new();
-        for i in 0..12_000u32 {
-            store.set(
-                encode_db_key(0, format!("key:{i:06}").as_bytes()),
-                b"v".to_vec(),
-                None,
-                0,
-            );
-        }
-        let reps = 4;
-        let t0 = std::time::Instant::now();
-        let mut acc = 0usize;
-        for _ in 0..reps {
-            acc = acc.wrapping_add(
-                interleaved(&mut store, 4, 10, 1)
-                    .iter()
-                    .map(Vec::len)
-                    .sum::<usize>(),
-            );
-        }
-        let single_ns = t0.elapsed().as_nanos().max(1);
-        std::hint::black_box(acc);
-        let t1 = std::time::Instant::now();
-        let mut acc2 = 0usize;
-        for _ in 0..reps {
-            acc2 = acc2.wrapping_add(
-                interleaved(&mut store, 4, 10, 0)
-                    .iter()
-                    .map(Vec::len)
-                    .sum::<usize>(),
-            );
-        }
-        let lru_ns = t1.elapsed().as_nanos().max(1);
-        std::hint::black_box(acc2);
-        assert_eq!(acc, acc2, "single-slot vs LRU returned different totals");
-        let score = single_ns as f64 / lru_ns as f64;
-        eprintln!(
-            "SCANLRU 4 interleaved scans of 12k @ COUNT 10: single-slot={single_ns}ns lru={lru_ns}ns score={score:.2}x"
-        );
-        assert!(
-            score >= 2.0 || !ratio_gate_enforced(),
-            "LRU must be >=2.0x vs single-slot for concurrent scans; got {score:.2}x"
-        );
-    }
-
     // (frankenredis-377jl) Frozen fingerprint of the grouped PEL AOF corpus.
     const AOFPEL_GOLDEN: u64 = 0xa82a_4b22_ca56_1dc1;
 
@@ -75990,6 +75448,10 @@ mod tests {
         dst.hash_max_listpack_value = 20;
         dst.restore_key(b"h", 0, &payload, false, 100).unwrap();
         assert_eq!(dst.object_encoding(b"h", 100), Some("listpack"));
+        assert!(matches!(
+            &dst.entries.get(b"h" as &[u8]).expect("restored key").value,
+            Value::Hash(map) if matches!(map.as_ref(), HashFieldMap::Listpack(_))
+        ));
     }
 
     /// The entry-count threshold must still promote on its own, with every element

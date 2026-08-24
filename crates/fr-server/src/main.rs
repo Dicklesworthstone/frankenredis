@@ -4015,14 +4015,22 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
         }
 
         if let Some(packet) = parse_borrowed_plain_ping_packet(unparsed, &parser_config) {
-            if let Some(message) = packet.message {
-                fr_protocol::encode_bulk_string_slice(
-                    Some(message),
-                    false,
+            let client_resp3 = connection.session.resp_protocol_version() == 3;
+            if runtime
+                .execute_plain_ping_borrowed_into(
+                    packet.message,
+                    ts,
+                    client_resp3,
                     &mut connection.write_buf,
-                );
-            } else {
-                connection.write_buf.extend_from_slice(b"+PONG\r\n");
+                )
+                .is_none()
+            {
+                let mut argv = vec![RespFrame::BulkString(Some(b"PING".to_vec()))];
+                if let Some(message) = packet.message {
+                    argv.push(RespFrame::BulkString(Some(message.to_vec())));
+                }
+                let reply = runtime.execute_frame(RespFrame::Array(Some(argv)), ts);
+                encode_client_reply(&reply, client_resp3, &mut connection.write_buf);
             }
             consumed_total += packet.consumed;
             continue;
@@ -6745,11 +6753,13 @@ fn handle_sharded_set_get_readable(
         runtime.note_read_event();
     }
     let output_before = conn.write_buf.len();
+    let parser_config = runtime.parser_config();
     dispatch_sharded_set_get_frames(
         token,
         conn,
+        runtime,
         pool,
-        runtime.parser_config(),
+        parser_config,
         closing_tokens,
         deferred_tokens,
         ts,
@@ -6782,6 +6792,12 @@ fn handle_sharded_set_get_readable(
 fn dispatch_sharded_set_get_frames(
     token: Token,
     conn: &mut ClientConnection,
+    // (frankenredis-uhthd, drive-by build fix) `9c3309870` added a PING fast path to
+    // this function that calls `runtime.execute_plain_ping_borrowed_into(..)`, but
+    // this function had no `runtime` -- it takes a shard `pool`. Committed `main`
+    // did not compile for `fr-server` as a result. Threading the runtime in is what
+    // that block was written against; both call sites already hold one.
+    runtime: &mut Runtime,
     pool: &ShardedSetGetPool,
     parser_config: ParserConfig,
     closing_tokens: &mut TokenSet,
@@ -6837,13 +6853,19 @@ fn dispatch_sharded_set_get_frames(
 
         let unparsed = &conn.read_buf[consumed_total..];
         if let Some(packet) = parse_borrowed_plain_ping_packet(unparsed, &parser_config) {
-            let response = if let Some(message) = packet.message {
-                let mut response = Vec::new();
-                fr_protocol::encode_bulk_string_slice(Some(message), false, &mut response);
-                response
-            } else {
-                b"+PONG\r\n".to_vec()
-            };
+            let client_resp3 = conn.session.resp_protocol_version() == 3;
+            let mut response = Vec::new();
+            if runtime
+                .execute_plain_ping_borrowed_into(packet.message, ts, client_resp3, &mut response)
+                .is_none()
+            {
+                let mut argv = vec![RespFrame::BulkString(Some(b"PING".to_vec()))];
+                if let Some(message) = packet.message {
+                    argv.push(RespFrame::BulkString(Some(message.to_vec())));
+                }
+                let reply = runtime.execute_frame(RespFrame::Array(Some(argv)), ts);
+                encode_client_reply(&reply, client_resp3, &mut response);
+            }
             if !conn
                 .sharded_replies
                 .complete_local(response, &mut conn.write_buf)
@@ -7016,11 +7038,13 @@ fn process_deferred_sharded_set_get_clients(
             continue;
         }
         let output_before = conn.write_buf.len();
+        let parser_config = runtime.parser_config();
         dispatch_sharded_set_get_frames(
             token,
             conn,
+            runtime,
             pool,
-            runtime.parser_config(),
+            parser_config,
             closing_tokens,
             deferred_tokens,
             ts,
@@ -15975,6 +15999,9 @@ enum BorrowedDispatchFloorClass {
     XackMissing,
     XrangeZero,
     XrevrangeZero,
+    /// Single-key non-blocking `XREADGROUP GROUP … STREAMS key <explicit-id>`.
+    /// The exact arities mirror `parse_borrowed_plain_xreadgroup_history_packet`.
+    XreadgroupHistory,
     /// (frankenredis-getexgate) Single-key non-blocking XREAD, both the bare
     /// `XREAD STREAMS key id` (array_len 4) and `XREAD COUNT n STREAMS key id`
     /// (array_len 6). The arm delegates to the SAME parser and executor the cascade
@@ -16282,6 +16309,7 @@ enum BorrowedDispatchFloorCommand {
     Xrevrange,
     Xtrim,
     Xread,
+    Xreadgroup,
     Xlen,
     Zadd,
     Zcard,
@@ -16530,6 +16558,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         10 => match uppercase_ascii_token::<10>(token)? {
+            [b'X', b'R', b'E', b'A', b'D', b'G', b'R', b'O', b'U', b'P'] => {
+                Some(BorrowedDispatchFloorCommand::Xreadgroup)
+            }
             [b'S', b'D', b'I', b'F', b'F', b'S', b'T', b'O', b'R', b'E'] => {
                 Some(BorrowedDispatchFloorCommand::Sdiffstore)
             }
@@ -17661,6 +17692,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (4, BorrowedDispatchFloorCommand::Xrevrange) if xrevrange_zero_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XrevrangeZero)
+        }
+        // The history parser serves exactly `GROUP g c STREAMS key id` (*7) and its
+        // COUNT sibling (*9). *9 also spells a multi-key form, so the parser's required
+        // COUNT token remains the discriminant; every decline takes generic dispatch.
+        (7 | 9, BorrowedDispatchFloorCommand::Xreadgroup) => {
+            Some(BorrowedDispatchFloorClass::XreadgroupHistory)
         }
         // (frankenredis-getexgate) XREAD was a STRANDED route: its parser, its zero-copy
         // executor and a cascade arm wiring them together all existed, but no row here -- so
@@ -22800,6 +22837,39 @@ fn try_dispatch_floor_classified_action(
             if let Some(packet) = parse_borrowed_plain_xread_single_packet(unparsed, &parser_config)
                 && runtime
                     .execute_plain_xread_single_borrowed_into(
+                        packet.key,
+                        packet.id,
+                        packet.count,
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::XreadgroupHistory => {
+            // Verbatim the cascade arm: the executor owns the RESP version and history
+            // eligibility checks, and declines `>`/NOACK/error forms to generic dispatch.
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) =
+                parse_borrowed_plain_xreadgroup_history_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_xreadgroup_history_borrowed_into(
+                        packet.group,
+                        packet.consumer,
                         packet.key,
                         packet.id,
                         packet.count,
@@ -55021,6 +55091,90 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         );
         assert_eq!(borrowed_dispatch_floor_command(b"ZSCOR"), None);
         assert_eq!(borrowed_dispatch_floor_command(b"HGE"), None);
+    }
+
+    #[test]
+    fn xreadgroup_history_floor_class_claims_only_its_two_parser_arities_iqicb() {
+        use super::BorrowedDispatchFloorClass as C;
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for arg in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", arg.len(), arg).as_bytes());
+            }
+            p
+        }
+
+        for served in [
+            vec!["XREADGROUP", "GROUP", "g", "c", "STREAMS", "xrg", "0"],
+            vec![
+                "xreadgroup",
+                "group",
+                "g",
+                "c",
+                "count",
+                "1",
+                "streams",
+                "xrg",
+                "0",
+            ],
+        ] {
+            let pkt = packet(&served);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::XreadgroupHistory),
+                "{served:?} must be floor-classified"
+            );
+            assert!(
+                super::parse_borrowed_plain_xreadgroup_history_packet(&pkt, &cfg).is_some(),
+                "{served:?} is claimed but its history parser refuses it"
+            );
+        }
+
+        // *9 is also the multi-key spelling. The class may claim the arity, but the
+        // parser must reject it so the floor arm reaches generic dispatch unchanged.
+        let multi = packet(&[
+            "XREADGROUP",
+            "GROUP",
+            "g",
+            "c",
+            "STREAMS",
+            "x1",
+            "x2",
+            "0",
+            "0",
+        ]);
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&multi, &cfg),
+            Some(C::XreadgroupHistory)
+        );
+        assert!(super::parse_borrowed_plain_xreadgroup_history_packet(&multi, &cfg).is_none());
+
+        // NOACK is *8 and has no history floor class. BLOCK has the COUNT form's *9
+        // width, so it is classed and then rejected by the parser before generic dispatch.
+        let noack = packet(&[
+            "XREADGROUP", "GROUP", "g", "c", "NOACK", "STREAMS", "xrg", "0",
+        ]);
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(&noack, &cfg),
+            Some(C::XreadgroupHistory)
+        );
+        let block = packet(&[
+            "XREADGROUP",
+            "GROUP",
+            "g",
+            "c",
+            "BLOCK",
+            "0",
+            "STREAMS",
+            "xrg",
+            "0",
+        ]);
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&block, &cfg),
+            Some(C::XreadgroupHistory)
+        );
+        assert!(super::parse_borrowed_plain_xreadgroup_history_packet(&block, &cfg).is_none());
     }
 
     #[test]

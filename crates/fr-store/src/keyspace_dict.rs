@@ -1,9 +1,9 @@
 //! `KeyDict` — a redis-dict-class chaining hash table in 100% safe Rust.
-//! (frankenredis-uhthd, step 1)
+//! (frankenredis-uhthd) **This IS `Store::entries`.**
 //!
 //! ## Why this exists
 //!
-//! fr's keyspace is a `hashbrown::HashMap<Arc<[u8]>, Entry>`. hashbrown is
+//! fr's keyspace was a `hashbrown::HashMap<Box<[u8]>, Entry>`. hashbrown is
 //! open-addressing, which gives compact storage but provides **neither** of the
 //! two capabilities a Redis keyspace needs natively:
 //!
@@ -24,12 +24,15 @@
 //! (no refcount header, no `Arc` sharing), so that when it replaces `entries` it
 //! also deletes `ordered_keys` + `random_key_slots` wholesale.
 //!
-//! ## Status
+//! ## Status: WIRED
 //!
-//! Step 1 = this self-contained, exhaustively-tested primitive (NOT yet wired
-//! into `Store`). Step 2 = swap it in for `entries`, route SCAN through
-//! [`KeyDict::scan`] and RANDOMKEY through [`KeyDict::random_sample`], and delete
-//! the side indices. Grows at load factor 1 and shrinks under ~10% fill
+//! `Store::entries` is a `KeyDict`. Keyspace SCAN runs through [`KeyDict::scan`]
+//! and RANDOMKEY through [`KeyDict::random_sample`], and `ordered_keys`,
+//! `random_key_slots` and the two SCAN resume caches are deleted. Measured against
+//! a live Redis 7.2.4 in one invocation, 1M keys, A/A null 0.9995:
+//! **248.1 -> 145.4 bytes/key, 3.0005x -> 1.7612x.**
+//!
+//! Grows at load factor 1 and shrinks under ~10% fill
 //! ([`maybe_shrink`](KeyDict::maybe_shrink), Redis's HASHTABLE_MIN_FILL policy) so a
 //! keyspace that spikes large then sheds its keys returns the bucket memory — the
 //! reverse-binary cursor keeps its no-missed-key guarantee across both grow and
@@ -39,25 +42,56 @@
 
 use std::hash::BuildHasher;
 
+/// "No node here" for a bucket head or a chain link.
+///
+/// (uhthd) Arena links are `u32` + sentinel rather than `Option<usize>` because this
+/// table's whole purpose is bytes per key. `Option<usize>` is **16 bytes**: `usize` has
+/// no spare bit pattern, so the discriminant cannot be packed into it and the compiler
+/// adds a whole word. That 16 is paid twice per key — once in `buckets` (load factor 1,
+/// so one bucket slot per key) and once in `Node::next` — for a value whose real range
+/// is bounded by the node arena.
+///
+/// The arena is bounded by `u32::MAX - 1` nodes, checked in [`KeyDict::alloc_node`].
+/// That is not a practical limit: a node is ~72 bytes plus its key allocation, so
+/// 4.29e9 of them is over 300 GB of keyspace index before any values.
+const NIL: u32 = u32::MAX;
+
 /// One key/value cell; `next` chains collisions in the same bucket.
 struct Node<V> {
-    hash: u64,
+    /// Low 32 bits of the key's hash, kept as a cheap pre-filter before the byte
+    /// compare and as the rehash input.
+    ///
+    /// (uhthd) 32 bits suffice for BOTH uses. As a rehash input it is exact: the
+    /// bucket index is `hash & mask`, and `mask` can never exceed `u32::MAX`, because
+    /// a bucket count above 2^32 would require more than `u32::MAX` nodes, which
+    /// [`KeyDict::alloc_node`] refuses. As a pre-filter it is a probabilistic
+    /// accelerator, never a decision: a collision here still falls through to the
+    /// full `*node.key == *key` compare, so a 32-bit match cannot return a wrong key.
+    hash: u32,
     key: Box<[u8]>,
     value: V,
-    next: Option<usize>,
+    /// Index of the next node in this bucket's chain, or [`NIL`].
+    next: u32,
 }
 
 /// A chaining hash table keyed by raw bytes, sized to a power of two so the
 /// bucket index is `hash & mask` and the [`reverse-binary cursor`](KeyDict::scan)
 /// is well-defined.
 pub struct KeyDict<V> {
-    buckets: Vec<Option<usize>>,
+    /// Head node index per bucket, or [`NIL`]. One `u32` per bucket, not one
+    /// `Option<usize>` — see [`NIL`].
+    buckets: Vec<u32>,
     /// Arena of key/value cells. Removed cells become `None` and their slot is
     /// pushed into `free`, so high-churn workloads do not allocate a fresh node
     /// per insert. This removes the pass226 `Box<Node>` allocation penalty while
     /// keeping key ownership and chain order semantics unchanged.
+    ///
+    /// `Option<Node<V>>` is the same size as `Node<V>`: `key: Box<[u8]>` is a
+    /// non-null pointer, so the `None` discriminant lives in that niche. Pinned by
+    /// `node_layout_is_compact_uhthd` so a future field reorder cannot silently add
+    /// a word per key.
     nodes: Vec<Option<Node<V>>>,
-    free: Vec<usize>,
+    free: Vec<u32>,
     /// `buckets.len() - 1`; bucket index = `hash & mask`.
     mask: u64,
     count: usize,
@@ -67,6 +101,45 @@ pub struct KeyDict<V> {
 impl<V> Default for KeyDict<V> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// (uhthd) Equality is by CONTENT, deliberately not by layout.
+///
+/// Two dicts holding the same keys almost never share a bucket layout: each carries
+/// its own randomly-seeded hasher, so the same key lands in different buckets and
+/// the arenas are ordered by insertion history. A derived `PartialEq` would compare
+/// those and report "not equal" for two keyspaces that are observably identical --
+/// which is exactly what the `Store` equality assertions in the test suite mean to
+/// check.
+///
+/// This is O(n) probes rather than an O(n) memcmp, which is the price of the
+/// randomised seeding that defeats hash flooding.
+impl<V: PartialEq> PartialEq for KeyDict<V> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.count != other.count {
+            return false;
+        }
+        self.iter()
+            .all(|(key, value)| other.get(key).is_some_and(|theirs| theirs == value))
+    }
+}
+
+impl<V: Eq> Eq for KeyDict<V> {}
+
+/// (uhthd) `Store` derives `Debug`, so the keyspace has to be printable. This
+/// deliberately prints a SUMMARY rather than the entries: a `Store` debug-print of a
+/// million-key keyspace would be unusable, and `Entry` values can hold whole
+/// collections. The counts are what anyone reading a `Store` dump actually wants
+/// from this field.
+impl<V> std::fmt::Debug for KeyDict<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyDict")
+            .field("len", &self.count)
+            .field("buckets", &self.buckets.len())
+            .field("arena_slots", &self.nodes.len())
+            .field("free_slots", &self.free.len())
+            .finish()
     }
 }
 
@@ -93,8 +166,7 @@ impl<V> KeyDict<V> {
     /// RANDOMKEY semantics as incremental growth.
     pub fn with_capacity(capacity: usize) -> Self {
         let n = Self::bucket_count_for_capacity(capacity);
-        let mut buckets = Vec::with_capacity(n);
-        buckets.resize_with(n, || None);
+        let buckets = vec![NIL; n];
         Self {
             buckets,
             nodes: Vec::with_capacity(capacity),
@@ -107,6 +179,13 @@ impl<V> KeyDict<V> {
 
     /// Reserve room for at least `additional` more inserts without resizing the
     /// bucket table or growing the live-node arena.
+    ///
+    /// (uhthd) Together with `bucket_count`, `storage_slots` and `capacity` this is
+    /// the sizing/observability surface: `capacity` is read by `Store`'s
+    /// flush-releases-capacity assertions and the other three by this module's own
+    /// growth, churn and presized-build tests. None is on a production path, so a
+    /// lib-only build sees them as unused.
+    #[allow(dead_code)]
     pub fn reserve(&mut self, additional: usize) {
         let needed = self.count.saturating_add(additional);
         if needed > self.buckets.len() {
@@ -128,6 +207,7 @@ impl<V> KeyDict<V> {
 
     /// Number of buckets (power of two). Exposed for tests / sizing.
     #[inline]
+    #[allow(dead_code)]
     pub fn bucket_count(&self) -> usize {
         self.buckets.len()
     }
@@ -135,27 +215,40 @@ impl<V> KeyDict<V> {
     /// Number of arena slots allocated for nodes, including free slots retained
     /// for reuse. Exposed for the churn guard; not part of Redis-visible state.
     #[inline]
+    #[allow(dead_code)]
     pub fn storage_slots(&self) -> usize {
         self.nodes.len()
     }
 
+    /// Low 32 bits of the key's hash. See [`Node::hash`] for why 32 is exact for
+    /// bucket selection and safe for the pre-filter.
     #[inline]
-    fn hash_key(&self, key: &[u8]) -> u64 {
-        self.hasher.hash_one(key)
+    fn hash_key(&self, key: &[u8]) -> u32 {
+        self.hasher.hash_one(key) as u32
     }
 
     #[inline]
-    fn bucket_of(&self, hash: u64) -> usize {
-        (hash & self.mask) as usize
+    fn bucket_of(&self, hash: u32) -> usize {
+        (u64::from(hash) & self.mask) as usize
     }
 
-    fn alloc_node(&mut self, node: Node<V>) -> usize {
+    /// Take a free arena slot or push a new one, returning its index.
+    ///
+    /// The `u32` arena bound is enforced HERE rather than trusted, because it is what
+    /// makes every `NIL`-sentinel link and the 32-bit `Node::hash` sound. Exceeding it
+    /// fails loudly instead of aliasing a live node with the sentinel.
+    fn alloc_node(&mut self, node: Node<V>) -> u32 {
         if let Some(idx) = self.free.pop() {
-            self.nodes[idx] = Some(node);
+            self.nodes[idx as usize] = Some(node);
             idx
         } else {
+            assert!(
+                self.nodes.len() < (NIL as usize),
+                "KeyDict node arena exceeded u32 addressing ({} slots)",
+                self.nodes.len()
+            );
             self.nodes.push(Some(node));
-            self.nodes.len() - 1
+            (self.nodes.len() - 1) as u32
         }
     }
 
@@ -163,8 +256,8 @@ impl<V> KeyDict<V> {
     pub fn get(&self, key: &[u8]) -> Option<&V> {
         let h = self.hash_key(key);
         let mut cur = self.buckets[self.bucket_of(h)];
-        while let Some(idx) = cur {
-            let node = self.nodes[idx]
+        while cur != NIL {
+            let node = self.nodes[cur as usize]
                 .as_ref()
                 .expect("bucket chain points at live node");
             if node.hash == h && *node.key == *key {
@@ -180,13 +273,13 @@ impl<V> KeyDict<V> {
         let h = self.hash_key(key);
         let b = self.bucket_of(h);
         let mut cur = self.buckets[b];
-        while let Some(idx) = cur {
-            let node = self.nodes[idx]
+        while cur != NIL {
+            let node = self.nodes[cur as usize]
                 .as_ref()
                 .expect("bucket chain points at live node");
             if node.hash == h && *node.key == *key {
                 return Some(
-                    &mut self.nodes[idx]
+                    &mut self.nodes[cur as usize]
                         .as_mut()
                         .expect("bucket chain points at live node")
                         .value,
@@ -202,6 +295,80 @@ impl<V> KeyDict<V> {
         self.get(key).is_some()
     }
 
+    /// Borrow the STORED key bytes alongside the value.
+    ///
+    /// (uhthd) The `Store` wiring needs this because several side maps
+    /// (`expiry_deadlines`, `hash_field_expires`, `volatile_keys`) are keyed by the
+    /// canonical key rather than by the caller's argv slice, and the caller's slice
+    /// is a borrow of a network buffer that does not outlive the command. Returning
+    /// the dict's own copy is what lets those maps be built without re-deriving the
+    /// key from the request. Mirrors `HashMap::get_key_value`.
+    pub fn get_key_value(&self, key: &[u8]) -> Option<(&[u8], &V)> {
+        let h = self.hash_key(key);
+        let mut cur = self.buckets[self.bucket_of(h)];
+        while cur != NIL {
+            let node = self.nodes[cur as usize]
+                .as_ref()
+                .expect("bucket chain points at live node");
+            if node.hash == h && *node.key == *key {
+                return Some((&node.key, &node.value));
+            }
+            cur = node.next;
+        }
+        None
+    }
+
+    /// Node-arena slots reserved, the analogue of `HashMap::capacity`.
+    ///
+    /// (uhthd) Reported off the ARENA and not off the bucket array because it is the
+    /// arena that holds the keys and values, and because `release_empty_keyspace_capacity`
+    /// asserts this reaches exactly 0 after a flush — a bucket-derived figure could
+    /// not, since the table keeps its four-slot floor.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn capacity(&self) -> usize {
+        self.nodes.capacity()
+    }
+
+    /// Release memory the live entries do not need: compact the arena, shrink the
+    /// bucket table to the smallest power of two that still holds `count`, and hand
+    /// back both Vecs' spare capacity.
+    ///
+    /// (uhthd) `Store::release_empty_keyspace_capacity` runs this after a flush and
+    /// asserts `capacity() == 0`, so a plain `Vec::shrink_to_fit` on `nodes` is NOT
+    /// enough: removal leaves `None` holes and `nodes.len()` stays at the high-water
+    /// mark, so `shrink_to_fit` would only drop capacity BEYOND that mark and a
+    /// flushed keyspace would keep its whole arena forever. The holes are therefore
+    /// compacted out first.
+    ///
+    /// Compaction RENUMBERS nodes, which invalidates every bucket head and `next`
+    /// link, so the bucket table is rebuilt from the surviving nodes rather than
+    /// patched — the same rehash `resize_buckets` performs, and equally safe for the
+    /// reverse-binary cursor, which derives everything from `hash & mask`.
+    pub fn shrink_to_fit(&mut self) {
+        if !self.free.is_empty() {
+            self.nodes.retain(|slot| slot.is_some());
+            self.free.clear();
+            self.free.shrink_to_fit();
+            debug_assert_eq!(self.nodes.len(), self.count);
+            // Every index moved, so relink from scratch rather than patching.
+            let mask = self.mask;
+            self.buckets.fill(NIL);
+            for (idx, node) in self.nodes.iter_mut().enumerate() {
+                let node = node.as_mut().expect("holes were just compacted out");
+                let b = (u64::from(node.hash) & mask) as usize;
+                node.next = self.buckets[b];
+                self.buckets[b] = idx as u32;
+            }
+        }
+        self.nodes.shrink_to_fit();
+        let target = Self::bucket_count_for_capacity(self.count);
+        if target < self.buckets.len() {
+            self.resize_buckets(target);
+        }
+        self.buckets.shrink_to_fit();
+    }
+
     /// Insert `key`/`value`, returning the previous value if the key existed.
     /// The key bytes are owned once (`Box<[u8]>`), with no `Arc` header.
     pub fn insert(&mut self, key: Box<[u8]>, value: V) -> Option<V> {
@@ -209,8 +376,8 @@ impl<V> KeyDict<V> {
         let b = self.bucket_of(h);
         // Overwrite in place if present.
         let mut cur = self.buckets[b];
-        while let Some(idx) = cur {
-            let node = self.nodes[idx]
+        while cur != NIL {
+            let node = self.nodes[cur as usize]
                 .as_mut()
                 .expect("bucket chain points at live node");
             if node.hash == h && *node.key == *key {
@@ -236,7 +403,7 @@ impl<V> KeyDict<V> {
             value,
             next: head,
         });
-        self.buckets[b] = Some(idx);
+        self.buckets[b] = idx;
         self.count += 1;
         if self.count > self.buckets.len() {
             self.grow();
@@ -248,26 +415,26 @@ impl<V> KeyDict<V> {
     pub fn remove(&mut self, key: &[u8]) -> Option<V> {
         let h = self.hash_key(key);
         let b = self.bucket_of(h);
-        let mut prev: Option<usize> = None;
+        let mut prev = NIL;
         let mut cur = self.buckets[b];
-        while let Some(idx) = cur {
-            let node = self.nodes[idx]
+        while cur != NIL {
+            let node = self.nodes[cur as usize]
                 .as_ref()
                 .expect("bucket chain points at live node");
             let next = node.next;
             if node.hash == h && *node.key == *key {
-                let removed = self.nodes[idx]
+                let removed = self.nodes[cur as usize]
                     .take()
                     .expect("bucket chain points at live node");
-                if let Some(prev_idx) = prev {
-                    self.nodes[prev_idx]
+                if prev != NIL {
+                    self.nodes[prev as usize]
                         .as_mut()
                         .expect("bucket chain points at live node")
                         .next = removed.next;
                 } else {
                     self.buckets[b] = removed.next;
                 }
-                self.free.push(idx);
+                self.free.push(cur);
                 self.count -= 1;
                 self.maybe_shrink();
                 return Some(removed.value);
@@ -327,13 +494,12 @@ impl<V> KeyDict<V> {
             return;
         }
         let new_mask = (new_len as u64) - 1;
-        let mut buckets: Vec<Option<usize>> = Vec::with_capacity(new_len);
-        buckets.resize_with(new_len, || None);
+        let mut buckets: Vec<u32> = vec![NIL; new_len];
         for (idx, node) in self.nodes.iter_mut().enumerate() {
             if let Some(node) = node {
-                let b = (node.hash & new_mask) as usize;
+                let b = (u64::from(node.hash) & new_mask) as usize;
                 node.next = buckets[b];
-                buckets[b] = Some(idx);
+                buckets[b] = idx as u32;
             }
         }
         self.buckets = buckets;
@@ -342,7 +508,7 @@ impl<V> KeyDict<V> {
 
     /// Remove all entries (keeps the allocated bucket array, like `HashMap::clear`).
     pub fn clear(&mut self) {
-        self.buckets.fill(None);
+        self.buckets.fill(NIL);
         self.nodes.clear();
         self.free.clear();
         self.count = 0;
@@ -353,7 +519,7 @@ impl<V> KeyDict<V> {
         KeyDictIter {
             dict: self,
             bucket: 0,
-            current: None,
+            current: NIL,
         }
     }
 
@@ -377,8 +543,8 @@ impl<V> KeyDict<V> {
         loop {
             let b = (v & self.mask) as usize;
             let mut node = self.buckets[b];
-            while let Some(idx) = node {
-                let n = self.nodes[idx]
+            while node != NIL {
+                let n = self.nodes[node as usize]
                     .as_ref()
                     .expect("bucket chain points at live node");
                 emit(&n.key, &n.value);
@@ -415,26 +581,29 @@ impl<V> KeyDict<V> {
         // Bounded retries: with load factor <= 1 a random bucket is non-empty
         // with decent probability; cap attempts then fall back to a linear scan
         // from a random origin so we always return in O(buckets) worst case.
+        // Walk a chain as an iterator of arena indices, terminating on the NIL
+        // sentinel. `successors` needs an `Option`, so the sentinel is mapped to
+        // `None` here rather than being represented as one in the node.
+        let chain = |head: u32| {
+            std::iter::successors(Some(head), |&idx| {
+                match self.nodes[idx as usize]
+                    .as_ref()
+                    .expect("bucket chain points at live node")
+                    .next
+                {
+                    NIL => None,
+                    next => Some(next),
+                }
+            })
+        };
         for _ in 0..64 {
             let b = reduce(next_rand(), nb);
-            if let Some(head) = self.buckets[b] {
-                let chain_len = std::iter::successors(Some(head), |&idx| {
-                    self.nodes[idx]
-                        .as_ref()
-                        .expect("bucket chain points at live node")
-                        .next
-                })
-                .count();
+            let head = self.buckets[b];
+            if head != NIL {
+                let chain_len = chain(head).count();
                 let pick = reduce(next_rand(), chain_len);
-                let chosen = std::iter::successors(Some(head), |&idx| {
-                    self.nodes[idx]
-                        .as_ref()
-                        .expect("bucket chain points at live node")
-                        .next
-                })
-                .nth(pick)
-                .unwrap();
-                let chosen = self.nodes[chosen]
+                let chosen = chain(head).nth(pick).expect("pick is within chain length");
+                let chosen = self.nodes[chosen as usize]
                     .as_ref()
                     .expect("bucket chain points at live node");
                 return Some((&chosen.key, &chosen.value));
@@ -444,8 +613,9 @@ impl<V> KeyDict<V> {
         let start = reduce(next_rand(), nb);
         for i in 0..self.buckets.len() {
             let b = (start + i) % self.buckets.len();
-            if let Some(head) = self.buckets[b] {
-                let head = self.nodes[head]
+            let head = self.buckets[b];
+            if head != NIL {
+                let head = self.nodes[head as usize]
                     .as_ref()
                     .expect("bucket chain points at live node");
                 return Some((&head.key, &head.value));
@@ -459,7 +629,7 @@ impl<V> KeyDict<V> {
 pub struct KeyDictIter<'a, V> {
     dict: &'a KeyDict<V>,
     bucket: usize,
-    current: Option<usize>,
+    current: u32,
 }
 
 impl<'a, V> Iterator for KeyDictIter<'a, V> {
@@ -467,8 +637,8 @@ impl<'a, V> Iterator for KeyDictIter<'a, V> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(idx) = self.current {
-                let node = self.dict.nodes[idx]
+            if self.current != NIL {
+                let node = self.dict.nodes[self.current as usize]
                     .as_ref()
                     .expect("bucket chain points at live node");
                 self.current = node.next;
@@ -559,6 +729,193 @@ mod tests {
             cand < base,
             "KeyDict must use less RAM than the 3 side indices"
         );
+    }
+
+    /// (uhthd) The per-key byte cost IS the feature here, so the layout that
+    /// produces it is asserted rather than assumed.
+    ///
+    /// Three separate properties, each of which a plausible edit would silently
+    /// break:
+    ///
+    /// 1. **A bucket slot is 4 bytes.** At load factor 1 there is one bucket per
+    ///    key, so widening this to `Option<usize>` costs 12 B/key on its own.
+    /// 2. **`Option<Node<V>>` is the same size as `Node<V>`.** The arena stores
+    ///    `Option`s so removal can vacate a slot; that is free only while
+    ///    `key: Box<[u8]>` donates its non-null niche. Replacing the key with a
+    ///    niche-less representation (a raw index pair, say) would add a word to
+    ///    every node without touching any line that looks like a size decision.
+    /// 3. **A node carrying a 48-byte value fits in 72 bytes.** 4 (hash) + 16
+    ///    (key) + 48 (value) + 4 (next) with no padding. This is the number the
+    ///    RAM claim is built from; `<=` rather than `==` so a smaller future
+    ///    layout is not a test failure.
+    ///
+    /// A negative control is built in: the assertions are written against a
+    /// concrete 48-byte payload, so a regression to `Option<usize>` links or a
+    /// lost niche fails here, not merely in an RSS benchmark that nobody runs.
+    #[test]
+    fn node_layout_is_compact_uhthd() {
+        use std::mem::size_of;
+
+        /// Stand-in for `Store`'s `Entry`, which is pinned at <= 48 bytes. The
+        /// payload exists to give the type its size; nothing reads it.
+        #[allow(dead_code)]
+        struct FortyEight([u64; 6]);
+        assert_eq!(size_of::<FortyEight>(), 48);
+
+        assert_eq!(size_of::<u32>(), 4, "bucket slot must stay 4 bytes");
+        assert_eq!(
+            size_of::<Option<Node<FortyEight>>>(),
+            size_of::<Node<FortyEight>>(),
+            "arena Option must ride the Box<[u8]> niche, not add a word per key"
+        );
+        assert!(
+            size_of::<Node<FortyEight>>() <= 72,
+            "node with a 48-byte value must fit in 72 bytes, got {}",
+            size_of::<Node<FortyEight>>()
+        );
+    }
+
+    /// (uhthd) The 32-bit `Node::hash` is a pre-filter, never a decision: two keys
+    /// whose stored hashes are equal must still be told apart by the byte compare.
+    ///
+    /// Constructing a genuine 32-bit collision would require inverting foldhash, so
+    /// this drives the property from the other side — force every key into ONE
+    /// bucket by keeping the table at its 4-bucket minimum is not possible either
+    /// (it grows), so instead insert enough keys that chains are exercised and
+    /// assert every single key still resolves to its own value. A `hash`-only
+    /// match that skipped `*node.key == *key` would return a neighbour's value for
+    /// at least one of these.
+    #[test]
+    fn chain_lookup_distinguishes_keys_not_just_hashes_uhthd() {
+        let n = 20_000usize;
+        let mut d: KeyDict<usize> = KeyDict::new();
+        for i in 0..n {
+            d.insert(format!("key:{i:08}").into_bytes().into_boxed_slice(), i);
+        }
+        assert_eq!(d.len(), n);
+        for i in 0..n {
+            assert_eq!(
+                d.get(format!("key:{i:08}").as_bytes()),
+                Some(&i),
+                "key {i} resolved to the wrong node"
+            );
+        }
+        // Absent keys that share the live keys' shape must still miss.
+        for i in n..n + 500 {
+            assert_eq!(d.get(format!("key:{i:08}").as_bytes()), None);
+        }
+    }
+
+    /// (uhthd) `Store::release_empty_keyspace_capacity` asserts `capacity() == 0`
+    /// after a flush, so this pins the property that assertion depends on — AND the
+    /// case that makes it non-trivial.
+    ///
+    /// The negative case is the churned dict: `remove` leaves a `None` hole and
+    /// `nodes.len()` stays at the high-water mark, so an implementation that only
+    /// called `Vec::shrink_to_fit` would drop capacity beyond the mark and leave a
+    /// flushed keyspace holding its entire arena forever. Building 5,000 keys,
+    /// deleting them all, and demanding 0 is exactly that mistake's shape.
+    #[test]
+    fn shrink_to_fit_releases_a_flushed_keyspace_uhthd() {
+        let mut d: KeyDict<u64> = KeyDict::with_capacity(5_000);
+        for i in 0..5_000u64 {
+            d.insert(format!("key:{i}").into_bytes().into_boxed_slice(), i);
+        }
+        assert!(d.capacity() >= 5_000);
+
+        // Remove one at a time (the churn path that leaves holes), not clear().
+        for i in 0..5_000u64 {
+            assert_eq!(d.remove(format!("key:{i}").as_bytes()), Some(i));
+        }
+        assert_eq!(d.len(), 0);
+        d.shrink_to_fit();
+        assert_eq!(d.capacity(), 0, "a flushed keyspace must release its arena");
+
+        // And the dict is still usable afterwards.
+        d.insert(k("after"), 7);
+        assert_eq!(d.get(b"after"), Some(&7));
+    }
+
+    /// (uhthd) Compaction RENUMBERS every node, which invalidates every bucket head
+    /// and `next` link. This is the test that a half-done implementation fails: it
+    /// shrinks a dict that is still HOLDING data behind holes, then demands that
+    /// every survivor is still reachable by lookup, by iteration, and by a full
+    /// SCAN. Forgetting to rebuild the bucket table leaves survivors linked by stale
+    /// indices — lookups miss, or worse, return a neighbour.
+    #[test]
+    fn shrink_to_fit_preserves_every_surviving_key_uhthd() {
+        let mut d: KeyDict<u64> = KeyDict::new();
+        for i in 0..4_000u64 {
+            d.insert(format!("key:{i}").into_bytes().into_boxed_slice(), i);
+        }
+        // Punch holes: drop every third key, so `free` is non-empty and the arena
+        // is fragmented rather than merely over-allocated.
+        let mut survivors: Vec<u64> = Vec::new();
+        for i in 0..4_000u64 {
+            if i % 3 == 0 {
+                assert_eq!(d.remove(format!("key:{i}").as_bytes()), Some(i));
+            } else {
+                survivors.push(i);
+            }
+        }
+        assert_eq!(d.len(), survivors.len());
+
+        d.shrink_to_fit();
+
+        assert_eq!(d.len(), survivors.len(), "shrink must not lose entries");
+        for &i in &survivors {
+            assert_eq!(
+                d.get(format!("key:{i}").as_bytes()),
+                Some(&i),
+                "key {i} unreachable after compaction"
+            );
+        }
+        for i in (0..4_000u64).filter(|i| i % 3 == 0) {
+            assert_eq!(
+                d.get(format!("key:{i}").as_bytes()),
+                None,
+                "removed key {i} came back after compaction"
+            );
+        }
+        // Iteration and a full SCAN must both see exactly the survivors.
+        let mut iterated: Vec<u64> = d.iter().map(|(_, v)| *v).collect();
+        iterated.sort_unstable();
+        assert_eq!(iterated, survivors);
+
+        let mut scanned: Vec<u64> = Vec::new();
+        let mut cursor = 0u64;
+        loop {
+            cursor = d.scan(cursor, 32, |_, v| scanned.push(*v));
+            if cursor == 0 {
+                break;
+            }
+        }
+        scanned.sort_unstable();
+        scanned.dedup();
+        assert_eq!(scanned, survivors, "SCAN must still reach every survivor");
+    }
+
+    /// (uhthd) `get_key_value` must hand back the dict's OWN key bytes, not the
+    /// lookup slice — that is the whole reason the `Store` wiring needs it, since
+    /// the lookup slice borrows a network buffer that does not outlive the command.
+    /// Probing with a separately-allocated equal slice and asserting the returned
+    /// bytes are equal but at a DIFFERENT address is what distinguishes a real
+    /// implementation from one that echoes its argument back.
+    #[test]
+    fn get_key_value_returns_the_stored_key_not_the_probe_uhthd() {
+        let mut d: KeyDict<u32> = KeyDict::new();
+        d.insert(k("alpha"), 1);
+
+        let probe: Vec<u8> = b"alpha".to_vec();
+        let (stored, value) = d.get_key_value(&probe).expect("present");
+        assert_eq!(stored, b"alpha");
+        assert_eq!(value, &1);
+        assert_ne!(
+            stored.as_ptr(),
+            probe.as_ptr(),
+            "must return the dict's own key, not the caller's slice"
+        );
+        assert_eq!(d.get_key_value(b"absent"), None);
     }
 
     // Small deterministic LCG so tests are reproducible without rand crates and

@@ -566,6 +566,158 @@ impl<'a> Iterator for GenericSetIter<'a> {
 // `HashFieldBytes` / `FieldHashTable` (the former inline-or-heap IndexMap backing
 // for the Hash variant) were superseded by `CompactFieldMap` (frankenredis-ideww).
 
+/// An immutable RDB hash listpack plus a bounded open-addressed field index.
+///
+/// RDB `HASH_LISTPACK` values already arrive as one contiguous allocation. Rebuilding
+/// them into `PackedStrMap` copied every field and value into a second arena before
+/// freeing the source blob. This representation keeps that blob and indexes the
+/// field spans directly. The table is deliberately bounded by the configured
+/// listpack entry ceiling; a tag collision is never trusted without an exact byte
+/// comparison, so an absent field cannot resolve to an unrelated value.
+#[derive(Clone, Debug)]
+pub struct VerbatimListpackHash {
+    bytes: Vec<u8>,
+    entries: Vec<ListpackValueSpan>,
+    /// Zero is empty; a non-zero slot stores `pair_index + 1`.
+    slots: Vec<u32>,
+}
+
+impl VerbatimListpackHash {
+    fn field_hash(field: &[u8]) -> u64 {
+        // The table is bounded by the configured small-hash ceiling, so even a
+        // deliberately colliding payload has bounded work. The final byte compare
+        // below remains mandatory for absent-field safety.
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for &byte in field {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    fn slot_capacity(pair_count: usize) -> Option<usize> {
+        pair_count
+            .checked_mul(2)?
+            .max(2)
+            .checked_next_power_of_two()
+    }
+
+    /// Retain a valid, unique RDB hash listpack without re-packing its payload.
+    ///
+    /// The inner `Err` returns the unchanged blob for the normal rebuild path:
+    /// either the value would not remain listpack-encoded under the live
+    /// thresholds, or duplicate fields need RDB-load's existing last-wins
+    /// handling. Invalid listpacks remain errors rather than becoming a deferred
+    /// failure.
+    pub fn try_from_rdb(
+        bytes: Vec<u8>,
+        max_entries: usize,
+        max_value: usize,
+    ) -> Result<Result<Self, Vec<u8>>, fr_persist::listpack::ListpackError> {
+        let entries = fr_persist::listpack::decode_value_spans(&bytes)?;
+        if !entries.len().is_multiple_of(2) {
+            return Ok(Err(bytes));
+        }
+        let pair_count = entries.len() / 2;
+        if pair_count == 0
+            || pair_count > max_entries
+            || entries.iter().any(|entry| entry.byte_len() > max_value)
+        {
+            return Ok(Err(bytes));
+        }
+        let Some(slot_capacity) = Self::slot_capacity(pair_count) else {
+            return Ok(Err(bytes));
+        };
+        let mut slots = vec![0_u32; slot_capacity];
+        let mask = slot_capacity - 1;
+        for pair_index in 0..pair_count {
+            let field = entries[pair_index * 2].as_bytes(&bytes);
+            let mut slot = (Self::field_hash(field) as usize) & mask;
+            loop {
+                let occupant = slots[slot];
+                if occupant == 0 {
+                    let Ok(index) = u32::try_from(pair_index + 1) else {
+                        return Ok(Err(bytes));
+                    };
+                    slots[slot] = index;
+                    break;
+                }
+                let existing = entries[(occupant as usize - 1) * 2].as_bytes(&bytes);
+                if existing == field {
+                    // RDB load's duplicate behavior is last-wins. Retaining the
+                    // first listpack span would silently change that contract, so
+                    // keep the established materializing route for this case.
+                    return Ok(Err(bytes));
+                }
+                slot = (slot + 1) & mask;
+            }
+        }
+        Ok(Ok(Self {
+            bytes,
+            entries,
+            slots,
+        }))
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len() / 2
+    }
+
+    #[must_use]
+    pub fn get(&self, field: &[u8]) -> Option<&[u8]> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut slot = (Self::field_hash(field) as usize) & mask;
+        loop {
+            let occupant = self.slots[slot];
+            if occupant == 0 {
+                return None;
+            }
+            let pair_index = occupant as usize - 1;
+            if self.entries[pair_index * 2].as_bytes(&self.bytes) == field {
+                return Some(self.entries[pair_index * 2 + 1].as_bytes(&self.bytes));
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+
+    #[must_use]
+    pub fn get_index(&self, index: usize) -> Option<(&[u8], &[u8])> {
+        let first = index.checked_mul(2)?;
+        Some((
+            self.entries.get(first)?.as_bytes(&self.bytes),
+            self.entries.get(first + 1)?.as_bytes(&self.bytes),
+        ))
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> VerbatimListpackHashIter<'_> {
+        VerbatimListpackHashIter {
+            map: self,
+            pair_index: 0,
+        }
+    }
+}
+
+/// Borrowing iterator over a [`VerbatimListpackHash`] in RDB listpack order.
+pub struct VerbatimListpackHashIter<'a> {
+    map: &'a VerbatimListpackHash,
+    pair_index: usize,
+}
+
+impl<'a> Iterator for VerbatimListpackHashIter<'a> {
+    type Item = (&'a [u8], &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.map.get_index(self.pair_index)?;
+        self.pair_index += 1;
+        Some(item)
+    }
+}
+
 /// Storage for a hash's field→value map: a packed listpack-style buffer while
 /// small, promoting to an `IndexMap` hashtable past the threshold. Drop-in for
 /// the former `IndexMap` alias — same insertion-ordered iteration and identical
@@ -575,6 +727,7 @@ impl<'a> Iterator for GenericSetIter<'a> {
 pub enum HashFieldMap {
     Packed(PackedStrMap),
     Hash(CompactFieldMap),
+    Listpack(VerbatimListpackHash),
 }
 
 impl Default for HashFieldMap {
@@ -584,6 +737,17 @@ impl Default for HashFieldMap {
 }
 
 impl HashFieldMap {
+    /// Build the immutable RDB-load representation when the raw listpack remains
+    /// within the current small-hash thresholds and has unique fields.
+    pub fn try_from_rdb_listpack(
+        bytes: Vec<u8>,
+        max_entries: usize,
+        max_value: usize,
+    ) -> Result<Result<Self, Vec<u8>>, fr_persist::listpack::ListpackError> {
+        VerbatimListpackHash::try_from_rdb(bytes, max_entries, max_value)
+            .map(|map| map.map(HashFieldMap::Listpack))
+    }
+
     /// (frankenredis-qxfmr) Build a map from already-unique pairs in ONE O(n)
     /// pass, instead of N incremental `insert`s that each do an O(n) `locate` /
     /// `contains_key` scan (O(n²) total) plus a mid-stream Packed→Hash promotion
@@ -744,6 +908,7 @@ impl HashFieldMap {
     /// command occurrence order, and duplicate command fields use the last value.
     #[must_use]
     pub fn try_update_existing_packed_borrowed(&mut self, flat: &[&[u8]]) -> Option<usize> {
+        self.materialize_listpack();
         let pair_count = flat.len() / 2;
         let HashFieldMap::Packed(packed) = self else {
             return None;
@@ -822,6 +987,7 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Packed(p) => p.len(),
             HashFieldMap::Hash(h) => h.len(),
+            HashFieldMap::Listpack(l) => l.len(),
         }
     }
 
@@ -835,6 +1001,7 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Packed(p) => p.get(field),
             HashFieldMap::Hash(h) => h.get(field),
+            HashFieldMap::Listpack(l) => l.get(field),
         }
     }
 
@@ -843,6 +1010,7 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Packed(p) => p.contains_key(field),
             HashFieldMap::Hash(h) => h.contains_key(field),
+            HashFieldMap::Listpack(l) => l.get(field).is_some(),
         }
     }
 
@@ -851,21 +1019,38 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Packed(p) => p.get_index(idx),
             HashFieldMap::Hash(h) => h.get_index(idx),
+            HashFieldMap::Listpack(l) => l.get_index(idx),
         }
     }
 
+    fn materialize_listpack(&mut self) {
+        let HashFieldMap::Listpack(listpack) = self else {
+            return;
+        };
+        let pairs = listpack
+            .iter()
+            .map(|(field, value)| (field.to_vec(), value.to_vec()))
+            .collect();
+        *self = HashFieldMap::from_unique_pairs(pairs);
+    }
+
     fn promote(&mut self) {
-        if let HashFieldMap::Packed(p) = self {
-            let mut h = CompactFieldMap::new();
-            for (k, v) in p.iter() {
-                h.insert(k, v);
+        match self {
+            HashFieldMap::Packed(p) => {
+                let mut h = CompactFieldMap::new();
+                for (k, v) in p.iter() {
+                    h.insert(k, v);
+                }
+                *self = HashFieldMap::Hash(h);
             }
-            *self = HashFieldMap::Hash(h);
+            HashFieldMap::Listpack(_) => self.materialize_listpack(),
+            HashFieldMap::Hash(_) => {}
         }
     }
 
     /// Insert/overwrite, returning the previous value (matches `IndexMap::insert`).
     pub fn insert(&mut self, field: Vec<u8>, value: Vec<u8>) -> Option<Vec<u8>> {
+        self.materialize_listpack();
         // (cc_fr) Test the O(1) promotion PRECONDITION (at entry cap / oversized field or value)
         // before the O(n) `contains_key` locate scan: promotion is impossible below all caps, so a
         // steady-state small-hash HSET short-circuits and skips this scan entirely — collapsing the
@@ -882,6 +1067,7 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Packed(p) => p.insert(field, value),
             HashFieldMap::Hash(h) => h.insert(&field, &value),
+            HashFieldMap::Listpack(_) => unreachable!("listpack was materialized before mutation"),
         }
     }
 
@@ -897,6 +1083,7 @@ impl HashFieldMap {
     /// a single `get_mut`. The promotion check fires under the identical condition
     /// as `insert` (new field only), so the encoding transition is unchanged.
     pub fn insert_borrowed(&mut self, field: &[u8], value: Vec<u8>) -> bool {
+        self.materialize_listpack();
         // (cc_fr) O(1) promotion precondition before the O(n) `contains_key` locate scan (see
         // `insert`): the steady-state small-hash HSET (below all caps) short-circuits and skips
         // this scan, so a packed HSET does ONE locate (insert_borrowed's) instead of two. `&&`
@@ -916,13 +1103,16 @@ impl HashFieldMap {
             // get_mut/insert split byte-for-byte while avoiding old-value
             // allocation on duplicate-field HSET.
             HashFieldMap::Hash(h) => h.insert_borrowed(field, &value),
+            HashFieldMap::Listpack(_) => unreachable!("listpack was materialized before mutation"),
         }
     }
 
     pub fn shift_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
+        self.materialize_listpack();
         match self {
             HashFieldMap::Packed(p) => p.shift_remove(field),
             HashFieldMap::Hash(h) => h.shift_remove(field),
+            HashFieldMap::Listpack(_) => unreachable!("listpack was materialized before mutation"),
         }
     }
 
@@ -934,9 +1124,11 @@ impl HashFieldMap {
     /// unordered too), so swapping is safe. `Packed` (listpack) keeps the
     /// order-preserving remove to match redis's small-hash listpack delete.
     pub fn swap_remove(&mut self, field: &[u8]) -> Option<Vec<u8>> {
+        self.materialize_listpack();
         match self {
             HashFieldMap::Packed(p) => p.shift_remove(field),
             HashFieldMap::Hash(h) => h.swap_remove(field),
+            HashFieldMap::Listpack(_) => unreachable!("listpack was materialized before mutation"),
         }
     }
 
@@ -945,9 +1137,11 @@ impl HashFieldMap {
     /// owned-value allocation that `swap_remove` makes on the hashtable path.
     /// Same final state and order semantics as `swap_remove(field).is_some()`.
     pub fn delete(&mut self, field: &[u8]) -> bool {
+        self.materialize_listpack();
         match self {
             HashFieldMap::Packed(p) => p.shift_remove(field).is_some(),
             HashFieldMap::Hash(h) => h.delete(field),
+            HashFieldMap::Listpack(_) => unreachable!("listpack was materialized before mutation"),
         }
     }
 
@@ -956,6 +1150,7 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Packed(p) => HashFieldMapIter::Packed(p.iter()),
             HashFieldMap::Hash(h) => HashFieldMapIter::Hash(h.iter()),
+            HashFieldMap::Listpack(l) => HashFieldMapIter::Listpack(l.iter()),
         }
     }
 
@@ -965,6 +1160,7 @@ impl HashFieldMap {
             // negligible. The hashtable-range variant skips the value entirely.
             HashFieldMap::Packed(p) => HashFieldMapKeyIter::Packed(p.iter()),
             HashFieldMap::Hash(h) => HashFieldMapKeyIter::Hash(h.field_iter()),
+            HashFieldMap::Listpack(l) => HashFieldMapKeyIter::Listpack(l.iter()),
         }
     }
 
@@ -998,6 +1194,7 @@ impl FromIterator<(Vec<u8>, Vec<u8>)> for HashFieldMap {
 pub enum HashFieldMapKeyIter<'a> {
     Packed(PackedStrMapIter<'a>),
     Hash(CompactFieldMapFieldIter<'a>),
+    Listpack(VerbatimListpackHashIter<'a>),
 }
 
 impl<'a> Iterator for HashFieldMapKeyIter<'a> {
@@ -1006,6 +1203,7 @@ impl<'a> Iterator for HashFieldMapKeyIter<'a> {
         match self {
             HashFieldMapKeyIter::Packed(it) => it.next().map(|(k, _)| k),
             HashFieldMapKeyIter::Hash(it) => it.next(),
+            HashFieldMapKeyIter::Listpack(it) => it.next().map(|(k, _)| k),
         }
     }
 }
@@ -1014,6 +1212,7 @@ impl<'a> Iterator for HashFieldMapKeyIter<'a> {
 pub enum HashFieldMapIter<'a> {
     Packed(PackedStrMapIter<'a>),
     Hash(CompactFieldMapIter<'a>),
+    Listpack(VerbatimListpackHashIter<'a>),
 }
 
 impl<'a> Iterator for HashFieldMapIter<'a> {
@@ -1023,6 +1222,7 @@ impl<'a> Iterator for HashFieldMapIter<'a> {
         match self {
             HashFieldMapIter::Packed(it) => it.next(),
             HashFieldMapIter::Hash(it) => it.next(),
+            HashFieldMapIter::Listpack(it) => it.next(),
         }
     }
 }
@@ -6833,6 +7033,56 @@ mod tests {
         // redis: HGETALL -> [f1,v1,f1,v2], insertion order, duplicate included.
         assert_eq!(m.get_index(0), Some((&b"f1"[..], &b"v1"[..])));
         assert_eq!(m.get_index(1), Some((&b"f1"[..], &b"v2"[..])));
+    }
+
+    #[test]
+    fn verbatim_rdb_hash_listpack_indexes_reads_and_materializes_on_write_qj6jn() {
+        let blob = fr_persist::encode_listpack_strings_blob(&[
+            b"alpha".as_slice(),
+            b"one".as_slice(),
+            b"beta".as_slice(),
+            b"2".as_slice(),
+        ])
+        .expect("fixture listpack encodes");
+        let mut map = super::HashFieldMap::try_from_rdb_listpack(blob, 512, 64)
+            .expect("valid listpack")
+            .expect("unique small listpack retains its raw payload");
+        assert!(matches!(map, super::HashFieldMap::Listpack(_)));
+        assert_eq!(map.get(b"alpha"), Some(&b"one"[..]));
+        assert_eq!(map.get(b"beta"), Some(&b"2"[..]));
+        assert_eq!(
+            map.get(b"absent"),
+            None,
+            "a hash collision must not invent a field"
+        );
+        assert_eq!(
+            map.iter().collect::<Vec<_>>(),
+            vec![(&b"alpha"[..], &b"one"[..]), (&b"beta"[..], &b"2"[..])]
+        );
+
+        assert_eq!(
+            map.insert(b"alpha".to_vec(), b"replaced".to_vec()),
+            Some(b"one".to_vec())
+        );
+        assert!(matches!(map, super::HashFieldMap::Packed(_)));
+        assert_eq!(map.get(b"alpha"), Some(&b"replaced"[..]));
+        assert_eq!(map.get(b"beta"), Some(&b"2"[..]));
+
+        let duplicate = fr_persist::encode_listpack_strings_blob(&[
+            b"field".as_slice(),
+            b"first".as_slice(),
+            b"field".as_slice(),
+            b"last".as_slice(),
+        ])
+        .expect("duplicate fixture encodes");
+        assert!(
+            matches!(
+                super::HashFieldMap::try_from_rdb_listpack(duplicate, 512, 64)
+                    .expect("duplicate is structurally valid"),
+                Err(_)
+            ),
+            "RDB-load duplicates must retain the established last-wins fallback"
+        );
     }
 
     use super::{

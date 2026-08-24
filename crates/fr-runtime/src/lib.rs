@@ -15127,7 +15127,13 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        // `processCommand` applies the RDB/AOF disk-error gate to PING even
+        // though PING is otherwise read-only. Keep that exceptional command
+        // rule here: a denied PING must fall through to
+        // `reject_due_to_disk_write_error` for the canonical MISCONF reply.
+        if self.active_disk_write_denial().is_some()
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
             return None;
         }
 
@@ -27255,12 +27261,14 @@ impl Runtime {
         let keys_start = out.len();
         let mut returned = 0usize;
         let next_cursor = self.server.store.scan_in_db_visit(
-            db,
-            cursor,
-            pattern,
-            type_filter,
-            count,
-            now_ms,
+            fr_store::ScanQuery {
+                db,
+                cursor,
+                pattern,
+                type_filter,
+                count,
+                now_ms,
+            },
             |logical| {
                 returned += 1;
                 if !suppress_reply {
@@ -27665,12 +27673,22 @@ impl Runtime {
         let next_cursor =
             self.server
                 .store
-                .scan_in_db_visit(db, cursor, None, None, 10, now_ms, |logical| {
-                    count += 1;
-                    if !suppress_reply {
-                        fr_protocol::encode_bulk_string_slice(Some(logical), resp3, out);
-                    }
-                });
+                .scan_in_db_visit(
+                    fr_store::ScanQuery {
+                        db,
+                        cursor,
+                        pattern: None,
+                        type_filter: None,
+                        count: 10,
+                        now_ms,
+                    },
+                    |logical| {
+                        count += 1;
+                        if !suppress_reply {
+                            fr_protocol::encode_bulk_string_slice(Some(logical), resp3, out);
+                        }
+                    },
+                );
         if !suppress_reply {
             let keys_len = out.len() - keys_start;
             out.extend_from_slice(b"*2\r\n");
@@ -50328,16 +50346,26 @@ fn apply_rdb_entries_to_store(
             // the last value wins, whereas Store::restore_key rejects the payload.
             // Routing this through hash_from_listpack_spans would have quietly
             // turned a loadable RDB into a rejected one.
-            RdbValue::HashListpack(ref blob) => {
-                let spans = fr_persist::listpack::decode_value_spans(blob)
-                    .map_err(|_| PersistError::InvalidFrame)?;
-                if !spans.len().is_multiple_of(2) {
-                    return Err(PersistError::InvalidFrame);
+            RdbValue::HashListpack(blob) => {
+                // Retain a unique small hash's RDB listpack and build only its
+                // bounded field index. The store hands the unchanged blob back
+                // for every case where this would alter existing RDB-load
+                // semantics (duplicates, live-threshold promotion, LFU, or an
+                // existing target); those remain on the established rebuild path.
+                if let Some(blob) = store
+                    .load_hash_listpack_verbatim(&key, blob, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?
+                {
+                    let spans = fr_persist::listpack::decode_value_spans(&blob)
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                    if !spans.len().is_multiple_of(2) {
+                        return Err(PersistError::InvalidFrame);
+                    }
+                    let pairs: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(&blob)).collect();
+                    store
+                        .hset_borrowed_many(&key, &pairs, now_ms)
+                        .map_err(|_| PersistError::InvalidFrame)?;
                 }
-                let pairs: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(blob)).collect();
-                store
-                    .hset_borrowed_many(&key, &pairs, now_ms)
-                    .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
                         &key,
@@ -52109,6 +52137,28 @@ mod tests {
             "MULTI PING must defer to generic (queue)"
         );
         assert!(tx_out.is_empty());
+    }
+
+    #[test]
+    fn plain_ping_borrowed_defers_to_misconf_gate() {
+        let mut runtime = Runtime::default_strict();
+        runtime.set_rdb_path(std::path::PathBuf::from("dump.rdb"));
+        runtime.server.store.stat_rdb_last_bgsave_ok = false;
+
+        let mut out = Vec::new();
+        assert!(
+            runtime
+                .execute_plain_ping_borrowed_into(None, 1, false, &mut out)
+                .is_none(),
+            "PING must not bypass the disk-error gate"
+        );
+        assert!(out.is_empty());
+
+        let reply = runtime.execute_frame(command(&[b"PING"]), 1);
+        assert!(
+            matches!(&reply, RespFrame::Error(message) if message.starts_with("MISCONF")),
+            "the generic PING gate owns the canonical MISCONF reply: {reply:?}"
+        );
     }
 
     #[test]
@@ -62501,6 +62551,55 @@ mod tests {
             matches!(entry.value, RdbValue::Hash(_)),
             "expected plain Hash, got {:?}",
             entry.value
+        );
+    }
+
+    #[test]
+    fn rdb_v11_hash_listpack_load_reads_then_materializes_on_hset_qj6jn() {
+        let blob = fr_persist::encode_listpack_strings_blob(&[
+            b"alpha".as_slice(),
+            b"one".as_slice(),
+            b"beta".as_slice(),
+            b"2".as_slice(),
+        ])
+        .expect("compact hash fixture encodes");
+        let encoded = fr_persist::encode_rdb(
+            &[RdbEntry {
+                db: 0,
+                key: b"hash".to_vec(),
+                value: RdbValue::HashListpack(blob),
+                expire_ms: None,
+            }],
+            &[],
+        );
+        assert_eq!(&encoded[..9], b"REDIS0011", "fixture must be RDB v11");
+        let (entries, _) = fr_persist::decode_rdb(&encoded).expect("RDB v11 decodes");
+
+        let mut rt = Runtime::default_strict();
+        super::apply_rdb_entries_to_store(&mut rt.server.store, entries, 0)
+            .expect("RDB hash listpack applies");
+        assert_eq!(
+            rt.execute_frame(command(&[b"HGET", b"hash", b"alpha"]), 0),
+            RespFrame::BulkString(Some(b"one".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"HGET", b"hash", b"missing"]), 0),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"HSET", b"hash", b"alpha", b"replaced", b"gamma", b"3"]),
+                1,
+            ),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"HGET", b"hash", b"alpha"]), 2),
+            RespFrame::BulkString(Some(b"replaced".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"HLEN", b"hash"]), 2),
+            RespFrame::Integer(3)
         );
     }
 
