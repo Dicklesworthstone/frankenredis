@@ -9747,12 +9747,14 @@ pub fn apply_xadd_maxlen_trim_after_add(
 /// Resolve `args->limit` exactly as upstream's `streamParseAddOrTrimArgsOrReply` does
 /// (t_stream.c:1008-1036), including the arm fr was missing:
 ///
+/// ```text
 ///     if (mustObeyClient(c)) {
 ///         /* If command came from master or from AOF we must not enforce maxnodes
 ///          * (The maxlen/minid argument was re-written to make sure there's no
 ///          * inconsistency). */
 ///         args->limit = 0;
 ///     } else { ... 100 * stream_node_max_entries, capped [10000, 1000000] ... }
+/// ```
 ///
 /// (frankenredis-obeyclient-strlen-qxdyn) The comment is the whole argument. A master
 /// REWRITES `MAXLEN ~ N` into an exact count before propagating it, precisely so every replica
@@ -17347,8 +17349,10 @@ fn build_lcs_dp_full(a: &[u8], b: &[u8]) -> LcsDp {
 
 /// Upstream `lcsCommand`'s length guard (t_string.c:791):
 ///
+/// ```text
 ///     if (sdslen(a) >= UINT32_MAX-1 || sdslen(b) >= UINT32_MAX-1)
 ///         addReplyError(c, "String too long for LCS");
+/// ```
 ///
 /// An OVERFLOW guard there -- the DP matrix is indexed with 32-bit arithmetic -- which fr, using
 /// `usize`, cannot trip the same way. Ported anyway because without it the two engines answer
@@ -19513,11 +19517,13 @@ pub fn command_is_noscript(argv: &[Vec<u8>]) -> bool {
 ///
 /// Upstream `scriptFlagsToCmdFlags` (script.c:111):
 ///
+/// ```text
 ///     cmd_flags &= ~(CMD_STALE | CMD_DENYOOM | CMD_WRITE);
 ///     if (!(script_flags & (ALLOW_OOM | NO_WRITES))) cmd_flags |= CMD_DENYOOM;
 ///     if (!(script_flags & NO_WRITES))               cmd_flags |= CMD_WRITE;
 ///     if (script_flags & ALLOW_STALE)                cmd_flags |= CMD_STALE;
 ///     cmd_flags &= ~CMD_MAY_REPLICATE;
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScriptCommandFlags {
     pub stale: bool,
@@ -19538,8 +19544,10 @@ pub struct ScriptCommandFlags {
 /// MEASURED, two functions in ONE library on ONE stale replica drawing two DIFFERENT upstream
 /// answers while fr gave one answer for both (`caea5edab`, and the ledger row at `4d4dd3ae8`):
 ///
+/// ```text
 ///     fcall     write-capable fn   redis  READONLY You can't write against a read only replica.
 ///     fcall_ro  no-writes fn       redis  MASTERDOWN ...replica-serve-stale-data is set to 'no'.
+/// ```
 ///
 /// Both fall straight out of the rebuild. A function registered with no flags gets `write` set and
 /// `stale` cleared, so the read-only-replica gate fires first; a `no-writes` function gets `write`
@@ -27197,10 +27205,12 @@ fn script_shebang_line_has_flag(line: &[u8], wanted: &str) -> bool {
 /// Upstream `scriptPrepareForRun`'s OOM refusal (script.c:191-199), which fr had no counterpart
 /// for:
 ///
+/// ```text
 ///     /* Check OOM state. the no-writes flag imply allow-oom. we tested it
 ///      * after the no-write error, so no need to mention it in the error reply. */
 ///     if (!client_allow_oom && server.pre_command_oom_state && server.maxmemory &&
 ///         !(script_flags & (SCRIPT_FLAG_ALLOW_OOM|SCRIPT_FLAG_NO_WRITES)))
+/// ```
 ///
 /// This refuses the WHOLE script before a line of it runs, and it is NOT the same gate as
 /// `scriptVerifyOOM` (script.c:405), which fr already has: that one refuses an individual inner
@@ -27222,8 +27232,10 @@ fn script_shebang_line_has_flag(line: &[u8], wanted: &str) -> bool {
 /// for every client fr can construct, so it is folded out rather than faked.
 /// Upstream `scriptPrepareForRun`'s read-only-replica refusal (script.c:158-161):
 ///
+/// ```text
 ///     if (server.masterhost && server.repl_slave_ro && !obey_client) {
 ///         addReplyError(caller, "-READONLY Can not run script with write flag on readonly replica");
+/// ```
 ///
 /// fr already refuses an inner write from a script on a read-only replica (the `replro` gate in
 /// `dispatch_argv`), but that fires MID-SCRIPT and answers "READONLY You can't write against a
@@ -27245,8 +27257,10 @@ fn script_shebang_line_has_flag(line: &[u8], wanted: &str) -> bool {
 /// upstream of here.
 /// Upstream `scriptPrepareForRun`'s third write-flag check (script.c:178-181):
 ///
+/// ```text
 ///     if (ro) {
 ///         addReplyError(caller, "Can not execute a script with write flag using *_ro command.");
+/// ```
 ///
 /// `ro` is the `_ro` COMMAND variant -- EVAL_RO, EVALSHA_RO, FCALL_RO -- not the script's own
 /// flags. A script that does not declare `no-writes` is write-flagged by contract, so calling it
@@ -27259,10 +27273,12 @@ fn script_shebang_line_has_flag(line: &[u8], wanted: &str) -> bool {
 /// before the OOM one -- and covers all three commands.
 /// Upstream `scriptPrepareForRun`'s write-quorum check (script.c:184-188):
 ///
+/// ```text
 ///     /* Don't accept write commands if there are not enough good slaves and
 ///      * user configured the min-slaves-to-write option. */
 ///     if (!checkGoodReplicasStatus()) {
 ///         addReplyErrorObject(caller, shared.noreplicaserr);
+/// ```
 ///
 /// fr enforced the quorum for ordinary commands in the runtime's pre-dispatch chain, but a
 /// script's inner `redis.call` reaches `dispatch_argv` directly and never passes through it. So a
@@ -27281,9 +27297,11 @@ fn script_prepare_replica_quorum_refusal(store: &Store, no_writes: bool) -> Opti
 
 /// Upstream `scriptPrepareForRun`'s disk-error refusal (script.c:165-176):
 ///
+/// ```text
 ///     /* Deny writes if we're unable to persist. */
 ///     int deny_write_type = writeCommandsDeniedByDiskError();
 ///     if (deny_write_type != DISK_ERROR_TYPE_NONE && !obey_client) { ... MISCONF ... }
+/// ```
 ///
 /// Last of the four checks in upstream's write-flag block, and the same story as the other
 /// three: fr refused ordinary commands with MISCONF in the runtime's pre-dispatch chain, while a
@@ -27314,8 +27332,10 @@ fn script_prepare_ro_command_refusal(ro: bool, no_writes: bool) -> Option<RespFr
 
 /// Upstream `scriptPrepareForRun`'s FIRST refusal (script.c:141):
 ///
+/// ```text
 ///     if ((script_flags & SCRIPT_FLAG_NO_CLUSTER) && server.cluster_enabled) {
 ///         addReplyError(caller, "Can not run script on cluster, 'no-cluster' flag is set.");
+/// ```
 ///
 /// fr's shebang validator has always ACCEPTED `no-cluster` while nothing read it, on the stated
 /// grounds that a single-node runtime has no cluster path to gate. That stopped being true:
@@ -27336,8 +27356,10 @@ fn script_prepare_no_cluster_refusal(store: &Store, no_cluster: bool) -> Option<
 
 /// Upstream `scriptPrepareForRun`'s SECOND refusal (script.c:146):
 ///
+/// ```text
 ///     if (running_stale && !(script_flags & SCRIPT_FLAG_ALLOW_STALE)) {
 ///         addReplyError(caller, "-MASTERDOWN Link with MASTER is down, ...");
+/// ```
 ///
 /// THE OUTER TWIN of the per-inner-command stale check in `dispatch_argv`, and not a duplicate of
 /// it: that one refuses a single `redis.call` that lacks `CMD_STALE` (upstream's
@@ -27364,6 +27386,7 @@ fn script_prepare_stale_refusal(store: &Store, allow_stale: bool) -> Option<Resp
 /// Upstream `scriptPrepareForRun`'s EVAL_COMPAT_MODE arm (script.c:200-205), the `else` half of
 /// the branch whose `if` half `script_prepare_stale_refusal` implements:
 ///
+/// ```text
 ///     } else {
 ///         /* Special handling for backwards compatibility (no shebang eval[sha]) mode */
 ///         if (running_stale) {
@@ -27371,6 +27394,7 @@ fn script_prepare_stale_refusal(store: &Store, allow_stale: bool) -> Option<Resp
 ///             return C_ERR;
 ///         }
 ///     }
+/// ```
 ///
 /// UNCONDITIONAL, and that is the whole difference from the shebang twin: a body with no `#!`
 /// carries NO FLAGS AT ALL, so there is no `allow-stale` to opt out with and nothing to pass in.
