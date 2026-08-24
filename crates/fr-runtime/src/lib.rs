@@ -42763,7 +42763,23 @@ impl Runtime {
         // returned only once even when multiple patterns (or repeats
         // of the same pattern) match it. Track seen keys
         // case-insensitively to mirror that. (frankenredis-8xgpr)
-        let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        // (frankenredis-e6c9t) foldhash, NOT the std default. This set is probed once per
+        // emitted pair, and `CONFIG GET *` emits ~200 of them: COUNTED at 201.00 lookups/op
+        // on this shape, driving 421.00 `hash_one` calls and a large share of the 1,140.00
+        // SipHash rounds/op the route spends. `std::collections::HashSet` uses SipHash-1-3,
+        // a keyed cryptographic hash, to answer "have I already emitted this config name" --
+        // where the keys are the server's OWN parameter names out of a static table, never
+        // attacker-supplied.
+        //
+        // This crate already uses `foldhash::quality::RandomState` for exactly this job
+        // (`ConfigStaticParamIndex`, `pubsub_outbox`); the set was simply missed. It stays
+        // randomly seeded, so the flooding resistance that matters for a keyspace-facing map
+        // is unchanged -- and nothing here is keyspace-facing anyway.
+        //
+        // Membership semantics are hasher-independent, and `seen` is only ever `contains`ed
+        // and `insert`ed -- never iterated -- so the emitted reply cannot change.
+        let mut seen: std::collections::HashSet<Vec<u8>, foldhash::quality::RandomState> =
+            std::collections::HashSet::default();
         // Redis 7+ supports multiple patterns: CONFIG GET pattern1 pattern2 ...
         for arg in &argv[2..] {
             let raw_pattern = match std::str::from_utf8(arg) {
