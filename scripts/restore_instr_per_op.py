@@ -33,7 +33,7 @@ not grow across the run and the slope is decode work rather than insertion growt
     serverCron contaminant (~3 pct), so quote fr-side deltas with more confidence
     than the ratio.
 
-Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list] [--op=restore|reload]
+Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset] [--op=restore|reload]
 """
 from __future__ import annotations
 
@@ -134,7 +134,30 @@ def seed_command(kind, members):
         # a digit-leading payload takes the derivation-guard path and measures a
         # different frame (frankenredis-qj6jn).
         return resp("RPUSH", "src", *["v%04d" % i for i in range(members)])
-    raise SystemExit("unknown container type %r (want hash|list)" % kind)
+    if kind == "set":
+        # (frankenredis-qj6jn) SET and ZSET were added for the same reason LIST was:
+        # their RDB-FILE load arms materialise one owned Vec<u8> per member out of a
+        # listpack the store is about to copy anyway, while their RESTORE arms already
+        # walk borrowed spans. Measuring that on a hash or list workload would measure
+        # a path it does not touch.
+        #
+        # KEEP `members` UNDER set-max-listpack-entries (128) OR THIS MEASURES THE
+        # WRONG ARM. Above it the set is hashtable-encoded and saves as the plain
+        # RDB_TYPE_SET, which never reaches the listpack decode arm at all -- the run
+        # still completes and still prints a ratio, so the mistake looks like data.
+        # Letter-leading members on purpose: all-integer members would save as
+        # RDB_TYPE_SET_INTSET, a third arm again.
+        return resp("SADD", "src", *["v%04d" % i for i in range(members)])
+    if kind == "zset":
+        # Same threshold trap as `set`, against zset-max-listpack-entries (128).
+        # Integer scores on purpose -- a listpack integer score takes the
+        # allocation-free `n as f64` shortcut, so what is left in the frame is the
+        # MEMBER materialisation this arm exists to measure.
+        args = []
+        for i in range(members):
+            args += [str(i), "v%04d" % i]
+        return resp("ZADD", "src", *args)
+    raise SystemExit("unknown container type %r (want hash|list|set|zset)" % kind)
 
 
 def run(binary, tag, port, members, ops, workdir, kind="hash", op="restore"):

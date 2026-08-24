@@ -10,7 +10,7 @@ arbitrary bytes.
 Load-immune, like every instruction-count instrument here: no quiet window, no core
 pinning. Verified while the host sat at loadavg 36.
 
-    restore_profile_frames.py <fr_binary> <members> <ops> [--type=hash|list]
+    restore_profile_frames.py <fr_binary> <members> <ops> [--type=hash|list|set|zset]
     callgrind_annotate --threshold=60 <printed dump path>
 
 WHAT IT ESTABLISHED, 2026-08-16, 128-field hash, 300 ops, ELF 2d5a352c (self cost,
@@ -101,7 +101,16 @@ def main():
     subprocess.run([sys.executable,
                     os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "assert_fresh_build.py"), fr], check=False)
-    work = os.path.join(ROOT, "target", "restore_profile")
+    # (frankenredis-qj6jn) ONE DIRECTORY PER RUN. This used a single fixed workdir,
+    # and fr-server configures an rdb path by default -- so `DEBUG RELOAD` leaves a
+    # dump.rdb behind and the NEXT run's server LOADS it at startup. That put a
+    # previous run's `src` key of a DIFFERENT TYPE into the keyspace, the seed
+    # command then failed with WRONGTYPE (silently: the reply is read and not
+    # checked), and the profile that came out described the stale container instead
+    # of the requested one. It cost me a --type=set profile whose three largest
+    # frames were LIST functions -- a clean, plausible, entirely wrong answer.
+    # Nothing is deleted; each run simply gets its own directory.
+    work = os.path.join(ROOT, "target", "restore_profile", "run-%d-%s" % (os.getpid(), KIND))
     os.makedirs(work, exist_ok=True)
     out = os.path.join(work, "cg.restore.out")
     port = 47900 + (os.getpid() % 90)
@@ -135,14 +144,31 @@ def main():
         # path is reached from the LIST arm of the RESTORE payload walk, not the
         # hash arm. Profiling a hash workload to reason about that lever profiles a
         # path it never executes.
+        #
+        # (frankenredis-qj6jn) SET and ZSET for the same reason again. KEEP `members`
+        # UNDER set-/zset-max-listpack-entries (128) for those two: above it the
+        # container is hashtable-encoded and saves as the PLAIN RDB type, so the
+        # listpack decode arm never runs and the profile silently describes a
+        # different route.
         if KIND == "list":
             sock.sendall(resp("RPUSH", "src", *["v%04d" % i for i in range(members)]))
+        elif KIND == "set":
+            sock.sendall(resp("SADD", "src", *["v%04d" % i for i in range(members)]))
+        elif KIND == "zset":
+            args = []
+            for i in range(members):
+                args += [str(i), "v%04d" % i]
+            sock.sendall(resp("ZADD", "src", *args))
         else:
             fields = []
             for i in range(members):
                 fields += ["f%04d" % i, "v%04d" % i]
             sock.sendall(resp("HSET", "src", *fields))
-        _, buf = read_reply(sock, buf)
+        seed_reply, buf = read_reply(sock, buf)
+        # And CHECK it. The swallowed error above is what made the stale-keyspace
+        # contamination invisible rather than loud.
+        if seed_reply.startswith(b"-"):
+            raise RuntimeError("seed command failed: %r" % seed_reply)
         sock.sendall(resp("DUMP", "src"))
         payload, buf = read_reply(sock, buf)
         if not payload:
