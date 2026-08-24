@@ -19,6 +19,23 @@ import sys
 
 from _respread import cmd, conn
 
+
+def _check_reply(fails, label, oracle, fr):
+    if oracle != fr:
+        fails.append(f"{label}: redis={oracle[:70]!r} fr={fr[:70]!r}")
+
+
+def _self_test():
+    """A byte-different Redis-script reply must not let this gate pass."""
+    failures = []
+    _check_reply(failures, "planted_wrong_reply", b"+AFTER\r\n", b"+WRONG\r\n")
+    if failures != ["planted_wrong_reply: redis=b'+AFTER\\r\\n' fr=b'+WRONG\\r\\n'"]:
+        print(f"SELF-TEST FAIL: planted reply was not reported exactly: {failures!r}")
+        return 1
+    print("SELF-TEST PASS: redis.call gate catches a planted wrong reply")
+    return 0
+
+
 def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
@@ -28,8 +45,7 @@ def main():
     fails = []
     def chk(label, inner):
         ro, rf = cmd(o, "EVAL", inner, "0"), cmd(f, "EVAL", inner, "0")
-        if ro != rf:
-            fails.append(f"{label}: redis={ro[:70]!r} fr={rf[:70]!r}")
+        _check_reply(fails, label, ro, rf)
     # control-flow: redis.call command error ABORTS the script (no 'AFTER')
     for nm, c in [("xadd00", b"redis.call('XADD','st','0-0','f','v')"),
                   ("maxlenneg", b"redis.call('XADD','st','MAXLEN','-1','*','f','v')"),
@@ -81,4 +97,4 @@ def main():
           "(raise+abort+script-suffix, unknown-cmd/subcmd & arity rewrites, pcall {err=} table)")
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(_self_test() if "--self-test" in sys.argv else main())

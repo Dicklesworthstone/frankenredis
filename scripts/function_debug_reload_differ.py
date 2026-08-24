@@ -26,6 +26,7 @@ parity_suite.py launches both servers with --enable-debug-command yes.
 Usage: function_debug_reload_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
+import argparse
 import sys
 
 from _respread import assert_ok, assert_seed, cmd, conn
@@ -122,23 +123,25 @@ def seed(sock):
     assert_seed(cmd(sock, "FCALL", "fn_a", "0"), 1, "FCALL fn_a before reload")
 
 
+def record_mismatch(label, subject, oracle, fr, fails):
+    """Record a mismatch through the common gate predicate."""
+    if oracle != fr:
+        fails.append(f"[{label}] {subject}: redis={oracle!r} fr={fr!r}")
+
+
 def compare(od, fr, label, fails):
     for argv in PROBES:
         ro, rf = cmd(od, *argv), cmd(fr, *argv)
-        if ro != rf:
-            fails.append(f"[{label}] {' '.join(argv)!r}: redis={ro!r} fr={rf!r}")
+        record_mismatch(label, repr(" ".join(argv)), ro, rf, fails)
     ro, rf = cmd(od, "GET", "plain"), cmd(fr, "GET", "plain")
-    if ro != rf:
-        fails.append(f"[{label}] 'GET plain': redis={ro!r} fr={rf!r}")
+    record_mismatch(label, repr("GET plain"), ro, rf, fails)
     mo = function_map(cmd(od, "FUNCTION", "LIST"))
     mf = function_map(cmd(fr, "FUNCTION", "LIST"))
-    if mo != mf:
-        fails.append(f"[{label}] FUNCTION LIST libraries: redis={mo!r} fr={mf!r}")
+    record_mismatch(label, "FUNCTION LIST libraries", mo, mf, fails)
     for lib in ("lib_one", "lib_two"):
         mo = function_map(cmd(od, "FUNCTION", "LIST", "LIBRARYNAME", lib))
         mf = function_map(cmd(fr, "FUNCTION", "LIST", "LIBRARYNAME", lib))
-        if mo != mf:
-            fails.append(f"[{label}] FUNCTION LIST LIBRARYNAME {lib}: redis={mo!r} fr={mf!r}")
+        record_mismatch(label, f"FUNCTION LIST LIBRARYNAME {lib}", mo, mf, fails)
 
 
 def reload_both(od, fr):
@@ -155,8 +158,25 @@ def reload_both(od, fr):
 
 
 def main():
-    op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
-    fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
+    ap = argparse.ArgumentParser()
+    ap.add_argument("oracle_port", nargs="?", type=int, default=16399)
+    ap.add_argument("fr_port", nargs="?", type=int, default=16400)
+    ap.add_argument(
+        "--planted-negative",
+        action="store_true",
+        help="prove the live FCALL/FUNCTION comparator rejects a missing function",
+    )
+    args = ap.parse_args()
+    if args.planted_negative:
+        fails = []
+        record_mismatch("PLANTED NEGATIVE", "FCALL fn_a 0", b":1\\r\\n", b"-ERR Function not found\\r\\n", fails)
+        if not fails:
+            print("PLANTED NEGATIVE unexpectedly passed")
+            return 2
+        print(f"PLANTED NEGATIVE detected: {fails[0]}")
+        return 1
+
+    op, fp = args.oracle_port, args.fr_port
     od, fr = conn(op), conn(fp)
     for s in (od, fr):
         seed(s)
@@ -185,13 +205,14 @@ def main():
         print(f"FAIL — {len(fails)} FUNCTION/DEBUG RELOAD divergence(s) vs redis 7.2.4:")
         for x in fails[:12]:
             print(f"  {x}")
-        sys.exit(1)
+        return 1
     print(
         "PASS — FUNCTION libraries survive DEBUG RELOAD identically to redis 7.2.4 "
         f"({len(PROBES)} FCALL probes byte-exact + library/function sets, at 3 reload "
         "points, 2 libraries / 3 functions, plus flush-then-reload)"
     )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

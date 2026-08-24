@@ -19,9 +19,6 @@ restart, or unable to come back from its own dump. Those were seams 4, 2 and 3 o
 import socket
 import sys
 
-RS = int(sys.argv[1])
-FR = int(sys.argv[2])
-
 SHEBANG = "#!lua name=%s\n"
 
 
@@ -277,6 +274,19 @@ def step(conn, *args):
         return f"RESP3-FRAME {exc.tag}", Conn(conn.port)
 
 
+def replies_agree(redis_reply, fr_reply):
+    """The deliberate error-envelope comparison used by every lifecycle row."""
+    return (redis_reply.split(":")[0] == fr_reply.split(":")[0]) and (
+        redis_reply.startswith("ERR") == fr_reply.startswith("ERR")
+    )
+
+
+def require_round_trip_reply(label, reply, expected, invalid_steps):
+    """A lifecycle command must have actually completed, not merely matched an error."""
+    if reply != expected:
+        invalid_steps.append((label, reply, expected))
+
+
 def round_trip(conn, lib, fname, body):
     """Load, call, survive a reload, and survive its own DUMP/RESTORE.
 
@@ -289,6 +299,7 @@ def round_trip(conn, lib, fname, body):
     # invented divergences in every later case.
     c = Conn(conn.port)
     out = []
+    invalid_steps = []
     c.cmd("FUNCTION", "FLUSH")
     src = (SHEBANG % lib) + (body % fname)
 
@@ -298,37 +309,49 @@ def round_trip(conn, lib, fname, body):
         if replacement is not None:
             c = replacement
         out.append((label, reply))
+        return reply
 
-    record("load", "FUNCTION", "LOAD", "REPLACE", src)
-    record("fcall", "FCALL", fname, "0")
+    # A failed FLUSH can leave a prior library resident; require it before the
+    # load so a same-error pair does not get counted as a persistence pass.
+    flush_reply = record("flush_before_load", "FUNCTION", "FLUSH")
+    require_round_trip_reply("flush_before_load", flush_reply, "OK OK", invalid_steps)
+    load_reply = record("load", "FUNCTION", "LOAD", "REPLACE", src)
+    require_round_trip_reply("load", load_reply, f"OK {lib}", invalid_steps)
+    fcall_reply = record("fcall", "FCALL", fname, "0")
+    require_round_trip_reply("fcall", fcall_reply, "OK 41", invalid_steps)
 
     # seam 2: the registration must survive a reload. DEBUG RELOAD round-trips the dataset
     # through RDB in-process, which is the same path a restart takes.
-    record("reload", "DEBUG", "RELOAD")
-    record("fcall_after_reload", "FCALL", fname, "0")
+    reload_reply = record("reload", "DEBUG", "RELOAD")
+    require_round_trip_reply("reload", reload_reply, "OK OK", invalid_steps)
+    fcall_after_reload = record("fcall_after_reload", "FCALL", fname, "0")
+    require_round_trip_reply("fcall_after_reload", fcall_after_reload, "OK 41", invalid_steps)
 
     # seam 3: the library must come back from its own FUNCTION DUMP.
     try:
         dumped = c.cmd("FUNCTION", "DUMP")
     except Resp3OnResp2 as exc:
         out.append(("dump", f"RESP3-FRAME {exc.tag}"))
-        out.append(("restore", "SKIPPED: dump failed"))
-        out.append(("fcall_after_restore", "SKIPPED: dump failed"))
-        return out
+        invalid_steps.append(("dump", f"RESP3-FRAME {exc.tag}", "non-empty dump payload"))
+        return out, invalid_steps
     if not isinstance(dumped, bytes) or dumped.startswith(b"ERRREPLY:"):
         out.append(("dump", classify(dumped)))
-        out.append(("restore", "SKIPPED: dump failed"))
-        out.append(("fcall_after_restore", "SKIPPED: dump failed"))
-        return out
+        invalid_steps.append(("dump", classify(dumped), "non-empty dump payload"))
+        return out, invalid_steps
     out.append(("dump", "OK %d bytes" % len(dumped)))
-    c.cmd("FUNCTION", "FLUSH")
-    record("restore", "FUNCTION", "RESTORE", dumped)
-    record("fcall_after_restore", "FCALL", fname, "0")
-    return out
+    if not dumped:
+        invalid_steps.append(("dump", "OK 0 bytes", "non-empty dump payload"))
+    flush_reply = record("flush_before_restore", "FUNCTION", "FLUSH")
+    require_round_trip_reply("flush_before_restore", flush_reply, "OK OK", invalid_steps)
+    restore_reply = record("restore", "FUNCTION", "RESTORE", dumped)
+    require_round_trip_reply("restore", restore_reply, "OK OK", invalid_steps)
+    fcall_after_restore = record("fcall_after_restore", "FCALL", fname, "0")
+    require_round_trip_reply("fcall_after_restore", fcall_after_restore, "OK 41", invalid_steps)
+    return out, invalid_steps
 
 
 def run_round_trips(redis, fr):
-    """Returns (divergences, control_failures). Any divergence here is a FAILURE.
+    """Returns (divergences, control_failures, invalid_steps). Any divergence here is a FAILURE.
 
     There are deliberately no EXPECTED_DIVERGENCES for these rows. The three seams they cover
     were all fixed in the same session as this harness, so an allowance would be an excuse
@@ -340,20 +363,37 @@ def run_round_trips(redis, fr):
     print("-" * 100)
     divergences = 0
     control_failures = 0
+    invalid_steps = []
     for i, (name, body, _desc) in enumerate(ROUND_TRIP_CASES):
         lib, fname = f"rtlib{i}", f"rtfn{i}"
-        r_steps = round_trip(redis, lib, fname, body)
-        f_steps = round_trip(fr, lib, fname, body)
+        r_steps, r_invalid = round_trip(redis, lib, fname, body)
+        f_steps, f_invalid = round_trip(fr, lib, fname, body)
+        invalid_steps.extend(("redis", name, *entry) for entry in r_invalid)
+        invalid_steps.extend(("fr", name, *entry) for entry in f_invalid)
         for (step, r_reply), (_, f_reply) in zip(r_steps, f_steps):
-            agree = (r_reply.split(":")[0] == f_reply.split(":")[0]) and (
-                r_reply.startswith("ERR") == f_reply.startswith("ERR"))
+            agree = replies_agree(r_reply, f_reply)
             mark = "" if agree else "   <-- DIVERGES"
             if not agree:
                 divergences += 1
                 if name.startswith("rt_CONTROL"):
                     control_failures += 1
             print(f"{name:<20} {step:<20} {f_reply[:29]:<30} {r_reply[:29]}{mark}")
-    return divergences, control_failures
+    return divergences, control_failures, invalid_steps
+
+
+def planted_negative():
+    """Prove the live lifecycle predicates reject a skipped reload and bad FCALL."""
+    invalid_steps = []
+    require_round_trip_reply("reload", "ERR DEBUG command not allowed", "OK OK", invalid_steps)
+    fcall_disagrees = not replies_agree("OK 41", "ERR Function not found")
+    if not invalid_steps or not fcall_disagrees:
+        print("PLANTED NEGATIVE unexpectedly passed")
+        return 2
+    print(
+        "PLANTED NEGATIVE detected: reload was not OK and FCALL after reload disagreed "
+        "through the live lifecycle predicates"
+    )
+    return 1
 
 
 def classify(reply):
@@ -367,7 +407,14 @@ def classify(reply):
 
 
 def main():
-    redis, fr = Conn(RS), Conn(FR)
+    if len(sys.argv) == 2 and sys.argv[1] == "--planted-negative":
+        return planted_negative()
+    if len(sys.argv) > 3:
+        print("usage: function_load_differ.py <redis_port> <fr_port> | --planted-negative")
+        return 2
+    redis_port = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
+    fr_port = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
+    redis, fr = Conn(redis_port), Conn(fr_port)
     for c in (redis, fr):
         c.cmd("FUNCTION", "FLUSH")
 
@@ -395,8 +442,7 @@ def main():
         src = (SHEBANG % lib) + body.replace("'f'", f"'f{i}'")
         r_reply = classify(redis.cmd("FUNCTION", "LOAD", "REPLACE", src))
         f_reply = classify(fr.cmd("FUNCTION", "LOAD", "REPLACE", src))
-        agree = (r_reply.split(":")[0] == f_reply.split(":")[0]) and (
-            r_reply.startswith("ERR") == f_reply.startswith("ERR"))
+        agree = replies_agree(r_reply, f_reply)
         # (frankenredis-fnukn) The rule above compares the FIRST COLON SEGMENT, so two errors
         # agreeing on `ERR Error registering functions` count as agreement however their tails
         # differ. That is exactly how fnukn's measured wording regressed unnoticed when 9hori
@@ -482,8 +528,13 @@ def main():
         print("FAIL: %d ENVELOPE mismatch(es): %s" % (
             len(envelope_mismatches), ", ".join(n for n, _, _ in envelope_mismatches)))
         return 1
-    rt_div, rt_control = run_round_trips(redis, fr)
+    rt_div, rt_control, rt_invalid = run_round_trips(redis, fr)
     print()
+    if rt_invalid:
+        print("HARNESS INVALID: required FUNCTION persistence steps did not complete:")
+        for engine, case, label, got, expected in rt_invalid[:12]:
+            print(f"  {engine} {case} {label}: got {got!r}, expected {expected!r}")
+        return 2
     if rt_control:
         print(f"HARNESS INVALID: {rt_control} round-trip CONTROL step(s) diverged — a library "
               f"with everything literal must survive load, reload and restore on both engines. "

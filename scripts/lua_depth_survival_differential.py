@@ -173,6 +173,28 @@ def bisect_ceiling(port, tag, tmpl, n_slots, cap):
     return lo, detail
 
 
+def recurse_parity_passes(fr_max, fr_txt, rd_max, rd_txt):
+    """Assert the live non-tail recursion contract against Redis 7.2.4.
+
+    The heap continuation must make the published 17,000-depth capability
+    usable, then refuse runaway recursion in Redis's stack-overflow class.
+    A printed bisection table is evidence for a human; this assertion makes a
+    mismatch fail the differential gate that produced it.
+    """
+    failures = []
+    if fr_max != rd_max:
+        failures.append("ceiling differs: fr=%s redis=%s" % (fr_max, rd_max))
+    if fr_max is None or fr_max < 17_000:
+        failures.append("fr does not complete the required 17000-deep non-tail call")
+    if "stack overflow" not in fr_txt or "stack overflow" not in rd_txt:
+        failures.append("runaway recursion did not fail in the stack-overflow class")
+    if failures:
+        print("RECURSE PARITY FAIL: " + "; ".join(failures))
+        return False
+    print("RECURSE PARITY PASS: 17000+ succeeds and both runaways fail as stack overflow")
+    return True
+
+
 def main():
     for b in (REDIS, FR):
         if not os.path.exists(b):
@@ -213,6 +235,8 @@ def main():
             print("fr alive at end:    %s" % alive(FR_PORT))
             print("redis alive at end: %s" % alive(REDIS_PORT))
             print("loadavg at end: %s" % loadavg())
+            if walk == "recurse":
+                return 0 if recurse_parity_passes(fr_max, fr_txt, rd_max, rd_txt) else 1
             return 0
         depths = ([int(x) for x in sys.argv[2].split(",")] if len(sys.argv) > 2
                   else [100, 900, 999, 1000, 1001, 2000])

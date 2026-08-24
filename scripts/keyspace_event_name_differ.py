@@ -40,6 +40,24 @@ def drain(s, settle=0.3):
         return s.recv(1 << 20)
     except Exception:
         return b""
+
+
+def assert_psubscribed(reply, pattern):
+    expected = (
+        b"*3\r\n$10\r\npsubscribe\r\n$%d\r\n%s\r\n:1\r\n"
+        % (len(pattern), pattern)
+    )
+    if reply != expected:
+        print(f"SETUP FAILED [PSUBSCRIBE {pattern!r}]: got {reply!r}, expected {expected!r}")
+        raise SystemExit(1)
+
+
+def compare_event_names(label, oracle, fr):
+    """Return one when the gate's event-name multiset comparison detects a mismatch."""
+    if oracle == fr:
+        return 0
+    print(f"{label}: redis={sorted(oracle.items())} fr={sorted(fr.items())}")
+    return 1
 PRE=[["RPUSH","mylist","a","b","c"],["SADD","myset","x","y"],["HSET","myhash","f","v"],
      ["ZADD","myzset","1","a"],["SET","str1","v"],["SET","num","5"],["SET","ttl1","v"],
      ["XADD","mystream","1-1","f","v"],["SET","app1","v"],["SET","ren1","v"]]
@@ -62,22 +80,30 @@ def events(p):
     # engines would emit the same (empty) event set — a gate that passes having
     # observed no notifications at all. (frankenredis-gpry6)
     assert_seed(cmd(ctl,"DBSIZE"), len({r[1] for r in PRE}), "PRE seeds present")
-    sub=conn(p); cmd(sub,"PSUBSCRIBE","__keyevent@0__:*")   # one confirmation frame
+    sub=conn(p)
+    pattern=b"__keyevent@0__:*"
+    assert_psubscribed(cmd(sub,"PSUBSCRIBE",pattern), pattern)
     run=conn(p)
     for op in OPS: cmd(run,*op)
     blob=drain(sub)
     for c in (ctl,sub,run): c.close()
-    return Counter(re.findall(rb"__keyevent@0__:([a-z_]+)", blob))
+    observed = Counter(re.findall(rb"__keyevent@0__:([a-z_]+)", blob))
+    if not observed:
+        print("SETUP FAILED: captured zero keyspace events; subscription or notification setup was skipped")
+        raise SystemExit(1)
+    return observed
 def main():
+    if sys.argv[1:] == ["--planted-negative"]:
+        return compare_event_names("PLANTED NEGATIVE detected", Counter({b"set": 1}), Counter())
     op=int(sys.argv[1]) if len(sys.argv)>1 else 16399
     fp=int(sys.argv[2]) if len(sys.argv)>2 else 16400
     co,cf=events(op),events(fp)
-    if co!=cf:
+    if compare_event_names("FAIL — keyspace event-name divergence vs redis 7.2.4", co, cf):
         print("="*60)
-        print("FAIL — keyspace event-name divergence vs redis 7.2.4:")
         print(f"  MISSING in fr: {sorted((co-cf).items())}")
         print(f"  EXTRA in fr:   {sorted((cf-co).items())}")
-        sys.exit(1)
+        return 1
     print("="*60)
     print(f"PASS — per-command keyspace event names byte-exact vs redis 7.2.4 ({sum(co.values())} events across ~28 commands)")
-if __name__=="__main__": main()
+    return 0
+if __name__=="__main__": raise SystemExit(main())

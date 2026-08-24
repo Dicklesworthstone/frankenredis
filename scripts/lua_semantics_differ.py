@@ -161,6 +161,27 @@ SNIPPETS = [
 ]
 
 
+def _same_reply(oracle, fr):
+    """Ignore only source-location wording on otherwise-identical Lua errors."""
+    def norm(reply):
+        if reply[0] == "-":
+            return ("-", reply[1].split()[0] if reply[1] else "")
+        return reply
+    return norm(oracle) == norm(fr)
+
+
+def _self_test():
+    """A wrong Lua-semantics reply must be rejected by the live comparator."""
+    if _same_reply((":", 1), (":", 2)):
+        print("SELF-TEST FAIL: planted scalar mismatch was accepted")
+        return 1
+    if _same_reply(("-", "ERR syntax"), ("-", "WRONGTYPE value")):
+        print("SELF-TEST FAIL: planted error-code mismatch was accepted")
+        return 1
+    print("SELF-TEST PASS: Lua-semantics gate catches planted wrong replies")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--oracle", type=int, default=16399)
@@ -168,17 +189,11 @@ def main():
     args = ap.parse_args()
     R, F = Conn(args.oracle), Conn(args.fr)
 
-    def norm(x):
-        # compare error replies by leading code word (line-number wording is noise)
-        if x[0] == "-":
-            return ("-", x[1].split()[0] if x[1] else "")
-        return x
-
     failures = []
     for snip in SNIPPETS:
         a = R.cmd("EVAL", snip, "0")
         b = F.cmd("EVAL", snip, "0")
-        if norm(a) != norm(b):
+        if not _same_reply(a, b):
             failures.append((snip, a, b))
     if failures:
         print(f"FAIL: {len(failures)} Lua semantics divergence(s):")
@@ -191,4 +206,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(_self_test() if "--self-test" in sys.argv else main())

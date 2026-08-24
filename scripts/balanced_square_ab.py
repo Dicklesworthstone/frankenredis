@@ -549,6 +549,13 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
          + ["XGROUP CREATE xpp:s xpp:g 0",
             "XREADGROUP GROUP xpp:g c1 COUNT 32 STREAMS xpp:s >"],
          ["XPENDING", "xpp:s", "xpp:g"]),
+        # (frankenredis-iqicb) The non-blocking explicit-id history shape. The setup
+        # places the one entry in c's PEL; every measured request then reads that same
+        # pending entry, so neither arm grows state across the balanced-square slots.
+        ("xreadgroup_history",
+         ["XADD xrgh:s 1-1 f v", "XGROUP CREATE xrgh:s xrgh:g 0",
+          "XREADGROUP GROUP xrgh:g c COUNT 1 STREAMS xrgh:s >"],
+         ["XREADGROUP", "GROUP", "xrgh:g", "c", "COUNT", "1", "STREAMS", "xrgh:s", "0"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
     # (frankenredis-copydeficit) COPY's REPLACE form, front-classified at 9,257.3 ->

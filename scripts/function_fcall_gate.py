@@ -129,6 +129,37 @@ def wait_up(port, tries=60):
     return False
 
 
+def _diff_steps(fr_steps, redis_steps):
+    """Return every missing, extra, or byte-different FUNCTION probe."""
+    diffs = []
+    for index, (fr_step, redis_step) in enumerate(zip(fr_steps, redis_steps)):
+        lf, vf = fr_step
+        lr, vr = redis_step
+        if lf != lr or vf != vr:
+            diffs.append((f"{index}:{lf}/{lr}", vf, vr))
+    if len(fr_steps) != len(redis_steps):
+        longer_name, longer = (
+            ("fr", fr_steps) if len(fr_steps) > len(redis_steps) else ("redis", redis_steps)
+        )
+        for label, value in longer[min(len(fr_steps), len(redis_steps)):]:
+            diffs.append((f"{longer_name}-only:{label}", value, "<missing>"))
+    return diffs
+
+
+def _self_test():
+    """The complete FUNCTION step comparator must catch planted bad replies."""
+    base = [("load", ("S", "lib")), ("call", ("I", 1))]
+    wrong = [("load", ("S", "lib")), ("call", ("I", 2))]
+    if not _diff_steps(base, wrong):
+        print("SELF-TEST FAIL: planted FCALL reply mismatch was accepted")
+        return 1
+    if not _diff_steps(base, base[:1]):
+        print("SELF-TEST FAIL: missing trailing FUNCTION step was accepted")
+        return 1
+    print("SELF-TEST PASS: FUNCTION/FCALL gate catches wrong and missing replies")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", default=os.environ.get("FR_BIN",
@@ -139,9 +170,9 @@ def main():
     args = ap.parse_args()
     fr = os.path.abspath(args.bin); redis = os.path.abspath(args.redis_bin)
     if not os.path.exists(fr):
-        print(f"SKIP: fr binary not found at {fr}"); return 0
+        print(f"FAIL: fr binary not found at {fr}"); return 2
     if not os.path.exists(redis):
-        print(f"SKIP: redis-server not found at {redis}"); return 0
+        print(f"FAIL: redis-server not found at {redis}"); return 2
 
     rdir = tempfile.mkdtemp(prefix="fr_funcgate_")
     fp, rp = free_port(), free_port()
@@ -162,10 +193,7 @@ def main():
             try: p.wait(timeout=5)
             except Exception: p.kill()
 
-    diffs = []
-    for (lf, vf), (lr, vr) in zip(fsteps, rsteps):
-        if vf != vr:
-            diffs.append((lf, vf, vr))
+    diffs = _diff_steps(fsteps, rsteps)
     for label, a, b in diffs:
         print(f"  [DIFF] {label}\n    fr={a}\n    rd={b}")
     if diffs:
@@ -176,4 +204,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_self_test() if "--self-test" in sys.argv else main())

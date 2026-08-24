@@ -14,7 +14,7 @@ no-op). Approximate (`~`) MAXLEN/MINID trims are exercised: fr models whole-node
 (stream-node-max-entries = 100) eviction to match streamTrim's count exactly.
 
 Self-launches a clean fr + redis pair and sweeps several seeds.
-Usage: [--bin FR] [--redis-bin REDIS] [--seeds N] [--iters N]
+Usage: [--bin FR] [--redis-bin REDIS] [--seeds N] [--iters N] [--planted-negative]
 """
 import argparse, os, random, socket, subprocess, sys, tempfile, time
 
@@ -158,6 +158,14 @@ def wait_up(port, tries=60):
     return False
 
 
+def require_binary(path, label):
+    """A missing executable is a failed gate setup, never a passing skip."""
+    if os.path.exists(path):
+        return True
+    print(f"FAIL: {label} not found at {path}")
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", default=os.environ.get("FR_BIN",
@@ -167,12 +175,24 @@ def main():
                                  "legacy_redis_code/redis/src/redis-server")))
     ap.add_argument("--seeds", type=int, default=8)
     ap.add_argument("--iters", type=int, default=700)
+    ap.add_argument(
+        "--planted-negative",
+        action="store_true",
+        help="prove a missing executable makes this gate fail instead of skip",
+    )
     args = ap.parse_args()
+    if args.planted_negative:
+        if require_binary("/definitely-missing-frankenredis-stream-gate", "planted stream binary"):
+            print("PLANTED NEGATIVE MISSED: missing stream binary passed setup")
+            return 0
+        print("PLANTED NEGATIVE DETECTED: missing stream binary fails setup")
+        return 1
+
     fr_bin = os.path.abspath(args.bin); redis = os.path.abspath(args.redis_bin)
-    if not os.path.exists(fr_bin):
-        print(f"SKIP: fr binary not found at {fr_bin}"); return 0
-    if not os.path.exists(redis):
-        print(f"SKIP: redis-server not found at {redis}"); return 0
+    if not require_binary(fr_bin, "fr binary"):
+        return 2
+    if not require_binary(redis, "redis-server"):
+        return 2
 
     rdir = tempfile.mkdtemp(prefix="fr_streamfuzz_")
     fp, rp = free_port(), free_port()
