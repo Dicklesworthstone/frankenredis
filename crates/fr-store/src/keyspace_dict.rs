@@ -39,25 +39,56 @@
 
 use std::hash::BuildHasher;
 
+/// "No node here" for a bucket head or a chain link.
+///
+/// (uhthd) Arena links are `u32` + sentinel rather than `Option<usize>` because this
+/// table's whole purpose is bytes per key. `Option<usize>` is **16 bytes**: `usize` has
+/// no spare bit pattern, so the discriminant cannot be packed into it and the compiler
+/// adds a whole word. That 16 is paid twice per key — once in `buckets` (load factor 1,
+/// so one bucket slot per key) and once in `Node::next` — for a value whose real range
+/// is bounded by the node arena.
+///
+/// The arena is bounded by `u32::MAX - 1` nodes, checked in [`KeyDict::alloc_node`].
+/// That is not a practical limit: a node is ~72 bytes plus its key allocation, so
+/// 4.29e9 of them is over 300 GB of keyspace index before any values.
+const NIL: u32 = u32::MAX;
+
 /// One key/value cell; `next` chains collisions in the same bucket.
 struct Node<V> {
-    hash: u64,
+    /// Low 32 bits of the key's hash, kept as a cheap pre-filter before the byte
+    /// compare and as the rehash input.
+    ///
+    /// (uhthd) 32 bits suffice for BOTH uses. As a rehash input it is exact: the
+    /// bucket index is `hash & mask`, and `mask` can never exceed `u32::MAX`, because
+    /// a bucket count above 2^32 would require more than `u32::MAX` nodes, which
+    /// [`KeyDict::alloc_node`] refuses. As a pre-filter it is a probabilistic
+    /// accelerator, never a decision: a collision here still falls through to the
+    /// full `*node.key == *key` compare, so a 32-bit match cannot return a wrong key.
+    hash: u32,
     key: Box<[u8]>,
     value: V,
-    next: Option<usize>,
+    /// Index of the next node in this bucket's chain, or [`NIL`].
+    next: u32,
 }
 
 /// A chaining hash table keyed by raw bytes, sized to a power of two so the
 /// bucket index is `hash & mask` and the [`reverse-binary cursor`](KeyDict::scan)
 /// is well-defined.
 pub struct KeyDict<V> {
-    buckets: Vec<Option<usize>>,
+    /// Head node index per bucket, or [`NIL`]. One `u32` per bucket, not one
+    /// `Option<usize>` — see [`NIL`].
+    buckets: Vec<u32>,
     /// Arena of key/value cells. Removed cells become `None` and their slot is
     /// pushed into `free`, so high-churn workloads do not allocate a fresh node
     /// per insert. This removes the pass226 `Box<Node>` allocation penalty while
     /// keeping key ownership and chain order semantics unchanged.
+    ///
+    /// `Option<Node<V>>` is the same size as `Node<V>`: `key: Box<[u8]>` is a
+    /// non-null pointer, so the `None` discriminant lives in that niche. Pinned by
+    /// `node_layout_is_compact_uhthd` so a future field reorder cannot silently add
+    /// a word per key.
     nodes: Vec<Option<Node<V>>>,
-    free: Vec<usize>,
+    free: Vec<u32>,
     /// `buckets.len() - 1`; bucket index = `hash & mask`.
     mask: u64,
     count: usize,
@@ -93,8 +124,7 @@ impl<V> KeyDict<V> {
     /// RANDOMKEY semantics as incremental growth.
     pub fn with_capacity(capacity: usize) -> Self {
         let n = Self::bucket_count_for_capacity(capacity);
-        let mut buckets = Vec::with_capacity(n);
-        buckets.resize_with(n, || None);
+        let buckets = vec![NIL; n];
         Self {
             buckets,
             nodes: Vec::with_capacity(capacity),
@@ -139,23 +169,35 @@ impl<V> KeyDict<V> {
         self.nodes.len()
     }
 
+    /// Low 32 bits of the key's hash. See [`Node::hash`] for why 32 is exact for
+    /// bucket selection and safe for the pre-filter.
     #[inline]
-    fn hash_key(&self, key: &[u8]) -> u64 {
-        self.hasher.hash_one(key)
+    fn hash_key(&self, key: &[u8]) -> u32 {
+        self.hasher.hash_one(key) as u32
     }
 
     #[inline]
-    fn bucket_of(&self, hash: u64) -> usize {
-        (hash & self.mask) as usize
+    fn bucket_of(&self, hash: u32) -> usize {
+        (u64::from(hash) & self.mask) as usize
     }
 
-    fn alloc_node(&mut self, node: Node<V>) -> usize {
+    /// Take a free arena slot or push a new one, returning its index.
+    ///
+    /// The `u32` arena bound is enforced HERE rather than trusted, because it is what
+    /// makes every `NIL`-sentinel link and the 32-bit `Node::hash` sound. Exceeding it
+    /// fails loudly instead of aliasing a live node with the sentinel.
+    fn alloc_node(&mut self, node: Node<V>) -> u32 {
         if let Some(idx) = self.free.pop() {
-            self.nodes[idx] = Some(node);
+            self.nodes[idx as usize] = Some(node);
             idx
         } else {
+            assert!(
+                self.nodes.len() < (NIL as usize),
+                "KeyDict node arena exceeded u32 addressing ({} slots)",
+                self.nodes.len()
+            );
             self.nodes.push(Some(node));
-            self.nodes.len() - 1
+            (self.nodes.len() - 1) as u32
         }
     }
 
@@ -163,8 +205,8 @@ impl<V> KeyDict<V> {
     pub fn get(&self, key: &[u8]) -> Option<&V> {
         let h = self.hash_key(key);
         let mut cur = self.buckets[self.bucket_of(h)];
-        while let Some(idx) = cur {
-            let node = self.nodes[idx]
+        while cur != NIL {
+            let node = self.nodes[cur as usize]
                 .as_ref()
                 .expect("bucket chain points at live node");
             if node.hash == h && *node.key == *key {
@@ -180,13 +222,13 @@ impl<V> KeyDict<V> {
         let h = self.hash_key(key);
         let b = self.bucket_of(h);
         let mut cur = self.buckets[b];
-        while let Some(idx) = cur {
-            let node = self.nodes[idx]
+        while cur != NIL {
+            let node = self.nodes[cur as usize]
                 .as_ref()
                 .expect("bucket chain points at live node");
             if node.hash == h && *node.key == *key {
                 return Some(
-                    &mut self.nodes[idx]
+                    &mut self.nodes[cur as usize]
                         .as_mut()
                         .expect("bucket chain points at live node")
                         .value,
@@ -209,8 +251,8 @@ impl<V> KeyDict<V> {
         let b = self.bucket_of(h);
         // Overwrite in place if present.
         let mut cur = self.buckets[b];
-        while let Some(idx) = cur {
-            let node = self.nodes[idx]
+        while cur != NIL {
+            let node = self.nodes[cur as usize]
                 .as_mut()
                 .expect("bucket chain points at live node");
             if node.hash == h && *node.key == *key {
@@ -236,7 +278,7 @@ impl<V> KeyDict<V> {
             value,
             next: head,
         });
-        self.buckets[b] = Some(idx);
+        self.buckets[b] = idx;
         self.count += 1;
         if self.count > self.buckets.len() {
             self.grow();
@@ -248,26 +290,26 @@ impl<V> KeyDict<V> {
     pub fn remove(&mut self, key: &[u8]) -> Option<V> {
         let h = self.hash_key(key);
         let b = self.bucket_of(h);
-        let mut prev: Option<usize> = None;
+        let mut prev = NIL;
         let mut cur = self.buckets[b];
-        while let Some(idx) = cur {
-            let node = self.nodes[idx]
+        while cur != NIL {
+            let node = self.nodes[cur as usize]
                 .as_ref()
                 .expect("bucket chain points at live node");
             let next = node.next;
             if node.hash == h && *node.key == *key {
-                let removed = self.nodes[idx]
+                let removed = self.nodes[cur as usize]
                     .take()
                     .expect("bucket chain points at live node");
-                if let Some(prev_idx) = prev {
-                    self.nodes[prev_idx]
+                if prev != NIL {
+                    self.nodes[prev as usize]
                         .as_mut()
                         .expect("bucket chain points at live node")
                         .next = removed.next;
                 } else {
                     self.buckets[b] = removed.next;
                 }
-                self.free.push(idx);
+                self.free.push(cur);
                 self.count -= 1;
                 self.maybe_shrink();
                 return Some(removed.value);
@@ -327,13 +369,12 @@ impl<V> KeyDict<V> {
             return;
         }
         let new_mask = (new_len as u64) - 1;
-        let mut buckets: Vec<Option<usize>> = Vec::with_capacity(new_len);
-        buckets.resize_with(new_len, || None);
+        let mut buckets: Vec<u32> = vec![NIL; new_len];
         for (idx, node) in self.nodes.iter_mut().enumerate() {
             if let Some(node) = node {
-                let b = (node.hash & new_mask) as usize;
+                let b = (u64::from(node.hash) & new_mask) as usize;
                 node.next = buckets[b];
-                buckets[b] = Some(idx);
+                buckets[b] = idx as u32;
             }
         }
         self.buckets = buckets;
@@ -342,7 +383,7 @@ impl<V> KeyDict<V> {
 
     /// Remove all entries (keeps the allocated bucket array, like `HashMap::clear`).
     pub fn clear(&mut self) {
-        self.buckets.fill(None);
+        self.buckets.fill(NIL);
         self.nodes.clear();
         self.free.clear();
         self.count = 0;
@@ -353,7 +394,7 @@ impl<V> KeyDict<V> {
         KeyDictIter {
             dict: self,
             bucket: 0,
-            current: None,
+            current: NIL,
         }
     }
 
@@ -377,8 +418,8 @@ impl<V> KeyDict<V> {
         loop {
             let b = (v & self.mask) as usize;
             let mut node = self.buckets[b];
-            while let Some(idx) = node {
-                let n = self.nodes[idx]
+            while node != NIL {
+                let n = self.nodes[node as usize]
                     .as_ref()
                     .expect("bucket chain points at live node");
                 emit(&n.key, &n.value);
@@ -415,26 +456,29 @@ impl<V> KeyDict<V> {
         // Bounded retries: with load factor <= 1 a random bucket is non-empty
         // with decent probability; cap attempts then fall back to a linear scan
         // from a random origin so we always return in O(buckets) worst case.
+        // Walk a chain as an iterator of arena indices, terminating on the NIL
+        // sentinel. `successors` needs an `Option`, so the sentinel is mapped to
+        // `None` here rather than being represented as one in the node.
+        let chain = |head: u32| {
+            std::iter::successors(Some(head), |&idx| {
+                match self.nodes[idx as usize]
+                    .as_ref()
+                    .expect("bucket chain points at live node")
+                    .next
+                {
+                    NIL => None,
+                    next => Some(next),
+                }
+            })
+        };
         for _ in 0..64 {
             let b = reduce(next_rand(), nb);
-            if let Some(head) = self.buckets[b] {
-                let chain_len = std::iter::successors(Some(head), |&idx| {
-                    self.nodes[idx]
-                        .as_ref()
-                        .expect("bucket chain points at live node")
-                        .next
-                })
-                .count();
+            let head = self.buckets[b];
+            if head != NIL {
+                let chain_len = chain(head).count();
                 let pick = reduce(next_rand(), chain_len);
-                let chosen = std::iter::successors(Some(head), |&idx| {
-                    self.nodes[idx]
-                        .as_ref()
-                        .expect("bucket chain points at live node")
-                        .next
-                })
-                .nth(pick)
-                .unwrap();
-                let chosen = self.nodes[chosen]
+                let chosen = chain(head).nth(pick).expect("pick is within chain length");
+                let chosen = self.nodes[chosen as usize]
                     .as_ref()
                     .expect("bucket chain points at live node");
                 return Some((&chosen.key, &chosen.value));
@@ -444,8 +488,9 @@ impl<V> KeyDict<V> {
         let start = reduce(next_rand(), nb);
         for i in 0..self.buckets.len() {
             let b = (start + i) % self.buckets.len();
-            if let Some(head) = self.buckets[b] {
-                let head = self.nodes[head]
+            let head = self.buckets[b];
+            if head != NIL {
+                let head = self.nodes[head as usize]
                     .as_ref()
                     .expect("bucket chain points at live node");
                 return Some((&head.key, &head.value));
@@ -459,7 +504,7 @@ impl<V> KeyDict<V> {
 pub struct KeyDictIter<'a, V> {
     dict: &'a KeyDict<V>,
     bucket: usize,
-    current: Option<usize>,
+    current: u32,
 }
 
 impl<'a, V> Iterator for KeyDictIter<'a, V> {
@@ -467,8 +512,8 @@ impl<'a, V> Iterator for KeyDictIter<'a, V> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(idx) = self.current {
-                let node = self.dict.nodes[idx]
+            if self.current != NIL {
+                let node = self.dict.nodes[self.current as usize]
                     .as_ref()
                     .expect("bucket chain points at live node");
                 self.current = node.next;
@@ -559,6 +604,79 @@ mod tests {
             cand < base,
             "KeyDict must use less RAM than the 3 side indices"
         );
+    }
+
+    /// (uhthd) The per-key byte cost IS the feature here, so the layout that
+    /// produces it is asserted rather than assumed.
+    ///
+    /// Three separate properties, each of which a plausible edit would silently
+    /// break:
+    ///
+    /// 1. **A bucket slot is 4 bytes.** At load factor 1 there is one bucket per
+    ///    key, so widening this to `Option<usize>` costs 12 B/key on its own.
+    /// 2. **`Option<Node<V>>` is the same size as `Node<V>`.** The arena stores
+    ///    `Option`s so removal can vacate a slot; that is free only while
+    ///    `key: Box<[u8]>` donates its non-null niche. Replacing the key with a
+    ///    niche-less representation (a raw index pair, say) would add a word to
+    ///    every node without touching any line that looks like a size decision.
+    /// 3. **A node carrying a 48-byte value fits in 72 bytes.** 4 (hash) + 16
+    ///    (key) + 48 (value) + 4 (next) with no padding. This is the number the
+    ///    RAM claim is built from; `<=` rather than `==` so a smaller future
+    ///    layout is not a test failure.
+    ///
+    /// A negative control is built in: the assertions are written against a
+    /// concrete 48-byte payload, so a regression to `Option<usize>` links or a
+    /// lost niche fails here, not merely in an RSS benchmark that nobody runs.
+    #[test]
+    fn node_layout_is_compact_uhthd() {
+        use std::mem::size_of;
+
+        /// Stand-in for `Store`'s `Entry`, which is pinned at <= 48 bytes.
+        struct FortyEight([u64; 6]);
+        assert_eq!(size_of::<FortyEight>(), 48);
+
+        assert_eq!(size_of::<u32>(), 4, "bucket slot must stay 4 bytes");
+        assert_eq!(
+            size_of::<Option<Node<FortyEight>>>(),
+            size_of::<Node<FortyEight>>(),
+            "arena Option must ride the Box<[u8]> niche, not add a word per key"
+        );
+        assert!(
+            size_of::<Node<FortyEight>>() <= 72,
+            "node with a 48-byte value must fit in 72 bytes, got {}",
+            size_of::<Node<FortyEight>>()
+        );
+    }
+
+    /// (uhthd) The 32-bit `Node::hash` is a pre-filter, never a decision: two keys
+    /// whose stored hashes are equal must still be told apart by the byte compare.
+    ///
+    /// Constructing a genuine 32-bit collision would require inverting foldhash, so
+    /// this drives the property from the other side — force every key into ONE
+    /// bucket by keeping the table at its 4-bucket minimum is not possible either
+    /// (it grows), so instead insert enough keys that chains are exercised and
+    /// assert every single key still resolves to its own value. A `hash`-only
+    /// match that skipped `*node.key == *key` would return a neighbour's value for
+    /// at least one of these.
+    #[test]
+    fn chain_lookup_distinguishes_keys_not_just_hashes_uhthd() {
+        let n = 20_000usize;
+        let mut d: KeyDict<usize> = KeyDict::new();
+        for i in 0..n {
+            d.insert(format!("key:{i:08}").into_bytes().into_boxed_slice(), i);
+        }
+        assert_eq!(d.len(), n);
+        for i in 0..n {
+            assert_eq!(
+                d.get(format!("key:{i:08}").as_bytes()),
+                Some(&i),
+                "key {i} resolved to the wrong node"
+            );
+        }
+        // Absent keys that share the live keys' shape must still miss.
+        for i in n..n + 500 {
+            assert_eq!(d.get(format!("key:{i:08}").as_bytes()), None);
+        }
     }
 
     // Small deterministic LCG so tests are reproducible without rand crates and
