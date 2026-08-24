@@ -74,13 +74,16 @@ def read_reply(sock, buf):
 
 
 KIND = "hash"
+OP = "restore"
 
 
 def main():
-    global KIND
+    global KIND, OP
     for a in sys.argv[1:]:
         if a.startswith("--type="):
             KIND = a.split("=", 1)[1]
+        if a.startswith("--op="):
+            OP = a.split("=", 1)[1]
     argv = [a for a in sys.argv[1:] if not a.startswith("--")]
     if len(argv) != 3:
         print("usage: restore_profile_frames.py <fr_binary> <members> <ops>", file=sys.stderr)
@@ -105,7 +108,9 @@ def main():
 
     proc = subprocess.Popen(
         ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out, fr,
-         "--port", str(port), "--save", "", "--appendonly", "no", "--dir", work],
+         "--port", str(port), "--save", "", "--appendonly", "no", "--dir", work,
+         # DEBUG RELOAD needs the debug command admitted (--op=reload).
+         "--enable-debug-command", "yes"],
         cwd=work, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     sock = None
     try:
@@ -143,7 +148,13 @@ def main():
         if not payload:
             raise RuntimeError("empty DUMP")
 
-        one = resp("RESTORE", "dst", "0", payload, "REPLACE")
+        # (frankenredis-qj6jn) `--op=reload` profiles DEBUG RELOAD (save+load of
+        # the whole db), which is a different route from single-key RESTORE and the
+        # one the 3.31x figure names.
+        if OP == "reload":
+            one = resp("DEBUG", "RELOAD")
+        else:
+            one = resp("RESTORE", "dst", "0", payload, "REPLACE")
         sock.sendall(one * ops)
         done = 0
         while done < ops:
