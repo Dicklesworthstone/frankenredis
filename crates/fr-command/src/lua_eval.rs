@@ -62,13 +62,15 @@ use crate::{CommandError, SCRIPT_NOSCRIPT_ERROR, dispatch_argv, parse_i64_arg};
 // upvalue cells — registers a `Weak` handle in a thread-local registry. At the
 // end of each `eval_script` (success, error, OR panic-unwind, via the
 // `LuaGcScope` Drop guard) we sweep the slice of the registry allocated by that
-// eval and CLEAR each still-live object's contents: emptying a table inner /
-// setting a cell to `Nil` severs the internal back-edge, the strong counts
-// collapse to zero, and the memory is reclaimed. The sweep runs only after the
+// eval and clears each still-live object's contents unless it remains reachable
+// from a shared template: emptying a table inner / setting a cell to `Nil`
+// severs the internal back-edge, the strong counts collapse to zero, and the
+// memory is reclaimed. A value stored in the shared string metatable is one
+// such long-lived root, so its reachable graph must survive the sweep just as
+// it does in Redis's server-wide lua_State. The sweep runs only after the
 // script's return value has been serialized to an owned `RespFrame` and the
-// `LuaState` has dropped, so live results and non-cyclic data are unaffected
-// (their `Weak`s simply fail to upgrade). The registry holds only `Weak`s, so
-// it never itself keeps a Lua object alive.
+// `LuaState` has dropped. The registries hold only `Weak`s, so they never
+// themselves keep a Lua object alive.
 
 enum LuaGcHandle {
     Table(Weak<RefCell<LuaTableInner>>),
@@ -213,11 +215,125 @@ fn lua_gc_sweep_and_drain_prefix(mark: usize) {
 /// Clear each still-live registered object, severing the back-edge that keeps its cycle alive.
 /// Shared by the eval-end sweep and the FCALL library-cache eviction sweep so the two cannot
 /// disagree about what "breaking a cycle" means. (frankenredis-kbyhy)
+#[derive(Default)]
+struct LuaGcReachable {
+    tables: HashSet<usize>,
+    cells: HashSet<usize>,
+}
+
+impl LuaGcReachable {
+    fn visit_value(&mut self, value: &LuaValue) {
+        match value {
+            LuaValue::Table(table) => self.visit_table(table),
+            LuaValue::Function(function) => self.visit_function(function),
+            LuaValue::Userdata(LuaUserdata::Proxy(proxy)) => {
+                if let Some(metatable) = &proxy.metatable {
+                    self.visit_table(metatable);
+                }
+            }
+            LuaValue::Coroutine(coroutine) | LuaValue::WrappedCoroutine(coroutine) => {
+                let (function, env, varargs) = {
+                    let inner = coroutine.inner.borrow();
+                    (inner.func.clone(), inner.env.clone(), inner.varargs.clone())
+                };
+                self.visit_function(&function);
+                self.visit_env(&env);
+                for value in &varargs {
+                    self.visit_value(value);
+                }
+            }
+            LuaValue::Nil
+            | LuaValue::Bool(_)
+            | LuaValue::Number(_)
+            | LuaValue::Str(_)
+            | LuaValue::RustFunction(_)
+            | LuaValue::Userdata(LuaUserdata::CjsonNull) => {}
+        }
+    }
+
+    fn visit_table(&mut self, table: &LuaTable) {
+        let address = Rc::as_ptr(&table.inner) as usize;
+        if !self.tables.insert(address) {
+            return;
+        }
+        let (array, string_values, other_entries, metatable) = {
+            let inner = table.inner.borrow();
+            (
+                inner.array.clone(),
+                inner.string_hash.values().cloned().collect::<Vec<_>>(),
+                inner.other_hash.clone(),
+                inner.metatable.clone(),
+            )
+        };
+        for value in array.iter().chain(string_values.iter()) {
+            self.visit_value(value);
+        }
+        for (key, value) in &other_entries {
+            self.visit_value(key);
+            self.visit_value(value);
+        }
+        if let Some(metatable) = &metatable {
+            self.visit_table(metatable);
+        }
+    }
+
+    fn visit_function(&mut self, function: &LuaFunc) {
+        if let Some(captured) = &function.captured_env {
+            for scope in captured {
+                for (_, cell) in scope {
+                    self.visit_cell(cell);
+                }
+            }
+        }
+        if let Some(env_table) = function.env_table.borrow().clone() {
+            self.visit_table(&env_table);
+        }
+    }
+
+    fn visit_env(&mut self, env: &Option<Env>) {
+        let Some(env) = env else {
+            return;
+        };
+        for scope in &env.scopes {
+            for binding in &scope.locals {
+                self.visit_cell(&binding.cell);
+            }
+        }
+        if let Some(global_env) = &env.global_env {
+            self.visit_table(global_env);
+        }
+    }
+
+    fn visit_cell(&mut self, cell: &LuaCell) {
+        let address = Rc::as_ptr(cell) as usize;
+        if self.cells.insert(address) {
+            let value = cell.borrow().clone();
+            self.visit_value(&value);
+        }
+    }
+}
+
+fn lua_gc_shared_reachable() -> LuaGcReachable {
+    let mut reachable = LuaGcReachable::default();
+    // Standard-library templates are recursively read-only before a script can observe them. The
+    // shared string metatable is the one mutable cross-EVAL root, so it alone can retain a table
+    // allocated by a completed EVAL. Walking only it avoids turning every EVAL teardown into a
+    // traversal of every standard-library table.
+    if let Some(metatable) = LUA_STRING_METATABLE.with(|cell| cell.borrow().clone()) {
+        reachable.visit_table(&metatable);
+    }
+    reachable
+}
+
 fn lua_gc_break_cycles<'h>(handles: impl Iterator<Item = &'h LuaGcHandle>) {
+    let reachable = lua_gc_shared_reachable();
     for handle in handles {
         match handle {
             LuaGcHandle::Table(weak) => {
                 if let Some(inner) = weak.upgrade() {
+                    if reachable.tables.contains(&(Rc::as_ptr(&inner) as usize)) {
+                        continue;
+                    }
                     // try_borrow_mut is defensive: post-teardown nothing
                     // should hold a live borrow, and a contended borrow
                     // must never panic during cleanup.
@@ -234,10 +350,13 @@ fn lua_gc_break_cycles<'h>(handles: impl Iterator<Item = &'h LuaGcHandle>) {
                 }
             }
             LuaGcHandle::Cell(weak) => {
-                if let Some(cell) = weak.upgrade()
-                    && let Ok(mut slot) = cell.try_borrow_mut()
-                {
-                    *slot = LuaValue::Nil;
+                if let Some(cell) = weak.upgrade() {
+                    if reachable.cells.contains(&(Rc::as_ptr(&cell) as usize)) {
+                        continue;
+                    }
+                    if let Ok(mut slot) = cell.try_borrow_mut() {
+                        *slot = LuaValue::Nil;
+                    }
                 }
             }
         }
@@ -645,17 +764,16 @@ impl LuaTable {
         // Bump site 5 of 5 (see LUA_TABLE_FIELD_EPOCH): same address-reuse
         // argument as `new()`.
         bump_lua_field_epoch();
-        Self {
-            inner: Rc::new(RefCell::new(LuaTableInner {
-                array: Vec::new(),
-                string_hash: LuaMap::default(),
-                other_hash: Vec::new(),
-                other_keys: HashSet::new(),
-                metatable: None,
-                shared_template: true,
-                readonly: false,
-            })),
-        }
+        let inner = Rc::new(RefCell::new(LuaTableInner {
+            array: Vec::new(),
+            string_hash: LuaMap::default(),
+            other_hash: Vec::new(),
+            other_keys: HashSet::new(),
+            metatable: None,
+            shared_template: true,
+            readonly: false,
+        }));
+        Self { inner }
     }
 
     fn get(&self, key: &LuaValue) -> LuaValue {
@@ -3406,12 +3524,14 @@ fn resolve_lua_local_slots(stmts: &mut Block) {
 /// (frankenredis-lua-call-depth-ug22x) 768, raised from 512 once 79e2438e3 cut the per-level
 /// cost. The arithmetic, so the next person can redo it rather than trust it:
 ///
+/// ```text
 ///     cycle cost      4352 B/level   call_function 416 + exec_block 96 + exec_stmts 128
 ///                                    + exec_stmt 1264 + eval_expr 816 x3, read from the
 ///                                    shipping ELF's prologues by recursion_stack_budget_gate.py
 ///     worker stack    8 MiB          WORKER_THREAD_STACK_SIZE, fr-server/src/main.rs:79
 ///     absolute cap    1928 levels    8 MiB / 4352 B
 ///     41 pct margin   790 levels     the convention the reply-walk bound uses
+/// ```
 ///
 /// 768 rather than 790: it is under the convention at 39.8 pct, and a power of two is a number
 /// someone can recognise as chosen rather than fitted. The margin is not decoration -- a Lua
@@ -3432,6 +3552,10 @@ fn resolve_lua_local_slots(stmts: &mut Block) {
 /// nesting, so what this bound still governs is NON-tail recursion, which is where the residual
 /// gap described above lives.
 const MAX_CALL_DEPTH: usize = 768;
+/// Lua 5.1's observed non-tail call ceiling is 19,998.  Heap-backed
+/// continuations match that capability without letting a hostile script grow
+/// the interpreter heap without bound.
+const MAX_HEAP_CALL_CONTINUATIONS: usize = 19_998;
 const MAX_ITERATIONS: u64 = 1_000_000;
 const LUA_EXACT_INTEGER_LIMIT: i128 = 1_i128 << 53;
 const LUA_YIELD_SENTINEL: &str = "__frankenredis_lua_coroutine_yield__";
@@ -3490,6 +3614,19 @@ enum ControlFlow {
 struct TailCall {
     callee: LuaValue,
     args: Vec<LuaValue>,
+    /// Callers that have evaluated the left side of `return lhs + f(...)`.
+    /// Unlike a Rust call frame these live in a Vec owned by the trampoline,
+    /// so a non-tail recursive Lua call does not consume the worker stack.
+    continuations: Vec<NonTailCallFrame>,
+}
+
+/// The completed portion of a non-tail binary return.  The vector containing
+/// these frames is the interpreter's heap stack; `call_function` pops it once
+/// the deferred callee has produced its first result.
+#[derive(Debug)]
+struct NonTailCallFrame {
+    left: LuaValue,
+    op: BinOp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5051,8 +5188,10 @@ thread_local! {
 /// (frankenredis-kbyhy) MEASURED, not guessed. After the library body stopped being re-executed
 /// per call, `frame_delta` over the lib1/lib32 pair put the entire residual slope in one frame:
 ///
+/// ```text
 ///     sip::Hasher::write         296.0 instr/op at lib1  ->   5,862.0 at lib32   (19.8x)
 ///     whole op                10,929.9                   ->  16,833.8            (+5,903.9)
+/// ```
 ///
 /// so 94 pct of the growth across a 32x library was the cache PROBE hashing the whole library to
 /// find an entry it then confirms by equality anyway. The default `SipHash13` reads every byte;
@@ -6410,11 +6549,64 @@ impl<'a> LuaState<'a> {
                         return Ok(ControlFlow::TailCall(Box::new(TailCall {
                             callee: func,
                             args: arg_vals,
+                            continuations: Vec::new(),
                         })));
                     }
                     return Ok(ControlFlow::Return(self.invoke_call_expr(
                         func_expr, &func, arg_vals, call_args, env, varargs,
                     )?));
+                }
+                // (frankenredis-ug22x) A direct call on the right of an
+                // arithmetic return is non-tail: its caller still has to add
+                // the result.  Preserve that completed left operand in the
+                // call transfer instead of nesting `call_function` on the
+                // Rust stack.  Each recurrence adds one small heap frame to
+                // the trampoline's Vec, which is released as results unwind.
+                //
+                // This intentionally covers the arithmetic forms first.  They
+                // are the recursive shape that exposed the 10x frame gap, and
+                // `eval_binop` applies their ordinary Lua number coercion when
+                // the deferred call returns.  Metamethod-bearing forms retain
+                // the existing evaluator path below until they have an equally
+                // complete continuation representation.
+                if let [Expr::BinOp(left, op, right)] = exprs.as_slice()
+                    && matches!(right.as_ref(), Expr::Call(_, _))
+                    && matches!(
+                        op,
+                        BinOp::Add
+                            | BinOp::Sub
+                            | BinOp::Mul
+                            | BinOp::Div
+                            | BinOp::Mod
+                            | BinOp::Pow
+                    )
+                {
+                    let left_value = self.eval_expr(left, env, varargs)?;
+                    if left_value.to_number().is_some() {
+                        let Expr::Call(func_expr, call_args) = right.as_ref() else {
+                            unreachable!("right is constrained by the pattern above");
+                        };
+                        let func = self.eval_expr(func_expr, env, varargs)?;
+                        let arg_vals = self.eval_call_args(call_args, env, varargs)?;
+                        if matches!(func, LuaValue::Function(_)) {
+                            return Ok(ControlFlow::TailCall(Box::new(TailCall {
+                                callee: func,
+                                args: arg_vals,
+                                continuations: vec![NonTailCallFrame {
+                                    left: left_value,
+                                    op: op.clone(),
+                                }],
+                            })));
+                        }
+                        let right_value = self
+                            .invoke_call_expr(func_expr, &func, arg_vals, call_args, env, varargs)?
+                            .into_iter()
+                            .next()
+                            .unwrap_or(LuaValue::Nil);
+                        return Ok(ControlFlow::Return(vec![
+                            self.eval_binop(&left_value, op, &right_value)?,
+                        ]));
+                    }
                 }
                 let vals = self.eval_expr_list(exprs, env, varargs)?;
                 Ok(ControlFlow::Return(vals))
@@ -7964,8 +8156,12 @@ impl<'a> LuaState<'a> {
         env: &mut Env,
         varargs: &mut Vec<LuaValue>,
     ) -> Result<Vec<LuaValue>, String> {
-        let TailCall { callee, mut args } = tail;
-        self.call_function(&callee, &mut args, env, varargs)
+        let TailCall {
+            callee,
+            mut args,
+            continuations,
+        } = tail;
+        self.call_function_with_continuations(&callee, &mut args, env, varargs, continuations)
     }
 
     fn invoke_call_expr(
@@ -9141,7 +9337,18 @@ impl<'a> LuaState<'a> {
         func: &LuaValue,
         args: &mut [LuaValue],
         env: &mut Env,
-        _varargs: &mut Vec<LuaValue>,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<Vec<LuaValue>, String> {
+        self.call_function_with_continuations(func, args, env, varargs, Vec::new())
+    }
+
+    fn call_function_with_continuations(
+        &mut self,
+        func: &LuaValue,
+        args: &mut [LuaValue],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+        continuations: Vec<NonTailCallFrame>,
     ) -> Result<Vec<LuaValue>, String> {
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
@@ -9178,7 +9385,13 @@ impl<'a> LuaState<'a> {
             new_args.extend_from_slice(args);
             self.call_depth -= 1;
             self.lua_frame_kinds.pop();
-            return self.call_function(&callable, &mut new_args, env, _varargs);
+            return self.call_function_with_continuations(
+                &callable,
+                &mut new_args,
+                env,
+                varargs,
+                continuations,
+            );
         }
         let result = match func {
             LuaValue::RustFunction(name) => self.call_builtin(name, args, env),
@@ -9213,6 +9426,7 @@ impl<'a> LuaState<'a> {
             LuaValue::Function(entry_func) => {
                 let mut tail_owner: Option<LuaValue> = None;
                 let mut tail_args: Vec<LuaValue> = Vec::new();
+                let mut continuations = continuations;
                 let mut first = true;
                 loop {
                     let lua_func: &LuaFunc = match tail_owner.as_ref() {
@@ -9238,9 +9452,25 @@ impl<'a> LuaState<'a> {
                     }
                     first = false;
                     break match result {
-                        Ok(ControlFlow::Return(vals)) => Ok(vals),
+                        Ok(ControlFlow::Return(mut vals)) => {
+                            while let Some(frame) = continuations.pop() {
+                                let right = vals.into_iter().next().unwrap_or(LuaValue::Nil);
+                                vals = vec![self.eval_binop(&frame.left, &frame.op, &right)?];
+                            }
+                            Ok(vals)
+                        }
                         Ok(ControlFlow::TailCall(tail)) => {
-                            let TailCall { callee, args } = *tail;
+                            let TailCall {
+                                callee,
+                                args,
+                                continuations: deferred,
+                            } = *tail;
+                            if continuations.len().saturating_add(deferred.len())
+                                > MAX_HEAP_CALL_CONTINUATIONS
+                            {
+                                return Err("user_script:1: stack overflow".to_string());
+                            }
+                            continuations.extend(deferred);
                             tail_owner = Some(callee);
                             tail_args = args;
                             continue;
@@ -13237,23 +13467,71 @@ fn lua_class_match(class: u8, ch: u8) -> bool {
     }
 }
 
-/// Check if a byte matches a single pattern element at position `pi` in pattern.
-/// Returns the number of pattern bytes consumed.
-fn lua_single_match(pat: &[u8], pi: usize, ch: u8) -> bool {
-    if pi >= pat.len() {
-        return false;
+/// One decoded matcher state. The general matcher selects this state once per
+/// pattern element, then a quantified run consumes subject bytes without
+/// repeatedly decoding the same pattern byte.
+///
+/// `%b`/`%f`/`%N` and captures remain in `lua_pat_match`: they have stateful
+/// semantics, rather than the independent-byte semantics represented here.
+enum LuaPatternState<'a> {
+    Literal(u8),
+    Any,
+    Class(u8),
+    Set { pat: &'a [u8], start: usize },
+}
+
+impl LuaPatternState<'_> {
+    fn matches(&self, ch: u8) -> bool {
+        match self {
+            Self::Literal(expected) => ch == *expected,
+            Self::Any => true,
+            Self::Class(class) => lua_class_match(*class, ch),
+            Self::Set { pat, start } => lua_set_match(pat, *start, ch),
+        }
     }
-    match pat[pi] {
-        b'.' => true,
-        b'%' => {
-            if pi + 1 < pat.len() {
-                lua_class_match(pat[pi + 1], ch)
-            } else {
-                false
+
+    /// Consume a greedy quantified run. The state dispatch is outside the
+    /// byte loop, which is the common `a+`/`%d*` matcher path.
+    fn greedy_end(&self, s: &[u8], start: usize) -> usize {
+        match self {
+            Self::Literal(expected) => s[start..]
+                .iter()
+                .position(|&ch| ch != *expected)
+                .map_or(s.len(), |offset| start + offset),
+            Self::Any => s.len(),
+            Self::Class(class) => {
+                let mut end = start;
+                while end < s.len() && lua_class_match(*class, s[end]) {
+                    end += 1;
+                }
+                end
+            }
+            Self::Set {
+                pat,
+                start: pattern_start,
+            } => {
+                let mut end = start;
+                while end < s.len() && lua_set_match(pat, *pattern_start, s[end]) {
+                    end += 1;
+                }
+                end
             }
         }
-        b'[' => lua_set_match(pat, pi, ch),
-        c => c == ch,
+    }
+}
+
+/// Decode the stateless element at `pi` once. Pattern validation has already
+/// rejected malformed `%` and `[` forms before this matcher is entered.
+fn lua_pattern_state(pat: &[u8], pi: usize) -> (LuaPatternState<'_>, usize) {
+    match pat[pi] {
+        b'.' => (LuaPatternState::Any, pi + 1),
+        b'%' if pi + 1 < pat.len() => (LuaPatternState::Class(pat[pi + 1]), pi + 2),
+        b'%' => (LuaPatternState::Literal(b'%'), pi + 1),
+        b'[' => (
+            LuaPatternState::Set { pat, start: pi },
+            pi + lua_pattern_element_len(pat, pi),
+        ),
+        literal => (LuaPatternState::Literal(literal), pi + 1),
     }
 }
 
@@ -13501,8 +13779,10 @@ fn lua_pattern_error_take() -> Option<String> {
 /// this bead was first fixed, so a literal pattern costs no stack and `string.rep('a',300)` matches.
 /// The NON-tail positions still recurse once per repetition, and they still hit the guard:
 ///
+/// ```text
 ///     EVAL "return string.match(string.rep('ab',N), string.rep('a*b',N)) ~= nil" 0
 ///     N=200 -> fr :1, redis :1        N=201 -> fr $-1, redis :1
+/// ```
 ///
 /// measured against live 7.2.4, diverging EXACTLY at the guard. The failure is a silent NON-MATCH,
 /// not an error, which is the half that makes it dangerous.
@@ -13511,9 +13791,11 @@ fn lua_pattern_error_take() -> Option<String> {
 /// 8 + 8*6 pushes + sub 120 = 176 BYTES per level, and the symbol makes 3 DIRECT self-calls, so one
 /// level is one frame:
 ///
+/// ```text
 ///     whole 8 MiB worker stack           47,662 levels
 ///     MAX_CALL_DEPTH worst case           3,342,336 B (768 x 4352)
 ///     stack remaining beneath it          5,046,272 B  ->  28,672 levels
+/// ```
 ///
 /// THE MIDDLE LINE IS WHY THIS IS NOT SIZED LIKE `MAX_CALL_DEPTH`: the matcher runs INSIDE a Lua
 /// call stack that is itself bounded at 768 levels, so its budget is what is left UNDER that worst
@@ -13630,7 +13912,7 @@ fn lua_pat_match(
         // upstream lstrlib.c::match_capture compares the N-th captured
         // substring's bytes against s starting at si. The capture must
         // already be closed (Substring(start, Some(end)) or Position).
-        // fr previously fell through to lua_single_match → lua_class_match
+        // fr previously fell through to the generic byte matcher → lua_class_match
         // which treated '%1' as the literal char '1'.
         if pi + 1 < pat.len() && pat[pi] == b'%' && (b'1'..=b'9').contains(&pat[pi + 1]) {
             let cap_idx = (pat[pi + 1] - b'0') as usize - 1;
@@ -13720,31 +14002,42 @@ fn lua_pat_match(
             return None;
         }
 
-        let elem_len = lua_pattern_element_len(pat, pi);
-        let after_elem = pi + elem_len;
+        // The ordinary matcher path is a small state machine: decode the
+        // element once, then use that state for the quantifier and byte match.
+        // This is deliberately below the capture/%N/%f/%b arms above, whose
+        // stateful behavior cannot be represented as an independent byte test.
+        let (element, after_elem) = lua_pattern_state(pat, pi);
 
         // Check for quantifier after element
         if after_elem < pat.len() {
             match pat[after_elem] {
                 b'*' => {
                     // Greedy 0+
-                    return lua_pat_greedy(s, si, pat, pi, after_elem + 1, captures, depth);
+                    return lua_pat_greedy(s, si, &element, pat, after_elem + 1, captures, depth);
                 }
                 b'+' => {
                     // Greedy 1+
-                    if si < s.len() && lua_single_match(pat, pi, s[si]) {
-                        return lua_pat_greedy(s, si + 1, pat, pi, after_elem + 1, captures, depth);
+                    if si < s.len() && element.matches(s[si]) {
+                        return lua_pat_greedy(
+                            s,
+                            si + 1,
+                            &element,
+                            pat,
+                            after_elem + 1,
+                            captures,
+                            depth,
+                        );
                     }
                     return None;
                 }
                 b'-' => {
                     // Lazy 0+
-                    return lua_pat_lazy(s, si, pat, pi, after_elem + 1, captures, depth);
+                    return lua_pat_lazy(s, si, &element, pat, after_elem + 1, captures, depth);
                 }
                 b'?' => {
                     // Optional
                     if si < s.len()
-                        && lua_single_match(pat, pi, s[si])
+                        && element.matches(s[si])
                         && let Some(end) =
                             lua_pat_match(s, si + 1, pat, after_elem + 1, captures, depth + 1)
                     {
@@ -13758,7 +14051,7 @@ fn lua_pat_match(
         }
 
         // No quantifier: match single element
-        if si < s.len() && lua_single_match(pat, pi, s[si]) {
+        if si < s.len() && element.matches(s[si]) {
             si += 1;
             pi = after_elem;
             continue 'match_pattern;
@@ -13772,25 +14065,22 @@ fn lua_pat_match(
 fn lua_pat_greedy(
     s: &[u8],
     si: usize,
+    element: &LuaPatternState<'_>,
     pat: &[u8],
-    elem_pi: usize,
     rest_pi: usize,
     captures: &mut Vec<LuaCapture>,
     depth: usize,
 ) -> Option<usize> {
-    let mut count = 0;
-    while si + count < s.len() && lua_single_match(pat, elem_pi, s[si + count]) {
-        count += 1;
-    }
+    let mut end = element.greedy_end(s, si);
     // Try from longest match down
     loop {
-        if let Some(end) = lua_pat_match(s, si + count, pat, rest_pi, captures, depth + 1) {
-            return Some(end);
+        if let Some(match_end) = lua_pat_match(s, end, pat, rest_pi, captures, depth + 1) {
+            return Some(match_end);
         }
-        if count == 0 {
+        if end == si {
             break;
         }
-        count -= 1;
+        end -= 1;
     }
     None
 }
@@ -13799,8 +14089,8 @@ fn lua_pat_greedy(
 fn lua_pat_lazy(
     s: &[u8],
     si: usize,
+    element: &LuaPatternState<'_>,
     pat: &[u8],
-    elem_pi: usize,
     rest_pi: usize,
     captures: &mut Vec<LuaCapture>,
     depth: usize,
@@ -13810,7 +14100,7 @@ fn lua_pat_lazy(
         if let Some(end) = lua_pat_match(s, pos, pat, rest_pi, captures, depth + 1) {
             return Some(end);
         }
-        if pos < s.len() && lua_single_match(pat, elem_pi, s[pos]) {
+        if pos < s.len() && element.matches(s[pos]) {
             pos += 1;
         } else {
             return None;
@@ -14289,9 +14579,11 @@ fn resp_to_lua(frame: &RespFrame, resp3: bool) -> LuaValue {
 /// 7.2.4 with `scripts/lua_depth_survival_differential.py reply`, both engines
 /// side by side on the same script:
 ///
+/// ```text
 ///     depth   2000    4000    7000    7990    8000
 ///     redis   OK      OK      OK      OK      refuses (~7995 delivered)
 ///     fr      OK      refused refused refused refused      <- at the old 2000
+/// ```
 ///
 /// So upstream's real ceiling is ~7995 levels, essentially `LUAI_MAXCSTACK`, and
 /// the old bound refused everything from 2001 up — replies Redis returns. That is
@@ -17130,49 +17422,35 @@ mod tests {
         assert_eq!(out, RespFrame::BulkString(Some(b"b".to_vec())));
     }
 
-    /// NON-tail recursion must STILL be bounded, and this is the discriminating negative case.
-    ///
-    /// (frankenredis-lua-tail-calls-ps0le) `return 1 + f(n-1)` needs the caller's frame to add to
-    /// the result, so Lua does not treat it as a tail call and it must keep costing a frame here.
-    /// A fix that merely stopped charging `call_depth` for every `return f(...)`-shaped call would
-    /// pass the test above and FAIL this one by recursing natively until the process aborts --
-    /// strictly worse than the refusal it replaced.
-    ///
-    /// IT RUNS ON A SIZED THREAD ON PURPOSE. Rust's default test thread gets 2 MiB, so on the
-    /// harness's own thread the native stack dies BEFORE the guard can fire and the whole test
-    /// binary aborts with SIGABRT -- which is what happened the first time this test ran.
-    ///
-    /// 8 MiB WAS NOT ENOUGH EITHER, and the reason is worth keeping because it caught two people:
-    /// the 4352 B per level that sizes `MAX_CALL_DEPTH` is a RELEASE figure, and 768 x 4352 =
-    /// 3.34 MB does fit 8 MiB. But tests run at opt-level 0, where the same cycle measures
-    /// 19,560 B per level -- 4.5x fatter (call_function 416 -> 2464, eval_expr 816 -> 4104,
-    /// exec_stmt 1264 -> 4112, read from this crate's own debug test binary). At that cost 768
-    /// levels need 14.33 MB, an 8 MiB thread holds 429, and the binary aborted again.
-    ///
-    /// So the thread is sized for the DEBUG cost with headroom, matching the 64 MiB probes
-    /// elsewhere in this file (`thread-stack-size-1tlyh`, `9a4ca2c28`). A depth bound is sized
-    /// for PRODUCTION from release frames -- that part was right and `MAX_CALL_DEPTH` does not
-    /// move -- but the test that PROVES the bound has to fit the profile the test runs in, or the
-    /// bound is unprovable and the suite is unrunnable.
+    /// A non-tail recursive return needs a caller frame for the pending add,
+    /// but that frame belongs on the interpreter heap rather than the Rust
+    /// worker stack.  This depth is deliberately beyond both MAX_CALL_DEPTH
+    /// and the old native-stack ceiling.
     #[test]
-    fn non_tail_recursion_is_still_refused_at_the_bound_ps0le() {
-        let probe = std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let mut store = Store::new();
-                eval_script(
-                    b"local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f(20000)",
-                    &[],
-                    &[],
-                    &mut store,
-                    0,
-                )
-                .expect_err("non-tail recursion must be refused, never abort the process")
-            })
-            .expect("spawn the 64 MiB probe thread");
-        let err = probe
-            .join()
-            .expect("the guard must fire before the stack does");
+    fn non_tail_arithmetic_recursion_uses_heap_continuations_ug22x() {
+        let mut store = Store::new();
+        let out = eval_script(
+            b"local function f(n) if n == 0 then return 0 end return 1 + f(n - 1) end return f(19998)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("heap-backed non-tail frames must reach the incumbent boundary");
+        assert_eq!(out, RespFrame::Integer(19_998));
+    }
+
+    /// The heap stack retains the incumbent's finite non-tail ceiling instead
+    /// of replacing one process-abort hazard with an unbounded allocation.
+    #[test]
+    fn non_tail_recursion_is_refused_at_the_heap_bound_ug22x() {
+        let mut store = Store::new();
+        let script = format!(
+            "local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f({})",
+            super::MAX_HEAP_CALL_CONTINUATIONS + 1
+        );
+        let err = eval_script(script.as_bytes(), &[], &[], &mut store, 0)
+            .expect_err("non-tail recursion must be refused without growing the Rust stack");
         assert!(
             err.contains("stack overflow"),
             "expected upstream's stack-overflow wording, got {err}"
@@ -17790,9 +18068,7 @@ mod tests {
         );
 
         // Method lookup runs THROUGH __index, so replacing it redirects every string method and
-        // orphans the ones the string table used to serve. Both halves in one script: fr's
-        // end-of-eval cycle breaking clears a table stored across evals, which is a separate defect
-        // and would make a two-script version fail for an unrelated reason.
+        // orphans the ones the string table used to serve.
         assert_eq!(
             run(
                 &mut store,
@@ -17802,6 +18078,15 @@ mod tests {
             ),
             "Zx|false",
             "replacing __index must redirect method lookup AND orphan string.rep"
+        );
+
+        // The replacement table is reachable from the shared string metatable, so it and the
+        // function it owns must survive the EVAL-boundary cycle sweep. Before wh9mn the table
+        // object survived but the sweep emptied its contents, making this second EVAL see nil.
+        assert_eq!(
+            run(&mut store, b"return type(('x').zap) .. '|' .. ('x'):zap()"),
+            "function|Zx",
+            "a table retained by the shared string metatable must keep its entries across EVALs"
         );
     }
 
@@ -23532,44 +23817,10 @@ end
 
     #[test]
     fn deep_lua_recursion_refuses_with_the_incumbents_wording_5h2lu() {
-        // fr refuses deep Lua recursion earlier than 7.2.4 does -- see the derivation on
-        // MAX_CALL_DEPTH -- and that gap cannot be closed by moving a constant. What it CAN do,
-        // and what this pins, is refuse with the message the incumbent uses instead of one that
-        // appears nowhere in Redis: `luaD_growCI` raises `luaG_runerror(L, "stack overflow")`
-        // (ldo.c:170-175), while fr answered "script exceeded maximum call depth".
-        //
-        // Nothing else pinned the old string -- three emission sites, no test, no fixture -- which
-        // is exactly why it survived: an invented error nobody asserts on reads as correct forever.
-        // The 64 MiB thread is a TEST-PROFILE accommodation, the same one
-        // `lua_reply_walk_bounds_nesting_like_upstream_luareplytoredisreply` already carries: this
-        // workspace defines no [profile.test], so tests run at opt-level 0 where the evaluator's
-        // frames are far fatter than in the shipping binary. MEASURED here rather than assumed --
-        // without it this test aborts the whole test binary with a real stack overflow before the
-        // depth guard can fire, which is how it first ran. That is a statement about opt-level 0
-        // on a 2 MiB test thread, NOT about production, where workers get 8 MiB (c63b56ef1).
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
         let mut store = Store::new();
-
-        // CONTROL, and it is the half that catches an over-eager fix: a recursion comfortably
-        // inside the bound must still RUN. DERIVED from MAX_CALL_DEPTH rather than written as a
-        // literal -- this said `f(100)` against a bound of 128, and its partner said `f(500)`
-        // against the same 128, so raising the bound to the measured 512 left the "past the
-        // bound" half asserting a refusal that could no longer happen. Both ends now move with
-        // the constant, which is what makes this a bound test rather than a depth-500 test.
-        // (frankenredis-lua-tail-calls-ps0le) BOTH PROBES ARE NON-TAIL NOW -- `return 1 + f(n-1)`,
-        // not `return f(n-1)` -- and the change is a correction, not an accommodation. This test
-        // asserted that `return f(n-1)` past the bound is REFUSED. That shape is a TAIL CALL, and
-        // Lua 5.1 gives tail calls a reused frame, so 7.2.4 answers 0 for it at 600, 5000 and
-        // 50000 alike (measured live on that bead). The assertion was therefore pinning fr's
-        // DIVERGENCE from the incumbent as if it were the contract, and it went green for exactly
-        // as long as fr had the bug. `MAX_CALL_DEPTH` governs non-tail recursion; both halves now
-        // probe what it governs. This is the second time on this project that a test has encoded
-        // an assumption a later fix invalidated without touching a line the test names.
         let inside = format!(
             "local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f({})",
-            super::MAX_CALL_DEPTH / 4
+            super::MAX_HEAP_CALL_CONTINUATIONS
         );
         let ok = eval_script(
             inside.as_bytes(),
@@ -23581,13 +23832,13 @@ end
         .expect("a recursion inside the bound must still run");
         assert_eq!(
             ok,
-            RespFrame::Integer((super::MAX_CALL_DEPTH / 4) as i64),
+            RespFrame::Integer(super::MAX_HEAP_CALL_CONTINUATIONS as i64),
             "the non-tail control sums 1 per level, so it returns the depth it was given"
         );
 
         let past = format!(
             "local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f({})",
-            super::MAX_CALL_DEPTH + 100
+            super::MAX_HEAP_CALL_CONTINUATIONS + 1
         );
         let err = eval_script(
             past.as_bytes(),
@@ -23605,10 +23856,6 @@ end
             !err.contains("maximum call depth"),
             "the invented string must be gone: {err}"
         );
-            })
-            .expect("spawn a test thread with headroom")
-            .join()
-            .expect("the depth guard must fire instead of overflowing the stack");
     }
 
     #[test]
@@ -29369,6 +29616,41 @@ end
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"M,M,xyMyx".to_vec())));
+    }
+
+    #[test]
+    fn lua_pattern_state_machine_preserves_quantified_byte_classes_25uop() {
+        // The state machine decodes an ordinary matcher element once before
+        // consuming a quantified run. These rows cover each stateless state
+        // (literal, dot, class, and set) plus a negative no-match control.
+        let mut store = Store::new();
+        let cases: &[(&[u8], RespFrame)] = &[
+            (
+                b"return string.match('aaaaab', 'a+')",
+                RespFrame::BulkString(Some(b"aaaaa".to_vec())),
+            ),
+            (
+                b"return string.match('ab123cd', '%d+')",
+                RespFrame::BulkString(Some(b"123".to_vec())),
+            ),
+            (
+                b"return string.match('abc123', '[a-z]+')",
+                RespFrame::BulkString(Some(b"abc".to_vec())),
+            ),
+            (
+                b"return string.match('abcd', '.+')",
+                RespFrame::BulkString(Some(b"abcd".to_vec())),
+            ),
+            (
+                b"return string.match('bbbb', 'a+')",
+                RespFrame::BulkString(None),
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0)
+                .unwrap_or_else(|err| panic!("{}: {err}", String::from_utf8_lossy(body)));
+            assert_eq!(frame, *expected, "body={}", String::from_utf8_lossy(body));
+        }
     }
 
     #[test]
