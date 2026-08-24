@@ -748,6 +748,89 @@ mod tests {
     /// either structure (RSS only grows, so the two deltas are clean and additive —
     /// no allocator-retention confound). Run:
     ///   cargo test -p fr-store keydict_vs_side_index_ram_uhthd -- --ignored --nocapture
+    /// (frankenredis-uhthd) WHERE THE REMAINING BYTES/KEY GO.
+    ///
+    /// The wired keyspace measures ~149.5 B/key against Redis 7.2.4's ~82.6. Three
+    /// candidate levers were each worth "about 15 B/key" by arithmetic -- a key
+    /// arena, an inline small value, a denser node -- which is not a basis for
+    /// choosing between them. This attributes real resident bytes to components so
+    /// the next lever is picked on measurement.
+    ///
+    /// It has already earned its place twice: it priced `frankenredis-hwcm1`'s SCAN
+    /// prefilter at 8.4 B/key (one `u64` per bucket at load factor ~1, which nobody
+    /// had costed in bytes/key), and it is what exposed the key-arena rejection --
+    /// see the REJECT row, and note the trap below.
+    ///
+    /// **`key BYTES` is PAYLOAD, not footprint.** It sums `k.len()`, so per-key
+    /// allocator overhead lands in UNACCOUNTED and arena capacity slack would not
+    /// appear at all. Reading UNACCOUNTED as "what an arena would save" is exactly
+    /// the mistake that made the arena look like a 21.7 B/key win in-process while
+    /// it measured a 6.5 B/key LOSS against a live server.
+    #[test]
+    #[ignore = "RSS attribution; run explicitly with --ignored --nocapture"]
+    fn keydict_byte_attribution_uhthd() {
+        use std::mem::size_of;
+
+        fn rss_bytes() -> usize {
+            let s = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+            let pages: usize = s
+                .split_whitespace()
+                .nth(1)
+                .and_then(|f| f.parse().ok())
+                .unwrap_or(0);
+            pages * 4096
+        }
+
+        // A 48-byte payload stands in for `Store`'s `Entry`.
+        #[derive(Clone)]
+        struct FortyEight([u64; 6]);
+
+        let n = 1_000_000usize;
+        let r0 = rss_bytes();
+        let mut kd: KeyDict<FortyEight> = KeyDict::new();
+        for i in 0..n {
+            // Same shape DEBUG POPULATE uses: key:N
+            kd.insert(
+                format!("key:{i}").into_bytes().into_boxed_slice(),
+                FortyEight([0; 6]),
+            );
+        }
+        let r1 = rss_bytes();
+        let resident = r1 - r0;
+
+        let node = size_of::<Option<Node<FortyEight>>>();
+        let nodes_bytes = kd.nodes.capacity() * node;
+        let buckets_bytes = kd.buckets.capacity() * size_of::<u32>();
+        let free_bytes = kd.free.capacity() * size_of::<u32>();
+        // (frankenredis-hwcm1) One u64 per BUCKET for the SCAN first-byte prefilter.
+        // Counted explicitly because at load factor ~1 that is 8 bytes per KEY --
+        // the same order as the levers this attribution ranks.
+        let first_byte_bits_bytes = kd.first_byte_bits.capacity() * size_of::<u64>();
+        let key_bytes: usize = kd.iter().map(|(k, _)| k.len()).sum();
+        let accounted =
+            nodes_bytes + buckets_bytes + free_bytes + first_byte_bits_bytes + key_bytes;
+
+        let per = |b: usize| b as f64 / n as f64;
+        println!(
+            "KeyDict byte attribution (N={n}, 48-byte value, key:N keys)\n  resident            {:8.1} B/key  ({:.1} MB)\n  node arena          {:8.1} B/key  (cap {} x {} B/node)\n  bucket table        {:8.1} B/key  (cap {})\n  free list           {:8.1} B/key\n  SCAN first-byte     {:8.1} B/key  (hwcm1 prefilter, 8 B/bucket)\n  key PAYLOAD         {:8.1} B/key  (k.len() only -- NOT footprint)\n  accounted           {:8.1} B/key\n  UNACCOUNTED         {:8.1} B/key  <- per-allocation overhead on {} key blocks",
+            per(resident),
+            resident as f64 / 1e6,
+            per(nodes_bytes),
+            kd.nodes.capacity(),
+            node,
+            per(buckets_bytes),
+            kd.buckets.capacity(),
+            per(free_bytes),
+            per(first_byte_bits_bytes),
+            per(key_bytes),
+            per(accounted),
+            per(resident.saturating_sub(accounted)),
+            n,
+        );
+        std::hint::black_box(&kd);
+        assert!(resident > 0, "no resident growth measured");
+    }
+
     #[test]
     #[ignore = "RSS benchmark; run explicitly with --ignored --nocapture"]
     fn keydict_vs_side_index_ram_uhthd() {
