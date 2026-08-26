@@ -22,7 +22,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use crate::listpack::{ListpackError, RawListpackValue, decode_raw_values};
+use crate::listpack::{ListpackError, RawKind, RawListpackValue, decode_raw_values};
 use crate::{
     BorrowedStreamEntry, EncodableStreamEntry, RdbStreamConsumer, RdbStreamConsumerGroup,
     RdbStreamMetadata, RdbStreamPendingEntry, RdbValue, StreamEntry,
@@ -1295,9 +1295,9 @@ fn take_int(lp: &[RawListpackValue], idx: &mut usize) -> Result<i64, UpstreamStr
         .get(*idx)
         .ok_or(UpstreamStreamError::ShortListpackEntries)?;
     *idx += 1;
-    match v {
-        RawListpackValue::Integer(n) => Ok(*n),
-        RawListpackValue::String(_) => Err(UpstreamStreamError::ExpectedListpackInteger),
+    match v.kind() {
+        RawKind::Integer(n) => Ok(n),
+        RawKind::String(_) => Err(UpstreamStreamError::ExpectedListpackInteger),
     }
 }
 
@@ -1332,9 +1332,9 @@ fn take_string<'blob>(
     // Only the integer case owns, because the decimal rendering has to live
     // somewhere -- and upstream writes field/value pairs with `lpAppend`, not
     // `lpAppendInteger`, so it is the rare arm.
-    Ok(match v {
-        RawListpackValue::Integer(n) => Cow::Owned(crate::decimal_i64_bytes(*n)),
-        RawListpackValue::String(range) => Cow::Borrowed(
+    Ok(match v.kind() {
+        RawKind::Integer(n) => Cow::Owned(crate::decimal_i64_bytes(n)),
+        RawKind::String(range) => Cow::Borrowed(
             blob.get(range.start as usize..range.end as usize)
                 .ok_or(UpstreamStreamError::ShortListpackEntries)?,
         ),
