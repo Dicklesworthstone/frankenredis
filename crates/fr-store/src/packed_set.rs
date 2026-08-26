@@ -2208,7 +2208,7 @@ impl PackedStreamLog {
     /// have returned. Only the lookup changes, never the result.
     fn intern_indexed<'a>(
         field_dict: &mut Vec<Box<[u8]>>,
-        index: &mut std::collections::HashMap<&'a [u8], usize>,
+        index: &mut std::collections::HashMap<&'a [u8], usize, foldhash::quality::RandomState>,
         name: &'a [u8],
     ) -> usize {
         if let Some(&i) = index.get(name) {
@@ -2563,8 +2563,18 @@ impl PackedStreamLog {
         // bytes this produces -- are unchanged. `HashMap::new` does not allocate, so
         // a stream whose names repeat never pays for it; the address cache above
         // answers those without reaching here.
-        let mut dict_index: std::collections::HashMap<&'a [u8], usize> =
-            std::collections::HashMap::new();
+        // foldhash, not std's SipHash. With 800 distinct names the default hasher
+        // was 28.4 pct of this operation -- `sip::Hasher::write` 216,719 Ir/op plus
+        // `hash_one::<&&[u8]>` 165,816 -- which is the cost of hashing short keys
+        // with a hash built for a different threat model. `foldhash::quality` is
+        // what `KeyDict` already uses for the keyspace itself, and it stays
+        // randomised per instance, so a field name arriving from an RDB payload
+        // cannot be used to force collisions.
+        let mut dict_index: std::collections::HashMap<
+            &'a [u8],
+            usize,
+            foldhash::quality::RandomState,
+        > = std::collections::HashMap::default();
         for (id, pairs) in entries {
             let off = log.arena.len();
             for (pos, (f, v)) in pairs.iter().enumerate() {
