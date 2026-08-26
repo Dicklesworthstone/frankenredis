@@ -6098,7 +6098,20 @@ impl PackedZSet {
     /// bulk-construction path for a missing-key `ZADD`.
     #[must_use]
     pub fn from_unique_pairs(mut pairs: Vec<(Vec<u8>, f64)>) -> Self {
-        pairs.sort_by(|(am, ascore), (bm, bscore)| zset_cmp(*ascore, am, *bscore, bm));
+        // (BlackThrush 2026-08-26) VALIDATE BEFORE SORTING, which is what the
+        // borrowed twin below has always done and this one never did.
+        // `from_sorted_unique_pairs_borrowed`'s own doc says it: "RDB zset
+        // listpacks are emitted in this order; validating it before calling this
+        // constructor avoids a second O(n log n) sort during RESTORE." RESTORE got
+        // that check; the RDB-FILE loader, which reaches this owned twin, kept
+        // sorting input Redis had already written in score order. Measured at
+        // 243,400 instructions per 200-key DEBUG RELOAD in the sort frame alone.
+        //
+        // Byte-identical: an already-ordered input produces the same buffer whether
+        // or not it is sorted again, and an out-of-order one still gets sorted.
+        if !Self::owned_pairs_are_sorted(&pairs) {
+            pairs.sort_by(|(am, ascore), (bm, bscore)| zset_cmp(*ascore, am, *bscore, bm));
+        }
         let cap = pairs
             .iter()
             .map(|(member, _)| member.len().saturating_add(10))
@@ -6120,6 +6133,15 @@ impl PackedZSet {
     /// decode. The packed representation owns one contiguous buffer either way,
     /// so borrowed inputs let the caller skip transient per-member `Vec<u8>`
     /// allocations and copy each member directly into the final packed buffer.
+    /// Owned-input twin of [`Self::borrowed_pairs_are_sorted`]. Same predicate,
+    /// same canonical `(score, member)` order; only the pair type differs.
+    #[must_use]
+    fn owned_pairs_are_sorted(pairs: &[(Vec<u8>, f64)]) -> bool {
+        pairs
+            .windows(2)
+            .all(|pair| !zset_cmp(pair[1].1, &pair[1].0, pair[0].1, &pair[0].0).is_lt())
+    }
+
     #[must_use]
     pub fn from_unique_pairs_borrowed(mut pairs: Vec<(&[u8], f64)>) -> Self {
         pairs.sort_by(|(am, ascore), (bm, bscore)| zset_cmp(*ascore, am, *bscore, bm));
