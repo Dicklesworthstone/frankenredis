@@ -108,15 +108,38 @@ def read_reply(sock, buf):
 
 
 def total_ir(path):
+    """Whole-process Ir, counted ONCE per callgrind dump.
+
+    (BlackThrush 2026-08-25) This summed every line matching `summary:` OR
+    `totals:`, and a callgrind dump carries BOTH with the same value -- so every
+    arm was reported at exactly 2x its real instruction count. The RATIO is
+    unaffected (both arms doubled identically, which is why this survived every
+    ratio row taken with it), but every ABSOLUTE instr/op figure this harness has
+    printed is twice the truth, and its stated A/A noise floor of ~4.5 instr/op
+    was being compared against doubled arms. Verified against the sibling
+    profiler on the identical workload: 62,600 instr/op here vs 31,175 there,
+    the same 2x.
+
+    `totals:` is the grand total when present; `summary:` is the per-part one.
+    Take totals if the file has it, else summary, and never both.
+    """
     total = 0
     directory = os.path.dirname(path)
     for name in os.listdir(directory):
         if not name.startswith(os.path.basename(path)):
             continue
+        summary = None
+        totals = None
         with open(os.path.join(directory, name), "rb") as fh:
             for raw in fh:
-                if raw.startswith(b"summary:") or raw.startswith(b"totals:"):
-                    total += int(raw.split(b":", 1)[1].split()[0])
+                if raw.startswith(b"summary:"):
+                    summary = int(raw.split(b":", 1)[1].split()[0])
+                elif raw.startswith(b"totals:"):
+                    totals = int(raw.split(b":", 1)[1].split()[0])
+        if totals is not None:
+            total += totals
+        elif summary is not None:
+            total += summary
     return total
 
 
@@ -167,6 +190,50 @@ def seed_command(kind, members):
     raise SystemExit("unknown container type %r (want hash|list|set|zset)" % kind)
 
 
+def elf_identity_from_maps(pid, binary):
+    """sha256 of the ELF the SERVER IS RUNNING, proven to be that one via /proc.
+
+    `/proc/<pid>/exe` is the obvious call and it is WRONG here: every arm runs
+    under valgrind, which loads the guest itself, so /proc/<pid>/exe resolves to
+    /usr/libexec/valgrind/callgrind-amd64-linux for fr and for redis alike. The
+    first version of this function printed one identical hash for all three arms
+    -- an identity check that could not tell the two engines apart, which is
+    worse than none because it reads as provenance.
+
+    The guest is in /proc/<pid>/maps with its dev:inode. `/proc/<pid>/map_files`
+    would hash that inode directly but needs CAP_SYS_ADMIN and is unreadable
+    here, so we hash the PATH and admit the hash only when the path still
+    resolves to the inode the process actually mapped. `target/release/<bin>` is
+    SHARED across agents in this checkout; when a peer's `cargo build` replaces
+    it mid-run the path gets a new inode, the comparison fails, and we refuse
+    rather than print a hash of bytes nothing executed.
+    """
+    binary = os.path.realpath(binary)
+    mapped = None
+    with open("/proc/%d/maps" % pid, "r") as fh:
+        for line in fh:
+            parts = line.split(None, 5)
+            if len(parts) < 6:
+                continue
+            path = parts[5].strip()
+            if "x" in parts[1] and os.path.realpath(path) == binary:
+                mapped = parts[4]  # inode
+                break
+    if mapped is None:
+        raise RuntimeError("no executable mapping of %s in pid %d" % (binary, pid))
+    on_disk = str(os.stat(binary).st_ino)
+    if mapped != on_disk:
+        raise RuntimeError(
+            "%s was REPLACED while this arm was running (process maps inode %s, path is now "
+            "inode %s) -- the file we could hash is not the ELF that served this arm"
+            % (binary, mapped, on_disk))
+    digest = hashlib.sha256()
+    with open(binary, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def run(binary, tag, port, members, ops, workdir, kind="hash", op="restore"):
     out = os.path.join(workdir, "cg.%s.out" % tag)
     argv = ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out,
@@ -193,18 +260,7 @@ def run(binary, tag, port, members, ops, workdir, kind="hash", op="restore"):
                 time.sleep(0.25)
         if sock is None:
             raise RuntimeError("%s never became ready under callgrind" % tag)
-        # (frankenredis-lua-tail-calls-ps0le) IN-PROCESS ELF IDENTITY, read from
-        # /proc/<pid>/exe of the server that is actually serving this arm rather
-        # than from the path we were handed. `target/release/<bin>` is SHARED
-        # across agents in this checkout: a peer's `cargo build` between the N and
-        # 2N launches replaces the file under us, and a two-point subtraction
-        # across two DIFFERENT ELFs is not a measurement of either. The caller
-        # compares the two launches' hashes and refuses the arm if they differ.
-        exe_sha = hashlib.sha256()
-        with open("/proc/%d/exe" % proc.pid, "rb") as fh:
-            for block in iter(lambda: fh.read(1 << 20), b""):
-                exe_sha.update(block)
-        exe_sha = exe_sha.hexdigest()
+        exe_sha = elf_identity_from_maps(proc.pid, binary)
         buf = b""
 
         sock.sendall(seed_command(kind, members))
