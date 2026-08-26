@@ -40,6 +40,7 @@ Every arm also prints the sha256 of `/proc/<pid>/exe` of the server that served 
 and the run aborts if an arm's N and 2N launches did not run the same ELF.
 
 Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset|stream] [--op=restore|reload|loadaof] [--varyfields] [--valuesize=N] [--aa] [--keys=N]
+           [--redis-extra="<config passed to the INCUMBENT only>"]
 """
 from __future__ import annotations
 
@@ -53,6 +54,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REDIS = os.path.join(ROOT, "legacy_redis_code/redis/src/redis-server")
+REDIS_EXTRA = ""
 
 # (frankenredis-gvm6z) A/A NOISE FLOOR FOR THIS HARNESS'S ARMS, in ABSOLUTE instr/op.
 #
@@ -305,6 +307,22 @@ def run(binary, tag, port, members, ops, workdir, kind="hash", op="restore", key
             "--appendonly", "yes" if op == "loadaof" else "no", "--dir", workdir,
             # DEBUG RELOAD needs the debug command admitted on both engines.
             "--enable-debug-command", "yes"]
+    # (BlackThrush 2026-08-26) `--redis-extra=` puts EXTRA CONFIG ON THE INCUMBENT
+    # ONLY, and exists because the default comparison is not like-for-like on
+    # RESTORE. Redis's `sanitize-dump-payload` defaults to `no`: it header-checks a
+    # DUMP payload and then TRUSTS it, doing zero per-field validation -- measured,
+    # its marginal hash-RESTORE profile is 76 pct `lzf_decompress` and nothing else.
+    # fr validates unconditionally. So the default ratio prices fr's safety property
+    # as if it were overhead. With `--redis-extra="--sanitize-dump-payload yes"` the
+    # incumbent does the same class of work and the ratio answers a different, also
+    # honest, question.
+    #
+    # BOTH numbers are real and NEITHER replaces the other: default posture is what
+    # a user gets out of the box, equal posture is where the difference comes from.
+    # Report them as a pair. Empty by default, so an unflagged run is BYTE-IDENTICAL
+    # to before this existed (see the --valuesize fixture accident, 3722af80a).
+    if REDIS_EXTRA and os.path.abspath(binary) == os.path.abspath(REDIS):
+        argv += REDIS_EXTRA.split()
     proc = subprocess.Popen(argv, cwd=workdir,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     sock = None
@@ -411,6 +429,7 @@ def main():
     # verify it IS its source before printing a denominator.
     require_incumbent(REDIS, os.path.join(ROOT, "legacy_redis_code/redis"))
     argv = [a for a in sys.argv[1:] if not a.startswith("--")]
+    global REDIS_EXTRA
     kind = "hash"
     op = "restore"
     for a in sys.argv[1:]:
@@ -418,6 +437,8 @@ def main():
             kind = a.split("=", 1)[1]
         if a.startswith("--op="):
             op = a.split("=", 1)[1]
+        if a.startswith("--redis-extra="):
+            REDIS_EXTRA = a.split("=", 1)[1]
     if op not in ("restore", "reload", "loadaof"):
         raise SystemExit("unknown --op=%r (want restore|reload|loadaof)" % op)
     if len(argv) != 3:

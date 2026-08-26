@@ -67721,3 +67721,78 @@ the doc comment so the next reader cannot repeat mistake (1).
 
 Keyspace stands at **1.8112x** vs live Redis 7.2.4 on this HEAD — up from 1.7612x
 because of the prefilter's 8.4 B/key, not because of anything in this row.
+
+## 2026-08-26 — EVERY RESTORE RATIO ON THE BOARD WAS COMPARING UNEQUAL SAFETY POSTURES
+
+`sanitize-dump-payload` defaults to **`no`**. At that default Redis header-checks a
+DUMP payload and then **trusts** it: the two-point marginal profile of hash RESTORE
+@400 is 76 pct `lzf_decompress`, 12 pct CRC, and essentially nothing else. There is
+no per-field validation in it at all. fr validates unconditionally. So every RESTORE
+row in this ledger has been pricing fr's safety property as if it were overhead.
+
+Measured both ways, same invocation, same payloads, `restore_instr_per_op.py`
+(fr ELF `19ffb754f9b2305022714636f0de6440b1e3973540b1bbfd54c2f784e90a035d`,
+redis ELF `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`,
+incumbent verified == vendored source HEAD, clean):
+
+    arm                    default posture   redis ALSO validating   payload
+    stream vary @400          3.2921x              1.5710x            8015 B
+    stream @400               3.0583x              1.3815x            4398 B
+    zset @100                 2.8334x              0.4551x             637 B
+    set @100                  2.3909x              0.3889x             429 B
+    hash @400                 2.2240x              0.3515x            2696 B
+    list @400                 1.9498x              1.3207x            1654 B
+
+**Three arms recorded as 2.2-2.8x losses are 2.2-2.8x WINS once the incumbent does
+the same class of work.** The genuine, posture-independent losses are STREAM
+(1.5710x / 1.3815x) and LIST (1.3207x) — and those are the only RESTORE arms worth a
+lever. hash/set/zset RESTORE should stop being described as gaps.
+
+### The validation is not theoretical — it rejects what Redis accepts
+
+Corrupt a byte inside the listpack body of a 20-field hash DUMP and **reseal the
+CRC-64/Jones footer** so the checksum still passes (`corrupt_probe.py`; its CRC
+implementation self-checks against the intact payload's own footer before any
+verdict is read, which caught a wrong polynomial on the first run and voided it):
+
+    case            fr                     redis (default sanitize=no)
+    intact          ACCEPTED, HLEN=20      ACCEPTED, HLEN=20
+    byte@12^0xff    -ERR Bad data format   ACCEPTED, HLEN=20     <-- corrupt listpack
+    byte@20^0xff    -ERR Bad data format   ACCEPTED, HLEN=20     <-- into the keyspace
+    byte@28^0xff    -ERR Bad data format   -ERR Bad data format
+    byte@36^0xff    -ERR Bad data format   -ERR Bad data format
+
+fr's extra work buys a demonstrable property. Priced: redis with
+`--sanitize-dump-payload yes` costs **537,923 instr/op** on the hash arm against
+fr's 189,793 — `lpValidateNext` 37,600, `_lpEntryValidation` 30,016, `siphash`
+33,070, `dictFindPositionForInsert` 28,486, plus ~88k of jemalloc.
+
+**"Equal posture" is approximate and is stated as such:** it means the incumbent is
+configured to validate too, not that the two validations are identical. fr was shown
+to reject payloads default-redis accepts; fr was NOT shown to reject everything
+sanitize-redis rejects. Both columns are real and NEITHER replaces the other —
+default posture is what a user gets out of the box, equal posture is where the
+difference comes from. Report them as a pair.
+
+### Instrument defect this also fixed: FRAME totals were carrying SEED cost
+
+`restore_profile_frames.py` and `redis_restore_profile.py` divide a WHOLE-RUN
+callgrind total by the op count. The seed is in there. A 400-field hash is seeded
+with one `HSET`, and `hashTypeSet` calls `lpFind` per field over a growing
+listpack — O(n^2) — so redis's table showed **`lpFind` 28,006 "per op"** and I read
+it as Redis doing quadratic duplicate detection *inside RESTORE*. It does not; the
+frame vanishes entirely under two-point subtraction. `scripts/frame_delta.py`
+already differences two dumps correctly and reconciles against the whole-process
+number; use it on these dumps rather than dividing a total.
+
+    redis hash RESTORE @400, MARGINAL      fr, MARGINAL
+      65782  lzf_decompress                 72825  decode_rdb_string      (1.11x)
+      10473  crcspeed64little                2138  fr_simd::crc64_pclmul  (fr 4.9x FASTER)
+        716  memcpy                         41873  VerbatimListpackHash::try_from_rdb
+                                            32868  listpack::decode_value_spans
+                                            28659  memcpy + memset
+      85961  total                         189793  total
+
+`--redis-extra=` (this commit) puts config on the INCUMBENT ONLY and is empty by
+default, so an unflagged run is byte-identical to before it existed — verified by
+re-running the hash arm unflagged and reproducing 2.2122x at the same 2696 B payload.
