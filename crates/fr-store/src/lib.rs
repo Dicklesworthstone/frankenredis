@@ -35879,53 +35879,55 @@ impl Store {
             RDB_TYPE_STREAM_LISTPACKS
             | RDB_TYPE_STREAM_LISTPACKS_2
             | RDB_TYPE_STREAM_LISTPACKS_3 => {
-                let (stream_value, consumed) = fr_persist::decode_upstream_stream_payload(
+                // The entries are decoded BORROWED and consumed inside this
+                // closure: every field name and value is a slice of the
+                // decompressed macro-node listpack, which `decode_..._borrowed`
+                // keeps alive for the duration of the call. The owned decode
+                // allocated twice per field -- once for the name, once for the
+                // value -- and copied both, purely so the entries could outlive
+                // the blob they came from, and this is the one caller that
+                // rebuilds a store representation and drops them immediately.
+                let (built, rest, consumed) = fr_persist::decode_upstream_stream_payload_borrowed(
                     type_byte,
                     &payload[cursor..data_end],
+                    |stream_entries| -> Result<StreamEntries, StoreError> {
+                        // Upstream serializes stream entries in strictly
+                        // id-ascending order, so build the node index in bulk
+                        // (O(n)) instead of a BTree range lookup + in-node binary
+                        // search per entry (`node_key_for`, the RESTORE hot path).
+                        // Fall back to per-entry `insert` only if the payload is
+                        // NOT strictly increasing — that path tolerates reordering
+                        // and rejects duplicates.
+                        let strictly_increasing = stream_entries
+                            .windows(2)
+                            .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1));
+                        if strictly_increasing {
+                            return Ok(StreamEntries::from_sorted_entries(
+                                stream_entries
+                                    .iter()
+                                    .map(|(ms, seq, fields)| ((*ms, *seq), fields.as_slice())),
+                            ));
+                        }
+                        let mut entries = StreamEntries::new();
+                        for (ms, seq, fields) in stream_entries {
+                            // `insert` returns true if this id already appeared —
+                            // a duplicate in the DUMP payload is malformed.
+                            if entries.insert((*ms, *seq), fields) {
+                                return Err(StoreError::InvalidDumpPayload);
+                            }
+                        }
+                        Ok(entries)
+                    },
                 )
                 .ok_or(StoreError::InvalidDumpPayload)?;
                 cursor += consumed;
-                let fr_persist::RdbValue::Stream(
-                    stream_entries,
-                    watermark,
-                    groups,
-                    _,
-                    entries_added,
-                    max_deleted,
-                ) = stream_value
-                else {
-                    return Err(StoreError::InvalidDumpPayload);
-                };
-                // Upstream serializes stream entries in strictly id-ascending
-                // order, so build the node index in bulk (O(n)) instead of a
-                // BTree range lookup + in-node binary search per entry
-                // (`node_key_for`, the RESTORE hot path). Fall back to per-entry
-                // `insert` only if the payload is NOT strictly increasing — that
-                // path tolerates reordering and rejects duplicates.
-                let strictly_increasing = stream_entries
-                    .windows(2)
-                    .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1));
-                let entries = if strictly_increasing {
-                    StreamEntries::from_sorted_entries(
-                        stream_entries
-                            .iter()
-                            .map(|(ms, seq, fields)| ((*ms, *seq), fields.as_slice())),
-                    )
-                } else {
-                    let mut entries = StreamEntries::new();
-                    for (ms, seq, fields) in &stream_entries {
-                        // `insert` returns true if this id already appeared — a
-                        // duplicate in the DUMP payload is malformed.
-                        if entries.insert((*ms, *seq), fields) {
-                            return Err(StoreError::InvalidDumpPayload);
-                        }
-                    }
-                    entries
-                };
-                restored_stream_last_id = watermark.or_else(|| entries.keys().next_back().copied());
-                restored_stream_entries_added = entries_added;
-                restored_stream_max_deleted_id = max_deleted;
-                restored_stream_groups = Some(restore_stream_groups(groups)?);
+                let entries = built?;
+                restored_stream_last_id = rest
+                    .watermark
+                    .or_else(|| entries.keys().next_back().copied());
+                restored_stream_entries_added = rest.entries_added;
+                restored_stream_max_deleted_id = rest.max_deleted;
+                restored_stream_groups = Some(restore_stream_groups(rest.groups)?);
                 Value::Stream(Box::new(entries))
             }
             RDB_TYPE_LIST_ZIPLIST => {

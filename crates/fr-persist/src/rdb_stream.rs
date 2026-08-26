@@ -19,12 +19,13 @@
 //!
 //! (br-frankenredis-hjub, br-frankenredis-qi6z, br-frankenredis-6zk9)
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use crate::listpack::{ListpackError, RawListpackValue, decode_raw_values};
 use crate::{
-    EncodableStreamEntry, RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata,
-    RdbStreamPendingEntry, RdbValue, StreamEntry,
+    BorrowedStreamEntry, EncodableStreamEntry, RdbStreamConsumer, RdbStreamConsumerGroup,
+    RdbStreamMetadata, RdbStreamPendingEntry, RdbValue, StreamEntry,
 };
 
 use super::{rdb_decode_length, rdb_decode_string};
@@ -646,202 +647,294 @@ pub(crate) fn decode_upstream_stream_skeleton(
     type_byte: u8,
     data: &[u8],
 ) -> Result<(RdbValue, usize), UpstreamStreamError> {
-    let is_v2_or_later = match type_byte {
-        crate::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS => false,
-        crate::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2 => true,
-        crate::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3 => true,
-        other => return Err(UpstreamStreamError::UnsupportedTypeByte(other)),
-    };
-    let is_v3 = type_byte == crate::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3;
+    let (skeleton, cursor) = UpstreamStreamSkeleton::decode(type_byte, data)?;
+    // The owned form: one allocation per field name and per value, exactly as
+    // before this split. Callers that immediately rebuild a store representation
+    // should use `UpstreamStreamSkeleton::entries` instead and skip all of it.
+    let entries = skeleton.owned_entries()?;
+    Ok((skeleton.into_rdb_value(entries), cursor))
+}
 
-    let mut cursor = 0usize;
-    let mut entries: Vec<StreamEntry> = Vec::new();
+/// An upstream stream record with its macro-node listpacks decompressed but its
+/// ENTRIES not yet decoded.
+///
+/// Splitting the decode in two is what lets entries borrow: a stream entry's
+/// field names and values are ranges inside a decompressed macro-node blob, and
+/// the blobs used to be per-iteration locals, so the only way to return entries
+/// was to copy every field onto the heap. Holding the blobs here instead means
+/// [`Self::entries`] can hand out `Cow::Borrowed` slices that live exactly as
+/// long as `self`.
+pub(crate) struct UpstreamStreamSkeleton {
+    /// `(master_ms, master_seq, decompressed listpack)` per radix-tree node.
+    nodes: Vec<(u64, u64, Vec<u8>)>,
+    watermark: Option<(u64, u64)>,
+    groups: Vec<RdbStreamConsumerGroup>,
+    metadata: RdbStreamMetadata,
+    entries_added: u64,
+    max_deleted: Option<(u64, u64)>,
+}
 
-    // (1) Listpacks count.
-    let (listpacks_count, c) =
-        rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
-    cursor += c;
-
-    // (2) For each radix-tree pair: nodekey (16-byte streamID) + listpack blob.
-    for _ in 0..listpacks_count {
-        let (nodekey, c1) =
-            rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
-        if nodekey.len() != 16 {
-            return Err(UpstreamStreamError::InvalidNodekeyLength);
-        }
-        let master_ms = u64::from_be_bytes(
-            nodekey[0..8]
-                .try_into()
-                .map_err(|_| UpstreamStreamError::InvalidNodekeyLength)?,
-        );
-        let master_seq = u64::from_be_bytes(
-            nodekey[8..16]
-                .try_into()
-                .map_err(|_| UpstreamStreamError::InvalidNodekeyLength)?,
-        );
-        cursor += c1;
-        let (lp_bytes, c2) =
-            rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
-        cursor += c2;
-        // (BlackThrush 2026-08-26) Raw values, not owned entries. `decode_listpack`
-        // allocated a `Vec<u8>` per string entry that `take_string` then cloned --
-        // two allocations per field. Counted at 16,600 of the 103,681 allocations a
-        // 200-key x 40-entry stream DEBUG RELOAD makes.
-        let lp = decode_raw_values(&lp_bytes)?;
-        decode_stream_listpack(&lp, &lp_bytes, master_ms, master_seq, &mut entries)?;
+impl UpstreamStreamSkeleton {
+    /// Decode every entry in the record, borrowing field names and values
+    /// directly out of the retained macro-node blobs.
+    pub(crate) fn entries(&self) -> Result<Vec<BorrowedStreamEntry<'_>>, UpstreamStreamError> {
+        self.decode_entries()
     }
 
-    // (3) Stream length (total entry count).
-    let (stream_length, c) =
-        rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
-    cursor += c;
-
-    // (4) last_id.ms, last_id.seq (always present).
-    let (last_id_ms, c) =
-        rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
-    cursor += c;
-    let (last_id_seq, c) =
-        rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
-    cursor += c;
-
-    // (5) v2/v3 extras: first_id.ms, first_id.seq, max_deleted_id.ms,
-    //     max_deleted_id.seq, entries_added (indices 0..5).
-    let mut entries_added = u64::try_from(stream_length).unwrap_or(u64::MAX);
-    let mut max_deleted_ms = 0u64;
-    let mut max_deleted_seq = 0u64;
-    if is_v2_or_later {
-        for index in 0..5 {
-            let (_v, c) =
-                rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
-            match index {
-                2 => max_deleted_ms = u64::try_from(_v).unwrap_or(0),
-                3 => max_deleted_seq = u64::try_from(_v).unwrap_or(0),
-                4 => entries_added = u64::try_from(_v).unwrap_or(u64::MAX),
-                _ => {}
-            }
-            cursor += c;
-        }
+    /// The owned form, for callers that must outlive the blobs (`RdbValue::Stream`).
+    ///
+    /// This instantiates the SAME decoder with `F = Vec<u8>`, so the owned path
+    /// allocates once per field exactly as it did before the borrowed split --
+    /// it never builds a `Cow` intermediate only to convert and drop it. Going
+    /// through `Cow` here cost the DEBUG RELOAD arm +0.75 pct, which is about 41
+    /// extra allocations per op: one per entry plus the outer vector.
+    pub(crate) fn owned_entries(&self) -> Result<Vec<StreamEntry>, UpstreamStreamError> {
+        self.decode_entries()
     }
 
-    // (6) Number of consumer groups.
-    let (groups_count, c) =
-        rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
-    cursor += c;
+    fn decode_entries<'blob, F>(
+        &'blob self,
+    ) -> Result<Vec<EncodableStreamEntry<F, F>>, UpstreamStreamError>
+    where
+        F: From<Cow<'blob, [u8]>>,
+    {
+        let mut entries: Vec<EncodableStreamEntry<F, F>> = Vec::new();
+        for (master_ms, master_seq, blob) in &self.nodes {
+            let lp = decode_raw_values(blob)?;
+            decode_stream_listpack(&lp, blob, *master_ms, *master_seq, &mut entries)?;
+        }
+        Ok(entries)
+    }
 
-    // (7) For each group: name, last-delivered-id (ms,seq), entries_read (v2+),
-    //     PEL count + entries, consumer count + per-consumer fields.
-    let mut groups = Vec::with_capacity(groups_count.min(256));
-    for _ in 0..groups_count {
-        let (name, c) =
-            rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
-        cursor += c;
-        let (last_delivered_id_ms, c) =
-            rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
-        cursor += c;
-        let (last_delivered_id_seq, c) =
-            rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
-        cursor += c;
-        let entries_read = if is_v2_or_later {
-            let (v, c) =
-                rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
-            cursor += c;
-            if v == usize::MAX {
-                None
-            } else {
-                Some(v as u64)
-            }
-        } else {
-            None
+    pub(crate) fn watermark(&self) -> Option<(u64, u64)> {
+        self.watermark
+    }
+
+    pub(crate) fn entries_added(&self) -> u64 {
+        self.entries_added
+    }
+
+    pub(crate) fn max_deleted(&self) -> Option<(u64, u64)> {
+        self.max_deleted
+    }
+
+    pub(crate) fn into_groups(self) -> Vec<RdbStreamConsumerGroup> {
+        self.groups
+    }
+
+    /// Consume the skeleton, pairing it with already-decoded owned entries.
+    fn into_rdb_value(self, entries: Vec<StreamEntry>) -> RdbValue {
+        RdbValue::Stream(
+            entries,
+            self.watermark,
+            self.groups,
+            Some(self.metadata),
+            Some(self.entries_added),
+            self.max_deleted,
+        )
+    }
+
+    pub(crate) fn decode(type_byte: u8, data: &[u8]) -> Result<(Self, usize), UpstreamStreamError> {
+        let is_v2_or_later = match type_byte {
+            crate::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS => false,
+            crate::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2 => true,
+            crate::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3 => true,
+            other => return Err(UpstreamStreamError::UnsupportedTypeByte(other)),
         };
-        let (pel_count, c) =
+        let is_v3 = type_byte == crate::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3;
+
+        let mut cursor = 0usize;
+
+        // (1) Listpacks count.
+        let (listpacks_count, c) =
             rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
         cursor += c;
-        let mut global_pel: BTreeMap<(u64, u64), (u64, u64)> = BTreeMap::new();
-        for _ in 0..pel_count {
-            let (entry_id, c) = take_raw_stream_id(data, cursor)?;
-            cursor += c;
-            let delivery_time_ms = take_millisecond_time(data, cursor)?;
-            cursor += 8;
-            let (delivery_count, c) =
-                rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
-            cursor += c;
-            global_pel.insert(entry_id, (delivery_time_ms, delivery_count as u64));
+        // Bounded by the declared count but capped: a corrupt length must not make us
+        // reserve gigabytes before the first blob is even read.
+        let mut nodes: Vec<(u64, u64, Vec<u8>)> = Vec::with_capacity(listpacks_count.min(256));
+
+        // (2) For each radix-tree pair: nodekey (16-byte streamID) + listpack blob.
+        for _ in 0..listpacks_count {
+            let (nodekey, c1) =
+                rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
+            if nodekey.len() != 16 {
+                return Err(UpstreamStreamError::InvalidNodekeyLength);
+            }
+            let master_ms = u64::from_be_bytes(
+                nodekey[0..8]
+                    .try_into()
+                    .map_err(|_| UpstreamStreamError::InvalidNodekeyLength)?,
+            );
+            let master_seq = u64::from_be_bytes(
+                nodekey[8..16]
+                    .try_into()
+                    .map_err(|_| UpstreamStreamError::InvalidNodekeyLength)?,
+            );
+            cursor += c1;
+            let (lp_bytes, c2) =
+                rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
+            cursor += c2;
+            // (BlackThrush 2026-08-26) The blob is RETAINED, not decoded here. Entries
+            // borrow their field names and values out of it, so it has to outlive them
+            // -- decoding in this loop meant `lp_bytes` died at the end of the
+            // iteration and every field had to be copied onto the heap to escape.
+            nodes.push((master_ms, master_seq, lp_bytes));
         }
-        let (consumers_count, c) =
+
+        // (3) Stream length (total entry count).
+        let (stream_length, c) =
             rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
         cursor += c;
-        let mut consumers = Vec::with_capacity(consumers_count.min(256));
-        let mut pending = Vec::with_capacity(pel_count.min(4096));
-        for _ in 0..consumers_count {
-            let (consumer_name, c) =
+
+        // (4) last_id.ms, last_id.seq (always present).
+        let (last_id_ms, c) =
+            rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
+        cursor += c;
+        let (last_id_seq, c) =
+            rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
+        cursor += c;
+
+        // (5) v2/v3 extras: first_id.ms, first_id.seq, max_deleted_id.ms,
+        //     max_deleted_id.seq, entries_added (indices 0..5).
+        let mut entries_added = u64::try_from(stream_length).unwrap_or(u64::MAX);
+        let mut max_deleted_ms = 0u64;
+        let mut max_deleted_seq = 0u64;
+        if is_v2_or_later {
+            for index in 0..5 {
+                let (_v, c) =
+                    rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
+                match index {
+                    2 => max_deleted_ms = u64::try_from(_v).unwrap_or(0),
+                    3 => max_deleted_seq = u64::try_from(_v).unwrap_or(0),
+                    4 => entries_added = u64::try_from(_v).unwrap_or(u64::MAX),
+                    _ => {}
+                }
+                cursor += c;
+            }
+        }
+
+        // (6) Number of consumer groups.
+        let (groups_count, c) =
+            rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
+        cursor += c;
+
+        // (7) For each group: name, last-delivered-id (ms,seq), entries_read (v2+),
+        //     PEL count + entries, consumer count + per-consumer fields.
+        let mut groups = Vec::with_capacity(groups_count.min(256));
+        for _ in 0..groups_count {
+            let (name, c) =
                 rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
             cursor += c;
-            // seen_time (type 19+), then active_time (type 21+); both mstime_t.
-            // An active_time of -1 is upstream's "never actively consumed"
-            // sentinel. (frankenredis-sq4ov)
-            let mut seen_time_ms = 0u64;
-            let mut active_time_ms: Option<u64> = None;
-            if is_v2_or_later {
-                seen_time_ms = take_millisecond_time(data, cursor)?;
-                cursor += 8;
-            }
-            if is_v3 {
-                let raw = take_millisecond_time(data, cursor)?;
-                cursor += 8;
-                active_time_ms = if raw as i64 == -1 { None } else { Some(raw) };
-            }
-            consumers.push(RdbStreamConsumer {
-                name: consumer_name.clone(),
-                seen_time_ms,
-                active_time_ms,
-            });
-            let (cpel_count, c) =
+            let (last_delivered_id_ms, c) =
                 rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
             cursor += c;
-            for _ in 0..cpel_count {
+            let (last_delivered_id_seq, c) =
+                rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
+            cursor += c;
+            let entries_read = if is_v2_or_later {
+                let (v, c) =
+                    rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
+                cursor += c;
+                if v == usize::MAX {
+                    None
+                } else {
+                    Some(v as u64)
+                }
+            } else {
+                None
+            };
+            let (pel_count, c) =
+                rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
+            cursor += c;
+            let mut global_pel: BTreeMap<(u64, u64), (u64, u64)> = BTreeMap::new();
+            for _ in 0..pel_count {
                 let (entry_id, c) = take_raw_stream_id(data, cursor)?;
                 cursor += c;
-                let Some((last_delivered_ms, deliveries)) = global_pel.get(&entry_id) else {
-                    return Err(UpstreamStreamError::MissingGlobalPelEntry);
-                };
-                pending.push(RdbStreamPendingEntry {
-                    entry_id_ms: entry_id.0,
-                    entry_id_seq: entry_id.1,
-                    consumer: consumer_name.clone(),
-                    deliveries: *deliveries,
-                    last_delivered_ms: *last_delivered_ms,
-                });
+                let delivery_time_ms = take_millisecond_time(data, cursor)?;
+                cursor += 8;
+                let (delivery_count, c) =
+                    rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
+                cursor += c;
+                global_pel.insert(entry_id, (delivery_time_ms, delivery_count as u64));
             }
+            let (consumers_count, c) =
+                rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
+            cursor += c;
+            let mut consumers = Vec::with_capacity(consumers_count.min(256));
+            let mut pending = Vec::with_capacity(pel_count.min(4096));
+            for _ in 0..consumers_count {
+                let (consumer_name, c) =
+                    rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
+                cursor += c;
+                // seen_time (type 19+), then active_time (type 21+); both mstime_t.
+                // An active_time of -1 is upstream's "never actively consumed"
+                // sentinel. (frankenredis-sq4ov)
+                let mut seen_time_ms = 0u64;
+                let mut active_time_ms: Option<u64> = None;
+                if is_v2_or_later {
+                    seen_time_ms = take_millisecond_time(data, cursor)?;
+                    cursor += 8;
+                }
+                if is_v3 {
+                    let raw = take_millisecond_time(data, cursor)?;
+                    cursor += 8;
+                    active_time_ms = if raw as i64 == -1 { None } else { Some(raw) };
+                }
+                consumers.push(RdbStreamConsumer {
+                    name: consumer_name.clone(),
+                    seen_time_ms,
+                    active_time_ms,
+                });
+                let (cpel_count, c) =
+                    rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
+                cursor += c;
+                for _ in 0..cpel_count {
+                    let (entry_id, c) = take_raw_stream_id(data, cursor)?;
+                    cursor += c;
+                    let Some((last_delivered_ms, deliveries)) = global_pel.get(&entry_id) else {
+                        return Err(UpstreamStreamError::MissingGlobalPelEntry);
+                    };
+                    pending.push(RdbStreamPendingEntry {
+                        entry_id_ms: entry_id.0,
+                        entry_id_seq: entry_id.1,
+                        consumer: consumer_name.clone(),
+                        deliveries: *deliveries,
+                        last_delivered_ms: *last_delivered_ms,
+                    });
+                }
+            }
+            groups.push(RdbStreamConsumerGroup {
+                name,
+                last_delivered_id_ms: last_delivered_id_ms as u64,
+                last_delivered_id_seq: last_delivered_id_seq as u64,
+                entries_read,
+                consumers,
+                pending,
+            });
         }
-        groups.push(RdbStreamConsumerGroup {
-            name,
-            last_delivered_id_ms: last_delivered_id_ms as u64,
-            last_delivered_id_seq: last_delivered_id_seq as u64,
-            entries_read,
-            consumers,
-            pending,
-        });
-    }
 
-    let watermark = Some((last_id_ms as u64, last_id_seq as u64));
-    let metadata = RdbStreamMetadata {
-        upstream_type_byte: type_byte,
-        upstream_payload: data[..cursor].to_vec(),
-    };
-    let max_deleted = if max_deleted_ms == 0 && max_deleted_seq == 0 {
-        None
-    } else {
-        Some((max_deleted_ms, max_deleted_seq))
-    };
-    let value = RdbValue::Stream(
-        entries,
-        watermark,
-        groups,
-        Some(metadata),
-        Some(entries_added),
-        max_deleted,
-    );
-    Ok((value, cursor))
+        let watermark = Some((last_id_ms as u64, last_id_seq as u64));
+        let metadata = RdbStreamMetadata {
+            upstream_type_byte: type_byte,
+            upstream_payload: data[..cursor].to_vec(),
+        };
+        let max_deleted = if max_deleted_ms == 0 && max_deleted_seq == 0 {
+            None
+        } else {
+            Some((max_deleted_ms, max_deleted_seq))
+        };
+        Ok((
+            Self {
+                nodes,
+                watermark,
+                groups,
+                metadata,
+                entries_added,
+                max_deleted,
+            },
+            cursor,
+        ))
+    }
 }
 
 fn take_raw_stream_id(
@@ -885,13 +978,16 @@ fn take_millisecond_time(data: &[u8], cursor: usize) -> Result<u64, UpstreamStre
 ///               (field_count, *field_names)?,   ; when SAMEFIELDS is unset
 ///               *values,                        ; master_field_count of them
 ///               lp_count]
-fn decode_stream_listpack(
+fn decode_stream_listpack<'blob, F>(
     lp: &[RawListpackValue],
-    blob: &[u8],
+    blob: &'blob [u8],
     master_ms: u64,
     master_seq: u64,
-    out: &mut Vec<StreamEntry>,
-) -> Result<(), UpstreamStreamError> {
+    out: &mut Vec<EncodableStreamEntry<F, F>>,
+) -> Result<(), UpstreamStreamError>
+where
+    F: From<Cow<'blob, [u8]>>,
+{
     let mut idx = 0usize;
     let declared_live_count = take_usize(lp, &mut idx)?;
     let declared_deleted_count = take_usize(lp, &mut idx)?;
@@ -899,7 +995,7 @@ fn decode_stream_listpack(
         .checked_add(declared_deleted_count)
         .ok_or(UpstreamStreamError::InconsistentEntryCount)?;
     let master_field_count = take_usize(lp, &mut idx)?;
-    let mut master_fields: Vec<Vec<u8>> = Vec::with_capacity(master_field_count);
+    let mut master_fields: Vec<Cow<'blob, [u8]>> = Vec::with_capacity(master_field_count);
     for _ in 0..master_field_count {
         master_fields.push(take_string(lp, blob, &mut idx)?);
     }
@@ -927,17 +1023,23 @@ fn decode_stream_listpack(
             take_usize(lp, &mut idx)?
         };
 
-        let mut fields: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(field_count);
+        let mut fields: Vec<(F, F)> = Vec::with_capacity(field_count);
         if same_fields {
             for master_name in master_fields.iter().take(field_count) {
                 let value = take_string(lp, blob, &mut idx)?;
-                fields.push((master_name.clone(), value));
+                // For the BORROWED instantiation, cloning a `Cow::Borrowed` copies
+                // a slice reference, not bytes. This used to clone a `Vec<u8>` per
+                // field per entry -- 80 heap allocations and 80 memcpys on a
+                // 40-entry x 2-field stream -- whose only consumer is
+                // `intern_field`, which maps every copy straight back to the same
+                // dictionary index.
+                fields.push((F::from(master_name.clone()), F::from(value)));
             }
         } else {
             for _ in 0..field_count {
                 let name = take_string(lp, blob, &mut idx)?;
                 let value = take_string(lp, blob, &mut idx)?;
-                fields.push((name, value));
+                fields.push((F::from(name), F::from(value)));
             }
         }
 
@@ -1001,11 +1103,11 @@ fn take_usize(lp: &[RawListpackValue], idx: &mut usize) -> Result<usize, Upstrea
     usize::try_from(n).map_err(|_| UpstreamStreamError::InvalidFieldCount)
 }
 
-fn take_string(
+fn take_string<'blob>(
     lp: &[RawListpackValue],
-    blob: &[u8],
+    blob: &'blob [u8],
     idx: &mut usize,
-) -> Result<Vec<u8>, UpstreamStreamError> {
+) -> Result<Cow<'blob, [u8]>, UpstreamStreamError> {
     let v = lp
         .get(*idx)
         .ok_or(UpstreamStreamError::ShortListpackEntries)?;
@@ -1018,16 +1120,18 @@ fn take_string(
     // int. Match upstream's listpackGetValue, which returns a
     // decimal-stringified integer; the Integer arm below is that case.
     //
-    // ONE allocation, where the owned decode made two: the string case copies
-    // straight out of the blob instead of cloning a `Vec` the decoder had already
-    // built, and the integer case renders the same canonical decimal
-    // `ListpackEntry::to_bytes` did.
+    // ZERO allocations for the string case, which is every user-visible field and
+    // value: the entry BORROWS the decompressed macro-node blob, which the
+    // `UpstreamStreamSkeleton` keeps alive for exactly as long as the entries do.
+    // Only the integer case owns, because the decimal rendering has to live
+    // somewhere -- and upstream writes field/value pairs with `lpAppend`, not
+    // `lpAppendInteger`, so it is the rare arm.
     Ok(match v {
-        RawListpackValue::Integer(n) => crate::decimal_i64_bytes(*n),
-        RawListpackValue::String(range) => blob
-            .get(range.clone())
-            .ok_or(UpstreamStreamError::ShortListpackEntries)?
-            .to_vec(),
+        RawListpackValue::Integer(n) => Cow::Owned(crate::decimal_i64_bytes(*n)),
+        RawListpackValue::String(range) => Cow::Borrowed(
+            blob.get(range.clone())
+                .ok_or(UpstreamStreamError::ShortListpackEntries)?,
+        ),
     })
 }
 

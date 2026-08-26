@@ -1254,6 +1254,16 @@ pub struct RdbDecodeResult {
 pub type StreamEntry = EncodableStreamEntry<Vec<u8>, Vec<u8>>;
 pub type EncodableStreamEntry<F, V> = (u64, u64, Vec<(F, V)>);
 
+/// A stream entry whose field names and values BORROW the decompressed
+/// macro-node listpack they were decoded from.
+///
+/// `Cow` rather than `&[u8]` because a field packed as a listpack integer has to
+/// be rendered to its canonical decimal, which needs somewhere to live; every
+/// other field is a borrowed range. `Cow<[u8]>` implements `AsRef<[u8]>`, so these
+/// feed `PackedStreamLog::from_sorted_entries` with no conversion.
+pub type BorrowedStreamEntry<'a> =
+    EncodableStreamEntry<std::borrow::Cow<'a, [u8]>, std::borrow::Cow<'a, [u8]>>;
+
 /// A pending entry in a consumer group (PEL entry).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RdbStreamPendingEntry {
@@ -1465,6 +1475,56 @@ where
 #[must_use]
 pub fn decode_upstream_stream_payload(type_byte: u8, data: &[u8]) -> Option<(RdbValue, usize)> {
     rdb_stream::decode_upstream_stream_skeleton(type_byte, data).ok()
+}
+
+/// Decode an upstream stream DUMP payload WITHOUT materializing owned entries.
+///
+/// `build` is handed the record's entries with their field names and values
+/// borrowed out of the decompressed macro-node listpacks, and whatever it returns
+/// is passed back to the caller. This exists for RESTORE and RDB load, which
+/// immediately rebuild a store-side representation and then drop the entries: the
+/// owned form allocates twice per field (once for the name, once for the value)
+/// and copies both, purely so the entries can outlive the blob they came from.
+///
+/// The other returns are the record's non-entry parts, in the same order and with
+/// the same meanings as `RdbValue::Stream`'s trailing fields, plus the number of
+/// bytes consumed so callers can verify the payload boundary.
+#[must_use]
+pub fn decode_upstream_stream_payload_borrowed<R>(
+    type_byte: u8,
+    data: &[u8],
+    build: impl FnOnce(&[BorrowedStreamEntry<'_>]) -> R,
+) -> Option<(R, DecodedStreamRest, usize)> {
+    let (skeleton, consumed) = rdb_stream::UpstreamStreamSkeleton::decode(type_byte, data).ok()?;
+    let watermark = skeleton.watermark();
+    let entries_added = skeleton.entries_added();
+    let max_deleted = skeleton.max_deleted();
+    let built = {
+        let entries = skeleton.entries().ok()?;
+        build(&entries)
+        // `entries` borrows `skeleton`; the borrow has to end before the groups
+        // can be moved out of it below.
+    };
+    Some((
+        built,
+        DecodedStreamRest {
+            watermark,
+            groups: skeleton.into_groups(),
+            entries_added: Some(entries_added),
+            max_deleted,
+        },
+        consumed,
+    ))
+}
+
+/// The non-entry parts of a decoded upstream stream record, with the same
+/// meanings as the trailing fields of `RdbValue::Stream`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedStreamRest {
+    pub watermark: Option<(u64, u64)>,
+    pub groups: Vec<RdbStreamConsumerGroup>,
+    pub entries_added: Option<u64>,
+    pub max_deleted: Option<(u64, u64)>,
 }
 
 /// Encode an RDB length using Redis's variable-length encoding.
