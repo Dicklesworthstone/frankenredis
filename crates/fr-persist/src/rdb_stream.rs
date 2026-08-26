@@ -253,7 +253,26 @@ fn entry_same_fields<F: AsRef<[u8]>, V>(
             .2
             .iter()
             .zip(master_fields)
-            .all(|((field, _), master)| field.as_ref() == *master)
+            .all(|((field, _), master)| same_field_name(field.as_ref(), master))
+}
+
+/// Field-name equality with an ADDRESS short-circuit.
+///
+/// This runs once per field per entry and is the SAMEFIELDS test, so on the shape
+/// it exists to detect it is called with the same name over and over: a stream
+/// saved out of `PackedStreamLog` hands every entry the same `field_dict` slice,
+/// and comparing two-byte names by bytes is a libc `memcmp` CALL -- measured at
+/// 16,000 of the 21,600 memcmp calls per 200-key stream DEBUG RELOAD, two per
+/// entry.
+///
+/// Equal pointer and equal length is the same memory, hence the same bytes, so the
+/// short-circuit can only skip work it would have proved. Anything else falls
+/// through to the byte compare, so a caller whose names are separately owned is
+/// unaffected apart from one extra pointer test.
+#[inline(always)]
+fn same_field_name(field: &[u8], master: &[u8]) -> bool {
+    field.len() == master.len()
+        && (std::ptr::eq(field.as_ptr(), master.as_ptr()) || field == master)
 }
 
 /// Append one member entry to `builder` in upstream's listpack item layout.
