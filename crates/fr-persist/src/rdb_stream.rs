@@ -1315,7 +1315,7 @@ fn take_string<'blob>(
     Ok(match v {
         RawListpackValue::Integer(n) => Cow::Owned(crate::decimal_i64_bytes(*n)),
         RawListpackValue::String(range) => Cow::Borrowed(
-            blob.get(range.clone())
+            blob.get(range.start as usize..range.end as usize)
                 .ok_or(UpstreamStreamError::ShortListpackEntries)?,
         ),
     })

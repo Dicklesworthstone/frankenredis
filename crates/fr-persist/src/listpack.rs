@@ -423,14 +423,45 @@ pub fn parse_header(data: &[u8]) -> Result<(u32, u16), ListpackError> {
 /// materializing a [`ListpackEntry::String`] would pay. (frankenredis zsetlpscore)
 pub enum RawListpackValue {
     Integer(i64),
-    String(Range<usize>),
+    /// Byte range into the source listpack, as `u32`.
+    ///
+    /// A listpack's own header stores `total_bytes` in a `u32`, so no offset in a
+    /// well-formed listpack can exceed `u32::MAX` and nothing is lost. What IS
+    /// lost by using `usize` is size: `Range<usize>` is 16 bytes, which pushes
+    /// this enum to 24 and makes every `values.push(..)` in `decode_raw_values`
+    /// SIX scattered stores (8+1+1+4+2+8) instead of two aligned ones -- measured
+    /// at 39.63 pct of that decoder, once per element. `Range<u32>` takes the enum
+    /// to 16 bytes. `ListpackValueSpan` in this file already stores `Range<u32>`
+    /// for the same reason.
+    String(Range<u32>),
 }
+
+// Lock the size in. Nothing fails if this drifts back to 24 bytes -- it just
+// silently gives back the win -- so assert it rather than trusting the layout.
+const _: () = assert!(std::mem::size_of::<RawListpackValue>() == 16);
 
 /// Allocation-free entry decode: the exact byte-dispatch of [`decode_entry`] but
 /// string entries return their `Range` rather than a copied `Vec`. Returns the
 /// raw value and the total bytes the entry occupies (encoding + data + backlen).
 /// [`decode_entry`] is a thin materializing wrapper over this, so both share one
 /// parser and cannot drift.
+/// Narrow an already-bounds-checked `[start, end)` to the `u32` range
+/// `RawListpackValue::String` stores. A well-formed listpack cannot overflow this
+/// (its header's `total_bytes` is itself a `u32`); a malformed one is rejected
+/// here rather than silently truncated.
+/// The inverse of [`u32_range`], for indexing the source bytes.
+#[inline(always)]
+fn usize_range(range: Range<u32>) -> Range<usize> {
+    range.start as usize..range.end as usize
+}
+
+#[inline(always)]
+fn u32_range(start: usize, end: usize) -> Result<Range<u32>, ListpackError> {
+    let start = u32::try_from(start).map_err(|_| ListpackError::StringLengthOverflow)?;
+    let end = u32::try_from(end).map_err(|_| ListpackError::StringLengthOverflow)?;
+    Ok(start..end)
+}
+
 #[inline(always)]
 fn decode_entry_raw(
     data: &[u8],
@@ -457,7 +488,7 @@ fn decode_entry_raw(
         }
         let data_len = 1 + slen;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((RawListpackValue::String(start..end), entry_len));
+        return Ok((RawListpackValue::String(u32_range(start, end)?), entry_len));
     }
     // 13-bit signed int: 110xxxxx + 1 byte.
     if first & 0xE0 == 0xC0 {
@@ -486,7 +517,7 @@ fn decode_entry_raw(
         }
         let data_len = 2 + slen;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((RawListpackValue::String(start..end), entry_len));
+        return Ok((RawListpackValue::String(u32_range(start, end)?), entry_len));
     }
     // Remaining: 0xF0..=0xF4 / 0xFF.
     match first {
@@ -510,7 +541,7 @@ fn decode_entry_raw(
             }
             let data_len = 5 + slen;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((RawListpackValue::String(start..end), entry_len))
+            Ok((RawListpackValue::String(u32_range(start, end)?), entry_len))
         }
         0xF1 => {
             // 16-bit signed int: 11110001 + u16 LE.
@@ -583,7 +614,7 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
         RawListpackValue::Integer(value) => ListpackEntry::Integer(value),
         // Materialize the borrowed range into the owned payload — the single
         // `to_vec()` the pre-refactor `decode_entry` performed inline.
-        RawListpackValue::String(range) => ListpackEntry::String(data[range].to_vec()),
+        RawListpackValue::String(range) => ListpackEntry::String(data[usize_range(range)].to_vec()),
     };
     Ok((entry, entry_len))
 }
@@ -893,17 +924,19 @@ pub fn decode_zset_listpack_pairs(data: &[u8]) -> Result<Vec<(Vec<u8>, f64)>, Li
                 // to canonical decimal, matching `ListpackEntry::into_bytes`).
                 pending_member = Some(match raw {
                     RawListpackValue::Integer(n) => crate::decimal_i64_bytes(n),
-                    RawListpackValue::String(range) => data[range].to_vec(),
+                    RawListpackValue::String(range) => data[usize_range(range)].to_vec(),
                 });
             }
             Some(member) => {
                 // Score position: read the f64 WITHOUT allocating the score string.
                 let score = match raw {
                     RawListpackValue::Integer(n) => n as f64,
-                    RawListpackValue::String(range) => std::str::from_utf8(&data[range])
-                        .ok()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .ok_or(ListpackError::InvalidScore)?,
+                    RawListpackValue::String(range) => {
+                        std::str::from_utf8(&data[usize_range(range)])
+                            .ok()
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .ok_or(ListpackError::InvalidScore)?
+                    }
                 };
                 pairs.push((member, score));
             }
@@ -1324,9 +1357,7 @@ pub fn decode_zset_spans_and_scores(
         }
         // Member half: rendered exactly as the general decoder would.
         let member = match raw_member {
-            RawListpackValue::String(range) => {
-                ListpackValueSpan::String(narrow_span(range.start, range.end)?)
-            }
+            RawListpackValue::String(range) => ListpackValueSpan::String(range),
             RawListpackValue::Integer(value) => ListpackValueSpan::integer(value),
         };
 
@@ -1348,7 +1379,7 @@ pub fn decode_zset_spans_and_scores(
             #[allow(clippy::cast_precision_loss)]
             RawListpackValue::Integer(value) => value as f64,
             RawListpackValue::String(range) => {
-                let text = std::str::from_utf8(&data[range])
+                let text = std::str::from_utf8(&data[usize_range(range)])
                     .map_err(|_| ListpackError::TruncatedEntry)?;
                 let parsed: f64 = text.parse().map_err(|_| ListpackError::TruncatedEntry)?;
                 if parsed.is_nan() {
@@ -1405,9 +1436,7 @@ pub fn decode_zset_spans_and_scores_orig(
         match pending.take() {
             None => {
                 pending = Some(match raw {
-                    RawListpackValue::String(range) => {
-                        ListpackValueSpan::String(narrow_span(range.start, range.end)?)
-                    }
+                    RawListpackValue::String(range) => ListpackValueSpan::String(range),
                     RawListpackValue::Integer(value) => ListpackValueSpan::integer(value),
                 });
             }
@@ -1416,7 +1445,7 @@ pub fn decode_zset_spans_and_scores_orig(
                     #[allow(clippy::cast_precision_loss)]
                     RawListpackValue::Integer(value) => value as f64,
                     RawListpackValue::String(range) => {
-                        let text = std::str::from_utf8(&data[range])
+                        let text = std::str::from_utf8(&data[usize_range(range)])
                             .map_err(|_| ListpackError::TruncatedEntry)?;
                         let parsed: f64 =
                             text.parse().map_err(|_| ListpackError::TruncatedEntry)?;
@@ -2814,7 +2843,14 @@ mod tests {
 
         // A list of ids: every entry is an integer.
         assert_eq!(
-            split(&[b"1", b"2", b"3", b"100", b"-9223372036854775808", b"9223372036854775807"]),
+            split(&[
+                b"1",
+                b"2",
+                b"3",
+                b"100",
+                b"-9223372036854775808",
+                b"9223372036854775807"
+            ]),
             (6, 6),
             "every entry of an id list is integer-encoded"
         );
@@ -2832,5 +2868,4 @@ mod tests {
         assert_eq!(spans[1].as_bytes(&blob), b"9223372036854775807");
         assert_eq!(spans[0].byte_len(), 20, "i64::MIN renders to 20 bytes");
     }
-
 }
