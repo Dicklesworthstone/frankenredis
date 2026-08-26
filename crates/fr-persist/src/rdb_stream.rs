@@ -487,6 +487,11 @@ fn append_stream_id<const DIRECT_IDS: bool>(buf: &mut Vec<u8>, ms: u64, seq: u64
 /// Encode `value` as a listpack integer element, byte-for-byte matching
 /// upstream `lpEncodeIntegerGetType` across all six width buckets (7-bit, 13-,
 /// 16-, 24-, 32-, 64-bit) plus the trailing backlen.
+/// (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: the plain hint
+/// is DECLINED by LLVM for bodies this size and leaves the call count untouched --
+/// see 9d7be9b44, where it moved the ratio 0.1 pct and the profile not at all.
+/// This is an out-of-line call once per listpack element on the RDB save path.
+#[inline(always)]
 fn encode_listpack_int(buf: &mut Vec<u8>, value: i64) {
     let start = buf.len();
     if (0..=127).contains(&value) {
@@ -578,6 +583,11 @@ fn listpack_string_to_int64(s: &[u8]) -> Option<i64> {
 
 /// Append a stream field/value element exactly as upstream `lpAppend` does:
 /// integer-encode when the bytes are a canonical i64, otherwise string-encode.
+/// (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: the plain hint
+/// is DECLINED by LLVM for bodies this size and leaves the call count untouched --
+/// see 9d7be9b44, where it moved the ratio 0.1 pct and the profile not at all.
+/// This is an out-of-line call once per listpack element on the RDB save path.
+#[inline(always)]
 fn encode_listpack_bytes(buf: &mut Vec<u8>, data: &[u8]) -> Option<()> {
     if let Some(value) = listpack_string_to_int64(data) {
         encode_listpack_int(buf, value);

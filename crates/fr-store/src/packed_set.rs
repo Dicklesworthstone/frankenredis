@@ -2149,6 +2149,11 @@ pub struct FieldsRefIter<'a> {
 
 impl<'a> Iterator for FieldsRefIter<'a> {
     type Item = (&'a [u8], &'a [u8]);
+    // (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: 24,000
+    // out-of-line calls per 200-key stream DEBUG RELOAD, one per field, and the
+    // plain hint is declined for bodies this size (9d7be9b44 measured the hint at
+    // 0.1 pct with the call count unchanged).
+    #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         if self.pos >= self.buf.len() {
             return None;
