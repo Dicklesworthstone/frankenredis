@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod lua_eval;
 pub use lua_eval::eval_script;
@@ -20,10 +20,11 @@ use icu_collator::{
 use icu_locale_core::Locale;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
+use std::ffi::CString;
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30858,6 +30859,106 @@ fn ascii_alnum_fast_path_agrees_with(
     true
 }
 
+/// An owned `locale_t` used exclusively through the `_l` collation APIs.
+///
+/// This is strictly-unavoidable FFI: Rust has no safe API for glibc's locale-aware `strcoll`,
+/// and Redis itself delegates this exact comparison to libc. `newlocale` returns either null or
+/// an immutable locale object; this type owns the latter and frees it exactly once.
+struct LibcCollationLocale {
+    raw: libc::locale_t,
+}
+
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    fn strcoll_l(
+        left: *const libc::c_char,
+        right: *const libc::c_char,
+        locale: libc::locale_t,
+    ) -> libc::c_int;
+}
+
+// SAFETY: POSIX locale objects created by `newlocale` are immutable. We only call the re-entrant
+// `strcoll_l` while an `RwLock` read guard keeps the owner alive; replacement and `freelocale`
+// require its write guard, so no thread can use a freed handle.
+#[allow(unsafe_code)]
+unsafe impl Send for LibcCollationLocale {}
+// SAFETY: see the `Send` rationale above. `strcoll_l` permits concurrent reads of one immutable
+// locale object and this type exposes its raw handle only inside this module's FFI call.
+#[allow(unsafe_code)]
+unsafe impl Sync for LibcCollationLocale {}
+
+impl LibcCollationLocale {
+    #[allow(unsafe_code)]
+    fn new(name: &str) -> Result<Self, ()> {
+        let name = CString::new(name).map_err(|_| ())?;
+        // SAFETY: `name` is NUL-terminated; `LC_COLLATE_MASK` requests only collation; null base
+        // asks libc to allocate a new locale. A null result becomes an error before it is stored.
+        let raw = unsafe {
+            libc::newlocale(libc::LC_COLLATE_MASK, name.as_ptr(), std::ptr::null_mut())
+        };
+        if raw.is_null() {
+            Err(())
+        } else {
+            Ok(Self { raw })
+        }
+    }
+}
+
+impl Drop for LibcCollationLocale {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: `raw` came from exactly one successful `newlocale` call and remains owned here.
+        unsafe { libc::freelocale(self.raw) };
+    }
+}
+
+fn active_libc_collation_locale() -> &'static RwLock<LibcCollationLocale> {
+    static LOCALE: OnceLock<RwLock<LibcCollationLocale>> = OnceLock::new();
+    LOCALE.get_or_init(|| {
+        // Redis's empty default derives LC_COLLATE from the environment. Falling back to ICU or
+        // byte order would hide a server-startup semantic failure.
+        let locale = LibcCollationLocale::new("")
+            .expect("the process locale must be valid before command dispatch begins");
+        RwLock::new(locale)
+    })
+}
+
+/// Validate a prospective `CONFIG SET locale-collate` value without changing live collation.
+#[must_use]
+pub fn sort_alpha_locale_is_valid(locale: &str) -> bool {
+    LibcCollationLocale::new(locale).is_ok()
+}
+
+/// Commit a previously validated `locale-collate` value.
+pub fn set_sort_alpha_locale(locale: &str) -> Result<(), ()> {
+    let next = LibcCollationLocale::new(locale)?;
+    let mut active = match active_libc_collation_locale().write() {
+        Ok(active) => active,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *active = next;
+    Ok(())
+}
+
+/// Redis-compatible `strcoll` over arbitrary RESP byte strings.
+///
+/// Redis stores C-terminated SDS values, while a Rust `&[u8]` has no spare terminator. Embedded
+/// NUL cannot be represented to libc and retains the established byte-order fallback rather than
+/// truncating either input.
+#[allow(unsafe_code)]
+pub fn sort_alpha_compare_glibc(left: &[u8], right: &[u8]) -> Ordering {
+    let (Ok(left), Ok(right)) = (CString::new(left), CString::new(right)) else {
+        return left.cmp(right);
+    };
+    let active = match active_libc_collation_locale().read() {
+        Ok(active) => active,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    // SAFETY: inputs are live NUL-terminated `CString`s; `active.raw` is a non-null `newlocale`
+    // result, and the read guard prevents `freelocale` until this call returns.
+    unsafe { strcoll_l(left.as_ptr(), right.as_ptr(), active.raw) }.cmp(&0)
+}
+
 /// The `SORT ... ALPHA` collator, plus whether the ASCII fast path was VALIDATED against
 /// that exact collator. The two travel together because either alone is unusable: the
 /// flag means nothing without the collator it was checked against.
@@ -31373,12 +31474,6 @@ fn sort_generic<const MOVE: bool>(
             elements = reordered;
         } else {
             // Alpha (lexicographic) sort
-            let collation = active_sort_alpha_collation();
-            let (collator, ascii_fast_path) = if store_dest.is_none() {
-                (collation.collator.as_ref(), collation.ascii_fast_path)
-            } else {
-                (None, false)
-            };
             // `None` = no BY pattern, so each element sorts on ITSELF and the slices
             // below borrow `elements` directly rather than a per-element copy of it.
             let mut indexed: Vec<(usize, &[u8])> = match &sort_keys {
@@ -31398,7 +31493,11 @@ fn sort_generic<const MOVE: bool>(
             // stable ordering of equal-key rows exactly while making `cmp` a
             // strict total order for the partial sort. (frankenredis-sortlim)
             let mut cmp = |a: &(usize, &[u8]), b: &(usize, &[u8])| {
-                let base = sort_alpha_compare_with_ascii_fast_path(collator, ascii_fast_path, a.1, b.1);
+                let base = if store_dest.is_none() {
+                    sort_alpha_compare_glibc(a.1, b.1)
+                } else {
+                    a.1.cmp(b.1)
+                };
                 let base = if desc { base.reverse() } else { base };
                 base.then_with(|| a.0.cmp(&b.0))
             };
@@ -64134,6 +64233,32 @@ mod tests {
             posix_locale_to_bcp47("de_DE.UTF-8@euro"),
             Some("de-DE".to_string())
         );
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn glibc_collation_rejects_the_icu_punctuation_tie_break() {
+        // Redis 7.2.4 calls glibc strcoll after selecting locale-collate. ICU's shifted
+        // comparator treats punctuation as ignorable here, so the old implementation preserved
+        // insertion order (`a-b`, `ab`, `a b`) rather than glibc's `a b`, `a-b`, `ab` order.
+        let locale = super::LibcCollationLocale::new("en_US.utf8").expect("test locale installed");
+        let left = std::ffi::CString::new("a b").expect("no NUL");
+        let right = std::ffi::CString::new("a-b").expect("no NUL");
+        // SAFETY: both `CString`s are live and NUL-terminated; `locale.raw` is the non-null
+        // handle just returned by `newlocale` and remains owned for this entire call.
+        let glibc_order = unsafe { super::strcoll_l(left.as_ptr(), right.as_ptr(), locale.raw) }.cmp(&0);
+        assert_eq!(glibc_order, std::cmp::Ordering::Less);
+
+        let mut options = CollatorOptions::default();
+        options.alternate_handling = Some(AlternateHandling::Shifted);
+        let icu_locale = "en-US".parse::<Locale>().expect("valid ICU locale");
+        let icu = Collator::try_new(icu_locale.into(), options).expect("ICU collator");
+        assert_ne!(
+            icu.compare("a b", "a-b"),
+            glibc_order,
+            "the old ICU comparator must fail this glibc-specific tie-break"
+        );
+        assert!(!super::sort_alpha_locale_is_valid("bad\0locale"));
     }
 
     /// The `SORT ... ALPHA` collator is memoised (frankenredis-r9mqp), so assert BOTH

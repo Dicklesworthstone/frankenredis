@@ -374,6 +374,7 @@ dependencies = [
  "fr-store",
  "icu_collator",
  "icu_locale_core",
+ "libc",
  "mimalloc",
  "proptest",
  "serde_json",

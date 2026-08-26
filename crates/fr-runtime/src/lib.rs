@@ -43607,6 +43607,7 @@ impl Runtime {
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from(".").join("dump.rdb"));
         let mut next_acl_file_path = self.server.acl_file_path.clone();
+        let mut next_locale_collate: Option<String> = None;
         let mut rdb_path_changed = false;
         let mut encoding_threshold_updates: Vec<(&str, usize)> = Vec::new();
         let mut static_override_updates: Vec<(String, String)> = Vec::new();
@@ -45512,6 +45513,16 @@ impl Runtime {
                         );
                     }
                 }
+                if canonical == "locale-collate" {
+                    let value = match std::str::from_utf8(value_bytes) {
+                        Ok(value) => value,
+                        Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                    };
+                    if !fr_command::sort_alpha_locale_is_valid(value) {
+                        return config_set_failed("locale-collate", "Invalid locale name");
+                    }
+                    next_locale_collate = Some(value.to_string());
+                }
                 let value = String::from_utf8_lossy(value_bytes).to_string();
                 static_override_updates.push((canonical.to_string(), value));
                 continue;
@@ -45524,6 +45535,11 @@ impl Runtime {
             ));
         }
 
+        if let Some(locale) = next_locale_collate
+            && fr_command::set_sort_alpha_locale(&locale).is_err()
+        {
+            return config_set_failed("locale-collate", "Invalid locale name");
+        }
         if let Some(requirepass) = next_requirepass {
             // CONFIG SET requirepass should bridge ACL defaults without dropping this session.
             self.apply_requirepass_update(requirepass, true);
@@ -73514,6 +73530,37 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 RespFrame::BulkString(Some(b"list-max-listpack-size".to_vec())),
                 RespFrame::BulkString(Some(b"-2".to_vec())),
             ]))
+        );
+    }
+
+    #[test]
+    fn config_set_locale_collate_rejects_invalid_name_without_partial_update() {
+        let mut rt = Runtime::default_strict();
+        let reply = rt.execute_frame(
+            command(&[
+                b"CONFIG",
+                b"SET",
+                b"timeout",
+                b"300",
+                b"locale-collate",
+                b"bad\0locale",
+            ]),
+            0,
+        );
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'locale-collate') - Invalid locale name"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"timeout"]), 1),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"timeout".to_vec())),
+                RespFrame::BulkString(Some(b"0".to_vec())),
+            ])),
+            "a naive implementation that applies CONFIG pairs as it parses them leaks timeout=300"
         );
     }
 

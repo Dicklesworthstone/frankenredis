@@ -10,6 +10,7 @@ fr-store = { version = "0.1.0", path = "../fr-store" }
 foldhash = "0.2"
 icu_collator = "2.2.0"
 icu_locale_core = "2.2.0"
+libc.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 

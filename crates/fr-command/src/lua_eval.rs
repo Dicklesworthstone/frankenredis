@@ -14147,23 +14147,17 @@ fn lua_pattern_find(s: &[u8], pat: &[u8], init: usize) -> Result<Option<LuaPatMa
 /// default UTF-8 environment `'a' < 'B'` is TRUE on 7.2.4 and false byte-wise. This affects every
 /// `<`, `>`, `<=`, `>=` on strings and `table.sort`'s default comparator.
 ///
-/// It reuses the collator `SORT ... ALPHA` already resolves rather than introducing a second one.
-/// That matters beyond tidiness: two collation sources in one process can disagree, and a script
-/// that sorts with `table.sort` and then compares against a `SORT ALPHA` result would see the
-/// disagreement as data corruption. `active_sort_alpha_collation` is memoised, so this costs a
-/// static read per comparison and not a locale lookup.
+/// It reuses the exact glibc `strcoll_l` wrapper that `SORT ... ALPHA` uses rather than introducing
+/// a second collation source. That matters beyond tidiness: a script that sorts with `table.sort`
+/// and then compares against a `SORT ALPHA` result must not observe a disagreement as data
+/// corruption. The active immutable locale is shared behind a read lock and is changed only by
+/// `CONFIG SET locale-collate` after validation.
 ///
 /// Where SORT and Lua legitimately differ: SORT passes `None` when a `STORE` destination is
 /// present, because a stored result must not vary with the server's locale. Lua has no such case --
 /// upstream's VM always calls `strcoll` -- so this always collates.
 fn lua_str_collate(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
-    let collation = crate::active_sort_alpha_collation();
-    crate::sort_alpha_compare_with_ascii_fast_path(
-        collation.collator.as_ref(),
-        collation.ascii_fast_path,
-        a,
-        b,
-    )
+    crate::sort_alpha_compare_glibc(a, b)
 }
 
 fn lua_pattern_raise(inv_name: Option<&str>, msg: String) -> String {
@@ -18100,31 +18094,22 @@ mod tests {
     /// (frankenredis-jdii2) A NUL byte ENDS a Lua pattern. Upstream's matcher takes `const char *p`
     /// with no length and `case '\0'` is its "end of pattern" (lstrlib.c:406), so everything after
     /// a NUL is never compiled and never matched. Every assertion is a row MEASURED against 7.2.4.
-    /// (frankenredis-u45ul) Lua's string comparison must agree with the collator `SORT ... ALPHA`
-    /// uses, because upstream drives both from the same `LC_COLLATE`.
+    /// (frankenredis-u45ul) Lua's string comparison must agree with the glibc `strcoll_l` route
+    /// `SORT ... ALPHA` uses, because upstream drives both from the same `LC_COLLATE`.
     ///
     /// Asserted as AGREEMENT with the collator rather than as literal orderings, deliberately. A
     /// test that hardcoded `'a' < 'B'` would encode this machine's locale and fail under
-    /// `LC_ALL=C`, where `resolve_sort_alpha_collator` correctly returns `None` and both paths fall
-    /// back to bytes. The property that must hold in EVERY locale is that the two agree; the
-    /// specific order is the environment's business.
+    /// `LC_ALL=C`, where glibc collates by byte. The property that must hold in EVERY locale is
+    /// that the two paths agree; the specific order is the environment's business.
     #[test]
     fn lua_string_comparison_agrees_with_sort_alpha_collation_u45ul() {
         let mut store = Store::new();
-        let collation = crate::active_sort_alpha_collation();
-        let expect = |a: &str, b: &str| {
-            crate::sort_alpha_compare_with_ascii_fast_path(
-                collation.collator.as_ref(),
-                collation.ascii_fast_path,
-                a.as_bytes(),
-                b.as_bytes(),
-            )
-        };
+        let expect = |a: &str, b: &str| crate::sort_alpha_compare_glibc(a.as_bytes(), b.as_bytes());
 
         // Pairs chosen to straddle the cases where BYTE order and collation disagree: letter case,
         // a leading underscore, and digits vs letters. Under a collating locale these are exactly
         // the rows that used to diverge from 7.2.4; under LC_ALL=C they all still agree by
-        // construction, which is why the assertion compares against the collator.
+        // construction, which is why the assertion compares against the shared glibc route.
         for (a, b) in [
             ("a", "B"),
             ("B", "a"),
