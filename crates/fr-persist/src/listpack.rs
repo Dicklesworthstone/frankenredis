@@ -1222,45 +1222,25 @@ pub fn decode_string_ranges_if_all_strings(
 /// retain that arena with the spans; extending `data` instead would change the
 /// payload length used by the quicklist fill policy.
 pub fn decode_retained_listpack_spans(data: &[u8]) -> Result<RetainedListpackSpans, ListpackError> {
-    let (total_bytes, num_elements) = parse_header(data)?;
-    let end = (total_bytes as usize) - 1;
-    let mut cursor = LISTPACK_HEADER_SIZE;
-    let capacity = if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN {
-        usize::from(num_elements)
-    } else {
-        0
-    };
-    let mut entries = Vec::with_capacity(capacity);
+    // The generic decoder already walks every entry once and preserves string
+    // ranges plus the canonical decimal bytes for integer encodings.  Reusing
+    // it here keeps the compact retained representation without paying a
+    // second raw-entry decode on RESTORE's list path.
+    let decoded = decode_value_spans(data)?;
+    let mut entries = Vec::with_capacity(decoded.len());
     let mut integer_bytes = Vec::new();
 
-    while cursor < end {
-        let (raw, consumed) = decode_entry_raw(data, cursor)?;
-        let entry = match raw {
-            RawListpackValue::String(range) => {
-                RetainedListpackValueSpan::String(narrow_span(range.start, range.end)?)
-            }
-            RawListpackValue::Integer(value) => {
+    for span in decoded {
+        let entry = match span {
+            ListpackValueSpan::String(range) => RetainedListpackValueSpan::String(range),
+            ListpackValueSpan::Integer(bytes) => {
                 let start = integer_bytes.len();
-                let mut scratch = [0_u8; 20];
-                let digits_start = crate::decimal_i64_into(&mut scratch, value);
-                integer_bytes.extend_from_slice(&scratch[digits_start..]);
+                integer_bytes.extend_from_slice(bytes.as_slice());
                 let end = integer_bytes.len();
                 RetainedListpackValueSpan::Integer(narrow_span(start, end)?)
             }
         };
         entries.push(entry);
-        cursor = cursor
-            .checked_add(consumed)
-            .ok_or(ListpackError::TruncatedEntry)?;
-        if cursor > end {
-            return Err(ListpackError::TruncatedEntry);
-        }
-    }
-    if cursor != end {
-        return Err(ListpackError::MissingTerminator);
-    }
-    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && entries.len() != usize::from(num_elements) {
-        return Err(ListpackError::ElementCountMismatch);
     }
     Ok(RetainedListpackSpans {
         entries,

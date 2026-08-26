@@ -35554,16 +35554,8 @@ impl Store {
                     cursor += vc;
                     pairs.push((field, value));
                 }
-                {
-                    let mut seen = HashSet::with_capacity_and_hasher(
-                        pairs.len(),
-                        foldhash::quality::RandomState::default(),
-                    );
-                    for (field, _) in &pairs {
-                        if !seen.insert(field.as_slice()) {
-                            return Err(StoreError::InvalidDumpPayload);
-                        }
-                    }
+                if restore_items_have_duplicate_key(&pairs, |(field, _)| field.as_slice()) {
+                    return Err(StoreError::InvalidDumpPayload);
                 }
                 Value::Hash(Box::new(HashFieldMap::from_unique_pairs(pairs)))
             }
@@ -35614,16 +35606,8 @@ impl Store {
                     }
                     pairs.push((member, canonicalize_zero_score(score)));
                 }
-                {
-                    let mut seen = HashSet::with_capacity_and_hasher(
-                        pairs.len(),
-                        foldhash::quality::RandomState::default(),
-                    );
-                    for (member, _) in &pairs {
-                        if !seen.insert(member.as_slice()) {
-                            return Err(StoreError::InvalidDumpPayload);
-                        }
-                    }
+                if restore_items_have_duplicate_key(&pairs, |(member, _)| member.as_slice()) {
+                    return Err(StoreError::InvalidDumpPayload);
                 }
                 let zs = SortedSet::from_unique_pairs_with_limits(
                     pairs,
@@ -35852,16 +35836,8 @@ impl Store {
                 // member with no lookup (O(n)); insertion order — the only observable
                 // order for a listpack set — is unchanged. RESTORE still rejects a
                 // duplicate member.
-                {
-                    let mut seen = HashSet::with_capacity_and_hasher(
-                        members.len(),
-                        foldhash::quality::RandomState::default(),
-                    );
-                    for member in &members {
-                        if !seen.insert(*member) {
-                            return Err(StoreError::InvalidDumpPayload);
-                        }
-                    }
+                if restore_items_have_duplicate_key(&members, |member| *member) {
+                    return Err(StoreError::InvalidDumpPayload);
                 }
                 force_set_listpack_encoding = true;
                 Value::Set(Box::new(SetValue::Generic(
@@ -37673,13 +37649,35 @@ fn restore_field_probe_hash(bytes: &[u8]) -> u64 {
 /// replaces. Above that bound the randomized `HashSet` is kept, so the unbounded
 /// case retains its collision resistance.
 fn restore_pairs_have_duplicate_field(pairs: &[(&[u8], &[u8])]) -> bool {
-    if pairs.len() > RESTORE_STACK_DUP_MAX {
+    restore_items_have_duplicate_key(pairs, |(field, _)| *field)
+}
+
+/// The same rule for any RESTORE element list, whatever the element type.
+///
+/// (frankenredis-33832, BlackThrush 2026-08-25) The rule above was implemented
+/// ONCE, for the hash listpack arm, and the zset and set arms kept the
+/// `HashSet<&[u8], foldhash::quality::RandomState>` it replaced — so the lever
+/// that took hash RESTORE off the top of the board never reached the two arms
+/// that then became the worst on it. Measured on this HEAD against live Redis
+/// 7.2.4, zset RESTORE was the worst vs-incumbent ratio in the project at
+/// 2.6285x and set RESTORE second at 2.4304x, and `hashbrown::HashMap<&[u8],
+/// ()>::insert` was the single largest frame in the zset profile at 10.65% of
+/// the whole process.
+///
+/// `key` projects an element to the bytes that must be unique: the member for a
+/// set, the member of a `(member, score)` pair for a zset, the field of a
+/// `(field, value)` pair for a hash. Everything else — the exactness argument,
+/// the fixed-seed argument, the bound, the `HashSet` fallback above it — is
+/// unchanged from the doc comment on `restore_pairs_have_duplicate_field`, and
+/// there is now one implementation of it rather than one per container type.
+fn restore_items_have_duplicate_key<T>(items: &[T], key: impl Fn(&T) -> &[u8]) -> bool {
+    if items.len() > RESTORE_STACK_DUP_MAX {
         let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
             std::collections::HashSet::with_capacity_and_hasher(
-                pairs.len(),
+                items.len(),
                 foldhash::quality::RandomState::default(),
             );
-        return !pairs.iter().all(|(field, _)| seen.insert(*field));
+        return !items.iter().all(|item| seen.insert(key(item)));
     }
     // Power-of-two slot count at >= 2x the entry ceiling keeps the load factor at
     // or below 0.5, where linear probing averages ~1.5 probes.
@@ -37687,7 +37685,8 @@ fn restore_pairs_have_duplicate_field(pairs: &[(&[u8], &[u8])]) -> bool {
     debug_assert!(SLOTS.is_power_of_two());
     // 0 is the empty sentinel, so slots hold `index + 1`.
     let mut table = [0u16; SLOTS];
-    for (index, (field, _)) in pairs.iter().enumerate() {
+    for (index, item) in items.iter().enumerate() {
+        let field = key(item);
         let mut slot = (restore_field_probe_hash(field) as usize) & (SLOTS - 1);
         loop {
             let occupant = table[slot];
@@ -37695,7 +37694,7 @@ fn restore_pairs_have_duplicate_field(pairs: &[(&[u8], &[u8])]) -> bool {
                 table[slot] = u16::try_from(index + 1).expect("index bounded by SLOTS/2");
                 break;
             }
-            if pairs[usize::from(occupant) - 1].0 == *field {
+            if key(&items[usize::from(occupant) - 1]) == field {
                 return true;
             }
             slot = (slot + 1) & (SLOTS - 1);
@@ -37813,16 +37812,8 @@ fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError
     }
     // RESTORE rejects a duplicate member (the per-member insert returned false for
     // an already-present member); from_unique_pairs_with_limits requires uniqueness.
-    {
-        let mut seen = HashSet::with_capacity_and_hasher(
-            pairs.len(),
-            foldhash::quality::RandomState::default(),
-        );
-        for (member, _) in &pairs {
-            if !seen.insert(member.as_slice()) {
-                return Err(StoreError::InvalidDumpPayload);
-            }
-        }
+    if restore_items_have_duplicate_key(&pairs, |(member, _)| member.as_slice()) {
+        return Err(StoreError::InvalidDumpPayload);
     }
     Ok(SortedSet::from_unique_pairs_with_limits(
         pairs,
@@ -37854,16 +37845,8 @@ fn zset_from_listpack_spans(listpack: &[u8]) -> Result<(SortedSet, usize), Store
         pairs.push((member, *score));
     }
 
-    {
-        let mut seen = HashSet::with_capacity_and_hasher(
-            pairs.len(),
-            foldhash::quality::RandomState::default(),
-        );
-        for (member, _) in &pairs {
-            if !seen.insert(*member) {
-                return Err(StoreError::InvalidDumpPayload);
-            }
-        }
+    if restore_items_have_duplicate_key(&pairs, |(member, _)| *member) {
+        return Err(StoreError::InvalidDumpPayload);
     }
 
     Ok((

@@ -38668,7 +38668,13 @@ impl Runtime {
             return None;
         }
         let command = argv.first()?;
-        if !fr_command::is_write_command(command) {
+        // Upstream rebuilds CMD_WRITE for resolved script commands from the script's declared
+        // flags before this gate. The command table marks FCALL as a write, but a `no-writes`
+        // function is not one here; conversely a flagless function must be rejected here before
+        // the stale-data gate gets a chance to answer it. (script.c::scriptFlagsToCmdFlags)
+        let command_writes = fr_command::script_effective_command_flags(argv, &self.server.store)
+            .map_or_else(|| fr_command::is_write_command(command), |flags| flags.write);
+        if !command_writes {
             return None;
         }
         Some(RespFrame::Error(
@@ -38716,7 +38722,9 @@ impl Runtime {
         // Reading the flag also fixes a case the parent-keyed list could not express at all --
         // `object|help` is stale while `object|encoding` is not, and the same split applies to
         // function, memory, module, xgroup, xinfo, sentinel and script|load.
-        if fr_command::command_is_stale(argv) {
+        let command_is_stale = fr_command::script_effective_command_flags(argv, &self.server.store)
+            .map_or_else(|| fr_command::command_is_stale(argv), |flags| flags.stale);
+        if command_is_stale {
             return None;
         }
 
@@ -39068,11 +39076,14 @@ impl Runtime {
             return self.reject_and_flag_transaction(reply);
         }
 
-        if let Some(reply) = self.reject_stale_replica_read_request(argv) {
+        if command_arity_ok && let Some(reply) = self.reject_write_on_readonly_replica(argv) {
             return self.reject_and_flag_transaction(reply);
         }
 
-        if command_arity_ok && let Some(reply) = self.reject_write_on_readonly_replica(argv) {
+        // processCommand checks the command's effective WRITE bit before its effective STALE bit.
+        // That order is observable for a stale read-only replica: a flagless FCALL is READONLY,
+        // while a no-writes FCALL has WRITE cleared and therefore reaches MASTERDOWN instead.
+        if let Some(reply) = self.reject_stale_replica_read_request(argv) {
             return self.reject_and_flag_transaction(reply);
         }
 
@@ -40702,11 +40713,19 @@ impl Runtime {
 
         let loop_result = self.refresh_over_maxmemory(now_ms);
 
-        // A script entrypoint is sampled, never REJECTED here. Refusing EVAL itself would
-        // over-reject every read-only-body script, which 7.2.4 runs happily over maxmemory --
-        // upstream puts the refusal on the script's inner denyoom calls
-        // (script.c::scriptVerifyOOM), not on the entrypoint.
-        if script_entrypoint {
+        // `scriptFlagsToCmdFlags` makes a resolved shebang script/function denyoom unless it
+        // declares allow-oom or no-writes. Compat EVAL and unresolved EVALSHA/FCALL deliberately
+        // leave the command table alone and must reach their later NOSCRIPT/script paths instead
+        // of being preempted by OOM.
+        let script_command_flags =
+            fr_command::script_effective_command_flags(argv, &self.server.store);
+        let command_denyoom = script_command_flags.map_or_else(
+            || argv
+                .first()
+                .is_some_and(|cmd| fr_command::command_is_denyoom(cmd)),
+            |flags| flags.denyoom,
+        );
+        if script_entrypoint && (script_command_flags.is_none() || !command_denyoom) {
             return None;
         }
 
@@ -40739,10 +40758,7 @@ impl Runtime {
         // behaviours upstream has there. The bead carries the shape and the one open question
         // (what supplies the OOM verdict at queue time, given `over_maxmemory_live` is written by
         // this function and so is one command stale there).
-        if !argv
-            .first()
-            .is_some_and(|cmd| fr_command::command_is_denyoom(cmd))
-        {
+        if !command_denyoom {
             return None;
         }
 
@@ -69850,6 +69866,54 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"blocked", b"value"]), 3),
             expected
+        );
+    }
+
+    #[test]
+    fn stale_readonly_replica_uses_a_functions_effective_command_flags_3bda1() {
+        // The table marks both FCALL forms STALE and FCALL as WRITE. That is deliberately NOT
+        // enough: scriptFlagsToCmdFlags replaces those bits from each resolved function's flags
+        // before processCommand admits it. A table-only implementation serves both functions;
+        // one that checks stale before write returns MASTERDOWN for the first row; one that
+        // refuses every function returns MASTERDOWN for the third. All three are wrong.
+        let mut rt = Runtime::default_strict();
+        let library = b"#!lua name=staleflags\n\
+redis.register_function('writefn', function(keys, args) return 1 end)\n\
+redis.register_function{function_name='readonlyfn', callback=function(keys, args) return 1 end, flags={'no-writes'}}\n\
+redis.register_function{function_name='allowstalefn', callback=function(keys, args) return 1 end, flags={'no-writes','allow-stale'}}";
+        assert!(matches!(
+            rt.execute_frame(command(&[b"FUNCTION", b"LOAD", library]), 0),
+            RespFrame::SimpleString(_)
+        ));
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"replica-serve-stale-data", b"no"]),
+                2,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL", b"writefn", b"0"]), 3),
+            RespFrame::Error("READONLY You can't write against a read only replica.".to_string()),
+            "a flagless function rebuilds WRITE, so READONLY precedes stale refusal"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL_RO", b"readonlyfn", b"0"]), 4),
+            RespFrame::Error(
+                "MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'."
+                    .to_string(),
+            ),
+            "no-writes clears WRITE but not STALE, so the stale gate answers"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL_RO", b"allowstalefn", b"0"]), 5),
+            RespFrame::Integer(1),
+            "allow-stale restores STALE and must not be over-refused"
         );
     }
 
