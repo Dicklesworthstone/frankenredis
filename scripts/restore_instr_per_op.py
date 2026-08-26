@@ -33,10 +33,17 @@ not grow across the run and the slope is decode work rather than insertion growt
     serverCron contaminant (~3 pct), so quote fr-side deltas with more confidence
     than the ratio.
 
-Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset] [--op=restore|reload]
+`--aa` adds a THIRD arm: the same fr ELF measured a second time as an independent
+pair of processes. Its ratio against the fr arm is this invocation's own null, and
+a fr/redis figure printed from a run whose null missed the band is not quotable.
+Every arm also prints the sha256 of `/proc/<pid>/exe` of the server that served it,
+and the run aborts if an arm's N and 2N launches did not run the same ELF.
+
+Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset] [--op=restore|reload] [--aa]
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import socket
 import subprocess
@@ -186,6 +193,18 @@ def run(binary, tag, port, members, ops, workdir, kind="hash", op="restore"):
                 time.sleep(0.25)
         if sock is None:
             raise RuntimeError("%s never became ready under callgrind" % tag)
+        # (frankenredis-lua-tail-calls-ps0le) IN-PROCESS ELF IDENTITY, read from
+        # /proc/<pid>/exe of the server that is actually serving this arm rather
+        # than from the path we were handed. `target/release/<bin>` is SHARED
+        # across agents in this checkout: a peer's `cargo build` between the N and
+        # 2N launches replaces the file under us, and a two-point subtraction
+        # across two DIFFERENT ELFs is not a measurement of either. The caller
+        # compares the two launches' hashes and refuses the arm if they differ.
+        exe_sha = hashlib.sha256()
+        with open("/proc/%d/exe" % proc.pid, "rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                exe_sha.update(block)
+        exe_sha = exe_sha.hexdigest()
         buf = b""
 
         sock.sendall(seed_command(kind, members))
@@ -240,7 +259,7 @@ def run(binary, tag, port, members, ops, workdir, kind="hash", op="restore"):
         raise RuntimeError(
             "%s produced no callgrind total -- the arm did not measure. This is "
             "what reading the dump before process exit looks like." % tag)
-    return ir, payload_len
+    return ir, payload_len, exe_sha
 
 
 def main():
@@ -273,15 +292,49 @@ def main():
     subprocess.run([sys.executable,
                     os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "assert_fresh_build.py"), fr_bin], check=False)
+    # (frankenredis-33832) A/A NULL, in this same invocation. The ratio this
+    # harness prints is a CROSS-PROCESS, cross-binary quantity, so the control
+    # that authenticates it has to be the same shape: a SECOND, independent
+    # two-point subtraction of the fr binary against itself, launched from the
+    # same loop, on the same host, in the same window. Without it a printed
+    # fr/redis figure and "I ran two arms that happened to differ" are
+    # indistinguishable from inside the run.
+    aa = "--aa" in sys.argv
+    AA_BAND = 0.005  # 0.5 pct; the doc above measures this harness's fr arm at 0.03 pct
     port = 47800 + (os.getpid() % 200) * 4
     with tempfile.TemporaryDirectory(dir="/data/tmp") as workdir:
         results = {}
-        for name, binary in (("fr", fr_bin), ("redis", REDIS)):
-            a, plen = run(binary, name + ".n", port, members, ops, workdir, kind, op)
-            b, _ = run(binary, name + ".2n", port + 1, members, ops * 2, workdir, kind, op)
+        shas = {}
+        arms = [("fr", fr_bin), ("redis", REDIS)]
+        if aa:
+            # Same ELF, independent processes and ports: this arm's ONLY difference
+            # from "fr" is that it is a different pair of processes.
+            arms.append(("fr_aa", fr_bin))
+        for idx, (name, binary) in enumerate(arms):
+            base = port + idx * 2
+            a, plen, sha_a = run(binary, name + ".n", base, members, ops, workdir, kind, op)
+            b, _, sha_b = run(binary, name + ".2n", base + 1, members, ops * 2, workdir, kind, op)
+            # A two-point subtraction across two different ELFs is not a
+            # measurement of either one (`feedback_a_failed_build_leaves_a_stale_elf`).
+            if sha_a != sha_b:
+                raise SystemExit(
+                    "%s: the N and 2N launches ran DIFFERENT binaries (%s vs %s) -- a peer "
+                    "rebuilt under this run and the subtraction is void" % (name, sha_a, sha_b))
             results[name] = (b - a) / ops
+            shas[name] = sha_a
             print("  %-6s Ir(N)=%-14d Ir(2N)=%-14d -> %10.1f instr/op  (payload %d B)"
                   % (name, a, b, results[name], plen))
+        for name in shas:
+            print("  %-6s in-process ELF sha256 %s" % (name, shas[name]))
+        if aa:
+            if shas["fr_aa"] != shas["fr"]:
+                raise SystemExit("A/A arms ran different binaries -- null is void")
+            null = results["fr_aa"] / results["fr"]
+            verdict = "PASS" if abs(null - 1.0) <= AA_BAND else "FAIL"
+            print("  A/A null (fr_aa/fr, same ELF, independent processes): %.6fx  [%s, band %.3f]"
+                  % (null, verdict, AA_BAND))
+            if verdict == "FAIL":
+                print("  A/A OUTSIDE BAND -- do not quote the fr/redis ratio from this run.")
         print("  fr/redis instructions per op: %.4fx" % (results["fr"] / results["redis"]))
         # (frankenredis-gvm6z) Print the NOISE FLOOR next to the number, because this harness
         # had none and the natural fallback is wrong here by an order of magnitude.
