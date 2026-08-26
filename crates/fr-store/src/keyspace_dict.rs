@@ -86,7 +86,29 @@ pub struct KeyDict<V> {
     /// absent while retaining the normal reverse-binary cursor. A collision is
     /// only a false positive (the caller still checks the complete glob), never
     /// a missed key.
-    first_byte_bits: Vec<u64>,
+    /// SCAN first-byte prefilter, ONE BYTE per bucket.
+    ///
+    /// (frankenredis-hwcm1 shipped this as `Vec<u64>`; BlackThrush 2026-08-26
+    /// narrowed it.) This is a pure RAM/false-positive trade on the keyspace
+    /// index, which is the project's most universal loss: the u64 form cost
+    /// **8.4 B/key** at load factor ~1 -- its own attribution test says so, and
+    /// the ledger row that landed it recorded keyspace moving 1.7612x -> 1.8112x
+    /// against live Redis 7.2.4 as a result. One byte per bucket costs 1.05
+    /// B/key instead; two bytes per bucket cost 2.1 B/key.
+    ///
+    /// The fingerprint is a bitmask, so it can only ever RULE A BUCKET OUT --
+    /// every surviving candidate is still emitted for the caller's full MATCH
+    /// validation, exactly as before. Going from 64 bits to 16 takes the
+    /// aliasing from 4-way to 16-way, so a singleton bucket that cannot contain
+    /// the wanted byte is now visited with probability 1/16 rather than 1/64 --
+    /// still skipping ~94 pct of buckets where a prefilter-free scan visits all
+    /// of them.
+    ///
+    /// 8 bits was tried first and REJECTED by this module's own effectiveness
+    /// test: at 8 slots the index can only come from three bits of the byte, and
+    /// the corpus that matters here -- ASCII key names -- puts almost none of
+    /// its entropy there.
+    first_byte_bits: Vec<u16>,
     /// Arena of key/value cells. Removed cells become `None` and their slot is
     /// pushed into `free`, so high-churn workloads do not allocate a fresh node
     /// per insert. This removes the pass226 `Box<Node>` allocation penalty while
@@ -240,8 +262,17 @@ impl<V> KeyDict<V> {
     }
 
     #[inline]
-    fn first_byte_bit(key: &[u8]) -> u64 {
-        1_u64 << usize::from(key.first().copied().unwrap_or_default() & 63)
+    fn first_byte_bit(key: &[u8]) -> u16 {
+        // MIX the byte into the slot index; do not just keep its low bits. The
+        // `u64` form used `byte & 63`, which is fine at 64 slots and breaks down
+        // as the mask narrows: `byte & 7` keeps only the low three bits, and
+        // ASCII keys carry almost no entropy there -- `b'p'` and `b'x'` differ by
+        // exactly 8, so they share a slot and the prefilter stops filtering. A
+        // Fibonacci multiply spreads all eight bits of the byte over the four
+        // index bits, so the 16 slots take 16 byte values each wherever the
+        // input's entropy happens to sit.
+        let byte = key.first().copied().unwrap_or_default();
+        1_u16 << ((u32::from(byte).wrapping_mul(0x9E37_79B1) >> 28) & 15)
     }
 
     fn rebuild_first_byte_bits(&mut self) {
@@ -805,14 +836,14 @@ mod tests {
         // (frankenredis-hwcm1) One u64 per BUCKET for the SCAN first-byte prefilter.
         // Counted explicitly because at load factor ~1 that is 8 bytes per KEY --
         // the same order as the levers this attribution ranks.
-        let first_byte_bits_bytes = kd.first_byte_bits.capacity() * size_of::<u64>();
+        let first_byte_bits_bytes = kd.first_byte_bits.capacity() * size_of::<u16>();
         let key_bytes: usize = kd.iter().map(|(k, _)| k.len()).sum();
         let accounted =
             nodes_bytes + buckets_bytes + free_bytes + first_byte_bits_bytes + key_bytes;
 
         let per = |b: usize| b as f64 / n as f64;
         println!(
-            "KeyDict byte attribution (N={n}, 48-byte value, key:N keys)\n  resident            {:8.1} B/key  ({:.1} MB)\n  node arena          {:8.1} B/key  (cap {} x {} B/node)\n  bucket table        {:8.1} B/key  (cap {})\n  free list           {:8.1} B/key\n  SCAN first-byte     {:8.1} B/key  (hwcm1 prefilter, 8 B/bucket)\n  key PAYLOAD         {:8.1} B/key  (k.len() only -- NOT footprint)\n  accounted           {:8.1} B/key\n  UNACCOUNTED         {:8.1} B/key  <- per-allocation overhead on {} key blocks",
+            "KeyDict byte attribution (N={n}, 48-byte value, key:N keys)\n  resident            {:8.1} B/key  ({:.1} MB)\n  node arena          {:8.1} B/key  (cap {} x {} B/node)\n  bucket table        {:8.1} B/key  (cap {})\n  free list           {:8.1} B/key\n  SCAN first-byte     {:8.1} B/key  (hwcm1 prefilter, 2 B/bucket)\n  key PAYLOAD         {:8.1} B/key  (k.len() only -- NOT footprint)\n  accounted           {:8.1} B/key\n  UNACCOUNTED         {:8.1} B/key  <- per-allocation overhead on {} key blocks",
             per(resident),
             resident as f64 / 1e6,
             per(nodes_bytes),
