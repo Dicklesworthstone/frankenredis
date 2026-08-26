@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::listpack::{ListpackEntry, ListpackError, decode_listpack};
+use crate::listpack::{ListpackError, RawListpackValue, decode_raw_values};
 use crate::{
     EncodableStreamEntry, RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata,
     RdbStreamPendingEntry, RdbValue, StreamEntry,
@@ -668,8 +668,12 @@ pub(crate) fn decode_upstream_stream_skeleton(
         let (lp_bytes, c2) =
             rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
         cursor += c2;
-        let lp = decode_listpack(&lp_bytes)?;
-        decode_stream_listpack(&lp, master_ms, master_seq, &mut entries)?;
+        // (BlackThrush 2026-08-26) Raw values, not owned entries. `decode_listpack`
+        // allocated a `Vec<u8>` per string entry that `take_string` then cloned --
+        // two allocations per field. Counted at 16,600 of the 103,681 allocations a
+        // 200-key x 40-entry stream DEBUG RELOAD makes.
+        let lp = decode_raw_values(&lp_bytes)?;
+        decode_stream_listpack(&lp, &lp_bytes, master_ms, master_seq, &mut entries)?;
     }
 
     // (3) Stream length (total entry count).
@@ -867,7 +871,8 @@ fn take_millisecond_time(data: &[u8], cursor: usize) -> Result<u64, UpstreamStre
 ///               *values,                        ; master_field_count of them
 ///               lp_count]
 fn decode_stream_listpack(
-    lp: &[ListpackEntry],
+    lp: &[RawListpackValue],
+    blob: &[u8],
     master_ms: u64,
     master_seq: u64,
     out: &mut Vec<StreamEntry>,
@@ -881,7 +886,7 @@ fn decode_stream_listpack(
     let master_field_count = take_usize(lp, &mut idx)?;
     let mut master_fields: Vec<Vec<u8>> = Vec::with_capacity(master_field_count);
     for _ in 0..master_field_count {
-        master_fields.push(take_string(lp, &mut idx)?);
+        master_fields.push(take_string(lp, blob, &mut idx)?);
     }
     // Master terminator: integer 0.
     let terminator = take_int(lp, &mut idx)?;
@@ -910,13 +915,13 @@ fn decode_stream_listpack(
         let mut fields: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(field_count);
         if same_fields {
             for master_name in master_fields.iter().take(field_count) {
-                let value = take_string(lp, &mut idx)?;
+                let value = take_string(lp, blob, &mut idx)?;
                 fields.push((master_name.clone(), value));
             }
         } else {
             for _ in 0..field_count {
-                let name = take_string(lp, &mut idx)?;
-                let value = take_string(lp, &mut idx)?;
+                let name = take_string(lp, blob, &mut idx)?;
+                let value = take_string(lp, blob, &mut idx)?;
                 fields.push((name, value));
             }
         }
@@ -962,18 +967,18 @@ fn expected_entry_lp_count(
     i64::try_from(total).map_err(|_| UpstreamStreamError::InvalidFieldCount)
 }
 
-fn take_int(lp: &[ListpackEntry], idx: &mut usize) -> Result<i64, UpstreamStreamError> {
+fn take_int(lp: &[RawListpackValue], idx: &mut usize) -> Result<i64, UpstreamStreamError> {
     let v = lp
         .get(*idx)
         .ok_or(UpstreamStreamError::ShortListpackEntries)?;
     *idx += 1;
     match v {
-        ListpackEntry::Integer(n) => Ok(*n),
-        ListpackEntry::String(_) => Err(UpstreamStreamError::ExpectedListpackInteger),
+        RawListpackValue::Integer(n) => Ok(*n),
+        RawListpackValue::String(_) => Err(UpstreamStreamError::ExpectedListpackInteger),
     }
 }
 
-fn take_usize(lp: &[ListpackEntry], idx: &mut usize) -> Result<usize, UpstreamStreamError> {
+fn take_usize(lp: &[RawListpackValue], idx: &mut usize) -> Result<usize, UpstreamStreamError> {
     let n = take_int(lp, idx)?;
     if n < 0 {
         return Err(UpstreamStreamError::InvalidFieldCount);
@@ -981,21 +986,34 @@ fn take_usize(lp: &[ListpackEntry], idx: &mut usize) -> Result<usize, UpstreamSt
     usize::try_from(n).map_err(|_| UpstreamStreamError::InvalidFieldCount)
 }
 
-fn take_string(lp: &[ListpackEntry], idx: &mut usize) -> Result<Vec<u8>, UpstreamStreamError> {
+fn take_string(
+    lp: &[RawListpackValue],
+    blob: &[u8],
+    idx: &mut usize,
+) -> Result<Vec<u8>, UpstreamStreamError> {
     let v = lp
         .get(*idx)
         .ok_or(UpstreamStreamError::ShortListpackEntries)?;
     *idx += 1;
-    if matches!(v, ListpackEntry::Integer(_)) {
-        // Upstream writes field names + values via lpAppend; integer values
-        // get packed as LP_ENCODING_*_INT but were byte-strings on the
-        // write side (stream arg processing calls lpAppend, not
-        // lpAppendInteger, for field/value pairs). So integers here
-        // should not occur for user-visible fields — but in practice an
-        // integer-looking value CAN be packed as an int. Match upstream's
-        // listpackGetValue which returns a decimal-stringified integer.
-    }
-    Ok(v.to_bytes())
+    // Upstream writes field names + values via lpAppend; integer values get
+    // packed as LP_ENCODING_*_INT but were byte-strings on the write side
+    // (stream arg processing calls lpAppend, not lpAppendInteger, for
+    // field/value pairs). So integers here should not occur for user-visible
+    // fields -- but in practice an integer-looking value CAN be packed as an
+    // int. Match upstream's listpackGetValue, which returns a
+    // decimal-stringified integer; the Integer arm below is that case.
+    //
+    // ONE allocation, where the owned decode made two: the string case copies
+    // straight out of the blob instead of cloning a `Vec` the decoder had already
+    // built, and the integer case renders the same canonical decimal
+    // `ListpackEntry::to_bytes` did.
+    Ok(match v {
+        RawListpackValue::Integer(n) => crate::decimal_i64_bytes(*n),
+        RawListpackValue::String(range) => blob
+            .get(range.clone())
+            .ok_or(UpstreamStreamError::ShortListpackEntries)?
+            .to_vec(),
+    })
 }
 
 /// Apply a signed delta to an unsigned 64-bit base, wrapping on overflow.

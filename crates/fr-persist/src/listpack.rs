@@ -421,7 +421,7 @@ pub fn parse_header(data: &[u8]) -> Result<(u32, u16), ListpackError> {
 /// consumer that only needs to *read* a string entry (e.g. parse a zset score to
 /// `f64`) can borrow the slice instead of forcing the `to_vec()` copy that
 /// materializing a [`ListpackEntry::String`] would pay. (frankenredis zsetlpscore)
-enum RawListpackValue {
+pub enum RawListpackValue {
     Integer(i64),
     String(Range<usize>),
 }
@@ -1439,6 +1439,47 @@ pub fn decode_zset_spans_and_scores_orig(
         return Err(ListpackError::ElementCountMismatch);
     }
     Ok(pairs)
+}
+
+/// Decode every entry to its ALLOCATION-FREE raw form: integers stay `i64`,
+/// strings stay a `Range` into `data`.
+///
+/// (BlackThrush 2026-08-26) For a consumer that reads a mix of integers and byte
+/// strings, this is the right decode and the other two are both wrong.
+/// `decode_listpack` allocates a `Vec<u8>` per string entry, which the caller then
+/// clones again -- two allocations per field. `decode_value_spans` allocates
+/// nothing per entry but RENDERS integers to decimal, so an integer read has to
+/// parse the decimal back, and an upstream stream node listpack is mostly integers
+/// (live and deleted counts, field counts, per-entry flags, ms and seq deltas,
+/// lp_count). This keeps both halves cheap.
+///
+/// The caller materialises a string only where it actually needs owned bytes.
+pub fn decode_raw_values(data: &[u8]) -> Result<Vec<RawListpackValue>, ListpackError> {
+    let (total_bytes, num_elements) = parse_header(data)?;
+    let end = (total_bytes as usize) - 1;
+    let mut cursor = LISTPACK_HEADER_SIZE;
+    let mut values = if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN {
+        Vec::with_capacity(usize::from(num_elements))
+    } else {
+        Vec::new()
+    };
+    while cursor < end {
+        let (raw, consumed) = decode_entry_raw(data, cursor)?;
+        values.push(raw);
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+    }
+    if cursor != end {
+        return Err(ListpackError::MissingTerminator);
+    }
+    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && values.len() != usize::from(num_elements) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    Ok(values)
 }
 
 fn decode_value_spans_impl<const PRESIZE: bool>(
