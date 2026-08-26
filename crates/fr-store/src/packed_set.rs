@@ -2200,6 +2200,26 @@ impl PackedStreamLog {
         }
     }
 
+    /// Bulk-build interning with an O(1) index instead of [`Self::intern_field`]'s
+    /// linear scan.
+    ///
+    /// Produces the SAME dictionary: a name absent from the index is pushed, so the
+    /// dictionary keeps first-seen order and every index matches what the scan would
+    /// have returned. Only the lookup changes, never the result.
+    fn intern_indexed<'a>(
+        field_dict: &mut Vec<Box<[u8]>>,
+        index: &mut std::collections::HashMap<&'a [u8], usize>,
+        name: &'a [u8],
+    ) -> usize {
+        if let Some(&i) = index.get(name) {
+            return i;
+        }
+        let i = field_dict.len();
+        field_dict.push(name.into());
+        index.insert(name, i);
+        i
+    }
+
     /// Return the index of `name` in the field dict, appending it if new. Linear
     /// scan: stream field-name cardinality is small and stable in practice.
     fn intern_field(&mut self, name: &[u8]) -> usize {
@@ -2528,6 +2548,23 @@ impl PackedStreamLog {
         // `usize::MAX` length never matches a real slice, so an unused slot misses.
         let mut field_cache: [(usize, usize, usize); FIELD_CACHE] =
             [(0, usize::MAX, 0); FIELD_CACHE];
+
+        // (BlackThrush 2026-08-26) `intern_field` LINEAR-SCANS the field dictionary,
+        // so a stream whose entries carry DIFFERENT field names -- upstream's
+        // SAMEFIELDS flag off, which any varying schema produces -- interns in
+        // O(distinct^2). Measured on a 400-entry stream RESTORE with 800 distinct
+        // names: 319,600 `memcmp` calls per op, `__memcmp_avx2_movbe` at 61.44 pct
+        // of the WHOLE operation, and 51.93x vs live Redis 7.2.4. The cost is
+        // quadratic, so it is invisible at the 2-field shape every other
+        // measurement here used (3.14x) and ruinous past a few hundred names.
+        //
+        // This index is LOCAL to the bulk build: the stored `field_dict` keeps its
+        // first-seen order and its layout, so the arena's varint indices -- and the
+        // bytes this produces -- are unchanged. `HashMap::new` does not allocate, so
+        // a stream whose names repeat never pays for it; the address cache above
+        // answers those without reaching here.
+        let mut dict_index: std::collections::HashMap<&'a [u8], usize> =
+            std::collections::HashMap::new();
         for (id, pairs) in entries {
             let off = log.arena.len();
             for (pos, (f, v)) in pairs.iter().enumerate() {
@@ -2539,12 +2576,13 @@ impl PackedStreamLog {
                     if cached.0 == name_ptr && cached.1 == name_len {
                         cached.2
                     } else {
-                        let fresh = log.intern_field(name);
+                        let fresh =
+                            Self::intern_indexed(&mut log.field_dict, &mut dict_index, name);
                         field_cache[slot] = (name_ptr, name_len, fresh);
                         fresh
                     }
                 } else {
-                    log.intern_field(name)
+                    Self::intern_indexed(&mut log.field_dict, &mut dict_index, name)
                 };
                 write_varint(&mut log.arena, idx);
                 write_varint(&mut log.arena, v.as_ref().len());

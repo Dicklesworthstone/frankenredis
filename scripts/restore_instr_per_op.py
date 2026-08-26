@@ -39,7 +39,7 @@ a fr/redis figure printed from a run whose null missed the band is not quotable.
 Every arm also prints the sha256 of `/proc/<pid>/exe` of the server that served it,
 and the run aborts if an arm's N and 2N launches did not run the same ELF.
 
-Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset|stream] [--op=restore|reload|loadaof] [--aa] [--keys=N]
+Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset|stream] [--op=restore|reload|loadaof] [--varyfields] [--aa] [--keys=N]
 """
 from __future__ import annotations
 
@@ -74,6 +74,8 @@ REDIS = os.path.join(ROOT, "legacy_redis_code/redis/src/redis-server")
 # magnitude floor rather than a calibrated gate until someone repeats the six-draw procedure
 # on a RESTORE shape; the honest use is "is my delta ~10 instr or ~1,000", which is the
 # question the five micro-levers on this surface actually turned on.
+# Set from --varyfields; see the stream seeder.
+VARY_FIELDS = False
 NULL_SIGMA_INSTR = 4.46
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -189,13 +191,21 @@ def seed_command(kind, members, key="src"):
         # Explicit IDs so the seed is deterministic and the save side has a dense
         # (ms, seq) range to encode; two fields per entry, letter-leading, matching
         # the other types' element shape.
-        args = []
-        for i in range(members):
-            args += ["XADD", key, "%d-1" % (i + 1), "f0", "v%04d" % i, "f1", "w%04d" % i]
+        # (BlackThrush 2026-08-26) `--varyfields` gives every entry DIFFERENT field
+        # NAMES, which turns upstream's SAMEFIELDS flag OFF. That is a separate
+        # branch in both the encoder (`append_member` writes the names per entry)
+        # and the decoder, and it defeats two shipped levers by construction: the
+        # address-keyed field interning (e05e5340d) and the SAMEFIELDS address
+        # short-circuit (e1b89e6f4) both rely on the SAME name recurring. The
+        # default keeps the shared-schema shape every other measurement used.
         out = []
         for i in range(members):
-            base = i * 7
-            out.append(resp(*args[base:base + 7]))
+            if VARY_FIELDS:
+                f0, f1 = "f%04da" % i, "f%04db" % i
+            else:
+                f0, f1 = "f0", "f1"
+            out.append(resp("XADD", key, "%d-1" % (i + 1),
+                            f0, "v%04d" % i, f1, "w%04d" % i))
         return b"".join(out)
     if kind == "zset":
         # Same threshold trap as `set`, against zset-max-listpack-entries (128).
@@ -419,6 +429,8 @@ def main():
     # `[a for a in sys.argv[1:] if not a.startswith("--")]`, so a separated value
     # survives as a fourth positional and the run dies on the usage line.
     keys = 1
+    global VARY_FIELDS
+    VARY_FIELDS = any(a == "--varyfields" for a in sys.argv[1:])
     for a in sys.argv[1:]:
         if a.startswith("--keys="):
             keys = int(a.split("=", 1)[1])

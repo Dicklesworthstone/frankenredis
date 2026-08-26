@@ -78,13 +78,19 @@ OP = "restore"
 KEYS = 1
 
 
+VARY_FIELDS = False
+
+
 def main():
+    global VARY_FIELDS
     global KIND, OP, KEYS
     for a in sys.argv[1:]:
         if a.startswith("--type="):
             KIND = a.split("=", 1)[1]
         if a.startswith("--op="):
             OP = a.split("=", 1)[1]
+        if a == "--varyfields":
+            VARY_FIELDS = True
         if a.startswith("--keys="):
             KEYS = int(a.split("=", 1)[1])
     argv = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -165,8 +171,13 @@ def main():
                 # restore_instr_per_op.py uses, so this profile describes exactly
                 # the workload its ratio was taken on.
                 for i in range(members):
+                    # `--varyfields`: distinct field NAMES per entry, which turns
+                    # upstream's SAMEFIELDS flag off and grows the stream's field
+                    # dictionary once per entry.
+                    f0, f1 = (("f%04da" % i, "f%04db" % i) if VARY_FIELDS
+                              else ("f0", "f1"))
                     sock.sendall(resp("XADD", key, "%d-1" % (i + 1),
-                                      "f0", "v%04d" % i, "f1", "w%04d" % i))
+                                      f0, "v%04d" % i, f1, "w%04d" % i))
                 for _ in range(members):
                     seed_reply, buf = read_reply(sock, buf)
                     if seed_reply.startswith(b"-"):
