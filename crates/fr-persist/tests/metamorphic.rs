@@ -103,6 +103,16 @@ fn canonicalise_decoded_set(value: &RdbValue) -> RdbValue {
             }
             RdbValue::List(items)
         }
+        // (BlackThrush) A set handed to the encoder as its listpack blob: decode
+        // back to the `Set` spelling the generator produced, so every member is
+        // still compared and only the VARIANT stops being load-bearing.
+        RdbValue::SetListpack(blob) => RdbValue::Set(
+            fr_persist::listpack::decode_value_spans(blob)
+                .expect("a blob we just encoded must decode")
+                .iter()
+                .map(|s| s.as_bytes(blob).to_vec())
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -115,6 +125,7 @@ fn rdb_value_kind(value: &RdbValue) -> &'static str {
         RdbValue::List(_) => "List",
         RdbValue::ListQuicklist2Packed(_) => "ListQuicklist2Packed",
         RdbValue::Set(_) => "Set",
+        RdbValue::SetListpack(_) => "SetListpack",
         RdbValue::IntSet(_) => "IntSet",
         RdbValue::SetHashtable(_) => "SetHashtable",
         RdbValue::Hash(_) => "Hash",

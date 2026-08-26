@@ -3454,6 +3454,22 @@ impl SetValue {
         SetValue::Int(Vec::new())
     }
 
+    /// The members as BORROWED slices when generically encoded; `None` for the
+    /// intset encoding, whose members exist only as `i64` and would have to be
+    /// rendered.
+    ///
+    /// (BlackThrush 2026-08-26) `iter()` yields `Cow`, and the RDB save path
+    /// called `.into_owned()` on every one -- allocating a `Vec<u8>` per member
+    /// out of a `Cow::Borrowed` that already pointed at this set's own buffer.
+    /// One `Vec` of slices replaces N `Vec`s of bytes.
+    #[must_use]
+    pub fn borrowed_generic_members(&self) -> Option<Vec<&[u8]>> {
+        match self {
+            SetValue::Int(_) => None,
+            SetValue::Generic(g) => Some(g.iter().collect()),
+        }
+    }
+
     /// The raw sorted-ascending i64 members when intset-encoded; `None` for the
     /// generic encoding. Lets hot paths (e.g. DUMP) consume the integers directly
     /// instead of round-tripping each through `set_int_to_bytes` + `parse_i64`.

@@ -1339,6 +1339,20 @@ pub enum RdbValue {
     /// `hashtable` across a whole-DB save/load — upstream saves by ENCODING, not
     /// by re-deriving from content. (frankenredis-39is8)
     SetHashtable(Vec<Vec<u8>>),
+    /// (BlackThrush 2026-08-26) A set already encoded as its RDB `SET_LISTPACK`
+    /// blob, built on the SAVE side straight from the store's own borrowed bytes.
+    ///
+    /// The save-direction twin of [`RdbValue::HashListpack`]. Building
+    /// `RdbValue::Set` meant materialising one owned `Vec<u8>` per member for the
+    /// encoder to copy into a listpack and drop -- 8,200 allocations per 200-key
+    /// DEBUG RELOAD, counted, 42 pct of every allocation in the operation, out of
+    /// `Cow::Borrowed`s that already pointed at the store's own buffer.
+    ///
+    /// The blob IS the wire form here, so producing it from borrowed members
+    /// eliminates a walk and those allocations rather than DEFERRING them. That
+    /// is what separates this from the zset load-side blob experiment, which only
+    /// moved the decode and measured -0.8 pct.
+    SetListpack(Vec<u8>),
     Hash(Vec<(Vec<u8>, Vec<u8>)>),
     /// (frankenredis-aqkvk) A hash still in its RDB `HASH_LISTPACK` blob form.
     ///
@@ -1954,6 +1968,13 @@ fn encode_rdb_internal(
                     rdb_encode_string(&mut buf, &entry.key);
                     buf.extend_from_slice(&payload);
                 }
+                // VERBATIM: the save side already built exactly the bytes the
+                // listpack arm below would have produced, from borrowed members.
+                RdbValue::SetListpack(blob) => {
+                    buf.push(RDB_TYPE_SET_LISTPACK);
+                    rdb_encode_string(&mut buf, &entry.key);
+                    rdb_encode_string(&mut buf, blob);
+                }
                 RdbValue::Set(members) => {
                     if let Some(thresholds) = options.compact.as_ref() {
                         if let Some(payload) = encode_compact_set_intset(members, thresholds) {
@@ -2164,6 +2185,46 @@ fn encode_compact_set_listpack(
     // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
     rdb_encode_string(&mut out, &lp);
     Some(out)
+}
+
+/// Borrowed-member twin of [`encode_set_listpack_blob`], with the eligibility
+/// tests the encoder applies folded in so the caller never materialises owned
+/// members.
+///
+/// Returns `None` for every shape that would NOT have been written as
+/// `RDB_TYPE_SET_LISTPACK`, and the caller then falls through to the owned form
+/// -- which is what the encoder would have produced anyway. That is what keeps
+/// the emitted RDB type byte identical, and it is deliberately CONSERVATIVE:
+/// declining a set the intset arm would itself have refused costs one owned
+/// rebuild and cannot change a byte.
+#[must_use]
+pub fn encode_set_listpack_blob_borrowed(
+    members: &[&[u8]],
+    thresholds: &CompactRdbThresholds,
+) -> Option<Vec<u8>> {
+    if members.len() > thresholds.set_max_listpack_entries {
+        return None;
+    }
+    if members
+        .iter()
+        .any(|m| m.len() > thresholds.set_max_listpack_value)
+    {
+        return None;
+    }
+    // An all-integer set reaches RDB_TYPE_SET_INTSET, which the encoder tries
+    // BEFORE its listpack arm. Decline so that decision stays exactly where it is.
+    if members.len() <= thresholds.set_max_intset_entries
+        && !members.is_empty()
+        && members.iter().all(|m| parse_listpack_integer(m).is_some())
+    {
+        return None;
+    }
+    let cap = LISTPACK_BLOB_OVERHEAD + members.iter().map(|m| m.len() + 11).sum::<usize>();
+    let mut encoded = listpack_blob_with_header(cap);
+    for member in members {
+        encode_listpack_entry(&mut encoded, member);
+    }
+    finish_listpack_blob(encoded, members.len())
 }
 
 fn encode_set_listpack_blob(members: &[Vec<u8>]) -> Option<Vec<u8>> {
@@ -4379,6 +4440,15 @@ pub fn canonicalise_rdb_value(value: &RdbValue) -> RdbValue {
                 }
             }
             RdbValue::List(items)
+        }
+        // (BlackThrush) A set handed to the encoder as its listpack blob spells the
+        // same members; decode it back so a caller comparing CONTENT still compares
+        // every one, and a blob whose contents drifted still compares unequal.
+        RdbValue::SetListpack(blob) => {
+            let Ok(spans) = listpack::decode_value_spans(blob) else {
+                return value.clone();
+            };
+            RdbValue::Set(spans.iter().map(|s| s.as_bytes(blob).to_vec()).collect())
         }
         other => other.clone(),
     }

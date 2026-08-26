@@ -50132,6 +50132,29 @@ fn store_to_rdb_entries_with_thresholds(
                 }
             }
             Value::Set(s) => {
+                // (BlackThrush 2026-08-26) BORROWED save path, mirroring the hash
+                // arm below: build the listpack blob from the bytes the store
+                // already holds instead of allocating one owned `Vec<u8>` per
+                // member for the encoder to copy and drop. Counted at 8,200
+                // allocations per 200-key DEBUG RELOAD, 42 pct of every allocation
+                // in the operation.
+                //
+                // A hashtable-encoded set needs an imposed order and keeps the
+                // owned form, as does an intset and anything the blob builder
+                // declines -- which is exactly the set of shapes the encoder would
+                // not have written as RDB_TYPE_SET_LISTPACK anyway.
+                let borrowed_blob = if store.set_is_hashtable_encoded(&key) {
+                    None
+                } else {
+                    compact.and_then(|thresholds| {
+                        s.borrowed_generic_members().and_then(|borrowed| {
+                            fr_persist::encode_set_listpack_blob_borrowed(&borrowed, thresholds)
+                        })
+                    })
+                };
+                if let Some(blob) = borrowed_blob {
+                    RdbValue::SetListpack(blob)
+                } else {
                 let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                 // (frankenredis-39is8) Save by ACTUAL encoding: a hashtable set
                 // emits the plain RDB_TYPE_SET so the encoding survives a
@@ -50147,6 +50170,7 @@ fn store_to_rdb_entries_with_thresholds(
                     RdbValue::SetHashtable(members)
                 } else {
                     RdbValue::Set(members)
+                }
                 }
             }
             Value::Hash(h) => {
@@ -50346,6 +50370,27 @@ fn apply_rdb_entries_to_store(
                 // does with the identical payload bytes. Hand the blobs to that constructor.
                 store
                     .load_rdb_quicklist2_packed_list(&key, nodes, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?;
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
+            RdbValue::SetListpack(ref blob) => {
+                // (BlackThrush) This variant is produced by the SAVE side; a decode
+                // of RDB_TYPE_SET_LISTPACK still yields `Set`, so this arm is only
+                // reached by a caller that applies a value it built itself. Handle
+                // it from BORROWED spans -- no owned member is materialised -- and
+                // reject a blob that does not parse rather than loading a partial
+                // set.
+                let spans = fr_persist::listpack::decode_value_spans(blob)
+                    .map_err(|_| PersistError::InvalidFrame)?;
+                let members: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(blob)).collect();
+                store
+                    .sadd_loading(&key, &members, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
