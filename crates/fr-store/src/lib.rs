@@ -2897,7 +2897,11 @@ enum SortedSetIterAscInner<'a> {
 impl<'a> Iterator for SortedSetIterAsc<'a> {
     type Item = (&'a [u8], f64);
 
-    fn next(&mut self) -> Option<Self::Item> {
+    // (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: once per
+    // ELEMENT on the RDB path; the plain hint is declined at this body size
+    // (9d7be9b44).
+    #[inline(always)]
+fn next(&mut self) -> Option<Self::Item> {
         match &mut self.inner {
             SortedSetIterAscInner::Packed(iter) => iter.next(),
             SortedSetIterAscInner::Full(keys) => {
@@ -3640,6 +3644,10 @@ impl SetValue {
 
     /// The canonical i64 for `member`, or `None` if it is not a canonical
     /// integer (and therefore can never live in an intset).
+    // (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: once per
+    // ELEMENT on the RDB path; the plain hint is declined at this body size
+    // (9d7be9b44).
+    #[inline(always)]
     fn canonical_int(member: &[u8]) -> Option<i64> {
         parse_i64(member).ok()
     }

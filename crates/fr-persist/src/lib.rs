@@ -2501,6 +2501,11 @@ fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Ve
 /// — which re-parsed as an i64 and became an *integer* entry where upstream stores the string
 /// `"5e+18"`. It also used a `±1e18` gate rather than `double2ll`'s real `±2^62` window.
 /// Both are fixed by deferring to the shared `fr_protocol` classifier.
+// (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: called once per
+// ELEMENT on the RDB save/load path, and the plain hint is DECLINED by LLVM for
+// bodies this size -- 9d7be9b44 measured it moving the ratio 0.1 pct with the call
+// count byte-for-byte unchanged.
+#[inline(always)]
 fn encode_zset_score_listpack_entry(encoded: &mut Vec<u8>, member: &[u8], score: f64) {
     encode_listpack_entry(encoded, member);
     match fr_protocol::zset_score_listpack_entry(score) {
@@ -3060,6 +3065,11 @@ fn encode_sorted_intset_blob(values: &[i64], width: u32) -> Option<Vec<u8>> {
     Some(out)
 }
 
+// (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: called once per
+// ELEMENT on the RDB save/load path, and the plain hint is DECLINED by LLVM for
+// bodies this size -- 9d7be9b44 measured it moving the ratio 0.1 pct with the call
+// count byte-for-byte unchanged.
+#[inline(always)]
 fn encode_listpack_backlen(buf: &mut Vec<u8>, len: usize) {
     if len <= 127 {
         buf.push(len as u8);
@@ -3172,6 +3182,11 @@ fn listpack_int_bytes_are_canonical(entry: &[u8]) -> bool {
     true
 }
 
+// (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: called once per
+// ELEMENT on the RDB save/load path, and the plain hint is DECLINED by LLVM for
+// bodies this size -- 9d7be9b44 measured it moving the ratio 0.1 pct with the call
+// count byte-for-byte unchanged.
+#[inline(always)]
 fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
     let start = buf.len();
     if (0..=127).contains(&value) {
@@ -3202,6 +3217,11 @@ fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
     encode_listpack_backlen(buf, data_len);
 }
 
+// (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: called once per
+// ELEMENT on the RDB save/load path, and the plain hint is DECLINED by LLVM for
+// bodies this size -- 9d7be9b44 measured it moving the ratio 0.1 pct with the call
+// count byte-for-byte unchanged.
+#[inline(always)]
 fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
     if let Some(value) = parse_listpack_integer(entry) {
         encode_listpack_integer_entry(buf, value);
@@ -3213,6 +3233,11 @@ fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
 
 /// `encode_listpack_entry` for bytes already known not to be a canonical i64 decimal.
 #[inline]
+// (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: called once per
+// ELEMENT on the RDB save/load path, and the plain hint is DECLINED by LLVM for
+// bodies this size -- 9d7be9b44 measured it moving the ratio 0.1 pct with the call
+// count byte-for-byte unchanged.
+#[inline(always)]
 fn encode_listpack_string_entry(buf: &mut Vec<u8>, entry: &[u8]) {
     let start = buf.len();
     if entry.len() < 64 {

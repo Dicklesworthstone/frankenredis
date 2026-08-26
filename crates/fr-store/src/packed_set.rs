@@ -91,6 +91,10 @@ impl PackedStrSet {
     /// guarantees `member` is not already present (bulk RDB/build path). O(member.len())
     /// per call versus `insert`'s O(n) `contains` scan, so building from N unique
     /// members is O(total bytes) instead of O(n²).
+    // (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: once per
+    // ELEMENT on the RDB path; the plain hint is declined at this body size
+    // (9d7be9b44).
+    #[inline(always)]
     pub fn append(&mut self, member: &[u8]) {
         write_varint(&mut self.buf, member.len());
         self.buf.extend_from_slice(member);
@@ -555,7 +559,11 @@ pub enum GenericSetIter<'a> {
 
 impl<'a> Iterator for GenericSetIter<'a> {
     type Item = &'a [u8];
-    fn next(&mut self) -> Option<&'a [u8]> {
+    // (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: once per
+    // ELEMENT on the RDB path; the plain hint is declined at this body size
+    // (9d7be9b44).
+    #[inline(always)]
+fn next(&mut self) -> Option<&'a [u8]> {
         match self {
             GenericSetIter::Packed(it) => it.next(),
             GenericSetIter::Hash(it) => it.next(),
@@ -6199,6 +6207,10 @@ impl PackedZSet {
     }
 
     /// Decode the record starting at `pos`: `(member, score, record_end)`.
+    // (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: once per
+    // ELEMENT on the RDB path; the plain hint is declined at this body size
+    // (9d7be9b44).
+    #[inline(always)]
     fn record_at(&self, pos: usize) -> (&[u8], f64, usize) {
         let (mlen, m_start) = read_varint(&self.buf, pos);
         let m_end = m_start + mlen;
