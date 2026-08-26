@@ -84,12 +84,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _incumbent import require_incumbent  # noqa: E402  (path set above)
 
 
-def _val(i):
+def _val(i, prefix="v"):
     """Element payload. `--valuesize=N` pads it to N bytes; the fixtures have only
     ever used ~5-byte values, so the large-value regime -- 12-bit listpack string
-    headers, a different LZF ratio, and thresholds that flip the encoding -- has
-    never been measured."""
-    base = "v%04d" % i
+    headers, a different LZF ratio, and thresholds that flip the encoding -- had
+    never been measured.
+
+    At `VALUE_SIZE == 0` this returns EXACTLY the bytes the seeders used before the
+    knob existed, `prefix` included: the stream arm's second field was `w%04d`, and
+    silently turning it into something else would have shifted every stream baseline
+    in the ledger without anything failing.
+    """
+    base = "%s%04d" % (prefix, i)
     if VALUE_SIZE > len(base):
         return base + "x" * (VALUE_SIZE - len(base))
     return base
@@ -218,7 +224,7 @@ def seed_command(kind, members, key="src"):
             else:
                 f0, f1 = "f0", "f1"
             out.append(resp("XADD", key, "%d-1" % (i + 1),
-                            f0, _val(i), f1, _val(i + 100000)))
+                            f0, _val(i), f1, _val(i, "w")))
         return b"".join(out)
     if kind == "zset":
         # Same threshold trap as `set`, against zset-max-listpack-entries (128).
