@@ -3620,6 +3620,41 @@ pub fn bench_lzf_compress_guard<const GUARD: bool>(
     })
 }
 
+/// Same-binary A/B hook exposing the WHOLE dispatch tuple.
+///
+/// Each of the six hooks above pins the other parameters to whatever the baseline
+/// was on the day its slice landed, so none of them can answer the question that
+/// actually matters now: is the SHIPPING tuple
+/// `<true, true, false, false, true, true, true>` still the best point on the
+/// payload shape that dominates today? `examples/lzf_sweep.rs` answers it by
+/// walking the six one-flag neighbours of the shipping tuple, asserting each is
+/// byte-identical to it before timing.
+///
+/// Every parameter here changes only HOW the match search runs, never what is
+/// emitted -- so any combination is safe to measure, and a combination whose
+/// output differs is a bug in that slice, not a legitimate trade.
+#[doc(hidden)]
+pub fn bench_lzf_compress_tuple<
+    const SIMD: bool,
+    const HOIST: bool,
+    const BATCH: bool,
+    const GUARD: bool,
+    const XORTAG: bool,
+    const TIER: bool,
+    const WIDETAG: bool,
+>(
+    input: &[u8],
+    out_budget: usize,
+) -> Option<Vec<u8>> {
+    LZF_SCRATCH.with(|scratch| {
+        lzf_compress_dispatch::<SIMD, HOIST, BATCH, GUARD, XORTAG, TIER, WIDETAG>(
+            input,
+            out_budget,
+            &mut scratch.borrow_mut(),
+        )
+    })
+}
+
 #[derive(Clone, Copy, Default)]
 struct LzfHashSlot {
     generation: u32,
