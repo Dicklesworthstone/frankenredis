@@ -573,6 +573,13 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
          ["COPY", "cp:src", "cp:dst", "REPLACE"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
+    # (frankenredis-z5bc2) The banked exit condition names PUBSUB CHANNELS.
+    # It must be timed beside an unaffected request so that a movement of the
+    # harness itself cannot be mistaken for a command-table-index result.
+    "z5bc2": [
+        ("pubsub_channels", [], ["PUBSUB", "CHANNELS"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     # (frankenredis-copydeficit / getexgate) The shipped-but-uncertified cells, each with an
     # IN-GROUP control that is NOT `get_control`. That choice is the point of these groups:
     # get_control has now null-failed six times across two sessions and is drift-limited -- it
