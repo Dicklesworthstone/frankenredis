@@ -23011,10 +23011,22 @@ impl Store {
     /// which is exactly what `SortedSet::from_unique_pairs_with_limits` wants. The
     /// load path nonetheless reordered it TWICE: the apply arm flipped it to
     /// `(score, member)` to reach [`Self::zadd_plain_owned_loading`], whose
-    /// loading fast path then flipped it straight back. Two full rebuilds of an
-    /// 8,000-element vector per 200-key DEBUG RELOAD, for a tuple whose halves
-    /// were already in the right order -- 8,400 `memcpy` CALLS per op, counted,
-    /// attributed to that function alone.
+    /// loading fast path then flipped it straight back. Removing one of those two
+    /// rebuild passes over an 8,000-element vector is worth a measured -155,461
+    /// instructions per 200-key DEBUG RELOAD (-1.37 pct, zset reload 2.7172x ->
+    /// 2.6830x vs live Redis 7.2.4).
+    ///
+    /// CORRECTION to what `76e944d08` first claimed here: that commit attributed
+    /// the win to removing "8,400 memcpy CALLS per op". It does NOT remove them.
+    /// Counted on both ELFs, the memcpy total is 52,322/op and the allocation
+    /// total 10,867/op -- IDENTICAL before and after -- and the 8,400 memcpys
+    /// charged to this function are `restore_field_probe_hash`'s `copy_from_slice`
+    /// tail, one per member, which this change does not touch (and which
+    /// `6c9773c99` measured as NOT worth removing). What actually goes is the
+    /// per-element work of one `map().collect()` pass: about 19 instructions per
+    /// member, which is the whole of the measured delta. The collect was already
+    /// in-place, so it never allocated and its element moves were never memcpy
+    /// calls -- which is exactly why the counters did not move.
     ///
     /// Same fast path, same guarantees, same fallback: the bulk build is taken
     /// only for an absent key whose members the stack probe PROVES unique, and
