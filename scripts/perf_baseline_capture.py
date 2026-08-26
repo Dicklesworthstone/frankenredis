@@ -182,14 +182,18 @@ def _wait_up(port, deadline=10):
     return False
 
 
+def _config_set_reply_ok(reply):
+    return reply.startswith(b"+OK\r\n")
+
+
 def _config_set(port, key, value):
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
             s.sendall(_enc(["CONFIG", "SET", key, value]))
             time.sleep(0.03)
-            s.recv(256)
+            return _config_set_reply_ok(s.recv(256))
     except Exception:
-        pass
+        return False
 
 
 def _checked_executable(path, label):
@@ -316,6 +320,12 @@ def run_interleaved_cell(
 
 
 def _self_test():
+    # A successful connection is not a successful configuration. In particular,
+    # a Redis -ERR reply must block the run instead of leaving one arm with a
+    # different workload configuration.
+    assert _config_set_reply_ok(b"+OK\r\n")
+    assert not _config_set_reply_ok(b"-ERR unknown configuration parameter\r\n")
+
     # A tiny standalone CV never licenses a verdict without an A/A null.
     low_cv_provenance = _cv_pct([1.200, 1.201, 1.199, 1.200])
     assert low_cv_provenance < 1.0
@@ -432,7 +442,9 @@ def main():
             sys.exit(2)
         # Avoid the config-pollution false positive (true redis default is -2).
         for p in (oracle_port, fr_port, fr_null_port):
-            _config_set(p, "list-max-listpack-size", "-2")
+            if not _config_set(p, "list-max-listpack-size", "-2"):
+                print(f"FAIL — CONFIG SET list-max-listpack-size failed on port {p}")
+                sys.exit(2)
 
         ports = {
             "redis": oracle_port,
