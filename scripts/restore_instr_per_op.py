@@ -39,7 +39,7 @@ a fr/redis figure printed from a run whose null missed the band is not quotable.
 Every arm also prints the sha256 of `/proc/<pid>/exe` of the server that served it,
 and the run aborts if an arm's N and 2N launches did not run the same ELF.
 
-Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset|stream] [--op=restore|reload] [--aa] [--keys=N]
+Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset|stream] [--op=restore|reload|loadaof] [--aa] [--keys=N]
 """
 from __future__ import annotations
 
@@ -271,7 +271,9 @@ def run(binary, tag, port, members, ops, workdir, kind="hash", op="restore", key
     out = os.path.join(workdir, "cg.%s.out" % tag)
     argv = ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out,
             "--collect-systime=no", binary, "--port", str(port), "--save", "",
-            "--appendonly", "no", "--dir", workdir,
+            # `--op=loadaof` needs the AOF actually written; every other op wants it
+            # off so the measured work is only the route under test.
+            "--appendonly", "yes" if op == "loadaof" else "no", "--dir", workdir,
             # DEBUG RELOAD needs the debug command admitted on both engines.
             "--enable-debug-command", "yes"]
     proc = subprocess.Popen(argv, cwd=workdir,
@@ -322,7 +324,15 @@ def run(binary, tag, port, members, ops, workdir, kind="hash", op="restore", key
             raise RuntimeError("%s produced an empty DUMP" % tag)
         payload_len = len(payload)
 
-        if op == "reload":
+        if op == "loadaof":
+            # (BlackThrush 2026-08-26) DEBUG LOADAOF flushes the AOF buffer and
+            # reloads the dataset FROM THE AOF -- a third persistence route,
+            # distinct from both RESTORE and RDB reload, and one that had never
+            # been measured against the incumbent at all. Both engines implement it
+            # (fr: fr-command DEBUG LOADAOF; redis: debug.c "loadaof").
+            one = resp("DEBUG", "LOADAOF")
+            expect_err = b"-"
+        elif op == "reload":
             # (frankenredis-qj6jn) DEBUG RELOAD is save+load of the WHOLE db, which
             # is a different route from single-key RESTORE: it additionally pays RDB
             # WRITE, the file round-trip, and one keyspace INSERT per key. The bead's
@@ -379,8 +389,8 @@ def main():
             kind = a.split("=", 1)[1]
         if a.startswith("--op="):
             op = a.split("=", 1)[1]
-    if op not in ("restore", "reload"):
-        raise SystemExit("unknown --op=%r (want restore|reload)" % op)
+    if op not in ("restore", "reload", "loadaof"):
+        raise SystemExit("unknown --op=%r (want restore|reload|loadaof)" % op)
     if len(argv) != 3:
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
         return 2
@@ -412,6 +422,11 @@ def main():
     for a in sys.argv[1:]:
         if a.startswith("--keys="):
             keys = int(a.split("=", 1)[1])
+    # A legitimate arm has never read outside 0.25x-4x of the incumbent on any
+    # surface measured here. An ABSOLUTE floor is the wrong test -- list RESTORE at
+    # 40 elements is a real 19,334 instr/op measurement -- so gate on the RATIO
+    # being physically implausible instead of on the magnitude.
+    IMPLAUSIBLE_RATIO = 100.0
     AA_BAND = 0.005  # 0.5 pct; the doc above measures this harness's fr arm at 0.03 pct
     port = 47800 + (os.getpid() % 200) * 4
     with tempfile.TemporaryDirectory(dir="/data/tmp") as workdir:
@@ -447,6 +462,21 @@ def main():
                   % (null, verdict, AA_BAND))
             if verdict == "FAIL":
                 print("  A/A OUTSIDE BAND -- do not quote the fr/redis ratio from this run.")
+        # (BlackThrush 2026-08-26) FAIL CLOSED on an arm that did no work. fr's
+        # `DEBUG LOADAOF` is a deliberate NO-OP (fr-command lib.rs, x0rb0: "fr's
+        # runtime doesn't drive AOF reload from this surface"), so `--op=loadaof`
+        # reads fr at ~5,900 instr/op against redis's ~45,200,000 and prints
+        # 0.0001x. That is not a 7,000x win, it is one engine doing nothing, and a
+        # ratio that flattering is exactly the kind a reader quotes without
+        # checking. Refuse to print it rather than leave the trap armed.
+        ratio = results["fr"] / results["redis"]
+        if ratio > IMPLAUSIBLE_RATIO or ratio < 1.0 / IMPLAUSIBLE_RATIO:
+            print("  IMPLAUSIBLE ratio %.6fx (fr %.1f / redis %.1f instr/op)."
+                  % (ratio, results["fr"], results["redis"]))
+            print("  REFUSING to print it: at this separation one arm is not performing"
+                  " the operation. For --op=loadaof that is expected on fr today --"
+                  " its DEBUG LOADAOF returns OK without reloading.")
+            return 1
         print("  fr/redis instructions per op: %.4fx" % (results["fr"] / results["redis"]))
         # (frankenredis-gvm6z) Print the NOISE FLOOR next to the number, because this harness
         # had none and the natural fallback is wrong here by an order of magnitude.
