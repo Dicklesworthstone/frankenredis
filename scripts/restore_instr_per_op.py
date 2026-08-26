@@ -39,7 +39,7 @@ a fr/redis figure printed from a run whose null missed the band is not quotable.
 Every arm also prints the sha256 of `/proc/<pid>/exe` of the server that served it,
 and the run aborts if an arm's N and 2N launches did not run the same ELF.
 
-Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset] [--op=restore|reload] [--aa] [--keys=N]
+Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset|stream] [--op=restore|reload] [--aa] [--keys=N]
 """
 from __future__ import annotations
 
@@ -178,6 +178,25 @@ def seed_command(kind, members, key="src"):
         # Letter-leading members on purpose: all-integer members would save as
         # RDB_TYPE_SET_INTSET, a third arm again.
         return resp("SADD", key, *["v%04d" % i for i in range(members)])
+    if kind == "stream":
+        # (BlackThrush 2026-08-26) STREAM was added because it was the only
+        # collection type with NO ratio at all -- every other type had one and this
+        # one was assumed rather than measured. Its RDB save arm clones every
+        # field/value pair per ENTRY (`fields.to_pairs()`), which is the shape that
+        # cost the other types 5-10 pct each, so leaving it unmeasured risked
+        # optimising a 2.5x arm while a worse one sat unlooked-at.
+        #
+        # Explicit IDs so the seed is deterministic and the save side has a dense
+        # (ms, seq) range to encode; two fields per entry, letter-leading, matching
+        # the other types' element shape.
+        args = []
+        for i in range(members):
+            args += ["XADD", key, "%d-1" % (i + 1), "f0", "v%04d" % i, "f1", "w%04d" % i]
+        out = []
+        for i in range(members):
+            base = i * 7
+            out.append(resp(*args[base:base + 7]))
+        return b"".join(out)
     if kind == "zset":
         # Same threshold trap as `set`, against zset-max-listpack-entries (128).
         # Integer scores on purpose -- a listpack integer score takes the
@@ -187,7 +206,7 @@ def seed_command(kind, members, key="src"):
         for i in range(members):
             args += [str(i), "v%04d" % i]
         return resp("ZADD", key, *args)
-    raise SystemExit("unknown container type %r (want hash|list|set|zset)" % kind)
+    raise SystemExit("unknown container type %r (want hash|list|set|zset|stream)" % kind)
 
 
 def elf_identity_from_maps(pid, binary):
@@ -285,9 +304,13 @@ def run(binary, tag, port, members, ops, workdir, kind="hash", op="restore", key
         # one container and buries the per-key term the ratio is supposed to
         # expose. Reload read 1.02-1.40x per type at one key; that number is a
         # statement about fixed cost, not about reload.
+        # A stream seed is `members` separate XADDs, every other type is one
+        # command, so count the replies the builder actually produced rather than
+        # assuming one per key.
+        replies_per_key = members if kind == "stream" else 1
         for index in range(keys):
             sock.sendall(seed_command(kind, members, "src:%d" % index))
-        for _ in range(keys):
+        for _ in range(keys * replies_per_key):
             reply, buf = read_reply(sock, buf)
             if reply.startswith(b"-"):
                 raise RuntimeError("%s seed failed: %r" % (tag, reply))

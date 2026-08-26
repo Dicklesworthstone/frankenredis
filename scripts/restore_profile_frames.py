@@ -159,6 +159,19 @@ def main():
         # -- which is what the reload gap actually is -- barely register.
         for index in range(KEYS):
             key = "src:%d" % index
+            if KIND == "stream":
+                # (BlackThrush 2026-08-26) STREAM: `members` XADDs per key with
+                # explicit IDs and two fields each -- the same seed
+                # restore_instr_per_op.py uses, so this profile describes exactly
+                # the workload its ratio was taken on.
+                for i in range(members):
+                    sock.sendall(resp("XADD", key, "%d-1" % (i + 1),
+                                      "f0", "v%04d" % i, "f1", "w%04d" % i))
+                for _ in range(members):
+                    seed_reply, buf = read_reply(sock, buf)
+                    if seed_reply.startswith(b"-"):
+                        raise RuntimeError("stream seed failed: %r" % seed_reply)
+                continue
             if KIND == "list":
                 sock.sendall(resp("RPUSH", key, *["v%04d" % i for i in range(members)]))
             elif KIND == "set":
@@ -173,11 +186,14 @@ def main():
                 for i in range(members):
                     fields += ["f%04d" % i, "v%04d" % i]
                 sock.sendall(resp("HSET", key, *fields))
-        seed_reply = b""
-        for _ in range(KEYS):
-            seed_reply, buf = read_reply(sock, buf)
-            if seed_reply.startswith(b"-"):
-                break
+        # A stream key consumes its own XADD replies above; every other type
+        # queued exactly one command per key.
+        seed_reply = b"+OK"
+        if KIND != "stream":
+            for _ in range(KEYS):
+                seed_reply, buf = read_reply(sock, buf)
+                if seed_reply.startswith(b"-"):
+                    break
         # And CHECK it. The swallowed error above is what made the stale-keyspace
         # contamination invisible rather than loud.
         if seed_reply.startswith(b"-"):
