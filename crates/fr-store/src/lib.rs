@@ -20752,8 +20752,24 @@ impl Store {
                     (s, added)
                 };
                 let mut entry = Entry::new(Value::Set(Box::new(s)), now_ms);
-                Self::refresh_set_encoding_flags(
+                // (BlackThrush 2026-08-26) Take the longest member from the INPUT,
+                // whose lengths are already sitting in front of us, rather than
+                // letting the refresh walk the set we just built. That walk went
+                // through `GenericSetIter` and a span decode per member -- counted
+                // at 8,200 iterator steps per 200-key DEBUG RELOAD, on top of the
+                // 8,200 the save side makes. `refresh_set_encoding_flags_from_max_len`
+                // is the O(1)-per-length twin `frankenredis-3uuan` built for the
+                // RESTORE route; its doc states the substituted predicate
+                // (`max_member_len <= max_listpack_value` for the `all`) picks the
+                // same tier, so OBJECT ENCODING is unchanged.
+                let max_member_len = members
+                    .iter()
+                    .map(|m| m.as_ref().len())
+                    .max()
+                    .unwrap_or(0);
+                Self::refresh_set_encoding_flags_from_max_len(
                     &mut entry,
+                    max_member_len,
                     max_intset_entries,
                     max_listpack_entries,
                     max_listpack_value,
@@ -23072,15 +23088,33 @@ impl Store {
             // Canonicalise IN PLACE. The old path only ever reached
             // `canonicalize_zero_score` while rebuilding the vector; doing it here
             // keeps -0.0 folding to +0.0 exactly as before, without the rebuild.
+            //
+            // (BlackThrush 2026-08-26) The same loop reports the longest MEMBER,
+            // which is the only thing the encoding refresh below needs from the
+            // elements. `refresh_zset_encoding_flag` was re-deriving it by walking
+            // the sorted set that had JUST been built out of these very pairs --
+            // counted at 8,000 `PackedZSet::record_at` calls per 200-key DEBUG
+            // RELOAD, one per member, on top of the 8,000 the save side makes.
+            // `refresh_zset_encoding_flag_from_max_len` is the O(1) twin
+            // `frankenredis-3uuan` built for the RESTORE route, whose doc states
+            // the predicate is identical: member lengths only, scores never
+            // participate.
+            let mut max_member_len = 0_usize;
             for pair in &mut pairs {
                 pair.1 = canonicalize_zero_score(pair.1);
+                max_member_len = max_member_len.max(pair.0.len());
             }
             let added = pairs.len();
             let zs =
                 SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
             let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
             entry.touch_write(now_ms, lfu_tracking_enabled);
-            Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
+            Self::refresh_zset_encoding_flag_from_max_len(
+                &mut entry,
+                max_member_len,
+                zset_max_entries,
+                zset_max_value,
+            );
             self.internal_entries_insert(key.to_vec(), entry);
             Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
             self.dirty = self.dirty.saturating_add(added as u64);
