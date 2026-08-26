@@ -35912,6 +35912,7 @@ impl Store {
                             // bytes removes 118 of the 133 memcmp calls per op.
                             return Ok(StreamEntries::from_sorted_entries_repeated_fields(
                                 stream_entries.iter(),
+                                stream_entries.arena_hint(),
                             ));
                         }
                         let mut entries = StreamEntries::new();

@@ -714,7 +714,7 @@ impl UpstreamStreamSkeleton {
         &'blob self,
     ) -> Result<Vec<EncodableStreamEntry<F, F>>, UpstreamStreamError>
     where
-        F: From<Cow<'blob, [u8]>>,
+        F: From<Cow<'blob, [u8]>> + AsRef<[u8]>,
     {
         let mut out: StreamOut<F> = StreamOut::default();
         for (master_ms, master_seq, blob) in &self.nodes {
@@ -1016,6 +1016,10 @@ pub struct StreamOut<F> {
     fields: Vec<(F, F)>,
     /// `FLAT == true` only: `(ms, seq, offset into `fields`, field count)`.
     index: Vec<(u64, u64, u32, u32)>,
+    /// `FLAT == true` only: total VALUE bytes, summed as they are decoded so the
+    /// consumer can size its arena in one allocation. Free here -- the length is
+    /// already in hand -- and a second walk to recover it would not be.
+    value_bytes: usize,
 }
 
 impl<F> Default for StreamOut<F> {
@@ -1024,6 +1028,7 @@ impl<F> Default for StreamOut<F> {
             entries: Vec::new(),
             fields: Vec::new(),
             index: Vec::new(),
+            value_bytes: 0,
         }
     }
 }
@@ -1032,6 +1037,19 @@ impl<F> StreamOut<F> {
     #[must_use]
     pub fn len(&self) -> usize {
         self.index.len()
+    }
+
+    /// Bytes to reserve for a consumer that appends, per field, a varint field
+    /// index, a varint value length and the value itself.
+    ///
+    /// `PackedStreamLog` grows its arena from EMPTY across every append, and a
+    /// growth on a buffer that accumulates costs the whole buffer, not one
+    /// element. Two bytes per field covers both varints for any realistic schema;
+    /// capacity is a hint, so an underestimate costs one growth and never content.
+    #[must_use]
+    pub fn arena_hint(&self) -> usize {
+        self.value_bytes
+            .saturating_add(self.fields.len().saturating_mul(2))
     }
 
     /// Entry ids in decode order, for the caller's strictly-increasing check.
@@ -1056,7 +1074,7 @@ fn decode_stream_listpack<'blob, F, const FLAT: bool>(
     out: &mut StreamOut<F>,
 ) -> Result<(), UpstreamStreamError>
 where
-    F: From<Cow<'blob, [u8]>>,
+    F: From<Cow<'blob, [u8]>> + AsRef<[u8]>,
 {
     let mut idx = 0usize;
     let declared_live_count = take_usize(lp, &mut idx)?;
@@ -1087,6 +1105,8 @@ where
 
     let mut decoded_total_count = 0usize;
     let mut decoded_live_count = 0usize;
+    // Reused across entries; see the assignment inside the loop.
+    let mut fields: Vec<(F, F)> = Vec::new();
     while idx < lp.len() {
         decoded_total_count = decoded_total_count
             .checked_add(1)
@@ -1108,11 +1128,14 @@ where
         // never allocated (`Vec::new` does not touch the heap and the const makes
         // its drop a no-op the compiler removes).
         let mark = out.fields.len();
-        let mut fields: Vec<(F, F)> = if FLAT {
-            Vec::new()
-        } else {
-            Vec::with_capacity(field_count)
-        };
+        // Only the !FLAT arm ever owns a per-entry vector. Declaring it OUTSIDE the
+        // entry loop and assigning here means the FLAT arm never touches it, so it
+        // is constructed and dropped once for the whole node instead of leaving an
+        // empty `Vec` to be dropped per entry -- 40 `drop_glue` calls per op that
+        // the const branch could not remove on its own.
+        if !FLAT {
+            fields = Vec::with_capacity(field_count);
+        }
         if same_fields {
             for master_name in master_fields.iter().take(field_count) {
                 let value = take_string(lp, blob, &mut idx)?;
@@ -1124,9 +1147,10 @@ where
                 // dictionary index.
                 let pair = (F::from(master_name.clone()), F::from(value));
                 if FLAT {
-                    out.fields.push(pair)
+                    out.value_bytes = out.value_bytes.saturating_add(pair.1.as_ref().len());
+                    out.fields.push(pair);
                 } else {
-                    fields.push(pair)
+                    fields.push(pair);
                 }
             }
         } else {
@@ -1135,9 +1159,10 @@ where
                 let value = take_string(lp, blob, &mut idx)?;
                 let pair = (F::from(name), F::from(value));
                 if FLAT {
-                    out.fields.push(pair)
+                    out.value_bytes = out.value_bytes.saturating_add(pair.1.as_ref().len());
+                    out.fields.push(pair);
                 } else {
-                    fields.push(pair)
+                    fields.push(pair);
                 }
             }
         }
@@ -1170,7 +1195,7 @@ where
             let off = u32::try_from(mark).map_err(|_| UpstreamStreamError::InvalidFieldCount)?;
             out.index.push((ms, seq, off, len));
         } else {
-            out.entries.push((ms, seq, fields));
+            out.entries.push((ms, seq, std::mem::take(&mut fields)));
         }
     }
     if decoded_total_count != declared_total_count || decoded_live_count != declared_live_count {

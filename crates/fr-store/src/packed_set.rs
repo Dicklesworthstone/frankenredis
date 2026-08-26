@@ -2455,7 +2455,7 @@ impl PackedStreamLog {
         V: AsRef<[u8]> + 'a,
         I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
     {
-        Self::from_sorted_entries_impl::<F, V, I, false>(entries)
+        Self::from_sorted_entries_impl::<F, V, I, false>(entries, 0)
     }
 
     /// Same builder, for callers whose entries present the SAME field-name buffers
@@ -2467,23 +2467,33 @@ impl PackedStreamLog {
     /// repeat. The RDB loader hands over separately-allocated `Vec`s that can never
     /// hit, and MEASURED +0.94 pct (four-slot scan) / +0.62 pct (single compare) on
     /// the reload arm when it was made to pay for the lookup anyway.
+    ///
+    /// `arena_hint` is the number of payload bytes the entries will append (varint
+    /// field index + varint value length + value, per field). The arena otherwise
+    /// grows from EMPTY across every append, and a growth on a buffer that
+    /// accumulates copies the whole buffer, not one element. Capacity never affects
+    /// content, so a wrong hint costs at most one growth. Pass 0 for "unknown".
     #[must_use]
-    pub fn from_sorted_entries_repeated_fields<'a, F, V, I>(entries: I) -> Self
+    pub fn from_sorted_entries_repeated_fields<'a, F, V, I>(entries: I, arena_hint: usize) -> Self
     where
         F: AsRef<[u8]> + 'a,
         V: AsRef<[u8]> + 'a,
         I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
     {
-        Self::from_sorted_entries_impl::<F, V, I, true>(entries)
+        Self::from_sorted_entries_impl::<F, V, I, true>(entries, arena_hint)
     }
 
-    fn from_sorted_entries_impl<'a, F, V, I, const CACHE_FIELDS: bool>(entries: I) -> Self
+    fn from_sorted_entries_impl<'a, F, V, I, const CACHE_FIELDS: bool>(
+        entries: I,
+        arena_hint: usize,
+    ) -> Self
     where
         F: AsRef<[u8]> + 'a,
         V: AsRef<[u8]> + 'a,
         I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
     {
         let mut log = Self::new();
+        log.arena.reserve(arena_hint);
         let mut node_entries: Vec<StreamNodeEntry> =
             Vec::with_capacity(PACKED_STREAM_NODE_MAX_ENTRIES);
         let mut node_first: Option<(u64, u64)> = None;
