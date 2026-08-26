@@ -67796,3 +67796,47 @@ number; use it on these dumps rather than dividing a total.
 `--redis-extra=` (this commit) puts config on the INCUMBENT ONLY and is empty by
 default, so an unflagged run is byte-identical to before it existed — verified by
 re-running the hash arm unflagged and reproducing 2.2122x at the same 2696 B payload.
+
+## 2026-08-26 — THE STREAM RESTORE LEVER, PRICED: 213,688 instr/op, 48.2 pct of the op
+
+The stream arm's frame table in this ledger was seed-contaminated like the hash one
+(400 separate XADDs divided into "per op"). Re-derived with `frame_delta.py`, 400
+entries, 100 vs 200 ops, against an incumbent at EQUAL POSTURE
+(`--sanitize-dump-payload yes`):
+
+    fr  443,021 instr/op                     redis  317,349 instr/op
+    104658  lzf_decompress                    97643  lzf_decompress          <- parity
+      3268  fr_simd::crc64_pclmul             17062  crcspeed64little        <- fr 5.2x FASTER
+     89960  listpack::decode_raw_values      106100  lpValidateNext
+                                              35744  streamValidateListpackIntegrity
+                                              32320  lpGetIntegerIfValid
+              (89,960 vs 174,164)                                            <- fr 1.94x FASTER
+     94187  UpstreamStreamSkeleton::flat_entries
+     68544  PackedStreamLog::from_sorted_entries_impl
+     45655  memcpy                             1936  memcpy
+      7238  drop_glue::<StreamOut<Cow<[u8]>>>  1090  raxGenericInsert
+              (213,688 fr-only)                                              <- THE WHOLE GAP
+
+**fr validates the payload nearly TWICE AS FAST as Redis does. Every instruction of
+the stream loss is the REBUILD.** Redis decompresses straight into the macro-node
+listpack it keeps and inserts a pointer into the rax — 1,936 instr/op of memcpy for
+a ~8 KB decompressed payload is not a copy. fr decodes the blob into
+`Vec<(Cow,Cow)>` and re-encodes it into `PackedStreamLog`'s private arena.
+
+Subtract the rebuild and fr lands at 229,333 instr/op:
+
+    stream RESTORE @400     now        rebuild removed
+      equal posture      1.3815x          0.7227x     (fr 1.38x FASTER)
+      default posture    3.0583x          1.5813x
+
+That is the `VerbatimListpackStream` item, and it is no longer a feeling: it is worth
+**213,688 instr/op** and it turns the worst arm on the board into a win at equal
+posture. It stays a loss at DEFAULT posture because default-Redis declines
+validation altogether — which is the safety trade, stated honestly, not a gap.
+
+Sizing is unchanged and still governs: `PackedStreamLog` exposes 17 non-bench public
+methods a second representation must satisfy (contains_key, first_id,
+first_key_value, from_sorted_entries x2, get, insert, is_empty, iter, keys, last_id,
+last_key_value, len, new, range, remove, values), plus XADD append into a retained
+node, XRANGE across node boundaries, and the group/PEL state. `VerbatimListpackHash`
+is the working precedent one screen away in fr-store packed_set.rs.
