@@ -39,7 +39,7 @@ a fr/redis figure printed from a run whose null missed the band is not quotable.
 Every arm also prints the sha256 of `/proc/<pid>/exe` of the server that served it,
 and the run aborts if an arm's N and 2N launches did not run the same ELF.
 
-Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset|stream] [--op=restore|reload|loadaof] [--varyfields] [--aa] [--keys=N]
+Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset|stream] [--op=restore|reload|loadaof] [--varyfields] [--valuesize=N] [--aa] [--keys=N]
 """
 from __future__ import annotations
 
@@ -76,10 +76,23 @@ REDIS = os.path.join(ROOT, "legacy_redis_code/redis/src/redis-server")
 # question the five micro-levers on this surface actually turned on.
 # Set from --varyfields; see the stream seeder.
 VARY_FIELDS = False
+# Set from --valuesize=N; see `_val`.
+VALUE_SIZE = 0
 NULL_SIGMA_INSTR = 4.46
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _incumbent import require_incumbent  # noqa: E402  (path set above)
+
+
+def _val(i):
+    """Element payload. `--valuesize=N` pads it to N bytes; the fixtures have only
+    ever used ~5-byte values, so the large-value regime -- 12-bit listpack string
+    headers, a different LZF ratio, and thresholds that flip the encoding -- has
+    never been measured."""
+    base = "v%04d" % i
+    if VALUE_SIZE > len(base):
+        return base + "x" * (VALUE_SIZE - len(base))
+    return base
 
 
 def resp(*args):
@@ -158,14 +171,14 @@ def seed_command(kind, members, key="src"):
     if kind == "hash":
         fields = []
         for i in range(members):
-            fields += ["f%04d" % i, "v%04d" % i]
+            fields += ["f%04d" % i, _val(i)]
         return resp("HSET", key, *fields)
     if kind == "list":
         # Short string elements: this is the listpack (QUICKLIST_2 type 2) regime,
         # which is the one the span lever decodes. Letter-leading on purpose --
         # a digit-leading payload takes the derivation-guard path and measures a
         # different frame (frankenredis-qj6jn).
-        return resp("RPUSH", key, *["v%04d" % i for i in range(members)])
+        return resp("RPUSH", key, *[_val(i) for i in range(members)])
     if kind == "set":
         # (frankenredis-qj6jn) SET and ZSET were added for the same reason LIST was:
         # their RDB-FILE load arms materialise one owned Vec<u8> per member out of a
@@ -179,7 +192,7 @@ def seed_command(kind, members, key="src"):
         # still completes and still prints a ratio, so the mistake looks like data.
         # Letter-leading members on purpose: all-integer members would save as
         # RDB_TYPE_SET_INTSET, a third arm again.
-        return resp("SADD", key, *["v%04d" % i for i in range(members)])
+        return resp("SADD", key, *[_val(i) for i in range(members)])
     if kind == "stream":
         # (BlackThrush 2026-08-26) STREAM was added because it was the only
         # collection type with NO ratio at all -- every other type had one and this
@@ -205,7 +218,7 @@ def seed_command(kind, members, key="src"):
             else:
                 f0, f1 = "f0", "f1"
             out.append(resp("XADD", key, "%d-1" % (i + 1),
-                            f0, "v%04d" % i, f1, "w%04d" % i))
+                            f0, _val(i), f1, _val(i + 100000)))
         return b"".join(out)
     if kind == "zset":
         # Same threshold trap as `set`, against zset-max-listpack-entries (128).
@@ -214,7 +227,7 @@ def seed_command(kind, members, key="src"):
         # MEMBER materialisation this arm exists to measure.
         args = []
         for i in range(members):
-            args += [str(i), "v%04d" % i]
+            args += [str(i), _val(i)]
         return resp("ZADD", key, *args)
     raise SystemExit("unknown container type %r (want hash|list|set|zset|stream)" % kind)
 
@@ -431,6 +444,10 @@ def main():
     keys = 1
     global VARY_FIELDS
     VARY_FIELDS = any(a == "--varyfields" for a in sys.argv[1:])
+    global VALUE_SIZE
+    for a in sys.argv[1:]:
+        if a.startswith("--valuesize="):
+            VALUE_SIZE = int(a.split("=", 1)[1])
     for a in sys.argv[1:]:
         if a.startswith("--keys="):
             keys = int(a.split("=", 1)[1])
