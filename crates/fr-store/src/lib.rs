@@ -35902,7 +35902,12 @@ impl Store {
                             .windows(2)
                             .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1));
                         if strictly_increasing {
-                            return Ok(StreamEntries::from_sorted_entries(
+                            // `_repeated_fields`: these entries are the BORROWED
+                            // decode, so every entry's j-th field name is the same
+                            // `Cow::Borrowed` of the one master name in the node's
+                            // listpack. Interning them by address instead of by
+                            // bytes removes 118 of the 133 memcmp calls per op.
+                            return Ok(StreamEntries::from_sorted_entries_repeated_fields(
                                 stream_entries
                                     .iter()
                                     .map(|(ms, seq, fields)| ((*ms, *seq), fields.as_slice())),

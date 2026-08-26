@@ -2455,15 +2455,87 @@ impl PackedStreamLog {
         V: AsRef<[u8]> + 'a,
         I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
     {
+        Self::from_sorted_entries_impl::<F, V, I, false>(entries)
+    }
+
+    /// Same builder, for callers whose entries present the SAME field-name buffers
+    /// over and over -- the borrowed RESTORE decode, where every entry's `j`-th
+    /// name is a `Cow::Borrowed` of the one master name in the macro-node listpack.
+    ///
+    /// Enabling the address cache is a caller's choice rather than something this
+    /// function detects, because the cache can only pay when the buffers actually
+    /// repeat. The RDB loader hands over separately-allocated `Vec`s that can never
+    /// hit, and MEASURED +0.94 pct (four-slot scan) / +0.62 pct (single compare) on
+    /// the reload arm when it was made to pay for the lookup anyway.
+    #[must_use]
+    pub fn from_sorted_entries_repeated_fields<'a, F, V, I>(entries: I) -> Self
+    where
+        F: AsRef<[u8]> + 'a,
+        V: AsRef<[u8]> + 'a,
+        I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
+    {
+        Self::from_sorted_entries_impl::<F, V, I, true>(entries)
+    }
+
+    fn from_sorted_entries_impl<'a, F, V, I, const CACHE_FIELDS: bool>(entries: I) -> Self
+    where
+        F: AsRef<[u8]> + 'a,
+        V: AsRef<[u8]> + 'a,
+        I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
+    {
         let mut log = Self::new();
         let mut node_entries: Vec<StreamNodeEntry> =
             Vec::with_capacity(PACKED_STREAM_NODE_MAX_ENTRIES);
         let mut node_first: Option<(u64, u64)> = None;
         let mut total = 0usize;
+        // Field names repeat verbatim across entries: upstream sets its SAMEFIELDS
+        // flag whenever consecutive entries share them, so a 40-entry two-field
+        // stream presents the SAME two names 40 times each. `intern_field` linearly
+        // scans the dictionary comparing byte slices, and comparing two-byte names
+        // that way is a libc `memcmp` CALL -- measured at 118 of the 133 memcmp
+        // calls per stream RESTORE.
+        //
+        // The cache is keyed on the name's ADDRESS, not its bytes. That is sound
+        // here and only here: every `&'a [(F, V)]` this iterator yields outlives the
+        // whole call, so all field buffers are simultaneously live, and two live
+        // objects cannot share an address. A (ptr, len) hit therefore means the very
+        // same object, hence the same bytes. Dictionary indices are stable once
+        // assigned (`intern_field` only ever pushes), so a cached index cannot go
+        // stale. Instantiations whose fields are separately-owned `Vec`s simply miss
+        // and fall through -- correct, just no saving.
+        //
+        // Keyed by the field's POSITION in the entry, so a hit is ONE comparison.
+        // Under SAMEFIELDS the j-th field of every entry is always the j-th master
+        // name, so position is exactly the right key; a scan over recently-seen
+        // names would instead pay its full width on every miss. That matters
+        // because the OWNED instantiation (the RDB loader, whose fields are
+        // separately allocated `Vec`s) can never hit: a four-slot scan cost it
+        // +0.94 pct, where a single compare is inside its noise.
+        //
+        // Positions past the cache alias onto earlier slots. That only ever costs a
+        // miss -- correctness rests on the (ptr, len) check, never on the slot.
+        const FIELD_CACHE: usize = 8;
+        // `usize::MAX` length never matches a real slice, so an unused slot misses.
+        let mut field_cache: [(usize, usize, usize); FIELD_CACHE] =
+            [(0, usize::MAX, 0); FIELD_CACHE];
         for (id, pairs) in entries {
             let off = log.arena.len();
-            for (f, v) in pairs {
-                let idx = log.intern_field(f.as_ref());
+            for (pos, (f, v)) in pairs.iter().enumerate() {
+                let name = f.as_ref();
+                let idx = if CACHE_FIELDS {
+                    let (name_ptr, name_len) = (name.as_ptr() as usize, name.len());
+                    let slot = pos % FIELD_CACHE;
+                    let cached = field_cache[slot];
+                    if cached.0 == name_ptr && cached.1 == name_len {
+                        cached.2
+                    } else {
+                        let fresh = log.intern_field(name);
+                        field_cache[slot] = (name_ptr, name_len, fresh);
+                        fresh
+                    }
+                } else {
+                    log.intern_field(name)
+                };
                 write_varint(&mut log.arena, idx);
                 write_varint(&mut log.arena, v.as_ref().len());
                 log.arena.extend_from_slice(v.as_ref());
