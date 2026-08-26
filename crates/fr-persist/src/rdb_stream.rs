@@ -685,6 +685,9 @@ pub(crate) fn decode_upstream_stream_skeleton(
 /// long as `self`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpstreamStreamSkeleton {
+    /// The record's declared LIVE entry count, used to size the decode's output
+    /// vectors once for the whole record instead of once per node.
+    stream_length: usize,
     /// `(master_ms, master_seq, decompressed listpack)` per radix-tree node.
     nodes: Vec<(u64, u64, Vec<u8>)>,
     watermark: Option<(u64, u64)>,
@@ -712,6 +715,14 @@ impl UpstreamStreamSkeleton {
     /// and each entry can be a subslice.
     pub fn flat_entries(&self) -> Result<StreamOut<Cow<'_, [u8]>>, UpstreamStreamError> {
         let mut out = StreamOut::default();
+        // ONE growth for the whole record. The per-NODE reserve inside
+        // `decode_stream_listpack` still grows an ACCUMULATING vector once per
+        // node, and a growth on an accumulating buffer copies the whole buffer --
+        // measured at 10,760 Ir per 400-entry decode for three `reserve` calls,
+        // 4.95 pct of this frame. The record's own header declares the live entry
+        // count, so the final size is known before the first node is touched.
+        // Capacity is a hint: a wrong one costs a growth, never content.
+        out.reserve_for_record(self.stream_length);
         for (master_ms, master_seq, blob) in &self.nodes {
             let lp = decode_raw_values(blob)?;
             decode_stream_listpack::<_, true>(&lp, blob, *master_ms, *master_seq, &mut out)?;
@@ -993,6 +1004,7 @@ impl UpstreamStreamSkeleton {
         };
         Ok((
             Self {
+                stream_length,
                 nodes,
                 watermark,
                 groups,
@@ -1084,6 +1096,14 @@ impl<F> Default for StreamOut<F> {
 }
 
 impl<F> StreamOut<F> {
+    /// Pre-size both vectors from the record's declared entry count. `fields` is
+    /// sized for two fields per entry, the overwhelmingly common stream shape; a
+    /// wider schema simply grows once more.
+    fn reserve_for_record(&mut self, entries: usize) {
+        self.index.reserve(entries);
+        self.fields.reserve(entries.saturating_mul(2));
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.index.len()
