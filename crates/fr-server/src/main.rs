@@ -1658,7 +1658,7 @@ impl ShardedSetGetPool {
             let wake = Arc::clone(&waker);
             let pending = Arc::clone(&wake_pending);
             let handle = thread::Builder::new()
-                .name(format!("fr-set-get-shard-{worker_idx}"))
+                .name(format!("fr-key-set-get-shard-{worker_idx}"))
                 .stack_size(WORKER_THREAD_STACK_SIZE)
                 .spawn(move || run_sharded_set_get_worker(job_rx, tx, wake, pending))?;
             jobs.push(job_tx);
@@ -4270,6 +4270,9 @@ OPTIONS:\n\
                              Run supported default-DB partition-local commands\n\
                              on N connection-affine reactors over a partitioned\n\
                              keyspace (1-{SHARDED_SET_GET_MAX_WORKERS})\n\
+  --experimental-key-sharded-set-get-workers <N>\n\
+                             Run the retained per-key comparison arm on N workers\n\
+                             (1-{SHARDED_SET_GET_MAX_WORKERS})\n\
   --help                     Show this help\n"
     )
 }
@@ -4574,6 +4577,7 @@ fn main() -> ExitCode {
     let mut cli_passthrough: Vec<(String, String)> = Vec::new();
     let mut file_passthrough: Vec<(String, String)> = Vec::new();
     let mut sharded_set_get_workers: Option<usize> = None;
+    let mut key_sharded_set_get_workers: Option<usize> = None;
     #[cfg(feature = "io-uring-writes")]
     let mut io_uring_output = false;
     #[cfg(not(feature = "io-uring-writes"))]
@@ -4726,6 +4730,23 @@ fn main() -> ExitCode {
                 };
                 sharded_set_get_workers = Some(workers);
             }
+            "--experimental-key-sharded-set-get-workers" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --experimental-key-sharded-set-get-workers requires a value");
+                    return ExitCode::from(1);
+                }
+                let workers = match args[i].parse::<usize>() {
+                    Ok(workers @ 1..=SHARDED_SET_GET_MAX_WORKERS) => workers,
+                    _ => {
+                        eprintln!(
+                            "error: sharded command worker count must be in 1..={SHARDED_SET_GET_MAX_WORKERS}"
+                        );
+                        return ExitCode::from(1);
+                    }
+                };
+                key_sharded_set_get_workers = Some(workers);
+            }
             "--help" | "-h" => {
                 print!("{}", server_help_text());
                 return ExitCode::SUCCESS;
@@ -4758,7 +4779,14 @@ fn main() -> ExitCode {
         i += 1;
     }
 
-    if sharded_set_get_workers.is_some() {
+    if sharded_set_get_workers.is_some() && key_sharded_set_get_workers.is_some() {
+        eprintln!(
+            "error: --experimental-sharded-set-get-workers and --experimental-key-sharded-set-get-workers are mutually exclusive"
+        );
+        return ExitCode::from(1);
+    }
+
+    if sharded_set_get_workers.is_some() || key_sharded_set_get_workers.is_some() {
         let incompatible = if mode_str != "strict" {
             Some("--mode hardened")
         } else if sentinel_mode {
@@ -4782,7 +4810,7 @@ fn main() -> ExitCode {
         };
         if let Some(option) = incompatible {
             eprintln!(
-                "error: {option} is incompatible with --experimental-sharded-set-get-workers"
+                "error: {option} is incompatible with experimental sharded command workers"
             );
             return ExitCode::from(1);
         }
@@ -5009,7 +5037,10 @@ fn main() -> ExitCode {
     {
         rdb_path = Some(effective.to_string_lossy().into_owned());
     }
-    if rdb_path.is_none() && sharded_set_get_workers.is_none() {
+    if rdb_path.is_none()
+        && sharded_set_get_workers.is_none()
+        && key_sharded_set_get_workers.is_none()
+    {
         rdb_path = Some("dump.rdb".to_string());
     }
 
@@ -5048,27 +5079,7 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // (frankenredis-zwtqi) UNREACHABLE: `--experimental-sharded-set-get-workers`
-    // returns into `run_shared_nothing_server` above, so `sharded_set_get_workers`
-    // is always `None` by the time control reaches here and this pool is never
-    // built. It is left in place pending an owner decision on the bead; do NOT
-    // read it as the live sharding design. The live path routes CONNECTIONS
-    // round-robin at accept (`SharedNothingWorkerPool::next_worker`), whereas this
-    // pool routes KEYS (`sharded_set_get_shard` = crc16_slot % workers). Modelling
-    // the server on this dead path is what produced the stale hot-shard invariant
-    // fixed in frankenredis-uiqc5.
-    // (frankenredis-zwtqi) The paragraph above is a COMMENT, and a comment cannot
-    // fail. This asserts the invariant it describes, so moving the early return —
-    // the edit that would silently resurrect the dead per-KEY design — trips here
-    // instead of producing a server that looks sharded and is not.
-    debug_assert!(
-        sharded_set_get_workers.is_none(),
-        "the --experimental-sharded-set-get-workers path must have returned into \
-         run_shared_nothing_server before this point; if it reaches here the dead \
-         per-KEY pool below has become live and the live per-CONNECTION design is \
-         being bypassed (see frankenredis-zwtqi, frankenredis-uiqc5)"
-    );
-    let sharded_set_get_pool = if let Some(worker_count) = sharded_set_get_workers {
+    let sharded_set_get_pool = if let Some(worker_count) = key_sharded_set_get_workers {
         match ShardedSetGetPool::new(worker_count, Arc::clone(&background_waker)) {
             Ok(pool) => {
                 eprintln!(
@@ -47961,6 +47972,10 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         assert!(help.contains("--replicaof <HOST> <PORT>"));
         assert!(help.contains("--masteruser <USERNAME>"));
         assert!(help.contains("--masterauth <PASSWORD>"));
+        assert!(help.contains("--experimental-sharded-set-get-workers <N>"));
+        assert!(help.contains("connection-affine reactors"));
+        assert!(help.contains("--experimental-key-sharded-set-get-workers <N>"));
+        assert!(help.contains("retained per-key comparison arm"));
         assert!(help.contains("--help"));
     }
 

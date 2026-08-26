@@ -2047,7 +2047,13 @@ pub struct PackedStreamLog {
     /// compaction — a churning schema is the only case it grows past the live
     /// set). NOT serialized — DUMP/RESTORE/DIGEST go through `to_pairs`, which
     /// reconstructs the names, so the observable bytes are unchanged.
-    field_dict: Vec<Box<[u8]>>,
+    ///
+    /// Stored as ONE arena plus spans rather than a `Box<[u8]>` per name. A
+    /// varying-schema stream interns a name per entry, and a heap block each cost
+    /// ~34,500 Ir/op of allocator time on a 400-entry RESTORE (800 names) before
+    /// this, plus a per-block allocator header for every one of them. The arena is
+    /// append-only for the same reason the dictionary is, so spans stay valid.
+    dict: FieldDict,
     /// Bytes in `arena` belonging to removed/overwritten entries (compaction hint).
     dead: usize,
     len: usize,
@@ -2108,6 +2114,47 @@ impl StreamNode {
     }
 }
 
+/// The stream's field-name dictionary: one append-only arena plus a span per name.
+///
+/// A `Box<[u8]>` per name cost a heap block each -- ~34,500 Ir/op of allocator time
+/// on a 400-entry varying-schema RESTORE (800 names), plus a per-block allocator
+/// header for every one. Keeping it as ONE type rather than two loose fields also
+/// keeps [`FieldsRef`] at a single pointer: two slices would make every borrowed
+/// view 16 bytes wider, which the READ path pays on every save.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FieldDict {
+    arena: Vec<u8>,
+    spans: Vec<(u32, u32)>,
+}
+
+impl FieldDict {
+    #[must_use]
+    fn get(&self, index: usize) -> &[u8] {
+        self.spans.get(index).map_or(&[][..], |&(off, len)| {
+            let start = off as usize;
+            &self.arena[start..start + len as usize]
+        })
+    }
+
+    fn position(&self, name: &[u8]) -> Option<usize> {
+        (0..self.spans.len()).find(|&i| self.get(i) == name)
+    }
+
+    /// Append a name and return its index, which is what the entry arena stores.
+    fn push(&mut self, name: &[u8]) -> usize {
+        let off = u32::try_from(self.arena.len()).unwrap_or(u32::MAX);
+        let len = u32::try_from(name.len()).unwrap_or(u32::MAX);
+        self.arena.extend_from_slice(name);
+        self.spans.push((off, len));
+        self.spans.len() - 1
+    }
+
+    #[must_use]
+    fn len(&self) -> usize {
+        self.spans.len()
+    }
+}
+
 /// A borrowed view over one entry's packed fields. The arena holds
 /// `[field_idx varint][vlen varint][value]` per field; the field NAME is
 /// recovered from the owning log's `field_dict`. Mirrors the read surface of
@@ -2115,7 +2162,7 @@ impl StreamNode {
 #[derive(Clone, Copy)]
 pub struct FieldsRef<'a> {
     buf: &'a [u8],
-    dict: &'a [Box<[u8]>],
+    dict: &'a FieldDict,
     count: u32,
 }
 
@@ -2151,7 +2198,7 @@ impl<'a> FieldsRef<'a> {
 /// `[field_idx][vlen][value]` and resolves the name via the field dict.
 pub struct FieldsRefIter<'a> {
     buf: &'a [u8],
-    dict: &'a [Box<[u8]>],
+    dict: &'a FieldDict,
     pos: usize,
 }
 
@@ -2170,7 +2217,7 @@ impl<'a> Iterator for FieldsRefIter<'a> {
         let (vlen, p2) = read_varint(self.buf, p);
         let (vs, ve) = (p2, p2 + vlen);
         self.pos = ve;
-        let name: &[u8] = self.dict.get(idx).map_or(&[][..], |n| n);
+        let name: &[u8] = self.dict.get(idx);
         Some((name, &self.buf[vs..ve]))
     }
 }
@@ -2195,7 +2242,7 @@ impl PackedStreamLog {
     fn span_slice(&self, span: &FieldSpan) -> FieldsRef<'_> {
         FieldsRef {
             buf: &self.arena[span.off..span.off + span.len as usize],
-            dict: &self.field_dict,
+            dict: &self.dict,
             count: span.count,
         }
     }
@@ -2207,7 +2254,7 @@ impl PackedStreamLog {
     /// dictionary keeps first-seen order and every index matches what the scan would
     /// have returned. Only the lookup changes, never the result.
     fn intern_indexed<'a>(
-        field_dict: &mut Vec<Box<[u8]>>,
+        dict: &mut FieldDict,
         index: &mut std::collections::HashMap<&'a [u8], usize, foldhash::quality::RandomState>,
         name: &'a [u8],
         hint: usize,
@@ -2237,8 +2284,7 @@ impl PackedStreamLog {
         match index.entry(name) {
             std::collections::hash_map::Entry::Occupied(slot) => *slot.get(),
             std::collections::hash_map::Entry::Vacant(slot) => {
-                let i = field_dict.len();
-                field_dict.push(name.into());
+                let i = dict.push(name);
                 *slot.insert(i)
             }
         }
@@ -2247,12 +2293,9 @@ impl PackedStreamLog {
     /// Return the index of `name` in the field dict, appending it if new. Linear
     /// scan: stream field-name cardinality is small and stable in practice.
     fn intern_field(&mut self, name: &[u8]) -> usize {
-        if let Some(i) = self.field_dict.iter().position(|n| &**n == name) {
-            i
-        } else {
-            self.field_dict.push(name.into());
-            self.field_dict.len() - 1
-        }
+        self.dict
+            .position(name)
+            .unwrap_or_else(|| self.dict.push(name))
     }
 
     fn node_key_for(&self, id: (u64, u64)) -> Option<(u64, u64)> {
@@ -2615,17 +2658,13 @@ impl PackedStreamLog {
                     if cached.0 == name_ptr && cached.1 == name_len {
                         cached.2
                     } else {
-                        let fresh = Self::intern_indexed(
-                            &mut log.field_dict,
-                            &mut dict_index,
-                            name,
-                            field_hint,
-                        );
+                        let fresh =
+                            Self::intern_indexed(&mut log.dict, &mut dict_index, name, field_hint);
                         field_cache[slot] = (name_ptr, name_len, fresh);
                         fresh
                     }
                 } else {
-                    Self::intern_indexed(&mut log.field_dict, &mut dict_index, name, field_hint)
+                    Self::intern_indexed(&mut log.dict, &mut dict_index, name, field_hint)
                 };
                 write_varint(&mut log.arena, idx);
                 write_varint(&mut log.arena, v.as_ref().len());
@@ -2887,7 +2926,7 @@ impl PackedStreamLog {
 pub struct PackedStreamLogBTreeReference {
     arena: Vec<u8>,
     nodes: std::collections::BTreeMap<(u64, u64), StreamNode>,
-    field_dict: Vec<Box<[u8]>>,
+    dict: FieldDict,
     dead: usize,
     len: usize,
 }
@@ -2902,22 +2941,15 @@ impl PackedStreamLogBTreeReference {
     fn span_slice(&self, span: &FieldSpan) -> FieldsRef<'_> {
         FieldsRef {
             buf: &self.arena[span.off..span.off + span.len as usize],
-            dict: &self.field_dict,
+            dict: &self.dict,
             count: span.count,
         }
     }
 
     fn intern_field(&mut self, name: &[u8]) -> usize {
-        if let Some(index) = self
-            .field_dict
-            .iter()
-            .position(|candidate| &**candidate == name)
-        {
-            index
-        } else {
-            self.field_dict.push(name.into());
-            self.field_dict.len() - 1
-        }
+        self.dict
+            .position(name)
+            .unwrap_or_else(|| self.dict.push(name))
     }
 
     fn node_key_for(&self, id: (u64, u64)) -> Option<(u64, u64)> {
@@ -7742,7 +7774,9 @@ mod tests {
             |i: u64| -> Pairs { vec![(b"field".to_vec(), format!("value:{i}").into_bytes())] };
         let assert_same = |candidate: &PackedStreamLog, fallback: &PackedStreamLog| {
             assert_eq!(candidate.arena, fallback.arena);
-            assert_eq!(candidate.field_dict, fallback.field_dict);
+            // The dictionary is now an arena plus spans; compare BOTH halves, which
+            // is the same assertion (identical names in identical order).
+            assert_eq!(candidate.dict, fallback.dict);
             assert_eq!(candidate.dead, fallback.dead);
             assert_eq!(candidate.len, fallback.len);
             let contents = |log: &PackedStreamLog| {
