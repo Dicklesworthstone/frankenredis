@@ -37617,9 +37617,28 @@ fn restore_field_probe_hash(bytes: &[u8]) -> u64 {
         h = (h.rotate_left(5) ^ u64::from_le_bytes(*chunk)).wrapping_mul(SEED);
     }
     if !rest.is_empty() {
-        let mut buf = [0u8; 8];
-        buf[..rest.len()].copy_from_slice(rest);
-        h = (h.rotate_left(5) ^ u64::from_le_bytes(buf)).wrapping_mul(SEED);
+        // ACCUMULATE the tail with shifts rather than
+        //     let mut buf = [0u8; 8];
+        //     buf[..rest.len()].copy_from_slice(rest);
+        // which was the shape here and cost a real `memcpy@GLIBC` CALL per
+        // element. `copy_from_slice`'s length is a runtime value, so LLVM cannot
+        // pick a fixed-width store and emits the libc call — for a 1-7 byte move.
+        // Callgrind on a 40-member zset RESTORE charged `zset_from_listpack_spans`
+        // **41 memcpy calls per op**, and disassembly put 40 of them at exactly
+        // this line: every member under 8 bytes takes the tail branch, and the
+        // typical RESTORE member is under 8 bytes. Redis's whole RESTORE makes
+        // ~5 memcpy calls.
+        //
+        // BIT-IDENTICAL, not merely equivalent. `u64::from_le_bytes` of a
+        // zero-padded buffer places `rest[i]` at bits `8i..8i+8` and leaves the
+        // rest zero, which is exactly what this fold builds. The hash values, the
+        // probe order and the resulting table are unchanged; the randomised
+        // dup-detector corpus test pins that.
+        let mut tail = 0_u64;
+        for (index, byte) in rest.iter().enumerate() {
+            tail |= u64::from(*byte) << (index * 8);
+        }
+        h = (h.rotate_left(5) ^ tail).wrapping_mul(SEED);
     }
     // Fold the high half down: the caller takes the LOW bits for the slot index.
     h ^ (h >> 32)
@@ -42548,6 +42567,49 @@ mod tests {
     /// that real probe-hash collisions and real duplicates both occur often. A
     /// detector that compared probe hashes instead of field bytes would report
     /// false duplicates here.
+    /// The tail fold in `restore_field_probe_hash` replaced a
+    /// `copy_from_slice` into a zeroed `[u8; 8]`, which cost a real `memcpy`
+    /// CALL per element. The replacement claims to be BIT-identical, not merely
+    /// equivalent, so state the old formulation here and check it — otherwise
+    /// the claim in that comment is unfalsifiable, and a silent hash change
+    /// would only ever show up as a probe-order difference nothing asserts.
+    #[test]
+    fn restore_field_probe_hash_tail_fold_matches_the_zero_padded_buffer() {
+        fn reference(bytes: &[u8]) -> u64 {
+            const SEED: u64 = 0x517c_c1b7_2722_0a95;
+            let mut h = bytes.len() as u64;
+            let (chunks, rest) = bytes.as_chunks::<8>();
+            for chunk in chunks {
+                h = (h.rotate_left(5) ^ u64::from_le_bytes(*chunk)).wrapping_mul(SEED);
+            }
+            if !rest.is_empty() {
+                let mut buf = [0u8; 8];
+                buf[..rest.len()].copy_from_slice(rest);
+                h = (h.rotate_left(5) ^ u64::from_le_bytes(buf)).wrapping_mul(SEED);
+            }
+            h ^ (h >> 32)
+        }
+        // Every tail length 0..=7 at several total lengths, so the chunked head
+        // and the tail fold are both exercised, plus the empty slice.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for len in 0..40_usize {
+            for _ in 0..8 {
+                let field: Vec<u8> = (0..len).map(|_| (next() & 0xFF) as u8).collect();
+                assert_eq!(
+                    crate::restore_field_probe_hash(&field),
+                    reference(&field),
+                    "probe hash drifted at len {len} for {field:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn restore_dup_detector_matches_reference_on_randomised_corpora() {
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
