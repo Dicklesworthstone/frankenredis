@@ -50357,7 +50357,7 @@ fn apply_rdb_entries_to_store(
             }
             RdbValue::Set(ref members) => {
                 store
-                    .sadd(&key, members, now_ms)
+                    .sadd_loading(&key, members, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
@@ -50396,7 +50396,7 @@ fn apply_rdb_entries_to_store(
                 // intset-max), not the incremental intset-overflow→hashtable path.
                 let over_intset = members.len() > store.set_max_intset_entries;
                 store
-                    .sadd(&key, members, now_ms)
+                    .sadd_loading(&key, members, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if over_intset {
                     store.force_set_hashtable_encoding(&key);

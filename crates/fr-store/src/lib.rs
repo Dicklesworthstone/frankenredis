@@ -3512,7 +3512,19 @@ impl SetValue {
     /// — where intset ordering/promotion would diverge — or the set is small enough
     /// that the O(n) pre-scan is not worth replacing the loop. The de-dup, encoding
     /// choice, and iteration order are byte-identical to the loop's result.
-    fn try_bulk_unique_strings<M: AsRef<[u8]>>(members: &[M]) -> Option<(SetValue, u64)> {
+    ///
+    /// (BlackThrush 2026-08-26) `KNOWN_UNIQUE` is the RDB / AOF LOAD route saying
+    /// it has ALREADY established that these members are distinct, so the `seen`
+    /// set below is answering a question with no answer left in it. Measured on a
+    /// 200-key x 40-member set DEBUG RELOAD, `HashSet<&[u8]>::insert` reached from
+    /// here costs 787,819 instructions per RELOAD -- 8,000 calls, one per member,
+    /// 98 instructions each, 7.6 pct of fr's whole set reload. The caller only
+    /// passes `true` after proving uniqueness with the allocation-free stack probe,
+    /// and falls back to `false` otherwise, so the de-duplicated result, the
+    /// insertion order and `added` are unchanged in every case.
+    fn try_bulk_unique_strings<M: AsRef<[u8]>, const KNOWN_UNIQUE: bool>(
+        members: &[M],
+    ) -> Option<(SetValue, u64)> {
         if members.len() < SET_BULK_BUILD_MIN {
             return None;
         }
@@ -3530,18 +3542,23 @@ impl SetValue {
         if let Some((set, added)) = GenericSet::try_from_str_members_hash_dedup(members) {
             return Some((SetValue::Generic(set), added));
         }
-        let mut seen: HashSet<&[u8], foldhash::quality::RandomState> =
-            HashSet::with_capacity_and_hasher(
-                members.len(),
-                foldhash::quality::RandomState::default(),
-            );
-        let mut unique: Vec<&[u8]> = Vec::with_capacity(members.len());
-        for m in members {
-            let s = m.as_ref();
-            if seen.insert(s) {
-                unique.push(s);
+        let unique: Vec<&[u8]> = if KNOWN_UNIQUE {
+            members.iter().map(AsRef::as_ref).collect()
+        } else {
+            let mut seen: HashSet<&[u8], foldhash::quality::RandomState> =
+                HashSet::with_capacity_and_hasher(
+                    members.len(),
+                    foldhash::quality::RandomState::default(),
+                );
+            let mut unique: Vec<&[u8]> = Vec::with_capacity(members.len());
+            for m in members {
+                let s = m.as_ref();
+                if seen.insert(s) {
+                    unique.push(s);
+                }
             }
-        }
+            unique
+        };
         let added = unique.len() as u64;
         Some((
             SetValue::Generic(GenericSet::from_unique_str_members(&unique)),
@@ -20494,7 +20511,25 @@ impl Store {
         members: &[M],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
-        self.sadd_impl::<M, true>(key, members, now_ms)
+        self.sadd_impl::<M, true, false>(key, members, now_ms)
+    }
+
+    /// SADD for the RDB / AOF LOAD route, where the members come from a payload the
+    /// loader is replaying rather than from a client's argument list.
+    ///
+    /// Observably identical to [`Self::sadd`] -- same resulting set, same encoding,
+    /// same return value, same dirty accounting -- but allowed to notice that a
+    /// replayed payload's members are unique and skip the uniqueness `HashSet` the
+    /// fresh-key bulk build would otherwise construct and throw away. It only takes
+    /// that path after PROVING uniqueness with the allocation-free stack probe, so a
+    /// corrupt payload is de-duplicated exactly as it is today.
+    pub fn sadd_loading<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        members: &[M],
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        self.sadd_impl::<M, true, true>(key, members, now_ms)
     }
 
     /// Load a canonical RDB intset without rendering every member to decimal
@@ -20537,7 +20572,7 @@ impl Store {
         members: &[M],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
-        self.sadd_impl::<M, false>(key, members, now_ms)
+        self.sadd_impl::<M, false, false>(key, members, now_ms)
     }
 
     /// A/B toggle for the LFU SADD write-side keyspace-probe collapse (the set-add member of the
@@ -20546,7 +20581,7 @@ impl Store {
     /// separate `contains_key` rand-gate probe (2 -> 1). Byte/RNG-identical: the prior path drew only
     /// for a PRESENT key under LFU (`contains_key` true) = exactly the `Some`+LFU case here; the
     /// create arm (`None`, incl. a just-expired key) draws NOTHING either way. `false` = prior path.
-    fn sadd_impl<M: AsRef<[u8]>, const COLLAPSE: bool>(
+    fn sadd_impl<M: AsRef<[u8]>, const COLLAPSE: bool, const LOADING: bool>(
         &mut self,
         key: &[u8],
         members: &[M],
@@ -20657,7 +20692,18 @@ impl Store {
                     SetValue::try_bulk_unique_ints(members, max_intset_entries)
                 {
                     bulk
-                } else if let Some(bulk) = SetValue::try_bulk_unique_strings(members) {
+                } else if let Some(bulk) = if LOADING
+                    && members.len() <= RESTORE_STACK_DUP_MAX
+                    && !restore_items_have_duplicate_key(members, AsRef::as_ref)
+                {
+                    // The loader is replaying a payload whose members are distinct;
+                    // the probe just proved it, allocation-free and on the stack. A
+                    // duplicate falls through to the `false` arm, which is today's
+                    // code, so a corrupt RDB is de-duplicated exactly as it is now.
+                    SetValue::try_bulk_unique_strings::<M, true>(members)
+                } else {
+                    SetValue::try_bulk_unique_strings::<M, false>(members)
+                } {
                     bulk
                 } else {
                     let mut s = SetValue::new();
@@ -62292,7 +62338,7 @@ mod tests {
                     ai += 1;
                 }
             }
-            let (sb, ab) = SetValue::try_bulk_unique_strings(&refs)
+            let (sb, ab) = SetValue::try_bulk_unique_strings::<_, false>(&refs)
                 .expect("bulk-string must apply for k>=SET_BULK_BUILD_MIN(8)");
             assert_eq!(ab, ai, "added mismatch k={k}");
             let mi: Vec<Vec<u8>> = si.iter().map(|c| c.into_owned()).collect();
