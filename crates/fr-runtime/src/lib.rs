@@ -50508,7 +50508,7 @@ fn apply_rdb_entries_to_store(
                     .map(|(member, score)| (score, member))
                     .collect();
                 store
-                    .zadd_plain_owned(&key, zset_members, now_ms)
+                    .zadd_plain_owned_loading(&key, zset_members, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(

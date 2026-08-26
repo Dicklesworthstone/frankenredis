@@ -22924,7 +22924,23 @@ impl Store {
         members: Vec<(f64, Vec<u8>)>,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.zadd_plain_owned_with_encoding_refresh::<false>(key, members, now_ms)
+        self.zadd_plain_owned_with_encoding_refresh::<false, false>(key, members, now_ms)
+    }
+
+    /// ZADD for the RDB / AOF LOAD route, where the members come from a payload
+    /// the loader is replaying rather than from a client's argument list.
+    ///
+    /// Observably identical to [`Self::zadd_plain_owned`] -- same resulting zset,
+    /// same encoding, same return value, same dirty accounting -- but allowed to
+    /// notice that a replayed payload's members are unique and skip building the
+    /// last-wins collapse map. See the LOADING branch.
+    pub fn zadd_plain_owned_loading(
+        &mut self,
+        key: &[u8],
+        members: Vec<(f64, Vec<u8>)>,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.zadd_plain_owned_with_encoding_refresh::<false, true>(key, members, now_ms)
     }
 
     /// Collapse adjacent flagless ZADD commands for one key and one member to
@@ -23033,7 +23049,7 @@ impl Store {
         members: Vec<(f64, Vec<u8>)>,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.zadd_plain_owned_with_encoding_refresh::<true>(key, members, now_ms)
+        self.zadd_plain_owned_with_encoding_refresh::<true, false>(key, members, now_ms)
     }
 
     /// (frankenredis-qj6jn) Does the fresh-key ZADD collapse map PRESERVE the caller's
@@ -23060,7 +23076,7 @@ impl Store {
         true
     }
 
-    fn zadd_plain_owned_with_encoding_refresh<const FULL_SCAN: bool>(
+    fn zadd_plain_owned_with_encoding_refresh<const FULL_SCAN: bool, const LOADING: bool>(
         &mut self,
         key: &[u8],
         members: Vec<(f64, Vec<u8>)>,
@@ -23109,6 +23125,56 @@ impl Store {
             }
             (added, changed, touched)
         } else {
+            // (BlackThrush 2026-08-25) RDB / AOF LOAD ROUTE: SKIP THE COLLAPSE MAP.
+            //
+            // The `IndexMap` further down exists only to apply ZADD's last-wins rule
+            // to a repeated member and to count added-vs-changed. A loader replaying a
+            // zset into a key that does not exist has neither problem: the members are
+            // distinct, `added` is their count and `changed` is zero. Measured on a
+            // 200-key x 40-member zset DEBUG RELOAD, `IndexMap::insert_full` reached
+            // from here costs 1,055,220 instructions per RELOAD -- 8,000 calls, one per
+            // member, 132 instructions each, 7.9 pct of fr's whole reload and 11.6 pct
+            // of the gap against live Redis 7.2.4.
+            //
+            // `frankenredis-zsetrdbmove`'s closing row named this exact residual and
+            // DEFERRED it: "a fraction-of-a-fraction of end-to-end RDB load (~10-15%)
+            // ... estimated 1.05-1.12x, borderline/sub-gate; not worth re-wiring a
+            // just-shipped arm for a guessed marginal win". The figures above are that
+            // guess, measured.
+            //
+            // BYTE-IDENTICAL IN EVERY CASE, malformed input included. The fast path is
+            // entered only when the members really are unique; a duplicate falls
+            // through to the untouched code below, which still produces today's
+            // last-wins collapse and today's counts. A corrupt RDB therefore behaves
+            // exactly as it does now -- only the cost of the common case changes.
+            //
+            // The probe is the same allocation-free stack table the RESTORE arms use on
+            // these bytes. It is bounded at `RESTORE_STACK_DUP_MAX`; past that bound it
+            // would ADD a second hash structure rather than replace one, so the fast
+            // path stops there and large zsets keep the collapse map.
+            if LOADING
+                && members.len() > 1
+                && members.len() <= RESTORE_STACK_DUP_MAX
+                && !restore_items_have_duplicate_key(&members, |(_, member)| member.as_slice())
+            {
+                let added = members.len();
+                let pairs: Vec<(Vec<u8>, f64)> = members
+                    .into_iter()
+                    .map(|(score, member)| (member, canonicalize_zero_score(score)))
+                    .collect();
+                let zs = SortedSet::from_unique_pairs_with_limits(
+                    pairs,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
+                self.internal_entries_insert(key.to_vec(), entry);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add(added as u64);
+                return Ok(added);
+            }
             let mut iter = members.into_iter();
             let Some((score, member)) = iter.next() else {
                 return Ok(0);
