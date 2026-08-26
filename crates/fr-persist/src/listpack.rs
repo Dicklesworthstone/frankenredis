@@ -431,6 +431,7 @@ pub enum RawListpackValue {
 /// raw value and the total bytes the entry occupies (encoding + data + backlen).
 /// [`decode_entry`] is a thin materializing wrapper over this, so both share one
 /// parser and cannot drift.
+#[inline(always)]
 fn decode_entry_raw(
     data: &[u8],
     cursor: usize,

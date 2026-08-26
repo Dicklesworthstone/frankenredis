@@ -599,6 +599,11 @@ fn encode_listpack_bytes(buf: &mut Vec<u8>, data: &[u8]) -> Option<()> {
     Some(())
 }
 
+/// (BlackThrush 2026-08-26) `#[inline]`: this is an out-of-line CALL 57,200 times
+/// per 200-key stream DEBUG RELOAD -- once per listpack element -- for a body whose
+/// common case is one compare and one `Vec::push`. Counted at 23 instructions per
+/// call, where the work itself is a handful.
+#[inline(always)]
 fn encode_listpack_backlen(buf: &mut Vec<u8>, len: usize) {
     if len <= 127 {
         buf.push(len as u8);
