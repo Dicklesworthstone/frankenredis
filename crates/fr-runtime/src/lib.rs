@@ -50586,12 +50586,12 @@ fn apply_rdb_entries_to_store(
                 // HashMap (`member.clone()`) — the last redundant per-member alloc+copy on the
                 // zset RDB-load path, the qxfmr/duab9/qxfmrstream pattern still owed to zset.
                 // Byte-identical result (zadd_plain_owned_matches_default_option_engine).
-                let zset_members: Vec<(f64, Vec<u8>)> = members
-                    .into_iter()
-                    .map(|(member, score)| (score, member))
-                    .collect();
+                // (BlackThrush 2026-08-26) Hand the decoder's pairs over IN THEIR
+                // OWN ORDER. `RdbValue::SortedSet` already holds (member, score),
+                // which is what the bulk builder wants; flipping to (score, member)
+                // here only forced the store's loading fast path to flip back.
                 store
-                    .zadd_plain_owned_loading(&key, zset_members, now_ms)
+                    .zadd_pairs_loading(&key, members, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(

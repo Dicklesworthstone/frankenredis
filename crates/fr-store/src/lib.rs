@@ -23005,6 +23005,64 @@ impl Store {
         self.zadd_plain_owned_with_encoding_refresh::<false, true>(key, members, now_ms)
     }
 
+    /// RDB / AOF load of a zset from the decoder's OWN pair order.
+    ///
+    /// (BlackThrush 2026-08-26) `RdbValue::SortedSet` holds `(member, score)`,
+    /// which is exactly what `SortedSet::from_unique_pairs_with_limits` wants. The
+    /// load path nonetheless reordered it TWICE: the apply arm flipped it to
+    /// `(score, member)` to reach [`Self::zadd_plain_owned_loading`], whose
+    /// loading fast path then flipped it straight back. Two full rebuilds of an
+    /// 8,000-element vector per 200-key DEBUG RELOAD, for a tuple whose halves
+    /// were already in the right order -- 8,400 `memcpy` CALLS per op, counted,
+    /// attributed to that function alone.
+    ///
+    /// Same fast path, same guarantees, same fallback: the bulk build is taken
+    /// only for an absent key whose members the stack probe PROVES unique, and
+    /// anything else falls through to the established owned path with today's
+    /// semantics.
+    pub fn zadd_pairs_loading(
+        &mut self,
+        key: &[u8],
+        mut pairs: Vec<(Vec<u8>, f64)>,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if pairs.len() > 1
+            && pairs.len() <= RESTORE_STACK_DUP_MAX
+            && !self.entries.contains_key(key)
+            && !restore_items_have_duplicate_key(&pairs, |(member, _)| member.as_slice())
+        {
+            let zset_max_entries = self.zset_max_listpack_entries;
+            let zset_max_value = self.zset_max_listpack_value;
+            let lfu_tracking_enabled = self.lfu_tracking_enabled();
+            // Canonicalise IN PLACE. The old path only ever reached
+            // `canonicalize_zero_score` while rebuilding the vector; doing it here
+            // keeps -0.0 folding to +0.0 exactly as before, without the rebuild.
+            for pair in &mut pairs {
+                pair.1 = canonicalize_zero_score(pair.1);
+            }
+            let added = pairs.len();
+            let zs =
+                SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
+            let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+            entry.touch_write(now_ms, lfu_tracking_enabled);
+            Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
+            self.internal_entries_insert(key.to_vec(), entry);
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            self.dirty = self.dirty.saturating_add(added as u64);
+            return Ok(added);
+        }
+        // Rare: an existing key, a duplicate, a singleton, or a set past the probe
+        // bound. Hand it to the established path in the order that one expects.
+        let flipped: Vec<(f64, Vec<u8>)> = pairs
+            .into_iter()
+            .map(|(member, score)| (score, member))
+            .collect();
+        self.zadd_plain_owned_loading(key, flipped, now_ms)
+    }
+
     /// Collapse adjacent flagless ZADD commands for one key and one member to
     /// their final score. The shared-nothing reactor owns the partition for the
     /// complete run, so no intermediate score can be observed. The first
