@@ -15268,7 +15268,27 @@ impl Store {
         let entry = self.internal_entry(key, || Value::Hash(Box::new(map)), now_ms);
         entry.touch_lru(now_ms);
         entry.modification_count = entry.modification_count.wrapping_add(count);
-        Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
+        // (BlackThrush 2026-08-26) The O(n) re-walk here could only ever answer
+        // "no". `VerbatimListpackHash::try_from_rdb` DECLINES -- returns the blob
+        // back for the materialising route -- when `pair_count > max_entries` or
+        // when any `entry.byte_len() > max_value`. Reaching this line therefore
+        // PROVES both halves of `needs_hashtable` false, and
+        // `refresh_hash_encoding_flag` was re-deriving that by iterating every
+        // field of the hash it had just built.
+        //
+        // Counted on a 200-key x 40-field DEBUG RELOAD: 8,200 `HashFieldMapIter`
+        // steps per op reached from this function, each ~87 instructions once
+        // `get_index` and the two iterator layers are included -- about 717,000
+        // instructions per op spent confirming a guarantee the builder already
+        // enforced.
+        //
+        // `refresh_hash_encoding_flag_from_max_len` is the O(1) form
+        // `frankenredis-3uuan` built for the RESTORE route, which got this fix
+        // while the RDB-FILE route kept the re-walk -- the same two-routes split
+        // `project_rdb_load_and_restore_were_two_routes` exists to catch. Passing
+        // 0 as the observed max element length is exactly the guarantee above;
+        // the entry-count term is still evaluated, and is O(1).
+        Self::refresh_hash_encoding_flag_from_max_len(entry, 0, max_entries, max_value);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(count);
         Ok(None)
