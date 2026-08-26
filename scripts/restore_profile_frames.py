@@ -75,15 +75,18 @@ def read_reply(sock, buf):
 
 KIND = "hash"
 OP = "restore"
+KEYS = 1
 
 
 def main():
-    global KIND, OP
+    global KIND, OP, KEYS
     for a in sys.argv[1:]:
         if a.startswith("--type="):
             KIND = a.split("=", 1)[1]
         if a.startswith("--op="):
             OP = a.split("=", 1)[1]
+        if a.startswith("--keys="):
+            KEYS = int(a.split("=", 1)[1])
     argv = [a for a in sys.argv[1:] if not a.startswith("--")]
     if len(argv) != 3:
         print("usage: restore_profile_frames.py <fr_binary> <members> <ops>", file=sys.stderr)
@@ -150,26 +153,36 @@ def main():
         # container is hashtable-encoded and saves as the PLAIN RDB type, so the
         # listpack decode arm never runs and the profile silently describes a
         # different route.
-        if KIND == "list":
-            sock.sendall(resp("RPUSH", "src", *["v%04d" % i for i in range(members)]))
-        elif KIND == "set":
-            sock.sendall(resp("SADD", "src", *["v%04d" % i for i in range(members)]))
-        elif KIND == "zset":
-            args = []
-            for i in range(members):
-                args += [str(i), "v%04d" % i]
-            sock.sendall(resp("ZADD", "src", *args))
-        else:
-            fields = []
-            for i in range(members):
-                fields += ["f%04d" % i, "v%04d" % i]
-            sock.sendall(resp("HSET", "src", *fields))
-        seed_reply, buf = read_reply(sock, buf)
+        # (BlackThrush 2026-08-25) `--keys=N` seeds N containers rather than one.
+        # DEBUG RELOAD saves and loads the WHOLE db, so a one-key profile charges
+        # every per-RELOAD fixed cost against one container and the per-key frames
+        # -- which is what the reload gap actually is -- barely register.
+        for index in range(KEYS):
+            key = "src:%d" % index
+            if KIND == "list":
+                sock.sendall(resp("RPUSH", key, *["v%04d" % i for i in range(members)]))
+            elif KIND == "set":
+                sock.sendall(resp("SADD", key, *["v%04d" % i for i in range(members)]))
+            elif KIND == "zset":
+                args = []
+                for i in range(members):
+                    args += [str(i), "v%04d" % i]
+                sock.sendall(resp("ZADD", key, *args))
+            else:
+                fields = []
+                for i in range(members):
+                    fields += ["f%04d" % i, "v%04d" % i]
+                sock.sendall(resp("HSET", key, *fields))
+        seed_reply = b""
+        for _ in range(KEYS):
+            seed_reply, buf = read_reply(sock, buf)
+            if seed_reply.startswith(b"-"):
+                break
         # And CHECK it. The swallowed error above is what made the stale-keyspace
         # contamination invisible rather than loud.
         if seed_reply.startswith(b"-"):
             raise RuntimeError("seed command failed: %r" % seed_reply)
-        sock.sendall(resp("DUMP", "src"))
+        sock.sendall(resp("DUMP", "src:0"))
         payload, buf = read_reply(sock, buf)
         if not payload:
             raise RuntimeError("empty DUMP")

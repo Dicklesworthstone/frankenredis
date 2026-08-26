@@ -39,7 +39,7 @@ a fr/redis figure printed from a run whose null missed the band is not quotable.
 Every arm also prints the sha256 of `/proc/<pid>/exe` of the server that served it,
 and the run aborts if an arm's N and 2N launches did not run the same ELF.
 
-Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset] [--op=restore|reload] [--aa]
+Usage: restore_instr_per_op.py <fr_bin> <members> <ops> [--type=hash|list|set|zset] [--op=restore|reload] [--aa] [--keys=N]
 """
 from __future__ import annotations
 
@@ -143,7 +143,7 @@ def total_ir(path):
     return total
 
 
-def seed_command(kind, members):
+def seed_command(kind, members, key="src"):
     """The command that builds the source container, by container type.
 
     (frankenredis-gvm6z) LIST was added because the retained-listpack-span lever
@@ -157,13 +157,13 @@ def seed_command(kind, members):
         fields = []
         for i in range(members):
             fields += ["f%04d" % i, "v%04d" % i]
-        return resp("HSET", "src", *fields)
+        return resp("HSET", key, *fields)
     if kind == "list":
         # Short string elements: this is the listpack (QUICKLIST_2 type 2) regime,
         # which is the one the span lever decodes. Letter-leading on purpose --
         # a digit-leading payload takes the derivation-guard path and measures a
         # different frame (frankenredis-qj6jn).
-        return resp("RPUSH", "src", *["v%04d" % i for i in range(members)])
+        return resp("RPUSH", key, *["v%04d" % i for i in range(members)])
     if kind == "set":
         # (frankenredis-qj6jn) SET and ZSET were added for the same reason LIST was:
         # their RDB-FILE load arms materialise one owned Vec<u8> per member out of a
@@ -177,7 +177,7 @@ def seed_command(kind, members):
         # still completes and still prints a ratio, so the mistake looks like data.
         # Letter-leading members on purpose: all-integer members would save as
         # RDB_TYPE_SET_INTSET, a third arm again.
-        return resp("SADD", "src", *["v%04d" % i for i in range(members)])
+        return resp("SADD", key, *["v%04d" % i for i in range(members)])
     if kind == "zset":
         # Same threshold trap as `set`, against zset-max-listpack-entries (128).
         # Integer scores on purpose -- a listpack integer score takes the
@@ -186,7 +186,7 @@ def seed_command(kind, members):
         args = []
         for i in range(members):
             args += [str(i), "v%04d" % i]
-        return resp("ZADD", "src", *args)
+        return resp("ZADD", key, *args)
     raise SystemExit("unknown container type %r (want hash|list|set|zset)" % kind)
 
 
@@ -234,7 +234,21 @@ def elf_identity_from_maps(pid, binary):
     return digest.hexdigest()
 
 
-def run(binary, tag, port, members, ops, workdir, kind="hash", op="restore"):
+def run(binary, tag, port, members, ops, workdir, kind="hash", op="restore", keys=1):
+    # ONE DIRECTORY PER LAUNCH, and it is load-bearing for `--op=reload`.
+    #
+    # (BlackThrush 2026-08-25) Every launch used to share one workdir. That is
+    # harmless for `--op=restore`, which writes no rdb, and it silently destroys
+    # `--op=reload`: DEBUG RELOAD SAVES the whole db to `<dir>/dump.rdb`, so the
+    # NEXT server started with the same `--dir` LOADS the previous launch's dump
+    # at startup -- across arms, and across ENGINES. It cost me a full battery.
+    # The tell was not the ratios, which looked plausible, but the A/A null
+    # (0.66x-1.40x on four shapes) and the list arm's two same-ELF runs reporting
+    # DIFFERENT DUMP payload sizes, 191 B against 212 B.
+    #
+    # Same trap `restore_profile_frames.py` documents for a fixed profile dir.
+    workdir = os.path.join(workdir, tag)
+    os.makedirs(workdir, exist_ok=True)
     out = os.path.join(workdir, "cg.%s.out" % tag)
     argv = ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out,
             "--collect-systime=no", binary, "--port", str(port), "--save", "",
@@ -263,11 +277,23 @@ def run(binary, tag, port, members, ops, workdir, kind="hash", op="restore"):
         exe_sha = elf_identity_from_maps(proc.pid, binary)
         buf = b""
 
-        sock.sendall(seed_command(kind, members))
-        _, buf = read_reply(sock, buf)
+        # (BlackThrush 2026-08-25) SEED `keys` CONTAINERS, NOT ONE. This harness
+        # only ever built a single key, which is correct for `--op=restore` (the
+        # op is per-key) and MISLEADING for `--op=reload`: DEBUG RELOAD saves and
+        # loads the WHOLE db, so a one-key db charges every per-RELOAD fixed cost
+        # -- rdb header, aux fields, opcode framing, file round-trip -- against
+        # one container and buries the per-key term the ratio is supposed to
+        # expose. Reload read 1.02-1.40x per type at one key; that number is a
+        # statement about fixed cost, not about reload.
+        for index in range(keys):
+            sock.sendall(seed_command(kind, members, "src:%d" % index))
+        for _ in range(keys):
+            reply, buf = read_reply(sock, buf)
+            if reply.startswith(b"-"):
+                raise RuntimeError("%s seed failed: %r" % (tag, reply))
         # Take the payload from the engine under test, so each arm restores a
         # payload its own DUMP produced rather than one translated between them.
-        sock.sendall(resp("DUMP", "src"))
+        sock.sendall(resp("DUMP", "src:0"))
         payload, buf = read_reply(sock, buf)
         if not payload:
             raise RuntimeError("%s produced an empty DUMP" % tag)
@@ -356,6 +382,13 @@ def main():
     # fr/redis figure and "I ran two arms that happened to differ" are
     # indistinguishable from inside the run.
     aa = "--aa" in sys.argv
+    # `--keys=N`, not `--keys N`: the positional filter below is
+    # `[a for a in sys.argv[1:] if not a.startswith("--")]`, so a separated value
+    # survives as a fourth positional and the run dies on the usage line.
+    keys = 1
+    for a in sys.argv[1:]:
+        if a.startswith("--keys="):
+            keys = int(a.split("=", 1)[1])
     AA_BAND = 0.005  # 0.5 pct; the doc above measures this harness's fr arm at 0.03 pct
     port = 47800 + (os.getpid() % 200) * 4
     with tempfile.TemporaryDirectory(dir="/data/tmp") as workdir:
@@ -368,8 +401,8 @@ def main():
             arms.append(("fr_aa", fr_bin))
         for idx, (name, binary) in enumerate(arms):
             base = port + idx * 2
-            a, plen, sha_a = run(binary, name + ".n", base, members, ops, workdir, kind, op)
-            b, _, sha_b = run(binary, name + ".2n", base + 1, members, ops * 2, workdir, kind, op)
+            a, plen, sha_a = run(binary, name + ".n", base, members, ops, workdir, kind, op, keys)
+            b, _, sha_b = run(binary, name + ".2n", base + 1, members, ops * 2, workdir, kind, op, keys)
             # A two-point subtraction across two different ELFs is not a
             # measurement of either one (`feedback_a_failed_build_leaves_a_stale_elf`).
             if sha_a != sha_b:
