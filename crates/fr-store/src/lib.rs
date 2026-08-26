@@ -28217,6 +28217,7 @@ impl Store {
             StreamEntries::from_sorted_entries_repeated_fields(
                 entries.iter(),
                 entries.arena_hint(),
+                entries.field_count(),
             )
         } else {
             let mut map = StreamEntries::new();
@@ -35964,6 +35965,7 @@ impl Store {
                             return Ok(StreamEntries::from_sorted_entries_repeated_fields(
                                 stream_entries.iter(),
                                 stream_entries.arena_hint(),
+                                stream_entries.field_count(),
                             ));
                         }
                         let mut entries = StreamEntries::new();

@@ -563,7 +563,7 @@ impl<'a> Iterator for GenericSetIter<'a> {
     // ELEMENT on the RDB path; the plain hint is declined at this body size
     // (9d7be9b44).
     #[inline(always)]
-fn next(&mut self) -> Option<&'a [u8]> {
+    fn next(&mut self) -> Option<&'a [u8]> {
         match self {
             GenericSetIter::Packed(it) => it.next(),
             GenericSetIter::Hash(it) => it.next(),
@@ -2210,12 +2210,30 @@ impl PackedStreamLog {
         field_dict: &mut Vec<Box<[u8]>>,
         index: &mut std::collections::HashMap<&'a [u8], usize, foldhash::quality::RandomState>,
         name: &'a [u8],
+        hint: usize,
     ) -> usize {
         // ONE hash, not two. `get` then `insert` hashes the name twice on a miss,
         // and on the shape this index exists for -- every entry carrying a new
         // field name -- EVERY lookup is a miss. Measured at 84,453 Ir/op in this
         // function plus 82,842 in `HashMap::insert`, 17.8 pct of a varying-schema
         // stream RESTORE.
+        // Reserve only once the names are KNOWN to vary. Firing on the first name
+        // would size the table from `hint` for a stream whose dictionary ends up
+        // holding two entries -- measured at +0.23 pct on the SAMEFIELDS shape,
+        // which is most streams. Waiting until the ninth DISTINCT name costs the
+        // varying case three cheap early doublings and costs the common case
+        // nothing.
+        const RESERVE_AFTER: usize = 8;
+        if index.len() == RESERVE_AFTER && hint > RESERVE_AFTER && index.capacity() < hint {
+            // ONE growth for the whole build. Inserting `hint` names into a map that
+            // starts empty rehashes everything already in it at each of ~log2(hint)
+            // doublings -- measured at 63,668 Ir/op, 7.3 pct of a varying-schema
+            // stream RESTORE, in `RawTable::reserve_rehash`. The reserve happens on
+            // the first name that actually REACHES the index, so a stream whose
+            // names repeat (answered by the address cache above) never allocates a
+            // table sized for names it does not have.
+            index.reserve(hint - RESERVE_AFTER);
+        }
         match index.entry(name) {
             std::collections::hash_map::Entry::Occupied(slot) => *slot.get(),
             std::collections::hash_map::Entry::Vacant(slot) => {
@@ -2481,7 +2499,7 @@ impl PackedStreamLog {
         V: AsRef<[u8]> + 'a,
         I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
     {
-        Self::from_sorted_entries_impl::<F, V, I, false>(entries, 0)
+        Self::from_sorted_entries_impl::<F, V, I, false>(entries, 0, 0)
     }
 
     /// Same builder, for callers whose entries present the SAME field-name buffers
@@ -2500,18 +2518,23 @@ impl PackedStreamLog {
     /// accumulates copies the whole buffer, not one element. Capacity never affects
     /// content, so a wrong hint costs at most one growth. Pass 0 for "unknown".
     #[must_use]
-    pub fn from_sorted_entries_repeated_fields<'a, F, V, I>(entries: I, arena_hint: usize) -> Self
+    pub fn from_sorted_entries_repeated_fields<'a, F, V, I>(
+        entries: I,
+        arena_hint: usize,
+        field_hint: usize,
+    ) -> Self
     where
         F: AsRef<[u8]> + 'a,
         V: AsRef<[u8]> + 'a,
         I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
     {
-        Self::from_sorted_entries_impl::<F, V, I, true>(entries, arena_hint)
+        Self::from_sorted_entries_impl::<F, V, I, true>(entries, arena_hint, field_hint)
     }
 
     fn from_sorted_entries_impl<'a, F, V, I, const CACHE_FIELDS: bool>(
         entries: I,
         arena_hint: usize,
+        field_hint: usize,
     ) -> Self
     where
         F: AsRef<[u8]> + 'a,
@@ -2592,13 +2615,17 @@ impl PackedStreamLog {
                     if cached.0 == name_ptr && cached.1 == name_len {
                         cached.2
                     } else {
-                        let fresh =
-                            Self::intern_indexed(&mut log.field_dict, &mut dict_index, name);
+                        let fresh = Self::intern_indexed(
+                            &mut log.field_dict,
+                            &mut dict_index,
+                            name,
+                            field_hint,
+                        );
                         field_cache[slot] = (name_ptr, name_len, fresh);
                         fresh
                     }
                 } else {
-                    Self::intern_indexed(&mut log.field_dict, &mut dict_index, name)
+                    Self::intern_indexed(&mut log.field_dict, &mut dict_index, name, field_hint)
                 };
                 write_varint(&mut log.arena, idx);
                 write_varint(&mut log.arena, v.as_ref().len());
@@ -9105,13 +9132,40 @@ mod tests {
     fn list_lp_entry_bytes_matches_fr_persist_twin_qj6jn() {
         let mut cases: Vec<Vec<u8>> = Vec::new();
         for n in [
-            "0", "1", "127", "128", "-1", "-4096", "-4097", "4095", "4096", "32767", "-32768",
-            "32768", "8388607", "-8388608", "8388608", "2147483647", "-2147483648",
-            "2147483648", "9223372036854775807", "-9223372036854775808",
+            "0",
+            "1",
+            "127",
+            "128",
+            "-1",
+            "-4096",
+            "-4097",
+            "4095",
+            "4096",
+            "32767",
+            "-32768",
+            "32768",
+            "8388607",
+            "-8388608",
+            "8388608",
+            "2147483647",
+            "-2147483648",
+            "2147483648",
+            "9223372036854775807",
+            "-9223372036854775808",
         ] {
             cases.push(n.as_bytes().to_vec());
         }
-        for t in ["007", "-0", "+1", "1.0", "", " 1", "1 ", "0x10", "9223372036854775808"] {
+        for t in [
+            "007",
+            "-0",
+            "+1",
+            "1.0",
+            "",
+            " 1",
+            "1 ",
+            "0x10",
+            "9223372036854775808",
+        ] {
             cases.push(t.as_bytes().to_vec());
         }
         for len in [0usize, 1, 63, 64, 65, 4095, 4096, 4097] {
@@ -9125,7 +9179,8 @@ mod tests {
             let ours = super::list_lp_entry_bytes(case);
             let theirs = fr_persist::listpack_entry_encoded_len(case) as u64;
             assert_eq!(
-                ours, theirs,
+                ours,
+                theirs,
                 "fr-store and fr-persist disagree on the listpack length of {:?} (len {}): \
                  a divergence here moves quicklist node boundaries and so changes DUMP bytes \
                  against the incumbent",
@@ -9945,9 +10000,7 @@ mod tests {
         // including the size where the set has just converted.
         for n in [0usize, 1, 7, 128, 129, 300] {
             let mut set = GenericSet::default();
-            let members: Vec<Vec<u8>> = (0..n)
-                .map(|i| format!("m{i:04}").into_bytes())
-                .collect();
+            let members: Vec<Vec<u8>> = (0..n).map(|i| format!("m{i:04}").into_bytes()).collect();
             for m in &members {
                 set.insert(m.clone());
             }

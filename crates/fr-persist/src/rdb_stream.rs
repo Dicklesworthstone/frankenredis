@@ -1104,6 +1104,13 @@ impl<F> StreamOut<F> {
         self.fields.reserve(entries.saturating_mul(2));
     }
 
+    /// Total field slots across all entries -- an exact UPPER BOUND on the number
+    /// of distinct field names, for sizing a consumer's dictionary index.
+    #[must_use]
+    pub fn field_count(&self) -> usize {
+        self.fields.len()
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.index.len()
