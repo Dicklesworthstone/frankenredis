@@ -12,7 +12,7 @@ use fr_protocol::{RespFrame, RespParseError};
 pub mod listpack;
 #[allow(dead_code)]
 pub(crate) mod rdb_stream;
-pub use rdb_stream::StreamOut;
+pub use rdb_stream::{StreamOut, UpstreamStreamSkeleton};
 pub mod ziplist;
 
 /// Render `value`'s decimal ASCII RIGHT-aligned into `dst`, returning the start index.
@@ -1409,6 +1409,18 @@ pub enum RdbValue {
     /// SAVE-SIDE SPELLING ONLY -- decoding a stream still yields
     /// [`RdbValue::Stream`], so nothing downstream of the decoder sees this.
     StreamListpacks3(Vec<u8>),
+    /// A stream whose macro-node listpacks are decompressed but whose ENTRIES are
+    /// not yet decoded.
+    ///
+    /// Emitted by the RDB FILE loader only. `Stream` forces the decoder to
+    /// materialise every entry as `Vec<(Vec<u8>, Vec<u8>)>` -- 201 allocations per
+    /// key, 73 pct of every allocation a stream DEBUG RELOAD makes -- purely so the
+    /// entries can outlive the blob they were decoded from and cross this enum.
+    /// Carrying the skeleton instead moves the decode to the point of USE, where it
+    /// can borrow the blobs the skeleton owns, exactly as the RESTORE command
+    /// already does (b020ef2a4). Consumers that want owned entries call
+    /// [`UpstreamStreamSkeleton::owned_entries`].
+    StreamSkeleton(Box<rdb_stream::UpstreamStreamSkeleton>),
     /// Stream: entries + optional watermark + consumer groups + raw upstream
     /// metadata (for byte-exact replay) + entries-added counter +
     /// max-deleted-entry-id watermark (`None` == `0-0`, i.e. nothing deleted).
@@ -2198,6 +2210,15 @@ fn encode_rdb_internal(
                     buf.push(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3);
                     rdb_encode_string(&mut buf, &entry.key);
                     buf.extend_from_slice(blob);
+                }
+                // VERBATIM, same reasoning: a skeleton still holds the exact
+                // upstream record body it was decoded from, so a loaded stream
+                // re-saves byte-for-byte without re-deriving a payload from
+                // entries it has not even decoded.
+                RdbValue::StreamSkeleton(skeleton) => {
+                    buf.push(skeleton.upstream_type_byte());
+                    rdb_encode_string(&mut buf, &entry.key);
+                    buf.extend_from_slice(skeleton.upstream_payload());
                 }
                 RdbValue::Stream(
                     stream_entries,
@@ -4721,6 +4742,23 @@ pub fn canonicalise_rdb_value(value: &RdbValue) -> RdbValue {
                 None => value.clone(),
             }
         }
+        // (BlackThrush) A loaded stream carries its skeleton; content comparison
+        // wants the entries, so expand to the owned form here. This is the slow
+        // path on purpose -- it exists for differential comparison, not for load.
+        RdbValue::StreamSkeleton(skeleton) => match skeleton.owned_entries() {
+            Ok(entries) => RdbValue::Stream(
+                entries,
+                skeleton.watermark(),
+                skeleton.groups().to_vec(),
+                // The raw upstream record is RETAINED, not dropped: callers rely on
+                // it for byte-exact replay, and dropping it here would make this
+                // "canonical" form lossy.
+                Some(skeleton.metadata().clone()),
+                Some(skeleton.entries_added()),
+                skeleton.max_deleted(),
+            ),
+            Err(_) => value.clone(),
+        },
         other => other.clone(),
     }
 }
@@ -5280,11 +5318,17 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                         )
                     }
                     UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2 | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3 => {
-                        let (value, consumed) =
-                            rdb_stream::decode_upstream_stream_skeleton(type_byte, &data[cursor..])
+                        // The SKELETON, not the entries. Decoding entries here
+                        // materialises `Vec<(Vec<u8>, Vec<u8>)>` per entry -- 201
+                        // allocations per key, 73 pct of every allocation a stream
+                        // DEBUG RELOAD makes -- only so they can outlive the blob
+                        // and cross `RdbValue`. The applier decodes them BORROWED
+                        // out of the blobs this skeleton owns.
+                        let (skeleton, consumed) =
+                            rdb_stream::UpstreamStreamSkeleton::decode(type_byte, &data[cursor..])
                                 .map_err(|_| PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        value
+                        RdbValue::StreamSkeleton(Box::new(skeleton))
                     }
                     RDB_TYPE_SET_INTSET => {
                         // Payload is a string-wrapped binary intset blob.
@@ -7197,7 +7241,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _aux) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -7213,7 +7257,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -7229,7 +7273,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -7380,7 +7424,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -7396,7 +7440,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -7415,7 +7459,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -7431,7 +7475,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -7448,7 +7492,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &aux);
         let (decoded, aux_map) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
         assert_eq!(aux_map.get("redis-ver").map(String::as_str), Some("7.0.0"));
@@ -7732,7 +7776,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -8486,7 +8530,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode lzf-encoded string");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
 
@@ -8522,7 +8566,7 @@ mod tests {
         );
         let (decoded, _) = decode_rdb(&encoded).expect("decode short string");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -10311,7 +10355,17 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
+        // The RDB file loader decodes a stream to its SKELETON; the type byte it
+        // was saved as is the same fact, read off the skeleton instead of the
+        // metadata tuple field. The assertion is unchanged.
         match &decoded[0].value {
+            RdbValue::StreamSkeleton(skeleton) => {
+                assert_eq!(
+                    skeleton.upstream_type_byte(),
+                    UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
+                    "stream must SAVE as type 21 (STREAM_LISTPACKS_3)"
+                );
+            }
             RdbValue::Stream(_, _, _, Some(md), _, _) => {
                 assert_eq!(
                     md.upstream_type_byte, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
@@ -10350,7 +10404,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -10373,7 +10427,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -10389,7 +10443,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -10412,7 +10466,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -10463,7 +10517,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -10505,6 +10559,10 @@ mod tests {
 
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(decoded.len(), 1);
+        // The loader yields a SKELETON; canonicalise expands it to the owned form
+        // so every assertion below still compares entries, groups, PEL and
+        // counters -- only the variant stops being load-bearing.
+        let decoded_value = canonicalise_rdb_value(&decoded[0].value);
         let RdbValue::Stream(
             decoded_entries,
             decoded_watermark,
@@ -10512,7 +10570,7 @@ mod tests {
             metadata,
             decoded_entries_added,
             _,
-        ) = &decoded[0].value
+        ) = &decoded_value
         else {
             panic!("expected decoded stream");
         };
@@ -10690,7 +10748,7 @@ mod tests {
 
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
     }
@@ -10727,6 +10785,10 @@ mod tests {
         let encoded =
             encode_single_raw_rdb_entry(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, b"stream", &payload);
         let (decoded, _) = decode_rdb(&encoded).expect("decode type21 stream");
+        // The loader yields a SKELETON; canonicalise expands it so this still
+        // asserts the full decoded content -- entries, groups, consumers, PEL and
+        // counters -- and only the variant stops being load-bearing.
+        let decoded = canonicalise_rdb_entries(decoded);
         assert_eq!(
             decoded,
             vec![RdbEntry {
@@ -10838,7 +10900,7 @@ mod tests {
         let encoded = encode_rdb(&entries, &[("redis-ver", "7.2.0")]);
         let (decoded, aux) = decode_rdb(&encoded).expect("decode");
         assert_eq!(
-            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            strip_stream_metadata(canonicalise_rdb_entries(decoded)),
             entries
         );
         assert_eq!(aux.get("redis-ver").map(String::as_str), Some("7.2.0"));
@@ -11354,6 +11416,15 @@ mod tests {
                 // pairs so the comparison still tests every field and value and
                 // only the variant stops being load-bearing.
                 if matches!(&entry.value, RdbValue::HashListpack(_)) {
+                    entry.value = super::canonicalise_rdb_value(&entry.value);
+                }
+                // (BlackThrush 2026-08-26) And for a stream, which the RDB FILE
+                // loader now decodes to its SKELETON so the entries can be decoded
+                // borrowed at the point of use. `canonicalise_rdb_value` expands it
+                // to the owned `Stream` form, so this comparison still tests every
+                // entry, group, PEL row and counter -- only the variant stops being
+                // load-bearing, exactly as for the three above.
+                if matches!(&entry.value, RdbValue::StreamSkeleton(_)) {
                     entry.value = super::canonicalise_rdb_value(&entry.value);
                 }
                 // (frankenredis-qj6jn) And for a list written as QUICKLIST_2, which now

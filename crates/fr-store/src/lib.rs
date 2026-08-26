@@ -28184,6 +28184,50 @@ impl Store {
     /// leave (high id = the last sorted key; added = entry count). Used only by
     /// the RDB / DEBUG RELOAD stream loader, where the key is fresh; byte-
     /// identical final state to the incremental `xadd` loop.
+    /// [`Self::load_stream_entries`] fed straight from a BORROWED decode.
+    ///
+    /// The RDB loader used to hand over `Vec<(StreamId, Vec<StreamField>)>`, which
+    /// costs one allocation per field name, one per value and one per entry — 201
+    /// per key, 73 pct of every allocation a stream DEBUG RELOAD makes. Those
+    /// existed only so the entries could outlive the macro-node blob they were
+    /// decoded from. Taking `StreamOut` instead means the fields are `Cow::Borrowed`
+    /// views of blobs the caller still owns, and the packed log is built directly
+    /// from them — the same shape the RESTORE command has used since b020ef2a4.
+    pub fn load_stream_entries_borrowed(
+        &mut self,
+        key: &[u8],
+        entries: &fr_persist::StreamOut<std::borrow::Cow<'_, [u8]>>,
+        now_ms: u64,
+    ) {
+        if entries.len() == 0 {
+            return;
+        }
+        self.stream_groups.remove(key);
+        self.stream_max_deleted_ids.remove(key);
+        let mut prev: Option<StreamId> = None;
+        let strictly_increasing = entries.ids().all(|id| {
+            let ok = prev.is_none_or(|p| p < id);
+            prev = Some(id);
+            ok
+        });
+        let map = if strictly_increasing {
+            // `_repeated_fields`: under upstream's SAMEFIELDS flag every entry's
+            // j-th field name is the SAME borrowed slice, so interning by address
+            // skips the byte compare (e05e5340d).
+            StreamEntries::from_sorted_entries_repeated_fields(
+                entries.iter(),
+                entries.arena_hint(),
+            )
+        } else {
+            let mut map = StreamEntries::new();
+            for (id, fields) in entries.iter() {
+                map.insert(id, fields);
+            }
+            map
+        };
+        self.finish_stream_bulk_load(key, map, now_ms);
+    }
+
     pub fn load_stream_entries(
         &mut self,
         key: &[u8],
@@ -28212,6 +28256,13 @@ impl Store {
             }
             map
         };
+        self.finish_stream_bulk_load(key, map, now_ms);
+    }
+
+    /// The bookkeeping shared by both bulk stream loaders: last id, entries-added,
+    /// keyspace insert, digest invalidation and the dirty counter. Factored so the
+    /// owned and borrowed loaders cannot drift apart.
+    fn finish_stream_bulk_load(&mut self, key: &[u8], map: StreamEntries, now_ms: u64) {
         let count = map.len() as u64;
         let last_id = *map
             .keys()

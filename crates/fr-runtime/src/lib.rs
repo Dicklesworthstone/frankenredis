@@ -50386,6 +50386,59 @@ struct RdbLoadCounts {
     expired: usize,
 }
 
+/// Restore a stream's consumer groups from an RDB snapshot.
+///
+/// Extracted so the owned `Stream` arm and the borrowed `StreamSkeleton` arm share
+/// ONE implementation: group/PEL/consumer restoration is exactly the kind of
+/// bookkeeping that drifts when it is transcribed twice.
+fn restore_stream_groups_into(
+    store: &mut Store,
+    key: &[u8],
+    groups: &[fr_persist::RdbStreamConsumerGroup],
+    _now_ms: u64,
+) {
+    for group in groups {
+        // (frankenredis-sq4ov) Carry per-consumer seen/active times so XINFO
+        // CONSUMERS idle/inactive survive the reload. The map keys are the
+        // consumer names.
+        let consumer_metadata: std::collections::BTreeMap<
+            Vec<u8>,
+            fr_store::StreamConsumerMetadata,
+        > = group
+            .consumers
+            .iter()
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    fr_store::StreamConsumerMetadata {
+                        seen_time_ms: c.seen_time_ms,
+                        active_time_ms: c.active_time_ms,
+                    },
+                )
+            })
+            .collect();
+        let mut pending = std::collections::BTreeMap::new();
+        for pe in &group.pending {
+            pending.insert(
+                (pe.entry_id_ms, pe.entry_id_seq),
+                fr_store::StreamPendingEntry {
+                    consumer: pe.consumer.clone(),
+                    deliveries: pe.deliveries,
+                    last_delivered_ms: pe.last_delivered_ms,
+                },
+            );
+        }
+        store.restore_stream_group(
+            key,
+            group.name.clone(),
+            (group.last_delivered_id_ms, group.last_delivered_id_seq),
+            group.entries_read,
+            consumer_metadata,
+            pending,
+        );
+    }
+}
+
 fn apply_rdb_entries_to_store(
     store: &mut Store,
     entries: Vec<RdbEntry>,
@@ -50673,6 +50726,47 @@ fn apply_rdb_entries_to_store(
                 counts.expired = counts.expired.saturating_add(nested_counts.expired);
                 continue;
             }
+            // (BlackThrush 2026-08-26) The RDB FILE loader hands over a SKELETON:
+            // macro-node listpacks decompressed, entries not yet decoded. Decoding
+            // them here lets every field name and value be a `Cow::Borrowed` view
+            // of a blob the skeleton owns, instead of 201 heap allocations per key
+            // made only so the entries could outlive that blob and cross
+            // `RdbValue`. Same handling otherwise -- the metadata below is read
+            // through the skeleton's accessors rather than the tuple's fields.
+            RdbValue::StreamSkeleton(ref skeleton) => {
+                let Ok(flat) = skeleton.flat_entries() else {
+                    return Err(PersistError::InvalidFrame);
+                };
+                store.load_stream_entries_borrowed(&key, &flat, now_ms);
+                drop(flat);
+                let watermark = skeleton.watermark();
+                let entries_added = Some(skeleton.entries_added());
+                let max_deleted = skeleton.max_deleted();
+                if let Some((wm_ms, wm_seq)) = watermark {
+                    let _ = store.xsetid_with_metadata(
+                        &key,
+                        (wm_ms, wm_seq),
+                        entries_added,
+                        max_deleted,
+                        now_ms,
+                    );
+                } else if let Some(added) = entries_added {
+                    store.restore_stream_entries_added(&key, added);
+                }
+                if let Some(md) = max_deleted {
+                    store.restore_stream_max_deleted_id(&key, md);
+                }
+                restore_stream_groups_into(store, &key, skeleton.groups(), now_ms);
+                counts.loaded = counts.loaded.saturating_add(1);
+                if let Some(expires_at) = entry_expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+                continue;
+            }
             RdbValue::Stream(
                 stream_entries,
                 ref watermark,
@@ -50710,47 +50804,7 @@ fn apply_rdb_entries_to_store(
                 if let Some(max_deleted) = max_deleted {
                     store.restore_stream_max_deleted_id(&key, *max_deleted);
                 }
-                // Restore consumer groups from RDB snapshot.
-                for group in groups {
-                    // (frankenredis-sq4ov) Carry per-consumer seen/active times
-                    // so XINFO CONSUMERS idle/inactive survive the reload. The
-                    // map keys are the consumer names.
-                    let consumer_metadata: std::collections::BTreeMap<
-                        Vec<u8>,
-                        fr_store::StreamConsumerMetadata,
-                    > = group
-                        .consumers
-                        .iter()
-                        .map(|c| {
-                            (
-                                c.name.clone(),
-                                fr_store::StreamConsumerMetadata {
-                                    seen_time_ms: c.seen_time_ms,
-                                    active_time_ms: c.active_time_ms,
-                                },
-                            )
-                        })
-                        .collect();
-                    let mut pending = std::collections::BTreeMap::new();
-                    for pe in &group.pending {
-                        pending.insert(
-                            (pe.entry_id_ms, pe.entry_id_seq),
-                            fr_store::StreamPendingEntry {
-                                consumer: pe.consumer.clone(),
-                                deliveries: pe.deliveries,
-                                last_delivered_ms: pe.last_delivered_ms,
-                            },
-                        );
-                    }
-                    store.restore_stream_group(
-                        &key,
-                        group.name.clone(),
-                        (group.last_delivered_id_ms, group.last_delivered_id_seq),
-                        group.entries_read,
-                        consumer_metadata,
-                        pending,
-                    );
-                }
+                restore_stream_groups_into(store, &key, groups, now_ms);
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
                         &key,

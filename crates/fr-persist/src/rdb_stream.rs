@@ -664,7 +664,8 @@ pub(crate) fn decode_upstream_stream_skeleton(
 /// was to copy every field onto the heap. Holding the blobs here instead means
 /// [`Self::entries`] can hand out `Cow::Borrowed` slices that live exactly as
 /// long as `self`.
-pub(crate) struct UpstreamStreamSkeleton {
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpstreamStreamSkeleton {
     /// `(master_ms, master_seq, decompressed listpack)` per radix-tree node.
     nodes: Vec<(u64, u64, Vec<u8>)>,
     watermark: Option<(u64, u64)>,
@@ -677,7 +678,7 @@ pub(crate) struct UpstreamStreamSkeleton {
 impl UpstreamStreamSkeleton {
     /// Decode every entry in the record, borrowing field names and values
     /// directly out of the retained macro-node blobs.
-    pub(crate) fn entries(&self) -> Result<Vec<BorrowedStreamEntry<'_>>, UpstreamStreamError> {
+    pub fn entries(&self) -> Result<Vec<BorrowedStreamEntry<'_>>, UpstreamStreamError> {
         self.decode_entries()
     }
 
@@ -690,7 +691,7 @@ impl UpstreamStreamSkeleton {
     /// `&[(F, F)]` per entry either way ([`PackedStreamLog::from_sorted_entries`]
     /// takes exactly that), so the fields can live end-to-end in one allocation
     /// and each entry can be a subslice.
-    pub(crate) fn flat_entries(&self) -> Result<StreamOut<Cow<'_, [u8]>>, UpstreamStreamError> {
+    pub fn flat_entries(&self) -> Result<StreamOut<Cow<'_, [u8]>>, UpstreamStreamError> {
         let mut out = StreamOut::default();
         for (master_ms, master_seq, blob) in &self.nodes {
             let lp = decode_raw_values(blob)?;
@@ -706,7 +707,7 @@ impl UpstreamStreamSkeleton {
     /// it never builds a `Cow` intermediate only to convert and drop it. Going
     /// through `Cow` here cost the DEBUG RELOAD arm +0.75 pct, which is about 41
     /// extra allocations per op: one per entry plus the outer vector.
-    pub(crate) fn owned_entries(&self) -> Result<Vec<StreamEntry>, UpstreamStreamError> {
+    pub fn owned_entries(&self) -> Result<Vec<StreamEntry>, UpstreamStreamError> {
         self.decode_entries()
     }
 
@@ -724,19 +725,49 @@ impl UpstreamStreamSkeleton {
         Ok(out.entries)
     }
 
-    pub(crate) fn watermark(&self) -> Option<(u64, u64)> {
+    #[must_use]
+    pub fn watermark(&self) -> Option<(u64, u64)> {
         self.watermark
     }
 
-    pub(crate) fn entries_added(&self) -> u64 {
+    #[must_use]
+    pub fn entries_added(&self) -> u64 {
         self.entries_added
     }
 
-    pub(crate) fn max_deleted(&self) -> Option<(u64, u64)> {
+    #[must_use]
+    pub fn max_deleted(&self) -> Option<(u64, u64)> {
         self.max_deleted
     }
 
-    pub(crate) fn into_groups(self) -> Vec<RdbStreamConsumerGroup> {
+    /// The verbatim upstream record body this skeleton was decoded from, and its
+    /// type byte. Re-encoding a loaded stream writes these back unchanged, which
+    /// is both cheaper than re-deriving a payload from decoded entries and the
+    /// more faithful round trip -- the same reason the blob-carrying variants
+    /// exist on the save side.
+    #[must_use]
+    pub fn upstream_payload(&self) -> &[u8] {
+        &self.metadata.upstream_payload
+    }
+
+    #[must_use]
+    pub fn upstream_type_byte(&self) -> u8 {
+        self.metadata.upstream_type_byte
+    }
+
+    /// The retained raw upstream record, kept for byte-exact replay.
+    #[must_use]
+    pub fn metadata(&self) -> &RdbStreamMetadata {
+        &self.metadata
+    }
+
+    #[must_use]
+    pub fn groups(&self) -> &[RdbStreamConsumerGroup] {
+        &self.groups
+    }
+
+    #[must_use]
+    pub fn into_groups(self) -> Vec<RdbStreamConsumerGroup> {
         self.groups
     }
 
@@ -752,7 +783,7 @@ impl UpstreamStreamSkeleton {
         )
     }
 
-    pub(crate) fn decode(type_byte: u8, data: &[u8]) -> Result<(Self, usize), UpstreamStreamError> {
+    pub fn decode(type_byte: u8, data: &[u8]) -> Result<(Self, usize), UpstreamStreamError> {
         let is_v2_or_later = match type_byte {
             crate::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS => false,
             crate::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2 => true,
