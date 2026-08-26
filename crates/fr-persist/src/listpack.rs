@@ -1294,6 +1294,102 @@ pub fn decode_zset_spans_and_scores(
     } else {
         Vec::new()
     };
+    let mut count = 0usize;
+    // (BlackThrush 2026-08-26) DECODE THE PAIR, NOT ONE ENTRY AND A MEMORY OF THE
+    // LAST ONE. This loop used to carry the member in an
+    // `Option<ListpackValueSpan>` and `.take()` it on every entry, so each pair
+    // paid two moves of a 32-byte span (the type is capped at 32 by a
+    // compile-time assert, so the `Option` is ~40) plus two discriminant writes
+    // and a match, purely to remember which half of the pair it was on. A zset
+    // listpack strictly alternates member, score, member, score -- that is the
+    // shape of the data, so it can be the shape of the loop.
+    //
+    // Measured before the change: this function's SELF cost is 3,630 instructions
+    // per zset RESTORE of 40 members, 45 per entry on top of `decode_entry_raw`.
+    //
+    // SAME ERRORS, same order of detection. A trailing member with no score used
+    // to fall out of the `pending.is_some()` check after the loop; it now falls
+    // out of the score decode, which reaches the same
+    // `ElementCountMismatch`. Every other guard -- the per-entry bounds check
+    // against `end`, the terminator check, the header count check -- is
+    // unchanged and still runs per ENTRY, not per pair.
+    while cursor < end {
+        let (raw_member, consumed) = decode_entry_raw(data, cursor)?;
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+        // Member half: rendered exactly as the general decoder would.
+        let member = match raw_member {
+            RawListpackValue::String(range) => {
+                ListpackValueSpan::String(narrow_span(range.start, range.end)?)
+            }
+            RawListpackValue::Integer(value) => ListpackValueSpan::integer(value),
+        };
+
+        // Score half. An odd element count lands here with nothing left to read.
+        if cursor >= end {
+            return Err(ListpackError::ElementCountMismatch);
+        }
+        let (raw_score, consumed) = decode_entry_raw(data, cursor)?;
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+        // An integer-encoded score is taken as a number and never rendered. A
+        // string-encoded one is parsed, and that is the only branch that can
+        // produce NaN.
+        let score = match raw_score {
+            #[allow(clippy::cast_precision_loss)]
+            RawListpackValue::Integer(value) => value as f64,
+            RawListpackValue::String(range) => {
+                let text = std::str::from_utf8(&data[range])
+                    .map_err(|_| ListpackError::TruncatedEntry)?;
+                let parsed: f64 = text.parse().map_err(|_| ListpackError::TruncatedEntry)?;
+                if parsed.is_nan() {
+                    return Err(ListpackError::TruncatedEntry);
+                }
+                parsed
+            }
+        };
+        pairs.push((member, score));
+        count += 2;
+    }
+    if cursor != end {
+        return Err(ListpackError::MissingTerminator);
+    }
+    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && count != usize::from(num_elements) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    Ok(pairs)
+}
+
+/// Bench-only reference: the pre-change zset span decode that
+/// [`decode_zset_spans_and_scores`] replaces -- one entry per iteration, with the
+/// member carried between iterations in an `Option<ListpackValueSpan>` and
+/// `.take()`n on every entry.
+///
+/// Kept in-crate (like `decode_zset_listpack_pairs_orig` and
+/// `entry_len_with_backlen_orig`) so the same-binary A/B measures exactly what
+/// shipped: wall clock is unusable on this host and a server-level ratio needs a
+/// quiet window, but a pure decode kernel measured by callgrind slope is
+/// deterministic and load-immune. Result is identical to the production path;
+/// `examples/zset_span_decode_ab.rs` asserts that before timing.
+pub fn decode_zset_spans_and_scores_orig(
+    data: &[u8],
+) -> Result<Vec<(ListpackValueSpan, f64)>, ListpackError> {
+    let (total_bytes, num_elements) = parse_header(data)?;
+    let end = (total_bytes as usize) - 1;
+    let mut cursor = LISTPACK_HEADER_SIZE;
+    let mut pairs = if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN {
+        Vec::with_capacity(usize::from(num_elements) / 2)
+    } else {
+        Vec::new()
+    };
     let mut pending: Option<ListpackValueSpan> = None;
     let mut count = 0usize;
     while cursor < end {
@@ -1306,7 +1402,6 @@ pub fn decode_zset_spans_and_scores(
             return Err(ListpackError::TruncatedEntry);
         }
         match pending.take() {
-            // Member half: rendered exactly as the general decoder would.
             None => {
                 pending = Some(match raw {
                     RawListpackValue::String(range) => {
@@ -1316,9 +1411,6 @@ pub fn decode_zset_spans_and_scores(
                 });
             }
             Some(member) => {
-                // Score half: an integer-encoded score is taken as a number and
-                // never rendered. A string-encoded one is parsed, and that is the
-                // only branch that can produce NaN.
                 let score = match raw {
                     #[allow(clippy::cast_precision_loss)]
                     RawListpackValue::Integer(value) => value as f64,
