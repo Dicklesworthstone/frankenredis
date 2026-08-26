@@ -1371,6 +1371,19 @@ pub enum RdbValue {
     /// RDB_TYPE_HASH_WITH_TTLS (100). (br-frankenredis-th7q)
     HashWithTtls(Vec<(Vec<u8>, Vec<u8>, Option<u64>)>),
     SortedSet(Vec<(Vec<u8>, f64)>),
+    /// (BlackThrush 2026-08-26) A sorted set already encoded as its RDB
+    /// `ZSET_LISTPACK` blob, built on the SAVE side from the store's own borrowed
+    /// bytes. Exact mirror of [`RdbValue::SetListpack`].
+    ///
+    /// `SortedSet::iter_asc` yields `(&[u8], f64)` straight out of the packed
+    /// buffer, and building `RdbValue::SortedSet` called `.to_vec()` on every
+    /// member so the encoder could copy it into a listpack and drop it.
+    ///
+    /// NOTE this is a SAVE-side spelling only: decoding `RDB_TYPE_ZSET_LISTPACK`
+    /// still yields `SortedSet`. Carrying the blob in the LOAD direction was built
+    /// and REJECTED at -0.8 pct, because `PackedZSet` is not a listpack so the
+    /// blob only defers the decode. Here the blob IS the wire form.
+    ZsetListpack(Vec<u8>),
     /// Stream: entries + optional watermark + consumer groups + raw upstream
     /// metadata (for byte-exact replay) + entries-added counter +
     /// max-deleted-entry-id watermark (`None` == `0-0`, i.e. nothing deleted).
@@ -2079,6 +2092,13 @@ fn encode_rdb_internal(
                         buf.extend_from_slice(&encoded.to_le_bytes());
                     }
                 }
+                // VERBATIM: the save side already built exactly the bytes the
+                // listpack arm below would have produced, from borrowed members.
+                RdbValue::ZsetListpack(blob) => {
+                    buf.push(RDB_TYPE_ZSET_LISTPACK);
+                    rdb_encode_string(&mut buf, &entry.key);
+                    rdb_encode_string(&mut buf, blob);
+                }
                 RdbValue::SortedSet(members) => {
                     if let Some(thresholds) = options.compact.as_ref()
                         && let Some(payload) = encode_compact_zset_listpack(members, thresholds)
@@ -2364,6 +2384,50 @@ fn zset_member_cmp(left: (&[u8], f64), right: (&[u8], f64)) -> std::cmp::Orderin
         .partial_cmp(&right.1)
         .unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| left.0.cmp(right.0))
+}
+
+/// Borrowed-member twin of [`encode_compact_zset_listpack`]'s eligibility tests
+/// plus its blob build, so the save side never materialises owned members.
+///
+/// Returns `None` for every shape that would NOT have been written as
+/// `RDB_TYPE_ZSET_LISTPACK` -- over the entry or value thresholds, or carrying a
+/// NaN score, which upstream's `d2string` cannot represent -- and the caller then
+/// falls through to the owned form, which is what the encoder would have produced
+/// anyway. That is what keeps the emitted RDB type byte identical.
+#[must_use]
+pub fn encode_zset_listpack_blob_borrowed(
+    members: &[(&[u8], f64)],
+    thresholds: &CompactRdbThresholds,
+) -> Option<Vec<u8>> {
+    if members.len() > thresholds.zset_max_listpack_entries {
+        return None;
+    }
+    if members
+        .iter()
+        .any(|(m, _)| m.len() > thresholds.zset_max_listpack_value)
+    {
+        return None;
+    }
+    if members.iter().any(|(_, score)| score.is_nan()) {
+        return None;
+    }
+    // `iter_asc` hands these over in ascending order already, but check rather
+    // than assume: the predicate is the same one the owned path applies, and a
+    // caller that ever passes an unordered slice still gets the sorted blob.
+    if borrowed_zset_members_are_sorted(members) {
+        encode_zset_score_listpack_blob(members)
+    } else {
+        let mut sorted: Vec<(&[u8], f64)> = members.to_vec();
+        sorted.sort_by(|left, right| zset_member_cmp(*left, *right));
+        encode_zset_score_listpack_blob(&sorted)
+    }
+}
+
+/// Borrowed twin of [`zset_members_are_sorted`]; same comparator, same predicate.
+fn borrowed_zset_members_are_sorted(members: &[(&[u8], f64)]) -> bool {
+    members
+        .windows(2)
+        .all(|pair| zset_member_cmp(pair[0], pair[1]) != std::cmp::Ordering::Greater)
 }
 
 fn zset_members_are_sorted(members: &[(Vec<u8>, f64)]) -> bool {
@@ -4449,6 +4513,15 @@ pub fn canonicalise_rdb_value(value: &RdbValue) -> RdbValue {
                 return value.clone();
             };
             RdbValue::Set(spans.iter().map(|s| s.as_bytes(blob).to_vec()).collect())
+        }
+        // (BlackThrush) A zset handed to the encoder as its listpack blob spells the
+        // same pairs; decode it back so a caller comparing CONTENT still compares
+        // every member and score, and a blob whose contents drifted still differs.
+        RdbValue::ZsetListpack(blob) => {
+            let Ok(pairs) = listpack::decode_zset_listpack_pairs(blob) else {
+                return value.clone();
+            };
+            RdbValue::SortedSet(pairs)
         }
         other => other.clone(),
     }

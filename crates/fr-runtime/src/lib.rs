@@ -50243,9 +50243,25 @@ fn store_to_rdb_entries_with_thresholds(
                 }
             }
             Value::SortedSet(zs) => {
-                let members: Vec<(Vec<u8>, f64)> =
-                    zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
-                RdbValue::SortedSet(members)
+                // (BlackThrush 2026-08-26) BORROWED save path, the exact mirror of
+                // the set arm above. `iter_asc` yields `(&[u8], f64)` straight out
+                // of the packed buffer; `.to_vec()` allocated one `Vec<u8>` per
+                // member for the encoder to copy into a listpack and drop.
+                //
+                // Anything the blob builder declines -- over thresholds, or a NaN
+                // score -- keeps the owned form, which is exactly the set of shapes
+                // the encoder would not have written as RDB_TYPE_ZSET_LISTPACK.
+                let borrowed_blob = compact.and_then(|thresholds| {
+                    let borrowed: Vec<(&[u8], f64)> = zs.iter_asc().collect();
+                    fr_persist::encode_zset_listpack_blob_borrowed(&borrowed, thresholds)
+                });
+                if let Some(blob) = borrowed_blob {
+                    RdbValue::ZsetListpack(blob)
+                } else {
+                    let members: Vec<(Vec<u8>, f64)> =
+                        zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
+                    RdbValue::SortedSet(members)
+                }
             }
             Value::Stream(entries_map) => {
                 let stream_entries: Vec<fr_persist::StreamEntry> = entries_map
@@ -50530,6 +50546,28 @@ fn apply_rdb_entries_to_store(
                             .insert((key.clone(), field.clone()), *abs_ms);
                     }
                 }
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
+            RdbValue::ZsetListpack(ref blob) => {
+                // Produced by the SAVE side; a decode of RDB_TYPE_ZSET_LISTPACK
+                // still yields `SortedSet`, so this arm is only reached by a caller
+                // applying a value it built itself. Reject a blob that does not
+                // parse rather than loading a partial zset.
+                let pairs = fr_persist::listpack::decode_zset_listpack_pairs(blob)
+                    .map_err(|_| PersistError::InvalidFrame)?;
+                let zset_members: Vec<(f64, Vec<u8>)> = pairs
+                    .into_iter()
+                    .map(|(member, score)| (score, member))
+                    .collect();
+                store
+                    .zadd_plain_owned_loading(&key, zset_members, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
                         &key,

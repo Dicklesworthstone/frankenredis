@@ -113,6 +113,14 @@ fn canonicalise_decoded_set(value: &RdbValue) -> RdbValue {
                 .map(|s| s.as_bytes(blob).to_vec())
                 .collect(),
         ),
+        // (BlackThrush) A zset handed to the encoder as its listpack blob: decode
+        // back to the `SortedSet` spelling the generator produced, so every member
+        // and score is still compared and only the VARIANT stops being
+        // load-bearing.
+        RdbValue::ZsetListpack(blob) => RdbValue::SortedSet(
+            fr_persist::listpack::decode_zset_listpack_pairs(blob)
+                .expect("a blob we just encoded must decode"),
+        ),
         other => other.clone(),
     }
 }
@@ -132,6 +140,7 @@ fn rdb_value_kind(value: &RdbValue) -> &'static str {
         RdbValue::HashListpack(_) => "HashListpack",
         RdbValue::HashWithTtls(_) => "HashWithTtls",
         RdbValue::SortedSet(_) => "SortedSet",
+        RdbValue::ZsetListpack(_) => "ZsetListpack",
         RdbValue::Stream(..) => "Stream",
     }
 }
