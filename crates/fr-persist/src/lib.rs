@@ -1384,6 +1384,20 @@ pub enum RdbValue {
     /// and REJECTED at -0.8 pct, because `PackedZSet` is not a listpack so the
     /// blob only defers the decode. Here the blob IS the wire form.
     ZsetListpack(Vec<u8>),
+    /// (BlackThrush 2026-08-26) A stream already encoded as its upstream
+    /// `STREAM_LISTPACKS_3` payload, built on the SAVE side from the store's own
+    /// BORROWED field and value bytes.
+    ///
+    /// The save-direction twin of [`RdbValue::SetListpack`] and
+    /// [`RdbValue::ZsetListpack`], on the type where it is worth the most.
+    /// Building [`RdbValue::Stream`] means `fields.to_pairs()` per entry, cloning
+    /// every field AND value: counted at 32,000 of the 103,681 allocations a
+    /// 200-key x 40-entry DEBUG RELOAD makes, against zset's 10,867 for the whole
+    /// operation.
+    ///
+    /// SAVE-SIDE SPELLING ONLY -- decoding a stream still yields
+    /// [`RdbValue::Stream`], so nothing downstream of the decoder sees this.
+    StreamListpacks3(Vec<u8>),
     /// Stream: entries + optional watermark + consumer groups + raw upstream
     /// metadata (for byte-exact replay) + entries-added counter +
     /// max-deleted-entry-id watermark (`None` == `0-0`, i.e. nothing deleted).
@@ -2117,6 +2131,13 @@ fn encode_rdb_internal(
                         }
                     }
                 }
+                // VERBATIM: the save side already built exactly the payload the
+                // upstream arm inside `encode_stream_rdb_value` would produce.
+                RdbValue::StreamListpacks3(blob) => {
+                    buf.push(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3);
+                    rdb_encode_string(&mut buf, &entry.key);
+                    buf.extend_from_slice(blob);
+                }
                 RdbValue::Stream(
                     stream_entries,
                     watermark,
@@ -2740,6 +2761,52 @@ struct StreamRdbValueParts<'a> {
     max_deleted: Option<(u64, u64)>,
 }
 
+/// Build the upstream `STREAM_LISTPACKS_3` payload for a stream whose field and
+/// value bytes are BORROWED, or `None` when this stream cannot be written in that
+/// form losslessly.
+///
+/// (BlackThrush 2026-08-26) The encoder was already generic over the field and
+/// value types -- `encode_upstream_stream_listpacks3<F, V> where F/V: AsRef<[u8]>`
+/// -- and its own comment notes the DUMP caller already hands it borrowed slices.
+/// The only thing forcing the RDB save path to materialise owned bytes was the
+/// `RdbValue::Stream` boundary, so this lets the caller skip it entirely.
+///
+/// Declining here is not a fallback so much as the SAME decision
+/// `encode_stream_rdb_value` makes below: a stream that fails the lossless gate
+/// goes to `encode_private_stream_rdb_value`, which needs the owned form. The
+/// caller must build that form when this returns `None`.
+#[must_use]
+pub fn encode_stream_listpacks3_blob_borrowed<F, V>(
+    entries: &[EncodableStreamEntry<F, V>],
+    watermark: Option<(u64, u64)>,
+    groups: &[RdbStreamConsumerGroup],
+    entries_added: Option<u64>,
+    max_deleted: Option<(u64, u64)>,
+) -> Option<Vec<u8>>
+where
+    F: AsRef<[u8]> + Clone,
+    V: AsRef<[u8]> + Clone,
+{
+    #[cfg(feature = "upstream-stream-rdb")]
+    {
+        if !can_encode_upstream_stream_losslessly(entries, watermark, groups) {
+            return None;
+        }
+        return rdb_stream::encode_upstream_stream_listpacks3(
+            entries,
+            watermark,
+            groups,
+            entries_added,
+            max_deleted,
+        );
+    }
+    #[cfg(not(feature = "upstream-stream-rdb"))]
+    {
+        let _ = (entries, watermark, groups, entries_added, max_deleted);
+        None
+    }
+}
+
 fn encode_stream_rdb_value(buf: &mut Vec<u8>, key: &[u8], stream: StreamRdbValueParts<'_>) {
     if let Some(metadata) = stream.metadata {
         buf.push(metadata.upstream_type_byte);
@@ -2778,8 +2845,8 @@ fn encode_stream_rdb_value(buf: &mut Vec<u8>, key: &[u8], stream: StreamRdbValue
 }
 
 #[cfg(feature = "upstream-stream-rdb")]
-fn can_encode_upstream_stream_losslessly(
-    stream_entries: &[StreamEntry],
+fn can_encode_upstream_stream_losslessly<F, V>(
+    stream_entries: &[EncodableStreamEntry<F, V>],
     watermark: Option<(u64, u64)>,
     groups: &[RdbStreamConsumerGroup],
 ) -> bool {
@@ -4522,6 +4589,16 @@ pub fn canonicalise_rdb_value(value: &RdbValue) -> RdbValue {
                 return value.clone();
             };
             RdbValue::SortedSet(pairs)
+        }
+        // (BlackThrush) A stream handed to the encoder as its listpacks3 payload
+        // spells the same entries, groups and counters; decode it back so a caller
+        // comparing CONTENT still compares all of them, and a payload whose
+        // contents drifted still compares unequal.
+        RdbValue::StreamListpacks3(blob) => {
+            match decode_upstream_stream_payload(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, blob) {
+                Some((decoded, _)) => decoded,
+                None => value.clone(),
+            }
         }
         other => other.clone(),
     }

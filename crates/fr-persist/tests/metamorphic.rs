@@ -142,6 +142,7 @@ fn rdb_value_kind(value: &RdbValue) -> &'static str {
         RdbValue::SortedSet(_) => "SortedSet",
         RdbValue::ZsetListpack(_) => "ZsetListpack",
         RdbValue::Stream(..) => "Stream",
+        RdbValue::StreamListpacks3(_) => "StreamListpacks3",
     }
 }
 

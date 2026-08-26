@@ -50264,17 +50264,28 @@ fn store_to_rdb_entries_with_thresholds(
                 }
             }
             Value::Stream(entries_map) => {
-                let stream_entries: Vec<fr_persist::StreamEntry> = entries_map
+                // (BlackThrush 2026-08-26) BORROWED save path. `fields.to_pairs()`
+                // clones every field AND value per entry -- counted at 32,000 of
+                // the 103,681 allocations a 200-key x 40-entry DEBUG RELOAD makes,
+                // where zset's WHOLE operation makes 10,867. `FieldsRef::iter()`
+                // already yields the pairs borrowed out of the store's own buffer,
+                // and the encoder is already generic over the field/value types,
+                // so the owned form was only ever needed to cross the
+                // `RdbValue::Stream` boundary.
+                //
+                // The owned build below still runs for any stream the listpacks3
+                // encoder declines -- exactly the streams `encode_stream_rdb_value`
+                // would have sent down `encode_private_stream_rdb_value` anyway.
+                let borrowed_entries: Vec<(u64, u64, Vec<(&[u8], &[u8])>)> = entries_map
                     .iter()
-                    .map(|((ms, seq), fields)| {
-                        let field_pairs: Vec<(Vec<u8>, Vec<u8>)> = fields.to_pairs();
-                        (*ms, *seq, field_pairs)
-                    })
+                    .map(|((ms, seq), fields)| (*ms, *seq, fields.iter().collect()))
                     .collect();
                 let watermark = store.stream_watermark(&key).unwrap_or(None);
                 let entries_added = Some(store.stream_entries_added(&key, entries_map.len()));
                 let max_deleted = store.stream_max_deleted_id(&key);
-                let groups = store
+                // Annotated because the blob builder below takes `&[...]`, which
+                // leaves the collect target ambiguous without it.
+                let groups: Vec<fr_persist::RdbStreamConsumerGroup> = store
                     .stream_consumer_groups(&key)
                     .map(|gs| {
                         gs.iter()
@@ -50310,14 +50321,37 @@ fn store_to_rdb_entries_with_thresholds(
                             .collect()
                     })
                     .unwrap_or_default();
-                RdbValue::Stream(
-                    stream_entries,
+                if let Some(blob) = fr_persist::encode_stream_listpacks3_blob_borrowed(
+                    &borrowed_entries,
                     watermark,
-                    groups,
-                    None,
+                    &groups,
                     entries_added,
                     max_deleted,
-                )
+                ) {
+                    RdbValue::StreamListpacks3(blob)
+                } else {
+                    let stream_entries: Vec<fr_persist::StreamEntry> = borrowed_entries
+                        .into_iter()
+                        .map(|(ms, seq, fields)| {
+                            (
+                                ms,
+                                seq,
+                                fields
+                                    .into_iter()
+                                    .map(|(f, v)| (f.to_vec(), v.to_vec()))
+                                    .collect(),
+                            )
+                        })
+                        .collect();
+                    RdbValue::Stream(
+                        stream_entries,
+                        watermark,
+                        groups,
+                        None,
+                        entries_added,
+                        max_deleted,
+                    )
+                }
             }
         };
         entries.push(RdbEntry {
@@ -50600,6 +50634,28 @@ fn apply_rdb_entries_to_store(
                         now_ms,
                     );
                 }
+            }
+            RdbValue::StreamListpacks3(ref blob) => {
+                // Produced by the SAVE side only; the decoder still yields
+                // `RdbValue::Stream`, so this arm exists for a caller applying a
+                // value it built itself. Decode the payload and apply it through
+                // the ordinary Stream arm rather than duplicating that arm.
+                let Some((decoded, _)) = fr_persist::decode_upstream_stream_payload(
+                    fr_persist::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
+                    blob,
+                ) else {
+                    return Err(PersistError::InvalidFrame);
+                };
+                let nested = RdbEntry {
+                    db: entry.db,
+                    key: entry.key.clone(),
+                    value: decoded,
+                    expire_ms: entry.expire_ms,
+                };
+                let nested_counts = apply_rdb_entries_to_store(store, vec![nested], now_ms)?;
+                counts.loaded = counts.loaded.saturating_add(nested_counts.loaded);
+                counts.expired = counts.expired.saturating_add(nested_counts.expired);
+                continue;
             }
             RdbValue::Stream(
                 stream_entries,
