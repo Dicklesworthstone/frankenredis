@@ -12,6 +12,7 @@ use fr_protocol::{RespFrame, RespParseError};
 pub mod listpack;
 #[allow(dead_code)]
 pub(crate) mod rdb_stream;
+pub use rdb_stream::StreamOut;
 pub mod ziplist;
 
 /// Render `value`'s decimal ASCII RIGHT-aligned into `dst`, returning the start index.
@@ -1493,14 +1494,14 @@ pub fn decode_upstream_stream_payload(type_byte: u8, data: &[u8]) -> Option<(Rdb
 pub fn decode_upstream_stream_payload_borrowed<R>(
     type_byte: u8,
     data: &[u8],
-    build: impl FnOnce(&[BorrowedStreamEntry<'_>]) -> R,
+    build: impl FnOnce(&StreamOut<std::borrow::Cow<'_, [u8]>>) -> R,
 ) -> Option<(R, DecodedStreamRest, usize)> {
     let (skeleton, consumed) = rdb_stream::UpstreamStreamSkeleton::decode(type_byte, data).ok()?;
     let watermark = skeleton.watermark();
     let entries_added = skeleton.entries_added();
     let max_deleted = skeleton.max_deleted();
     let built = {
-        let entries = skeleton.entries().ok()?;
+        let entries = skeleton.flat_entries().ok()?;
         build(&entries)
         // `entries` borrows `skeleton`; the borrow has to end before the groups
         // can be moved out of it below.

@@ -35898,9 +35898,12 @@ impl Store {
                         // Fall back to per-entry `insert` only if the payload is
                         // NOT strictly increasing — that path tolerates reordering
                         // and rejects duplicates.
-                        let strictly_increasing = stream_entries
-                            .windows(2)
-                            .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1));
+                        let mut prev: Option<(u64, u64)> = None;
+                        let strictly_increasing = stream_entries.ids().all(|id| {
+                            let ok = prev.is_none_or(|p| p < id);
+                            prev = Some(id);
+                            ok
+                        });
                         if strictly_increasing {
                             // `_repeated_fields`: these entries are the BORROWED
                             // decode, so every entry's j-th field name is the same
@@ -35908,16 +35911,14 @@ impl Store {
                             // listpack. Interning them by address instead of by
                             // bytes removes 118 of the 133 memcmp calls per op.
                             return Ok(StreamEntries::from_sorted_entries_repeated_fields(
-                                stream_entries
-                                    .iter()
-                                    .map(|(ms, seq, fields)| ((*ms, *seq), fields.as_slice())),
+                                stream_entries.iter(),
                             ));
                         }
                         let mut entries = StreamEntries::new();
-                        for (ms, seq, fields) in stream_entries {
+                        for (id, fields) in stream_entries.iter() {
                             // `insert` returns true if this id already appeared —
                             // a duplicate in the DUMP payload is malformed.
-                            if entries.insert((*ms, *seq), fields) {
+                            if entries.insert(id, fields) {
                                 return Err(StoreError::InvalidDumpPayload);
                             }
                         }

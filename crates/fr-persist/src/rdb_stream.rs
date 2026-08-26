@@ -681,6 +681,24 @@ impl UpstreamStreamSkeleton {
         self.decode_entries()
     }
 
+    /// Every entry's fields in ONE vector, with a per-entry `(id, offset, len)`
+    /// index alongside.
+    ///
+    /// `entries()` gives each entry its own `Vec<(F, F)>`: 40 heap allocations,
+    /// 40 frees and 40 drops per 40-entry stream, for vectors that hold two
+    /// borrowed slices each and are consumed immediately. The consumer wants
+    /// `&[(F, F)]` per entry either way ([`PackedStreamLog::from_sorted_entries`]
+    /// takes exactly that), so the fields can live end-to-end in one allocation
+    /// and each entry can be a subslice.
+    pub(crate) fn flat_entries(&self) -> Result<StreamOut<Cow<'_, [u8]>>, UpstreamStreamError> {
+        let mut out = StreamOut::default();
+        for (master_ms, master_seq, blob) in &self.nodes {
+            let lp = decode_raw_values(blob)?;
+            decode_stream_listpack::<_, true>(&lp, blob, *master_ms, *master_seq, &mut out)?;
+        }
+        Ok(out)
+    }
+
     /// The owned form, for callers that must outlive the blobs (`RdbValue::Stream`).
     ///
     /// This instantiates the SAME decoder with `F = Vec<u8>`, so the owned path
@@ -698,12 +716,12 @@ impl UpstreamStreamSkeleton {
     where
         F: From<Cow<'blob, [u8]>>,
     {
-        let mut entries: Vec<EncodableStreamEntry<F, F>> = Vec::new();
+        let mut out: StreamOut<F> = StreamOut::default();
         for (master_ms, master_seq, blob) in &self.nodes {
             let lp = decode_raw_values(blob)?;
-            decode_stream_listpack(&lp, blob, *master_ms, *master_seq, &mut entries)?;
+            decode_stream_listpack::<_, false>(&lp, blob, *master_ms, *master_seq, &mut out)?;
         }
-        Ok(entries)
+        Ok(out.entries)
     }
 
     pub(crate) fn watermark(&self) -> Option<(u64, u64)> {
@@ -978,12 +996,64 @@ fn take_millisecond_time(data: &[u8], cursor: usize) -> Result<u64, UpstreamStre
 ///               (field_count, *field_names)?,   ; when SAMEFIELDS is unset
 ///               *values,                        ; master_field_count of them
 ///               lp_count]
-fn decode_stream_listpack<'blob, F>(
+/// Where a stream decode accumulates, in one of two shapes chosen by the caller.
+///
+/// `FLAT == false` is the historical shape: a `Vec<(F, F)>` per entry, which is
+/// what `RdbValue::Stream` has to hold. `FLAT == true` puts every entry's fields
+/// end-to-end in `fields` and records `(id, offset, len)` per entry, so a
+/// 40-entry stream makes ONE allocation for its fields instead of forty.
+///
+/// Two shapes, ONE walk: the entry format is byte-exactness-critical and must not
+/// be transcribed twice (the listpack size rule already taught that lesson). The
+/// const flag lets the compiler delete whichever half a given instantiation does
+/// not use, so the owned path's codegen is unchanged -- the same reason
+/// `from_sorted_entries` gates its field cache on a const rather than a runtime
+/// check.
+pub struct StreamOut<F> {
+    /// `FLAT == false` only.
+    entries: Vec<EncodableStreamEntry<F, F>>,
+    /// `FLAT == true` only: every entry's fields, back to back.
+    fields: Vec<(F, F)>,
+    /// `FLAT == true` only: `(ms, seq, offset into `fields`, field count)`.
+    index: Vec<(u64, u64, u32, u32)>,
+}
+
+impl<F> Default for StreamOut<F> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            fields: Vec::new(),
+            index: Vec::new(),
+        }
+    }
+}
+
+impl<F> StreamOut<F> {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    /// Entry ids in decode order, for the caller's strictly-increasing check.
+    pub fn ids(&self) -> impl ExactSizeIterator<Item = (u64, u64)> + '_ {
+        self.index.iter().map(|&(ms, seq, _, _)| (ms, seq))
+    }
+
+    /// `((ms, seq), fields)` per entry, each a subslice of the one `fields` vector.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = ((u64, u64), &[(F, F)])> + '_ {
+        self.index.iter().map(|&(ms, seq, off, len)| {
+            let start = off as usize;
+            ((ms, seq), &self.fields[start..start + len as usize])
+        })
+    }
+}
+
+fn decode_stream_listpack<'blob, F, const FLAT: bool>(
     lp: &[RawListpackValue],
     blob: &'blob [u8],
     master_ms: u64,
     master_seq: u64,
-    out: &mut Vec<EncodableStreamEntry<F, F>>,
+    out: &mut StreamOut<F>,
 ) -> Result<(), UpstreamStreamError>
 where
     F: From<Cow<'blob, [u8]>>,
@@ -1005,6 +1075,16 @@ where
         return Err(UpstreamStreamError::InconsistentEntryTrailer);
     }
 
+    // One growth per NODE instead of one every few entries. The node's own header
+    // declares how many live entries it holds and how many fields the master
+    // carries, which is the exact size for the SAMEFIELDS shape and a good guess
+    // otherwise. Capacity is a hint: a wrong one costs a growth, never content.
+    if FLAT {
+        out.index.reserve(declared_live_count);
+        out.fields
+            .reserve(declared_live_count.saturating_mul(master_field_count.max(1)));
+    }
+
     let mut decoded_total_count = 0usize;
     let mut decoded_live_count = 0usize;
     while idx < lp.len() {
@@ -1023,7 +1103,16 @@ where
             take_usize(lp, &mut idx)?
         };
 
-        let mut fields: Vec<(F, F)> = Vec::with_capacity(field_count);
+        // FLAT appends into the shared vector and remembers where this entry
+        // started, so a tombstone can roll back to it; the per-entry vector is
+        // never allocated (`Vec::new` does not touch the heap and the const makes
+        // its drop a no-op the compiler removes).
+        let mark = out.fields.len();
+        let mut fields: Vec<(F, F)> = if FLAT {
+            Vec::new()
+        } else {
+            Vec::with_capacity(field_count)
+        };
         if same_fields {
             for master_name in master_fields.iter().take(field_count) {
                 let value = take_string(lp, blob, &mut idx)?;
@@ -1033,13 +1122,23 @@ where
                 // 40-entry x 2-field stream -- whose only consumer is
                 // `intern_field`, which maps every copy straight back to the same
                 // dictionary index.
-                fields.push((F::from(master_name.clone()), F::from(value)));
+                let pair = (F::from(master_name.clone()), F::from(value));
+                if FLAT {
+                    out.fields.push(pair)
+                } else {
+                    fields.push(pair)
+                }
             }
         } else {
             for _ in 0..field_count {
                 let name = take_string(lp, blob, &mut idx)?;
                 let value = take_string(lp, blob, &mut idx)?;
-                fields.push((F::from(name), F::from(value)));
+                let pair = (F::from(name), F::from(value));
+                if FLAT {
+                    out.fields.push(pair)
+                } else {
+                    fields.push(pair)
+                }
             }
         }
 
@@ -1053,6 +1152,11 @@ where
         }
 
         if deleted {
+            // Tombstone: its fields were consumed to keep the cursor aligned but
+            // must not reach the output.
+            if FLAT {
+                out.fields.truncate(mark);
+            }
             continue;
         }
         decoded_live_count = decoded_live_count
@@ -1060,7 +1164,14 @@ where
             .ok_or(UpstreamStreamError::InconsistentEntryCount)?;
         let ms = combine_u64_i64(master_ms, ms_delta);
         let seq = combine_u64_i64(master_seq, seq_delta);
-        out.push((ms, seq, fields));
+        if FLAT {
+            let len = u32::try_from(out.fields.len() - mark)
+                .map_err(|_| UpstreamStreamError::InvalidFieldCount)?;
+            let off = u32::try_from(mark).map_err(|_| UpstreamStreamError::InvalidFieldCount)?;
+            out.index.push((ms, seq, off, len));
+        } else {
+            out.entries.push((ms, seq, fields));
+        }
     }
     if decoded_total_count != declared_total_count || decoded_live_count != declared_live_count {
         return Err(UpstreamStreamError::InconsistentEntryCount);
