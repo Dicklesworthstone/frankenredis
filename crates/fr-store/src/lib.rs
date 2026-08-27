@@ -958,7 +958,51 @@ fn store_key_from_slice(key: &[u8]) -> StoreKey {
 
 #[derive(Debug, Clone)]
 pub struct SortedSet {
-    inner: SortedSetInner,
+    repr: SortedSetRepr,
+}
+
+/// Wraps the decoded forms so a RETAINED (undecoded) RDB listpack can become a third
+/// case without every zset method learning about it.
+///
+/// Redis writes a zset listpack back verbatim on save and never decodes it; fr decodes
+/// into PackedZSet and re-encodes, which on the reload arm is ~3.4M Ir/op with no
+/// counterpart PLUS a 2,118,400 Ir/op lzf_compress a verbatim save deletes outright
+/// (7dc624cea). Same shape that took stream reload 2.5495x -> 0.8790x (5d06ac9aa).
+#[derive(Debug, Clone)]
+enum SortedSetRepr {
+    Ready(SortedSetInner),
+}
+
+impl SortedSet {
+    /// Every READ of the decoded form goes through here -- the single place a lazy
+    /// variant would materialize. On the stream port that choke point is Deref, and
+    /// THREE separate eager readers had to be found before retention paid; each one
+    /// silently nullified the lever until a caller table named it.
+    #[inline]
+    fn inner(&self) -> &SortedSetInner {
+        match &self.repr {
+            SortedSetRepr::Ready(inner) => inner,
+        }
+    }
+
+    #[inline]
+    fn inner_mut(&mut self) -> &mut SortedSetInner {
+        match &mut self.repr {
+            SortedSetRepr::Ready(inner) => inner,
+        }
+    }
+
+    #[inline]
+    fn from_inner(inner: SortedSetInner) -> Self {
+        Self {
+            repr: SortedSetRepr::Ready(inner),
+        }
+    }
+
+    #[inline]
+    fn set_inner(&mut self, inner: SortedSetInner) {
+        self.repr = SortedSetRepr::Ready(inner);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1748,12 +1792,12 @@ impl FullSortedSet {
 impl SortedSet {
     fn new() -> Self {
         Self {
-            inner: SortedSetInner::Packed(PackedZSet::new()),
+            repr: SortedSetRepr::Ready(SortedSetInner::Packed(PackedZSet::new())),
         }
     }
 
     fn len(&self) -> usize {
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Packed(p) => p.len(),
             SortedSetInner::Full(f) => f.len(),
         }
@@ -1764,7 +1808,7 @@ impl SortedSet {
     }
 
     fn promote(&mut self) {
-        let SortedSetInner::Packed(packed) = &mut self.inner else {
+        let SortedSetInner::Packed(packed) = self.inner_mut() else {
             return;
         };
         let packed = std::mem::take(packed);
@@ -1772,7 +1816,7 @@ impl SortedSet {
         for (member, score) in packed.iter() {
             full.insert(member.to_vec(), score);
         }
-        self.inner = SortedSetInner::Full(full);
+        self.set_inner(SortedSetInner::Full(full));
     }
 
     fn maybe_promote_for_insert(
@@ -1781,7 +1825,7 @@ impl SortedSet {
         max_listpack_entries: usize,
         max_listpack_value: usize,
     ) {
-        let SortedSetInner::Packed(p) = &self.inner else {
+        let SortedSetInner::Packed(p) = self.inner() else {
             return;
         };
         let contains_member = p.contains(member);
@@ -1826,7 +1870,7 @@ impl SortedSet {
     ) -> ZSetInsertResult {
         let score = canonicalize_zero_score(score);
         self.maybe_promote_for_insert(&member, max_listpack_entries, max_listpack_value);
-        match &mut self.inner {
+        match self.inner_mut() {
             SortedSetInner::Packed(p) => p.insert_result(&member, score).into(),
             SortedSetInner::Full(f) => f.insert_result(member, score),
         }
@@ -1840,14 +1884,12 @@ impl SortedSet {
     ) -> Self {
         if max_listpack_entries >= 1 && member.len() <= max_listpack_value {
             Self {
-                inner: SortedSetInner::Packed(PackedZSet::from_single(member, score)),
+                repr: SortedSetRepr::Ready(SortedSetInner::Packed(PackedZSet::from_single(member, score))),
             }
         } else {
-            Self {
-                inner: SortedSetInner::Full(FullSortedSet::from_unique_pairs(vec![(
-                    member, score,
-                )])),
-            }
+            Self::from_inner(SortedSetInner::Full(FullSortedSet::from_unique_pairs(
+                vec![(member, score)],
+            )))
         }
     }
 
@@ -1862,11 +1904,11 @@ impl SortedSet {
                 .all(|(member, _)| member.len() <= max_listpack_value)
         {
             Self {
-                inner: SortedSetInner::Packed(PackedZSet::from_unique_pairs(pairs)),
+                repr: SortedSetRepr::Ready(SortedSetInner::Packed(PackedZSet::from_unique_pairs(pairs))),
             }
         } else {
             Self {
-                inner: SortedSetInner::Full(FullSortedSet::from_unique_pairs(pairs)),
+                repr: SortedSetRepr::Ready(SortedSetInner::Full(FullSortedSet::from_unique_pairs(pairs))),
             }
         }
     }
@@ -1890,7 +1932,7 @@ impl SortedSet {
                 PackedZSet::from_unique_pairs_borrowed(pairs)
             };
             Self {
-                inner: SortedSetInner::Packed(packed),
+                repr: SortedSetRepr::Ready(SortedSetInner::Packed(packed)),
             }
         } else {
             let owned_pairs = pairs
@@ -1898,27 +1940,27 @@ impl SortedSet {
                 .map(|(member, score)| (member.to_vec(), score))
                 .collect();
             Self {
-                inner: SortedSetInner::Full(FullSortedSet::from_unique_pairs(owned_pairs)),
+                repr: SortedSetRepr::Ready(SortedSetInner::Full(FullSortedSet::from_unique_pairs(owned_pairs))),
             }
         }
     }
 
     fn remove(&mut self, member: &[u8]) -> bool {
-        match &mut self.inner {
+        match self.inner_mut() {
             SortedSetInner::Packed(p) => p.remove(member),
             SortedSetInner::Full(f) => f.remove(member),
         }
     }
 
     fn get_score(&self, member: &[u8]) -> Option<f64> {
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Packed(p) => p.get_score(member),
             SortedSetInner::Full(f) => f.get_score(member),
         }
     }
 
     pub fn iter_asc(&self) -> SortedSetIterAsc<'_> {
-        let inner = match &self.inner {
+        let inner = match self.inner() {
             SortedSetInner::Packed(p) => SortedSetIterAscInner::Packed(p.iter()),
             SortedSetInner::Full(f) => SortedSetIterAscInner::Full(f.ordered.keys()),
         };
@@ -1937,7 +1979,7 @@ impl SortedSet {
         if indices.is_empty() {
             return Vec::new();
         }
-        if let SortedSetInner::Full(full) = &self.inner
+        if let SortedSetInner::Full(full) = self.inner()
             && let Some(tree) = &full.rank_tree
         {
             return indices
@@ -1999,7 +2041,7 @@ impl SortedSet {
         if indices.is_empty() {
             return Vec::new();
         }
-        if let SortedSetInner::Full(full) = &self.inner {
+        if let SortedSetInner::Full(full) = self.inner() {
             return indices
                 .iter()
                 .filter_map(|&idx| {
@@ -2027,7 +2069,7 @@ impl SortedSet {
         if indices.is_empty() {
             return;
         }
-        if let SortedSetInner::Full(full) = &self.inner {
+        if let SortedSetInner::Full(full) = self.inner() {
             for &idx in indices {
                 if let Some((m, _)) = full.dict.get_index(idx) {
                     sink(m.as_ref());
@@ -2052,7 +2094,7 @@ impl SortedSet {
         if indices.is_empty() {
             return;
         }
-        if let SortedSetInner::Full(full) = &self.inner {
+        if let SortedSetInner::Full(full) = self.inner() {
             for &idx in indices {
                 if let Some((m, s)) = full.dict.get_index(idx) {
                     sink(m.as_ref(), *s);
@@ -2072,7 +2114,7 @@ impl SortedSet {
     /// collecting or warming the order-statistic treap. The Packed branch is not
     /// reached by that walk (gated to large => Full). (frankenredis-epxuu)
     pub(crate) fn dict_member_at(&self, idx: usize) -> Option<Cow<'_, [u8]>> {
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Full(full) => full
                 .dict
                 .get_index(idx)
@@ -2082,7 +2124,7 @@ impl SortedSet {
     }
 
     fn iter_desc(&self) -> SortedSetIterDesc<'_> {
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Packed(p) => SortedSetIterDesc::Packed(p.iter_desc()),
             SortedSetInner::Full(f) => SortedSetIterDesc::Full(f.ordered.keys().rev()),
         }
@@ -2103,7 +2145,7 @@ impl SortedSet {
     /// Invoke `f` for each (member, score) whose score lies in the inclusive
     /// range `[lo, hi]`, in ascending (score, member) order, borrowing members.
     fn for_each_in_score_range(&self, lo: f64, hi: f64, mut f: impl FnMut(&[u8], f64)) {
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Packed(p) => p.for_each_in_score_range(lo, hi, f),
             SortedSetInner::Full(full) => {
                 let lo_bound = ScoreMember::min_for_score(canonicalize_zero_score(lo));
@@ -2150,7 +2192,7 @@ impl SortedSet {
         offset: usize,
         take: usize,
     ) -> Vec<(Vec<u8>, f64)> {
-        if let SortedSetInner::Full(full) = &self.inner
+        if let SortedSetInner::Full(full) = self.inner()
             && let (Some(first), Some(last)) = (full.ordered.first(), full.ordered.last())
             && first.score == last.score
         {
@@ -2284,7 +2326,7 @@ impl SortedSet {
     /// `lex_in_range`; multi-score / `Packed` fall back to `iter_{asc,desc}().filter`
     /// — so membership and order are byte-identical.
     fn lex_range_refs(&self, min: &[u8], max: &[u8], rev: bool) -> Vec<(&[u8], f64)> {
-        if let SortedSetInner::Full(full) = &self.inner
+        if let SortedSetInner::Full(full) = self.inner()
             && let (Some(first), Some(last)) = (full.ordered.first(), full.ordered.last())
             && first.score == last.score
         {
@@ -2375,7 +2417,7 @@ impl SortedSet {
         offset: usize,
         take: usize,
     ) -> Vec<(&[u8], f64)> {
-        if let SortedSetInner::Full(full) = &self.inner
+        if let SortedSetInner::Full(full) = self.inner()
             && let (Some(first), Some(last)) = (full.ordered.first(), full.ordered.last())
             && first.score == last.score
         {
@@ -2441,7 +2483,7 @@ impl SortedSet {
     ) -> Vec<(Vec<u8>, f64)> {
         if take != usize::MAX
             && offset > 0
-            && let SortedSetInner::Full(full) = &mut self.inner
+            && let SortedSetInner::Full(full) = self.inner_mut()
         {
             full.maybe_warm_rank_tree_for_index(offset, take);
         }
@@ -2455,7 +2497,7 @@ impl SortedSet {
     /// `Packed` encoding fall back to the exact `iter_asc().filter().count()`, so
     /// the count is byte-for-byte identical (incl. the unequal-score handling).
     fn lex_count(&self, min: &[u8], max: &[u8]) -> usize {
-        if let SortedSetInner::Full(full) = &self.inner
+        if let SortedSetInner::Full(full) = self.inner()
             && let (Some(first), Some(last)) = (full.ordered.first(), full.ordered.last())
             && first.score == last.score
         {
@@ -2538,7 +2580,7 @@ impl SortedSet {
         count: usize,
         mut f: impl FnMut(&[u8], f64),
     ) {
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Packed(packed) => {
                 packed.for_each_index_slice_asc(start_idx, count, f);
             }
@@ -2558,7 +2600,7 @@ impl SortedSet {
         count: usize,
         mut f: impl FnMut(&[u8], f64),
     ) {
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Packed(packed) => {
                 packed.for_each_index_slice_desc(start_idx, count, f);
             }
@@ -2576,7 +2618,7 @@ impl SortedSet {
     /// route through here); the non-adaptive form was retired once every caller
     /// wanted the warm. (frankenredis-5l66d)
     fn index_slice_asc_adaptive(&mut self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
-        match &mut self.inner {
+        match self.inner_mut() {
             SortedSetInner::Packed(p) => p.index_slice_asc(start_idx, count),
             SortedSetInner::Full(f) => f.index_slice_asc_adaptive(start_idx, count),
         }
@@ -2588,28 +2630,28 @@ impl SortedSet {
     /// oversized zset (a live `zset-max-listpack-entries` shrink below its size)
     /// falls back to the positional cursor — same behaviour as before this fix.
     fn zscan_resume_index_after(&mut self, member: &[u8], score: f64) -> Option<usize> {
-        match &mut self.inner {
+        match self.inner_mut() {
             SortedSetInner::Full(f) => Some(f.resume_index_after(member, score)),
             SortedSetInner::Packed(_) => None,
         }
     }
 
     fn index_slice_desc_adaptive(&mut self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
-        match &mut self.inner {
+        match self.inner_mut() {
             SortedSetInner::Packed(p) => p.index_slice_desc(start_idx, count),
             SortedSetInner::Full(f) => f.index_slice_desc_adaptive(start_idx, count),
         }
     }
 
     fn pop_min(&mut self) -> Option<(Vec<u8>, f64)> {
-        match &mut self.inner {
+        match self.inner_mut() {
             SortedSetInner::Packed(p) => p.pop_min(),
             SortedSetInner::Full(f) => f.pop_min(),
         }
     }
 
     fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
-        match &mut self.inner {
+        match self.inner_mut() {
             SortedSetInner::Packed(p) => p.pop_max(),
             SortedSetInner::Full(f) => f.pop_max(),
         }
@@ -2620,7 +2662,7 @@ impl SortedSet {
     /// (bounded by zset-max-listpack-entries) keeps the simple per-pop loop. Byte-
     /// identical to `count`× `pop_min()`.
     fn pop_min_n(&mut self, count: usize) -> Vec<(Vec<u8>, f64)> {
-        match &mut self.inner {
+        match self.inner_mut() {
             // (cc_fr) Contiguous front span drained in one shift — was count× O(len) `pop_min`.
             SortedSetInner::Packed(p) => p.pop_min_n(count),
             SortedSetInner::Full(f) => f.pop_min_n(count),
@@ -2629,7 +2671,7 @@ impl SortedSet {
 
     /// (CrimsonHawk) Bulk pop of the `count` highest members (descending).
     fn pop_max_n(&mut self, count: usize) -> Vec<(Vec<u8>, f64)> {
-        match &mut self.inner {
+        match self.inner_mut() {
             // (cc_fr) Contiguous tail span; scan-to-split + truncate — was count× O(len) `pop_max`.
             SortedSetInner::Packed(p) => p.pop_max_n(count),
             SortedSetInner::Full(f) => f.pop_max_n(count),
@@ -2642,7 +2684,7 @@ impl SortedSet {
     /// remove (Tree removal is O(count log n), Packed is bounded) — behaviour-identical
     /// to the old ZREMRANGEBYRANK path, so those encodings are unchanged.
     fn remove_rank_range(&mut self, s_idx: usize, count: usize) -> usize {
-        match &mut self.inner {
+        match self.inner_mut() {
             // (CrimsonHawk) Compact(Vec): drain the ordered slice in one shift.
             SortedSetInner::Full(f) if f.ordered_is_compact() => {
                 return f.remove_rank_range_compact(s_idx, count);
@@ -2679,7 +2721,7 @@ impl SortedSet {
     /// store members in `(score, member)` order, so a ZREMRANGEBYSCORE/BYLEX run is a
     /// contiguous rank span. `None` for a Full rank-tree (its callers keep the per-member path).
     fn contiguous_run_start(&self, member: &[u8], score: f64) -> Option<usize> {
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Full(f) => f.compact_position(score, member),
             // (cc_fr) Packed is rank-ordered too, so drain the run in one `drain_rank_range`
             // (O(len)) instead of count× O(len) `remove(member)` (O(count·len)) — the SCORE/LEX
@@ -2696,7 +2738,7 @@ impl SortedSet {
     /// `score_bound_range` collect path). Equivalent to `score_bound_range(min,max).len()` for the
     /// count and `rank(first_in_range)` for the start, but without the run Vec or the rank re-scan.
     fn packed_score_range_span(&self, min: ScoreBound, max: ScoreBound) -> Option<(usize, usize)> {
-        let SortedSetInner::Packed(p) = &self.inner else {
+        let SortedSetInner::Packed(p) = self.inner() else {
             return None;
         };
         let mut start = 0usize;
@@ -2716,14 +2758,14 @@ impl SortedSet {
     }
 
     fn rank_impl<const MEMBER_ONLY: bool>(&mut self, member: &[u8]) -> Option<usize> {
-        match &mut self.inner {
+        match self.inner_mut() {
             SortedSetInner::Packed(p) => p.rank_impl::<MEMBER_ONLY>(member),
             SortedSetInner::Full(f) => f.rank(member),
         }
     }
 
     fn rev_rank(&mut self, member: &[u8]) -> Option<usize> {
-        match &mut self.inner {
+        match self.inner_mut() {
             SortedSetInner::Packed(p) => p.rank(member).map(|rank| p.len() - 1 - rank),
             SortedSetInner::Full(f) => f.rev_rank(member),
         }
@@ -2731,14 +2773,14 @@ impl SortedSet {
 
     /// (CrimsonHawk) Rank + score in one pass — see `FullSortedSet::rank_with_score`.
     fn rank_with_score(&mut self, member: &[u8]) -> Option<(usize, f64)> {
-        match &mut self.inner {
+        match self.inner_mut() {
             SortedSetInner::Packed(p) => p.rank_with_score(member),
             SortedSetInner::Full(f) => f.rank_with_score(member),
         }
     }
 
     fn rev_rank_with_score(&mut self, member: &[u8]) -> Option<(usize, f64)> {
-        match &mut self.inner {
+        match self.inner_mut() {
             SortedSetInner::Packed(p) => {
                 let len = p.len();
                 p.rank_with_score(member)
@@ -2778,7 +2820,7 @@ impl SortedSet {
         // skip dominates the emitted slice (else the scan is cheaper) and the
         // treap is warm + consistent. Cold/packed/shallow fall through to the scan.
         if take != usize::MAX
-            && let SortedSetInner::Full(full) = &self.inner
+            && let SortedSetInner::Full(full) = self.inner()
             && let Some(tree) = &full.rank_tree
             && tree.len() == full.dict.len()
         {
@@ -2820,7 +2862,7 @@ impl SortedSet {
                 return out;
             }
         }
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Packed(p) => {
                 if rev {
                     p.iter_desc()
@@ -2890,7 +2932,7 @@ impl SortedSet {
         // only a pathological DEEP offset reverts to the O(offset) walk — the same
         // scan the owned path itself uses whenever `offset <= n_emit*24`, and it still
         // eliminates the per-member clone. (frankenredis-zrange-into deep-offset caveat)
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Packed(p) => {
                 if rev {
                     p.iter_desc()
@@ -2938,7 +2980,7 @@ impl SortedSet {
     /// (needed for the RESP array header) then streams each pair with zero
     /// per-member data copy.
     fn score_bound_range_asc_refs(&self, min: ScoreBound, max: ScoreBound) -> Vec<(&[u8], f64)> {
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Packed(p) => p
                 .iter()
                 .filter(|(_, score)| score_in_range(*score, min, max))
@@ -2960,7 +3002,7 @@ impl SortedSet {
     /// returning the matching `(member, score)` pairs in DESCENDING order with the
     /// member borrowed (no per-member `Vec<u8>` clone).
     fn score_bound_range_desc_refs(&self, min: ScoreBound, max: ScoreBound) -> Vec<(&[u8], f64)> {
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Packed(p) => p
                 .iter_desc()
                 .filter(|(_, score)| score_in_range(*score, min, max))
@@ -2989,7 +3031,7 @@ impl SortedSet {
     ) -> Vec<(Vec<u8>, f64)> {
         if take != usize::MAX
             && offset > 0
-            && let SortedSetInner::Full(full) = &mut self.inner
+            && let SortedSetInner::Full(full) = self.inner_mut()
         {
             full.maybe_warm_rank_tree_for_index(offset, take);
         }
@@ -3013,7 +3055,7 @@ impl SortedSet {
     }
 
     fn score_bound_count(&self, min: ScoreBound, max: ScoreBound) -> usize {
-        match &self.inner {
+        match self.inner() {
             SortedSetInner::Packed(p) => p
                 .iter()
                 .filter(|(_, score)| score_in_range(*score, min, max))
@@ -3057,7 +3099,7 @@ impl SortedSet {
     /// `score_bound_count_warm_treap_rank_diff_isomorphic_i5896` test).
     /// (frankenredis-p94tu)
     fn score_bound_count_adaptive(&mut self, min: ScoreBound, max: ScoreBound) -> usize {
-        if let SortedSetInner::Full(full) = &mut self.inner {
+        if let SortedSetInner::Full(full) = self.inner_mut() {
             full.maybe_warm_rank_tree_for_count();
         }
         self.score_bound_count(min, max)
@@ -3067,25 +3109,25 @@ impl SortedSet {
     /// `score_bound_count_adaptive`. Byte-identical result (see
     /// `lex_count_warm_treap_rank_diff_isomorphic_7uonw`). (frankenredis-p94tu)
     fn lex_count_adaptive(&mut self, min: &[u8], max: &[u8]) -> usize {
-        if let SortedSetInner::Full(full) = &mut self.inner {
+        if let SortedSetInner::Full(full) = self.inner_mut() {
             full.maybe_warm_rank_tree_for_count();
         }
         self.lex_count(min, max)
     }
 
     fn is_packed_storage(&self) -> bool {
-        matches!(self.inner, SortedSetInner::Packed(_))
+        matches!(self.inner(), SortedSetInner::Packed(_))
     }
 
     #[cfg(test)]
     fn is_full_storage(&self) -> bool {
-        matches!(self.inner, SortedSetInner::Full(_))
+        matches!(self.inner(), SortedSetInner::Full(_))
     }
 
     #[cfg(test)]
     fn insert_min_score_sentinel(&mut self, score: f64) {
         self.promote();
-        if let SortedSetInner::Full(full) = &mut self.inner {
+        if let SortedSetInner::Full(full) = self.inner_mut() {
             full.ordered.insert(ScoreMember::min_for_score(score));
         }
     }
@@ -3093,7 +3135,7 @@ impl SortedSet {
     #[cfg(test)]
     fn insert_max_score_sentinel(&mut self, score: f64) {
         self.promote();
-        if let SortedSetInner::Full(full) = &mut self.inner {
+        if let SortedSetInner::Full(full) = self.inner_mut() {
             full.ordered.insert(ScoreMember::max_for_score(score));
         }
     }
@@ -3101,7 +3143,7 @@ impl SortedSet {
     #[cfg(test)]
     fn contains_min_score_sentinel(&self, score: f64) -> bool {
         matches!(
-            &self.inner,
+            self.inner(),
             SortedSetInner::Full(full)
                 if full.ordered.contains(&ScoreMember::min_for_score(score))
         )
@@ -3110,7 +3152,7 @@ impl SortedSet {
     #[cfg(test)]
     fn contains_max_score_sentinel(&self, score: f64) -> bool {
         matches!(
-            &self.inner,
+            self.inner(),
             SortedSetInner::Full(full)
                 if full.ordered.contains(&ScoreMember::max_for_score(score))
         )

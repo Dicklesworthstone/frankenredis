@@ -69312,3 +69312,52 @@ nullified the whole lever until it was found.
 self-referential type rather than a usable count; it was reverted rather than debugged,
 so the wrapper surface here is still UNSIZED and that number is owed before the port
 starts.
+
+## 2026-08-27 — zset: the wrapper the stream port needed ALREADY EXISTED, and the sizing I owed
+
+`7dc624cea` left the zset wrapper surface UNSIZED after a malformed probe. Sized now,
+and the answer changes the shape of the port: **`SortedSet` is already a wrapper** --
+`pub struct SortedSet { inner: SortedSetInner }` over
+`enum SortedSetInner { Packed, Full }`. So unlike the stream case there is **no `Deref`
+layer and no constructor forwarding to write**; a retained-blob variant goes straight
+into that enum's owner.
+
+    SortedSetInner:: references   86   (Full 50, Packed 36)
+    match sites on self.inner     29
+    other self.inner uses         23
+    struct literals                6 single-line + 1 multi-line
+
+This commit routes every one of those through `inner()` / `inner_mut()` accessors, so a
+lazy variant has exactly ONE place to materialize -- the same role `Deref` plays for
+`StreamEntries`, where THREE separate eager readers each silently nullified the whole
+lever until a caller table named them.
+
+**MEASURED FREE**, which is the only reason it is landable on its own:
+
+    python3 scripts/restore_instr_per_op.py <bin> 40 20 --type=zset --op=reload \
+        --keys=200 --aa
+
+    TWO CERTIFIED DRAWS (all four A/A nulls PASS)
+      control 2.3738x / 2.3723x -> 2.3731x
+      wrapper 2.3779x / 2.3718x -> 2.3749x    +0.08 pct, inside the draw spread
+
+    control ELF caa66526d51c280357170104feb3cb98909de5ddd3873ca8665bbf4a4d354149
+    ship    ELF 90eac3c690522c34f73e9d7e4dffb4296ae18f19db9ff0f18c53a33b4dc9b3bc
+
+### Two traps this hit, both already in this file
+
+**A text-level rewrite cannot tell twin field names apart.** Replacing
+`&mut self.inner` globally also hit `SortedSetIterAsc`, a DIFFERENT struct with its own
+`inner` field, producing `self.inner_mut()` on an iterator. The compiler caught it;
+grep would not have.
+
+**Release green hid a red test build.** `cargo build -p fr-store` reported 0 errors
+while `cargo test -p fr-store --lib` failed on a `matches!(self.inner, ..)` inside
+`#[cfg(test)]` -- one site the release profile never compiles. Both builds, every time.
+
+**NO PERF CHANGE. This is step one of two.** The win comes when the loader retains
+(`decode_zset_listpack_pairs` -> `RdbValue::SortedSet(members)` today) and the save
+prefers the blob -- the verbatim `RdbValue::ZsetListpack(blob)` arm already exists.
+Expected shape, from the incumbent profile in `7dc624cea`: ~3.4M Ir/op of fr-only
+decode-and-re-encode plus a 2,118,400 Ir/op `lzf_compress` that a verbatim save deletes
+outright, against an fr arm of ~7.6M.
