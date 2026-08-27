@@ -71854,3 +71854,90 @@ REJECT above for the breakdown.
 `eval_semantics_differ`), which is what covers `find`/`match`/`gmatch`/`gsub` behaviour.
 `keyspace_accounting_gate` fails 3/225 and produced byte-identical output on a control ELF
 earlier today. `fr-runtime` 657 pass with the two stale-replica failures already present.
+
+## 2026-08-27 — KEEP/LANDED — the borrowed string check widened to the pure-read builtins: luapat_rep16 -134.5, luapatq_256 -128.5 (CROSSES 1.0), luapat_16 -127.4, luapatq_16 -123.2 instr/op
+
+`8511fc623` converted the eight `find`/`match`/`gmatch`/`gsub` sites to
+`lua_check_string_ref`. This converts the pure-READ string builtins that were still
+cloning their argument: `len`, `sub`, `rep`, `lower`, `upper`, `byte`.
+
+**PROVENANCE, because it is not this row's own commit.** The SOURCE change landed as
+`1800c5389`, a concurrent commit in this shared checkout that picked up the working tree
+while these measurements were running. Its diff is exactly the six conversions plus the
+`string.reverse` revert and a `.beads` sync -- verified by reading it, nothing else touches
+the source -- so ELF `b06e950d...`, built from that tree before the commit, is the code
+`1800c5389` contains. This row supplies the measurements that commit does not carry.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> luapat_rep16 | luapatq_16 | luapat_16 | luapatq_256
+
+    fr's OWN instr/op, n=4 per arm, three arms INTERLEAVED (control/ship/null):
+      luapat_rep16  15,804.7 -> 15,670.2   -134.5  (-0.85 pct)  A/A band 0.07 pct  DISJOINT
+      luapatq_256   29,057.7 -> 28,929.2   -128.5  (-0.44 pct)  A/A band 0.30 pct  DISJOINT
+      luapat_16     19,241.0 -> 19,113.6   -127.4  (-0.66 pct)  A/A band 0.11 pct  DISJOINT
+      luapatq_16    20,833.0 -> 20,709.8   -123.2  (-0.59 pct)  A/A band 0.20 pct  DISJOINT
+      get_control      911.9 ->    907.4     -4.5  (-0.49 pct)  A/A band 1.13 pct  flat
+
+    Every winning shape's delta exceeds ITS OWN A/A band.
+
+    fr/redis instructions per op, against that live Redis 7.2.4 arm:
+      luapatq_256   fr/redis 1.0059x -> 0.9985x    <- CROSSES 1.0
+      luapat_rep16  fr/redis 1.1877x -> 1.1735x
+      luapatq_16    fr/redis 1.1978x -> 1.1848x
+      luapat_16     fr/redis 1.1128x -> 1.1046x
+
+    A/A null, same invocation as the A/B arms, median 0.99996 bootstrap 95% median CI [0.99931, 1.00010]
+    on luapat_rep16; 0.99984 CI [0.99931, 1.00108] on luapat_16; 1.00060 CI [0.99859,
+    1.00296] on luapatq_256; 0.99931 CI [0.99796, 1.00170] on luapatq_16. Null arm is a
+    BYTE-IDENTICAL COPY of the ship ELF. All PASS.
+
+    COUNTED MECHANISM, `luapatq_16`, across the two commits:
+      __rust_alloc   33.0010 (before 8511fc623) -> 31.0010 (after) -> 30.0010 (here)
+      lua_check_string's share of those:  3.000 -> 1.000 -> ZERO
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      control  bench_elf_sha256=36d84525741cc21aebdc092e54bb88d1578d193ec25d33391b29760f49be19a3
+      ship     bench_elf_sha256=b06e950d090869f556918998115bef1dab934dbe9e38c915e0abd0be1e720fc3
+      null     bench_elf_sha256=b06e950d090869f556918998115bef1dab934dbe9e38c915e0abd0be1e720fc3
+      redis    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT rests on the BOOTSTRAP MEDIAN-CI plus the counted mechanism, and on nothing
+    else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-run on both SHA-256s; void if any shape's delta stops exceeding its
+    own A/A band, or if `lua_check_string` reappears as an `__rust_alloc` caller on
+    `luapatq_16`.
+
+### ONE SITE STAYED OWNING, AND THE COMPILER IS WHY
+
+`string.reverse` was converted with the rest and FAILED TO BUILD: it reverses the buffer IN
+PLACE and returns it as the result, so it needs a `Vec` it can mutate, not a borrow of the
+argument. Reverted to the owning form with a comment saying so. That is the whole reason
+`lua_check_string` still exists rather than being deleted -- `reverse` is a genuine owner,
+and `E0308` said so in one build rather than in review.
+
+The remaining owning callers are the `pack`/`unpack` family (`struct`-style codecs), which
+were left alone: they are not on any measured shape here, and each is one allocation.
+
+### WHY luapat_rep16 MOVED MOST FOR ITS SIZE
+
+`luapat_rep16` is `string.rep('a', 16) return #s` -- it is the shape whose ENTIRE body is
+the two builtins this commit converted (`rep` and `len`), with no pattern match at all. It
+is the smallest of the four at 15,804.7 instr/op and took the largest absolute cut, which
+is the dose-response one expects when the removed work is a fixed per-call allocation
+rather than something proportional to the subject.
+
+### GATES
+
+`fr-command` 1,294 pass. 31 of 32 differentials pass, including every Lua gate
+(`lua_semantics_differ`, `lua_lib_differ`, `lua_rediscall_error_differ`,
+`eval_semantics_differ`) -- which is what covers `len`/`sub`/`rep`/`lower`/`upper`/`byte`
+and `reverse` semantics. `keyspace_accounting_gate` fails 3/225 on sinter/sunion/sdiff and
+produced byte-identical output on a control ELF earlier today. `fr-runtime` 657 pass with
+the two stale-replica failures already present.
+
+fr is now at **30.0 allocations per op on `luapatq_16` against redis's 5.0**, down from
+33.0 at the start of this pair of commits.
