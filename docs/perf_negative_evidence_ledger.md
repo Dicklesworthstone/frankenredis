@@ -68936,3 +68936,52 @@ problem stands.
 **NO PERF CHANGE THIS TURN.** The deliverable is differential coverage of the path the
 next build lands on, plus one gate condition measured and rejected before it could
 become a false invariant.
+
+## 2026-08-27 — THE LAZY-RESTORE FLOOR, MEASURED WITH VALIDATION KEPT: 3.2230x -> 2.0525x (-36.4 pct)
+
+`8e9ac13f2` measured the rebuild half at -30.4 pct and projected ~1.79x for the full
+lazy design by frame arithmetic. **The arithmetic was optimistic and is now corrected
+by measurement.**
+
+First landable piece of the structural build: `UpstreamStreamSkeleton::validate_entries()`
+-- a `VALIDATE_ONLY` const-generic arm of `decode_stream_listpack` that runs the whole
+walk, every `take_*` and every trailer/count check, and materialises nothing. A
+blob-retaining RESTORE needs exactly this, because fr must keep rejecting corruption
+that default-redis accepts (`9a6f6c487`); the validation cannot be dropped along with
+the materialisation.
+
+**It is gated as an ORACLE, not asserted by inspection.** The test corrupts ONE BYTE AT
+A TIME across the whole record (two masks per offset) and asserts
+`validate_entries().is_ok() == flat_entries().is_ok()` on every comparable corruption,
+plus that the reject path was actually exercised. **Mutation-checked:** an
+unconditional `Ok(())` validator fails it at byte 24 ^ 0x01.
+
+**FLOOR MEASURED**, env-gated probe so both arms are ONE ELF (probe
+`6bb7bac8b285f760f23bdb8828569a1e3ea1ebdafba00654e57821ef6e84df6a`, reverted):
+
+    python3 scripts/restore_instr_per_op.py <bin> 400 100 --type=stream --varyfields --aa
+
+    ALL FOUR DRAWS CERTIFIED (A/A nulls PASS)
+      control  741,034.6 / 741,314.7 -> 741,174.7   3.2150x / 3.2310x -> 3.2230x
+      floor    473,271.7 / 469,918.2 -> 471,595.0   2.0600x / 2.0450x -> 2.0525x
+                                       -269,580 Ir/op   -36.37 pct
+
+**MY PROJECTION WAS 1.79x; THE MEASURED FLOOR IS 2.0525x.** The error: I treated
+`flat_entries`' whole 102,899 Ir/op as removable, but the validator still performs the
+WALK -- only the materialisation goes. **Price the replacement, not the incumbent
+frame** -- the fourth time this file records that error, and the first time it is
+corrected by building the replacement instead of estimating it.
+
+    worst arm today          3.2230x
+    rebuild removed          2.2400x   MEASURED (8e9ac13f2)
+    + materialisation, validation KEPT  2.0525x   MEASURED, this commit
+    (the earlier ~1.79x arithmetic is WITHDRAWN)
+
+**What ships here:** the validator and its oracle test. The remaining build is the
+lazy `Repr` on `PackedStreamLog` (90 internal field references to route through an
+accessor, ~17 delegating methods) plus RESTORE and save wiring. A `Value::StreamPending`
+variant was considered and rejected: **125 `Value::Stream` sites**, 73 in fr-store
+alone. Gates green on the shipping ELF
+`129b5d6f25e0f9c193e7f216ae28ff05f7d0a998839e36f8dbbadb8364640777`: fr-persist 239/239,
+stream reload+RESTORE fuzz 480 commands, AOF CLI restart gate; fr-store 960 passed with
+the 2 known pre-existing wall-clock failures.

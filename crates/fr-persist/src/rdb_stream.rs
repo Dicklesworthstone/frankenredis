@@ -725,9 +725,26 @@ impl UpstreamStreamSkeleton {
         out.reserve_for_record(self.stream_length);
         for (master_ms, master_seq, blob) in &self.nodes {
             let lp = decode_raw_values(blob)?;
-            decode_stream_listpack::<_, true>(&lp, blob, *master_ms, *master_seq, &mut out)?;
+            decode_stream_listpack::<_, true, false>(&lp, blob, *master_ms, *master_seq, &mut out)?;
         }
         Ok(out)
+    }
+
+    /// Walk and VALIDATE every entry without materialising any of it.
+    ///
+    /// Accepts exactly what [`Self::flat_entries`] accepts and rejects exactly what
+    /// it rejects -- same walk, same trailer and count checks, same errors -- but
+    /// pushes nothing. Prerequisite for a RESTORE that retains the macro-node blobs
+    /// instead of decoding them: fr must keep rejecting corrupt payloads that
+    /// default-redis accepts (9a6f6c487), so the validation cannot simply be
+    /// dropped along with the materialisation.
+    pub fn validate_entries(&self) -> Result<(), UpstreamStreamError> {
+        let mut sink: StreamOut<std::borrow::Cow<'_, [u8]>> = StreamOut::default();
+        for (master_ms, master_seq, blob) in &self.nodes {
+            let lp = decode_raw_values(blob)?;
+            decode_stream_listpack::<_, true, true>(&lp, blob, *master_ms, *master_seq, &mut sink)?;
+        }
+        Ok(())
     }
 
     /// The owned form, for callers that must outlive the blobs (`RdbValue::Stream`).
@@ -750,7 +767,7 @@ impl UpstreamStreamSkeleton {
         let mut out: StreamOut<F> = StreamOut::default();
         for (master_ms, master_seq, blob) in &self.nodes {
             let lp = decode_raw_values(blob)?;
-            decode_stream_listpack::<_, false>(&lp, blob, *master_ms, *master_seq, &mut out)?;
+            decode_stream_listpack::<_, false, false>(&lp, blob, *master_ms, *master_seq, &mut out)?;
         }
         Ok(out.entries)
     }
@@ -1143,7 +1160,7 @@ impl<F> StreamOut<F> {
     }
 }
 
-fn decode_stream_listpack<'blob, F, const FLAT: bool>(
+fn decode_stream_listpack<'blob, F, const FLAT: bool, const VALIDATE_ONLY: bool>(
     lp: &[RawListpackValue],
     blob: &'blob [u8],
     master_ms: u64,
@@ -1174,7 +1191,7 @@ where
     // declares how many live entries it holds and how many fields the master
     // carries, which is the exact size for the SAMEFIELDS shape and a good guess
     // otherwise. Capacity is a hint: a wrong one costs a growth, never content.
-    if FLAT {
+    if FLAT && !VALIDATE_ONLY {
         out.index.reserve(declared_live_count);
         out.fields
             .reserve(declared_live_count.saturating_mul(master_field_count.max(1)));
@@ -1223,7 +1240,9 @@ where
                 // `intern_field`, which maps every copy straight back to the same
                 // dictionary index.
                 let pair = (F::from(master_name.clone()), F::from(value));
-                if FLAT {
+                if VALIDATE_ONLY {
+                    drop(pair);
+                } else if FLAT {
                     out.value_bytes = out.value_bytes.saturating_add(pair.1.as_ref().len());
                     out.fields.push(pair);
                 } else {
@@ -1235,7 +1254,9 @@ where
                 let name = take_string(lp, blob, &mut idx)?;
                 let value = take_string(lp, blob, &mut idx)?;
                 let pair = (F::from(name), F::from(value));
-                if FLAT {
+                if VALIDATE_ONLY {
+                    drop(pair);
+                } else if FLAT {
                     out.value_bytes = out.value_bytes.saturating_add(pair.1.as_ref().len());
                     out.fields.push(pair);
                 } else {
@@ -1256,7 +1277,7 @@ where
         if deleted {
             // Tombstone: its fields were consumed to keep the cursor aligned but
             // must not reach the output.
-            if FLAT {
+            if FLAT && !VALIDATE_ONLY {
                 out.fields.truncate(mark);
             }
             continue;
@@ -1266,7 +1287,10 @@ where
             .ok_or(UpstreamStreamError::InconsistentEntryCount)?;
         let ms = combine_u64_i64(master_ms, ms_delta);
         let seq = combine_u64_i64(master_seq, seq_delta);
-        if FLAT {
+        if VALIDATE_ONLY {
+            // Counted, not materialised: the live-count check at the end of this
+            // function still has to see this entry.
+        } else if FLAT {
             let len = u32::try_from(out.fields.len() - mark)
                 .map_err(|_| UpstreamStreamError::InvalidFieldCount)?;
             let off = u32::try_from(mark).map_err(|_| UpstreamStreamError::InvalidFieldCount)?;
@@ -1363,6 +1387,74 @@ fn combine_u64_i64(base: u64, delta: i64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `validate_entries` must be a pure ORACLE for `flat_entries`: same accepts,
+    /// same rejects, on the same bytes.
+    ///
+    /// A validate-only walk is only useful to a RESTORE that retains the macro-node
+    /// blobs if it rejects EXACTLY what the materialising decode rejects. fr accepts
+    /// FOREIGN payloads here and rejects corruption that default-redis waves through
+    /// (9a6f6c487), so a validator that is even slightly more permissive would hand
+    /// that property away silently.
+    ///
+    /// Corrupts one byte at a time across the whole record and asserts the two agree
+    /// on every single one -- not just that both accept the clean payload.
+    #[test]
+    fn validate_entries_accepts_and_rejects_exactly_what_flat_entries_does() {
+        let entries: Vec<StreamEntry> = (1..=24u64)
+            .map(|i| {
+                (
+                    i,
+                    1,
+                    vec![
+                        (format!("f{i}").into_bytes(), format!("v{i}").into_bytes()),
+                        (b"shared".to_vec(), vec![b'x'; (i % 7) as usize]),
+                    ],
+                )
+            })
+            .collect();
+        let payload = encode_upstream_stream_listpacks3(&entries, Some((24, 1)), &[], Some(24), None)
+            .expect("encodes");
+
+        let clean = UpstreamStreamSkeleton::decode(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, &payload)
+            .expect("clean payload decodes")
+            .0;
+        assert!(clean.flat_entries().is_ok(), "clean payload must materialise");
+        assert!(clean.validate_entries().is_ok(), "clean payload must validate");
+
+        let mut agreed = 0_u32;
+        let mut both_rejected = 0_u32;
+        for offset in 0..payload.len() {
+            for xor in [0x01_u8, 0xff] {
+                let mut bad = payload.clone();
+                bad[offset] ^= xor;
+                let Ok((skeleton, _)) =
+                    UpstreamStreamSkeleton::decode(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, &bad)
+                else {
+                    // Rejected before either walk runs; nothing to compare.
+                    continue;
+                };
+                let flat_ok = skeleton.flat_entries().is_ok();
+                let validate_ok = skeleton.validate_entries().is_ok();
+                assert_eq!(
+                    flat_ok, validate_ok,
+                    "validator disagrees with the materialising decode at byte {offset} ^ {xor:#04x}: \
+                     flat_entries ok={flat_ok} validate_entries ok={validate_ok}"
+                );
+                agreed += 1;
+                if !flat_ok {
+                    both_rejected += 1;
+                }
+            }
+        }
+        // The corpus must actually exercise the REJECT path, or agreement is vacuous.
+        assert!(
+            both_rejected > 0,
+            "no corruption was rejected by either path -- the oracle test proves nothing"
+        );
+        assert!(agreed > 100, "too few comparable corruptions: {agreed}");
+    }
+
     use crate::{
         UPSTREAM_RDB_TYPE_STREAM_LISTPACKS, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2,
         UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, rdb_encode_length,
