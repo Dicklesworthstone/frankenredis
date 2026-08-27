@@ -68601,3 +68601,51 @@ REPLACEMENT, not the incumbent frame; I have no priced replacement for the match
 and four recorded over-estimates in this file say that proposing one from a
 read-derived argument is how those rows got written. The measurement stands on its own
 and the next attempt starts from a same-invocation baseline instead of a bracketed one.
+
+## 2026-08-26 — THE LZF GAP IS CODEGEN, NOT ALGORITHM. Priced at 8,510 Ir/compression
+
+Last turn closed with "no priced replacement for the match path". Priced now, by
+profiling the INCUMBENT on the IDENTICAL workload (40 entries x 40 keys x 6 reloads,
+both engines, 240 compressions each):
+
+    fr    lzf_compress SELF  5,889,558 Ir / 240 = 24,540 Ir per compression
+    redis lzf_compress SELF  3,847,140 Ir / 240 = 16,030 Ir per compression
+    ratio 1.5309x        gap 8,510 Ir per compression
+
+    hot code            fr                       redis
+    regions             FOUR (46+37+32+30 = 145) ONE (121 instrs)
+    top region share    28.6 pct                 89.9 pct
+    Ir/call in hot code 22,839 (93.1 pct)        14,406 (89.9 pct)
+
+Three independent measurements of this ratio now agree within 2.5 pct: the certified
+two-invocation 1.5139x, the same-invocation varyfields 1.4945x (`e48870e92`), and this
+same-workload 1.5309x.
+
+**THE OUTPUT IS BYTE-IDENTICAL, WHICH IS WHAT MAKES THIS CONCLUSIVE.**
+`lzf_dump_byte_equality_differ.py` PASSES across 59 payloads spanning the match-length
+overshoot boundary. Identical output means identical matches, which means identical
+loop iteration counts. **So the 1.53x cannot be "fr finds worse matches" or "fr scans
+more positions" -- it is purely instructions-per-iteration.** fr executes ~58 pct more
+instructions to produce the same bytes from the same input.
+
+**The remaining gap is REGISTER PRESSURE / LOOP FRAGMENTATION, not algorithm.** The
+disassembly shows fr's scan loop reloading the input base, the htab base and the base
+offset from the STACK on every position (`mov 0x48(%rsp)`, `mov 0x68(%rsp)`,
+`mov 0x60(%rsp)`) and storing `out.len` back per literal byte, while redis's fused
+121-instruction loop keeps its state in registers. Neither the bounds checks nor the
+hash are the problem: `input[ip+2]` compiles with NO bounds check, and slice 1 already
+made the htab probe's check provably dead.
+
+**THIS EXPLAINS WHY THE CAMPAIGN STALLED.** Seven algorithmic slices took the ratio
+1.76x -> ~1.53x and then flattened, because what is left is not algorithmic. **Stop
+looking for algorithmic slices in this kernel.** The remaining named candidates are
+already closed by size (`hval` <=2.9 pct, literal push 3.7 pct -- `7c90f7be8`), and the
+77 pct match path is expensive for the same codegen reason, not for a missing trick.
+
+Anything that does attack it has to reduce LIVE VALUES in the loop, and must clear two
+bars this file already records: the emitted bytes stay byte-exact (the differ above is
+the gate), and the estimate prices the REPLACEMENT rather than the incumbent frame.
+
+**NO CODE CHANGE THIS TURN.** The deliverable is the price and the mechanism: 8,510 Ir
+per compression, 7.58 pct of the reload arm, attributable to codegen rather than to
+any algorithm a source edit can reach.
