@@ -71292,3 +71292,116 @@ residual is still the per-call constant described in `1713d8ab5`, not a size slo
 named next lever is unchanged and its input now exists: key the command histogram by the
 COMMAND_TABLE INDEX and make it an array store, which removes the `HashMap<String,
 CommandHistogram>` probe still measuring 1.000 calls/op.
+
+## 2026-08-27 — KEEP/LANDED — SLOWLOG asks before it builds: config_get_one -194.2 (1.0635x -> 0.9683x), evalsha_small -206.5, fcall_lib1_pad -198.5 instr/op
+
+`record_slowlog` materialised the client address (`.to_vec()`) and cloned the client name
+**on every command**, then handed both to `record_slowlog_with_client`, whose first two
+lines threw them away unless the call exceeded the slowlog threshold. The overwhelmingly
+common case is a call far under it. Upstream `slowlogPushEntryIfNeeded` tests the
+threshold first and returns; fr did the work first and tested second.
+
+Fixed by hoisting the test into the caller as `Store::slowlog_would_record(duration_us)`.
+**Both recorders now call that same predicate instead of repeating the comparison**, so the
+caller's early exit and the recorder's guard cannot drift apart.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> config_get_one
+    python3 scripts/shape_instr_per_op.py <bin> evalsha_small
+    python3 scripts/shape_instr_per_op.py <bin> fcall_lib1_pad
+
+    fr's OWN instr/op, n=5 per arm, three arms INTERLEAVED (control/ship/null):
+      config_get_one  control 6,742.9 [6,717.3, 6,870.6]
+                      ship    6,548.7 [6,537.1, 6,596.1]   -194.2  -2.88 pct  DISJOINT
+      evalsha_small   control 11,415.0 [11,410.1, 11,425.5]
+                      ship    11,208.5 [11,206.3, 11,213.6] -206.5  -1.81 pct  DISJOINT
+      fcall_lib1_pad  control 10,733.9 [10,727.7, 10,741.4]
+                      ship    10,535.4 [10,518.5, 10,548.1] -198.5  -1.85 pct  DISJOINT
+
+    A/A null, same invocation as the A/B arms, median 0.99964 bootstrap 95% median CI [0.99947, 1.00113]
+    on evalsha_small (band 0.11 pct); 0.99887 CI [0.99685, 1.00084] on fcall_lib1_pad
+    (0.31 pct); 1.00154 CI [0.99846, 1.00384] on config_get_one (0.38 pct). The null arm
+    is a BYTE-IDENTICAL COPY of the ship ELF (same SHA-256) in the same rotation. Each
+    shape's delta exceeds ITS OWN band. All three PASS.
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, explicitly NOT a /proc/self/exe self-report:
+      control  bench_elf_sha256=94da1a5298869aa829a377e531cc443acab3a4efd61b90ebcd21efefefa72a5b
+      ship     bench_elf_sha256=4a904af53e17b132ab9c757ccb0c6edf40ffddcf1c2fe3d8db395f7809edb126
+      null     bench_elf_sha256=4a904af53e17b132ab9c757ccb0c6edf40ffddcf1c2fe3d8db395f7809edb126
+      redis    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT IS GATED ON THE BOOTSTRAP MEDIAN-CI and on nothing else. CV is diagnostic
+    only and did not influence this verdict; never on CV.
+
+    Retry predicate: re-run on both SHA-256s; void if the ship arm's bootstrap 95% median
+    CI ever overlaps the control's on any of the three shapes, or if `memcpy` is not
+    11.00 calls/op on `fcall_lib1_pad`.
+
+### A SECOND CROSSING
+
+fr/redis instructions per op, against the live vendored Redis 7.2.4 arm the harness runs
+in the same invocation:
+
+      config_get_one  fr/redis 1.0635x -> 0.9683x    <- crosses 1.0
+      fcall_lib1_pad  fr/redis 1.4494x -> 1.4136x
+      evalsha_small   fr/redis 1.2138x -> 1.2188x    (ratio flat; see below)
+
+`evalsha_small`'s ratio did not move even though its absolute fell 206.5, because the
+redis arm moved with it -- every window here was UNFIT and the denominator is the noisy
+half. The absolutes are the certified claim throughout.
+
+### THE MECHANISM IS A COUNT
+
+    memcpy           12.0020 -> 11.0025 calls/op   (the client-address `.to_vec()`)
+    record_slowlog    2.0000 ->  1.0000 calls/op   (the recorder is no longer entered)
+
+`clone_from` is UNCHANGED at 3.000, and that is worth stating rather than quietly
+claiming the client-name clone too: the bench client has no name, so
+`Option::clone().unwrap_or_default()` was already free there. **The measured win is the
+address materialisation only.** On a connection that HAS set a name the saving is larger,
+and this row does not claim that number because it did not measure it.
+
+### IT ONLY PAYS ON THE GENERIC ROUTE, AND THE FLAT SHAPES SAY SO
+
+      ping    579.7 ->  579.4   -0.05 pct   band 0.34 pct   UNRESOLVED
+      llen  1,148.8 -> 1,148.1  -0.06 pct   band 0.26 pct   UNRESOLVED
+      get_control  911.7 -> 913.2  +0.16 pct  band 3.36 pct  UNRESOLVED
+
+Three front-classified shapes, all flat. They do not reach this `record_slowlog`, so the
+lever is confined to generically-dispatched commands -- which is where every remaining
+loss is. Reported as UNRESOLVED rather than "no regression": each shape's delta is inside
+its own A/A band, so the honest statement is that this run cannot resolve them either way.
+
+### CORRECTNESS: THE FAILURE MODE HERE IS SILENT
+
+An early exit that fires when it should not does not error -- SLOWLOG simply stops
+recording. So the gate drives the threshold across its meaningful settings on both ELFs:
+`-1` (disabled), `0` (log everything, where the exit must NOT fire), a high value (nothing
+qualifies), and back to `0` (proving the exit is not sticky). Entry CONTENTS are checked
+too, since the client address and name are precisely what the exit skips building.
+Control and ship IDENTICAL on every phase, including 14 entries landing with the address
+present at threshold 0.
+
+**The first version of that probe was blind to half the change and said so.**
+`entry_has_name` read False on BOTH ELFs -- every `redis-cli` invocation is a new
+connection, so `CLIENT SETNAME` never survived to the logged command. A second probe
+speaks RESP on ONE socket so SETNAME, the logged command and `SLOWLOG GET` share a
+connection; it asserts its own precondition (the control must actually record a name, or
+the probe proved nothing) and then compares. Both ELFs: name present, identical.
+
+### GATES
+
+`fr-command` 1,294 pass. 31 of 32 differentials pass; `keyspace_accounting_gate` fails
+3/225 on sinter/sunion/sdiff and produced the byte-identical three lines on a control ELF
+earlier today. `fr-runtime` 657 pass with the two stale-replica failures already present.
+
+`fr-store` reported three wall-clock "faster than" ratio asserts failing under a host at
+load 37-82. **This row cannot use the structural dismissal the previous two rows used --
+this change DOES touch fr-store.** The evidence is instead: `zadd_insert_move` PASSED on
+re-run (ratio 0.97x), and `swapdb_db_enumeration` + `intersect_sorted_i64_galloping` were
+both already failing earlier today on an ELF where fr-store was provably unmodified (see
+the `985499ab2` row, where fr-store's independence from fr-command and fr-runtime was
+established). None of the three touches slowlog.

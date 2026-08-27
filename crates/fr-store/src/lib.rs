@@ -8480,6 +8480,24 @@ impl Store {
         self.record_slowlog_with_client(argv, duration_us, now_ms, client_address, client_name);
     }
 
+    /// Whether a call of this duration would produce a SLOWLOG entry.
+    ///
+    /// (BlackThrush 2026-08-27) The threshold test, exposed so a caller can ask BEFORE
+    /// building the entry's inputs. `record_slowlog` was materialising the client address
+    /// (`.to_vec()`) and cloning the client name on EVERY command, and only then calling
+    /// `record_slowlog_with_client`, which threw both away on the two guards below.
+    /// Upstream `slowlogPushEntryIfNeeded` tests the threshold first and returns.
+    ///
+    /// `record_slowlog_with_client` calls THIS rather than repeating the comparison, so
+    /// the caller's early exit and the recorder's guard cannot drift apart -- a duplicated
+    /// rule with two copies is how the wrong half gets updated.
+    #[inline]
+    #[must_use]
+    pub fn slowlog_would_record(&self, duration_us: u64) -> bool {
+        self.slowlog_log_slower_than_us >= 0
+            && (duration_us as i64) >= self.slowlog_log_slower_than_us
+    }
+
     pub fn record_slowlog_with_client(
         &mut self,
         argv: &[Vec<u8>],
@@ -8488,10 +8506,7 @@ impl Store {
         client_address: Vec<u8>,
         client_name: Vec<u8>,
     ) {
-        if self.slowlog_log_slower_than_us < 0 {
-            return;
-        }
-        if (duration_us as i64) < self.slowlog_log_slower_than_us {
+        if !self.slowlog_would_record(duration_us) {
             return;
         }
         let entry = SlowlogEntry {
@@ -8517,10 +8532,7 @@ impl Store {
         client_address: Vec<u8>,
         client_name: Vec<u8>,
     ) {
-        if self.slowlog_log_slower_than_us < 0 {
-            return;
-        }
-        if (duration_us as i64) < self.slowlog_log_slower_than_us {
+        if !self.slowlog_would_record(duration_us) {
             return;
         }
         let entry = SlowlogEntry {

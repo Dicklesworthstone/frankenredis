@@ -46688,6 +46688,17 @@ impl Runtime {
 
     /// Record a command execution in the slow log if it exceeded the threshold.
     fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
+        // (BlackThrush 2026-08-27) Ask BEFORE building the entry's inputs. The two lines
+        // below allocate the client address and clone the client name, and
+        // `record_slowlog_with_client` then discarded both on its threshold guard -- on
+        // EVERY command, since the overwhelmingly common case is a call far under the
+        // slowlog threshold. Measured on `fcall_lib1_pad`: `record_slowlog` was 1.000 of
+        // the shape's 12.002 memcpy calls/op, with the `String::clone_from` beside it.
+        // Upstream `slowlogPushEntryIfNeeded` tests the threshold first for the same
+        // reason. The predicate is the recorder's OWN guard, not a copy of it.
+        if !self.server.store.slowlog_would_record(duration_us) {
+            return;
+        }
         let client_address = if self.session.peer_addr.is_some() {
             self.refresh_dispatch_peer_addr_cache(self.session.peer_addr);
             self.dispatch_peer_addr_cache.as_bytes().to_vec()
@@ -46705,6 +46716,11 @@ impl Runtime {
     }
 
     fn record_prebuilt_slowlog(&mut self, argv: Vec<Vec<u8>>, duration_us: u64, now_ms: u64) {
+        // Same early exit as `record_slowlog`. The caller has already built `argv` here, so
+        // this saves the address and name rather than the whole entry.
+        if !self.server.store.slowlog_would_record(duration_us) {
+            return;
+        }
         let client_address = if self.session.peer_addr.is_some() {
             self.refresh_dispatch_peer_addr_cache(self.session.peer_addr);
             self.dispatch_peer_addr_cache.as_bytes().to_vec()
