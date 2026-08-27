@@ -68895,3 +68895,44 @@ reach, which is a worse number to leave in the record than an honest bracket.
 **The build is now justified by measurement.** It is still ~17 delegating methods plus
 the RESTORE and save wiring, and it is still not something to leave half-done in a
 shared checkout -- but nobody has to take the payoff on faith any more.
+
+## 2026-08-27 — RESTORE payload path brought under the fuzz gate; and stream DUMP is NOT byte-identical across engines
+
+`abf460569` built a stream fuzz gate over the RDB FILE path and it found a data-loss
+bug on its first run. The RESTORE PAYLOAD path -- a DIFFERENT decoder, and the one the
+worst arm lives on -- was still uncovered. That gap is not hypothetical: when the empty
+grouped stream was being dropped on reload, **DUMP/RESTORE round-tripped it perfectly**,
+so one path passing says nothing about the other.
+
+`scripts/stream_reload_digest_fuzz.py` now also, per round and per key: DUMPs on both
+engines, RESTOREs each engine's OWN payload into a fresh key, compares the RESTORE
+replies, and re-compares the whole-keyspace `DEBUG DIGEST`.
+
+    4 seeds x 6 cycles, 960 stream commands -- PASS on HEAD (29ed9d2a...)
+    still FAILS on the pre-fix ELF 771c89eb... at seed 4201 round 0
+
+### A gate condition I wrote, measured, and REJECTED
+
+The first version asserted the DUMP payloads are BYTE-IDENTICAL across engines. It
+fired immediately: **redis 488 B vs fr 463 B** for the same stream after deletions.
+That is not an fr bug and the assertion was mine, not a property fr claims:
+
+**Redis PRESERVES its existing macro-node structure on DUMP; fr RE-PACKS into fresh
+nodes.** After XDEL/XTRIM the two describe the same stream with different node
+boundaries. Proven benign the right way -- each engine's own payload restores to a
+state whose whole-keyspace digest matches the other's -- so the gate now asserts STATE
+equality, not byte equality.
+
+**Do not re-add the byte-equality condition for streams.** The string-value
+byte-equality property (`lzf_dump_byte_equality_differ.py`) is real and does hold;
+stream node packing is not covered by it and never was.
+
+**It also bears on the save-side node cache** ([[project_verbatim_listpack_precedent_for_streams]]):
+fr already does not preserve node identity across a DUMP, so a cache that serves
+previously-packed nodes cannot break a guarantee fr was making -- there is none to
+break. That removes one objection to that lever, though its interior-mutability
+problem stands.
+
+**NO PERF CHANGE THIS TURN.** The deliverable is differential coverage of the path the
+next build lands on, plus one gate condition measured and rejected before it could
+become a false invariant.

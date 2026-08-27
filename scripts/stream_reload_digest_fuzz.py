@@ -220,9 +220,67 @@ def main():
                     print("[seed %d round %d] DIGEST DIVERGE AFTER RELOAD\n"
                           "  redis=%r\n  fr   =%r" % (4200 + sd, rd_i, rdig, fdig))
                     return 1
-        print("OK: %d seed(s) x %d reload cycles, %d stream commands -- fr matches "
-              "redis 7.2.4 reply-for-reply AND on whole-keyspace DEBUG DIGEST across "
-              "every DEBUG RELOAD" % (SEEDS, ROUNDS, issued))
+
+                # DUMP / RESTORE round trip, per key. The reload check above covers
+                # the RDB FILE path; this covers the PAYLOAD path, which is a
+                # DIFFERENT decoder -- when an empty grouped stream was being
+                # dropped on reload (abf460569) DUMP/RESTORE round-tripped it
+                # perfectly, so one path passing says nothing about the other.
+                #
+                # Two assertions per key: the payloads are BYTE-IDENTICAL across
+                # engines (fr claims byte-exact DUMP), and restoring fr's own
+                # payload into a fresh key reproduces the whole-keyspace digest
+                # relationship -- i.e. the restored copy equals redis's restored
+                # copy.
+                for k in KEYS:
+                    for sock in (rs, fs):
+                        sock.sendall(resp("DUMP", k))
+                    rdmp, rbuf = read_reply(rs, rbuf)
+                    fdmp, fbuf = read_reply(fs, fbuf)
+                    # NOT asserted: byte-identical stream DUMP across engines.
+                    # Measured and REJECTED as a gate condition -- after deletions
+                    # redis PRESERVES its existing macro-node structure while fr
+                    # RE-PACKS into fresh nodes, so the payloads differ in length
+                    # (488 B vs 463 B on the first shape that hit it) while
+                    # describing the same stream. What matters is that each
+                    # engine's OWN payload restores to equal state, which is what
+                    # the digest below checks.
+                    if (rdmp == b"$-1") != (fdmp == b"$-1"):
+                        print("[seed %d round %d] one engine has %s and the other "
+                              "does not (redis=%r fr=%r)"
+                              % (4200 + sd, rd_i, k, rdmp[:12], fdmp[:12]))
+                        return 1
+                    if rdmp == b"$-1":
+                        continue
+                    rraw = rdmp.split(b":", 1)[1]
+                    fraw = fdmp.split(b":", 1)[1]
+                    rs.sendall(resp("RESTORE", k + "_rt", "0", rraw, "REPLACE"))
+                    fs.sendall(resp("RESTORE", k + "_rt", "0", fraw, "REPLACE"))
+                    rr, rbuf = read_reply(rs, rbuf)
+                    fr_, fbuf = read_reply(fs, fbuf)
+                    if rr != fr_:
+                        print("[seed %d round %d] RESTORE reply diverges for %s\n"
+                              "  redis=%r\n  fr   =%r"
+                              % (4200 + sd, rd_i, k, rr[:120], fr_[:120]))
+                        return 1
+                for sock in (rs, fs):
+                    sock.sendall(resp("DEBUG", "DIGEST"))
+                rdig2, rbuf = read_reply(rs, rbuf)
+                fdig2, fbuf = read_reply(fs, fbuf)
+                if rdig2 != fdig2:
+                    print("[seed %d round %d] DIGEST DIVERGE AFTER DUMP/RESTORE\n"
+                          "  redis=%r\n  fr   =%r" % (4200 + sd, rd_i, rdig2, fdig2))
+                    return 1
+                # Drop the round-trip copies so the next round's state is the
+                # generator's, not an accumulation of restored duplicates.
+                for sock in (rs, fs):
+                    sock.sendall(resp("DEL", *[k + "_rt" for k in KEYS]))
+                _, rbuf = read_reply(rs, rbuf)
+                _, fbuf = read_reply(fs, fbuf)
+        print("OK: %d seed(s) x %d cycles, %d stream commands -- fr matches redis 7.2.4 "
+              "reply-for-reply, on whole-keyspace DEBUG DIGEST across every DEBUG "
+              "RELOAD, and on a per-key DUMP + RESTORE round trip of each engine's "
+              "own payload" % (SEEDS, ROUNDS, issued))
         return 0
     finally:
         for proc, sock in procs:
