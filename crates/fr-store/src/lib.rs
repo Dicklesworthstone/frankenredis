@@ -35597,12 +35597,22 @@ impl Store {
         // which is what makes `FUNCTION LOAD REPLACE` of an existing library
         // still work.
         for entry in &functions {
+            // (BlackThrush 2026-08-27, frankenredis-function-name-case-duplicate-73c03)
+            // CASE-INSENSITIVE across libraries, matching redis 7.2.4: with `myfunc`
+            // registered, loading a second library that registers `MYFUNC` is refused with
+            // `ERR Function MYFUNC already exists`. fr compared exact bytes and accepted
+            // it, which is what let two case-variant registrations coexist and made FCALL's
+            // answer depend on `HashMap` order.
+            //
+            // The two WITHIN-library checks stay case-SENSITIVE on purpose: redis accepts
+            // `f` and `F` registered inside ONE library, and so does fr. That pair already
+            // agreed, and making it insensitive here would over-refuse.
             let taken = self.function_libraries.iter().any(|(other_name, other)| {
                 other_name != &lib_name
                     && other
                         .functions
                         .iter()
-                        .any(|existing| existing.name == entry.name)
+                        .any(|existing| existing.name.eq_ignore_ascii_case(&entry.name))
             });
             if taken {
                 return Err(StoreError::GenericError(format!(

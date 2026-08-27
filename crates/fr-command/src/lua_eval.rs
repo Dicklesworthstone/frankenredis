@@ -5334,10 +5334,42 @@ pub(crate) fn function_call_registered(
     keys: Vec<Vec<u8>>,
     args: Vec<Vec<u8>>,
 ) -> Result<RespFrame, (u32, String)> {
-    let Some((_, callback)) = callbacks
-        .iter()
-        .find(|(name, _)| name.as_slice() == function_name)
-    else {
+    // (BlackThrush 2026-08-27, frankenredis-function-name-case-duplicate-73c03)
+    // CASE-INSENSITIVE, to agree with the stage that selected this library.
+    //
+    // FCALL resolves in two stages: `Store::function_get` picks the LIBRARY with
+    // `eq_ignore_ascii_case`, and this picks the CALLBACK within it. This compare used to
+    // be exact bytes, so the two stages disagreed and the mismatch was visible two ways.
+    // With only `myfunc` registered, `FCALL MYFUNC` selected the right library and then
+    // failed here -- redis 7.2.4 returns the function. And with two libraries registering
+    // `myfunc` and `MYFUNC`, stage 1 picks one by `HashMap` order (seeded per PROCESS) and
+    // this compare then either matches or does not, so exactly one of the two names worked
+    // per process and WHICH ONE VARIED: 2 distinct outcomes over 5 fresh servers.
+    // FIRST CASE-INSENSITIVE MATCH, with an exact compare as a per-element short-circuit.
+    //
+    // (BlackThrush 2026-08-27, frankenredis-function-name-case-duplicate-73c03)
+    // This compare used to be exact bytes only, which disagreed with the stage that
+    // selected this library (`Store::function_get`, `eq_ignore_ascii_case`). The mismatch
+    // showed two ways: with only `myfunc` registered, `FCALL MYFUNC` selected the right
+    // library and then failed HERE, where redis 7.2.4 returns the function; and with two
+    // libraries registering `myfunc` and `MYFUNC`, stage 1 picked one by `HashMap` order
+    // (seeded per PROCESS) so exactly one of the names worked and WHICH ONE VARIED --
+    // 2 distinct outcomes over 5 fresh servers.
+    //
+    // FIRST match, not best match, and that is MEASURED against the oracle rather than
+    // reasoned out. A library may legally register both `f` and `F` (redis accepts it,
+    // fr accepts it). An "exact first, insensitive as fallback" version looks obviously
+    // better and is WRONG: redis answers `FCALL F` with `f`'s function, so trying exact
+    // first diverged. Matching the oracle means taking the first insensitive match.
+    //
+    // `a == b || a.eq_ignore_ascii_case(b)` is logically identical to the insensitive test
+    // alone -- an exact match IS a case-insensitive one -- so the semantics are unchanged
+    // and the common call, which uses the registered casing, settles on the cheap compare.
+    // The insensitive test alone measured +93.5 instr/op on fcall_lib1_pad and +113.2 on
+    // fcall_lib32 against exact bytes, both far outside their A/A bands.
+    let Some((_, callback)) = callbacks.iter().find(|(name, _)| {
+        name.as_slice() == function_name || name.eq_ignore_ascii_case(function_name)
+    }) else {
         // Upstream functions.c:630 replies "Function not found"; fr's FCALL surface already
         // spells it with the ERR prefix.
         return Err((0, "ERR Function not found".to_string()));

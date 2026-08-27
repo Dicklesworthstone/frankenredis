@@ -71502,3 +71502,100 @@ which also lets a replica disagree with its master. Filed as
 
 Sizing, not a lever: the index is worth ~173 instr/op plus the `eq_ignore_ascii_case`
 memcmp, and it is BLOCKED on settling the case semantics, not on effort.
+
+## 2026-08-27 — CORRECTNESS/NEUTRAL — FCALL's two-stage lookup disagreed on case; fixed at zero measured instruction cost, and a CORRECTION to the mechanism I published in 732c36a91
+
+**No perf claim is made here.** The shipped change is measured NEUTRAL on every shape; it
+is in this ledger because the obvious form of it measured a real REGRESSION, and because
+it corrects a mechanism this ledger already published.
+
+### THE CORRECTION
+
+`732c36a91` described the defect as "`function_get` resolves CASE-INSENSITIVELY" and the
+symptom as FCALL "picking by HashMap order". That is half right and it named the wrong
+user-visible failure. FCALL resolves in TWO stages and they disagreed:
+
+    stage 1  fr-store::Store::function_get         eq_ignore_ascii_case  -> picks the LIBRARY
+             (walks `function_libraries`, a HashMap, order seeded per PROCESS)
+    stage 2  fr-command::lua_eval::function_call_registered
+             name.as_slice() == function_name      EXACT BYTES  -> picks the CALLBACK
+
+**The primary defect was not the non-determinism.** It was that `FCALL MYFUNC` could not
+reach a function registered as `myfunc` AT ALL -- stage 1 selected the right library and
+stage 2 then refused it -- where redis 7.2.4 returns the function. The non-determinism was
+downstream of that: with two case-variant libraries loaded, stage 1 picked one by hash
+order and stage 2 either matched or did not.
+
+### MEASURED AGAINST THE ORACLE, PER AXIS
+
+    axis                                   before          after       redis 7.2.4
+    within one library, register f and F   loads           loads       loads
+    cross-library myfunc then MYFUNC       ACCEPTS         rejects     rejects
+    only myfunc registered, FCALL MYFUNC   ERR not found   'A'         'A'
+    only myfunc registered, FCALL MyFunc   ERR not found   'A'         'A'
+    FUNCTION DELETE casing                 agrees          agrees      agrees
+
+Non-determinism, 5 fresh servers: before **2 distinct outcomes**, after **1**, matching
+redis's 1.
+
+### THE OBVIOUS FIX MEASURED A REGRESSION
+
+Making stage 2 simply case-insensitive is one token and it costs:
+
+    fcall_lib1_pad  10,536.6 -> 10,630.1   +93.5  (+0.89 pct)  A/A band 0.10 pct  REGRESS
+    fcall_lib32     10,617.6 -> 10,730.8  +113.2  (+1.07 pct)  A/A band 0.06 pct  REGRESS
+
+Shipped instead as `name.as_slice() == function_name || name.eq_ignore_ascii_case(..)`.
+That is LOGICALLY IDENTICAL -- an exact match is a case-insensitive one -- so the
+semantics are unchanged, and the common call, which uses the registered casing, settles on
+the cheap compare. Re-measured, control `4a904af5...` vs ship `50dbbce8...`:
+
+    fcall_lib1_pad  10,534.4 -> 10,541.5   +7.1 (+0.07 pct)  A/A band 0.20 pct  flat
+    fcall_lib32     10,614.0 -> 10,614.3   +0.3 (+0.00 pct)  A/A band 0.12 pct  flat
+    evalsha_small   11,208.5 -> 11,208.9   +0.4 (+0.00 pct)  A/A band 0.08 pct  flat
+    get_control        912.5 ->    906.4   -6.1 (-0.67 pct)  A/A band 1.18 pct  flat
+
+Every shape is inside ITS OWN A/A band. fr/redis instructions per op, against the live
+Redis 7.2.4 arm the harness runs in the same invocation: fcall_lib1_pad 1.3745x ->
+1.3674x, fcall_lib32 1.3873x -> 1.3700x -- movement inside the bands, not a claim.
+
+    A/A null, same invocation as the A/B arms, median 0.99957 bootstrap 95% median CI [0.99923, 1.00014]
+    on evalsha_small; 0.99937 CI [0.99827, 1.00197] on fcall_lib1_pad. Null arm is a
+    BYTE-IDENTICAL COPY of the ship ELF. Both PASS.
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      control  bench_elf_sha256=4a904af53e17b132ab9c757ccb0c6edf40ffddcf1c2fe3d8db395f7809edb126
+      ship     bench_elf_sha256=50dbbce825e12e830513fae563b655ec1d94a0a339eec141d1c79a4c89df1435
+      redis    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    Any verdict here IS GATED ON THE BOOTSTRAP MEDIAN-CI and on nothing else. CV is
+    diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-run on both SHA-256s; re-open if any shape's delta ever exceeds
+    its own A/A band, or if `fncase2.py` reports a divergence on a gated axis.
+
+### THE ORACLE IS UNSTABLE ON ONE AXIS, AND ONE DRAW NEARLY DECIDED THE DESIGN
+
+A third form -- exact match first, case-insensitive as a fallback -- is what intuition
+suggests, because a library may register BOTH `f` and `F` and each name "should" resolve to
+itself. One probe run supported it: redis answered `FCALL F` with `1`, so exact-first
+looked like the divergent option.
+
+**Redis is non-deterministic on that axis.** Across 8 fresh servers
+(`redis_ff_stability.py`) it answers `(FCALL f, FCALL F)` as `('1','1')` four times and
+`('2','2')` four times -- which of two case-variant registrations inside ONE library wins
+is unspecified. A single draw of an unstable oracle nearly drove a design choice, and the
+probe now marks that axis informational so it prints but cannot gate.
+
+fr is STABLE there: `('1','1')` 8 of 8 -- a superset guarantee, the same shape as fr's
+sorted `KEYS` reply.
+
+### GATES
+
+`fr-command` 1,294 pass. 31 of 32 differentials pass; `keyspace_accounting_gate` fails
+3/225 on sinter/sunion/sdiff and produced byte-identical output on a control ELF earlier
+today. `fr-store` reported three wall-clock "faster than" ratio asserts failing under load
+7-82 -- and the FAILING SET ROTATES between runs (`zadd_insert_move`, then `diff_sorted`,
+then `foldhash_generic_set_membership`, with the earlier ones passing on re-run), which is
+the load-flake signature rather than a deterministic break. None touches functions.
