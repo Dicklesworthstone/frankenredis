@@ -5464,9 +5464,15 @@ impl ServerState {
     /// a RespFrame::Error counts as a failed call (matching upstream
     /// server.c::call which checks the reply buffer for a leading
     /// error byte).
-    fn record_command_histogram(&mut self, argv: &[Vec<u8>], duration_us: u64, reply: &RespFrame) {
+    fn record_command_histogram(
+        &mut self,
+        argv: &[Vec<u8>],
+        resolved_canonical: Option<&'static str>,
+        duration_us: u64,
+        reply: &RespFrame,
+    ) {
         let failed = matches!(reply, RespFrame::Error(_));
-        self.record_command_histogram_outcome(argv, duration_us, failed);
+        self.record_command_histogram_outcome(argv, resolved_canonical, duration_us, failed);
     }
 
     /// Cheaper wrapper over `record_command_histogram` for callers that
@@ -5474,6 +5480,7 @@ impl ServerState {
     fn record_command_histogram_outcome(
         &mut self,
         argv: &[Vec<u8>],
+        resolved_canonical: Option<&'static str>,
         duration_us: u64,
         failed: bool,
     ) {
@@ -5502,6 +5509,27 @@ impl ServerState {
         // else the histogram tracker lowercases the name itself, so a borrowed
         // Cow over the raw command bytes is enough.
         // (frankenredis-light-cmd-dispatch-overhead-byq16)
+        //
+        // (BlackThrush 2026-08-27) When the caller already resolved the command, use it.
+        // `resolve_command_name_and_arity` hands back the COMMAND_TABLE / SUBCOMMAND_TABLE
+        // entry's own name — `&'static str`, already lowercase, already valid UTF-8, and
+        // for a container already the `parent|sub` fullname this histogram keys on. That
+        // is EXACTLY the contract `record_command_histogram_canonical_with_kind` asks for,
+        // and it was already being met by the borrowed fast paths and by nobody on the
+        // generic route, which instead paid `String::from_utf8_lossy` on the raw bytes and
+        // then had the tracker ASCII-lowercase them again. Measured on `fcall_lib1_pad`:
+        // `from_utf8` 5.000 calls/op with 2 of them on this path, inside a commandstats
+        // cluster of ~485 instr/op.
+        //
+        // A PARAMETER, not `session.last_command_name`, for the reason `resolved_arity_ok`
+        // is one: `execute_bytes` reaches `execute_frame_internal` without passing through
+        // `execute_dispatch`, so a stored value would go stale there. `None` means "do it
+        // the old way", which is what every other caller still does.
+        if let Some(canonical) = resolved_canonical {
+            self.store
+                .record_command_histogram_canonical_with_kind(canonical, duration_us, kind);
+            return;
+        }
         let parent = argv.first().map(Vec::as_slice).unwrap_or(b"");
         if argv.len() > 1 && fr_command::command_has_subcommands_bytes(parent) {
             // (frankenredis-fpqns) Build `parent|sub` into a REUSED buffer instead of
@@ -38354,6 +38382,10 @@ impl Runtime {
         // stale on that path. `None` there means "resolve it yourself", which is what it did
         // before.
         let mut resolved_arity_ok: Option<bool> = None;
+        // (BlackThrush 2026-08-27) The canonical name from that same pass, carried to
+        // `execute_frame_internal` for INFO commandstats. Hoisted for the same reason as
+        // the arity verdicts: `canonical` is bound inside the `Ok(argv)` block below.
+        let mut resolved_canonical: Option<&'static str> = None;
         // (frankenredis-z5bc2) The PARENT-only verdict, carried separately for the ACL path.
         // `permission_error_for_set` suppresses an ACL denial when the command's OWN arity is
         // wrong, so it must not see the full parent+subcommand verdict: a container with a bad
@@ -38373,6 +38405,7 @@ impl Runtime {
             self.session.last_command_name = canonical;
             resolved_arity_ok = Some(arity_ok);
             resolved_parent_arity_ok = Some(parent_ok);
+            resolved_canonical = canonical;
             // Upstream `argv_len_sum` (CLIENT INFO `argv-mem`): byte-length sum
             // of the live command's args. (frankenredis-clargvmem)
             self.session.last_argv_len_sum = argv.iter().map(Vec::len).sum();
@@ -38401,6 +38434,7 @@ impl Runtime {
                 unix_time_us,
                 resolved_arity_ok,
                 resolved_parent_arity_ok,
+                resolved_canonical,
             )
         });
         if let RespFrame::Error(msg) = &reply {
@@ -38768,6 +38802,11 @@ impl Runtime {
         unix_time_us: Option<u64>,
         resolved_arity_ok: Option<bool>,
         resolved_parent_arity_ok: Option<bool>,
+        // (BlackThrush 2026-08-27) The canonical name from the SAME table pass that
+        // produced `resolved_arity_ok`, carried for INFO commandstats. A parameter for
+        // the identical reason: `execute_bytes` reaches this function without passing
+        // through `execute_dispatch`, and `None` means "resolve it the old way".
+        resolved_canonical: Option<&'static str>,
     ) -> RespFrame {
         // Use pre-parsed argv if available, avoiding duplicate parsing.
         let argv = match argv_result {
@@ -38866,7 +38905,7 @@ impl Runtime {
                 self.record_slowlog(argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(argv, elapsed_us, now_ms);
                 self.server
-                    .record_command_histogram(argv, elapsed_us, &reply);
+                    .record_command_histogram(argv, resolved_canonical, elapsed_us, &reply);
                 return reply;
             }
             Some(RuntimeSpecialCommand::Hello) => {
@@ -38880,7 +38919,7 @@ impl Runtime {
                 self.record_slowlog(argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(argv, elapsed_us, now_ms);
                 self.server
-                    .record_command_histogram(argv, elapsed_us, &reply);
+                    .record_command_histogram(argv, resolved_canonical, elapsed_us, &reply);
                 return reply;
             }
             _ => {}
@@ -39251,7 +39290,7 @@ impl Runtime {
             self.record_slowlog(argv, elapsed_us, now_ms);
             self.server.record_latency_sample(argv, elapsed_us, now_ms);
             self.server
-                .record_command_histogram(argv, elapsed_us, &reply);
+                .record_command_histogram(argv, resolved_canonical, elapsed_us, &reply);
             return reply;
         }
 
@@ -39352,7 +39391,7 @@ impl Runtime {
                     self.record_slowlog(argv, elapsed_us, now_ms);
                     self.server.record_latency_sample(argv, elapsed_us, now_ms);
                     self.server
-                        .record_command_histogram(argv, elapsed_us, &reply);
+                        .record_command_histogram(argv, resolved_canonical, elapsed_us, &reply);
                     // Upstream call() feeds MONITOR at the end of every executed
                     // command except CMD_ADMIN / CMD_SKIP_MONITOR ones. This
                     // special-command early-return path used to feed only under
@@ -39453,7 +39492,7 @@ impl Runtime {
                 Ok(_) => false,
             };
             self.server
-                .record_command_histogram_outcome(argv, elapsed_us, failed);
+                .record_command_histogram_outcome(argv, resolved_canonical, elapsed_us, failed);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -40642,6 +40681,9 @@ impl Runtime {
                     // resolved the command yet: the gate resolves it itself, exactly as
                     // before this parameter existed.
                     None,
+                    None,
+                    // Same for the canonical name: nothing has resolved it on this path,
+                    // so commandstats keeps its from-bytes route here.
                     None,
                 )
                 .to_bytes()
@@ -49456,8 +49498,10 @@ replica_announced:1\r\n",
                 Ok(RespFrame::Error(_)) | Err(_) => true,
                 Ok(_) => false,
             };
+            // No resolved name here: the EXEC replay path does not run the table pass
+            // that produces one, so this keeps the from-bytes route.
             self.server
-                .record_command_histogram_outcome(argv, elapsed_us, failed);
+                .record_command_histogram_outcome(argv, None, elapsed_us, failed);
 
             // (frankenredis-e8f9q) Upstream execCommand call()s each queued
             // command, so MONITOR mirrors them between the MULTI and EXEC lines

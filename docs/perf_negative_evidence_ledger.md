@@ -71059,3 +71059,139 @@ asserted. `fr-runtime` 657 pass with the two stale-replica failures already pres
 "expected >2x" having measured exactly 2x. That one needs no control run to dismiss:
 **fr-store does not depend on fr-command**, so its test binary is byte-identical with and
 without this change. It is a WALL-CLOCK ratio assert on a host carrying peer builds.
+
+## 2026-08-27 — KEEP/LANDED — commandstats through the ALREADY-RESOLVED canonical name: config_get_one -556.2 (1.1485x -> 1.0243x), evalsha_small -295.7, fcall_lib1_pad -253.4 instr/op
+
+`record_command_histogram_canonical_with_kind` has existed since `par0e`, documented as
+"the caller guarantees `canonical_lower` is ALREADY the canonical lowercase command
+fullname ... skipping the per-command ASCII-lowercase + UTF-8 validation". The borrowed
+fast paths used it. **The generic dispatch route did not** -- it called
+`String::from_utf8_lossy` on the raw argv bytes and then had the tracker lowercase them
+again, and for a container it built a `parent|sub` key by hand first.
+
+Meanwhile `resolve_command_name_and_arity` was ALREADY producing exactly that value on
+the same path: the `COMMAND_TABLE` / `SUBCOMMAND_TABLE` entry's own `&'static str`,
+already lowercase, already valid UTF-8, already the `parent|sub` fullname for a
+container. It was being stored to `session.last_command_name` and otherwise dropped.
+
+This is the second time this campaign that the fix already existed and had been wired
+into only some of its call sites (see the GEODIST row, `8d547b26f`).
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> config_get_one
+    python3 scripts/shape_instr_per_op.py <bin> evalsha_small
+    python3 scripts/shape_instr_per_op.py <bin> fcall_lib1_pad
+
+    fr's OWN instr/op, n=5 per arm, three arms INTERLEAVED (control/ship/null):
+      config_get_one  control 7,299.3 [7,280.6, 7,301.2]
+                      ship    6,743.1 [6,742.1, 6,749.6]   -556.2  -7.62 pct  DISJOINT
+      evalsha_small   control 11,707.0 [11,706.6, 11,714.1]
+                      ship    11,411.3 [11,411.2, 11,417.1] -295.7  -2.53 pct  DISJOINT
+      fcall_lib1_pad  control 10,989.0 [10,985.2, 10,995.2]
+                      ship    10,735.6 [10,725.7, 10,756.8] -253.4  -2.31 pct  DISJOINT
+
+    A/A null, same invocation as the A/B arms, median 1.00010 bootstrap 95% median CI [1.00003, 1.00040]
+    on evalsha_small; 0.99924 CI [0.99760, 1.00142] on fcall_lib1_pad; 0.99898 CI
+    [0.99073, 0.99999] on config_get_one. The null arm is a BYTE-IDENTICAL COPY of the
+    ship ELF (same SHA-256) in the same rotation. All three PASS.
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, explicitly NOT a /proc/self/exe self-report, which
+    callgrind makes impossible:
+      control  bench_elf_sha256=48f5f4d1ceafec6e1876c160d3c3d332daf15fc341a6c10f8f8bef158a12e110
+      ship     bench_elf_sha256=94da1a5298869aa829a377e531cc443acab3a4efd61b90ebcd21efefefa72a5b
+      null     bench_elf_sha256=94da1a5298869aa829a377e531cc443acab3a4efd61b90ebcd21efefefa72a5b
+      redis    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT IS GATED ON THE BOOTSTRAP MEDIAN-CI and on nothing else. CV is diagnostic
+    only and did not influence this verdict; never on CV.
+
+    Retry predicate: re-run on both SHA-256s; void if the ship arm's bootstrap 95% median
+    CI ever overlaps the control's on any of the three shapes, or if `from_utf8` is not
+    3.000 calls/op on `fcall_lib1_pad`.
+
+### A LOSS CROSSES
+
+fr/redis instructions per op, against the live vendored Redis 7.2.4 arm the harness runs
+in the same invocation:
+
+      config_get_one  fr/redis 1.1485x -> 1.0243x     <- off the loss board
+      evalsha_small   fr/redis 1.2676x -> 1.2249x
+      fcall_lib1_pad  fr/redis 1.4748x -> 1.4014x
+
+Every window in this run was UNFIT for a ratio (the host carried peer builds throughout),
+so the RATIOS ARE SIZING and fr's absolute is the certified claim. The absolutes are
+extremely tight -- `evalsha_small` spans [11,411.2, 11,417.1], 0.05 pct -- which is what
+a load-immune instruction count looks like next to a redis denominator that moved several
+percent.
+
+### THE MECHANISM IS A COUNT
+
+    from_utf8         5.0000 -> 3.0000 calls/op
+    record_with_kind  1.0000 -> 0.0000 calls/op   (bypassed; the canonical entry is called directly)
+    record_canonical_with_kind  1.0000 -> 1.0000  (unchanged -- same work, entered directly)
+    get_mut                     1.0000 -> 1.0000  (the HashMap probe REMAINS -- see below)
+
+Two `from_utf8` calls go: the `from_utf8_lossy` on this path, and the one inside
+`record_with_kind` that lowercased what was already lowercase.
+
+### THE FIRST VERSION REGRESSED CONTAINERS, AND THE CALL COUNTS SAID WHY
+
+Threading only `record_command_histogram_outcome` measured `config_get_one` at
+**+20.8 instr/op, CIs DISJOINT** -- a real regression on the arm I had predicted would
+improve. The call counts on that arm were **IDENTICAL on both ELFs** (`record_with_kind`
+1.0000, `push_ascii_lowercase` 2.0000, `from_utf8` 3.0005), which is conclusive: no new
+work was being done, so the delta was codegen/layout, and the reason it had not improved
+was that **containers do not record through that site at all.** They reach one of four
+`record_command_histogram(argv, ..)` calls earlier inside `execute_frame_internal`.
+Threading those four as well turned +20.8 into **-556.2**.
+
+Had I shipped on the first measurement I would have banked a container regression and
+missed the largest win in the row. `[[feedback_count_calls_before_chasing_a_hot_frame]]`
+is usually about not chasing; here identical counts under a moved number were the
+evidence that the change had not reached the path.
+
+### WHY A PARAMETER AND NOT `session.last_command_name`
+
+The value is already stored there, and reading it would have been one line. It is threaded
+instead, mirroring `resolved_arity_ok`, whose comment states the reason: "`execute_bytes`
+reaches `execute_frame_internal` without passing through here, and a stored value would go
+stale on that path." `None` means "resolve it yourself", which is what the EXEC replay path
+and `execute_bytes` still do.
+
+### CORRECTNESS: THIS CHANGES WHICH KEY EACH ROW IS FILED UNDER
+
+So the gate is the rows themselves. A new differential compares `INFO commandstats` and
+`INFO errorstats` between the control ELF and the ship ELF over a 54-command workload
+chosen per-branch rather than for volume: mixed case, containers, **UNKNOWN subcommands of
+known containers** (canonical is `None`, so the fall-back must still run), aliases,
+commands absent from the table, arity rejections, and error replies. Counters are compared
+exactly; `usec`/`usec_per_call` are dropped because they are wall-clock.
+
+**IDENTICAL over 43 rows.** Four fr-vs-redis divergences exist and appear byte-identically
+on BOTH fr ELFs, so they are pre-existing and not this change: fr files a
+`cmdstat_<parent>|<bogussub>` row for an unknown subcommand where redis files none, and a
+`cmdstat_get` count differs by one.
+
+### GATES
+
+`fr-command` 1,294 pass. 31 of 32 differentials pass; `keyspace_accounting_gate` fails
+3/225 on sinter/sunion/sdiff and produces the byte-identical three lines on the control
+ELF -- confirmed by running it, earlier today. `fr-runtime` 657 pass with the two
+stale-replica failures already present.
+
+`fr-store` reported two wall-clock "faster than" asserts failing (`swapdb_db_enumeration`,
+`intersect_sorted_i64_galloping`). No control run is needed to dismiss them: **fr-store
+depends on neither fr-command nor fr-runtime**, so its test binary is byte-identical with
+and without this change.
+
+### WHAT IS STILL THERE
+
+`get_mut` stays at 1.000 calls/op: the `HashMap<String, CommandHistogram>` probe is
+untouched, because commands without a direct field still key by name. The named
+follow-on remains the one `[[project_commandstats_string_hash_per_command]]` wrote down
+and nobody has taken -- key the histogram by the COMMAND_TABLE INDEX and make it an array
+store. That index is now resolved exactly once per command (`985499ab2`), so the input
+that follow-on needs already exists.
