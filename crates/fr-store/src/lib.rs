@@ -18925,26 +18925,25 @@ impl Store {
         if self.entries.contains_key(key) {
             return self.load_rdb_quicklist2_packed_list(key, nodes, now_ms);
         }
-        let mut restored = Vec::with_capacity(nodes.len());
+        // (BlackThrush 2026-08-27) Build NOTHING. The first cut of this function ran
+        // the eager builder for its derived totals and dropped the chunks it had just
+        // made -- correct, and 288,200 Ir/op of the reload arm (9.2 pct) spent on
+        // structures nobody would look at. `retained_quicklist2_from_spans` computes
+        // the same totals through the same `packed_node_totals` fold, reading
+        // `decode_value_spans` output directly, so the SPAN CONVERSION
+        // (`decode_retained_listpack_spans`, a second span vector plus a
+        // rendered-integer side buffer) is skipped as well.
+        let mut packed: Vec<(Vec<u8>, Vec<fr_persist::listpack::ListpackValueSpan>)> =
+            Vec::with_capacity(nodes.len());
         for blob in nodes {
-            let spans = fr_persist::listpack::decode_retained_listpack_spans(&blob)
+            let entries = fr_persist::listpack::decode_value_spans(&blob)
                 .map_err(|_| StoreError::InvalidDumpPayload)?;
-            if spans.is_empty() {
-                continue;
-            }
-            let (entries, integer_bytes) = spans.into_parts();
-            restored.push(RestoredListNode::Listpack {
-                bytes: blob,
-                entries,
-                integer_bytes,
-            });
+            packed.push((blob, entries));
         }
-        let derived = ListValue::from_restored_quicklist2_nodes(restored);
-        if derived.is_empty() {
+        let Some(list) = ListValue::retained_quicklist2_from_spans(&packed, raw) else {
             return Err(StoreError::InvalidDumpPayload);
-        }
-        let len = derived.len();
-        let list = ListValue::retained_quicklist2(derived, raw);
+        };
+        let len = list.len();
         let entry = Entry::new(Value::List(Box::new(list)), now_ms);
         self.internal_entries_insert(key.to_vec(), entry);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
@@ -36708,9 +36707,31 @@ impl Store {
                 Value::List(Box::new(list.into()))
             }
             RDB_TYPE_LIST_QUICKLIST_2 => {
+                // (BlackThrush 2026-08-27) RETAIN, the way the RDB-FILE route does since
+                // `bffacc1b0`. Redis validates each node's listpack and then ATTACHES the
+                // blob as a quicklist node -- `lpValidateIntegrity` and nothing else. fr
+                // additionally converted every span into the narrower retained form and
+                // built chunk structures; on a 400-element RESTORE that is
+                // `decode_retained_listpack_spans` + `from_restored_quicklist2_nodes`
+                // against a redis side that stops after validating.
+                //
+                // VALIDATION IS NOT SKIPPED, only the building is. `decode_value_spans`
+                // is the same walk `decode_retained_listpack_spans` runs first, so a
+                // corrupt node still fails HERE rather than at first read.
+                //
+                // A PLAIN node has no listpack to retain, so any plain node anywhere
+                // sends the whole payload down the original element path -- the packed
+                // nodes beside it included, in RECORD ORDER, which is why the walk below
+                // keeps one ordered vector rather than two.
+                let body_start = cursor;
                 let (node_count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
+                enum QuicklistNode {
+                    Plain(Vec<u8>),
+                    Packed(Vec<u8>, Vec<fr_persist::listpack::ListpackValueSpan>),
+                }
                 let mut nodes = Vec::with_capacity(node_count);
+                let mut all_packed = true;
                 for _ in 0..node_count {
                     let (container, consumed) = decode_length(payload, cursor)?;
                     cursor += consumed;
@@ -36721,32 +36742,67 @@ impl Store {
                             if item.is_empty() {
                                 return Err(StoreError::InvalidDumpPayload);
                             }
-                            nodes.push(RestoredListNode::Plain(item));
+                            all_packed = false;
+                            nodes.push(QuicklistNode::Plain(item));
                         }
                         2 => {
                             let (listpack, consumed) =
                                 decode_rdb_string(payload, cursor, data_end)?;
                             cursor += consumed;
-                            let spans =
-                                fr_persist::listpack::decode_retained_listpack_spans(&listpack)
-                                    .map_err(|_| StoreError::InvalidDumpPayload)?;
-                            if !spans.is_empty() {
+                            let entries = fr_persist::listpack::decode_value_spans(&listpack)
+                                .map_err(|_| StoreError::InvalidDumpPayload)?;
+                            nodes.push(QuicklistNode::Packed(listpack, entries));
+                        }
+                        _ => return Err(StoreError::InvalidDumpPayload),
+                    }
+                }
+                if all_packed {
+                    let packed: Vec<(Vec<u8>, Vec<fr_persist::listpack::ListpackValueSpan>)> =
+                        nodes
+                            .into_iter()
+                            .map(|node| match node {
+                                QuicklistNode::Packed(bytes, entries) => (bytes, entries),
+                                QuicklistNode::Plain(_) => {
+                                    unreachable!("all_packed excludes plain nodes")
+                                }
+                            })
+                            .collect();
+                    let body = payload
+                        .get(body_start..cursor)
+                        .ok_or(StoreError::InvalidDumpPayload)?
+                        .to_vec();
+                    let list = ListValue::retained_quicklist2_from_spans(&packed, body)
+                        .ok_or(StoreError::InvalidDumpPayload)?;
+                    Value::List(Box::new(list))
+                } else {
+                    let mut restored = Vec::with_capacity(nodes.len());
+                    for node in nodes {
+                        match node {
+                            QuicklistNode::Plain(item) => {
+                                restored.push(RestoredListNode::Plain(item));
+                            }
+                            QuicklistNode::Packed(listpack, _) => {
+                                let spans =
+                                    fr_persist::listpack::decode_retained_listpack_spans(&listpack)
+                                        .map_err(|_| StoreError::InvalidDumpPayload)?;
+                                if spans.is_empty() {
+                                    continue;
+                                }
                                 let (entries, integer_bytes) = spans.into_parts();
-                                nodes.push(RestoredListNode::Listpack {
+                                restored.push(RestoredListNode::Listpack {
                                     bytes: listpack,
                                     entries,
                                     integer_bytes,
                                 });
                             }
                         }
-                        _ => return Err(StoreError::InvalidDumpPayload),
                     }
+                    let list = ListValue::from_restored_quicklist2_nodes(restored);
+                    if list.is_empty() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
+                    Value::List(Box::new(list))
                 }
-                let list = ListValue::from_restored_quicklist2_nodes(nodes);
-                if list.is_empty() {
-                    return Err(StoreError::InvalidDumpPayload);
-                }
-                Value::List(Box::new(list))
             }
             RDB_TYPE_LIST_QUICKLIST => {
                 let (node_count, consumed) = decode_length(payload, cursor)?;

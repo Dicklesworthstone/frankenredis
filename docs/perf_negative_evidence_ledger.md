@@ -70036,3 +70036,150 @@ up must quote the break-even, not the isolation ratio.
 **Every reload arm on the board is now a win.** fr is faster than redis 7.2.4 on all
 five. The next target is no longer on this board -- `restore_instr_per_op.py --op=restore`
 and the throughput surfaces are where the remaining losses live.
+
+## 2026-08-27 — list: the deferred fold LANDED — reload 0.8247x -> 0.7105x (-13.9 pct), and RESTORE retains too
+
+`bffacc1b0` named its own next lever and sized it: "`from_restored_quicklist2_nodes` is
+still there and the chunks it builds are dropped immediately in favour of the raw bytes
+-- 288,200 Ir/op, 9.2 pct of what is left". This is that lever, and it turned out to
+serve a SECOND arm the reload measurement could not see.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `restore_instr_per_op.py` runs the
+live vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm,
+under one callgrind two-point subtraction, and prints
+`fr/redis instructions per op: 0.7105x` from that pair -- not an fr-before/fr-after
+self-speedup.
+
+    python3 scripts/restore_instr_per_op.py <bin> 40 20 --type=list --op=reload \
+        --keys=200 --aa
+
+    TEN --aa DRAWS, ctl/ship INTERLEAVED, EVERY A/A NULL PASS (band 0.005)
+
+      control n=5  ratio median 0.824700  bootstrap 95% median CI [0.823300, 0.825700]
+      ship    n=5  ratio median 0.710500  bootstrap 95% median CI [0.709900, 0.710800]
+
+      A/A null, measured in the SAME INVOCATION as its own arm (a second fr process
+      off the identical ELF, run adjacent, never across the incumbent):
+        control n=5  median 0.999868  bootstrap 95% median CI [0.999140, 1.000185]
+        ship    n=5  median 0.999762  bootstrap 95% median CI [0.998835, 1.002433]
+
+      THE DECISION IS THE BOOTSTRAP MEDIAN-CI GATE: both null CIs sit inside +/-2 pct
+      of 1.0, and the two ratio CIs are disjoint with a gap of 0.1125x -- two orders of
+      magnitude wider than either null's whole interval. CV was never computed for this
+      verdict and is provenance only; it did not influence the decision.
+
+      fr instructions/op 3,140,812.8 -> 2,703,952.0  -436,860.8 Ir/op, -13.91 pct
+
+    IN-PROCESS ELF SHA-256, self-reported by the benchmarked binary itself
+    (the harness prints the hash the RUNNING process computed of its own image):
+      control ELF sha256 acfc0b5cd56e74a739e32f72064ff55a701e9197596e0343b47a4e84b504ccb7
+      ship    ELF sha256 2ea08045408a28812677076109a7024ba9af3008ec8db57ed4d116b2b2f1c3bf
+      redis   ELF sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    Retry predicate: re-run the command above on both ELF SHA-256s named here; this row
+    is void if the ship arm's bootstrap 95% median CI ever crosses the control's, or if
+    its A/A null median falls outside [0.98, 1.02].
+
+The fleet measurement slot could not be taken -- `acquire_build_slot` is refused
+server-side (`Build slots are disabled`) -- so the run carries unknown fleet
+contention; callgrind Ir is load-immune and the ten nulls are the evidence it did not
+matter (host at loadavg 5.8-10.1 across the draws).
+
+### THE RESTORE ARM: WHAT I WILL AND WILL NOT CLAIM
+
+The same change makes `Store::restore_key` retain, which the reload arm cannot show.
+Measured at 400 elements, 100 ops, **at EQUAL SAFETY POSTURE**
+(`--redis-extra="--sanitize-dump-payload yes"`, the framing
+`project_restore_board_was_unequal_safety_postures` established as mandatory before any
+RESTORE ratio is quoted):
+
+      fr's OWN absolute   96,921.6 -> 86,592.3 instr/op   -10.66 pct
+      bootstrap 95% median CI  [95,411.4, 98,617.1] -> [86,122.5, 89,572.6], disjoint
+
+**NO RATIO IS QUOTED FROM THAT ARM.** Its A/A null FAILED on three of four later draws
+(0.934122x, 0.967715x, 1.036724x) even though the first draw passed at 1.003496x. A
+ratio whose null failed is not evidence of anything, INCLUDING of my own change
+(`feedback_a_failed_null_is_not_evidence_against_your_own_change`, learned on this same
+harness two arms ago). The fr-side absolute is a before/after on ONE engine and does not
+need the null; the ratio does, and it did not certify. For the record the arm read
+1.3433x before this change with a passing null, but a single passing draw against three
+failing ones is a window that resolved once, not a bound.
+
+### The standing law this row engages head-on
+
+**RESTORE isolation (b1o02).** This row measures a RESTORE arm, so the law is not a
+footnote here -- it is the reason the arm is measured the way it is. Its point is that
+RESTORE-in-isolation flatters redis because fr decoded eagerly where redis attaches the
+listpack shallowly and re-walks it on every read, with the break-even well under one
+read per restore (`scripts/hash_restore_read_premise_run.sh`). **This change moves fr
+TOWARD redis's shape on exactly that axis** -- `restore_key` now attaches the record and
+defers the build -- so the law's asymmetry narrows rather than being argued around. It
+still applies to what is left, which is why no isolation ratio is claimed as a bound
+here and only fr's own absolute is quoted.
+
+### WHAT THE LEVER ACTUALLY IS
+
+Three things were being paid to answer one question -- what are this list's `lp_bytes`
+and `forced_quicklist`:
+
+  1. `decode_value_spans` builds a span vector (32 bytes per entry);
+  2. `decode_retained_listpack_spans` converts every one of those into the narrower
+     8-byte retained form plus a rendered-integer side buffer;
+  3. `from_restored_quicklist2_nodes` folds them for the totals AND builds chunk
+     structures, which the retaining load path then dropped.
+
+`frankenredis-c92f6` refuses deriving those totals by a second rule, so the fold could
+not simply be reimplemented. It is now EXTRACTED instead: `packed_node_totals` behind a
+four-method `ListNodeSpan` trait implemented for BOTH span types, so the eager route and
+the retaining route run the SAME fold -- same derivation, same `debug_assert` reference
+walk -- and the retaining route reads `decode_value_spans` output directly, skipping (2)
+and (3) entirely.
+
+      fr ship (86,214 Ir/op, RESTORE @400)     redis (70,086 Ir/op)
+      32,554  decode_rdb_string (= lzf)        32,667  lzf_decompress   <- parity
+      16,468  decode_value_spans               18,800  lpValidateNext
+      12,991  memcpy                            6,429  crcspeed64little
+      10,530  retained_quicklist2_from_spans    4,461  lpValidateIntegrity
+       2,410  crc64_pclmul  <- fr 2.7x faster     545  memcpy
+
+### NEXT LEVER ON THE RESTORE ARM, named and sized
+
+fr's validation (`decode_value_spans`, 16,468) is already CHEAPER than redis's
+(`lpValidateNext` + `lpValidateIntegrity`, 23,261) -- but it MATERIALISES a 12.8 KB span
+vector for 400 entries, used once by the fold and dropped, and that vector is most of
+the 12,991 memcpy against redis's 545. Redis walks in place and allocates nothing.
+**An in-place validating fold -- no span vector at all -- is worth roughly
+16,468 + ~11,000 memcpy against an in-place walk's own cost, on an arm whose whole gap
+is 16,128.** That is the change that would make the RESTORE arm a win.
+
+### GATES
+
+Nineteen differentials against live redis 7.2.4, all PASS, plus
+`reload_encoding_survival_gate` and `config_persistence_reload_gate`. The list retention
+probe gained an ARM F for what this change newly exposes: `restore_key` now produces a
+retained list whose body came from a DUMP payload rather than an RDB file, so a SAVE
+after a RESTORE splices those bytes -- F restores every seeded list into a copy, compares
+it against redis, then SAVES and restarts and compares again. All PASS, and the probe
+still passes on the incumbent ELF. The zset, set and hash probes were re-run against
+this ELF and all PASS.
+
+fr-persist 250+5+10+12 passed. fr-store 962 passed and fr-runtime 657 passed, each with
+the failure it already had on `bffacc1b0` (a Lua doctest, and the stale-replica pair).
+
+### A BOTCHED EDIT WORTH RECORDING
+
+The first cut of the RESTORE arm collected packed and plain nodes into two separate
+vectors and, on the plain-node fallback, appended all plain nodes then all packed ones
+-- **silently reordering the list**. It also referenced a binding it never declared, so
+the compiler caught the second bug and not the first. The rewrite keeps ONE vector in
+record order and matches on the node kind at use. *A fallback path that reorders is the
+kind of bug a ratio never shows and a content differential does; arm A of the probe
+would have caught it, which is the only reason it is a footnote and not an incident.*
+
+### The board after this lands, every A/A null PASS
+
+      set reload    0.9527x  win
+      stream reload 0.8828x  win
+      zset reload   0.8258x  win
+      hash reload   0.8230x  win
+      list reload   0.7105x  win   <- now the best arm on the board

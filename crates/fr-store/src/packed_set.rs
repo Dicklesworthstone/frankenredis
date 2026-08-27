@@ -4259,6 +4259,114 @@ impl Clone for PendingQuicklist2 {
     }
 }
 
+/// The four span operations the restored-node totals fold needs, so the ONE
+/// implementation of that fold can run over either span type.
+///
+/// (BlackThrush 2026-08-27) `decode_value_spans` yields `ListpackValueSpan`;
+/// `decode_retained_listpack_spans` converts those into the narrower
+/// `RetainedListpackValueSpan` plus a side buffer of rendered integers. The RETAINING
+/// load path wants the totals WITHOUT paying that conversion, and the eager path wants
+/// them from the converted spans it already holds. `frankenredis-c92f6` refused
+/// deriving these totals by a second rule, so the answer is one fold behind a trait --
+/// not two folds that agree today.
+trait ListNodeSpan {
+    fn span_byte_len(&self) -> usize;
+    fn span_is_string_encoded(&self) -> bool;
+    fn span_first_byte(&self, listpack: &[u8], integer_bytes: &[u8]) -> Option<u8>;
+    fn span_as_bytes<'a>(&'a self, listpack: &'a [u8], integer_bytes: &'a [u8]) -> &'a [u8];
+}
+
+impl ListNodeSpan for RetainedListpackValueSpan {
+    #[inline]
+    fn span_byte_len(&self) -> usize {
+        self.byte_len()
+    }
+    #[inline]
+    fn span_is_string_encoded(&self) -> bool {
+        self.is_string_encoded()
+    }
+    #[inline]
+    fn span_first_byte(&self, listpack: &[u8], integer_bytes: &[u8]) -> Option<u8> {
+        self.first_byte(listpack, integer_bytes)
+    }
+    #[inline]
+    fn span_as_bytes<'a>(&'a self, listpack: &'a [u8], integer_bytes: &'a [u8]) -> &'a [u8] {
+        self.as_bytes(listpack, integer_bytes)
+    }
+}
+
+impl ListNodeSpan for ListpackValueSpan {
+    #[inline]
+    fn span_byte_len(&self) -> usize {
+        self.byte_len()
+    }
+    #[inline]
+    fn span_is_string_encoded(&self) -> bool {
+        self.is_string_encoded()
+    }
+    #[inline]
+    fn span_first_byte(&self, listpack: &[u8], _integer_bytes: &[u8]) -> Option<u8> {
+        // An integer span carries its rendering inline, so there is no side buffer.
+        self.first_byte(listpack)
+    }
+    #[inline]
+    fn span_as_bytes<'a>(&'a self, listpack: &'a [u8], _integer_bytes: &'a [u8]) -> &'a [u8] {
+        // An integer span carries its rendering INLINE, so the result can borrow from
+        // `self` as well as from the listpack -- which is why the trait takes `&'a self`.
+        self.as_bytes(listpack)
+    }
+}
+
+/// Raw and encoded totals for ONE packed node. THE implementation of the
+/// `frankenredis-qj6jn` / `frankenredis-c92f6` rule; every caller goes through here.
+///
+/// `raw_total` is each element's own length. `enc_total` is DERIVED from the blob
+/// length whenever fr would encode every entry the way this payload already has, and
+/// falls back to the exact per-entry walk otherwise -- the derivation is invalid only
+/// for a string span whose bytes are a canonical `i64`, which is why the first-byte
+/// test is a pre-filter and `list_lp_int_scan_first` is the condition. The
+/// `debug_assert` makes the walk the reference in every build with debug assertions,
+/// so a payload that reaches the derivation and disagrees fails loudly.
+fn packed_node_totals<S: ListNodeSpan>(
+    bytes: &[u8],
+    entries: &[S],
+    integer_bytes: &[u8],
+) -> (u64, u64) {
+    let mut raw_total = 0_u64;
+    let mut derivable = true;
+    for span in entries {
+        raw_total += span.span_byte_len() as u64;
+        // Ordering is load-bearing: `span_as_bytes` materialises a bounds-checked
+        // subslice, which is what `span_byte_len`/`span_first_byte` exist to avoid in
+        // this fold, so the new term sits LAST and `&&` short-circuits. A
+        // letter-leading list never reaches it and pays nothing.
+        if derivable
+            && span.span_is_string_encoded()
+            && matches!(span.span_first_byte(bytes, integer_bytes), Some(b) if b.is_ascii_digit() || b == b'-')
+            && list_lp_int_scan_first(span.span_as_bytes(bytes, integer_bytes)).is_some()
+        {
+            derivable = false;
+        }
+    }
+    let enc_total = if derivable {
+        bytes.len() as u64 - LIST_LP_OVERHEAD
+    } else {
+        entries
+            .iter()
+            .map(|span| list_lp_entry_bytes(span.span_as_bytes(bytes, integer_bytes)))
+            .sum()
+    };
+    debug_assert_eq!(
+        enc_total,
+        entries
+            .iter()
+            .map(|span| list_lp_entry_bytes(span.span_as_bytes(bytes, integer_bytes)))
+            .sum::<u64>(),
+        "derived chunk total must equal the per-entry walk"
+    );
+    (raw_total, enc_total)
+}
+
 const LIST_CHUNK_TARGET: usize = 128;
 
 #[derive(Clone, Debug)]
@@ -5131,57 +5239,12 @@ impl ChunkedList {
                     // `is_string_encoded` rather than matching the variant here keeps the
                     // "nothing outside that module matches one" invariant its own comment relies
                     // on, which the previous form had quietly broken.
-                    let mut derivable = true;
-                    for span in &entries {
-                        raw_total += span.byte_len() as u64;
-                        // (frankenredis-qj6jn) The first-byte test is a cheap PRE-FILTER, not the
-                        // condition. What actually invalidates the derivation is the string BEING a
-                        // canonical i64: only then does `list_lp_entry_bytes` pick the integer width
-                        // while the source stored a string width. A string that merely STARTS like a
-                        // number -- `000000000000042`, `20260818T000042`, `7f3a...` -- re-encodes as a
-                        // string, so the derivation was correct for it and surrendering the chunk was
-                        // pure loss. Measured on a 300-element list, that surrender cost 2.74x to
-                        // 6.40x on this frame and turned a certified 0.9115x string RESTORE into
-                        // 1.5998x on digit-leading data.
-                        //
-                        // `list_lp_int` is the exact test, and NOT `list_lp_int_bytes_are_canonical`:
-                        // that one checks FORM only and defers range to the parse, so a 25-digit
-                        // canonical decimal would pass it, overflow `i64`, re-encode as a string, and
-                        // wrongly surrender the chunk.
-                        //
-                        // Ordering is load-bearing. `as_bytes` materialises a bounds-checked
-                        // subslice, which is precisely what `byte_len`/`first_byte` exist to avoid in
-                        // this fold, so the new term sits LAST and `&&` short-circuits: a
-                        // letter-leading list never reaches it and pays nothing.
-                        if derivable
-                            && span.is_string_encoded()
-                            && matches!(span.first_byte(&bytes, &integer_bytes), Some(b) if b.is_ascii_digit() || b == b'-')
-                            && list_lp_int_scan_first(span.as_bytes(&bytes, &integer_bytes))
-                                .is_some()
-                        {
-                            derivable = false;
-                        }
-                    }
-                    let chunk_enc = if derivable {
-                        bytes.len() as u64 - LIST_LP_OVERHEAD
-                    } else {
-                        let mut walked = 0u64;
-                        for span in &entries {
-                            walked += list_lp_entry_bytes(span.as_bytes(&bytes, &integer_bytes));
-                        }
-                        walked
-                    };
-                    // The walk is the reference in EVERY build that has debug assertions, so a
-                    // payload that reaches the derivation and disagrees with it fails loudly in
-                    // the whole test suite rather than silently reporting a wrong `lp_bytes`.
-                    debug_assert_eq!(
-                        chunk_enc,
-                        entries
-                            .iter()
-                            .map(|span| list_lp_entry_bytes(span.as_bytes(&bytes, &integer_bytes)))
-                            .sum::<u64>(),
-                        "derived chunk total must equal the per-entry walk"
-                    );
+                    // ONE implementation of the c92f6/qj6jn rule, shared with the
+                    // RETAINING path that computes these totals without building a
+                    // chunk. Same fold, same derivation, same debug_assert reference.
+                    let (node_raw, chunk_enc) =
+                        packed_node_totals(&bytes, &entries, &integer_bytes);
+                    raw_total += node_raw;
                     enc_total += chunk_enc;
                     out.len += entries.len();
                     out.chunks
@@ -5806,6 +5869,63 @@ impl ListValue {
             ListReprState::Pending(p) if p.decoded.get().is_none() => Some(&p.raw),
             _ => None,
         }
+    }
+
+    /// Build a RETAINED list straight from an all-PACKED record, without ever
+    /// constructing its chunks.
+    ///
+    /// (BlackThrush 2026-08-27) The form [`Self::retained_quicklist2`] should have had
+    /// from the start. That one takes a `ListValue` the eager builder produced and
+    /// throws its chunks away; this one never builds them. The derived totals still
+    /// come from `packed_node_totals`, the ONE implementation of the c92f6/qj6jn rule,
+    /// so the two routes cannot disagree -- and the span CONVERSION
+    /// (`decode_retained_listpack_spans`, a second span vector plus a rendered-integer
+    /// side buffer) is skipped too, because this fold reads `decode_value_spans`
+    /// output directly.
+    ///
+    /// `nodes` is `(blob, spans)` per PACKED node, in record order. Returns `None` for
+    /// an empty list, which the caller must reject as a corrupt payload exactly as the
+    /// eager route does.
+    ///
+    /// CALLER CONTRACT: every node must be PACKED (a PLAIN node has no listpack and
+    /// must take the eager route), and `raw` must be the record body those nodes were
+    /// decoded from.
+    #[must_use]
+    pub(crate) fn retained_quicklist2_from_spans(
+        nodes: &[(Vec<u8>, Vec<ListpackValueSpan>)],
+        raw: Vec<u8>,
+    ) -> Option<Self> {
+        let mut raw_total = 0_u64;
+        let mut enc_total = 0_u64;
+        let mut len = 0_usize;
+        for (bytes, entries) in nodes {
+            if entries.is_empty() {
+                continue;
+            }
+            let (node_raw, node_enc) = packed_node_totals(bytes, entries, &[]);
+            raw_total += node_raw;
+            enc_total += node_enc;
+            len += entries.len();
+        }
+        if len == 0 {
+            return None;
+        }
+        // Exactly what `from_restored_quicklist2_nodes` writes for these totals,
+        // including the multi-node stickiness `frankenredis-10ovx` established: redis
+        // only emits >1 node once a list crossed list-max-listpack-size, and load
+        // PRESERVES that encoding rather than re-deriving a smaller one.
+        let multi_node = nodes.iter().filter(|(_, e)| !e.is_empty()).count() > 1;
+        Some(Self {
+            repr_state: ListReprState::Pending(Box::new(PendingQuicklist2 {
+                raw: raw.into_boxed_slice(),
+                len,
+                decoded: std::cell::OnceCell::new(),
+            })),
+            lp_bytes: LIST_LP_OVERHEAD + enc_total,
+            forced_quicklist: multi_node || LIST_LP_OVERHEAD + raw_total > LIST_DEFAULT_BUDGET,
+            fill: -2,
+            decided_by_write: multi_node,
+        })
     }
 
     /// Install a list RETAINED in its on-disk form, carrying the derived totals the
