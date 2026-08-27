@@ -15662,6 +15662,72 @@ impl Store {
         Ok(())
     }
 
+    /// Install an RDB-loaded hash WITHOUT decompressing or decoding it.
+    ///
+    /// (BlackThrush 2026-08-27) The retaining twin of
+    /// [`Self::load_hash_listpack_verbatim`], and the third arm of the lever that took
+    /// zset reload to 0.8261x (`3f6e8c0b9`) and set reload to 0.9524x (`f8fa7dd6c`).
+    /// That function already avoided rebuilding the field payload -- it keeps the
+    /// DECOMPRESSED blob -- but the save side then re-encoded and re-COMPRESSED it,
+    /// which is 4,225,400 Ir/op of `lzf_compress`, the largest frame in the arm.
+    /// Keeping the RDB-ENCODED string means a reload that neither reads nor writes the
+    /// hash skips the decompress, the span build, the slot build, the re-encode AND
+    /// the compressor.
+    ///
+    /// `pair_count` and `max_entry_len` come from the decoder
+    /// (`listpack::hash_listpack_shape`), which also proved the payload structurally
+    /// valid, even-length and free of repeated fields.
+    ///
+    /// Same declines as its twin, for the same reasons: an active LFU policy (whose
+    /// per-access accounting is observable), an existing key, and any shape
+    /// `VerbatimListpackHash` would not retain. Those return the raw bytes in
+    /// `Ok(Some(_))` for the caller's established path.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] variants only for shapes the caller must treat as a
+    /// corrupt frame; a decline is `Ok(Some(raw))`.
+    pub fn load_hash_listpack_retained(
+        &mut self,
+        key: &[u8],
+        raw: Vec<u8>,
+        pair_count: usize,
+        max_entry_len: usize,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if self.lfu_tracking_enabled() {
+            return Ok(Some(raw));
+        }
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if self.entries.contains_key(key) {
+            return Ok(Some(raw));
+        }
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
+        let map = match HashFieldMap::pending_from_rdb_listpack(
+            raw,
+            pair_count,
+            max_entry_len,
+            max_entries,
+            max_value,
+        ) {
+            Ok(map) => map,
+            Err(raw) => return Ok(Some(raw)),
+        };
+        let count = pair_count as u64;
+        let entry = self.internal_entry(key, || Value::Hash(Box::new(map)), now_ms);
+        entry.touch_lru(now_ms);
+        entry.modification_count = entry.modification_count.wrapping_add(count);
+        // Same O(1) refresh and the same argument as the eager twin: the constructor
+        // above already proved `pair_count <= max_entries` and every entry
+        // `<= max_value`, so 0 is exactly the observed-max guarantee.
+        Self::refresh_hash_encoding_flag_from_max_len(entry, 0, max_entries, max_value);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(count);
+        Ok(None)
+    }
+
     /// Install a unique, threshold-fitting RDB hash listpack without rebuilding
     /// its field/value payload into the mutable packed arena.
     ///

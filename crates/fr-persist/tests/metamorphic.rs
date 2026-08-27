@@ -113,6 +113,27 @@ fn canonicalise_decoded_set(value: &RdbValue) -> RdbValue {
                 .map(|s| s.as_bytes(blob).to_vec())
                 .collect(),
         ),
+        // (BlackThrush 2026-08-27) A hash the DECODER retained in its on-disk form:
+        // undo the RDB string framing first, then decode back to the same spelling.
+        RdbValue::HashListpackRetained { raw, .. } => {
+            let listpack = fr_persist::rdb_decode_string_payload(raw)
+                .expect("a retained string we just encoded must decode")
+                .0;
+            let spans = fr_persist::listpack::decode_value_spans(&listpack)
+                .expect("a blob we just encoded must decode");
+            let (pairs, _) = spans.as_chunks::<2>();
+            RdbValue::Hash(
+                pairs
+                    .iter()
+                    .map(|p| {
+                        (
+                            p[0].as_bytes(&listpack).to_vec(),
+                            p[1].as_bytes(&listpack).to_vec(),
+                        )
+                    })
+                    .collect(),
+            )
+        }
         // (BlackThrush 2026-08-27) A set the DECODER retained in its on-disk form:
         // undo the RDB string framing first, then decode back to the same spelling.
         RdbValue::SetListpackRetained { raw, .. } => {
@@ -164,6 +185,7 @@ fn rdb_value_kind(value: &RdbValue) -> &'static str {
         RdbValue::SetHashtable(_) => "SetHashtable",
         RdbValue::Hash(_) => "Hash",
         RdbValue::HashListpack(_) => "HashListpack",
+        RdbValue::HashListpackRetained { .. } => "HashListpackRetained",
         RdbValue::HashWithTtls(_) => "HashWithTtls",
         RdbValue::SortedSet(_) => "SortedSet",
         RdbValue::ZsetListpack(_) => "ZsetListpack",

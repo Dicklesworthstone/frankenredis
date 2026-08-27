@@ -69712,3 +69712,178 @@ the failure it already had on `3f6e8c0b9` (a Lua doctest, and the stale-replica 
       set reload    0.9524x  win
       stream reload 0.8853x  win
       zset reload   0.8257x  win
+
+## 2026-08-27 — hash: the worst arm becomes a WIN — reload 2.1386x -> 0.8229x (-61.5 pct)
+
+Third port of the retention lever, and the one where the HALF-MEASURE was already in
+place: `RdbValue::HashListpack` (`frankenredis-aqkvk`) already carried the DECOMPRESSED
+blob, which spared the per-field decode but left the save calling `rdb_encode_string`
+over it -- and that IS `lzf_compress`.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `restore_instr_per_op.py` runs the
+live vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm,
+under one callgrind two-point subtraction, and prints
+`fr/redis instructions per op: 0.8229x` from that pair -- not an fr-before/fr-after
+self-speedup.
+
+    python3 scripts/restore_instr_per_op.py <bin> 40 20 --type=hash --op=reload \
+        --keys=200 --aa
+
+    TEN --aa DRAWS, ctl/ship INTERLEAVED, EVERY A/A NULL PASS (band 0.005)
+
+      control n=5  ratio median 2.138600  bootstrap 95% median CI [2.138000, 2.141500]
+      ship    n=5  ratio median 0.822900  bootstrap 95% median CI [0.822400, 0.823300]
+
+      A/A null, measured in the SAME INVOCATION as its own arm (a second fr process
+      off the identical ELF, run adjacent, never across the incumbent):
+        control n=5  median 0.999914  bootstrap 95% median CI [0.999851, 1.000277]
+        ship    n=5  median 1.000235  bootstrap 95% median CI [0.999403, 1.000716]
+
+      THE DECISION IS THE BOOTSTRAP MEDIAN-CI GATE: both null CIs sit inside +/-2 pct
+      of 1.0, so the harness is not moving, and the two ratio CIs are disjoint with a
+      gap of 1.3147x -- three orders of magnitude wider than either null's whole
+      interval. CV was never computed for this verdict and is provenance only; it did
+      not influence the decision.
+
+      fr instructions/op 12,904,994.8 -> 4,963,973.2  -7,941,021.6 Ir/op, -61.53 pct
+
+    IN-PROCESS ELF SHA-256, self-reported by the benchmarked binary itself
+    (the harness prints the hash the RUNNING process computed of its own image):
+      control ELF sha256 d6544d1145d89a340fd9accbe1886244885ac4025e89bdfa5262e024e41e15d1
+      ship    ELF sha256 6d708315cac977925d829733cfffa0cd7a9e83fb52f3800397dccb563a43846e
+      redis   ELF sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    Retry predicate: re-run the command above on both ELF SHA-256s named here; this row
+    is void if the ship arm's bootstrap 95% median CI ever crosses 1.0x, or if its A/A
+    null median falls outside [0.98, 1.02].
+
+The fleet measurement slot could not be taken -- `acquire_build_slot` is refused
+server-side (`Build slots are disabled`) -- so the run carries unknown fleet
+contention; callgrind Ir is load-immune and the ten nulls are the evidence it did not
+matter (host at loadavg 28-41 across the draws, and several draws died outright at that
+load; only completed draws with a PASSING null are quoted).
+
+### A HALF-MEASURE IS NOT A SMALL RESULT, IT IS A DIFFERENT LEVER
+
+`aqkvk` already stopped this arm decoding fields into owned `Vec<u8>`s. What it did not
+do -- could not, at the blob level it chose -- is stop the save re-encoding and
+re-COMPRESSING them. Retaining ONE LEVEL LOWER, at the RDB-encoded string, deleted
+7.94M Ir/op, and the compressor alone was 4,225,400 of it. This is the third arm where
+the choice of retention LEVEL was the whole result, and the only one where the wrong
+level was already shipped and looked finished.
+
+      fr ship (4,964,524 Ir/op)             redis (6,031,073 Ir/op)
+      1,787,600 lzf_decompress              2,575,238 lzf_compress   <- fr: GONE
+        937,159 memcpy                      1,472,000 lzf_decompress
+        669,600 decode_value_spans            607,651 crcspeed64little
+        528,600 hash_listpack_shape            120,035 fwrite
+
+Gone from the incumbent arm: `lzf_compress_dispatch` 4,225,400,
+`encode_listpack_string_entry` 880,000, `VerbatimListpackHash::try_from_rdb` 779,400,
+`encode_hash_listpack_blob_borrowed` 487,200, `get_index` 394,400,
+`VerbatimListpackHashIter::next` 212,000, `HashFieldMapIter::next` 147,600.
+
+### THE ONE THING A RETAINED HASH CANNOT SEE, and how it is guarded
+
+Per-field TTLs do not live in the value. They are a `Store` side map, so setting one
+writes state a retained hash has no way to notice, and a splice would silently DROP the
+deadline from the RDB -- the same shape as the stream port's groups/watermark, which is
+the only reason it was looked for here.
+
+The save path already checked the side map FIRST (`has_any_ttl`), before it ever asks
+whether the value is retained, so the hazard was closed by an ordering that predates
+this change. **That ordering is now PINNED by a test**
+(`a_field_ttl_on_a_retained_hash_blocks_the_verbatim_splice`): a later edit that moved
+the retained check above it would compile, pass every ratio, and lose data.
+
+*What writing that test cost, and the rule it re-taught.* The first version drove the
+round trip with `DEBUG RELOAD` and "failed" on its own precondition. `DEBUG RELOAD` is
+refused under `RuntimePolicy::default()`, so the reload never happened and the hash had
+never been loaded at all -- I spent two instrumentation cycles reading a decoder and a
+store guard that were both fine, because I checked the OUTCOME and not whether the
+SETUP had run. The test now asserts its own precondition (the value really is
+`HashListpackRetained` before the TTL is set) and drives encode/decode/apply directly.
+Same rule as `feedback_prove_the_precondition_not_just_the_outcome`, and the same rule
+the probes here follow by asserting `dbsize == 0` on a freshly booted pair.
+
+### THE GUARD IS THE CONTRACT
+
+Retention declines exactly what `VerbatimListpackHash::try_from_rdb` declines -- an
+empty payload, a pair count over `hash-max-listpack-entries`, an entry over
+`hash-max-listpack-value` -- plus a REPEATED FIELD, decided by the decoder, because RDB
+load's duplicate rule is last-wins and a retained span index cannot express it. An
+active LFU policy declines too, whose per-access accounting is observable, exactly as
+the eager twin already did. An ODD element count stays a decode ERROR rather than a
+decline: `rdb_decodes_compact_hash_listpack_rejects_odd_entry_count` caught that being
+deferred to apply once already, and `hash_listpack_shape` keeps it where it was.
+
+### RSS: the retained bytes are TAKEN, not held alongside
+
+`VerbatimListpackHash` keeps its raw string in a `RefCell<Option<_>>` and the
+`OnceCell` initialiser TAKES it, so after a first read the compressed copy is dropped
+rather than shadowing the decompressed one. Holding both would have been an RSS
+regression against the incumbent for any hash that is ever read, which the reload arm
+would never have shown.
+
+### Two standing laws this row touches, and why neither is contradicted
+
+**RESTORE isolation (b1o02).** The word appears here; no RESTORE ratio is claimed, and
+the RESTORE route is deliberately UNCHANGED -- `VerbatimListpackHash::try_from_rdb`
+still builds eagerly for it, because RESTORE has no separate on-disk string to retain.
+The law stands: RESTORE-in-isolation flatters redis because fr decodes eagerly where
+redis attaches the listpack shallowly and re-walks it on every read, and the break-even
+is well under one read per restore (`scripts/hash_restore_read_premise_run.sh`).
+
+**Medium-zset threshold (NEGATIVE_EVIDENCE.md:22581).** Fires on "zset" plus
+"threshold". This row does not touch the zset path, lowers no threshold, and does not
+move medium zsets to a tree or near the 2048 boundary; zset reload re-measured on the
+ship ELF at 0.8275x, null PASS. Retained values materialise into the same
+`Compact(Vec)` structures the eager paths built, whose `Vec::insert` is the hardware
+memmove that wins on constant factors.
+
+### GATES
+
+Eleven differentials against live redis 7.2.4, all PASS: `reload_digest_fidelity_gate`,
+`encoding_reload_gate`, `reload_edge_value_gate`, `dump_restore_fuzz` (8 seeds x 150
+keys), `zset_differ`, `restore_encoding_differ`, `zset_mixed_member_dump_differ`,
+`zset_score_emit_differ`, `zset_tiebreak_differ`, `zset_lex_range_differ`,
+`intset_restore_differential`; plus `reload_encoding_survival_gate` and
+`config_persistence_reload_gate`.
+
+A hash retention probe over a seed covering every decline (a hashtable-sized hash, an
+over-long value, a single-field hash, empty/blank/`007`/`1.5`/integer/binary/64-byte
+fields): (A) a real process RESTART off `dump.rdb`, twice; (B) load -> MUTATE ->
+reload; (C) load -> lower `hash-max-listpack-entries` -> reload; (D) `rdbcompression
+no` after a compressed load (LZF-framed `HASH_LISTPACK` strings 3 -> 0 on both engines);
+(E) LOAD-side decline. All PASS, and the probe PASSES on the incumbent ELF too, so it is
+a differential and not a rubber stamp. Its arm F (a per-field TTL on a retained hash) is
+SKIPPED at the wire, because the HEXPIRE family is off the 7.2.4 surface (`ja8yu`) --
+which is why that hazard is covered by the Rust test named above instead of quietly
+going untested.
+
+**The set and zset probes were re-run against this ELF and both PASS**, which is what
+says this arm did not borrow from the two already landed; the board below says the same
+with numbers.
+
+Unit: a repeated field is NOT retained, `hash_listpack_shape` reports
+count/longest-entry/duplicate correctly (including that a repeated VALUE is not a
+duplicate, and that an odd count is an error), and a retained record re-encodes
+BYTE-IDENTICALLY.
+
+fr-persist 247+5+10+12 passed. fr-store 962 passed and fr-runtime 657 passed, each with
+the failure it already had on `f8fa7dd6c` (a Lua doctest, and the stale-replica pair).
+
+### The board after this lands, every A/A null PASS
+
+      list reload   1.2619x  <- NEW WORST, and the ONLY remaining loss. Same
+                                 half-measure as this arm had: RdbValue::
+                                 ListQuicklist2Packed already retains the DECOMPRESSED
+                                 node blobs (qj6jn), so the save still re-encodes and
+                                 re-compresses them. A quicklist has N node strings
+                                 rather than one, which is the only new part.
+      hash reload   0.8229x  win
+      zset reload   0.8275x  win
+      stream reload 0.8840x  win
+      set reload    0.9528x  win
+
+fr is now faster than redis 7.2.4 on FOUR of the five reload arms.

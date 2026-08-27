@@ -1797,6 +1797,83 @@ pub fn set_listpack_shape(data: &[u8]) -> Result<SetListpackShape, ListpackError
     })
 }
 
+/// What a `RDB_TYPE_HASH_LISTPACK` payload looks like, WITHOUT materializing a
+/// single field or value.
+///
+/// (BlackThrush 2026-08-27) The hash twin of [`SetListpackShape`]. Everything
+/// `VerbatimListpackHash::try_from_rdb` needs to DECIDE with -- the pair count, the
+/// longest entry (fields and values alike, which is what the threshold check
+/// measures), and whether a field repeats -- taken once at decode time so the load
+/// side never has to decompress the payload to find out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HashListpackShape {
+    /// Number of (field, value) pairs.
+    pub pair_count: usize,
+    /// Longest ENTRY in bytes, fields and values alike: the threshold predicate
+    /// `try_from_rdb` applies is `entry.byte_len() > max_value` over every entry,
+    /// not over fields only.
+    pub max_entry_len: usize,
+    /// True if some FIELD appears twice. RDB load's duplicate behaviour is
+    /// last-wins, which a retained span index cannot express, so such a payload
+    /// must take the materialising route.
+    pub has_duplicate_field: bool,
+}
+
+/// Duplicate-FIELD probe over a hash listpack's spans (every other entry), the
+/// same table shape and reasoning as [`zset_member_spans_have_duplicate`].
+fn hash_field_spans_have_duplicate(data: &[u8], spans: &[ListpackValueSpan]) -> bool {
+    let pair_count = spans.len() / 2;
+    if pair_count > ZSET_STACK_DUP_MAX {
+        // Cold: over any default threshold, so never retained; the answer only
+        // steers the fallback.
+        let mut seen: std::collections::HashSet<&[u8]> =
+            std::collections::HashSet::with_capacity(pair_count);
+        return !(0..pair_count).all(|i| seen.insert(spans[i * 2].as_bytes(data)));
+    }
+    const SLOTS: usize = ZSET_STACK_DUP_MAX * 2;
+    const _: () = assert!(SLOTS.is_power_of_two());
+    let mut table = [0u16; SLOTS];
+    for pair_index in 0..pair_count {
+        let field = spans[pair_index * 2].as_bytes(data);
+        let mut slot = (zset_member_probe_hash(field) as usize) & (SLOTS - 1);
+        loop {
+            let occupant = table[slot];
+            if occupant == 0 {
+                table[slot] = u16::try_from(pair_index + 1).expect("index bounded by SLOTS/2");
+                break;
+            }
+            if spans[(usize::from(occupant) - 1) * 2].as_bytes(data) == field {
+                return true;
+            }
+            slot = (slot + 1) & (SLOTS - 1);
+        }
+    }
+    false
+}
+
+/// Validate a `RDB_TYPE_HASH_LISTPACK` payload and report its shape.
+///
+/// EXACTLY the acceptance the hash arm already applies -- it IS
+/// [`decode_value_spans`] plus the even-element-count guard the decoder has always
+/// run -- minus any owned entry. An ODD element count is a decode ERROR here, as it
+/// has always been: `rdb_decodes_compact_hash_listpack_rejects_odd_entry_count`
+/// caught exactly that being deferred to apply once already.
+pub fn hash_listpack_shape(data: &[u8]) -> Result<HashListpackShape, ListpackError> {
+    let spans = decode_value_spans(data)?;
+    if !spans.len().is_multiple_of(2) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    let mut max_entry_len = 0_usize;
+    for entry in &spans {
+        max_entry_len = max_entry_len.max(entry.byte_len());
+    }
+    Ok(HashListpackShape {
+        pair_count: spans.len() / 2,
+        max_entry_len,
+        has_duplicate_field: hash_field_spans_have_duplicate(data, &spans),
+    })
+}
+
 #[cfg(test)]
 mod tests {
 

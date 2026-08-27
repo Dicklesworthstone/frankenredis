@@ -50294,6 +50294,36 @@ fn store_to_rdb_entries_with_thresholds(
                         .collect();
                     fields.sort_by(|a, b| a.0.cmp(&b.0));
                     RdbValue::HashWithTtls(fields)
+                } else if let Some(thresholds) = compact
+                    .filter(|_| !cfg!(feature = "perf-ab-rdb-hash-owned"))
+                    && let Some((raw, pair_count, max_entry_len)) = h.retained_rdb_string()
+                    && pair_count <= thresholds.hash_max_listpack_entries
+                    && max_entry_len <= thresholds.hash_max_listpack_value
+                    && (fr_persist::rdb_compression_enabled()
+                        || !fr_persist::rdb_string_is_lzf_framed(&raw))
+                {
+                    // (BlackThrush 2026-08-27) VERBATIM FIRST, the third arm of the
+                    // lever. A hash still holding the RDB string it was loaded from
+                    // re-saves those exact bytes: `h.iter()` would materialise the
+                    // record only to hand its pairs to an encoder that reproduces the
+                    // listpack, and `rdb_encode_string` would then re-run
+                    // `lzf_compress` -- 4,225,400 Ir/op, the largest frame in the arm.
+                    //
+                    // `retained_rdb_string()` is `Some` only while nothing has read the
+                    // hash: a read fills the OnceCell and DROPS the raw bytes, and a
+                    // write replaces the whole `HashFieldMap` variant.
+                    //
+                    // The one thing that lives OUTSIDE the value is per-field TTLs,
+                    // and the `has_any_ttl` branch above has already claimed every
+                    // hash that has one -- a HEXPIRE writes only the Store side map,
+                    // which this value cannot see. BOTH thresholds are re-checked in
+                    // O(1) from the count and longest entry the record carries,
+                    // because CONFIG can have moved them since the load.
+                    RdbValue::HashListpackRetained {
+                        raw,
+                        pair_count,
+                        max_entry_len,
+                    }
                 } else if let Some(thresholds) =
                     compact.filter(|_| !cfg!(feature = "perf-ab-rdb-hash-owned"))
                 {
@@ -50789,6 +50819,44 @@ fn apply_rdb_entries_to_store(
             // the last value wins, whereas Store::restore_key rejects the payload.
             // Routing this through hash_from_listpack_spans would have quietly
             // turned a loadable RDB into a rejected one.
+            RdbValue::HashListpackRetained {
+                raw,
+                pair_count,
+                max_entry_len,
+            } => {
+                // (BlackThrush 2026-08-27) Install the record's own bytes and decode
+                // NOTHING -- not even the decompress. The decoder already proved the
+                // payload valid, even-length and free of repeated fields, and reported
+                // the pair count and longest entry, so the store applies its
+                // thresholds and the sticky encoding flag without looking inside.
+                //
+                // A declined shape (LFU active, an existing key, or a payload outside
+                // the live thresholds) is handed back and takes the ordinary path
+                // below, byte-identical to what this did before.
+                if let Some(raw) = store
+                    .load_hash_listpack_retained(&key, raw, pair_count, max_entry_len, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?
+                {
+                    let (blob, _) = fr_persist::rdb_decode_string_payload(&raw)
+                        .ok_or(PersistError::InvalidFrame)?;
+                    let spans = fr_persist::listpack::decode_value_spans(&blob)
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                    if !spans.len().is_multiple_of(2) {
+                        return Err(PersistError::InvalidFrame);
+                    }
+                    let pairs: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(&blob)).collect();
+                    store
+                        .hset_borrowed_many(&key, &pairs, now_ms)
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                }
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
             RdbValue::HashListpack(blob) => {
                 // Retain a unique small hash's RDB listpack and build only its
                 // bounded field index. The store hands the unchanged blob back
@@ -62898,6 +62966,100 @@ mod tests {
         }
     }
 
+    // (BlackThrush 2026-08-27) THE ONE THING A RETAINED HASH CANNOT SEE.
+    //
+    // A hash loaded from RDB_TYPE_HASH_LISTPACK is kept as its on-disk string and
+    // re-saved by splicing those exact bytes. Per-field TTLs do NOT live in the value
+    // -- they are a Store side map -- so setting one writes state the retained value
+    // has no way to notice, and splicing would silently DROP the TTL from the RDB.
+    //
+    // The save path guards this by checking the side map FIRST (`has_any_ttl`), before
+    // it ever asks whether the value is still retained. This pins that ordering: the
+    // guard is positional, and a later edit that moved the retained check above it
+    // would compile, pass every ratio, and lose data.
+    //
+    // The round trip is driven directly rather than through DEBUG RELOAD, which
+    // `RuntimePolicy::default()` refuses -- a first cut used it, the reload silently
+    // never happened, and the test then "failed" on a hash that had never been loaded.
+    #[test]
+    fn a_field_ttl_on_a_retained_hash_blocks_the_verbatim_splice() {
+        fn reload(store: &mut fr_store::Store, now_ms: u64) {
+            let thresholds = super::live_compact_thresholds(store);
+            let entries =
+                super::store_to_rdb_entries_with_thresholds(store, now_ms, Some(&thresholds));
+            let bytes = fr_persist::encode_rdb_with_functions_and_thresholds(
+                &entries,
+                &[],
+                &[],
+                thresholds,
+            );
+            let decoded = fr_persist::decode_rdb_prefix(&bytes).expect("round trip decodes");
+            let mut fresh = fr_store::Store::new();
+            super::copy_encoding_thresholds(&mut fresh, store);
+            super::apply_rdb_entries_to_store(&mut fresh, decoded.entries, now_ms)
+                .expect("applies");
+            super::preserve_store_load_context(&mut fresh, store);
+            *store = fresh;
+        }
+
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(
+            command(&[b"HSET", b"h", b"f0", b"v0", b"f1", b"v1", b"f2", b"v2"]),
+            100,
+        );
+        // Land it through a real RDB round trip: only the LOADER produces the retained
+        // representation, never HSET.
+        reload(&mut rt.server.store, 100);
+        let thresholds = super::live_compact_thresholds(&rt.server.store);
+
+        // PRECONDITION, not just the outcome: without this the test could pass because
+        // the hash was never retained in the first place.
+        let entries =
+            store_to_rdb_entries_with_thresholds(&mut rt.server.store, 100, Some(&thresholds));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == b"h" && matches!(e.value, RdbValue::HashListpackRetained { .. })),
+            "precondition: a freshly loaded hash must be retained, got {:?}",
+            entries.iter().map(|e| &e.value).collect::<Vec<_>>()
+        );
+
+        // Reload once more so the value is retained-and-unread again, then set a TTL.
+        reload(&mut rt.server.store, 100);
+        assert_eq!(
+            rt.server.store.hash_field_set_abs_expiry(
+                b"h",
+                b"f1",
+                1_000,
+                fr_store::HashFieldTtlCondition::None,
+                200,
+            ),
+            fr_store::HashFieldTtlSet::Applied
+        );
+
+        let entries =
+            store_to_rdb_entries_with_thresholds(&mut rt.server.store, 200, Some(&thresholds));
+        let value = &entries
+            .iter()
+            .find(|e| e.key == b"h")
+            .expect("hash must be saved")
+            .value;
+        match value {
+            RdbValue::HashWithTtls(fields) => {
+                assert_eq!(fields.len(), 3);
+                let ttl = fields
+                    .iter()
+                    .find(|(f, _, _)| f == b"f1")
+                    .expect("f1 present")
+                    .2;
+                assert_eq!(ttl, Some(1_000), "the field deadline must reach the RDB");
+            }
+            other => panic!(
+                "a hash with a per-field TTL must NOT be spliced verbatim, got {other:?}"
+            ),
+        }
+    }
+
     #[test]
     fn multi_db_persistence_tracks_selected_db_boundaries() {
         let mut rt = Runtime::default_strict();
@@ -74499,9 +74661,17 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 // so the load path can build from borrowed spans; accept either
                 // spelling here, since what this assertion is about is that the
                 // db-1 hash reached the base RDB at all.
+                // (BlackThrush 2026-08-27) ...and a HASH_LISTPACK hash comes back as
+                // the retained on-disk string. Accept any of the three spellings:
+                // this assertion is about the db-1 hash reaching the base RDB.
                 .any(|entry| entry.db == 1
                     && entry.key == b"db1:hash"
-                    && matches!(entry.value, RdbValue::Hash(_) | RdbValue::HashListpack(_))),
+                    && matches!(
+                        entry.value,
+                        RdbValue::Hash(_)
+                            | RdbValue::HashListpack(_)
+                            | RdbValue::HashListpackRetained { .. }
+                    )),
             "SAVE manifest base RDB must include DB 1 hash, got {:?}",
             loaded_manifest.base_rdb_entries
         );

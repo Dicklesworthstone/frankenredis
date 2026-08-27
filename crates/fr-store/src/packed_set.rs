@@ -851,12 +851,37 @@ impl<'a> Iterator for GenericSetIter<'a> {
 /// field spans directly. The table is deliberately bounded by the configured
 /// listpack entry ceiling; a tag collision is never trusted without an exact byte
 /// comparison, so an absent field cannot resolve to an unrelated value.
+/// The decoded half: the listpack payload, its span index, and the field slot
+/// table. Built eagerly by RESTORE, LAZILY by the RDB-file loader.
 #[derive(Clone, Debug)]
-pub struct VerbatimListpackHash {
+struct VerbatimListpackHashDecoded {
     bytes: Vec<u8>,
     entries: Vec<ListpackValueSpan>,
     /// Zero is empty; a non-zero slot stores `pair_index + 1`.
     slots: Vec<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VerbatimListpackHash {
+    /// The RDB-ENCODED string (length prefix, LZF framing and all) while this hash
+    /// has been loaded from an RDB FILE and not yet read. `None` once decoded, and
+    /// `None` from the start for the eager RESTORE constructor.
+    ///
+    /// (BlackThrush 2026-08-27) A `RefCell` so the OnceCell initialiser can TAKE it:
+    /// after materialisation the compressed copy is dead weight, and holding both
+    /// would be an RSS regression against the incumbent for any hash that is read.
+    raw: std::cell::RefCell<Option<Box<[u8]>>>,
+    /// Pair count, known without decoding. Answers `len()` from the header, which is
+    /// load-bearing: the store asks a value its length while STORING it and again on
+    /// the save side's encoding check, and routing that through the materialiser has
+    /// now silently nullified this lever three times (streams `9e8536f11`, zset
+    /// `3f6e8c0b9`, set `f8fa7dd6c`).
+    len: usize,
+    /// Longest ENTRY in bytes, fields and values alike -- the threshold predicate
+    /// `try_from_rdb` applies. Carried so a SAVE can re-emit the record's own shape
+    /// honestly instead of a placeholder, and so the threshold re-check is O(1).
+    max_entry_len: usize,
+    decoded: std::cell::OnceCell<VerbatimListpackHashDecoded>,
 }
 
 impl VerbatimListpackHash {
@@ -929,33 +954,117 @@ impl VerbatimListpackHash {
                 slot = (slot + 1) & mask;
             }
         }
-        Ok(Ok(Self {
+        let decoded = std::cell::OnceCell::new();
+        let len = entries.len() / 2;
+        let max_entry_len = entries.iter().map(ListpackValueSpan::byte_len).max().unwrap_or(0);
+        let _ = decoded.set(VerbatimListpackHashDecoded {
             bytes,
             entries,
             slots,
+        });
+        Ok(Ok(Self {
+            raw: std::cell::RefCell::new(None),
+            len,
+            max_entry_len,
+            decoded,
         }))
     }
 
+    /// Retain an RDB-encoded hash listpack string UNDECODED.
+    ///
+    /// CALLER CONTRACT: `listpack::hash_listpack_shape` must already have accepted the
+    /// decompressed payload and reported no repeated field, and the caller must have
+    /// checked `pair_count` / `max_entry_len` against the live listpack thresholds --
+    /// i.e. everything [`Self::try_from_rdb`] would have declined on. See
+    /// [`Self::decoded`].
+    #[must_use]
+    pub fn pending(raw: Vec<u8>, pair_count: usize, max_entry_len: usize) -> Self {
+        Self {
+            raw: std::cell::RefCell::new(Some(raw.into_boxed_slice())),
+            len: pair_count,
+            max_entry_len,
+            decoded: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The retained RDB string, when this hash has not been read yet.
+    ///
+    /// `None` once anything has read it -- a read fills the `OnceCell` and DROPS the
+    /// raw bytes -- so a `Some` here means the pairs are exactly as the record spelled
+    /// them. Returns `(raw, pair_count, max_entry_len)`, the last two so a caller can
+    /// re-check thresholds in O(1) and re-emit the record's own shape. Cloned rather
+    /// than borrowed because the bytes live behind a `RefCell`; the caller copies them
+    /// into the RDB buffer either way.
+    #[must_use]
+    pub fn retained_rdb_string(&self) -> Option<(Vec<u8>, usize, usize)> {
+        if self.decoded.get().is_some() {
+            return None;
+        }
+        self.raw
+            .borrow()
+            .as_ref()
+            .map(|raw| (raw.to_vec(), self.len, self.max_entry_len))
+    }
+
+    /// The decoded half, materialising it from the retained RDB string on first use.
+    ///
+    /// The expects are sound HERE and only here: a `pending` hash is built only after
+    /// `listpack::hash_listpack_shape` accepted the payload, which is the same
+    /// acceptance `try_from_rdb` applies, and only `pending` leaves `raw` populated.
+    fn decoded(&self) -> &VerbatimListpackHashDecoded {
+        self.decoded.get_or_init(|| {
+            let raw = self
+                .raw
+                .borrow_mut()
+                .take()
+                .expect("a VerbatimListpackHash is either decoded or holds its rdb string");
+            let (bytes, _) = fr_persist::rdb_decode_string_payload(&raw)
+                .expect("validated retained hash must decode its rdb string");
+            let entries = fr_persist::listpack::decode_value_spans(&bytes)
+                .expect("validated retained hash must decode its listpack");
+            let pair_count = entries.len() / 2;
+            let slot_capacity =
+                Self::slot_capacity(pair_count).expect("pair count bounded by the threshold");
+            let mut slots = vec![0_u32; slot_capacity];
+            let mask = slot_capacity - 1;
+            for pair_index in 0..pair_count {
+                let field = entries[pair_index * 2].as_bytes(&bytes);
+                let mut slot = (Self::field_hash(field) as usize) & mask;
+                while slots[slot] != 0 {
+                    slot = (slot + 1) & mask;
+                }
+                slots[slot] = u32::try_from(pair_index + 1).expect("bounded by the threshold");
+            }
+            VerbatimListpackHashDecoded {
+                bytes,
+                entries,
+                slots,
+            }
+        })
+    }
+
+    /// Pair count WITHOUT materialising. See the `len` field.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len() / 2
+        self.len
     }
 
     #[must_use]
     pub fn get(&self, field: &[u8]) -> Option<&[u8]> {
-        if self.slots.is_empty() {
+        let d = self.decoded();
+        if d.slots.is_empty() {
             return None;
         }
-        let mask = self.slots.len() - 1;
+        let mask = d.slots.len() - 1;
         let mut slot = (Self::field_hash(field) as usize) & mask;
         loop {
-            let occupant = self.slots[slot];
+            let occupant = d.slots[slot];
             if occupant == 0 {
                 return None;
             }
             let pair_index = occupant as usize - 1;
-            if self.entries[pair_index * 2].as_bytes(&self.bytes) == field {
-                return Some(self.entries[pair_index * 2 + 1].as_bytes(&self.bytes));
+            if d.entries[pair_index * 2].as_bytes(&d.bytes) == field {
+                return Some(d.entries[pair_index * 2 + 1].as_bytes(&d.bytes));
             }
             slot = (slot + 1) & mask;
         }
@@ -963,10 +1072,11 @@ impl VerbatimListpackHash {
 
     #[must_use]
     pub fn get_index(&self, index: usize) -> Option<(&[u8], &[u8])> {
+        let d = self.decoded();
         let first = index.checked_mul(2)?;
         Some((
-            self.entries.get(first)?.as_bytes(&self.bytes),
-            self.entries.get(first + 1)?.as_bytes(&self.bytes),
+            d.entries.get(first)?.as_bytes(&d.bytes),
+            d.entries.get(first + 1)?.as_bytes(&d.bytes),
         ))
     }
 
@@ -1023,6 +1133,49 @@ impl HashFieldMap {
     ) -> Result<Result<Self, Vec<u8>>, fr_persist::listpack::ListpackError> {
         VerbatimListpackHash::try_from_rdb(bytes, max_entries, max_value)
             .map(|map| map.map(HashFieldMap::Listpack))
+    }
+
+    /// Retain an RDB-encoded hash listpack string UNDECODED, when its shape is one
+    /// [`Self::try_from_rdb_listpack`] would have accepted.
+    ///
+    /// Returns the raw bytes back in `Err` for every shape that constructor declines
+    /// -- an empty payload, a count over `max_entries`, an entry over `max_value` --
+    /// so the caller keeps the established materialising route. The duplicate-field
+    /// case is decided by the DECODER (`listpack::hash_listpack_shape`) and never
+    /// reaches here.
+    ///
+    /// # Errors
+    /// Never fails in the fallible sense; `Err` hands the untouched input back.
+    pub fn pending_from_rdb_listpack(
+        raw: Vec<u8>,
+        pair_count: usize,
+        max_entry_len: usize,
+        max_entries: usize,
+        max_value: usize,
+    ) -> Result<Self, Vec<u8>> {
+        if pair_count == 0 || pair_count > max_entries || max_entry_len > max_value {
+            return Err(raw);
+        }
+        if VerbatimListpackHash::slot_capacity(pair_count).is_none()
+            || u32::try_from(pair_count).is_err()
+        {
+            return Err(raw);
+        }
+        Ok(HashFieldMap::Listpack(VerbatimListpackHash::pending(
+            raw,
+            pair_count,
+            max_entry_len,
+        )))
+    }
+
+    /// The retained RDB string, when this hash was loaded from an RDB file and
+    /// nothing has read it since. `None` for every other tier and every decoded one.
+    #[must_use]
+    pub fn retained_rdb_string(&self) -> Option<(Vec<u8>, usize, usize)> {
+        match self {
+            HashFieldMap::Listpack(l) => l.retained_rdb_string(),
+            HashFieldMap::Packed(_) | HashFieldMap::Hash(_) => None,
+        }
     }
 
     /// (frankenredis-qxfmr) Build a map from already-unique pairs in ONE O(n)

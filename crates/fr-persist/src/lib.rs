@@ -1397,6 +1397,29 @@ pub enum RdbValue {
     /// RESTORE command. Same shape as the existing `IntSet` variant, which
     /// exists so intset loads skip a decimal round trip.
     HashListpack(Vec<u8>),
+    /// A hash RETAINED in its on-disk form: the RDB-encoded string that followed the
+    /// `RDB_TYPE_HASH_LISTPACK` type byte, verbatim -- length prefix, LZF framing and
+    /// all.
+    ///
+    /// (BlackThrush 2026-08-27) The third arm of the lever that took zset reload
+    /// 2.3747x -> 0.8261x (`3f6e8c0b9`) and set reload 2.3404x -> 0.9524x
+    /// (`f8fa7dd6c`), and the one where the HALF-MEASURE was already in place:
+    /// [`RdbValue::HashListpack`] carries the DECOMPRESSED blob (`frankenredis-aqkvk`),
+    /// which spares the per-field decode but leaves the save calling
+    /// `rdb_encode_string` over it -- and that IS `lzf_compress`, 4,225,400 Ir/op, the
+    /// single largest frame in the hash reload arm. The bytes on disk are the bytes to
+    /// write back.
+    ///
+    /// `pair_count` and `max_entry_len` are taken at DECODE time from the decompressed
+    /// listpack (see [`listpack::hash_listpack_shape`]), so the store applies its
+    /// threshold and encoding decisions WITHOUT decompressing anything.
+    HashListpackRetained {
+        /// The RDB-encoded string, exactly as it appeared after the type byte.
+        raw: Vec<u8>,
+        pair_count: usize,
+        /// Longest entry, fields and values alike -- the threshold predicate.
+        max_entry_len: usize,
+    },
     /// Redis 7.4 hash with per-field TTLs. Each tuple is
     /// (field, value, Some(abs_deadline_ms)) for a TTL'd field or
     /// (field, value, None) for a field without a TTL. Encoded via
@@ -2230,6 +2253,14 @@ fn encode_rdb_internal(
                     buf.push(RDB_TYPE_HASH_LISTPACK);
                     rdb_encode_string(&mut buf, &entry.key);
                     rdb_encode_string(&mut buf, blob);
+                }
+                // VERBATIM, one level deeper: this blob is the ENCODED string, not
+                // the listpack, so it is spliced in whole. `rdb_encode_string` here
+                // would re-run `lzf_compress` to reproduce bytes already in the value.
+                RdbValue::HashListpackRetained { raw, .. } => {
+                    buf.push(RDB_TYPE_HASH_LISTPACK);
+                    rdb_encode_string(&mut buf, &entry.key);
+                    buf.extend_from_slice(raw);
                 }
                 RdbValue::HashWithTtls(fields) => {
                     buf.push(RDB_TYPE_HASH_WITH_TTLS);
@@ -4782,6 +4813,31 @@ pub fn canonicalise_rdb_value(value: &RdbValue) -> RdbValue {
                     .collect(),
             )
         }
+        // (BlackThrush 2026-08-27) A retained hash holds the ENCODED string;
+        // decompress it first, then spell out the same pairs.
+        RdbValue::HashListpackRetained { raw, .. } => {
+            let Some((listpack, _)) = rdb_decode_string(raw) else {
+                return value.clone();
+            };
+            let Ok(spans) = listpack::decode_value_spans(&listpack) else {
+                return value.clone();
+            };
+            if !spans.len().is_multiple_of(2) {
+                return value.clone();
+            }
+            let (pairs, _) = spans.as_chunks::<2>();
+            RdbValue::Hash(
+                pairs
+                    .iter()
+                    .map(|p| {
+                        (
+                            p[0].as_bytes(&listpack).to_vec(),
+                            p[1].as_bytes(&listpack).to_vec(),
+                        )
+                    })
+                    .collect(),
+            )
+        }
         // (frankenredis-qj6jn) Same job for the list's node blobs. QUICKLIST_2 decodes to
         // the verbatim listpack nodes so the store can install them the way upstream does;
         // a caller comparing CONTENT wants the elements those nodes spell, in order, which
@@ -5500,6 +5556,7 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                     }
                     RDB_TYPE_HASH_LISTPACK => {
                         // Listpack of f1, v1, f2, v2, ... pairs.
+                        let raw_start = cursor;
                         let (listpack, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
@@ -5544,13 +5601,31 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                             }
                             RdbValue::Hash(fields)
                         } else {
-                            let spans = listpack::decode_value_spans(&listpack)
+                            // (BlackThrush 2026-08-27) RETAIN THE ON-DISK STRING,
+                            // one level below the blob aqkvk started carrying. The
+                            // decompressed blob spared the per-field decode but left
+                            // the save calling `rdb_encode_string` over it, and that
+                            // IS `lzf_compress` -- 4,225,400 Ir/op, the largest frame
+                            // in this arm. `hash_listpack_shape` is the same
+                            // `decode_value_spans` + even-count acceptance this arm
+                            // has always applied, and it also reports the pair count
+                            // and longest entry so the store decides without
+                            // decompressing.
+                            //
+                            // A payload with a REPEATED FIELD declines: RDB load's
+                            // duplicate rule is last-wins, which a retained span index
+                            // cannot express, so it takes the original path unchanged.
+                            let shape = listpack::hash_listpack_shape(&listpack)
                                 .map_err(|_| PersistError::InvalidFrame)?;
-                            if !spans.len().is_multiple_of(2) {
-                                return Err(PersistError::InvalidFrame);
+                            if shape.has_duplicate_field || shape.pair_count == 0 {
+                                RdbValue::HashListpack(listpack)
+                            } else {
+                                RdbValue::HashListpackRetained {
+                                    raw: data[raw_start..cursor].to_vec(),
+                                    pair_count: shape.pair_count,
+                                    max_entry_len: shape.max_entry_len,
+                                }
                             }
-                            drop(spans);
-                            RdbValue::HashListpack(listpack)
                         }
                     }
                     RDB_TYPE_ZSET_LISTPACK => {
@@ -10035,9 +10110,11 @@ mod tests {
         // the load path can build from borrowed spans. Assert the blob shape
         // first — that is the decode contract this test names — then canonicalise
         // to check the contents it actually holds.
+        // (BlackThrush 2026-08-27) ...and now as the RETAINED on-disk string, one
+        // level below the blob, so the save can splice it. Same contract, deeper.
         assert!(
-            matches!(&entries[0].value, RdbValue::HashListpack(_)),
-            "HASH_LISTPACK must decode as the blob, got {:?}",
+            matches!(&entries[0].value, RdbValue::HashListpackRetained { .. }),
+            "HASH_LISTPACK must decode as the retained rdb string, got {:?}",
             entries[0].value
         );
         match &canonicalise_rdb_value(&entries[0].value) {
@@ -10052,6 +10129,84 @@ mod tests {
             }
             other => panic!("expected RdbValue::Hash, got {other:?}"),
         }
+    }
+
+    // (BlackThrush 2026-08-27) The hash retention fallback. A retained hash reports a
+    // pair count and a listpack tier without looking inside; RDB load's duplicate rule
+    // is last-wins, which a retained span index cannot express.
+    #[test]
+    fn rdb_hash_listpack_with_a_repeated_field_is_not_retained() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_HASH_LISTPACK);
+        rdb_encode_string(&mut blob, b"dup");
+        let lp = build_listpack_for_test(&[b"f", b"v1", b"g", b"v2", b"f", b"v3"]);
+        append_rdb_wrapped_string(&mut blob, &lp);
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        let (entries, _) = decode_rdb(&bytes).expect("decode duplicate-field hash");
+        assert!(
+            matches!(&entries[0].value, RdbValue::HashListpack(_)),
+            "a repeated field must NOT be retained, got {:?}",
+            entries[0].value
+        );
+    }
+
+    #[test]
+    fn hash_listpack_shape_reports_count_longest_entry_and_duplicates() {
+        // The longest ENTRY, fields and values alike -- that is the predicate
+        // `VerbatimListpackHash::try_from_rdb` applies.
+        let clean = build_listpack_for_test(&[b"f", b"vvvvvv", b"gg", b"w"]);
+        let shape = crate::listpack::hash_listpack_shape(&clean).expect("valid payload");
+        assert_eq!(shape.pair_count, 2);
+        assert_eq!(shape.max_entry_len, 6, "a VALUE is the longest entry here");
+        assert!(!shape.has_duplicate_field);
+
+        let dup = build_listpack_for_test(&[b"f", b"v1", b"f", b"v2"]);
+        assert!(
+            crate::listpack::hash_listpack_shape(&dup)
+                .expect("valid payload")
+                .has_duplicate_field
+        );
+
+        // A repeated VALUE is not a duplicate; only fields are keys.
+        let same_values = build_listpack_for_test(&[b"f", b"v", b"g", b"v"]);
+        assert!(
+            !crate::listpack::hash_listpack_shape(&same_values)
+                .expect("valid payload")
+                .has_duplicate_field
+        );
+
+        // Acceptance is unchanged: an odd element count is an ERROR, not a decline.
+        let odd = build_listpack_for_test(&[b"f", b"v", b"g"]);
+        assert!(crate::listpack::hash_listpack_shape(&odd).is_err());
+    }
+
+    #[test]
+    fn rdb_hash_listpack_retained_string_re_encodes_byte_identically() {
+        let fields: Vec<(Vec<u8>, Vec<u8>)> = (0..40)
+            .map(|i| {
+                (
+                    format!("field-{i:03}").into_bytes(),
+                    format!("value-{i:03}").into_bytes(),
+                )
+            })
+            .collect();
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"h".to_vec(),
+            value: RdbValue::Hash(fields),
+            expire_ms: None,
+        }];
+        let first = encode_rdb(&entries, &[]);
+        let (decoded, _) = decode_rdb(&first).expect("decode");
+        assert!(
+            matches!(decoded[0].value, RdbValue::HashListpackRetained { .. }),
+            "expected the loader to retain, got {:?}",
+            decoded[0].value
+        );
+        let second = encode_rdb(&decoded, &[]);
+        assert_eq!(first, second, "re-saving a retained hash must be byte-identical");
     }
 
     #[test]
@@ -10442,6 +10597,14 @@ mod tests {
                     match super::canonicalise_rdb_value(&entries[0].value) {
                         RdbValue::Set(members) => members.len(),
                         _ => panic!("seed {name}: retained set string did not decode: {raw:?}"),
+                    },
+                ),
+                // ...and RDB_TYPE_HASH_LISTPACK likewise. (BlackThrush 2026-08-27)
+                RdbValue::HashListpackRetained { raw, .. } => (
+                    "Hash",
+                    match super::canonicalise_rdb_value(&entries[0].value) {
+                        RdbValue::Hash(fields) => fields.len(),
+                        _ => panic!("seed {name}: retained hash string did not decode: {raw:?}"),
                     },
                 ),
                 _ => ("Other", 0),
@@ -11822,6 +11985,11 @@ mod tests {
                 // (BlackThrush 2026-08-27) And for a set written as
                 // RDB_TYPE_SET_LISTPACK, retained by the loader for the same reason.
                 if matches!(&entry.value, RdbValue::SetListpackRetained { .. }) {
+                    entry.value = super::canonicalise_rdb_value(&entry.value);
+                }
+                // (BlackThrush 2026-08-27) And for a hash written as
+                // RDB_TYPE_HASH_LISTPACK, retained for the same reason.
+                if matches!(&entry.value, RdbValue::HashListpackRetained { .. }) {
                     entry.value = super::canonicalise_rdb_value(&entry.value);
                 }
                 // (frankenredis-qj6jn) And for a list written as QUICKLIST_2, which now
