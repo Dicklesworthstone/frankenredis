@@ -67986,3 +67986,46 @@ only costs a later realloc; what it catches is a reserve that ran at the wrong m
 or against the wrong vector, which would disturb first-seen order or the assigned
 indices. Names are deliberately uneven and grow past the mean of the first eight so
 an off-by-one shows as mismatched bytes, not a coincidentally-equal short name.
+
+## 2026-08-26 — REJECT: building the (Cow, Cow) pair as the push argument. +0.22 pct
+
+FOURTH independent attempt on the `(Cow<[u8]>, Cow<[u8]>)` pair in
+`decode_stream_listpack` (inlined into `flat_entries`), and the first aimed at the
+function's own SELF cost rather than at the pair TYPE. The three prior attempts are
+in [[project_stream_flat_pair_is_closed]]: streaming cursor +4.31 pct, cold-splitting
+the integer arm +1.73 pct, and an arena that writes the same bytes plus an extra pass.
+
+**What the instruction profile showed.** `flat_entries` is 102,899 Ir/op, 128.6 Ir per
+pair, and one 142-instruction region is 52.3 pct of it (53,772 Ir/op, 67 Ir/pair).
+Disassembled, that region is dominated by stack traffic: each `Cow` is written to a
+`%rsp` slot (`movq $0x0,0x120(%rsp)`, `movq $0x8,0x128(%rsp)`, ...) and then copied
+into the vector -- 96 bytes of movement per pair where 48 would do -- inside a
+function whose frame is large enough that everything spills.
+
+**Two changes, both plausible, measured together:**
+
+1. drop the named `pair` binding on the FLAT arm, so the tuple is constructed as the
+   `push` argument instead of being kept alive in a stack slot to read `pair.1`;
+2. accumulate `value_bytes` in a LOCAL folded in once per node, instead of a
+   read-modify-write through the same `&mut StreamOut` that `push` borrows.
+
+    stream vary @400   741,400.8 -> 743,163.1 instr/op   +0.238 pct
+                       four certified pairs: +0.278 +0.149 +0.784 -0.257
+    flat_entries       102,899 -> 104,115 Ir/op          +1,216 Ir/op
+    whole op           740,452 -> 742,032 Ir/op          +0.213 pct
+
+**The frame count is the verdict, not the A/B.** Instruction counts are exact, and
+the TARGETED frame got 1,216 Ir/op WORSE. LLVM did not construct the tuple in place;
+removing the binding only changed which stack slots it used. The two measurements
+agree to within 0.03 points (+0.238 vs +0.213), which is the useful part -- a noisy
+four-draw A/B and a deterministic frame delta pointing the same way is a real result,
+where the A/B alone (spread -0.257 to +0.784) would not have been.
+
+Reverted. The rebuilt ELF reproduces HEAD's `9928ecb3...` exactly.
+
+**Standing conclusion, now on four attempts: the pair is not the lever.** The 48-byte
+width is forced by `PackedStreamLog::from_sorted_entries`'s `F: AsRef<[u8]>` bound,
+which demands MATERIALISED bytes; a listpack integer must be rendered to canonical
+decimal, so it must be owned, so it is a `Cow`. Nothing local to `decode_stream_listpack`
+gets past that. The remaining 213,688 Ir/op of rebuild needs the representation change
+([[project_verbatim_listpack_precedent_for_streams]]), not another local rewrite here.
