@@ -72454,3 +72454,94 @@ produced byte-identical output on a control ELF earlier today.
 session, including on ELFs where fr-store was provably untouched by this agent. This change
 DOES add a field to `Store`, so the structural dismissal used earlier does not apply and the
 evidence is the re-run plus that history instead.
+
+## 2026-08-27 — REJECT (frankenredis-kbyhy) — FCALL's residual is structural dispatch layering: five candidates priced, all below the bar, and the parse path is at PARITY
+
+After six levers this session the FCALL family is 1.3302x-1.3534x and **the gap is now almost
+exactly the dispatch cost**: fr 10,133.1 vs redis 7,487.3 on `fcall_lib32` is a gap of
+**2,646**, against a measured dispatch share of **2,432**. This row prices every remaining
+candidate on that path and rejects them, so the next reader does not re-derive the list.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> fcall_lib32 --keep-dumps
+    python3 scripts/call_count_delta.py <dump> 2000 --top 1.9
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      fr     bench_elf_sha256=c855af57e4ca81d2599985e3305e9f956826555825a6d5f8bf4f9e3bdf754890
+      redis  bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    A/A null, same invocation as the A/B arms, median 0.99982 bootstrap 95% median CI [0.99961, 1.00159]
+    on fcall_lib32 against a byte-identical copy of this ELF. PASSES.
+
+    The VERDICT rests on the BOOTSTRAP MEDIAN-CI plus the counted mechanisms below, and on
+    nothing else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-open a specific candidate only when its own number below changes,
+    or when a shape appears whose library or argv is large enough to move one of them out
+    of the tens-of-instructions range. The list is not re-openable as a whole.
+
+### THE CANDIDATES, EACH PRICED AND EACH TURNED DOWN
+
+    candidate                              cost        calls/op   why not
+    borrowed_fast_route_key                92.0        2.000      ~46 recoverable
+    Instant::now cluster                  ~135.0       3.000      ~45 recoverable
+    gen_per_hasher_seed                    42.0        3.000      safety, not size
+    ClientTrackingState::clone_from        40.0        2.000      40 total
+    is_in_subscription_mode                24.0        3.000      24 total
+
+**`borrowed_fast_route_key` is a REAL redundancy and still not worth it.** Both call sites
+are in `process_buffered_frames` and both fire on a generic command: one on the way IN
+(check the route-miss memo) and one on the way OUT (record it), computing the same key over
+the same bytes. Hoisting is NOT simply computing it once at the top -- on a front-classified
+command NEITHER site fires today, so an unconditional computation would ADD 46 instr/op to
+the majority path, which is the same trap that made the scope-stack reserve a regression.
+It needs lazy per-iteration memoisation threaded through a long, hot function for ~46
+instr/op, 0.45 pct of the shape. Rejected on the trade, not on the mechanism.
+
+**`gen_per_hasher_seed` is rejected on SAFETY, and that is a different verdict.** Two of its
+three calls are `LuaTable::new` building an empty `LuaMap` whose `foldhash` `RandomState`
+generates a per-hasher seed. A fixed seed removes it -- and Lua table keys are
+ATTACKER-CONTROLLED, since a script chooses them, so a fixed seed is a HashDoS surface. 42
+instr/op does not buy that.
+
+### THE PARSE PATH IS AT PARITY, WHICH IS WORTH RECORDING
+
+    fr     parse_command_args_borrowed_into  266.0  +  copy_borrowed_argv_into_scratch  119.0  =  385.0
+    redis  processMultibulkBuffer                                                             =  392.1
+
+The owned-argv materialisation FCALL performs -- long carried in this ledger as the "[C]
+work" blocking a borrowed scripting entry point -- costs fr **385.0** against redis's
+**392.1** for the same job. **It is not a deficit and threading borrowed argv through the
+scripting entry point would not buy one.** That premise should stop being quoted.
+
+### WHERE THE DIFFERENCE ACTUALLY IS
+
+    fr dispatch plumbing                                   redis
+      execute_frame_internal        399.0                    processMultibulkBuffer  392.1
+      dispatch_with_client_context  335.0                    call                    222.0
+      process_buffered_frames       308.0                    processCommand          181.0
+      parse_command_args_borrowed   266.0                    resetClient              97.0
+      execute_dispatch              190.0                    lookupCommandLogic       26.0
+      classify_command              172.0                  ------------------------------
+      command_table_index           155.0                    total                  ~918
+      floor classifier              145.0
+      copy_borrowed_argv            119.0
+      with_touch_disabled            45.0
+    ------------------------------------
+      total                       ~2,134
+
+fr spends roughly **2.3x** what redis does to decide which command to run, spread over three
+crates (server -> runtime -> command) with no single frame above 400. Redis reaches its
+handler through one `processCommand` and a dict lookup of 26.0 instr/op.
+
+**And fr is AHEAD on the Lua half**, which is why the whole-op gap is smaller than the
+dispatch gap: redis spends ~1,600 instr/op on `luaS_newlstr` (579.0) plus a GC quartet
+(`propagatemark` 394.4, `sweeplist` 340.5, `singlestep` 291.5) that fr does not pay at all.
+
+This is a LAYERING cost, not a lever. Closing it means collapsing dispatch layers, which is
+a design change with a correctness surface, not a frame to delete -- and it should not be
+attempted on the strength of a per-frame table, which is what
+[[feedback_name_the_replacement_before_naming_a_lever]] already cost this session twice.
