@@ -5267,8 +5267,43 @@ impl LibraryKeyHasher {
         self.state = self.state.wrapping_mul(0x0000_0100_0000_01b3);
     }
 
+    /// Fold eight bytes in one xor-multiply-avalanche instead of eight.
+    ///
+    /// (BlackThrush 2026-08-27) The byte-serial fold costs an xor and a multiply PER BYTE,
+    /// and this hasher reads a bounded 56 bytes on a long library -- 8 for the length plus
+    /// three 16-byte windows. That measured **192.0 instr/op on `fcall_lib1_pad`**, which is
+    /// about 3 instructions times 56 folds. A whole-word mix does the same span in 7.
+    ///
+    /// The extra `>> 29` xor is why this is not simply FNV with a wider input: FNV's
+    /// avalanche comes from re-multiplying after every byte, and folding a whole word
+    /// without it leaves high-entropy input bits with too little influence on the low bits
+    /// a `HashMap` buckets on.
+    ///
+    /// CHANGING THE MIX IS SAFE, and the reason is the one already recorded on this type: a
+    /// weak hash can only cause a COLLISION, and `HashMap` resolves a collision with the
+    /// key's `Eq`, which for `Vec<u8>` is exact. What a hash change can cost is TIME on a
+    /// collision, and that is bounded twice over -- the map holds at most
+    /// `FCALL_LIBRARY_CALLBACK_CACHE_MAX` entries, and a full compare is a `memcmp`.
+    #[inline]
+    fn mix(&mut self, chunk: u64) {
+        self.state ^= chunk;
+        self.state = self.state.wrapping_mul(0x0000_0100_0000_01b3);
+        self.state ^= self.state >> 29;
+    }
+
     fn fold_bytes(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            // `chunks_exact` yields exactly 8, so this cannot fail.
+            let word = u64::from_le_bytes(chunk.try_into().unwrap_or([0; 8]));
+            self.mix(word);
+        }
+        // The tail is folded BYTE-WISE rather than copied into a zero-padded buffer on
+        // purpose: `buf[..n].copy_from_slice(..)` with a RUNTIME `n` is a `memcpy` CALL, and
+        // that is exactly what made the KEYS prefix-digest comparator measure 25 pct WORSE
+        // (`0c1b567bf`). At most seven bytes reach here, and the measured path -- a long
+        // library, whose windows are exactly 16 bytes -- has no tail at all.
+        for &byte in chunks.remainder() {
             self.fold_byte(byte);
         }
     }
@@ -5277,10 +5312,8 @@ impl LibraryKeyHasher {
 impl std::hash::Hasher for LibraryKeyHasher {
     fn write(&mut self, bytes: &[u8]) {
         // The LENGTH is always folded, so two libraries of different sizes cannot collide however
-        // their sampled windows line up.
-        for byte in (bytes.len() as u64).to_le_bytes() {
-            self.fold_byte(byte);
-        }
+        // their sampled windows line up. One whole-word mix, not eight byte folds.
+        self.mix(bytes.len() as u64);
         if bytes.len() <= Self::WINDOW * 3 {
             self.fold_bytes(bytes);
             return;

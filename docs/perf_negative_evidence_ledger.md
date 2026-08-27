@@ -72194,3 +72194,90 @@ its own risk for a function on no hot path. The defect worth recording is the EV
 TRAIL, not the code: a lever that its own ledger says was "rejected and not shipped" is in
 main, and the next person to read that entry would be misled about the state of the tree.
 This row is that correction.
+
+## 2026-08-27 — KEEP/LANDED (frankenredis-kbyhy) — the library-cache hasher folded ONE BYTE AT A TIME: fcall_lib1_pad -177.6, fcall_lib32 -172.5, fcall_lib1 -150.2 instr/op
+
+The FCALL family is the worst vs-incumbent ratio on the board. `LibraryKeyHasher` reads a
+bounded 56-byte sample of the library key -- 8 length bytes plus three 16-byte windows --
+and folded it with an xor and a multiply PER BYTE. That measured **192.0 instr/op**, about
+3 instructions times 56 folds. Now folded eight bytes at a time: 7 whole-word mixes instead
+of 56 byte folds.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> fcall_lib1_pad | fcall_lib32 | fcall_lib1
+
+    fr's OWN instr/op, n=4 per arm, three arms INTERLEAVED (control/ship/null):
+      fcall_lib1_pad  10,532.3 -> 10,354.6   -177.6  (-1.69 pct)  A/A band 0.29 pct  DISJOINT
+      fcall_lib32     10,602.8 -> 10,430.2   -172.5  (-1.63 pct)  A/A band 0.11 pct  DISJOINT
+      fcall_lib1      10,255.2 -> 10,105.0   -150.2  (-1.46 pct)  A/A band 0.17 pct  DISJOINT
+      get_control        910.9 ->    911.7     +0.8  (+0.09 pct)  A/A band 0.72 pct  flat
+
+    Every winning shape's delta exceeds ITS OWN A/A band.
+
+    fr/redis instructions per op, against that live Redis 7.2.4 arm:
+      fcall_lib32     fr/redis 1.3986x -> 1.3402x
+      fcall_lib1      fr/redis 1.3810x -> 1.3390x
+      fcall_lib1_pad  fr/redis 1.4196x -> 1.4027x
+
+    A/A null, same invocation as the A/B arms, median 1.00013 bootstrap 95% median CI [0.99891, 1.00072]
+    on fcall_lib32; 1.00002 CI [0.99711, 1.00171] on fcall_lib1_pad; 1.00127 CI [1.00040,
+    1.00165] on fcall_lib1. Null arm is a BYTE-IDENTICAL COPY of the ship ELF. All PASS.
+
+    COUNTED MECHANISM:
+      <LibraryKeyHasher as Hasher>::write   192.0 instr/op -> the frame is GONE, inlined
+      the cache-probe closure around it     118.0 -> 89.0 instr/op
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      control  bench_elf_sha256=45c99c84d4064fc8438bfcf1ec83cda147cc05a7b9b951814913f384e197b3d0
+      ship     bench_elf_sha256=86db6d21db02700de96765fada3c9abf7230a0b0903d89e3cb572fcb2f8345b9
+      null     bench_elf_sha256=86db6d21db02700de96765fada3c9abf7230a0b0903d89e3cb572fcb2f8345b9
+      redis    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT rests on the BOOTSTRAP MEDIAN-CI plus the counted mechanism, and on nothing
+    else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-run on both SHA-256s; void if any FCALL shape's delta stops
+    exceeding its own A/A band, or if `LibraryKeyHasher::write` reappears as a frame above
+    100 instr/op.
+
+### WHY CHANGING THE MIX IS SAFE, AND WHY THAT ARGUMENT WAS ALREADY WRITTEN DOWN
+
+This type's own doc comment states it: a weak hash can only cause a COLLISION, and
+`HashMap` resolves a collision with the key's `Eq`, which for `Vec<u8>` is exact. What a
+hash change costs is TIME on a collision, bounded twice over -- the map holds at most
+`FCALL_LIBRARY_CALLBACK_CACHE_MAX` entries and a full compare is a `memcmp`. So the mixing
+function is free to change; only its distribution is at stake, never an answer.
+
+`library_key_hasher_collision_still_keeps_two_libraries_apart_kbyhy` is unaffected BY
+CONSTRUCTION and that was checked, not assumed: its two fixtures differ only at a byte
+OUTSIDE every sampled window and have equal lengths, so both feed the hasher IDENTICAL
+bytes under any deterministic mix. The test asserts the collision is real before checking
+the map separates them, so it is not vacuous either way. It passes.
+
+### THE TAIL IS FOLDED BYTE-WISE ON PURPOSE
+
+The obvious way to finish a chunked fold is to copy the remainder into a zero-padded
+`[u8; 8]`. **That would have been the same mistake that made the KEYS prefix-digest
+comparator measure 25 pct WORSE** (`0c1b567bf`): `buf[..n].copy_from_slice(..)` with a
+RUNTIME `n` is a `memcpy` CALL ([[project_variable_length_extend_is_a_memcpy_call]]). The
+tail is folded byte-wise instead -- at most seven bytes -- and the MEASURED path has no
+tail at all, because a long library's windows are exactly 16 bytes and the length fold is
+exactly 8.
+
+### THE `>> 29` IS NOT DECORATION
+
+FNV's avalanche comes from re-multiplying after every byte. Folding a whole word without
+replacing that would leave high-entropy input bits with too little influence on the low
+bits a `HashMap` buckets on, which costs collisions -- and collisions here cost a `memcmp`
+of the whole library. The shift-xor restores the mixing the per-byte multiply was providing.
+
+### GATES
+
+`fr-command` 1,295 pass, including
+`library_key_hasher_collision_still_keeps_two_libraries_apart_kbyhy` run explicitly. 31 of
+32 differentials pass; `keyspace_accounting_gate` fails 3/225 on sinter/sunion/sdiff and
+produced byte-identical output on a control ELF earlier today. `fr-runtime` 657 pass with
+the two stale-replica failures already present.
