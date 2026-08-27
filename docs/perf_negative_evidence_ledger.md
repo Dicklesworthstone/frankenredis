@@ -68781,3 +68781,62 @@ stale-replica failures are the known pair.
 **The perf lever that started this is still unbuilt** -- but it now has the safety net
 it needs, and the surface it would have been built on turned out to be losing data
 already.
+
+## 2026-08-26 — WORST ARM ON HEAD, and the save-cache design SETTLED (safe form found, wrong arm)
+
+Worst measured overhead ratio, re-derived on HEAD after `abf460569`:
+
+    python3 scripts/restore_instr_per_op.py <bin> 400 100 --type=stream --varyfields --aa
+
+    two CERTIFIED draws (both A/A nulls in band)
+      draw1  fr 738,598.7  redis 227,617.2  3.2449x  null 1.003542x PASS
+      draw3  fr 739,826.2  redis 228,756.7  3.2341x  null 0.999653x PASS
+      mean   fr 739,212.5  redis 228,187.0  3.2395x
+    discarded and reported: one draw at null 0.993037x FAIL, and an earlier
+      whole run at 0.993360x FAIL (loadavg 30.9)
+
+    fr    ELF 29ed9d2add27b6134cc33956d5b7f55f16fc5d03b6469093add184049f48a609
+    redis ELF e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+### The save-blob cache: the CHEAP form is the UNSAFE one
+
+Sized at 18.2 pct of the reload arm (`22f0e2a78`). A STORE-LEVEL cache of the whole
+payload needs invalidation at **57 `stream_groups` sites alone** (36 `remove`, 11
+`get_mut`, 7 `insert`, 2 `entry`, 1 `clear`), plus the entries side and
+`stream_last_ids` / `stream_entries_added` / `stream_max_deleted_ids` -- every one of
+which feeds the payload. A single miss is a stale save, i.e. silent data loss.
+**Not buildable safely in that form**, and `stream_reload_digest_fuzz.py` covering the
+common commands is not proof of completeness.
+
+**The safe form exists and is the opposite of the cheap one.** The payload is
+`[listpack nodes][metadata][groups]`. A cache of the NODES ONLY, held INSIDE
+`PackedStreamLog`, cannot be invalidated by group or metadata changes because neither
+is in the nodes -- and entry mutations cannot bypass it, because they all go through
+that type's `&mut self` surface (`insert`, `remove`; the other ten mutators are
+private helpers those two call). Keyed on the node thresholds so a `CONFIG SET` cannot
+serve nodes cut to a stale shape. **Invalidation enforced by OWNERSHIP, not by 57
+remembered call sites.**
+
+**REUSABLE, and it inverts the usual intuition: a side-cache next to the data needs
+every writer to remember it; a cache INSIDE the value needs none, because mutation has
+to go through the owner. The "cheap" placement is the dangerous one.**
+
+**NOT BUILT, and the reason is the arm, not the risk:** this cache pays on RELOAD
+(2.5518x -> ~2.09x). It does NOTHING for the worst arm -- RESTORE never saves. Under a
+directive to take the WORST ratio it is the wrong target, and it is recorded here so
+the next agent building it starts from the safe shape rather than the cheap one.
+
+### CLOSED: `listpack_string_to_int64` is not waste
+
+31,600 calls/op looked like ~4 per entry where SAMEFIELDS should need 2. It is exactly
+right: the profiled shape is `--varyfields`, so SAMEFIELDS is OFF and `append_member`
+correctly encodes 2 field names AND 2 values per entry. `append_member` already skips
+field encoding when SAMEFIELDS is on. No lever.
+
+### The per-entry Vec, re-priced and declined
+
+`EncodableStreamEntry<F, V> = (u64, u64, Vec<(F, V)>)` is a PUBLIC type alias with 20
+uses across three files; a borrowed form needs a lifetime parameter through all of
+them, for ~1.56 pct before the 3-14x optimism discount. Declined on blast radius.
+
+**NO CODE CHANGE THIS TURN.**
