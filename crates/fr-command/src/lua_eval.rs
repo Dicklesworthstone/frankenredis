@@ -1353,19 +1353,31 @@ fn lua_check_number(
 // Mirror upstream luaL_checklstring. Numbers are coerced to their
 // luaO_str2d-formatted string; everything else (nil, bool, table, function,
 // thread) raises with the standard 'string expected, got <type>' wording.
-fn lua_check_string(
+/// Borrowing form of [`lua_check_string`]: the `Str` case hands back the argument's own
+/// bytes instead of a copy.
+///
+/// (BlackThrush 2026-08-27) `lua_check_string` clones on the `Str` arm, which is the
+/// overwhelmingly common one, and it measured 3.000 of `luapatq_16`'s 33.0 allocations per
+/// op -- `string.find(subject, pattern)` copied BOTH arguments only to read them. Callers
+/// that just need to look at the bytes take this and allocate nothing; the `Number` arm
+/// still has to build its text, so the return is a `Cow` rather than a plain slice.
+///
+/// The validation and the error wording live HERE and `lua_check_string` delegates, so the
+/// owning and borrowing forms cannot drift into disagreeing about what a valid string
+/// argument is.
+fn lua_check_string_ref<'a>(
     inv_name: Option<&str>,
-    args: &[LuaValue],
+    args: &'a [LuaValue],
     idx: usize,
     fname: &str,
-) -> Result<Vec<u8>, String> {
+) -> Result<Cow<'a, [u8]>, String> {
     match args.get(idx) {
-        Some(LuaValue::Str(b)) => Ok(b.clone()),
+        Some(LuaValue::Str(b)) => Ok(Cow::Borrowed(b.as_slice())),
         Some(LuaValue::Number(n)) => {
             if *n == (*n as i64) as f64 && n.is_finite() {
-                Ok(i64_to_ascii_bytes(*n as i64))
+                Ok(Cow::Owned(i64_to_ascii_bytes(*n as i64)))
             } else {
-                Ok(lua_number_to_string(*n).into_bytes())
+                Ok(Cow::Owned(lua_number_to_string(*n).into_bytes()))
             }
         }
         other => Err(lua_format_argerror(
@@ -1375,6 +1387,15 @@ fn lua_check_string(
             &format!("string expected, got {}", lua_arg_got_label(other)),
         )),
     }
+}
+
+fn lua_check_string(
+    inv_name: Option<&str>,
+    args: &[LuaValue],
+    idx: usize,
+    fname: &str,
+) -> Result<Vec<u8>, String> {
+    lua_check_string_ref(inv_name, args, idx, fname).map(Cow::into_owned)
 }
 
 // Mirror upstream luaL_checktype(L, idx, LUA_TTABLE). Returns a cloned
@@ -11687,9 +11708,9 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(result)])
             }
             "string.find" => {
-                let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "find")?;
+                let s = lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "find")?;
                 let pattern =
-                    lua_check_string(self.current_invocation_name.as_deref(), args, 1, "find")?;
+                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 1, "find")?;
                 // (frankenredis-izta5) Upstream luaB_str_find_aux uses
                 // luaL_optinteger for the init arg, which raises 'bad
                 // argument #3 (number expected, got TYPE)' when the
@@ -11786,9 +11807,9 @@ impl<'a> LuaState<'a> {
             }
             "string.match" => {
                 let s =
-                    lua_check_string(self.current_invocation_name.as_deref(), args, 0, "match")?;
+                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "match")?;
                 let pattern =
-                    lua_check_string(self.current_invocation_name.as_deref(), args, 1, "match")?;
+                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 1, "match")?;
                 // (frankenredis-izta5) Same init-arg validation as
                 // string.find — upstream luaB_str_find_aux raises
                 // 'bad argument #3' for non-number-convertible init.
@@ -11819,9 +11840,9 @@ impl<'a> LuaState<'a> {
                 // Returns an iterator function. Each call returns next match.
                 // We collect all matches and return a closure-like iterator via a table.
                 let s =
-                    lua_check_string(self.current_invocation_name.as_deref(), args, 0, "gmatch")?;
+                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "gmatch")?;
                 let pattern =
-                    lua_check_string(self.current_invocation_name.as_deref(), args, 1, "gmatch")?;
+                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 1, "gmatch")?;
                 // (frankenredis-vfv8s) Validate pattern eagerly so the
                 // iterator constructor surfaces malformed patterns the
                 // same way upstream's gmatch does.
@@ -11894,8 +11915,8 @@ impl<'a> LuaState<'a> {
             "string.gsub" => {
                 let inv_owned: Option<Cow<'static, str>> = self.current_invocation_name.clone();
                 let inv = inv_owned.as_deref();
-                let s = lua_check_string(inv, args, 0, "gsub")?;
-                let pattern = lua_check_string(inv, args, 1, "gsub")?;
+                let s = lua_check_string_ref(inv, args, 0, "gsub")?;
+                let pattern = lua_check_string_ref(inv, args, 1, "gsub")?;
                 let repl = args.get(2).cloned().unwrap_or(LuaValue::Nil);
                 // (frankenredis-tfob7) Upstream lstrlib.c:str_gsub
                 // validates the repl type at function entry via

@@ -71755,3 +71755,102 @@ recoverable by reserving harder.
 The gap is Lua environment and string construction, spread across a dozen sites at one or
 two allocations each. No single one is worth a commit, and the aggregate needs a structural
 change to how a Lua call builds its environment, not a capacity hint.
+
+## 2026-08-27 — KEEP/LANDED — lua_check_string borrowed the Str arm instead of cloning it: luapat_16 -233.1, luapatq_256 -196.0, luapatsp_16 -167.4, luapatq_16 -136.5 instr/op
+
+`lua_check_string` returned `Vec<u8>` and did `b.clone()` on the `Str` arm -- the
+overwhelmingly common one -- so `string.find(subject, pattern)` COPIED BOTH ARGUMENTS only
+to read them. It measured 3.000 of `luapatq_16`'s 33.0 allocations per op.
+
+Split into `lua_check_string_ref` returning `Cow<'a, [u8]>`: `Str` borrows the argument's
+own bytes, `Number` still owns the text it must build. `lua_check_string` now DELEGATES to
+it and calls `into_owned`, so the validation and the error wording have ONE definition and
+the owning and borrowing forms cannot drift about what a valid string argument is. The
+eight `string.find` / `match` / `gmatch` / `gsub` sites take the borrowing form.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> luapat_16 | luapatq_16 | luapatq_256 | luapatsp_16
+
+    fr's OWN instr/op, n=4 per arm, three arms INTERLEAVED (control/ship/null):
+      luapat_16     19,467.0 -> 19,233.9   -233.1  (-1.20 pct)  A/A band 0.42 pct  DISJOINT
+      luapatq_256   29,254.6 -> 29,058.5   -196.0  (-0.67 pct)  A/A band 0.25 pct  DISJOINT
+      luapatsp_16   19,694.7 -> 19,527.2   -167.4  (-0.85 pct)  A/A band 0.16 pct  DISJOINT
+      luapatq_16    20,980.8 -> 20,844.3   -136.5  (-0.65 pct)  A/A band 0.49 pct  DISJOINT
+      get_control      909.8 ->    910.3     +0.5  (+0.05 pct)  A/A band 0.39 pct  flat
+
+    Every winning shape's delta exceeds ITS OWN A/A band.
+
+    A/A null, same invocation as the A/B arms, median 0.99997 bootstrap 95% median CI [0.99844, 1.00037]
+    on luapatsp_16; 0.99939 CI [0.99581, 0.99986] on luapat_16; 1.00057 CI [0.99888,
+    1.00246] on luapatq_256; 0.99892 CI [0.99505, 1.00227] on luapatq_16. Null arm is a
+    BYTE-IDENTICAL COPY of the ship ELF. All PASS.
+
+    COUNTED MECHANISM:
+      __rust_alloc                          33.0010 -> 31.0010 calls/op
+      of which lua_check_string's share      3.000  ->  1.000
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      control  bench_elf_sha256=50dbbce825e12e830513fae563b655ec1d94a0a339eec141d1c79a4c89df1435
+      ship     bench_elf_sha256=36d84525741cc21aebdc092e54bb88d1578d193ec25d33391b29760f49be19a3
+      null     bench_elf_sha256=36d84525741cc21aebdc092e54bb88d1578d193ec25d33391b29760f49be19a3
+      redis    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT rests on the BOOTSTRAP MEDIAN-CI plus the counted mechanism, and on nothing
+    else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-run on both SHA-256s; void if any shape's delta stops exceeding its
+    own A/A band, or if `__rust_alloc` is not 31.00 calls/op on `luapatq_16`.
+
+### THE RATIOS
+
+fr/redis instructions per op, against the live vendored Redis 7.2.4 arm the harness runs
+in the same invocation:
+
+      luapatsp_16  fr/redis 1.1341x -> 1.1153x
+      luapat_16    fr/redis 1.1246x -> 1.1183x
+      luapatq_16   fr/redis 1.1959x -> 1.1850x
+      luapatq_256  fr/redis 1.0042x -> 1.0106x   (ratio WORSENED while the absolute fell)
+
+`luapatq_256` is the honest one to point at: its absolute dropped 196.0 and its RATIO went
+the wrong way, because the redis arm moved further in the same window. Every window here
+was UNFIT, so the absolutes are the certified claim and the ratios are directional.
+
+### WHY THIS ONE PAID WHERE THE CAPACITY RESERVE DID NOT
+
+The row immediately above rejects `Vec::with_capacity` on the scope stack, which MOVED an
+allocation and regressed. This DELETES two: `Cow::Borrowed` allocates nothing and copies
+nothing, so the replacement's cost is genuinely zero rather than "smaller". That is the
+distinction [[feedback_name_the_replacement_before_naming_a_lever]] asks for, and it is
+visible in the same counter that refuted the other lever -- `__rust_alloc` FELL here
+(33.0010 -> 31.0010) and did not move there.
+
+### A SIZE STORY THAT WAS NOT TRUE, CHECKED BEFORE BUILDING
+
+The obvious motivation is "the clone copies the subject, so it scales with subject size".
+**It does not.** `lua_check_string` is **141.0 instr/op at BOTH `luapatq_16` and
+`luapatq_256`** -- flat to the instruction across a 16x subject. The win is the ALLOCATION,
+not the copy, and pricing it as a size-proportional copy would have overstated it. The
+16-vs-256 dose-response cost one measurement and settled it before any code was written.
+
+### WHAT IS LEFT HERE
+
+`lua_check_string` still allocates 1.000/op on `luapatq_16` -- an unconverted caller, and
+the remaining 24 call sites (`len`, `sub`, `rep`, `lower`, `upper`, `reverse`, `byte`,
+`pack`/`unpack`) still take the owning form. Each is worth at most one allocation and needs
+its own downstream to accept a `Cow`, so they are individually below the bar; converting
+them is a sweep, not a lever.
+
+fr is still at **31.0 allocations per op on `luapatq_16` against redis's 5.0**. The
+remainder is Lua environment and string construction spread over a dozen sites -- see the
+REJECT above for the breakdown.
+
+### GATES
+
+`fr-command` 1,294 pass. 31 of 32 differentials pass, INCLUDING every Lua gate
+(`lua_semantics_differ`, `lua_lib_differ`, `lua_rediscall_error_differ`,
+`eval_semantics_differ`), which is what covers `find`/`match`/`gmatch`/`gsub` behaviour.
+`keyspace_accounting_gate` fails 3/225 and produced byte-identical output on a control ELF
+earlier today. `fr-runtime` 657 pass with the two stale-replica failures already present.
