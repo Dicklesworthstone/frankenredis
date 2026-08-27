@@ -70300,3 +70300,31 @@ before this change).
       geohash_2     1.5957x     (unswept since; re-measure before targeting)
       evalsha_large 1.2549x     was 3.4631x
       evalsha_small 1.2476x
+
+### CORRECTION to the surface table above (same day, before anything was built on it)
+
+The table above was written from a sweep I read at 115 of 236 shapes while it was still
+running, and it names the wrong next target. **The completed sweep, plus a re-measure of
+the top cells on the SHIP ELF, orders them:**
+
+      geohash_2       1.5622x   <- WORST REMAINING CELL
+      fcall_lib1_pad  1.5232x
+      fcall_lib8      1.3918x
+      fcall_lib32     1.4030x   (measured earlier in the same window band)
+      evalsha_large   1.2549x   this row's result
+      evalsha_small   1.2476x
+
+Two things were wrong. `geohash_2` was called "unswept since and needs re-measuring"
+when it had in fact been in the partial sweep all along at 1.5957x, and it is the
+highest remaining cell, not `fcall_lib8`. And `fcall_lib1_pad` -- the highest of the
+FCALL family -- was missing from the table entirely, because it sits above the 115-line
+cut I read.
+
+These ship-ELF numbers were taken in UNFIT windows and are RANKING ONLY; whichever is
+targeted next gets a proper FIT-window measurement first. Nothing in the verdict above
+depends on this table -- the `evalsha_large` result and its gates stand unchanged -- but
+the next target does, which is why the correction is recorded rather than left to be
+rediscovered.
+
+*The rule this cost:* a sweep launched in the background is not a sweep you have read.
+`wc -l` it against the shape count before ranking off it.
