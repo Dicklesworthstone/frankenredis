@@ -68555,3 +68555,49 @@ invocation.
 **No perf change landed this turn.** The deliverable is a redirection: the named
 remaining slice is closed at <=2.9 pct, the real cost is located at 77 pct, and the
 seven shipped slices are audited as still-paying.
+
+## 2026-08-26 — THE LZF RATIO, MEASURED SAME-INVOCATION AT LAST: 1.4945x
+
+The certified 1.5139x carried a standing caveat: `lzf_compressor_ratio.py` takes ONE
+ENGINE PER INVOCATION, so it never satisfied the same-invocation requirement, and the
+preflight passed it only because `incumbent_same_invocation` matches a PHRASE near a
+redis mention rather than the property. Discharged.
+
+`restore_instr_per_op.py` already runs both engines in ONE invocation; it just threw
+the dumps away. `--keep=<dir>` (this commit) retains them, which turns the existing
+two-engine run into a same-invocation FRAME comparison.
+
+    python3 scripts/restore_instr_per_op.py <bin> 40 20 --type=stream --op=reload \
+        --keys=200 --varyfields --aa --keep=<dir>
+
+    whole reload   fr 34,372,844   redis 13,469,957   2.5518x
+    A/A null 0.999596x  [PASS, band 0.005]
+    fr    ELF b62d740e58269337cae9cd00b7f9fff857a70620754f7e4af80d899f3448ea8d
+    redis ELF e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    frame            fr Ir/op    redis Ir/op   ratio
+    lzf_compress     7,877,800    5,271,020    1.4945x   <- the gap
+    lzf_decompress   3,544,800    3,410,400    1.0394x   <- PARITY, confirmed
+    crc64              165,780    1,478,651    fr 8.92x FASTER (pclmul vs table)
+
+**BOTH ENGINES CALL THEIR COMPRESSOR EXACTLY 200 TIMES PER OP**, and the DUMP payload
+is 869 B on both sides, so this is a KERNEL comparison and not a workload difference:
+**fr 39,389 Ir per compression against redis's 26,355.** The two-invocation 1.5139x
+was honest -- the same-invocation number lands within 1.3 pct of it -- but it is now a
+measured property rather than an assumed one.
+
+**The gap sized: 2,606,780 Ir/op = 7.58 pct of fr's reload arm** if the compressor
+reached parity. That is the largest single closable item in the #2 arm.
+
+`lzf_decompress` at 1.0394x settles the standing "do not attack it" note with a
+same-invocation number, and the crc row is worth keeping visible: fr's pclmul
+implementation is **8.92x cheaper than redis's table**, which is why the whole-reload
+ratio is 2.55x and not worse.
+
+**NO CODE CHANGE THIS TURN, deliberately.** The compressor is seven slices deep, 77 pct
+of its cost is the match path ([[project_lzf_compress_kernel_gap]]), and the emitted
+bytes must stay byte-exact for DUMP/RDB. This ledger's own rule is to price the
+REPLACEMENT, not the incumbent frame; I have no priced replacement for the match path,
+and four recorded over-estimates in this file say that proposing one from a
+read-derived argument is how those rows got written. The measurement stands on its own
+and the next attempt starts from a same-invocation baseline instead of a bracketed one.

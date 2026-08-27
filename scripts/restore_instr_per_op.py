@@ -485,7 +485,26 @@ def main():
     IMPLAUSIBLE_RATIO = 100.0
     AA_BAND = 0.005  # 0.5 pct; the doc above measures this harness's fr arm at 0.03 pct
     port = 47800 + (os.getpid() % 200) * 4
+    # `--keep=<dir>`: retain the callgrind dumps. Both engines already run in ONE
+    # invocation here, so keeping the dumps is what turns this into a SAME-INVOCATION
+    # FRAME comparison -- the property `lzf_compressor_ratio.py` cannot supply,
+    # because it takes one engine per invocation.
+    keep_dir = None
+    for a in sys.argv[1:]:
+        if a.startswith("--keep="):
+            keep_dir = os.path.abspath(a.split("=", 1)[1])
+    if keep_dir:
+        os.makedirs(keep_dir, exist_ok=True)
+        return _measure(fr_bin, members, ops, kind, op, keys, aa, keep_dir,
+                        port, AA_BAND)
     with tempfile.TemporaryDirectory(dir="/data/tmp") as workdir:
+        return _measure(fr_bin, members, ops, kind, op, keys, aa, workdir,
+                        port, AA_BAND)
+
+
+def _measure(fr_bin, members, ops, kind, op, keys, aa, workdir, port, AA_BAND):
+    IMPLAUSIBLE_RATIO = 100.0
+    if True:
         results = {}
         shas = {}
         arms = [("fr", fr_bin), ("redis", REDIS)]
