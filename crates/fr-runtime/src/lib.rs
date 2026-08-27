@@ -6240,6 +6240,9 @@ pub struct Runtime {
     pub server: ServerState,
     session: ClientSession,
     execution_source: ExecutionSource,
+    /// Set ONLY around `load_aof`'s replay loop, whose captured records
+    /// `self.server.aof_records = records` discards the moment it ends.
+    suppress_propagation_capture: bool,
     dispatch_acl_snapshot_user: Option<Vec<u8>>,
     dispatch_acl_snapshot_generation: u64,
     dispatch_peer_addr_cache: String,
@@ -6562,6 +6565,7 @@ impl Runtime {
             server,
             session,
             execution_source: ExecutionSource::Client,
+            suppress_propagation_capture: false,
             dispatch_acl_snapshot_user: None,
             dispatch_acl_snapshot_generation: 0,
             dispatch_peer_addr_cache: "127.0.0.1:0".to_string(),
@@ -6936,7 +6940,12 @@ impl Runtime {
             // which a trusted local AOF has no need of -- and `ServerState::load_aof`
             // already replays through argv with no frame at all.
             let reply = self.with_execution_source(ExecutionSource::AofLoad, |runtime| {
-                runtime.execute_dispatch(None, Ok(&record.argv), replay_now_ms, None)
+                // Everything the propagation-capture pipeline builds in this loop is
+                // discarded by `self.server.aof_records = records` below.
+                let previous = std::mem::replace(&mut runtime.suppress_propagation_capture, true);
+                let out = runtime.execute_dispatch(None, Ok(&record.argv), replay_now_ms, None);
+                runtime.suppress_propagation_capture = previous;
+                out
             });
             if matches!(reply, RespFrame::Error(_)) {
                 original_store.stat_total_error_replies = original_store
@@ -40825,6 +40834,32 @@ impl Runtime {
     }
 
     fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
+        // (BlackThrush 2026-08-26) An AOF LOAD must not re-capture what it is
+        // replaying. `Runtime::load_aof` overwrites `self.server.aof_records` with
+        // the file's own records the moment the replay loop ends, and sets
+        // `aof_selected_db` explicitly right after, so every record this pipeline
+        // built during a load was discarded -- after paying for it.
+        //
+        // Measured on a 2,000-record replay: rewrite_relative_expire_for_propagation
+        // 71, rewrite_effect_command_for_propagation 37, the two capture_aof_record
+        // halves 68, command_advances_replication_offset 20, the script-propagation
+        // probes 25, plus the `is_write_command` classifications those trigger --
+        // about 400 Ir per replayed command, 6.3 pct of the arm, all of it thrown
+        // away. It also built a second copy of every record only to drop it.
+        //
+        // Matching upstream, which does not re-propagate while loading an AOF:
+        // loadAppendOnlyFile runs each command on a fake AOF client, and propagation
+        // is driven from real command execution, not from replay.
+        // GATED ON THE LOOP, NOT ON `ExecutionSource::AofLoad`. The first version
+        // keyed off the execution source and broke
+        // `fr_p2c_005_u003_runtime_replay_aof_stream_applies_records`:
+        // `replay_records_with_source` ALSO replays under `AofLoad`, and its contract
+        // is that the replayed records DO land in `aof_records`. Only `load_aof`'s
+        // own loop overwrites them immediately afterwards, so only that loop may
+        // skip the capture.
+        if self.suppress_propagation_capture {
+            return;
+        }
         let is_select = argv
             .first()
             .is_some_and(|cmd| eq_ascii_token(cmd, b"SELECT"));

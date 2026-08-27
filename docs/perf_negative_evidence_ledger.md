@@ -68426,3 +68426,64 @@ from a LOW second arm while the first sat at the usual ~6,455, i.e. an occasiona
 Also fixed here: `--null-only` mode, which characterises this harness against itself
 with no incumbent -- the measurement that produced the 12 draws above and the only way
 to derive a band without an engine comparison contaminating it.
+
+## 2026-08-26 — AOF load skips the propagation capture it was throwing away: 1.0870x -> 1.0721x
+
+`Runtime::load_aof` ran the full propagation-capture pipeline for every replayed
+command and then discarded it: `self.server.aof_records = records` overwrites whatever
+capture built the moment the loop ends, and `aof_selected_db` is set explicitly right
+after. Upstream does not re-propagate while loading either -- `loadAppendOnlyFile`
+runs each command on a fake AOF client and propagation is driven from real execution.
+
+    whole process   6,376.5 -> 6,276.1 Ir/op  (-1.57 pct, deterministic)
+    classify_command    220 -> 132   (5.00 -> 3.00 calls/op)
+    is_write_command     64 ->  32   (4.00 -> 2.00 calls/op)
+    Runtime::capture_aof_record  36 -> 17 ; ServerState::capture_aof_record 32 -> 0
+
+    A/B, 2 certified pairs (both nulls PASS): 6,447.65 -> 6,268.2  -2.78 pct
+                                              1.0987x  -> 1.0701x
+
+    control ELF 771c89ebfb4f4459310f2ed6b5d0b02bc3a17a3417a0ec13ba10971041518b74
+    ship    ELF b62d740e58269337cae9cd00b7f9fff857a70620754f7e4af80d899f3448ea8d
+    redis   ELF e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    python3 scripts/aof_load_instr_per_op.py <bin> 2000 --aa
+
+**I PREDICTED 6.3 pct AND DELIVERED 1.57 pct.** The estimate summed every frame in the
+capture pipeline -- including `rewrite_relative_expire_for_propagation` (71) and
+`rewrite_effect_command_for_propagation` (37) -- but those run BEFORE
+`capture_aof_record`, elsewhere in dispatch, and the guard does not gate them. They are
+unchanged at 71 and 37 in the candidate. **Priced the incumbent frames instead of the
+replacement, 4x optimistic, exactly the band this ledger keeps recording**
+([[feedback_a_frame_total_is_not_the_recoverable_amount]]).
+
+### THE FIRST VERSION WAS WRONG AND A TEST CAUGHT IT
+
+Gating on `self.execution_source == ExecutionSource::AofLoad` broke
+`fr_p2c_005_u003_runtime_replay_aof_stream_applies_records`:
+`replay_records_with_source` ALSO replays under `AofLoad`, and its contract is that the
+replayed records DO land in `aof_records`. Only `load_aof`'s own loop discards them.
+Narrowed to a `suppress_propagation_capture` flag set around THAT loop alone.
+
+**The distinction is not "is this a load" but "is this loop's output discarded".** Two
+callers shared an execution source and had opposite contracts, and the source was the
+wrong thing to key on.
+
+### Correctness
+
+All three AOF gates pass on the shipping ELF including DEBUG DIGEST parity with live
+redis 7.2.4, and a post-load state comparison shows fr and redis agree exactly:
+`dbsize=200 master_repl_offset=0 aof_enabled=1` on redis, the control AND the
+candidate -- confirming capture's offset work was being discarded too. fr-runtime:
+656 passed, the 2 failures are the pre-existing stale-replica pair that fails
+identically on HEAD.
+
+### The bigger finding, not actionable in one turn
+
+fr's optimised command path (`classify_borrowed_dispatch_floor_packet_impl`, SET at
+1,342.6 instr/op) lives ONLY in `crates/fr-server/src/main.rs`, and fr-runtime does
+not depend on fr-server. **So every internal caller -- AOF replay, replica apply, Lua
+`redis.call`, MULTI/EXEC -- is structurally forced onto the generic route at ~6,300
+instr/op. A 4.75x gap between fr's own two routes, reachable only by moving the floor
+dispatch into a crate the runtime can call.** That is the largest single item now
+visible on this surface.
