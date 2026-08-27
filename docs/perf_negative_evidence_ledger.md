@@ -72023,3 +72023,90 @@ stale-replica failures already present.
 The ordering contract is unchanged by construction: the interior-NUL rejection
 `CString::new` performed is now an explicit `contains(&0)` with the same byte-order
 fallback, and `CString::new` rejects a TRAILING NUL too, which `contains` also catches.
+
+## 2026-08-27 — REJECT (frankenredis-cv3fm) — the STRANDED table is retired: all 18 cells are now WINS, 0.33x-0.53x, and none is a lever
+
+`frankenredis-cv3fm` inventoried every measured shape by dispatch share to find
+front-classification levers, and its STRANDED table (share above 40 pct) was the candidate
+list. **Re-measured on the current ELF, every one of its 18 cells is below 1.0.** There is
+no articulation-point lever left in it.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> <shape>     # the bead's own 18 shapes
+
+    shape              cv3fm (ce1109bd)   NOW (45c99c84)   share then -> now
+    setnx_existing        1.8418             0.3540          69.3 -> 50.2
+    hsetnx_existing       1.6435             0.4986          63.5 -> 33.6
+    lset_head             1.6575             0.5227          62.3 -> 28.1
+    geoadd_same           0.7637             0.3283          58.5 -> 23.5
+    del_1_missing         1.7353             0.4893          57.2 -> 35.5
+    del_missing           1.6481             0.4916          57.1 -> 34.0
+    pexpire_same          1.0543             0.4278          51.6 -> 29.4
+    hdel_missing          1.0163             0.4229          51.5 -> 39.1
+    hdel_1_missing        1.0134             0.3986          51.3 -> 38.8
+    sadd_existing         1.0160             0.4607          51.2 -> 38.1
+    pexpireat_same        1.2151             0.5280          51.0 -> 27.1
+    pfadd_existing        1.1045             0.5315          50.5 -> 31.7
+    pfadd_same            1.0848             0.5308          50.5 -> 31.7
+    srem_missing          1.0830             0.4483          50.3 -> 37.6
+    hincrbyfloat          1.1294             0.4172          49.9 -> 19.2
+    getset_same           1.7583             0.4354          47.4 -> 26.9
+    incrbyfloat_same      1.4288             0.4582          40.6 -> 16.9
+    zrem_missing          1.0587             0.4442          50.6 -> 37.8
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      fr     bench_elf_sha256=45c99c84d4064fc8438bfcf1ec83cda147cc05a7b9b951814913f384e197b3d0
+      redis  bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    A/A null, same invocation as the A/B arms, median 1.00013 bootstrap 95% median CI [0.99988, 1.00026]
+    -- carried from the `c037c333a` run on THIS ELF against a byte-identical copy of it.
+    PASSES.
+
+    THE EVIDENCE CLASS, stated rather than implied. This is a SCREEN: one draw per shape,
+    which cannot certify a 1 pct delta. It does not need to. The claim is "none of these
+    is above 1.0" and the smallest margin in the table is 0.5315x -- a 1.9x gap, orders
+    above any noise this harness shows. Four of the eighteen were also measured in a
+    separate earlier invocation (pexpireat_same 0.5491 vs 0.5280, pexpire_same 0.4296 vs
+    0.4278, pfadd_existing 0.5413 vs 0.5315, del_missing 0.4670 vs 0.4916): two independent
+    draws agree within 4 pct.
+
+    The VERDICT rests on the BOOTSTRAP MEDIAN-CI plus the counted margin above, and on
+    nothing else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-open only if a shape in this table measures ABOVE 1.0 on a later
+    ELF. A dispatch SHARE above 40 pct is explicitly NOT sufficient -- `setnx_existing`
+    still sits at 50.2 pct share and is 0.3540x, so share alone no longer identifies a
+    lever on this route.
+
+### WHY THE TABLE WENT STALE, AND WHY THAT IS THE REUSABLE PART
+
+Nothing in the bead was wrong when written. The rows were retired by work landed since,
+some of it under the bead ids the table itself names (`frankenredis-l9wvl`, CLOSED, took
+the DEL and keyed-values rows) and some by this session's dispatch levers, which cut the
+generic route for every generically-dispatched command: `985499ab2` (one COMMAND_TABLE
+lookup instead of two), `72d8ec881` (commandstats through the resolved canonical name) and
+`ebb6c402c` (SLOWLOG asks before it builds). That is why the SHARE column halved across
+the board rather than moving on the few shapes anyone targeted.
+
+**A candidate table keyed on a RATIO decays whenever anything shared moves.** The four
+spot-checks that opened this row cost one invocation and refuted the premise before any
+lever was designed against it -- which is the whole of
+[[feedback_remeasure_a_beads_cell_before_believing_it]].
+
+### AND ONE BEAD THAT IS ALREADY DONE
+
+`frankenredis-bf1ow` (perf, REPLCONF handshake fast-path) is in `br ready` but its own
+routing comment records the implementation already in main at `85b449e46`, with
+`60a9a4af4` recording the prior measurement. It is ready-listed, not open work. Not
+touched here beyond saying so.
+
+### WHERE THE REAL LOSSES ARE NOW
+
+Measured this session on the same ELF family, for whoever picks up the next lever: the
+FCALL family 1.38-1.45x (residual is a per-call constant, and fr does 12 allocations per
+op against redis's 4), EVALSHA 1.20-1.23x, and the Lua pattern family 1.10-1.18x with fr
+at 30.0 allocations per op against redis's 5.0. None of those is a dispatch-share problem,
+which is precisely why this table no longer finds them.
