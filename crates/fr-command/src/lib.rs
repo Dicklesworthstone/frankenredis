@@ -27466,6 +27466,29 @@ fn script_shebang_has_allow_oom_flag(script: &[u8]) -> bool {
 /// copy is how one of them ends up splitting differently from its siblings -- the same argument
 /// the `allow-oom` accessor above makes for sharing the `flags=` parser, one level up.
 fn script_shebang_has_flag(script: &[u8], wanted: &str) -> bool {
+    // (BlackThrush 2026-08-27) A SHEBANG IS THE FIRST TWO BYTES OR IT IS NOT ONE.
+    //
+    // This is not a new rule and not an approximation: `script_shebang_line_has_flag`
+    // opens with `line.strip_prefix(b"#!").unwrap_or(b"")`, so a line that does not
+    // start with `#!` becomes the empty slice and the function returns `false` for
+    // EVERY flag. `line` is a prefix of `script`, so it starts with `#!` exactly when
+    // `script` does. A body without that prefix therefore cannot produce a `true`, and
+    // the `\n` search below -- which walks the WHOLE body when there is no newline, i.e.
+    // for every one-line script -- is pure loss for it.
+    //
+    // The invariant was already WRITTEN on the accessors; it just was not exploited:
+    // "A script with NO shebang is upstream's EVAL_COMPAT_MODE and carries no flags at
+    // all, so this is false for it by construction" (`frankenredis-oo3aw`). Upstream
+    // decides the same way, on the same two bytes (`evalGenericCommand`).
+    //
+    // MEASURED, and it is the whole arm: `script_prepare_for_run` asks NINE of these
+    // per EVALSHA (five `no-writes`, two inside `is_oom_exempt`, plus `no-cluster` and
+    // `allow-stale`), and each ask re-scanned the entire body. On the 4 KB
+    // `evalsha_large` shape that was 20,112 Ir/op -- 62.7 pct of the whole command --
+    // against a redis side with no counterpart frame at all.
+    if !script.starts_with(b"#!") {
+        return false;
+    }
     let line = match script.iter().position(|&b| b == b'\n') {
         Some(end) => &script[..end],
         None => script,

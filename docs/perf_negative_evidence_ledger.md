@@ -70183,3 +70183,120 @@ would have caught it, which is the only reason it is a footnote and not an incid
       zset reload   0.8258x  win
       hash reload   0.8230x  win
       list reload   0.7105x  win   <- now the best arm on the board
+
+## 2026-08-27 — EVALSHA: the worst cell on the whole command surface — 3.4631x -> 1.2549x, from ONE early return
+
+The reload board being cleared, I swept the shape harness across all 236 shapes to find
+where fr actually still loses rather than guessing. **`evalsha_large` came back at
+3.4986x, more than twice the next worst cell** (`geohash_2` 1.5957x, the `fcall_lib*`
+family 1.38-1.48x, `evalsha_small` 1.3455x).
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the
+live vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm,
+under one callgrind two-point subtraction, and prints
+`fr/redis instructions per op: 1.2549x` from that pair -- not an fr-before/fr-after
+self-speedup.
+
+    python3 scripts/shape_instr_per_op.py <bin> evalsha_large
+
+    fr's OWN instr/op -- callgrind, load-immune, FIVE independent processes per ELF:
+      control n=5  median 32,054.9  bootstrap 95% median CI [32,052.8, 32,062.8]
+      ship    n=5  median 11,900.1  bootstrap 95% median CI [11,897.9, 11,907.1]
+                                    -20,154.8 Ir/op, -62.88 pct
+
+      Same-ELF dispersion across those five processes is 0.031 pct (control) and
+      0.077 pct (ship). THAT is the A/A evidence for this row: five independent
+      processes off one ELF, agreeing to within a thousandth of the effect.
+
+    vs-redis ratio, from the pairs the harness's OWN window gate marked FIT:
+      control 3.4631x, 3.4632x        ship 1.2549x, 1.2773x
+
+    IN-PROCESS ELF SHA-256 (harness-computed and re-verified after each arm; the
+    harness notes a callgrind'd process cannot self-report /proc/self/exe):
+      control ELF sha256 2ea08045408a28812677076109a7024ba9af3008ec8db57ed4d116b2b2f1c3bf
+      ship    ELF sha256 64ec1d1f9722b77716d9fe5ef4b1c2315bf99772bd29bb049319a969310829f1
+      redis   ELF sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    Retry predicate: re-run the command above on both ELF SHA-256s named here; this row
+    is void if fr's own instr/op on the ship ELF ever exceeds 15,000, or if a FIT-window
+    ratio on it exceeds 1.5x.
+
+**WHAT IS AND IS NOT CERTIFIED HERE.** Ten further draws per arm were taken and the
+host went to loadavg 46 under a peer's build, so the harness marked them UNFIT and they
+are recorded as distribution only: control median 3.4779x [3.4546, 3.5369], ship median
+1.2768x [1.2499, 1.2940] -- consistent with the FIT pairs, quoted as support, not as the
+bound. **fr's own instr/op needs no window at all**: it is a before/after on ONE engine
+under callgrind, and it is the number this row rests on.
+
+### THE WHOLE ARM WAS ONE MISSING EARLY RETURN
+
+`fr_command::script_shebang_has_flag` was **20,112 Ir/op of a 32,054 Ir/op command --
+62.7 pct -- against a redis side with NO counterpart frame at all.**
+
+    fr control (32,054 Ir/op)              redis (9,256 Ir/op)
+    20,112  script_shebang_has_flag        1,323  luaS_newlstr
+       985  Utf8Chunks::next                 591  siphash_nocase
+       395  execute_frame_internal           392  processMultibulkBuffer
+       350  command_table_index              315  sweeplist
+
+Two facts multiply into it. `script_prepare_for_run` asks NINE of these per EVALSHA
+(five `no-writes`, two inside `is_oom_exempt`, plus `no-cluster` and `allow-stale`). And
+each ask began by searching the body for the first `\n` to isolate the shebang LINE --
+**which walks the ENTIRE body when there is no newline, i.e. for every one-line
+script.** The `evalsha_large` body is `return 1 --` plus 4000 `x`, so nine full 4 KB
+scans, every call, forever.
+
+The fix is `if !script.starts_with(b"#!") { return false; }`, and it is provably
+equivalent rather than approximately so: `script_shebang_line_has_flag` opens with
+`line.strip_prefix(b"#!").unwrap_or(b"")`, so a line without that prefix becomes the
+empty slice and every flag reads false. `line` is a prefix of `script`, so it carries
+`#!` exactly when `script` does. **A body without those two bytes could never have
+produced a `true`, so the nine scans could never have changed an answer.**
+
+*The invariant was already written down, one screen above the code that ignored it:*
+"A script with NO shebang is upstream's EVAL_COMPAT_MODE and carries no flags at all, so
+this is false for it by construction" (`frankenredis-oo3aw`). Upstream decides on the
+same two bytes in `evalGenericCommand`. **This lever did not discover a rule; it made
+the implementation exploit a rule its own doc comment already promised.**
+
+### THE DIAGNOSIS IS CONFIRMED BY A SHAPE THAT DID *NOT* MOVE
+
+`evalsha_small` -- body `return 1`, eight bytes -- was 1.3455x and is 1.2476x. It barely
+moved, because eight bytes scanned nine times was never the cost. **The two shapes
+CONVERGE (1.2549x and 1.2476x), which is the claim stated as a measurement: fr's
+per-call EVALSHA cost no longer scales with script length.** A fix that had merely made
+things faster would not have collapsed the gap between the two sizes.
+
+`fcall_lib8` / `fcall_lib32` are unchanged at 1.4258x / 1.4030x, and correctly so: a
+FUNCTION library MUST begin `#!lua name=...`, so the early return never fires for them.
+They are now the worst cells on the surface and the next target.
+
+### GATES
+
+The full nineteen-differential persistence battery still passes, and TEN script/Lua
+differentials were added to it for this row, all PASS: `script_flag_gate_parity` (the
+gate that exists for exactly this question), `eval_semantics_differ`,
+`lua_semantics_differ`, `lua_lib_differ`, `eval_compile_error_line_differ`,
+`lua_rediscall_error_differ`, `lua_load_func_differ`, `function_fcall_gate` (26 steps),
+`function_load_differ`, plus `reload_encoding_survival_gate` and
+`config_persistence_reload_gate`.
+
+`function_load_differ` first came back rc=2 with `DEBUG command not allowed` -- **on
+BOTH engines identically**, which is the tell that it was my runner and not the code:
+that gate self-launches with `--enable-debug-command yes` and my harness did not. It
+passes once booted the way it expects. A differential that fails on both arms is
+measuring the harness.
+
+fr-command, fr-persist and fr-store suites pass; fr-runtime 657 pass with the two
+failures it already had on `600a361dd` (a Lua doctest, and the stale-replica pair --
+the latter is itself a script-flags test, and it fails at the same two line numbers as
+before this change).
+
+### The surface after this lands
+
+      fcall_lib8    1.4258x  <- NEW WORST. Same family, and NOT the same bug: a
+      fcall_lib32   1.4030x     FUNCTION library must start `#!lua name=...`, so the
+                                early return never fires. Needs its own profile.
+      geohash_2     1.5957x     (unswept since; re-measure before targeting)
+      evalsha_large 1.2549x     was 3.4631x
+      evalsha_small 1.2476x
