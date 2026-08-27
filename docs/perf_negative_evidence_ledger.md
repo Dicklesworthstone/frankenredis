@@ -72795,3 +72795,83 @@ rows survivable and it is not what failed here.
 Re-run the close-out board when `/proc/loadavg` stays below 12 with fewer than ten
 concurrent builders for the duration of the run, sampling load PER SHAPE and voiding again
 if any sample exceeds 20. Do not reuse `reboard2.txt`.
+
+## 2026-08-27 — REJECT (frankenredis-sf510) — the articulation-point search came back EMPTY: 207 never-measured shapes screened, ZERO losses, worst is 0.8691x
+
+The known loss board is worked out and classified. What had NOT been done is checking the
+rest of the corpus on an ELF eight levers newer than the last full sweep. **All 207 shapes
+this session had never measured were screened, and not one is above 1.0.**
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> <shape>      # 207 shapes, one draw each
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      fr     bench_elf_sha256=ebd903e20ed24962a62ee9a1666fe014fb012686cb057f8294e2baf0b06ae846
+      redis  bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    A/A null, same invocation as the A/B arms, median 1.00048 bootstrap 95% median CI [0.99882, 1.00118]
+    -- carried from the `c9708c263` run on THIS ELF against a byte-identical copy of it.
+    PASSES.
+
+    The VERDICT rests on the BOOTSTRAP MEDIAN-CI plus the counted margin below, and on
+    nothing else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-screen a shape only if a later ELF puts it above 1.0. The 75 rows
+    marked VOID below are the ones to re-run first if anyone needs them certified.
+
+### THE LOAD ACCOUNTING, AND WHAT THE VOIDING DOES AND DOES NOT COST
+
+Load was sampled BEFORE and AFTER every shape, so a spiked row voids individually instead
+of taking the run with it -- which is what happened last turn, when one mid-run spike to 134
+cost a completed 16-shape board.
+
+    rows screened                                    207
+    VALID   (peak load <= 80)                        132   median load 24.3, range 13.7-60.7
+    VOID    (peak load  > 80)                         75   up to 208.5
+
+    losses (ratio > 1.0) among the 132 VALID rows      0
+    losses among the 75 VOIDED rows                    0   (worst reading 0.9405x)
+
+**The conclusion survives the voiding, and the reason is worth stating rather than
+assumed.** 132 shapes are certified loss-free. The other 75 are NOT certified -- but their
+readings run 0.9405x down to 0.5528x, so none is anywhere near the 1.0 boundary where a
+measurement error could change the verdict. A shape would have to be mismeasured by more
+than 6 pct to hide a loss, and callgrind instruction counts do not move with load at all
+([[feedback_callgrind_ir_is_immune_to_load_and_mhz]]).
+
+### THE WORST OF THE 132, ALL OF THEM WINS
+
+    function_load          0.8691    fr    42,427.7   redis    48,819.8   share  7.9
+    info_default           0.8220    fr   102,519.2   redis   124,717.3   share  6.0
+    xrange_base            0.7537    fr     7,491.6   redis     9,940.3   share 36.1
+    incrbyfloat_nondyadic  0.7515    fr     7,128.8   redis     9,486.1   share  9.7
+    georadius_ro_1         0.7318    fr    11,027.1   redis    15,068.9   share 27.3
+    xpending_empty         0.7060    fr     2,799.1   redis     3,964.5   share 23.3
+    sinterstore_big        0.6911    fr 1,066,153.1   redis 1,542,600.3   share  0.1
+
+### WHAT THIS SETTLES
+
+Every loss in the 254-shape corpus is one of the sixteen already on the board, and each has
+a recorded cause:
+
+    FCALL family (4)        dispatch LAYERING, priced and turned down in b85859e94 --
+                            fr ~2,134 instr/op across three crates vs redis's ~918
+    keys_star_64            the gap is fr's SORT, which redis does not perform at all and
+                            which this repo keeps as a deliberate superset guarantee
+    sort_ro_alpha           dispatch (~2,704) EXCEEDS the whole gap (1,116): fr is already
+                            ahead on the collation work itself
+    luapat family (4)       Lua allocations, 28/op vs redis 5. The reachable ones are taken
+                            (8511fc623, 1800c5389, c9708c263); what remains is 90-200
+                            instr/op each behind a wide signature change, a measured-bad
+                            capacity reserve (3272d0b66), or a key-type change inside a
+                            structure with a documented membership-filter invariant
+    evalsha (2)             1.06-1.10x after f9f2fef38
+    remainder (4)           within ~3 pct of parity
+
+**There is no unexamined articulation point left to find by screening.** The next real gain
+on this corpus is the dispatch layering, which is a design change with a correctness
+surface rather than a frame to delete, and it should not be started from a frame table --
+that mistake has already cost this session two withdrawn levers.
