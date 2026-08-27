@@ -50164,6 +50164,24 @@ fn try_encode_string_only_rdb_snapshot(
 /// where it previously emitted `RDB_TYPE_HASH` — a silent change of on-disk
 /// shape. `store_to_rdb_entries` passes `None` for exactly that reason, and
 /// `rdb_roundtrip_hash_without_ttls_keeps_plain_type_tag` pins it.
+/// Does a retained `QUICKLIST_2` record body carry any LZF-framed node string?
+///
+/// The `rdbcompression` guard, the same one the listpack arms apply -- a record loaded
+/// with compression ON holds LZF-framed strings, and re-saving with the setting since
+/// turned OFF must emit the raw form, which `rdb_encode_string` would do and a splice
+/// would not. A list body holds N node strings rather than one, so every node is
+/// checked; the walk is over node headers only, never their payloads.
+fn quicklist2_body_is_lzf_framed(raw: &[u8]) -> bool {
+    let Some(nodes) = fr_persist::quicklist2_body_node_string_offsets(raw) else {
+        // Unparseable here means the splice cannot be justified either; decline it and
+        // let the ordinary re-encode path run.
+        return true;
+    };
+    nodes
+        .into_iter()
+        .any(|at| fr_persist::rdb_string_is_lzf_framed(&raw[at..]))
+}
+
 fn store_to_rdb_entries_with_thresholds(
     store: &mut Store,
     now_ms: u64,
@@ -50192,7 +50210,39 @@ fn store_to_rdb_entries_with_thresholds(
             Value::String(v) => RdbValue::String(v.to_vec()),
             Value::Integer(v) => RdbValue::String(v.to_string().into_bytes()),
             Value::List(l) => {
-                if let Some(nodes) = l.quicklist_packed_node_blobs(list_max_listpack_size) {
+                // (BlackThrush 2026-08-27) VERBATIM FIRST, the fourth arm of the lever.
+                // A list still holding the RDB record body it was loaded from re-saves
+                // those exact bytes: `quicklist_packed_node_blobs` clones every node
+                // out of the store, and the encoder then re-runs `rdb_encode_string`
+                // over each -- which IS `lzf_compress`, 1,513,200 Ir/op, the largest
+                // frame in this arm.
+                //
+                // `retained_rdb_body()` is `Some` only while nothing has read or
+                // written the list: a read fills the OnceCell and a write collapses the
+                // representation, and `repr()` / `repr_mut()` are the only doors to the
+                // elements. A list has nothing outside the value to compare -- no side
+                // map, unlike the hash arm's per-field TTLs.
+                //
+                // NO THRESHOLD RE-CHECK IS POSSIBLE OR NEEDED. Unlike the listpack
+                // collections, a QUICKLIST_2 record is not gated on a compact
+                // threshold: `quicklist_packed_node_blobs` answers from the value's own
+                // sticky `forced_quicklist`/`fill` state, which retention preserves
+                // exactly (the derived totals came from the eager builder at load).
+                if let Some(raw) = l.retained_rdb_body()
+                    && (fr_persist::rdb_compression_enabled()
+                        || !quicklist2_body_is_lzf_framed(raw))
+                {
+                    RdbValue::ListQuicklist2Retained {
+                        raw: raw.to_vec(),
+                        // EMPTY ON PURPOSE, and the apply side knows it: the save has
+                        // no decompressed nodes to hand over and manufacturing them
+                        // would undo the whole point. A consumer that APPLIES this
+                        // value rather than encoding it re-derives them from `raw`.
+                        nodes: Vec::new(),
+                    }
+                } else if let Some(nodes) =
+                    l.quicklist_packed_node_blobs(list_max_listpack_size)
+                {
                     RdbValue::ListQuicklist2Packed(nodes)
                 } else {
                     RdbValue::List(l.iter().map(<[u8]>::to_vec).collect())
@@ -50646,6 +50696,33 @@ fn apply_rdb_entries_to_store(
                 // rpush_for_rdb_load_shapes); mirrors the zset zadd_plain_owned wiring.
                 store
                     .rpush_owned(&key, items, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?;
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
+            RdbValue::ListQuicklist2Retained { raw, nodes } => {
+                // A DECODED record carries its nodes; a value the SAVE side built
+                // carries none, because it had nothing decompressed to give. Re-derive
+                // them here rather than letting the store see an empty list and call
+                // the record corrupt.
+                let nodes = if nodes.is_empty() {
+                    fr_persist::decode_quicklist2_packed_body(&raw)
+                        .ok_or(PersistError::InvalidFrame)?
+                } else {
+                    nodes
+                };
+                // (BlackThrush 2026-08-27) Keep the record's own bytes. `nodes` is the
+                // decompressed form the decode had to produce anyway; the store uses it
+                // ONCE to compute the list's derived totals through the one builder
+                // allowed to compute them, then drops it and keeps `raw`. That is why
+                // both ride in the variant and only one is stored.
+                store
+                    .load_rdb_quicklist2_retained_list(&key, raw, nodes, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
@@ -74686,7 +74763,9 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                     && entry.key == b"db2:list"
                     && matches!(
                         entry.value,
-                        RdbValue::List(_) | RdbValue::ListQuicklist2Packed(_)
+                        RdbValue::List(_)
+                            | RdbValue::ListQuicklist2Packed(_)
+                            | RdbValue::ListQuicklist2Retained { .. }
                     )),
             "SAVE manifest base RDB must include DB 2 list, got {:?}",
             loaded_manifest.base_rdb_entries

@@ -18891,6 +18891,67 @@ impl Store {
     ///
     /// The degenerate case — a key that already exists, i.e. a duplicate key inside one RDB —
     /// keeps the element path, so its append semantics are literally unchanged.
+    /// Install an RDB-loaded list keeping the record's OWN bytes.
+    ///
+    /// (BlackThrush 2026-08-27) The retaining twin of
+    /// [`Self::load_rdb_quicklist2_packed_list`], and the fourth arm of the lever that
+    /// took zset (`3f6e8c0b9`), set (`f8fa7dd6c`) and hash (`835d05854`) reload from
+    /// losses to wins. `frankenredis-qj6jn` already stopped this path rebuilding
+    /// elements -- it keeps the DECOMPRESSED node listpacks -- but the save then
+    /// re-encoded and re-COMPRESSED every node, 1,513,200 Ir/op of `lzf_compress`.
+    ///
+    /// THE DERIVED TOTALS ARE NOT RE-DERIVED. `nodes` is consumed by the SAME builder
+    /// the eager route uses, whose `lp_bytes` / `forced_quicklist` answer is then kept
+    /// while its chunks are dropped in favour of `raw`. `frankenredis-c92f6` refused
+    /// deriving those totals by a second rule precisely because a
+    /// non-canonically-encoded payload must keep reporting the same `OBJECT ENCODING`;
+    /// this lever runs the one implementation rather than adding a second.
+    ///
+    /// Declines -- an existing key, or an empty list -- fall back to the eager twin,
+    /// which is today's code.
+    ///
+    /// # Errors
+    /// [`StoreError::InvalidDumpPayload`] for a node that does not decode.
+    pub fn load_rdb_quicklist2_retained_list(
+        &mut self,
+        key: &[u8],
+        raw: Vec<u8>,
+        nodes: Vec<Vec<u8>>,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        if self.entries.contains_key(key) {
+            return self.load_rdb_quicklist2_packed_list(key, nodes, now_ms);
+        }
+        let mut restored = Vec::with_capacity(nodes.len());
+        for blob in nodes {
+            let spans = fr_persist::listpack::decode_retained_listpack_spans(&blob)
+                .map_err(|_| StoreError::InvalidDumpPayload)?;
+            if spans.is_empty() {
+                continue;
+            }
+            let (entries, integer_bytes) = spans.into_parts();
+            restored.push(RestoredListNode::Listpack {
+                bytes: blob,
+                entries,
+                integer_bytes,
+            });
+        }
+        let derived = ListValue::from_restored_quicklist2_nodes(restored);
+        if derived.is_empty() {
+            return Err(StoreError::InvalidDumpPayload);
+        }
+        let len = derived.len();
+        let list = ListValue::retained_quicklist2(derived, raw);
+        let entry = Entry::new(Value::List(Box::new(list)), now_ms);
+        self.internal_entries_insert(key.to_vec(), entry);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(len as u64);
+        Ok(len)
+    }
+
     pub fn load_rdb_quicklist2_packed_list(
         &mut self,
         key: &[u8],

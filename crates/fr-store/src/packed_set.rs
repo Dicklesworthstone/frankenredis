@@ -4207,6 +4207,58 @@ impl Default for ListRepr {
     }
 }
 
+/// Wraps the decoded list forms so a RETAINED (undecoded) RDB `QUICKLIST_2` record can
+/// become a third case without every list method learning about it.
+///
+/// (BlackThrush 2026-08-27) Fourth arm of the retention lever, after zset `3f6e8c0b9`,
+/// set `f8fa7dd6c` and hash `835d05854`. `frankenredis-qj6jn` already stopped this path
+/// rebuilding elements -- it keeps the DECOMPRESSED node listpacks -- but the save then
+/// re-encodes and re-COMPRESSES them, which is `lzf_compress` at 1,513,200 Ir/op, the
+/// largest frame in the arm. The same half-measure the hash arm had.
+///
+/// The derived fields on `ListValue` (`lp_bytes`, `forced_quicklist`, `fill`,
+/// `decided_by_write`) are computed EAGERLY at load, by the very same
+/// `from_restored_quicklist2_nodes` the eager route uses, and only the chunks are
+/// deferred. `frankenredis-c92f6` established that those totals may NOT be re-derived
+/// from a payload by a second rule, so this lever does not try: it runs the one
+/// implementation and keeps its answer.
+#[derive(Clone, Debug)]
+enum ListReprState {
+    Ready(ListRepr),
+    /// BOXED, for the reason the zset port measured: an enum is as wide as its widest
+    /// variant, so an inline pending case would set the size of EVERY list in the
+    /// keyspace.
+    Pending(Box<PendingQuicklist2>),
+}
+
+/// A list loaded from an RDB `QUICKLIST_2` record and not yet read.
+#[derive(Debug)]
+struct PendingQuicklist2 {
+    /// The RDB record BODY, verbatim: node count plus each node's container tag and
+    /// its RDB-encoded string, exactly as they sat in the file. NOT the decompressed
+    /// listpacks -- retaining those would leave the save calling `rdb_encode_string`,
+    /// which IS the compressor.
+    raw: Box<[u8]>,
+    /// Element count, known without decoding. Answers `len()` from the header; the
+    /// store asks a value its length while STORING it, and routing that through the
+    /// materialiser has silently nullified this lever three times already.
+    len: usize,
+    decoded: std::cell::OnceCell<ListRepr>,
+}
+
+impl Clone for PendingQuicklist2 {
+    fn clone(&self) -> Self {
+        // A clone that has already materialised keeps the decoded form; one that has
+        // not stays pending. Either way the raw bytes come along, so the clone can
+        // still be saved verbatim.
+        Self {
+            raw: self.raw.clone(),
+            len: self.len,
+            decoded: self.decoded.clone(),
+        }
+    }
+}
+
 const LIST_CHUNK_TARGET: usize = 128;
 
 #[derive(Clone, Debug)]
@@ -5628,7 +5680,7 @@ fn list_lp_entry_bytes(elem: &[u8]) -> u64 {
 /// retain/iter/...) is unchanged, so callers are unaffected. (frankenredis-rc49s)
 #[derive(Clone, Debug)]
 pub struct ListValue {
-    repr: ListRepr,
+    repr_state: ListReprState,
     /// Exact `lpBytes` of this list encoded as a single listpack.
     lp_bytes: u64,
     /// Sticky listpack→quicklist decision. Set by the ADD-time / LSET-time
@@ -5659,11 +5711,121 @@ pub struct ListValue {
 impl Default for ListValue {
     fn default() -> Self {
         ListValue {
-            repr: ListRepr::default(),
+            repr_state: ListReprState::Ready(ListRepr::default()),
             lp_bytes: LIST_LP_OVERHEAD,
             forced_quicklist: false,
             fill: -2,
             decided_by_write: false,
+        }
+    }
+}
+
+/// Decode a retained `QUICKLIST_2` record body back into chunks.
+///
+/// The expects are sound HERE and only here: a `Pending` is built only from a record
+/// the decoder validated and the eager builder already consumed once, so every node
+/// re-decodes. Nothing else may build a `Pending`.
+fn materialize_pending_quicklist2(raw: &[u8]) -> ListRepr {
+    let nodes = fr_persist::decode_quicklist2_packed_body(raw)
+        .expect("validated retained list must decode its record body");
+    let mut restored = Vec::with_capacity(nodes.len());
+    for blob in nodes {
+        let spans = fr_persist::listpack::decode_retained_listpack_spans(&blob)
+            .expect("validated retained list must decode its node listpack");
+        if spans.is_empty() {
+            continue;
+        }
+        let (entries, integer_bytes) = spans.into_parts();
+        restored.push(RestoredListNode::Listpack {
+            bytes: blob,
+            entries,
+            integer_bytes,
+        });
+    }
+    // Same builder the eager route uses, so the chunks are the chunks it would have
+    // produced. Its derived totals are discarded here because the `ListValue` already
+    // carries them, computed by this very function at LOAD time.
+    ListValue::from_restored_quicklist2_nodes(restored).into_repr()
+}
+
+impl ListValue {
+    /// Every READ of the decoded form goes through here -- the single place a retained
+    /// record materialises.
+    #[inline]
+    fn repr(&self) -> &ListRepr {
+        match &self.repr_state {
+            ListReprState::Ready(repr) => repr,
+            ListReprState::Pending(pending) => pending
+                .decoded
+                .get_or_init(|| materialize_pending_quicklist2(&pending.raw)),
+        }
+    }
+
+    /// Every WRITE goes through here, and it collapses the representation for good.
+    #[inline]
+    fn repr_mut(&mut self) -> &mut ListRepr {
+        if let ListReprState::Pending(pending) = &mut self.repr_state {
+            let repr = pending
+                .decoded
+                .take()
+                .unwrap_or_else(|| materialize_pending_quicklist2(&pending.raw));
+            self.repr_state = ListReprState::Ready(repr);
+        }
+        match &mut self.repr_state {
+            ListReprState::Ready(repr) => repr,
+            ListReprState::Pending(_) => unreachable!("collapsed above"),
+        }
+    }
+
+    /// Consume this value for its decoded representation. Used by the materialiser,
+    /// which wants the chunks and already holds the derived totals.
+    #[inline]
+    fn into_repr(self) -> ListRepr {
+        match self.repr_state {
+            ListReprState::Ready(repr) => repr,
+            ListReprState::Pending(pending) => pending
+                .decoded
+                .into_inner()
+                .unwrap_or_else(|| materialize_pending_quicklist2(&pending.raw)),
+        }
+    }
+
+    #[inline]
+    fn set_repr(&mut self, repr: ListRepr) {
+        self.repr_state = ListReprState::Ready(repr);
+    }
+
+    /// The retained RDB record body, when this list has not been read or written yet.
+    ///
+    /// `None` once anything has touched it: a read fills the `OnceCell` and a write
+    /// collapses to `Ready`, and `repr()` / `repr_mut()` are the only doors to the
+    /// elements. That is an OWNERSHIP guarantee, not a convention.
+    #[must_use]
+    pub fn retained_rdb_body(&self) -> Option<&[u8]> {
+        match &self.repr_state {
+            ListReprState::Pending(p) if p.decoded.get().is_none() => Some(&p.raw),
+            _ => None,
+        }
+    }
+
+    /// Install a list RETAINED in its on-disk form, carrying the derived totals the
+    /// eager builder already computed.
+    ///
+    /// CALLER CONTRACT: `derived` must be the `ListValue` that
+    /// [`Self::from_restored_quicklist2_nodes`] produced for THIS record, so the
+    /// totals are the one implementation's answer and not a second derivation
+    /// (`frankenredis-c92f6`). `raw` must be the record body those nodes were decoded
+    /// from.
+    #[must_use]
+    pub(crate) fn retained_quicklist2(derived: Self, raw: Vec<u8>) -> Self {
+        let len = derived.len();
+        Self {
+            repr_state: ListReprState::Pending(Box::new(PendingQuicklist2 {
+                raw: raw.into_boxed_slice(),
+                len,
+                decoded: std::cell::OnceCell::new(),
+            })),
+            ..derived
         }
     }
 }
@@ -5739,7 +5901,7 @@ impl ListValue {
         if !was_forced && self.forced_quicklist {
             let prefix_len = self.len().saturating_sub(added_count);
             if prefix_len != 0
-                && let ListRepr::Deque(list) = &mut self.repr
+                && let ListRepr::Deque(list) = self.repr_mut()
             {
                 Arc::make_mut(list).rpush_conversion_prefix_len = prefix_len;
             }
@@ -5760,7 +5922,7 @@ impl ListValue {
         // n = 250/256/260 gave redis ONE node and fr TWO. The window is exactly where
         // `raw < budget < encoded`; below it neither splits, above it both do.
         if !self.forced_quicklist
-            && let ListRepr::Deque(list) = &mut self.repr
+            && let ListRepr::Deque(list) = self.repr_mut()
         {
             let whole = list.len();
             Arc::make_mut(list).rpush_conversion_prefix_len = whole;
@@ -5820,7 +5982,7 @@ impl ListValue {
         };
         if below_half {
             self.forced_quicklist = false;
-            if let ListRepr::Deque(list) = &mut self.repr {
+            if let ListRepr::Deque(list) = self.repr_mut() {
                 Arc::make_mut(list).rpush_conversion_prefix_len = 0;
             }
         }
@@ -5887,7 +6049,18 @@ impl ListValue {
 
     #[must_use]
     pub fn len(&self) -> usize {
-        match &self.repr {
+        // Answered from the record's own count while the value is still retained.
+        // Routing this through `repr()` materialises every RDB-loaded list the moment
+        // the store asks how big it is -- and the store asks WHILE STORING IT. That
+        // exact reader has silently nullified this lever three times (streams
+        // 9e8536f11, zset 3f6e8c0b9, set f8fa7dd6c, the last of which landed EXACTLY
+        // zero change until it was found).
+        if let ListReprState::Pending(p) = &self.repr_state
+            && p.decoded.get().is_none()
+        {
+            return p.len;
+        }
+        match self.repr() {
             ListRepr::Packed(p) => p.len(),
             ListRepr::Deque(d) => d.len(),
         }
@@ -5900,19 +6073,19 @@ impl ListValue {
 
     #[must_use]
     pub fn get(&self, idx: usize) -> Option<&[u8]> {
-        match &self.repr {
+        match self.repr() {
             ListRepr::Packed(p) => p.get(idx),
             ListRepr::Deque(d) => d.get(idx),
         }
     }
 
     fn promote(&mut self) {
-        if let ListRepr::Packed(p) = &self.repr {
+        if let ListRepr::Packed(p) = self.repr() {
             let mut d: VecDeque<Vec<u8>> = VecDeque::with_capacity(p.len() + 1);
             for e in p.iter() {
                 d.push_back(e.to_vec());
             }
-            self.repr = ListRepr::Deque(Arc::new(ChunkedList::from(d)));
+            self.set_repr(ListRepr::Deque(Arc::new(ChunkedList::from(d))));
         }
     }
 
@@ -6010,12 +6183,12 @@ impl ListValue {
                 .inspect(|v| raw_add += v.len() as u64)
                 .inspect(|v| list.lp_bytes += list_lp_entry_bytes(v))
                 .collect();
-            list.repr = ListRepr::Deque(Arc::new(ChunkedList::from(head)));
+            list.set_repr(ListRepr::Deque(Arc::new(ChunkedList::from(head))));
             let fill = list.fill;
             for v in tail {
                 raw_add += v.len() as u64;
                 list.add_entry_bytes(&v);
-                match &mut list.repr {
+                match list.repr_mut() {
                     ListRepr::Packed(p) => p.push_back(&v),
                     ListRepr::Deque(d) => Arc::make_mut(d).push_back_with_fill(v, fill),
                 }
@@ -6054,7 +6227,7 @@ impl ListValue {
                 front_biased: false,
             });
         }
-        list.repr = ListRepr::Deque(Arc::new(chunked));
+        list.set_repr(ListRepr::Deque(Arc::new(chunked)));
         let fill = list.fill;
         // (frankenredis-qj6jn) Two loops rather than a per-element branch: the selector is read
         // ONCE PER KEY. A toggle inside a per-element loop was measured moving its own control
@@ -6064,7 +6237,7 @@ impl ListValue {
                 raw_add += v.len() as u64;
                 let entry_bytes = EntryBytes::of(&v);
                 list.lp_bytes += entry_bytes.get();
-                match &mut list.repr {
+                match list.repr_mut() {
                     ListRepr::Packed(p) => p.push_back(&v),
                     ListRepr::Deque(d) => {
                         Arc::make_mut(d).push_back_with_fill_sized(v, fill, entry_bytes);
@@ -6075,7 +6248,7 @@ impl ListValue {
             for v in tail {
                 raw_add += v.len() as u64;
                 list.add_entry_bytes(&v);
-                match &mut list.repr {
+                match list.repr_mut() {
                     ListRepr::Packed(p) => p.push_back(&v),
                     ListRepr::Deque(d) => Arc::make_mut(d).push_back_with_fill(v, fill),
                 }
@@ -6092,7 +6265,7 @@ impl ListValue {
     }
 
     fn maybe_promote(&mut self, added_len: usize) {
-        if let ListRepr::Packed(p) = &self.repr
+        if let ListRepr::Packed(p) = self.repr()
             && (p.len() >= PACKED_MAX_ENTRIES || added_len > PACKED_MAX_VALUE)
         {
             self.promote();
@@ -6108,10 +6281,11 @@ impl ListValue {
         let entry_bytes = EntryBytes::of(&elem);
         self.lp_bytes += entry_bytes.get();
         self.maybe_promote(elem.len());
-        match &mut self.repr {
+        let fill = self.fill;
+        match self.repr_mut() {
             ListRepr::Packed(p) => p.push_back(&elem),
             ListRepr::Deque(d) => {
-                Arc::make_mut(d).push_back_with_fill_sized(elem, self.fill, entry_bytes);
+                Arc::make_mut(d).push_back_with_fill_sized(elem, fill, entry_bytes);
             }
         }
     }
@@ -6125,10 +6299,11 @@ impl ListValue {
         self.maybe_promote(elem.len());
         let entry_bytes = EntryBytes::of(&elem);
         self.lp_bytes += entry_bytes.get();
-        match &mut self.repr {
+        let fill = self.fill;
+        match self.repr_mut() {
             ListRepr::Packed(p) => p.push_front(&elem),
             ListRepr::Deque(d) => {
-                Arc::make_mut(d).push_front_with_fill_sized(elem, self.fill, entry_bytes);
+                Arc::make_mut(d).push_front_with_fill_sized(elem, fill, entry_bytes);
             }
         }
     }
@@ -6143,10 +6318,11 @@ impl ListValue {
         let entry_bytes = EntryBytes::of(elem);
         self.lp_bytes += entry_bytes.get();
         self.maybe_promote(elem.len());
-        match &mut self.repr {
+        let fill = self.fill;
+        match self.repr_mut() {
             ListRepr::Packed(p) => p.push_back(elem),
             ListRepr::Deque(d) => {
-                Arc::make_mut(d).push_back_with_fill_sized(elem.to_vec(), self.fill, entry_bytes);
+                Arc::make_mut(d).push_back_with_fill_sized(elem.to_vec(), fill, entry_bytes);
             }
         }
     }
@@ -6155,11 +6331,12 @@ impl ListValue {
         self.maybe_promote(elem.len());
         let entry_bytes = EntryBytes::of(elem);
         self.lp_bytes += entry_bytes.get();
-        match &mut self.repr {
+        let fill = self.fill;
+        match self.repr_mut() {
             ListRepr::Packed(p) if DIRECT => p.push_front(elem),
             ListRepr::Packed(p) => p.push_front_splice_bench(elem),
             ListRepr::Deque(d) => {
-                Arc::make_mut(d).push_front_with_fill_sized(elem.to_vec(), self.fill, entry_bytes);
+                Arc::make_mut(d).push_front_with_fill_sized(elem.to_vec(), fill, entry_bytes);
             }
         }
     }
@@ -6180,14 +6357,15 @@ impl ListValue {
     fn push_front_reference_qj6jn(&mut self, elem: Vec<u8>) {
         self.add_entry_bytes(&elem);
         self.maybe_promote(elem.len());
-        match &mut self.repr {
+        let fill = self.fill;
+        match self.repr_mut() {
             ListRepr::Packed(p) => p.push_front(&elem),
-            ListRepr::Deque(d) => Arc::make_mut(d).push_front_with_fill(elem, self.fill),
+            ListRepr::Deque(d) => Arc::make_mut(d).push_front_with_fill(elem, fill),
         }
     }
 
     pub fn pop_front(&mut self) -> Option<Vec<u8>> {
-        let removed = match &mut self.repr {
+        let removed = match self.repr_mut() {
             ListRepr::Packed(p) => p.pop_front(),
             ListRepr::Deque(d) => Arc::make_mut(d).pop_front(),
         };
@@ -6198,7 +6376,7 @@ impl ListValue {
     }
 
     pub fn pop_back(&mut self) -> Option<Vec<u8>> {
-        let removed = match &mut self.repr {
+        let removed = match self.repr_mut() {
             ListRepr::Packed(p) => p.pop_back(),
             ListRepr::Deque(d) => Arc::make_mut(d).pop_back(),
         };
@@ -6219,7 +6397,7 @@ impl ListValue {
         let n = count.min(self.len());
         // Deque is already O(1)/element — preserve the exact pop_front sequence (incl per-pop
         // hysteresis / quicklist->listpack revert), no quadratic shift to eliminate.
-        if matches!(self.repr, ListRepr::Deque(_)) {
+        if matches!(self.repr(), ListRepr::Deque(_)) {
             let mut out = Vec::with_capacity(n);
             for _ in 0..n {
                 match self.pop_front() {
@@ -6230,7 +6408,7 @@ impl ListValue {
             return out;
         }
         let out = {
-            let ListRepr::Packed(p) = &mut self.repr else {
+            let ListRepr::Packed(p) = self.repr_mut() else {
                 unreachable!("repr checked to be Packed")
             };
             p.drain_front_n(n)
@@ -6248,7 +6426,7 @@ impl ListValue {
     /// Byte-identical observable state to calling `pop_back` `count` times (see `pop_front_n`).
     pub fn pop_back_n(&mut self, count: usize) -> Vec<Vec<u8>> {
         let n = count.min(self.len());
-        if matches!(self.repr, ListRepr::Deque(_)) {
+        if matches!(self.repr(), ListRepr::Deque(_)) {
             let mut out = Vec::with_capacity(n);
             for _ in 0..n {
                 match self.pop_back() {
@@ -6259,7 +6437,7 @@ impl ListValue {
             return out;
         }
         let out = {
-            let ListRepr::Packed(p) = &mut self.repr else {
+            let ListRepr::Packed(p) = self.repr_mut() else {
                 unreachable!("repr checked to be Packed")
             };
             p.drain_back_n(n)
@@ -6281,7 +6459,7 @@ impl ListValue {
         };
         let base = self.lp_bytes - old_entry_bytes;
         self.lp_bytes = base + list_lp_entry_bytes(&elem);
-        match &mut self.repr {
+        match self.repr_mut() {
             ListRepr::Packed(p) => p.set(idx, &elem),
             ListRepr::Deque(d) => Arc::make_mut(d).set(idx, elem),
         }
@@ -6292,14 +6470,14 @@ impl ListValue {
     pub fn insert(&mut self, idx: usize, elem: Vec<u8>) {
         self.add_entry_bytes(&elem);
         self.maybe_promote(elem.len());
-        match &mut self.repr {
+        match self.repr_mut() {
             ListRepr::Packed(p) => p.insert(idx, &elem),
             ListRepr::Deque(d) => Arc::make_mut(d).insert(idx, elem),
         }
     }
 
     pub fn remove(&mut self, idx: usize) -> Option<Vec<u8>> {
-        let removed = match &mut self.repr {
+        let removed = match self.repr_mut() {
             ListRepr::Packed(p) => p.remove(idx),
             ListRepr::Deque(d) => Arc::make_mut(d).remove(idx),
         };
@@ -6311,7 +6489,7 @@ impl ListValue {
 
     pub fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
         let before = self.len();
-        match &mut self.repr {
+        match self.repr_mut() {
             ListRepr::Packed(p) => p.retain(&mut keep),
             ListRepr::Deque(d) => Arc::make_mut(d).retain(&mut keep),
         }
@@ -6342,7 +6520,7 @@ impl ListValue {
         // what that fold would have written. (frankenredis-c92f6)
         let (chunks, raw_total, enc_total) = ChunkedList::from_restored_nodes(nodes);
         let mut list = ListValue {
-            repr: ListRepr::Deque(Arc::new(chunks)),
+            repr_state: ListReprState::Ready(ListRepr::Deque(Arc::new(chunks))),
             lp_bytes: LIST_LP_OVERHEAD + enc_total,
             forced_quicklist: LIST_LP_OVERHEAD + raw_total > LIST_DEFAULT_BUDGET,
             fill: -2,
@@ -6370,7 +6548,7 @@ impl ListValue {
     /// ORDER IS IDENTICAL to `iter()` by construction: the same chunk order, the same
     /// `front_biased` reversal, and the same `as_bytes` for a retained span.
     pub(crate) fn for_each_borrowed<'a>(&'a self, mut f: impl FnMut(&'a [u8])) {
-        match &self.repr {
+        match self.repr() {
             ListRepr::Packed(p) => {
                 for elem in p.iter() {
                     f(elem);
@@ -6410,7 +6588,7 @@ impl ListValue {
     }
 
     pub(crate) fn retained_listpack_chunks(&self) -> Option<Vec<RetainedListpackChunk<'_>>> {
-        let ListRepr::Deque(list) = &self.repr else {
+        let ListRepr::Deque(list) = self.repr() else {
             return None;
         };
         let mut chunks = Vec::with_capacity(list.chunks.len());
@@ -6478,7 +6656,7 @@ impl ListValue {
     }
 
     pub(crate) fn quicklist_packed_nodes(&self, fill: i64) -> Option<Vec<QuicklistPackedNode<'_>>> {
-        if let ListRepr::Deque(list) = &self.repr {
+        if let ListRepr::Deque(list) = self.repr() {
             let prefix_len = list.rpush_conversion_prefix_len.min(self.len());
             if prefix_len != 0 {
                 let mut nodes = Vec::new();
@@ -6514,7 +6692,7 @@ impl ListValue {
             }
         }
 
-        let ListRepr::Deque(list) = &self.repr else {
+        let ListRepr::Deque(list) = self.repr() else {
             return None;
         };
         let mut nodes = Vec::with_capacity(list.chunks.len());
@@ -6600,7 +6778,7 @@ impl ListValue {
 
     #[must_use]
     pub fn iter(&self) -> ListValueIter<'_> {
-        match &self.repr {
+        match self.repr() {
             ListRepr::Packed(p) => ListValueIter::Packed(p.iter()),
             ListRepr::Deque(d) => ListValueIter::Deque(d.iter()),
         }
@@ -6610,7 +6788,7 @@ impl ListValue {
     /// level for the large (quicklist) encoding so LRANGE with a deep start is
     /// O(start/chunk + count) not O(start). (frankenredis-3r9lz)
     pub fn iter_from(&self, start: usize) -> ListValueIter<'_> {
-        match &self.repr {
+        match self.repr() {
             ListRepr::Packed(p) => ListValueIter::Packed(p.iter_from(start)),
             ListRepr::Deque(d) => ListValueIter::Deque(d.iter_from(start)),
         }
@@ -6621,7 +6799,7 @@ impl ListValue {
     /// would be O(n*chunks). The packed encoding is bounded small, so collecting
     /// its borrowed refs to reverse them is trivial. (frankenredis-gjyzr)
     pub fn iter_rev(&self) -> ListValueRevIter<'_> {
-        match &self.repr {
+        match self.repr() {
             ListRepr::Packed(p) => {
                 ListValueRevIter::Packed(p.iter().collect::<Vec<&[u8]>>().into_iter().rev())
             }
@@ -6658,7 +6836,7 @@ impl From<VecDeque<Vec<u8>>> for ListValue {
             ListRepr::Packed(p)
         };
         let mut list = ListValue {
-            repr,
+            repr_state: ListReprState::Ready(repr),
             lp_bytes: LIST_LP_OVERHEAD,
             forced_quicklist: false,
             fill: -2,
@@ -9181,7 +9359,7 @@ mod tests {
         }
 
         let mut copy = source.clone();
-        let (source_deque, copy_deque) = match (&source.repr, &copy.repr) {
+        let (source_deque, copy_deque) = match (source.repr(), copy.repr()) {
             (ListRepr::Deque(source_deque), ListRepr::Deque(copy_deque)) => {
                 (source_deque, copy_deque)
             }
@@ -9196,7 +9374,7 @@ mod tests {
         assert_eq!(source.get(0), Some(zero.as_slice()));
         assert_eq!(copy.get(0), Some(&b"changed"[..]));
 
-        let (source_deque, copy_deque) = match (&source.repr, &copy.repr) {
+        let (source_deque, copy_deque) = match (source.repr(), copy.repr()) {
             (ListRepr::Deque(source_deque), ListRepr::Deque(copy_deque)) => {
                 (source_deque, copy_deque)
             }
@@ -9357,7 +9535,7 @@ mod tests {
                 list.push_back(elem.clone());
                 oracle.push_back(elem);
             }
-            prop_assert!(matches!(list.repr, ListRepr::Deque(_)));
+            prop_assert!(matches!(list.repr(), ListRepr::Deque(_)));
 
             for (op, elem, raw_idx) in ops {
                 let n = oracle.len();
@@ -9491,7 +9669,7 @@ mod tests {
         }
 
         fn prefix_len(l: &ListValue) -> usize {
-            match &l.repr {
+            match l.repr() {
                 ListRepr::Deque(d) => d.rpush_conversion_prefix_len,
                 ListRepr::Packed(_) => 0,
             }
@@ -10279,10 +10457,10 @@ mod tests {
         let value = ListValue::from_restored_quicklist2_nodes(vec![listpack_node(blob)]);
 
         assert!(
-            matches!(&value.repr, ListRepr::Deque(_)),
+            matches!(value.repr(), ListRepr::Deque(_)),
             "a restored node must retain its listpack representation"
         );
-        let ListRepr::Deque(chunks) = &value.repr else {
+        let ListRepr::Deque(chunks) = value.repr() else {
             return;
         };
         assert!(

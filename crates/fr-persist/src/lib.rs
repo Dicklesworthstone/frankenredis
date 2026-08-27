@@ -1336,6 +1336,29 @@ pub enum RdbValue {
     /// node (container 1) still decodes to `List`, because a plain node carries
     /// a bare element with no listpack to retain.
     ListQuicklist2Packed(Vec<Vec<u8>>),
+    /// A list RETAINED in its on-disk form: the `RDB_TYPE_LIST_QUICKLIST_2` record
+    /// BODY, verbatim -- node count, container tags, and each node's RDB-encoded
+    /// string with its length prefix and LZF framing.
+    ///
+    /// (BlackThrush 2026-08-27) Fourth arm of the lever, and the second where the
+    /// HALF-MEASURE was already shipped: [`RdbValue::ListQuicklist2Packed`]
+    /// (`frankenredis-qj6jn`) carries the DECOMPRESSED node listpacks, which spares
+    /// the per-element decode but leaves the save calling `rdb_encode_string` on each
+    /// node -- and that IS `lzf_compress`, 1,513,200 Ir/op, the largest frame in the
+    /// list reload arm.
+    ///
+    /// `nodes` rides along ONLY as far as the apply side, which needs the decompressed
+    /// listpacks to compute the list's derived totals (`lp_bytes`,
+    /// `forced_quicklist`) through the one builder that is allowed to compute them
+    /// (`frankenredis-c92f6` refused re-deriving those by a second rule). It drops
+    /// them and keeps `raw`.
+    ListQuicklist2Retained {
+        /// The record body, exactly as it appeared after the type byte and key.
+        raw: Vec<u8>,
+        /// The same node listpacks [`RdbValue::ListQuicklist2Packed`] would carry,
+        /// already decompressed by the decode that had to happen anyway.
+        nodes: Vec<Vec<u8>>,
+    },
     Set(Vec<Vec<u8>>),
     /// A canonical, sorted intset decoded from `RDB_TYPE_SET_INTSET`.
     ///
@@ -2147,6 +2170,14 @@ fn encode_rdb_internal(
                     buf.push(RDB_TYPE_LIST_QUICKLIST_2);
                     rdb_encode_string(&mut buf, &entry.key);
                     buf.extend_from_slice(&payload);
+                }
+                // VERBATIM, one level deeper: this is the ENCODED record body, so it
+                // is spliced in whole. The arm above re-runs `rdb_encode_string` per
+                // node to reproduce bytes already sitting in the value.
+                RdbValue::ListQuicklist2Retained { raw, .. } => {
+                    buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+                    rdb_encode_string(&mut buf, &entry.key);
+                    buf.extend_from_slice(raw);
                 }
                 // VERBATIM: the save side already built exactly the bytes the
                 // listpack arm below would have produced, from borrowed members.
@@ -4703,6 +4734,63 @@ fn lzf_decompress(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
     }
 }
 
+/// Byte offsets of each node's RDB-encoded STRING within an all-PACKED
+/// `RDB_TYPE_LIST_QUICKLIST_2` record body.
+///
+/// Walks node headers only and never touches a payload, so a caller can ask whether
+/// any node is LZF-framed without decompressing anything. `None` for a body this
+/// crate would not have produced.
+#[must_use]
+pub fn quicklist2_body_node_string_offsets(body: &[u8]) -> Option<Vec<usize>> {
+    let (node_count, mut cursor) = rdb_decode_length(body)?;
+    let mut offsets = Vec::with_capacity(node_count.min(RDB_COLLECTION_PRESIZE_CAP));
+    for _ in 0..node_count {
+        let (container, consumed) = rdb_decode_length(body.get(cursor..)?)?;
+        cursor += consumed;
+        if container != 2 {
+            return None;
+        }
+        offsets.push(cursor);
+        let (_, consumed) = rdb_decode_string(body.get(cursor..)?)?;
+        cursor += consumed;
+    }
+    if cursor != body.len() {
+        return None;
+    }
+    Some(offsets)
+}
+
+/// Decode an all-PACKED `RDB_TYPE_LIST_QUICKLIST_2` record BODY into its node
+/// listpacks.
+///
+/// The body is `node_count`, then per node a container tag and an RDB-encoded string.
+/// Public so a retained list (`RdbValue::ListQuicklist2Retained`) can be materialized
+/// by the crate that holds it, at the point of first READ, rather than being kept
+/// decompressed by a value that may never be looked at.
+///
+/// Returns `None` for a malformed body, a trailing byte, or ANY node whose container
+/// is not PACKED -- retention is only ever built for an all-packed record, so a
+/// caller reaching this with anything else has already broken its own contract.
+#[must_use]
+pub fn decode_quicklist2_packed_body(body: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let (node_count, mut cursor) = rdb_decode_length(body)?;
+    let mut nodes = Vec::with_capacity(node_count.min(RDB_COLLECTION_PRESIZE_CAP));
+    for _ in 0..node_count {
+        let (container, consumed) = rdb_decode_length(body.get(cursor..)?)?;
+        cursor += consumed;
+        let (blob, consumed) = rdb_decode_string(body.get(cursor..)?)?;
+        cursor += consumed;
+        if container != 2 {
+            return None;
+        }
+        nodes.push(blob);
+    }
+    if cursor != body.len() {
+        return None;
+    }
+    Some(nodes)
+}
+
 /// Decode an RDB-encoded string, undoing LZF framing if present.
 ///
 /// Public so a retained value (`RdbValue::ZsetListpackRetained`) can be
@@ -4854,6 +4942,11 @@ pub fn canonicalise_rdb_value(value: &RdbValue) -> RdbValue {
                 }
             }
             RdbValue::List(items)
+        }
+        // (BlackThrush 2026-08-27) A retained list carries the decompressed nodes
+        // alongside the record body; canonicalise through the same expansion.
+        RdbValue::ListQuicklist2Retained { nodes, .. } => {
+            canonicalise_rdb_value(&RdbValue::ListQuicklist2Packed(nodes.clone()))
         }
         // (BlackThrush) A set handed to the encoder as its listpack blob spells the
         // same members; decode it back so a caller comparing CONTENT still compares
@@ -5685,6 +5778,7 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                         }
                     }
                     RDB_TYPE_LIST_QUICKLIST_2 => {
+                        let body_start = cursor;
                         // node_count nodes, each: (container:length,
                         // listpack:string). Upstream's container is 1 for
                         // PLAIN nodes (raw string elements) and 2 for
@@ -5734,9 +5828,17 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                             nodes.push((container, node_blob));
                         }
                         if all_packed && !nodes.is_empty() {
-                            RdbValue::ListQuicklist2Packed(
-                                nodes.into_iter().map(|(_, blob)| blob).collect(),
-                            )
+                            // (BlackThrush 2026-08-27) RETAIN THE RECORD BODY too, one
+                            // level below the decompressed nodes qj6jn started
+                            // carrying. Those spared the per-element decode but left
+                            // the save re-encoding and re-COMPRESSING every node.
+                            // The nodes still ride along: the apply side needs them to
+                            // compute the list's derived totals through the one builder
+                            // allowed to compute them, and drops them after.
+                            RdbValue::ListQuicklist2Retained {
+                                raw: data[body_start..cursor].to_vec(),
+                                nodes: nodes.into_iter().map(|(_, blob)| blob).collect(),
+                            }
                         } else {
                             let mut items = Vec::with_capacity(nodes.len());
                             for (container, node_blob) in nodes {
@@ -8847,6 +8949,11 @@ mod tests {
     /// Encode a small listpack of byte-string entries, mirroring
     /// upstream `listpack.c::lpAppend`. Test-only — production callers
     /// live in `fr-store::dump_key`.
+    /// Does a retained QUICKLIST_2 body decode back to exactly this one node?
+    fn fr_persist_self_check_body_holds_node(raw: &[u8], node: &[u8]) -> bool {
+        super::decode_quicklist2_packed_body(raw).is_some_and(|nodes| nodes == vec![node.to_vec()])
+    }
+
     fn build_listpack_for_test(entries: &[&[u8]]) -> Vec<u8> {
         fn push_backlen(buf: &mut Vec<u8>, len: usize) {
             if len <= 127 {
@@ -10370,11 +10477,18 @@ mod tests {
         // `Vec<u8>` per element. The assertion is byte-level on purpose: "the decoder
         // returned the same bytes the payload carried" is the whole property, and an
         // element-list assertion would pass just as well for a decode-and-re-encode.
+        // (BlackThrush 2026-08-27) ...and now the RECORD BODY is retained alongside
+        // them, one level lower, so the save can splice it. The byte-level property is
+        // unchanged and is still what is asserted -- on the nodes the variant carries.
         match &entries[0].value {
-            RdbValue::ListQuicklist2Packed(nodes) => {
+            RdbValue::ListQuicklist2Retained { nodes, raw } => {
                 assert_eq!(nodes, &vec![lp.clone()], "node blob must be verbatim");
+                assert!(
+                    fr_persist_self_check_body_holds_node(raw, &lp),
+                    "the retained body must spell the same node listpack"
+                );
             }
-            other => panic!("expected RdbValue::ListQuicklist2Packed, got {other:?}"),
+            other => panic!("expected RdbValue::ListQuicklist2Retained, got {other:?}"),
         }
     }
 
@@ -10605,6 +10719,14 @@ mod tests {
                     match super::canonicalise_rdb_value(&entries[0].value) {
                         RdbValue::Hash(fields) => fields.len(),
                         _ => panic!("seed {name}: retained hash string did not decode: {raw:?}"),
+                    },
+                ),
+                // ...and RDB_TYPE_LIST_QUICKLIST_2 likewise. (BlackThrush 2026-08-27)
+                RdbValue::ListQuicklist2Retained { raw, .. } => (
+                    "List",
+                    match super::canonicalise_rdb_value(&entries[0].value) {
+                        RdbValue::List(items) => items.len(),
+                        _ => panic!("seed {name}: retained list body did not decode: {raw:?}"),
                     },
                 ),
                 _ => ("Other", 0),
@@ -11990,6 +12112,11 @@ mod tests {
                 // (BlackThrush 2026-08-27) And for a hash written as
                 // RDB_TYPE_HASH_LISTPACK, retained for the same reason.
                 if matches!(&entry.value, RdbValue::HashListpackRetained { .. }) {
+                    entry.value = super::canonicalise_rdb_value(&entry.value);
+                }
+                // (BlackThrush 2026-08-27) And for a list written as QUICKLIST_2,
+                // retained for the same reason.
+                if matches!(&entry.value, RdbValue::ListQuicklist2Retained { .. }) {
                     entry.value = super::canonicalise_rdb_value(&entry.value);
                 }
                 // (frankenredis-qj6jn) And for a list written as QUICKLIST_2, which now

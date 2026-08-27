@@ -103,6 +103,11 @@ fn canonicalise_decoded_set(value: &RdbValue) -> RdbValue {
             }
             RdbValue::List(items)
         }
+        // (BlackThrush 2026-08-27) A list the DECODER retained in its on-disk form
+        // carries the decompressed nodes alongside the record body; expand those.
+        RdbValue::ListQuicklist2Retained { nodes, .. } => {
+            canonicalise_decoded_set(&RdbValue::ListQuicklist2Packed(nodes.clone()))
+        }
         // (BlackThrush) A set handed to the encoder as its listpack blob: decode
         // back to the `Set` spelling the generator produced, so every member is
         // still compared and only the VARIANT stops being load-bearing.
@@ -178,6 +183,7 @@ fn rdb_value_kind(value: &RdbValue) -> &'static str {
         RdbValue::String(_) => "String",
         RdbValue::List(_) => "List",
         RdbValue::ListQuicklist2Packed(_) => "ListQuicklist2Packed",
+        RdbValue::ListQuicklist2Retained { .. } => "ListQuicklist2Retained",
         RdbValue::Set(_) => "Set",
         RdbValue::SetListpack(_) => "SetListpack",
         RdbValue::SetListpackRetained { .. } => "SetListpackRetained",

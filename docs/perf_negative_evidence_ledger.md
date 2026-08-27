@@ -69887,3 +69887,152 @@ the failure it already had on `f8fa7dd6c` (a Lua doctest, and the stale-replica 
       set reload    0.9528x  win
 
 fr is now faster than redis 7.2.4 on FOUR of the five reload arms.
+
+## 2026-08-27 — list: the LAST loss on the reload board becomes a WIN — 1.2633x -> 0.8263x (-34.6 pct)
+
+Fourth port of the retention lever, and the second where the HALF-MEASURE was already
+shipped: `RdbValue::ListQuicklist2Packed` (`frankenredis-qj6jn`) already carried the
+DECOMPRESSED node listpacks, but the save re-encoded and re-COMPRESSED every node.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `restore_instr_per_op.py` runs the
+live vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm,
+under one callgrind two-point subtraction, and prints
+`fr/redis instructions per op: 0.8263x` from that pair -- not an fr-before/fr-after
+self-speedup.
+
+    python3 scripts/restore_instr_per_op.py <bin> 40 20 --type=list --op=reload \
+        --keys=200 --aa
+
+    TEN --aa DRAWS, ctl/ship INTERLEAVED, EVERY A/A NULL PASS (band 0.005)
+
+      control n=5  ratio median 1.263300  bootstrap 95% median CI [1.262200, 1.266400]
+      ship    n=5  ratio median 0.826300  bootstrap 95% median CI [0.821200, 0.827100]
+
+      A/A null, measured in the SAME INVOCATION as its own arm (a second fr process
+      off the identical ELF, run adjacent, never across the incumbent):
+        control n=5  median 0.999672  bootstrap 95% median CI [0.999148, 1.001111]
+        ship    n=5  median 1.000545  bootstrap 95% median CI [0.999528, 1.002122]
+
+      THE DECISION IS THE BOOTSTRAP MEDIAN-CI GATE: both null CIs sit inside +/-2 pct
+      of 1.0, so the harness is not moving, and the two ratio CIs are disjoint with a
+      gap of 0.4351x -- two orders of magnitude wider than either null's whole
+      interval. CV was never computed for this verdict and is provenance only; it did
+      not influence the decision.
+
+      fr instructions/op 4,814,035.8 -> 3,143,133.1  -1,670,902.7 Ir/op, -34.71 pct
+
+    IN-PROCESS ELF SHA-256, self-reported by the benchmarked binary itself
+    (the harness prints the hash the RUNNING process computed of its own image):
+      control ELF sha256 6d708315cac977925d829733cfffa0cd7a9e83fb52f3800397dccb563a43846e
+      ship    ELF sha256 acfc0b5cd56e74a739e32f72064ff55a701e9197596e0343b47a4e84b504ccb7
+      redis   ELF sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    Retry predicate: re-run the command above on both ELF SHA-256s named here; this row
+    is void if the ship arm's bootstrap 95% median CI ever crosses 1.0x, or if its A/A
+    null median falls outside [0.98, 1.02].
+
+The fleet measurement slot could not be taken -- `acquire_build_slot` is refused
+server-side (`Build slots are disabled`) -- so the run carries unknown fleet
+contention; callgrind Ir is load-immune and the ten nulls are the evidence it did not
+matter (host at loadavg 14-19 across the draws).
+
+### WHAT WAS DEFERRED, AND WHAT DELIBERATELY WAS NOT
+
+`frankenredis-c92f6` established that a list's `lp_bytes` and its sticky
+`forced_quicklist` -- which together decide `OBJECT ENCODING` -- may NOT be re-derived
+from a payload by a second rule, because a non-canonically-encoded payload has to keep
+reporting what the walk reports. **So this lever does not re-derive them.** The load
+still runs `from_restored_quicklist2_nodes`, the ONE implementation allowed to compute
+those totals, keeps its answer, and defers only the CHUNKS.
+
+That is visible in the ship frame table and is the honest cost of the choice:
+
+      fr ship (3,141,300 Ir/op)              redis (3,807,506 Ir/op)
+      693,200  lzf_decompress                1,111,232  lzf_compress   <- fr: GONE
+      457,136  memcpy                          669,200  lzf_decompress
+      341,600  decode_value_spans              369,651  crcspeed64little
+      288,200  from_restored_quicklist2_nodes  153,635  fwrite
+
+`from_restored_quicklist2_nodes` is still there, and the chunks it builds are dropped
+immediately in favour of the raw bytes. Extracting a totals-only pass from it would
+recover most of that 288,200 -- but that function is the most carefully tuned code on
+this path (`qj6jn`'s per-entry fold, the derivation guard, the `debug_assert` that makes
+the walk the reference in every test build), and splitting it is a separate change with
+its own proof obligation. **NEXT LEVER ON THIS ARM, named and sized: 288,200 Ir/op,
+9.2 pct of what is left.**
+
+### WHY THE RAW REPLACES THE CHUNKS RATHER THAN JOINING THEM
+
+Keeping both would have been the smaller edit and would have collected the same
+compressor frame. It would also have added the compressed copy to every list's
+footprint permanently, which the reload arm would never have shown
+([[project_keyspace_ram_gap]] is a live concern). Holding the raw INSTEAD means RSS
+goes DOWN, at the cost of a rebuild on first read -- the same trade the other three arms
+already make.
+
+### A FINDING THIS TURNED UP THAT IS NOT MINE
+
+The probe's arm C -- `CONFIG SET list-max-listpack-size 4` then `DEBUG RELOAD` --
+diverges from redis 7.2.4 on OBJECT ENCODING for **every list**: fr reports `quicklist`
+where redis reports `listpack`. It reproduces **BYTE-FOR-BYTE IDENTICALLY on the
+incumbent ELF** (`6d708315...`), so it predates this lever and is untouched by it.
+Booting with the same threshold from the start (arm E) agrees, so the divergence is
+specific to CONFIG-SET-then-reload. **Filed here rather than folded into the probe
+silently:** the arm now compares CONTENT strictly and excludes only the encoding
+fields, with the control-run evidence quoted next to the exclusion, because narrowing a
+differential without first proving the exclusion is pre-existing is how a gate stops
+testing.
+
+### GATES
+
+Nineteen differentials against live redis 7.2.4, all PASS -- the eleven from the
+previous arms plus `list_differ`, `list_mutation_differ`, `list_ops_differ`,
+`list_quicklist_dump_differ`, `list_rdb_roundtrip_differ`,
+`quicklist_dump_boundary_differ`, `list_chunk_seal_gate`, `strlist_encoding_differ`;
+plus `reload_encoding_survival_gate` and `config_persistence_reload_gate`.
+
+A list retention probe over a seed built for what a list specifically risks: a genuinely
+MULTI-NODE quicklist, DIGIT-LEADING elements (canonical decimals, the near-misses that
+must stay strings, and a 25-digit value that overflows `i64` -- the `c92f6` derivation
+guard), binary elements, a PLAIN-node list (a 100 KB element, which has no listpack to
+retain), and a single-element list. Arms: (A) a real process RESTART off `dump.rdb`,
+twice; (B) load -> MUTATE -> reload, including `LSET`; (C) changed threshold; (D)
+`rdbcompression no` after a compressed load (LZF-framed QUICKLIST_2 first nodes 6 -> 0
+on both engines); (E) load under a changed threshold. All PASS, and the probe PASSES on
+the incumbent ELF too.
+
+*What the first version of that seed got wrong, worth recording:* it used 600 short
+elements for the "multi-node quicklist" and 400 for the crossed-then-shrunk case. **The
+default `list-max-listpack-size` is `-2` -- an 8 KiB NODE BUDGET, not 128 entries** --
+so both stayed ONE node and the multi-node path was never exercised at all, while the
+probe reported PASS. 300 x 64-byte elements is ~19 KiB and genuinely splits. A seed that
+does not reach the shape it names is a gate that passes for free.
+
+**The zset, set and hash probes were re-run against this ELF and all PASS**, so this arm
+did not borrow from the three already landed.
+
+fr-persist 250+5+10+12 passed. fr-store 962 passed and fr-runtime 657 passed, each with
+the failure it already had on `835d05854` (a Lua doctest, and the stale-replica pair).
+
+### The standing law this row touches
+
+**RESTORE isolation (b1o02).** The word appears in this row's closing line, which names
+`--op=restore` as where the remaining losses are. No RESTORE ratio is claimed here and
+the RESTORE route is untouched -- this lever is RDB-FILE load and save only. The law
+stands and is the reason that closing line is a pointer and not a target list:
+RESTORE-in-isolation flatters redis, because fr decodes eagerly where redis attaches
+the listpack shallowly and re-walks it on every read, and the break-even is well under
+one read per restore (`scripts/hash_restore_read_premise_run.sh`). Anyone picking that
+up must quote the break-even, not the isolation ratio.
+
+### The board after this lands, every A/A null PASS
+
+      set reload    0.9517x  win
+      stream reload 0.8827x  win
+      list reload   0.8263x  win
+      zset reload   0.8259x  win
+      hash reload   0.8227x  win
+
+**Every reload arm on the board is now a win.** fr is faster than redis 7.2.4 on all
+five. The next target is no longer on this board -- `restore_instr_per_op.py --op=restore`
+and the throughput surfaces are where the remaining losses live.
