@@ -68840,3 +68840,58 @@ uses across three files; a borrowed form needs a lifetime parameter through all 
 them, for ~1.56 pct before the 3-14x optimism discount. Declined on blast radius.
 
 **NO CODE CHANGE THIS TURN.**
+
+## 2026-08-27 — THE STRUCTURAL CHANGE IS NOW MEASURED, NOT PROJECTED: -30.4 pct MINIMUM on the worst arm
+
+Every previous note on `VerbatimListpackStream` carried a PROJECTED payoff derived
+from frame arithmetic. Measured now, with a bounding probe, on the worst arm.
+
+**The read-path blocker I asserted three times was wrong.** I claimed retaining blobs
+forces a second decoder into `FieldsRef` and therefore onto the hot read path. That is
+true only of an EAGER dual representation. A LAZILY MATERIALISED form does not: store
+the blob on RESTORE, decode once on first read, and the read path is untouched --
+`OnceCell` hands out a `&PackedStreamLog` borrowed from `&self`, so every method that
+returns `FieldsRef<'_>` or `&(u64, u64)` still typechecks. Streams that are restored
+and never read (replication fan-out, DUMP/RESTORE migration, RDB load then BGSAVE)
+never decode at all.
+
+**BOUNDING PROBE, env-gated so BOTH ARMS ARE THE SAME ELF** -- the `var_os` lookup
+runs either way and only the branch differs, so no codegen difference contaminates the
+delta. The probe returns an EMPTY stream from the RESTORE build closure: a WRONG result
+by construction, read only for instr/op, reverted immediately (HEAD ELF
+`29ed9d2a...` reproduced).
+
+    python3 scripts/restore_instr_per_op.py <bin> 400 100 --type=stream --varyfields --aa
+    probe ELF 83fc675b44d4d8e9dd59cb9a2b558d8857992c5507dfb62b0afd8ee2a1c99c4f
+
+    ALL FOUR DRAWS CERTIFIED (A/A nulls PASS)
+      control  741,252.3 / 738,987.4  ->  mean 740,119.9   3.2192x / 3.2071x
+      probe    513,643.0 / 516,174.2  ->  mean 514,908.6   2.2325x / 2.2475x
+                                          -225,211 Ir/op   -30.43 pct
+                                          3.2132x -> 2.2400x
+
+**Skipping ONLY the rebuild is worth 225,211 Ir/op**, far more than the 159,209 that
+`from_sorted_entries_impl`'s frame alone suggested -- because it also removes the field
+interning (`hash_one` 24,800), its allocator traffic and the `StreamOut` drop glue.
+**This is the estimate error running the OTHER way for once**, and it is worth naming:
+a frame total UNDER-states a lever when deleting the frame also deletes work charged
+elsewhere. Every previous row in this file records the opposite direction.
+
+**And that is the FLOOR, not the ceiling.** `flat_entries` is still running in the
+probe. Its 102,899 Ir/op is materialisation ON TOP of validation -- the validation
+(`decode_raw_values`, 141,044) lives beside it and the lazy design must KEEP it,
+because fr rejects corrupt payloads that default-redis accepts (`9a6f6c487`). Removing
+the materialisation too lands near 412,000 Ir/op, **~1.79x**, by frame arithmetic on a
+measured base rather than on an estimate.
+
+    worst arm today        3.2132x
+    rebuild removed        2.2400x   MEASURED
+    + materialisation      ~1.79x    frame arithmetic on the measured base
+
+A second probe that also skipped `flat_entries` was NOT run: it would have removed
+`decode_raw_values` with it and produced a floor (~1.18x) the real design cannot
+reach, which is a worse number to leave in the record than an honest bracket.
+
+**The build is now justified by measurement.** It is still ~17 delegating methods plus
+the RESTORE and save wiring, and it is still not something to leave half-done in a
+shared checkout -- but nobody has to take the payoff on faith any more.
