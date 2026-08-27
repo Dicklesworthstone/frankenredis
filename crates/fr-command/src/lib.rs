@@ -6444,7 +6444,7 @@ fn geo_radius_bbox(clon: f64, clat: f64, radius_m: f64) -> (f64, f64, f64, f64, 
 /// neighbour cell), so the scan can never miss an in-range point. Unlike
 /// upstream's `geohashEstimateStepsByRadius` heuristic this guarantees coverage,
 /// which fr's exact full scan requires. Returns 0 when even precision 1 is too
-/// fine (radius spans most of the globe) — the caller then does a full scan.
+/// fine (radius spans most of the globe).
 /// (frankenredis-7hg0r)
 fn geo_radius_cover_steps(clat: f64, radius_m: f64) -> u8 {
     if radius_m <= 0.0 {
@@ -6472,11 +6472,13 @@ fn geo_radius_cover_steps(clat: f64, radius_m: f64) -> u8 {
 
 /// Disjoint geohash-score ranges covering the center cell and its 8 neighbours
 /// at the precision from `geo_radius_cover_steps` — the only score
-/// sub-intervals that can hold a point within `radius_m` of the center. Returns
-/// `None` when the precision is so coarse (very large radius) that the cells span
-/// most of the keyspace and a plain full scan is just as good. Longitude wraps
-/// modulo 2^steps; out-of-range latitude neighbours are dropped (they hold no
-/// points — stored latitudes are clamped to +/-85.05). Each returned cell maps
+/// sub-intervals that can hold a point within `radius_m` of the center. For a
+/// globe-scale radius, this deliberately retains the level-1 cells instead of
+/// falling back to a raw score scan: Redis 7.2.4 searches geohash cells even at
+/// that scale, and the inclusive north-latitude endpoint encodes just outside
+/// the normal 52-bit cells. Longitude wraps modulo 2^steps; out-of-range
+/// latitude neighbours are dropped (they hold no points — stored latitudes are
+/// clamped to +/-85.05). Each returned cell maps
 /// to `[cell << shift, (cell << shift) | (2^shift - 1)]` because the stored score
 /// is the 52-bit interleave whose top `2*steps` bits identify the cell.
 /// (frankenredis-7hg0r)
@@ -6486,10 +6488,7 @@ fn geo_radius_cell_ranges(clon: f64, clat: f64, radius_m: f64) -> Option<Vec<(f6
     {
         return None;
     }
-    let steps = geo_radius_cover_steps(clat, radius_m);
-    if steps < 3 {
-        return None; // cells already span ~the whole world; full scan is fine
-    }
+    let steps = geo_radius_cover_steps(clat, radius_m).max(1);
     Some(geo_cells_for_steps(clon, clat, steps))
 }
 
@@ -79528,6 +79527,70 @@ mod tests {
             names,
             vec![b"Palermo".to_vec(), b"Catania".to_vec()],
             "DESC = farthest-first"
+        );
+    }
+
+    #[test]
+    fn geosearch_globe_radius_uses_redis_cells_at_inclusive_latitude_limit() {
+        // Redis accepts the inclusive GEO latitude endpoint and keeps it in
+        // the zset, but its level-1 neighbor-cell traversal omits the endpoint
+        // score from a globe-scale GEOSEARCH. Keep the scope to search-area
+        // selection: rejecting the coordinate or changing distance semantics
+        // would be a different (and incompatible) repair.
+        let mut store = Store::new();
+        let added = dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"g".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+                b"center".to_vec(),
+                b"0".to_vec(),
+                b"85.05112878".to_vec(),
+                b"north-limit".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("inclusive latitude remains a valid GEOADD coordinate");
+        assert_eq!(added, RespFrame::Integer(2));
+
+        // A naive endpoint rejection would make this nil. GEO distance keeps
+        // its existing behavior; only GEOSEARCH candidate-cell selection is
+        // intentionally Redis-compatible here.
+        let distance = dispatch_argv(
+            &[
+                b"GEODIST".to_vec(),
+                b"g".to_vec(),
+                b"center".to_vec(),
+                b"north-limit".to_vec(),
+                b"km".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("GEODIST must retain the stored endpoint");
+        assert!(matches!(distance, RespFrame::BulkString(Some(_))));
+
+        let found = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"g".to_vec(),
+                b"FROMMEMBER".to_vec(),
+                b"center".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"21000".to_vec(),
+                b"km".to_vec(),
+                b"ASC".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("GEOSEARCH");
+        assert_eq!(
+            found,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"center".to_vec()))])),
+            "Redis's level-1 GEOSEARCH cells exclude the inclusive north-limit score"
         );
     }
 
