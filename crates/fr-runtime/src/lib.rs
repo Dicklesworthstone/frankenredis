@@ -50318,6 +50318,42 @@ fn store_to_rdb_entries_with_thresholds(
                 // Anything the blob builder declines -- over thresholds, or a NaN
                 // score -- keeps the owned form, which is exactly the set of shapes
                 // the encoder would not have written as RDB_TYPE_ZSET_LISTPACK.
+                //
+                // (BlackThrush 2026-08-27) VERBATIM FIRST. A zset still holding
+                // the RDB string it was loaded from re-saves those exact bytes:
+                // `iter_asc` would materialize the record only to hand its members
+                // to an encoder that reproduces the listpack, and `rdb_encode_string`
+                // would then re-run `lzf_compress` -- 2,118,400 Ir/op, the single
+                // largest frame in the reload arm (7dc624cea) -- to reproduce a
+                // compressed string that is already sitting in the value.
+                //
+                // `retained_rdb_string()` is `Some` only while nothing has read or
+                // written the zset, which is an OWNERSHIP guarantee: `inner()` and
+                // `inner_mut()` are the only doors to the members, and both close
+                // this one. Unlike the stream case there is nothing outside the
+                // value to compare -- a zset has no groups, watermark or counters
+                // on the Store -- so the members being unchanged is the whole
+                // condition. The thresholds are still re-checked, in O(1) from the
+                // count and longest member the record carries, because CONFIG can
+                // have moved them since the load.
+                // The one thing splicing CAN change that a re-encode would not: an
+                // RDB loaded with `rdb-compression yes` holds LZF-framed strings,
+                // and re-saving with the setting since turned OFF must emit the raw
+                // form. `rdb_encode_string` would; a splice would not, so a
+                // compressed record only takes this path while compression is on.
+                if let Some(thresholds) = compact
+                    && let Some((raw, len, max_member_len)) = zs.retained_rdb_string()
+                    && len <= thresholds.zset_max_listpack_entries
+                    && max_member_len <= thresholds.zset_max_listpack_value
+                    && (fr_persist::rdb_compression_enabled()
+                        || !fr_persist::rdb_string_is_lzf_framed(raw))
+                {
+                    RdbValue::ZsetListpackRetained {
+                        raw: raw.to_vec(),
+                        pair_count: len,
+                        max_member_len,
+                    }
+                } else {
                 let borrowed_blob = compact.and_then(|thresholds| {
                     let borrowed: Vec<(&[u8], f64)> = zs.iter_asc().collect();
                     fr_persist::encode_zset_listpack_blob_borrowed(&borrowed, thresholds)
@@ -50328,6 +50364,7 @@ fn store_to_rdb_entries_with_thresholds(
                     let members: Vec<(Vec<u8>, f64)> =
                         zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
                     RdbValue::SortedSet(members)
+                }
                 }
             }
             Value::Stream(entries_map) => {
@@ -50726,6 +50763,47 @@ fn apply_rdb_entries_to_store(
                             .hash_field_expires
                             .insert((key.clone(), field.clone()), *abs_ms);
                     }
+                }
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
+            RdbValue::ZsetListpackRetained {
+                raw,
+                pair_count,
+                max_member_len,
+            } => {
+                // (BlackThrush 2026-08-27) Install the record's own bytes and
+                // decode NOTHING. The decoder already proved the payload valid,
+                // duplicate-free, and reported its member count and longest
+                // member, so the store can pick the encoding, set the sticky
+                // skiplist flag and answer `len()` without ever looking inside.
+                //
+                // A shape the thresholds send to a skiplist (or a key already
+                // present) is handed straight back, and takes the ordinary decode
+                // path below -- byte-identical to what this arm did before.
+                let raw = match store.zset_load_retained_listpack(
+                    &key,
+                    raw,
+                    pair_count,
+                    max_member_len,
+                    now_ms,
+                ) {
+                    Ok(_) => None,
+                    Err(raw) => Some(raw),
+                };
+                if let Some(raw) = raw {
+                    let (listpack, _) = fr_persist::rdb_decode_string_payload(&raw)
+                        .ok_or(PersistError::InvalidFrame)?;
+                    let pairs = fr_persist::listpack::decode_zset_listpack_pairs(&listpack)
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                    store
+                        .zadd_pairs_loading(&key, pairs, now_ms)
+                        .map_err(|_| PersistError::InvalidFrame)?;
                 }
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
@@ -74386,9 +74464,18 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             loaded_manifest
                 .base_rdb_entries
                 .iter()
+                // (BlackThrush 2026-08-27) ...and a ZSET_LISTPACK zset comes back
+                // as the retained on-disk string, so a SAVE that follows a load
+                // writes those bytes verbatim. Accept either spelling: what this
+                // assertion is about is that the db-4 zset reached the base RDB.
                 .any(|entry| entry.db == 4
                     && entry.key == b"db4:zset"
-                    && matches!(entry.value, RdbValue::SortedSet(_))),
+                    && matches!(
+                        entry.value,
+                        RdbValue::SortedSet(_)
+                            | RdbValue::ZsetListpack(_)
+                            | RdbValue::ZsetListpackRetained { .. }
+                    )),
             "SAVE manifest base RDB must include DB 4 zset, got {:?}",
             loaded_manifest.base_rdb_entries
         );

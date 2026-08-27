@@ -971,6 +971,73 @@ pub struct SortedSet {
 #[derive(Debug, Clone)]
 enum SortedSetRepr {
     Ready(SortedSetInner),
+    /// A zset loaded from RDB and still held as the bytes it was loaded from --
+    /// the RDB-ENCODED string (length prefix, LZF framing and all), not the
+    /// decompressed listpack.
+    ///
+    /// Decoded on first READ and never at all if the value is only saved, which is
+    /// exactly what a DEBUG RELOAD / replica handoff does. Only built for a payload
+    /// the decoder proved (a) structurally valid, (b) free of repeated members and
+    /// (c) inside the store's listpack thresholds, so materialization is
+    /// unconditionally `Packed` and cannot fail.
+    /// BOXED. Inline, this variant is a `Box<[u8]>` + a
+    /// `OnceCell<SortedSetInner>` + two `usize` -- about
+    /// `size_of::<SortedSetInner>() + 40` -- and an enum is as wide as its widest
+    /// variant, so it would set the size of EVERY `SortedSet` in the keyspace,
+    /// retained or not, on paths this lever never touches. Behind one pointer the
+    /// enum is exactly the width it was, which the `const` assert below pins.
+    ///
+    /// It costs one allocation per retained key: measured at +21,458 Ir/op on the
+    /// 200-key reload arm, 0.62 pct of it, against a whole-arm win of 65 pct.
+    Pending(Box<PendingZSet>),
+}
+
+// Lock the boxing in. A `Pending` that grows back inline widens every SortedSet in
+// the store; nothing else would fail, so it is asserted here. See the variant's doc.
+const _: () = assert!(
+    std::mem::size_of::<SortedSet>() == std::mem::size_of::<SortedSetInner>(),
+    "SortedSetRepr::Pending must stay behind a Box: a retained zset must not widen \
+     every sorted set in the keyspace"
+);
+
+/// A zset loaded from RDB and not yet decoded. See [`SortedSetRepr::Pending`].
+#[derive(Debug, Clone)]
+struct PendingZSet {
+    /// The RDB-ENCODED string (length prefix, LZF framing and all), verbatim.
+    raw: Box<[u8]>,
+    /// Filled by `inner()`. A `OnceCell` and not a `RefCell` because a read
+    /// only ever needs a shared borrow and the value is written exactly once.
+    decoded: std::cell::OnceCell<SortedSetInner>,
+    /// Member count, as the decoder counted it. Answers `len()` without
+    /// materializing -- load-bearing, not a convenience: the store's own
+    /// insert path asks a value for its length while storing it, which on the
+    /// stream port materialized every retained record the moment it landed and
+    /// cost +31.7 pct (9e8536f11).
+    len: usize,
+    /// Longest member in Redis-observable bytes, so the save side can re-check
+    /// the encoding thresholds in O(1) rather than walking the members.
+    max_member_len: usize,
+}
+
+/// Decode a retained RDB string into the packed form.
+///
+/// The expects are sound HERE and only here: `RdbValue::ZsetListpackRetained` is
+/// built only after `listpack::zset_listpack_shape` has accepted the decompressed
+/// payload -- the same acceptance `decode_zset_listpack_pairs` applies -- and
+/// `SortedSet::pending` is only reached from the apply path that carries such a
+/// value. Nothing else may build a `Pending`.
+fn materialize_pending_zset(raw: &[u8]) -> SortedSetInner {
+    let (listpack, _) = fr_persist::rdb_decode_string_payload(raw)
+        .expect("validated retained zset must decode its rdb string");
+    let mut pairs = fr_persist::listpack::decode_zset_listpack_pairs(&listpack)
+        .expect("validated retained zset must decode its listpack");
+    // The eager load path canonicalises in place before building; a retained one
+    // has to fold -0.0 to +0.0 at exactly the same point or the two routes would
+    // disagree on a score the payload spells as "-0".
+    for pair in &mut pairs {
+        pair.1 = canonicalize_zero_score(pair.1);
+    }
+    SortedSetInner::Packed(PackedZSet::from_unique_pairs(pairs))
 }
 
 impl SortedSet {
@@ -982,13 +1049,64 @@ impl SortedSet {
     fn inner(&self) -> &SortedSetInner {
         match &self.repr {
             SortedSetRepr::Ready(inner) => inner,
+            SortedSetRepr::Pending(pending) => pending
+                .decoded
+                .get_or_init(|| materialize_pending_zset(&pending.raw)),
         }
     }
 
     #[inline]
     fn inner_mut(&mut self) -> &mut SortedSetInner {
+        // A write collapses the representation for good: take the already-decoded
+        // value if a read produced one, otherwise decode now. No clone either way,
+        // and the retained bytes are dropped with the old repr.
+        if let SortedSetRepr::Pending(pending) = &mut self.repr {
+            let inner = pending
+                .decoded
+                .take()
+                .unwrap_or_else(|| materialize_pending_zset(&pending.raw));
+            self.repr = SortedSetRepr::Ready(inner);
+        }
         match &mut self.repr {
             SortedSetRepr::Ready(inner) => inner,
+            SortedSetRepr::Pending(_) => unreachable!("collapsed above"),
+        }
+    }
+
+    /// Retain an RDB-encoded zset listpack string UNDECODED.
+    ///
+    /// CALLER CONTRACT: `listpack::zset_listpack_shape` must already have accepted
+    /// the decompressed payload, reported no repeated member, and the caller must
+    /// have checked `len`/`max_member_len` against the listpack thresholds. See
+    /// [`materialize_pending_zset`].
+    #[must_use]
+    fn pending(raw: Vec<u8>, len: usize, max_member_len: usize) -> Self {
+        Self {
+            repr: SortedSetRepr::Pending(Box::new(PendingZSet {
+                raw: raw.into_boxed_slice(),
+                decoded: std::cell::OnceCell::new(),
+                len,
+                max_member_len,
+            })),
+        }
+    }
+
+    /// The retained RDB string, when this zset has not been decoded yet.
+    ///
+    /// `None` once anything has read or written it: a read fills the `OnceCell` and
+    /// a write collapses to `Ready`, so a `Some` here means the members are exactly
+    /// as the record spelled them. That is an OWNERSHIP guarantee, not a
+    /// convention -- `inner()` / `inner_mut()` are the only doors to the value.
+    ///
+    /// Returns `(raw, len, max_member_len)`; the last two let a caller re-check
+    /// encoding thresholds without walking a single member.
+    #[must_use]
+    pub fn retained_rdb_string(&self) -> Option<(&[u8], usize, usize)> {
+        match &self.repr {
+            SortedSetRepr::Pending(p) if p.decoded.get().is_none() => {
+                Some((&p.raw, p.len, p.max_member_len))
+            }
+            _ => None,
         }
     }
 
@@ -1797,6 +1915,15 @@ impl SortedSet {
     }
 
     fn len(&self) -> usize {
+        // Answered from the record's own count while the value is still retained.
+        // Routing this through `inner()` would materialize every RDB-loaded zset
+        // the moment the store asked how big it was -- the eager-reader trap that
+        // silently nullified the stream port three separate times (5d06ac9aa).
+        if let SortedSetRepr::Pending(p) = &self.repr
+            && p.decoded.get().is_none()
+        {
+            return p.len;
+        }
         match self.inner() {
             SortedSetInner::Packed(p) => p.len(),
             SortedSetInner::Full(f) => f.len(),
@@ -3116,11 +3243,24 @@ impl SortedSet {
     }
 
     fn is_packed_storage(&self) -> bool {
+        // A retained record is only ever built inside the listpack thresholds, so
+        // it materializes to `Packed`. Answering without decoding keeps this off
+        // the eager-reader list.
+        if let SortedSetRepr::Pending(p) = &self.repr
+            && p.decoded.get().is_none()
+        {
+            return true;
+        }
         matches!(self.inner(), SortedSetInner::Packed(_))
     }
 
     #[cfg(test)]
     fn is_full_storage(&self) -> bool {
+        if let SortedSetRepr::Pending(p) = &self.repr
+            && p.decoded.get().is_none()
+        {
+            return false;
+        }
         matches!(self.inner(), SortedSetInner::Full(_))
     }
 
@@ -23350,6 +23490,64 @@ impl Store {
     /// only for an absent key whose members the stack probe PROVES unique, and
     /// anything else falls through to the established owned path with today's
     /// semantics.
+    /// Install an RDB-loaded zset WITHOUT decoding it.
+    ///
+    /// (BlackThrush 2026-08-27) The retaining twin of [`Self::zadd_pairs_loading`],
+    /// and the load half of the zset verbatim-save lever. `raw` is the RDB-ENCODED
+    /// string that followed the `RDB_TYPE_ZSET_LISTPACK` type byte; `len` and
+    /// `max_member_len` were taken by the decoder from the decompressed payload
+    /// (`listpack::zset_listpack_shape`), which also proved it structurally valid
+    /// and free of repeated members.
+    ///
+    /// Everything this does to the entry -- the write touch, the sticky
+    /// skiplist-encoding refresh, the digest-stale mark, the dirty counter -- is
+    /// what `zadd_pairs_loading`'s bulk arm does, in the same order, so the two
+    /// routes are indistinguishable to anything but a profiler.
+    ///
+    /// Returns the raw bytes back in `Err` when the payload does not qualify (an
+    /// existing key, an empty payload, or a shape the thresholds send to a
+    /// skiplist); the caller then decodes and takes the ordinary path.
+    ///
+    /// # Errors
+    /// Never fails in the fallible sense; `Err` hands the untouched input back.
+    pub fn zset_load_retained_listpack(
+        &mut self,
+        key: &[u8],
+        raw: Vec<u8>,
+        len: usize,
+        max_member_len: usize,
+        now_ms: u64,
+    ) -> Result<usize, Vec<u8>> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
+        // A retained value materializes to `Packed` unconditionally, so anything
+        // the thresholds would have sent to a skiplist has to be decoded instead.
+        if len == 0
+            || len > zset_max_entries
+            || max_member_len > zset_max_value
+            || self.entries.contains_key(key)
+        {
+            return Err(raw);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let zs = SortedSet::pending(raw, len, max_member_len);
+        let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+        entry.touch_write(now_ms, lfu_tracking_enabled);
+        Self::refresh_zset_encoding_flag_from_max_len(
+            &mut entry,
+            max_member_len,
+            zset_max_entries,
+            zset_max_value,
+        );
+        self.internal_entries_insert(key.to_vec(), entry);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(len as u64);
+        Ok(len)
+    }
+
     pub fn zadd_pairs_loading(
         &mut self,
         key: &[u8],

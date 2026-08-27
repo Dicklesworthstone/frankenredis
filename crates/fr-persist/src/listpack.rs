@@ -1588,6 +1588,113 @@ fn decode_value_spans_impl<const PRESIZE: bool>(
 
 // ── Tests ───────────────────────────────────────────────────────────
 
+/// What a `RDB_TYPE_ZSET_LISTPACK` payload looks like, WITHOUT materializing a
+/// single member.
+///
+/// (BlackThrush 2026-08-27) The load side needs three facts to decide whether a
+/// zset can be kept in its on-disk form rather than decoded: how many members it
+/// holds, how long its longest member is (the encoding-flag predicate --
+/// `refresh_zset_encoding_flag_from_max_len`'s doc states scores never
+/// participate), and whether any member repeats (the store's bulk builder demands
+/// uniqueness). All three fall out of a walk that allocates ONE span vector and
+/// zero member buffers, where `decode_zset_listpack_pairs` allocates one `Vec<u8>`
+/// per member purely so the pairs can outlive the blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZsetListpackShape {
+    /// Number of (member, score) pairs.
+    pub pair_count: usize,
+    /// Longest member in Redis-observable bytes (an integer-encoded member counts
+    /// its decimal rendering, which is what every reader sees).
+    pub max_member_len: usize,
+    /// True if some member appears twice. Such a payload is legal on the wire but
+    /// cannot go through the unique-input bulk builder.
+    pub has_duplicate_member: bool,
+}
+
+/// Cheap fixed-seed probe hash, the twin of the store's `restore_field_probe_hash`.
+/// Correctness never depends on it: a collision only costs an extra byte compare.
+#[inline]
+fn zset_member_probe_hash(bytes: &[u8]) -> u64 {
+    const SEED: u64 = 0x517c_c1b7_2722_0a95;
+    let mut h = bytes.len() as u64;
+    let (chunks, rest) = bytes.as_chunks::<8>();
+    for chunk in chunks {
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(*chunk)).wrapping_mul(SEED);
+    }
+    if !rest.is_empty() {
+        let mut tail = [0u8; 8];
+        tail[..rest.len()].copy_from_slice(rest);
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(tail)).wrapping_mul(SEED);
+    }
+    h ^ (h >> 29)
+}
+
+/// Slot ceiling for the stack duplicate probe; above it the payload is not a
+/// listpack-encodable zset under any default config, so the answer stops mattering
+/// and the allocating set is fine.
+const ZSET_STACK_DUP_MAX: usize = 128;
+
+/// Duplicate-member probe over spans, allocation-free for the sizes that can be
+/// retained. Mirrors `restore_items_have_duplicate_key`: a power-of-two table at
+/// 2x the entry ceiling keeps linear probing at ~1.5 probes, and slots hold
+/// `index + 1` so 0 stays the empty sentinel.
+fn zset_member_spans_have_duplicate(data: &[u8], pairs: &[(ListpackValueSpan, f64)]) -> bool {
+    if pairs.len() > ZSET_STACK_DUP_MAX {
+        // Cold: such a payload cannot be listpack-encoded under any default
+        // config, so it is never retained and this answer only steers the
+        // fallback. std's hasher is fine here; the crate has no foldhash dep.
+        let mut seen: std::collections::HashSet<&[u8]> =
+            std::collections::HashSet::with_capacity(pairs.len());
+        return !pairs
+            .iter()
+            .all(|(member, _)| seen.insert(member.as_bytes(data)));
+    }
+    const SLOTS: usize = ZSET_STACK_DUP_MAX * 2;
+    const _: () = assert!(SLOTS.is_power_of_two());
+    let mut table = [0u16; SLOTS];
+    for (index, (member, _)) in pairs.iter().enumerate() {
+        let bytes = member.as_bytes(data);
+        let mut slot = (zset_member_probe_hash(bytes) as usize) & (SLOTS - 1);
+        loop {
+            let occupant = table[slot];
+            if occupant == 0 {
+                table[slot] = u16::try_from(index + 1).expect("index bounded by SLOTS/2");
+                break;
+            }
+            if pairs[usize::from(occupant) - 1].0.as_bytes(data) == bytes {
+                return true;
+            }
+            slot = (slot + 1) & (SLOTS - 1);
+        }
+    }
+    false
+}
+
+/// Validate a `RDB_TYPE_ZSET_LISTPACK` payload and report its shape.
+///
+/// EXACTLY the acceptance of [`decode_zset_listpack_pairs`] -- same structural
+/// walk, same terminator and element-count guards, same odd-count rejection, same
+/// score parse (so an unparseable score is still `InvalidScore`) -- reached
+/// through [`decode_zset_spans_and_scores`], which shares the raw-entry core with
+/// it. What it does NOT do is allocate a member buffer per pair.
+///
+/// This is the zset twin of the hash listpack arm's `decode_value_spans` call:
+/// carrying a blob past the decoder must not make the decoder accept payloads it
+/// used to reject, or a corrupt RDB reads as decodable and every test asserting
+/// rejection silently stops testing anything.
+pub fn zset_listpack_shape(data: &[u8]) -> Result<ZsetListpackShape, ListpackError> {
+    let pairs = decode_zset_spans_and_scores(data)?;
+    let mut max_member_len = 0_usize;
+    for (member, _) in &pairs {
+        max_member_len = max_member_len.max(member.byte_len());
+    }
+    Ok(ZsetListpackShape {
+        pair_count: pairs.len(),
+        max_member_len,
+        has_duplicate_member: zset_member_spans_have_duplicate(data, &pairs),
+    })
+}
+
 #[cfg(test)]
 mod tests {
 

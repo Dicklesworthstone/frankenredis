@@ -121,6 +121,17 @@ fn canonicalise_decoded_set(value: &RdbValue) -> RdbValue {
             fr_persist::listpack::decode_zset_listpack_pairs(blob)
                 .expect("a blob we just encoded must decode"),
         ),
+        // (BlackThrush) A zset the DECODER retained in its on-disk form: undo the
+        // RDB string framing first, then decode back to the same spelling. The
+        // members and scores stay load-bearing; only the variant does not.
+        RdbValue::ZsetListpackRetained { raw, .. } => RdbValue::SortedSet(
+            fr_persist::listpack::decode_zset_listpack_pairs(
+                &fr_persist::rdb_decode_string_payload(raw)
+                    .expect("a retained string we just encoded must decode")
+                    .0,
+            )
+            .expect("a blob we just encoded must decode"),
+        ),
         other => other.clone(),
     }
 }
@@ -141,6 +152,7 @@ fn rdb_value_kind(value: &RdbValue) -> &'static str {
         RdbValue::HashWithTtls(_) => "HashWithTtls",
         RdbValue::SortedSet(_) => "SortedSet",
         RdbValue::ZsetListpack(_) => "ZsetListpack",
+        RdbValue::ZsetListpackRetained { .. } => "ZsetListpackRetained",
         RdbValue::Stream(..) => "Stream",
         RdbValue::StreamListpacks3(_) => "StreamListpacks3",
         RdbValue::StreamSkeleton(_) => "StreamSkeleton",
@@ -458,5 +470,11 @@ fn unit_rdb_zset_roundtrip() {
     let encoded = encode_rdb(std::slice::from_ref(&entry), &[]);
     let (decoded, _) = decode_rdb(&encoded).unwrap();
     assert_eq!(decoded.len(), 1);
-    assert!(matches!(&decoded[0].value, RdbValue::SortedSet(members) if members.len() == 3));
+    // The loader RETAINS the on-disk zset string (BlackThrush 2026-08-27), so
+    // canonicalise before the shape check: this asserts three members, not a
+    // spelling.
+    assert!(matches!(
+        canonicalise_decoded_set(&decoded[0].value),
+        RdbValue::SortedSet(ref members) if members.len() == 3
+    ));
 }

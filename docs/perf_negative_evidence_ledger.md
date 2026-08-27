@@ -69361,3 +69361,168 @@ prefers the blob -- the verbatim `RdbValue::ZsetListpack(blob)` arm already exis
 Expected shape, from the incumbent profile in `7dc624cea`: ~3.4M Ir/op of fr-only
 decode-and-re-encode plus a 2,118,400 Ir/op `lzf_compress` that a verbatim save deletes
 outright, against an fr arm of ~7.6M.
+
+## 2026-08-27 — zset: the worst arm becomes a WIN — reload 2.3743x -> 0.8254x (-65.2 pct)
+
+`7dc624cea` priced the zset reload arm and named the cause; `839d14f38` built the
+wrapper. This lands the two halves it was waiting for: **the loader RETAINS the record
+and the save writes it back verbatim.**
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `restore_instr_per_op.py` runs the
+live vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm,
+under the same callgrind two-point subtraction, and prints
+`fr/redis instructions per op: 0.8254x` from that pair -- not an fr-before/fr-after
+self-speedup. Retry predicate: re-run the command below on both ELF
+SHA-256s named here; this row is void if the ship arm's bootstrap 95% median CI ever
+crosses 1.0x, or if its A/A null median falls outside [0.98, 1.02].
+
+    python3 scripts/restore_instr_per_op.py <bin> 40 20 --type=zset --op=reload \
+        --keys=200 --aa
+
+    ELEVEN --aa DRAWS, ctl/ship INTERLEAVED, EVERY A/A NULL PASS (band 0.005)
+
+      control n=6   ratio median 2.374650  bootstrap 95% median CI [2.372300, 2.376500]
+      ship    n=5   ratio median 0.826100  bootstrap 95% median CI [0.824600, 0.826900]
+
+      A/A null, measured in the SAME INVOCATION as its own arm (a second fr process
+      off the identical ELF, run adjacent, never across the incumbent):
+        control  n=6  median 1.000061  bootstrap 95% median CI [0.999588, 1.000386]
+        ship     n=5  median 1.000328  bootstrap 95% median CI [0.999833, 1.000688]
+
+      THE DECISION IS THE BOOTSTRAP MEDIAN-CI GATE, and it is what this verdict rests
+      on: both null CIs sit inside +/-2 pct of 1.0, so the harness is not moving, and
+      the two ratio CIs are disjoint with a gap of 1.5455x -- three orders of magnitude
+      wider than either null's whole interval. CV was never computed for this verdict
+      and is provenance only; it did not influence the decision.
+
+      fr instructions/op  9,914,182.7 -> 3,448,373.3   -6,465,809.4 Ir/op, -65.22 pct
+
+    IN-PROCESS ELF SHA-256, self-reported by the benchmarked binary itself
+    (the harness prints the hash the RUNNING process computed of its own image):
+      control ELF sha256 a9e91b7d3391fad05894c90ce26932506504f52f66c7a52ec427552e7a7dfdeb
+      ship    ELF sha256 7614340125ff8f44bcb33e51ba4ff099b872f7350056055433375fd035f978cd
+      redis   ELF sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+**fr is now FASTER than redis 7.2.4 on the arm that was the worst loss on the board.**
+The fleet measurement slot could not be taken -- `acquire_build_slot` is refused
+server-side (`Build slots are disabled`) -- so the run carries unknown fleet contention;
+callgrind Ir is load-immune, and the four A/A nulls are the evidence that it did not
+matter here (host sat at loadavg 31.7).
+
+### THE ONE DECISION THAT DECIDED IT: retain the RDB STRING, not the listpack
+
+`7dc624cea` projected the win from ~3.4M Ir/op of decode-and-re-encode PLUS a
+2,118,400 Ir/op `lzf_compress`. **Retaining the decompressed listpack would have
+collected the first and none of the second**: `RdbValue::ZsetListpack(blob)` goes
+through `rdb_encode_string`, which is the compressor. What deletes that frame is
+keeping the bytes one level lower down -- the RDB-ENCODED string, length prefix and LZF
+framing included, exactly as it sat in the file -- so the save is
+`buf.extend_from_slice(raw)` and no compressor runs at all. That is what
+`RdbValue::StreamSkeleton` already does, and re-reading WHY the stream win was bigger
+than its pieces is what caught it before it was built the small way.
+
+The frame table on the ship ELF says it worked:
+
+      fr (3,452,856 Ir/op)                        redis (4,175,805 Ir/op)
+      733,600  decode_zset_spans_and_scores       1,597,894  lzf_compress   <- fr: GONE
+      693,200  lzf_decompress                       730,800  lzf_decompress
+      638,827  memcpy                               485,651  crcspeed64little
+      440,400  zset_listpack_shape                  120,035  fwrite
+
+### NEXT LEVER ON THIS ARM, NAMED AND SIZED: the validation is 34 pct of what is left
+
+`decode_zset_spans_and_scores` + `zset_listpack_shape` = **1,174,000 Ir/op, 34.0 pct of
+the whole fr arm**, and every instruction of it is the decoder proving the payload is
+retainable. It allocates a 32-byte span per element and runs a duplicate probe over
+them. A validator that walks the raw entries without materialising a span vector -- the
+`validate_entries` shape 747a1eff4 built for streams -- is the obvious next cut.
+
+### WHY VALIDATION IS THERE AT ALL, and why it is not the place to save
+
+Carrying a blob past the decoder must not make the decoder ACCEPT payloads it used to
+reject, or a corrupt RDB reads as decodable and every test asserting rejection silently
+stops testing anything. That is the hash listpack arm's rule (`frankenredis-aqkvk`) and
+it applies here unchanged. `zset_listpack_shape` is `decode_zset_listpack_pairs`'s
+acceptance EXACTLY -- shared raw-entry core, same terminator / element-count / odd
+guards, same score parse -- minus the per-member `Vec<u8>`. `rdb_decodes_compact_zset_
+listpack_rejects_non_numeric_score` still passes, unchanged.
+
+It also reports the two things the apply side would otherwise have to decompress to
+learn: the member count and the longest member. So the store picks its encoding, sets
+the sticky skiplist flag and answers `len()` **without ever touching the payload**.
+
+### THE TRAP THAT DOES NOT SHOW UP IN THE ARM YOU ARE MEASURING
+
+`SortedSetRepr::Pending` inline is a `Box<[u8]>` + a `OnceCell<SortedSetInner>` + two
+`usize`, and an enum is as wide as its widest variant -- so it sets the size of EVERY
+`SortedSet` in the keyspace, retained or not, and `Value::SortedSet` is a `Box` whose
+allocation and moves all pay for it. Boxing the variant puts the enum back at exactly
+`size_of::<SortedSetInner>()`, which a `const` assert now pins. The box costs one
+allocation per retained key: **+21,458 Ir/op on this arm, 0.62 pct, against a 65 pct
+win.**
+
+*What this cost me:* I first read a zset RESTORE ratio move of 2.1424x -> 2.7672x as
+that regression. **It was not.** BOTH nulls on that arm FAILED (0.9880x, 0.9925x) and
+fr's own absolute never moved -- 29,089.7 vs 29,276.7 instr/op -- while redis's swung
+20,127.5 -> 12,301.5. The RESTORE arm differences ~10^7 totals to get ~3x10^4 per op, so
+its two-point subtraction is startup noise unless the null certifies. **A ratio whose
+null failed is not evidence of anything, including of your own change.** The boxing is
+right on the structural argument alone; it is not right because of that number.
+
+### WHAT THE SAVE SIDE COMPARES, AND THE ONE THING IT CANNOT SEE
+
+`retained_rdb_string()` is `Some` only while nothing has read or written the zset -- a
+read fills the `OnceCell`, a write collapses to `Ready`, and `inner()`/`inner_mut()` are
+the only doors to the members. That is an OWNERSHIP guarantee, not a convention, and
+unlike the stream case there is nothing outside the value to compare: a zset has no
+groups, watermark or counters on the Store. Thresholds are still re-checked in O(1) from
+the count and longest member the record carries, because CONFIG can have moved them.
+
+The one thing ownership does NOT cover is the `rdbcompression` setting. An RDB loaded
+with it ON holds LZF-framed strings; re-saving with it since turned OFF must emit the
+raw form, which `rdb_encode_string` would do and a splice would not. So a compressed
+record only takes the verbatim path while compression is on. **Verified, not argued:**
+with `rdbcompression no` after a retained load, fr's dump grows 797 B -> 4,372 B, redis's
+831 B -> 4,406 B. Without the guard fr would have stayed at 797 B and diverged.
+
+### Two standing laws this row touches, and why neither is contradicted
+
+**RESTORE isolation (b1o02).** This row quotes a zset RESTORE number, so the law fires.
+It is not quoted as a deficit: the only RESTORE claim here is that **fr's own absolute
+did not move** (29,089.7 -> 29,276.7 instr/op), which is a before/after on one engine and
+carries no isolation framing at all. The law's point stands unchallenged --
+RESTORE-in-isolation flatters redis because fr decodes eagerly where redis attaches the
+listpack shallowly and re-walks it on every read, and the break-even is well under one
+read per restore (`scripts/hash_restore_read_premise_run.sh`). Nothing in this lever
+changes the RESTORE route; retention is RDB-load only.
+
+**Medium-zset threshold (NEGATIVE_EVIDENCE.md:22581).** Also fires, on the word
+"threshold". This row does not lower `zset-max-listpack-entries`, does not move medium
+zsets to a tree, and does not touch the 2048 boundary: retention is BOUNDED BY the
+existing thresholds -- over them the payload is decoded exactly as before -- and a
+retained record materialises into the same `Compact(Vec)` `PackedZSet` the eager path
+built, whose `Vec::insert` is the hardware memmove that wins on constant factors. The
+representation the law defends is unchanged; only WHEN it is built moved.
+
+### GATES
+
+Ten differentials against live redis 7.2.4, all PASS: `reload_digest_fidelity_gate`,
+`encoding_reload_gate`, `reload_edge_value_gate`, `dump_restore_fuzz` (8 seeds x 150
+keys), `zset_differ` (4000 iters), `restore_encoding_differ`, `zset_mixed_member_dump_
+differ`, `zset_score_emit_differ`, `zset_tiebreak_differ`, `zset_lex_range_differ`; plus
+`reload_encoding_survival_gate` and `config_persistence_reload_gate`.
+
+A purpose-built probe for what retention specifically can break, every arm vs redis:
+(A) a real process RESTART off `dump.rdb`, twice, so a SAVE-of-a-retained-value is
+itself round-tripped; (B) load -> MUTATE -> reload; (C) load -> lower
+`zset-max-listpack-entries` -> reload; (D) `rdbcompression no` after a compressed load;
+(E) LOAD-side decline -- an RDB full of listpack zsets loaded by a server whose
+threshold no longer allows them, which must land on skiplist. All PASS.
+
+Unit: a repeated member is NOT retained (it takes the decode path and de-duplicates as
+before), `zset_listpack_shape` rejects exactly what `decode_zset_listpack_pairs`
+rejects, and a retained record re-encodes BYTE-IDENTICALLY.
+
+fr-persist 243+5+10+12 passed. fr-store 962 passed with the known
+`function_load_with_registrations` doctest failure (fails identically on `839d14f38`).
+fr-runtime 656 passed with the known stale-replica pair (same).

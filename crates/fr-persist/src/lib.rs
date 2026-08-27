@@ -1395,6 +1395,32 @@ pub enum RdbValue {
     /// and REJECTED at -0.8 pct, because `PackedZSet` is not a listpack so the
     /// blob only defers the decode. Here the blob IS the wire form.
     ZsetListpack(Vec<u8>),
+    /// A sorted set RETAINED in its on-disk form: the RDB-encoded string that
+    /// followed the `RDB_TYPE_ZSET_LISTPACK` type byte, verbatim -- length prefix,
+    /// LZF framing and all.
+    ///
+    /// (BlackThrush 2026-08-27) The LOAD-direction twin of [`RdbValue::ZsetListpack`],
+    /// and deliberately the RAW string rather than the decompressed listpack.
+    /// Carrying the decompressed blob would still leave the save side re-running
+    /// `rdb_encode_string` over it -- and that is `lzf_compress`, 2,118,400 Ir/op,
+    /// the single largest frame in the zset reload arm (7dc624cea). The bytes on
+    /// disk are the bytes to write back, so a reload that neither reads nor writes
+    /// the value never compresses, never encodes and never decodes it. This is what
+    /// took stream reload from 2.5495x to 0.8790x (5d06ac9aa), where
+    /// [`RdbValue::StreamSkeleton`] plays the same role.
+    ///
+    /// `pair_count` and `max_member_len` are taken at DECODE time from the
+    /// decompressed listpack (see [`listpack::zset_listpack_shape`]), so the apply
+    /// side can pick its encoding and set the sticky skiplist flag WITHOUT
+    /// decompressing anything. A payload whose members repeat, or one the store's
+    /// thresholds send to a skiplist, never reaches this variant / is handed back
+    /// by the store and decoded then.
+    ZsetListpackRetained {
+        /// The RDB-encoded string, exactly as it appeared after the type byte.
+        raw: Vec<u8>,
+        pair_count: usize,
+        max_member_len: usize,
+    },
     /// (BlackThrush 2026-08-26) A stream already encoded as its upstream
     /// `STREAM_LISTPACKS_3` payload, built on the SAVE side from the store's own
     /// BORROWED field and value bytes.
@@ -1598,6 +1624,16 @@ pub fn set_rdb_compression(enabled: bool) {
 #[must_use]
 pub fn rdb_compression_enabled() -> bool {
     RDB_COMPRESSION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// True if an RDB-encoded string carries the `0xC3` LZF special encoding.
+///
+/// A holder of a RETAINED rdb string needs this to know whether splicing it back
+/// verbatim still spells what `rdb_encode_string` would spell under the CURRENT
+/// `rdb-compression` setting.
+#[must_use]
+pub fn rdb_string_is_lzf_framed(raw: &[u8]) -> bool {
+    raw.first() == Some(&0xC3)
 }
 
 fn rdb_encode_string(buf: &mut Vec<u8>, data: &[u8]) {
@@ -2185,6 +2221,15 @@ fn encode_rdb_internal(
                     buf.push(RDB_TYPE_ZSET_LISTPACK);
                     rdb_encode_string(&mut buf, &entry.key);
                     rdb_encode_string(&mut buf, blob);
+                }
+                // VERBATIM, one level deeper: this blob is the ENCODED string, not
+                // the listpack, so it is spliced in whole. `rdb_encode_string` here
+                // would re-run `lzf_compress` to reproduce bytes that are already
+                // sitting in the value -- the largest single frame in the arm.
+                RdbValue::ZsetListpackRetained { raw, .. } => {
+                    buf.push(RDB_TYPE_ZSET_LISTPACK);
+                    rdb_encode_string(&mut buf, &entry.key);
+                    buf.extend_from_slice(raw);
                 }
                 RdbValue::SortedSet(members) => {
                     if let Some(thresholds) = options.compact.as_ref()
@@ -4598,6 +4643,17 @@ fn lzf_decompress(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
     }
 }
 
+/// Decode an RDB-encoded string, undoing LZF framing if present.
+///
+/// Public so a retained value (`RdbValue::ZsetListpackRetained`) can be
+/// materialized by the crate that holds it, at the point of first READ, rather
+/// than being decompressed on load by a caller that may never look at it.
+/// Returns the payload and the number of input bytes consumed.
+#[must_use]
+pub fn rdb_decode_string_payload(data: &[u8]) -> Option<(Vec<u8>, usize)> {
+    rdb_decode_string(data)
+}
+
 fn rdb_decode_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
     let first = *data.first()?;
     let encoding = (first & 0xC0) >> 6;
@@ -4728,6 +4784,18 @@ pub fn canonicalise_rdb_value(value: &RdbValue) -> RdbValue {
         // every member and score, and a blob whose contents drifted still differs.
         RdbValue::ZsetListpack(blob) => {
             let Ok(pairs) = listpack::decode_zset_listpack_pairs(blob) else {
+                return value.clone();
+            };
+            RdbValue::SortedSet(pairs)
+        }
+        // (BlackThrush) A retained zset holds the ENCODED string; decompress it
+        // first, then spell out the same pairs, so content comparison still sees
+        // every member and score.
+        RdbValue::ZsetListpackRetained { raw, .. } => {
+            let Some((listpack, _)) = rdb_decode_string(raw) else {
+                return value.clone();
+            };
+            let Ok(pairs) = listpack::decode_zset_listpack_pairs(&listpack) else {
                 return value.clone();
             };
             RdbValue::SortedSet(pairs)
@@ -5417,9 +5485,43 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                         // Listpack of m1, score1, m2, score2, ... where each
                         // score is encoded as a decimal string (upstream
                         // calls listpackAppend with the textual score).
+                        let raw_start = cursor;
                         let (listpack, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
+                        // (BlackThrush 2026-08-27) RETAIN THE ON-DISK STRING.
+                        //
+                        // Redis writes a zset listpack back verbatim and never
+                        // decodes it; fr decoded into `PackedZSet` and re-encoded,
+                        // which on the 200-key reload arm is ~3.4M Ir/op with no
+                        // counterpart on the redis side PLUS a 2,118,400 Ir/op
+                        // `lzf_compress` the save then paid to reproduce bytes it
+                        // had just thrown away (7dc624cea). Keeping the RAW string
+                        // -- not the decompressed listpack -- means a reload that
+                        // does not read the value skips the decompress, the decode,
+                        // the rebuild, the re-encode AND the compressor.
+                        //
+                        // VALIDATION STAYS HERE, the same rule the hash listpack
+                        // arm above states: carrying a blob past the decoder must
+                        // not make the decoder accept payloads it used to reject.
+                        // `zset_listpack_shape` is `decode_zset_listpack_pairs`'s
+                        // acceptance exactly -- shared raw-entry core, same
+                        // terminator/element-count/odd guards, same score parse --
+                        // minus the per-member `Vec<u8>`.
+                        //
+                        // A payload with a REPEATED member is legal on the wire but
+                        // cannot go through the store's unique-input bulk builder,
+                        // so it takes the original decode path unchanged and is
+                        // de-duplicated exactly as it is today.
+                        let shape = listpack::zset_listpack_shape(&listpack)
+                            .map_err(|_| PersistError::InvalidFrame)?;
+                        if !shape.has_duplicate_member && shape.pair_count > 0 {
+                            RdbValue::ZsetListpackRetained {
+                                raw: data[raw_start..cursor].to_vec(),
+                                pair_count: shape.pair_count,
+                                max_member_len: shape.max_member_len,
+                            }
+                        } else {
                         // Decode straight to (member, score) pairs. Members
                         // materialize owned bytes; each score's f64 is read
                         // allocation-free via the shared raw-entry core —
@@ -5433,6 +5535,7 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                         let members = listpack::decode_zset_listpack_pairs(&listpack)
                             .map_err(|_| PersistError::InvalidFrame)?;
                         RdbValue::SortedSet(members)
+                        }
                     }
                     RDB_TYPE_LIST_QUICKLIST_2 => {
                         // node_count nodes, each: (container:length,
@@ -8870,7 +8973,7 @@ mod tests {
         );
 
         let (decoded, _) = decode_rdb(&encoded).expect("decode compact zset listpack");
-        match &decoded[0].value {
+        match &canonicalise_rdb_value(&decoded[0].value) {
             RdbValue::SortedSet(members) => {
                 let actual: Vec<(&[u8], f64)> = members
                     .iter()
@@ -9802,7 +9905,14 @@ mod tests {
         let bytes = finalize_rdb_blob(&mut blob);
 
         let (entries, _) = decode_rdb(&bytes).expect("decode zset_listpack");
-        match &entries[0].value {
+        // The loader RETAINS the on-disk string (BlackThrush 2026-08-27); this
+        // test is about the MEMBERS it spells, so canonicalise the spelling away.
+        assert!(
+            matches!(&entries[0].value, RdbValue::ZsetListpackRetained { .. }),
+            "a valid duplicate-free zset listpack must be retained undecoded, got {:?}",
+            &entries[0].value
+        );
+        match &canonicalise_rdb_value(&entries[0].value) {
             RdbValue::SortedSet(members) => {
                 assert_eq!(members.len(), 3);
                 assert_eq!(members[0].0, b"a");
@@ -9814,6 +9924,81 @@ mod tests {
             }
             other => panic!("expected RdbValue::SortedSet, got {other:?}"),
         }
+    }
+
+    // (BlackThrush 2026-08-27) The retention fallbacks, both of them, because a
+    // retained value's whole safety argument is that the decoder rejected the
+    // shapes retention cannot serve. If either of these silently starts being
+    // retained, a zset would report a member count that its members contradict.
+    #[test]
+    fn rdb_zset_listpack_with_a_repeated_member_is_not_retained() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_ZSET_LISTPACK);
+        rdb_encode_string(&mut blob, b"dup");
+        // "a" twice: legal on the wire, but the store's bulk builder wants unique
+        // members, so this must take the decode path and de-duplicate as before.
+        let lp = build_listpack_for_test(&[b"a", b"1", b"b", b"2", b"a", b"3"]);
+        append_rdb_wrapped_string(&mut blob, &lp);
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        let (entries, _) = decode_rdb(&bytes).expect("decode duplicate-member zset");
+        match &entries[0].value {
+            RdbValue::SortedSet(members) => {
+                assert_eq!(members.len(), 3, "the decode path spells every pair");
+                assert_eq!(members[0].0, b"a");
+                assert_eq!(members[2].0, b"a");
+            }
+            other => panic!("a repeated member must NOT be retained, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zset_listpack_shape_reports_count_longest_member_and_duplicates() {
+        // Integer-encoded members count their DECIMAL rendering, which is what a
+        // reader sees and what the encoding-flag predicate measures.
+        let clean = build_listpack_for_test(&[b"a", b"1", b"bbbb", b"2", b"123456", b"3"]);
+        let shape = crate::listpack::zset_listpack_shape(&clean).expect("valid payload");
+        assert_eq!(shape.pair_count, 3);
+        assert_eq!(shape.max_member_len, 6, "\"123456\" is the longest member");
+        assert!(!shape.has_duplicate_member);
+
+        let dup = build_listpack_for_test(&[b"a", b"1", b"a", b"2"]);
+        assert!(
+            crate::listpack::zset_listpack_shape(&dup)
+                .expect("valid payload")
+                .has_duplicate_member
+        );
+
+        // Acceptance is decode_zset_listpack_pairs's, exactly: same rejections.
+        let odd = build_listpack_for_test(&[b"a", b"1", b"b"]);
+        assert!(crate::listpack::zset_listpack_shape(&odd).is_err());
+        let bad_score = build_listpack_for_test(&[b"a", b"not_a_number"]);
+        assert!(crate::listpack::zset_listpack_shape(&bad_score).is_err());
+    }
+
+    #[test]
+    fn rdb_zset_listpack_retained_string_re_encodes_byte_identically() {
+        // The whole point of holding the ON-DISK string: a save that follows a
+        // load must reproduce the record byte-for-byte, compressor included.
+        let members: Vec<(Vec<u8>, f64)> = (0..60)
+            .map(|i| (format!("member-{i:03}").into_bytes(), f64::from(i) * 1.5))
+            .collect();
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"z".to_vec(),
+            value: RdbValue::SortedSet(members),
+            expire_ms: None,
+        }];
+        let first = encode_rdb(&entries, &[]);
+        let (decoded, _) = decode_rdb(&first).expect("decode");
+        assert!(
+            matches!(decoded[0].value, RdbValue::ZsetListpackRetained { .. }),
+            "expected the loader to retain, got {:?}",
+            decoded[0].value
+        );
+        let second = encode_rdb(&decoded, &[]);
+        assert_eq!(first, second, "re-saving a retained zset must be byte-identical");
     }
 
     #[test]
@@ -10061,6 +10246,17 @@ mod tests {
                     },
                 ),
                 RdbValue::SortedSet(members) => ("SortedSet", members.len()),
+                // ...and RDB_TYPE_ZSET_LISTPACK decodes to the retained on-disk
+                // string, which is still a sorted set for this check. Cardinality
+                // comes from decoding it, so a seed whose member count drifted
+                // still fails. (BlackThrush 2026-08-27)
+                RdbValue::ZsetListpackRetained { raw, .. } => (
+                    "SortedSet",
+                    match super::canonicalise_rdb_value(&entries[0].value) {
+                        RdbValue::SortedSet(members) => members.len(),
+                        _ => panic!("seed {name}: retained zset string did not decode: {raw:?}"),
+                    },
+                ),
                 _ => ("Other", 0),
             };
             assert_eq!(
@@ -11425,6 +11621,15 @@ mod tests {
                 // entry, group, PEL row and counter -- only the variant stops being
                 // load-bearing, exactly as for the three above.
                 if matches!(&entry.value, RdbValue::StreamSkeleton(_)) {
+                    entry.value = super::canonicalise_rdb_value(&entry.value);
+                }
+                // (BlackThrush 2026-08-27) And for a zset written as
+                // RDB_TYPE_ZSET_LISTPACK, which the loader now RETAINS as the
+                // on-disk string so a save that follows can write those exact
+                // bytes back. Canonicalising undoes the RDB string framing and
+                // decodes the listpack, so every member and score is still
+                // compared and only the variant stops being load-bearing.
+                if matches!(&entry.value, RdbValue::ZsetListpackRetained { .. }) {
                     entry.value = super::canonicalise_rdb_value(&entry.value);
                 }
                 // (frankenredis-qj6jn) And for a list written as QUICKLIST_2, which now
