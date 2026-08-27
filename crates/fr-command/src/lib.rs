@@ -14270,6 +14270,9 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // bumped at the four `function_libraries` mutation sites (insert/remove/clear/clear), and
     // clear the cache when the generation moves. NOT done here -- a wrong cache executes a
     // stale library, and that is not a change to land without room to gate it.
+    // Read BEFORE the borrow below so the probe and the library come from the same
+    // observation of the library set.
+    let store_generation = store.function_generation();
     let (library, has_no_writes, has_allow_oom, has_allow_stale, has_no_cluster) =
         match store.function_get(func_name) {
             Some((lib, func)) => {
@@ -14302,13 +14305,22 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                 // `Ok` = already executed and retained; `Err` = the source to execute once. A Result
                 // rather than two Options so "cached AND a source" and "neither" are not
                 // representable.
-                match lua_eval::fcall_cached_library_callbacks(&lib.code) {
+                match lua_eval::fcall_cached_library_callbacks(
+                    lib.name.as_bytes(),
+                    store_generation,
+                ) {
                     Some(callbacks) => {
                         (Ok(callbacks), no_writes, allow_oom, allow_stale, no_cluster)
                     }
-                    None => {
-                        (Err(lib.code.clone()), no_writes, allow_oom, allow_stale, no_cluster)
-                    }
+                    None => (
+                        // The NAME travels with the source: the load re-probes and inserts
+                        // under the name, and it cannot recover the name from the body.
+                        Err((lib.name.clone().into_bytes(), lib.code.clone())),
+                        no_writes,
+                        allow_oom,
+                        allow_stale,
+                        no_cluster,
+                    ),
                 }
             }
             None => {
@@ -14377,7 +14389,9 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     //   * KEYS/ARGV. The wrapper bound them as GLOBALS; upstream passes them as the callback's
     //     two arguments and exposes no such globals inside a function.
     let result = match library
-        .or_else(|source| lua_eval::function_call_load_callbacks(store, now_ms, &source))
+        .or_else(|(library_name, source)| {
+            lua_eval::function_call_load_callbacks(store, now_ms, &library_name, &source)
+        })
         .and_then(|callbacks| {
             lua_eval::function_call_registered(
                 store,
@@ -76547,8 +76561,16 @@ mod tests {
         )
         .unwrap();
 
+        // (BlackThrush 2026-08-27) The probe is by library NAME plus the store's generation
+        // now, not by source. This assertion still holds and now holds for TWO reasons: the
+        // load does not insert, AND the load bumped the generation, so a probe at the new
+        // generation clears whatever a previous test left behind.
         assert!(
-            super::lua_eval::fcall_cached_library_callbacks(src).is_none(),
+            super::lua_eval::fcall_cached_library_callbacks(
+                b"kbyhylib",
+                store.function_generation()
+            )
+            .is_none(),
             "FUNCTION LOAD must not populate the FCALL cache -- it is FCALL's memo, and a load \
              that filled it would make the identity assertion below vacuous"
         );
@@ -76568,10 +76590,12 @@ mod tests {
             assert_eq!(out, RespFrame::BulkString(Some(b"hi".to_vec())));
         }
 
-        let after_first = super::lua_eval::fcall_cached_library_callbacks(src)
-            .expect("the first FCALL must retain the executed library");
-        let after_second = super::lua_eval::fcall_cached_library_callbacks(src)
-            .expect("the retained library must still be there");
+        let after_first =
+            super::lua_eval::fcall_cached_library_callbacks(b"kbyhylib", store.function_generation())
+                .expect("the first FCALL must retain the executed library");
+        let after_second =
+            super::lua_eval::fcall_cached_library_callbacks(b"kbyhylib", store.function_generation())
+                .expect("the retained library must still be there");
         assert!(
             std::rc::Rc::ptr_eq(&after_first, &after_second),
             "the second FCALL re-executed the library body instead of serving the retained one"

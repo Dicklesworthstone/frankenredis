@@ -6832,6 +6832,17 @@ pub struct Store {
     // (perf) foldhash — library name keys (set by the auth-gated FUNCTION LOAD; bounded), speeds up
     // every FCALL lookup.
     function_libraries: HashMap<String, FunctionLibrary, foldhash::quality::RandomState>,
+    /// Bumped on EVERY mutation of `function_libraries`.
+    ///
+    /// (BlackThrush 2026-08-27) fr-command caches a library's executed callbacks, and that
+    /// cache used to be keyed on the library SOURCE -- which bought invalidation for free,
+    /// because a replaced library is a different key, at the cost of an `Eq` over the whole
+    /// body on EVERY cache hit (+297.2 instr/op per 32x of library, measured). Keying that
+    /// cache on the library NAME is cheap but gives the guarantee up, so this counter
+    /// re-earns it: the cache stores the generation it was built at and clears itself when
+    /// this moves. Coarse on purpose -- any library mutation invalidates every entry --
+    /// because FUNCTION LOAD/DELETE/FLUSH are rare and FCALL is not.
+    function_generation: u64,
 
     /// Per-field hash TTLs (Redis 7.4 HEXPIRE family). Keyed on
     /// (hash-key-bytes, field-bytes) → absolute expiry in ms-since-epoch.
@@ -7381,6 +7392,7 @@ impl Default for Store {
             subscribed_shard_channels: HashSet::new(),
             pubsub_pending: Vec::new(),
             function_libraries: HashMap::default(),
+            function_generation: 0,
             hash_field_expires: BTreeMap::new(),
             hash_field_expired_counts: BTreeMap::new(),
             maxmemory_policy: MaxmemoryPolicy::default(),
@@ -35631,6 +35643,7 @@ impl Store {
         };
 
         self.function_libraries.insert(lib_name.clone(), library);
+        self.bump_function_generation();
         self.dirty = self.dirty.saturating_add(1);
         Ok(lib_name)
     }
@@ -35735,6 +35748,7 @@ impl Store {
                 "ERR Library not found".to_string(),
             ));
         }
+        self.bump_function_generation();
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
     }
@@ -35759,6 +35773,7 @@ impl Store {
     /// Flush all function libraries.
     pub fn function_flush(&mut self) {
         self.function_libraries.clear();
+        self.bump_function_generation();
         self.dirty = self.dirty.saturating_add(1);
     }
 
@@ -35963,6 +35978,7 @@ impl Store {
 
         if flush {
             self.function_libraries.clear();
+            self.bump_function_generation();
         }
         self.function_libraries.extend(restored_libraries);
         self.dirty = self.dirty.saturating_add(1);
@@ -35979,6 +35995,27 @@ impl Store {
             }
         }
         None
+    }
+
+    /// The current library-set generation. Any FUNCTION LOAD / DELETE / FLUSH moves it.
+    ///
+    /// fr-command's callback cache stores the generation it was built at and clears itself
+    /// when this differs, which is what lets that cache be keyed on the library NAME instead
+    /// of on the whole library SOURCE.
+    #[must_use]
+    pub const fn function_generation(&self) -> u64 {
+        self.function_generation
+    }
+
+    /// Invalidate every cached view of the library set.
+    ///
+    /// `wrapping_add` rather than `saturating_add` on purpose: saturating at `u64::MAX`
+    /// would FREEZE the generation, and a frozen generation is a cache that never
+    /// invalidates again -- the exact failure this counter exists to prevent. Wrapping is
+    /// safe because the cache compares for INEQUALITY, and reaching 2^64 mutations is not
+    /// a thing a process does.
+    fn bump_function_generation(&mut self) {
+        self.function_generation = self.function_generation.wrapping_add(1);
     }
 
     /// Get FUNCTION STATS data.

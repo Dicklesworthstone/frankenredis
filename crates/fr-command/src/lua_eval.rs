@@ -5206,11 +5206,24 @@ thread_local! {
     /// Thread-local rather than a `Store` field because the values are `Rc`-based and not `Send`,
     /// and because it is a pure function of the source bytes: two threads that build it
     /// independently get equivalent answers.
-    static FCALL_LIBRARY_CALLBACKS: std::cell::RefCell<
+    /// `(generation, name -> callbacks)`.
+    ///
+    /// (BlackThrush 2026-08-27) The key is the library NAME, not its SOURCE. Source-keying
+    /// bought invalidation for free -- a replaced library is a different key -- but charged
+    /// an `Eq` over the whole body on EVERY hit: MEASURED +297.2 instr/op per 32x of
+    /// library, at a CONSTANT memcmp call count, on `fcall_lib1` vs `fcall_lib32`.
+    ///
+    /// The generation re-earns that guarantee: `Store::function_generation()` moves on every
+    /// FUNCTION LOAD / DELETE / FLUSH, and a probe whose stored generation differs CLEARS the
+    /// map before answering. So a stale entry is unreachable, as before -- just paid for at
+    /// mutation time rather than on every call.
+    static FCALL_LIBRARY_CALLBACKS: std::cell::RefCell<(
+        u64,
         std::collections::HashMap<Vec<u8>, Rc<RegisteredCallbacks>, LibraryKeyHasherBuilder>,
-    > = const {
-        std::cell::RefCell::new(std::collections::HashMap::with_hasher(
-            LibraryKeyHasherBuilder,
+    )> = const {
+        std::cell::RefCell::new((
+            0,
+            std::collections::HashMap::with_hasher(LibraryKeyHasherBuilder),
         ))
     };
 }
@@ -5340,8 +5353,20 @@ const FCALL_LIBRARY_CALLBACK_CACHE_MAX: usize = 64;
 /// hit path: the previous shape cloned `lib.code` unconditionally because `store` is borrowed
 /// mutably further down, so every FCALL paid a full copy of the library to reach a cache that
 /// existed to avoid exactly that.
-pub(crate) fn fcall_cached_library_callbacks(code: &[u8]) -> Option<Rc<RegisteredCallbacks>> {
-    FCALL_LIBRARY_CALLBACKS.with(|cache| cache.borrow().get(code).cloned())
+pub(crate) fn fcall_cached_library_callbacks(
+    library_name: &[u8],
+    generation: u64,
+) -> Option<Rc<RegisteredCallbacks>> {
+    FCALL_LIBRARY_CALLBACKS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.0 != generation {
+            // The library set changed under us. Everything here describes the old one.
+            cache.0 = generation;
+            cache.1.clear();
+            return None;
+        }
+        cache.1.get(library_name).cloned()
+    })
 }
 
 /// Execute a library body once and retain the callbacks it registered.
@@ -5356,9 +5381,11 @@ pub(crate) fn fcall_cached_library_callbacks(code: &[u8]) -> Option<Rc<Registere
 pub(crate) fn function_call_load_callbacks(
     store: &mut Store,
     now_ms: u64,
+    library_name: &[u8],
     code: &[u8],
 ) -> Result<Rc<RegisteredCallbacks>, (u32, String)> {
-    if let Some(hit) = fcall_cached_library_callbacks(code) {
+    let generation = store.function_generation();
+    if let Some(hit) = fcall_cached_library_callbacks(library_name, generation) {
         return Ok(hit);
     }
     let mark = lua_gc_registry_len();
@@ -5372,11 +5399,14 @@ pub(crate) fn function_call_load_callbacks(
 
     FCALL_LIBRARY_CALLBACKS.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if cache.len() >= FCALL_LIBRARY_CALLBACK_CACHE_MAX {
-            cache.clear();
+        // The probe above already reconciled the generation; record it in case this is the
+        // first insert on a fresh thread, where the probe's early return left it unset.
+        cache.0 = generation;
+        if cache.1.len() >= FCALL_LIBRARY_CALLBACK_CACHE_MAX {
+            cache.1.clear();
             lua_gc_sweep_and_drain_prefix(mark);
         }
-        cache.insert(code.to_vec(), Rc::clone(&callbacks));
+        cache.1.insert(library_name.to_vec(), Rc::clone(&callbacks));
     });
     Ok(callbacks)
 }
