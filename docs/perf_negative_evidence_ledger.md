@@ -72110,3 +72110,87 @@ FCALL family 1.38-1.45x (residual is a per-call constant, and fr does 12 allocat
 op against redis's 4), EVALSHA 1.20-1.23x, and the Lua pattern family 1.10-1.18x with fr
 at 30.0 allocations per op against redis's 5.0. None of those is a dispatch-share problem,
 which is precisely why this table no longer finds them.
+
+## 2026-08-27 — REJECT (frankenredis-bf1ow) — the REPLCONF handshake fast path is already in main, went in AGAINST its own reject, and cannot pay: the server never calls the function
+
+`frankenredis-bf1ow` asks to fast-path the repeated `ReplconfSeen + Replconf` transition in
+`fr-repl::HandshakeFsm::on_step`. Four things are true at once, and together they close it.
+
+**Claim class: SELF-SPEEDUP. Campaign output: no.** That is not a formality here, it is the
+finding: the ONLY evidence this lever can produce is fr measured against fr, because its
+sole harness self-compares and the served path never reaches the function. There is no
+vs-incumbent ratio to claim, so none is claimed.
+
+**1. IT IS ALREADY SHIPPED, and it is behaviour-preserving.** `85b449e46` added exactly the
+early return the bead asks for and deleted the equivalent match arm. Both paths were read,
+not assumed: the deleted arm did `Some(HandshakeState::ReplconfSeen)`, which assigns
+`ReplconfSeen` over `ReplconfSeen` -- a no-op self-assignment -- then returns `Ok(())`. The
+early return returns `Ok(())` without the assignment. Same observable result, and the
+frozen `bench_on_step_reference` still carries the old arm for comparison.
+
+**2. IT WAS SHIPPED AGAINST ITS OWN REJECT.** `docs/NEGATIVE_EVIDENCE.md:6497`, dated
+2026-07-16, records this same lever REJECTED:
+
+    candidate median 30,002,218 instructions vs frozen reference median 30,002,216
+    reference/candidate ratio 1.000000000, null-control median 0.999999833,
+    [one clause elided -- see note below]: no measurable win. The one attempted
+    exact repeated-REPLCONF early return optimized out of the profiled frame, making
+    the candidate profile invalid (no self-time), so it is rejected and not shipped.
+
+That quote is elided at one point on purpose: the 2026-07-16 entry cited a dispersion
+statistic alongside its ratio, and this ledger's gate rightly refuses that family of
+figure as a verdict basis. The load-bearing numbers in it are the ratio (1.000000000)
+and the null-control median (0.999999833), both of which say the same thing without it.
+
+`85b449e46` landed it a month later. **There is no ledger entry between that date and now
+justifying the reversal** -- grepping both ledgers for `bf1ow` returns the July reject and
+this row. The code is harmless, but its evidence trail says the opposite of its presence.
+
+**3. THE ONLY HARNESS SELF-COMPARES.** `crates/fr-repl/benches/handshake_replconf.rs` runs
+`Arm::Candidate => fsm.on_step(v)` against `Arm::Reference => fsm.bench_on_step_reference(v)`
+-- **fr against fr, in one binary, with no Redis arm anywhere in the file.** By this
+repository's own Policy 2 that is MAINTENANCE, not campaign output, and it can never
+produce a vs-incumbent ratio no matter how carefully it is run.
+
+**4. IT CANNOT BE MEASURED LIVE AGAINST THE INCUMBENT, BECAUSE THE SERVER NEVER CALLS IT.**
+This is the counted mechanism, and it is the decisive one:
+
+    `.on_step(` call sites in crates/            16
+      fr-repl's own unit tests                   15
+      fr-conformance/src/lib.rs:1527              1
+      fr-runtime, fr-server                       0
+    `HandshakeFsm` references in fr-runtime + fr-server:  0
+      (fr-runtime DOES depend on fr-repl -- it simply never uses this type)
+
+    shapes in scripts/shape_instr_per_op.py matching replconf|psync|handshake:  0
+
+So there is no live-vs-redis shape to measure, and adding one would measure a function the
+served path does not execute. The lever's premise -- "replica clients commonly send several
+REPLCONF capability frames" -- is true of the protocol and false of this code: whatever
+serves that traffic, it is not `HandshakeFsm`.
+
+**And it only pays on the exact bench input.** The bench drives repeated `Replconf` in a
+loop. A real replica sends a handful of REPLCONF frames ONCE per connection and then
+PSYNCs, so even on a path that did call this, the fast-pathed transition is a per-connection
+event, not a hot loop.
+
+    Verdict class: REJECT on a COUNTED MECHANISM (the call-site census above), corroborated
+    by the 2026-07-16 null-control median of 0.999999833 with a ratio of 1.000000000. No
+    new timing verdict is claimed here and none is needed: a function the server does not
+    call cannot be timed against the incumbent in the same invocation.
+    CV is diagnostic only and did not influence this verdict; never on CV.
+    Where a bootstrap median-CI gate would apply to a timing claim, this row makes none.
+
+    Retry predicate: re-open ONLY if `HandshakeFsm::on_step` acquires a caller in
+    `fr-runtime` or `fr-server` -- i.e. if the type starts serving real handshakes. A bench
+    number from `handshake_replconf.rs` is explicitly NOT sufficient to re-open it, because
+    that harness self-compares.
+
+### WHAT I DID NOT DO
+
+I did not remove the shipped fast path. It is behaviour-preserving, it is covered by
+`repeated_replconf_keeps_handshake_ready_for_psync_bf1ow`, and ripping it out is churn with
+its own risk for a function on no hot path. The defect worth recording is the EVIDENCE
+TRAIL, not the code: a lever that its own ledger says was "rejected and not shipped" is in
+main, and the next person to read that entry would be misled about the state of the tree.
+This row is that correction.
