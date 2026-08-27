@@ -72733,3 +72733,65 @@ earlier today. `fr-store` reported exactly the two persistent wall-clock ratio a
 (`intersect_sorted_i64_galloping`, `swapdb_db_enumeration`) and NO flakes this run; both
 have failed in every run this session, including on ELFs where fr-store was provably
 untouched by this agent.
+
+## 2026-08-27 — VOID (frankenredis-sf510) — a completed 16-shape board is DISCARDED: the host spiked to load 134 mid-run, and no spike-free window was obtainable in ~20 minutes of polling
+
+No lever this turn, and no board either. This row records a measurement that COMPLETED and
+was thrown away, plus the reason a replacement could not be taken.
+
+**What was voided.** A 16-shape close-out board on ELF
+`ebd903e20ed24962a62ee9a1666fe014fb012686cb057f8294e2baf0b06ae846`, run to completion.
+Load was sampled per shape and ranged **51.15 to 134.18**:
+
+    evalsha_small   134.18      luapat_16       103.63
+    luapatq_16      126.80      evalsha_large    97.20
+    luapat_rep16    111.95      luapatsp_16      95.97
+
+That is a spike, not this host's steady state, and every number in that run is discarded
+rather than reported.
+
+**Why a replacement was not taken.** Polled for a window with load below 12 and fewer than
+ten concurrent `cargo`/`rustc` processes, over roughly twenty minutes:
+
+    poll  1  load  15.18  builders  38        poll  6  load  18.70  builders  16
+    poll  2  load  22.14  builders  34        poll  7  load  16.35  builders  20
+    poll  3  load  61.74  builders 194        poll  8  load  15.88  builders  30
+    poll  4  load  40.59  builders  25        poll  9  load  17.83  builders  36
+    poll  5  load  24.80  builders  24        poll 10  load 120.14  builders  32
+
+The host never reached the gate. Peers build continuously here and the load swings between
+roughly 13 and 194 builders within minutes.
+
+### THE TECHNICAL POINT, STATED SO THE VOID IS NOT MISREAD
+
+**Callgrind instruction counts are load-immune, and that is why this repo's harness admits
+them under load** ([[feedback_callgrind_ir_is_immune_to_load_and_mhz]]). The discarded
+numbers were most likely correct. They are voided under a stricter standing instruction,
+not because a defect was found in them, and this row says so rather than implying the
+harness produced garbage.
+
+Where the stricter rule does earn its keep is the RATIO: the harness's own FIT/UNFIT gate
+already refuses a ratio under a non-stationary load, and every window this session has been
+UNFIT for exactly that reason -- which is why every landed row this session quotes fr's
+ABSOLUTE as the certified claim and labels the ratio directional.
+
+### WHAT THIS DOES NOT CHANGE
+
+The eight levers landed this session are unaffected: each was measured with n=4 per arm,
+three interleaved arms, and a PER-SHAPE A/A null from a byte-identical copy of the ship
+ELF, and each winning delta was required to exceed its own null band. A null taken in the
+same window as the arms absorbs a shared disturbance; that is the property that made those
+rows survivable and it is not what failed here.
+
+    already committed this session, unaffected by this void:
+      c9708c263  EVAL caches the script only on a miss      luapatq_16 -263.7
+      f9f2fef38  EVALSHA fetches by normalised hex          evalsha_large -989.5
+      d3f465177  library cache keyed by name+generation     fcall_lib32 -299.3
+      1b0df6dd0  library-key hasher folds 8 bytes at a time fcall_lib1_pad -177.6
+      c037c333a  SORT ALPHA drops the per-comparison CString sort_ro_alpha_64 -13,280.4
+
+### RETRY PREDICATE
+
+Re-run the close-out board when `/proc/loadavg` stays below 12 with fewer than ten
+concurrent builders for the duration of the run, sampling load PER SHAPE and voiding again
+if any sample exceeds 20. Do not reuse `reboard2.txt`.
