@@ -70814,3 +70814,129 @@ the DISTANCE SEQUENCE in order and the `(member, distance)` SET, which pins ever
 this change could affect, and leaves the membership question to its own investigation.
 A member-ORDER difference among EQUAL distances is separately left unasserted -- ASC
 orders by distance and leaves ties unspecified.
+
+## 2026-08-27 — ANALYSIS/SIZING — the board re-ranked: 17 losses in 254 shapes, and the worst is the FCALL family — fcall_lib1_pad 1.4870x, fr 11,176.3 vs redis 7,509.3 instr/op
+
+Nothing landed here. This row records a MEASURED LOSS and the mechanism behind it, so
+the next lever is chosen from a current board rather than a stale one. It is explicitly
+**SIZING, not certified**: every draw's ratio window was UNFIT (see below).
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> fcall_lib1_pad
+
+    fr's OWN instr/op, five processes per arm, arms INTERLEAVED:
+      arm A       n=5   median 11,176.3  bootstrap 95% median CI [11,161.6, 11,190.3]
+      arm B/null  n=5   median 11,163.5  bootstrap 95% median CI [11,156.6, 11,204.1]
+      redis       n=10  median  7,509.3  bootstrap 95% median CI [ 7,390.1,  7,619.2]
+      ratio       n=10  median 1.4870x   bootstrap 95% median CI [1.4683, 1.5135]
+      gap                       3,667.0 Ir/op
+
+    A/A null, same invocation as the A/B arms, median 1.00038 bootstrap 95% median CI [0.99758, 1.00240]
+    -- arm B is a BYTE-IDENTICAL COPY of arm A (same SHA-256) in the same interleaved
+    rotation. It straddles 1.0 and the worst draw is 0.24 pct off, so the null PASSES.
+
+    ELF identity, verbatim from the harness's own per-arm key. HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm; explicitly NOT a /proc/self/exe self-report, which
+    callgrind makes impossible:
+      arm A  bench_elf_sha256=f4396f8f7cd3caafab54864f444f870137766e990bcc536976396502b6be49bb
+      arm B  bench_elf_sha256=f4396f8f7cd3caafab54864f444f870137766e990bcc536976396502b6be49bb
+      redis  bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT IS GATED ON THE BOOTSTRAP MEDIAN-CI and on nothing else. CV is
+    diagnostic only and did not influence this verdict; never on CV.
+
+    Retry predicate: re-measure on the same two SHA-256s in a FIT window before any
+    lever is priced against this row; void the RATIO if a FIT-window draw falls outside
+    [1.4683, 1.5135], and void the ABSOLUTE if fr's median leaves [11,161.6, 11,190.3].
+
+### WHY THE RATIO IS SIZING AND THE ABSOLUTE IS NOT
+
+All ten draws were UNFIT: the host carried 7-8 peer `cargo`/`rustc` processes and load
+ran 31-47 with the 1min/5min ratio outside the 15 pct stationarity limit. That
+disqualifies a certified RATIO. It does not disqualify fr's own instruction count, and
+this run is a clean demonstration of why: across that whole window -- **load 31 to 47,
+CPU MHz mean 1,909 to 4,059, iowait 0.01 pct to 45.5 pct** -- fr's absolute moved
+**0.425 pct across both arms**, while the redis denominator moved **8.34 pct**. The
+instruction count is load-immune; the ratio's noise is almost entirely redis's half.
+
+### THE BOARD, RE-RANKED (254 shapes, ELF at 8d547b26f)
+
+**Only 17 of 254 shapes are losses.** Worst ratio, then largest absolute gap:
+
+    shape                     fr        redis     ratio      gap
+    fcall_lib1_pad      11,190.9      7,597.0   1.4731x    3,593.9
+    fcall_lib8          10,980.1      7,582.7   1.4480x    3,397.4
+    fcall_lib1          10,914.4      7,553.7   1.4449x    3,360.7
+    fcall_lib32         11,240.1      8,261.2   1.3606x    2,978.9
+    evalsha_large       11,899.7      9,132.8   1.3030x    2,766.9
+    sort_ro_alpha       10,810.1      8,401.1   1.2867x    2,409.0
+    evalsha_small       11,907.2      9,448.5   1.2602x    2,458.7
+    luapatq_16          21,676.1     17,530.7   1.2365x    4,145.4
+    keys_star_64        44,752.7     40,554.7   1.1035x    4,198.0   (largest gap)
+
+**The FCALL size slope is GONE and that matters for what the lever now is.** lib1
+10,914.4, lib8 10,980.1, lib32 11,240.1 -- 3 pct across a 32x library. The residual is a
+per-call CONSTANT, so `fcall_lib1_pad`'s 1.47x is no longer the library-scanning defect
+that `a8d1db0c3` closed (25.3318x -> 1.4740x); quoting that history as the cause here
+would be wrong.
+
+### WHERE THE 3,667 GOES — BOTH SIDES PROFILED
+
+Neither side has a hot kernel: fr spreads over 1,273 frames with a 485.5 top, redis over
+1,359 with a 579.0 top. That flatness IS the finding -- this is constant overhead, not a
+function to optimise.
+
+    fr (11,160.4 Ir/op)                          redis (7,740.6 Ir/op)
+    485.5  __memcpy_avx_unaligned_erms            579.0  luaS_newlstr
+    465.7  __memcmp_avx2_movbe                    392.1  processMultibulkBuffer
+    395.0  Runtime::execute_frame_internal        366.6  __strcasecmp_avx2
+    364.0  fr_command::fcall_cmd                  317.2  sweeplist
+    335.0  Runtime::dispatch_with_client_context  308.1  propagatemark
+    310.0  fr_command::command_table_index        264.3  singlestep
+    308.0  frankenredis::process_buffered_frames  241.8  siphash_nocase
+    266.0  parse_command_args_borrowed_into       222.0  call
+    222.0  lua_eval::function_call_registered     191.1  dictFind
+    192.0  LuaTable::new                          181.0  processCommand
+    192.0  LibraryKeyHasher::write                100.0  scriptPrepareForRun
+
+Redis's top costs are genuine Lua work -- string interning plus a GC quartet
+(`sweeplist` + `propagatemark` + `reallymarkobject` + `singlestep` ~= 800 Ir/op) that fr
+does not pay at all. fr's are dispatch.
+
+**DISPATCH IS THE GAP.** The harness reports fr's dispatch share as 23.6 pct = 2,630.0 of
+11,160.4 instr/op. Summing fr's dispatch-side frames independently agrees: 310 + 172 +
+145 + 335 + 395 + 183 + 308 + 266 + 119 = **2,233**. Redis's counterpart -- `processCommand`
+181 + `call` 222 + `processMultibulkBuffer` 392 + `resetClient` 97 -- is **~892**. So
+roughly **1,700-1,740 of the 3,667 gap is dispatch fr pays and redis does not**, and the
+harness prints the size of the prize on its own: a front-classified route spends 428.0
+instr/op on dispatch against this route's 2,630.0.
+
+FCALL has no floor-class entry. That is the same shape as the `geohash_2` lever
+(`8a1a1f80f`, 1.5622x -> 0.5933x) and the `evalsha_large` lever (`b0f76b01e`), and it is
+the one named in [[project_xread_stranded_no_floor_entry]] as DISPATCH-not-encoders.
+
+### A SECOND, SMALLER MECHANISM — AND THE FRAME THAT LOOKS BIGGER THAN IT IS
+
+`FCALL_LIBRARY_CALLBACKS` is keyed on the **entire library source body**, so every FCALL
+hashes and then equality-compares the library text to find its callbacks, where redis
+resolves a function by NAME through `dictFind`. The hash half is already bounded --
+`LibraryKeyHasher` samples at most 56 bytes (`kbyhy`) -- and its 192.0 Ir/op is exactly
+what a byte-at-a-time FNV-1a over 56 sampled bytes plus 8 length bytes costs.
+
+**`__memcmp_avx2_movbe` at 465.7 is NOT that probe's cost**, and the caller table is why
+this is stated rather than assumed: memcmp is called **10.002 times per op**, and the
+library-cache probe is ONE of them (`LocalKey<RefCell<HashMap<Vec<u8>, ...>>>`), against
+2.000 from `command_table_index` and one each from the two borrowed-plain parse arms,
+`function_call_registered`, `execute_frame_internal`, `dispatch_with_client_context` and
+`Scope::set_local_cell`. Sizing the whole 465.7 to the library key would have overstated
+this lever by roughly 2x. So content-addressing the cache is worth on the order of 390
+Ir/op (192 hash + a ~200 compare), about 11 pct of the gap -- real, but an order below
+dispatch, and it carries an invalidation cost the current design gets for free (a
+replaced library MISSES naturally because the key is its content).
+
+**NEXT LEVER: a floor-class entry for FCALL.** Priced at ~1,700-2,200 Ir/op, which would
+take this shape from 1.4870x to roughly 1.2x. The known blocker is unchanged and is [C]
+work: the scripting entry point takes OWNED argv, and the floor path carries borrowed
+slices.
