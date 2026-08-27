@@ -71941,3 +71941,85 @@ the two stale-replica failures already present.
 
 fr is now at **30.0 allocations per op on `luapatq_16` against redis's 5.0**, down from
 33.0 at the start of this pair of commits.
+
+## 2026-08-27 — KEEP/LANDED — SORT ALPHA built a CString per COMPARISON: sort_ro_alpha_64 -13,280.4 instr/op (-13.7 pct), sort_ro_alpha -604.4 (1.1864x -> 1.1240x)
+
+`sort_alpha_compare_glibc` called `CString::new` on BOTH SIDES OF EVERY COMPARISON, purely
+to append the terminator `strcoll_l` needs. Redis calls `strcoll` straight on its sds
+values -- already NUL-terminated -- and allocates nothing to do it.
+
+Replaced with a thread-local reused buffer pair: `clear` + copy + push a NUL, no allocation
+after the first comparison. The interior-NUL check `CString::new` performed implicitly is
+now spelled out, keeping the same byte-order fallback for values libc cannot represent.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> sort_ro_alpha | sort_ro_alpha_64
+
+    fr's OWN instr/op, n=4 per arm, three arms INTERLEAVED (control/ship/null):
+      sort_ro_alpha_64  96,886.0 -> 83,605.6  -13,280.4  (-13.71 pct)  A/A band 0.03 pct  DISJOINT
+      sort_ro_alpha     10,103.0 ->  9,498.6     -604.4   (-5.98 pct)  A/A band 0.56 pct  DISJOINT
+      luapatq_16        20,692.2 -> 20,704.6      +12.4   (+0.06 pct)  A/A band 0.28 pct  flat
+      get_control          909.0 ->    910.6       +1.6   (+0.17 pct)  A/A band 0.22 pct  flat
+
+    fr/redis instructions per op, against that live Redis 7.2.4 arm:
+      sort_ro_alpha     fr/redis 1.1864x -> 1.1240x
+      sort_ro_alpha_64  fr/redis 0.4882x -> 0.4217x   (already a win; now a bigger one)
+
+    A/A null, same invocation as the A/B arms, median 1.00013 bootstrap 95% median CI [0.99988, 1.00026]
+    on sort_ro_alpha_64; 1.00103 CI [0.99774, 1.00557] on sort_ro_alpha. Null arm is a
+    BYTE-IDENTICAL COPY of the ship ELF. Both PASS.
+
+    COUNTED MECHANISM, `sort_ro_alpha`:
+      __rust_alloc                       17.0000 -> 11.0000 calls/op
+      CString::new as an allocation caller  6.000 -> ZERO
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      control  bench_elf_sha256=b06e950d090869f556918998115bef1dab934dbe9e38c915e0abd0be1e720fc3
+      ship     bench_elf_sha256=45c99c84d4064fc8438bfcf1ec83cda147cc05a7b9b951814913f384e197b3d0
+      null     bench_elf_sha256=45c99c84d4064fc8438bfcf1ec83cda147cc05a7b9b951814913f384e197b3d0
+      redis    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT rests on the BOOTSTRAP MEDIAN-CI plus the counted mechanism, and on nothing
+    else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-run on both SHA-256s; void if either sort shape's delta stops
+    exceeding its own A/A band, or if `CString::new` reappears as an `__rust_alloc` caller
+    on `sort_ro_alpha`.
+
+### THE 64-ELEMENT SHAPE IS THE DOSE-RESPONSE, AND IT IS WHY THIS IS THE SESSION'S LARGEST LEVER
+
+The removed work is PER COMPARISON, and comparisons go as n log n:
+
+      sort_ro_alpha     (3 elements)     -604.4 instr/op    -5.98 pct
+      sort_ro_alpha_64  (64 elements) -13,280.4 instr/op   -13.71 pct
+
+A per-op frame table on the 3-element shape prices this at ~1,320 instr/op of collation
+(`strcoll_l` 738.0 + `CString::new`'s `spec_new_impl` 336.0 + `sort_alpha_compare_glibc`
+246.0) and would have UNDERSTATED the lever by 20x on the shape that matters. The lever is
+not the frame; it is the frame times the comparison count.
+
+### WHAT MADE THIS FINDABLE — A CALL COUNT THAT DISAGREED WITH A FRAME
+
+fr and redis spend the IDENTICAL 738.0 instr/op in `strcoll_l`, so the collation itself
+looked like parity. The call counts said otherwise:
+
+      strcoll calls/op   fr 3.000   redis 6.000
+
+**fr made HALF as many collation calls and spent the same instructions in them**, which is
+only possible if fr's calls are twice as expensive each -- and they were, because fr handed
+`strcoll_l` freshly-allocated cache-cold buffers while redis hands it sds bytes already in
+cache. A frame comparison alone reads that as parity and stops.
+
+### GATES
+
+`fr-command` 1,294 pass, including the 37 sort/collation tests. 31 of 32 differentials
+pass; `keyspace_accounting_gate` fails 3/225 on sinter/sunion/sdiff and produced
+byte-identical output on a control ELF earlier today. `fr-runtime` 657 pass with the two
+stale-replica failures already present.
+
+The ordering contract is unchanged by construction: the interior-NUL rejection
+`CString::new` performed is now an explicit `contains(&0)` with the same byte-order
+fallback, and `CString::new` rejects a TRAILING NUL too, which `contains` also catches.

@@ -31070,18 +31070,55 @@ pub fn set_sort_alpha_locale(locale: &str) -> Result<(), ()> {
 /// Redis stores C-terminated SDS values, while a Rust `&[u8]` has no spare terminator. Embedded
 /// NUL cannot be represented to libc and retains the established byte-order fallback rather than
 /// truncating either input.
+std::thread_local! {
+    /// Reused NUL-terminated scratch for [`sort_alpha_compare_glibc`], one pair per thread.
+    ///
+    /// (BlackThrush 2026-08-27) The comparator built a `CString` for BOTH SIDES OF EVERY
+    /// COMPARISON purely to append a terminator libc needs. On `sort_ro_alpha` that measured
+    /// **6.000 allocations per op of fr's 17.0** -- `CString::new`'s `spec_new_impl` at 336.0
+    /// instr/op on top of them -- against a redis that calls `strcoll` straight on its sds
+    /// values, which are already NUL-terminated, and allocates nothing to do it.
+    ///
+    /// These buffers keep their capacity, so after the first comparison the terminator costs
+    /// a `clear` + copy + push and NO allocation. That is the same copy `CString::new` was
+    /// already making, minus the allocation and minus its separate interior-NUL scan.
+    static SORT_COLLATE_SCRATCH: core::cell::RefCell<(Vec<u8>, Vec<u8>)> =
+        const { core::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
 #[allow(unsafe_code)]
 pub fn sort_alpha_compare_glibc(left: &[u8], right: &[u8]) -> Ordering {
-    let (Ok(left), Ok(right)) = (CString::new(left), CString::new(right)) else {
+    // An embedded NUL cannot be handed to libc, so it keeps the established byte-order
+    // fallback rather than truncating either input. This is the check `CString::new` was
+    // performing; it is spelled out here because the scratch path does not do it implicitly.
+    if left.contains(&0) || right.contains(&0) {
         return left.cmp(right);
-    };
-    let active = match active_libc_collation_locale().read() {
-        Ok(active) => active,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    // SAFETY: inputs are live NUL-terminated `CString`s; `active.raw` is a non-null `newlocale`
-    // result, and the read guard prevents `freelocale` until this call returns.
-    unsafe { strcoll_l(left.as_ptr(), right.as_ptr(), active.raw) }.cmp(&0)
+    }
+    SORT_COLLATE_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        let (lbuf, rbuf) = &mut *scratch;
+        lbuf.clear();
+        lbuf.extend_from_slice(left);
+        lbuf.push(0);
+        rbuf.clear();
+        rbuf.extend_from_slice(right);
+        rbuf.push(0);
+        let active = match active_libc_collation_locale().read() {
+            Ok(active) => active,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        // SAFETY: both buffers are live for this call and NUL-terminated by the pushes above
+        // (and contain no interior NUL, checked); `active.raw` is a non-null `newlocale`
+        // result, and the read guard prevents `freelocale` until this call returns.
+        unsafe {
+            strcoll_l(
+                lbuf.as_ptr().cast::<std::os::raw::c_char>(),
+                rbuf.as_ptr().cast::<std::os::raw::c_char>(),
+                active.raw,
+            )
+        }
+        .cmp(&0)
+    })
 }
 
 /// The `SORT ... ALPHA` collator, plus whether the ASCII fast path was VALIDATED against
