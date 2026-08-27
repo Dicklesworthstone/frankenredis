@@ -68089,3 +68089,53 @@ ways** -- it FAILS the two broken arms on the pre-fix ELF `9928ecb3...` and pass
 Pre-existing and NOT from this change: `sharded_info_server_cpu_persistence_replication_are_not_multiplied`
 fails identically on HEAD's source ("CPU counters must register real work ... fr 0"),
 which is `used_cpu_*` accounting and nowhere near AOF.
+
+## 2026-08-26 — AOF LOAD MEASURED FOR THE FIRST TIME: 1.2823x, and it is NOT the worst arm
+
+The AOF load route had no number in this ledger because `DEBUG LOADAOF` is a no-op,
+so `restore_instr_per_op.py --op=loadaof` never measured a load. It is measurable now
+that `edabd8760` made `--appendonly yes` actually replay, and it needs a different
+measurement SHAPE: an AOF load is only observable across a PROCESS RESTART, so the
+thing being measured is a second process whose whole job is to start up and replay.
+
+New `scripts/aof_load_instr_per_op.py`: seed an appendonlydir with one process, copy
+it aside pristine (the loader mutates it), then boot a fresh process on a fresh copy
+UNDER CALLGRIND at N and 2N so startup, listener setup and teardown cancel.
+
+    writes    fr        redis     ratio      A/A null
+       300    7834.6    4375.0    1.7908x    --
+       500    7575.0    7006.6    1.0811x    PASS
+      2000    7770.6    6004.0    1.2942x    PASS  0.999311x
+      8000    7649.0    5965.2    1.2823x    PASS
+
+    fr    ELF e8dceffe1325f49073beaa0259b5085a6f89a70f91d8ea3cd7821726ac050cb5
+    redis ELF e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+**fr is FLAT at 7,575-7,835 instr/replayed-command across a 27x size range** -- the
+replay is cleanly linear. Every bit of the ratio's movement is in redis's small-N
+points, where the two-point subtraction divides a startup-sized difference by a small
+denominator. **Converged answer: ~1.28x. Quoting the 1.08x or the 1.79x would be
+reading noise as a result**, which is why the harness now says so in its own docstring.
+
+So AOF load is a mild loss, not a gap, and **the worst measured arm is unchanged:
+stream-vary @400 RESTORE at 3.2184x**, whose remaining 213,688 instr/op needs
+`VerbatimListpackStream`.
+
+### TWO INSTRUMENT DEFECTS THIS HARNESS WAS BORN WITH, both caught before any number
+
+1. **It read a PEER AGENT'S DATABASE.** With fixed ports 47701.., a seed directory
+   this harness had just created empty reported `DBSIZE=:4002`. Those keys belonged
+   to `fr.bcand`, another agent's server listening on 47702. **On this shared host a
+   hardcoded port range is someone else's port range, and the failure is not a bind
+   error -- it is silently measuring another agent's data.** Now every server picks a
+   random high port PROVEN free by a refused connection first.
+2. **It leaked its own servers.** A raise between boot and shutdown left the process
+   running, so the next run connected to the previous run's leftover. Boot and
+   shutdown are now paired in `try/finally`.
+
+Both were caught by the same guard, which is the point of it: the harness asserts the
+seed directory is EMPTY at boot and that `DBSIZE` after the measured boot equals the
+seeded count. **That check is load-bearing, not decoration: until `edabd8760` fr came
+up empty and truncated its AOF, and an unchecked harness would have reported that as
+an engine which replays an AOF very fast indeed.** A ratio means something only when
+both engines did the same work, and "did any work at all" has to be proven.
