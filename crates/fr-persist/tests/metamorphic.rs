@@ -113,6 +113,20 @@ fn canonicalise_decoded_set(value: &RdbValue) -> RdbValue {
                 .map(|s| s.as_bytes(blob).to_vec())
                 .collect(),
         ),
+        // (BlackThrush 2026-08-27) A set the DECODER retained in its on-disk form:
+        // undo the RDB string framing first, then decode back to the same spelling.
+        RdbValue::SetListpackRetained { raw, .. } => {
+            let listpack = fr_persist::rdb_decode_string_payload(raw)
+                .expect("a retained string we just encoded must decode")
+                .0;
+            RdbValue::Set(
+                fr_persist::listpack::decode_value_spans(&listpack)
+                    .expect("a blob we just encoded must decode")
+                    .iter()
+                    .map(|s| s.as_bytes(&listpack).to_vec())
+                    .collect(),
+            )
+        }
         // (BlackThrush) A zset handed to the encoder as its listpack blob: decode
         // back to the `SortedSet` spelling the generator produced, so every member
         // and score is still compared and only the VARIANT stops being
@@ -145,6 +159,7 @@ fn rdb_value_kind(value: &RdbValue) -> &'static str {
         RdbValue::ListQuicklist2Packed(_) => "ListQuicklist2Packed",
         RdbValue::Set(_) => "Set",
         RdbValue::SetListpack(_) => "SetListpack",
+        RdbValue::SetListpackRetained { .. } => "SetListpackRetained",
         RdbValue::IntSet(_) => "IntSet",
         RdbValue::SetHashtable(_) => "SetHashtable",
         RdbValue::Hash(_) => "Hash",

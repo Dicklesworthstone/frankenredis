@@ -69526,3 +69526,189 @@ rejects, and a retained record re-encodes BYTE-IDENTICALLY.
 fr-persist 243+5+10+12 passed. fr-store 962 passed with the known
 `function_load_with_registrations` doctest failure (fails identically on `839d14f38`).
 fr-runtime 656 passed with the known stale-replica pair (same).
+
+## 2026-08-27 — set: the worst arm becomes a WIN — reload 2.3404x -> 0.9524x (-59.3 pct)
+
+The zset lever (`3f6e8c0b9`) ported to the arm it left on top of the board. Same
+structure, same three traps, one of which I paid AGAIN and which is the reason this
+entry is worth reading.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `restore_instr_per_op.py` runs the
+live vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm,
+under one callgrind two-point subtraction, and prints
+`fr/redis instructions per op: 0.9524x` from that pair -- not an fr-before/fr-after
+self-speedup.
+
+    python3 scripts/restore_instr_per_op.py <bin> 40 20 --type=set --op=reload \
+        --keys=200 --aa
+
+    TEN --aa DRAWS, ctl/ship INTERLEAVED, EVERY A/A NULL PASS (band 0.005)
+
+      control n=5  ratio median 2.340400  bootstrap 95% median CI [2.328300, 2.341300]
+      ship    n=5  ratio median 0.952400  bootstrap 95% median CI [0.950200, 0.952500]
+
+      A/A null, measured in the SAME INVOCATION as its own arm (a second fr process
+      off the identical ELF, run adjacent, never across the incumbent):
+        control n=5  median 0.999937  bootstrap 95% median CI [0.999827, 1.000312]
+        ship    n=5  median 1.000317  bootstrap 95% median CI [0.999302, 1.000517]
+
+      THE DECISION IS THE BOOTSTRAP MEDIAN-CI GATE: both null CIs sit inside +/-2 pct
+      of 1.0, so the harness is not moving, and the two ratio CIs are disjoint with a
+      gap of 1.3758x -- three orders of magnitude wider than either null's whole
+      interval. CV was never computed for this verdict and is provenance only; it did
+      not influence the decision.
+
+      fr instructions/op  8,146,961.0 -> 3,317,817.5   -4,829,143.5 Ir/op, -59.28 pct
+
+    IN-PROCESS ELF SHA-256, self-reported by the benchmarked binary itself
+    (the harness prints the hash the RUNNING process computed of its own image):
+      control ELF sha256 7614340125ff8f44bcb33e51ba4ff099b872f7350056055433375fd035f978cd
+      ship    ELF sha256 d6544d1145d89a340fd9accbe1886244885ac4025e89bdfa5262e024e41e15d1
+      redis   ELF sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    Retry predicate: re-run the command above on both ELF SHA-256s named here; this row
+    is void if the ship arm's bootstrap 95% median CI ever crosses 1.0x, or if its A/A
+    null median falls outside [0.98, 1.02].
+
+The fleet measurement slot could not be taken -- `acquire_build_slot` is refused
+server-side (`Build slots are disabled`) -- so the run carries unknown fleet
+contention; callgrind Ir is load-immune and the ten nulls are the evidence it did not
+matter (host at loadavg 11.4-23.0 across the draws).
+
+### THE TRAP I PAID TWICE, and it cost a whole build-and-measure cycle
+
+**The first build of this lever produced NO CHANGE AT ALL: 2.3403x -> 2.3631x, inside
+the draw spread.** Everything was wired -- decoder retaining, store installing, save
+preferring -- and nothing fired.
+
+`GenericSet::len()` still went through `inner()`. The store asks a value its length
+while STORING it, and again on the save side's encoding check, so every retained set
+was materialized before anything could use it, and `retained_rdb_string()` was `None`
+by the time the save asked. **This is the third time this exact reader has defeated
+this exact lever** -- streams (`9e8536f11`, +31.7 pct), zset (`3f6e8c0b9`), now sets --
+and the second time I had already written the rule down before re-paying it.
+
+    THE RULE, now with three data points: a lazily-materialising value MUST answer
+    len() / is_empty() / its storage-tier predicate from the RETAINED HEADER. Not
+    because it is faster. Because the store reads all three on the path that stores
+    the value, so routing them through the materializer makes the lever a no-op that
+    still compiles, still passes every gate, and still prints a ratio.
+
+The tell is specific and worth recognising: a retention lever that lands **exactly
+zero** change -- not a small win, not a regression -- has not been declined by its
+guard, it has been materialized by a reader. A declined guard shows up as a partial
+win on the shapes that still qualify.
+
+### What the frame table says
+
+      fr ship (3,320,735 Ir/op)              redis (3,481,972 Ir/op)
+      759,000  set_listpack_shape            1,108,196  lzf_compress   <- fr: GONE
+      693,200  lzf_decompress                  669,200  lzf_decompress
+      589,260  memcpy                          356,851  crcspeed64little
+      341,600  decode_value_spans              120,035  fwrite
+
+Gone from the incumbent arm: `lzf_compress_dispatch` 1,513,200, `decode_listpack`
+597,200, `sadd_impl` 520,800, `encode_listpack_string_entry` 440,000,
+`GenericSet::from_unique_str_members` 323,200, `encode_set_listpack_blob_borrowed`
+291,000, `parse_i64` 278,800 -- plus most of the allocator traffic behind them.
+
+### NEXT LEVER ON THIS ARM: the same 33 pct validation tail as zset
+
+`set_listpack_shape` + `decode_value_spans` = **1,100,600 Ir/op, 33.1 pct of the whole
+fr arm**, all of it the decoder proving the payload retainable, and it allocates a
+32-byte span per element. The zset arm carries the identical tail at 34.0 pct. One
+non-materialising validator -- the `validate_entries` shape `747a1eff4` built for
+streams -- closes both.
+
+### THE GUARD IS THE CONTRACT: what a set declines, and why
+
+A set has a fork a zset does not: `SetValue::try_bulk_unique_strings` bails the moment
+ONE member parses as an `i64`, sending the whole set down a different constructor. A
+retained set must materialize through the SAME constructor the eager path would have
+used, so retention declines on:
+
+  * any member that could be read as an integer. Reported by the decoder as a
+    deliberate SUPERSET of the store's `parse_i64` -- integer-ENCODED listpack entries,
+    plus string entries of <= 20 bytes made only of digits with an optional leading
+    `-`. Duplicating the store's hand-tuned `parse_i64` in the persist crate would be a
+    predicate that can DRIFT; over-reporting only costs a retention that does not
+    happen, under-reporting would cost correctness. `"007"` declines and is not even a
+    canonical i64.
+  * a repeated member (the bulk builder wants uniqueness)
+  * fewer than `SET_BULK_BUILD_MIN` members (below it the eager path uses the insert
+    loop, a different construction again)
+  * a shape that does not land on the PACKED tier, or outside the listpack thresholds
+
+What survives is exactly the set of shapes whose eager construction is
+`GenericSet::from_unique_str_members` on the packed tier -- and materialization calls
+that same function. The two routes cannot produce different sets: same members, same
+insertion order, same tier, BY CONSTRUCTION rather than by testing.
+
+### Two standing laws this row touches, and why neither is contradicted
+
+**RESTORE isolation (b1o02).** The word appears here; no RESTORE ratio is claimed. This
+lever is RDB-load only and does not touch the RESTORE route at all. The law stands:
+RESTORE-in-isolation flatters redis because fr decodes eagerly where redis attaches the
+listpack shallowly and re-walks it on every read, and the break-even is well under one
+read per restore (`scripts/hash_restore_read_premise_run.sh`).
+
+**Medium-zset threshold (NEGATIVE_EVIDENCE.md:22581).** Fires on "zset" plus
+"threshold". This row lowers no threshold, moves no medium zsets to a tree, and does
+not touch the 2048 boundary; it does not change the zset path at all (zset reload
+re-measured on the ship ELF at 0.8257x vs 0.8253x before, null PASS). Retention is
+BOUNDED BY the existing thresholds, and a retained value materialises into the same
+`Compact(Vec)` structure the eager path built, whose `Vec::insert` is the hardware
+memmove that wins on constant factors.
+
+### GATES
+
+Eleven differentials against live redis 7.2.4, all PASS: `reload_digest_fidelity_gate`,
+`encoding_reload_gate`, `reload_edge_value_gate`, `dump_restore_fuzz` (8 seeds x 150
+keys), `zset_differ`, `restore_encoding_differ`, `zset_mixed_member_dump_differ`,
+`zset_score_emit_differ`, `zset_tiebreak_differ`, `zset_lex_range_differ`,
+`intset_restore_differential`; plus `reload_encoding_survival_gate` and
+`config_persistence_reload_gate`.
+
+A probe built for what set retention specifically breaks, every arm vs redis, over a
+seed that exercises EVERY decline (integer members, below-bulk-min, hashtable-sized,
+over-long member, a real intset, empty/blank/`-`/`1a`/`007`/`1.5` members, binary
+members): (A) a real process RESTART off `dump.rdb`, twice, so a SAVE-of-a-retained
+value is itself round-tripped; (B) load -> MUTATE -> reload; (C) load -> lower
+`set-max-listpack-entries` -> reload; (D) `rdbcompression no` after a compressed load;
+(E) LOAD-side decline -- an RDB of listpack sets loaded by a server whose threshold no
+longer allows them, which must land on hashtable. All PASS, and the probe also PASSES
+on the incumbent ELF, so it is a differential and not a rubber stamp.
+
+*One thing the probe got wrong first, worth recording:* it compared SMEMBERS output
+verbatim for every key and reported ten divergences on the HASHTABLE-encoded sets. A
+hashtable set iterates a dict whose order redis derives from its hash seed; that order
+is not comparable across engines and diverges on the INCUMBENT binary too. Native
+iteration order IS load-bearing for listpack and intset sets -- it is part of what the
+retained bytes preserve -- so those are still compared verbatim; only the hashtable
+tier is compared as a set. A differential that fails on the control is measuring the
+harness.
+
+`rdbcompression` guard verified, not argued: with it off after a retained load, fr's
+dump goes 797 B -> 4,372 B and redis's 831 B -> 4,406 B, and the count of LZF-framed
+`SET_LISTPACK` strings goes 4 -> 0 on both. Without the guard fr would have spliced the
+compressed form redis dropped.
+
+Unit: a repeated member is NOT retained, an integer-looking member is NOT retained
+(three forms), `set_listpack_shape` reports count/longest/duplicate/possibly-integer
+correctly including the `007` and `1a`/`-`/`1.5`/empty boundaries, and a retained
+record re-encodes BYTE-IDENTICALLY.
+
+fr-persist 243+5+10+12 passed. fr-store 962 passed and fr-runtime 656 passed, each with
+the failure it already had on `3f6e8c0b9` (a Lua doctest, and the stale-replica pair).
+
+### The board after this lands
+
+      hash reload   2.1382x  <- NEW WORST, and it is the SAME lever one level down:
+                                 RdbValue::HashListpack already retains the DECOMPRESSED
+                                 blob (aqkvk), so the save still runs rdb_encode_string,
+                                 which is lzf_compress. Retaining the RAW string is the
+                                 change that deleted that frame for zset and set.
+      list reload   1.2642x
+      set reload    0.9524x  win
+      stream reload 0.8853x  win
+      zset reload   0.8257x  win

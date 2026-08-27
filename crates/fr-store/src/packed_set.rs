@@ -322,14 +322,213 @@ const PACKED_MAX_VALUE: usize = 64;
 /// packed half), so SMEMBERS/SSCAN/SPOP output is byte-for-byte unchanged.
 /// (frankenredis-9mh3o)
 #[derive(Clone, Debug)]
-pub enum GenericSet {
+pub enum GenericSetInner {
     Packed(PackedStrSet),
     Hash(CompactStrSet),
 }
 
+/// Wraps the decoded forms so a RETAINED (undecoded) RDB set listpack can become a
+/// third case without every set method learning about it.
+///
+/// Redis writes a set listpack back verbatim and never decodes it; fr decodes into
+/// `PackedStrSet` and re-encodes, which on the 200-key reload arm is ~2.8M Ir/op with
+/// no counterpart PLUS a 1,513,200 Ir/op `lzf_compress` a verbatim save deletes
+/// outright. Same shape that took zset reload 2.3747x -> 0.8261x (3f6e8c0b9) and stream
+/// reload 2.5495x -> 0.8790x (5d06ac9aa).
+#[derive(Clone, Debug)]
+pub struct GenericSet {
+    repr: GenericSetRepr,
+}
+
+#[derive(Clone, Debug)]
+enum GenericSetRepr {
+    Ready(GenericSetInner),
+    /// BOXED. Inline this variant is a `Box<[u8]>` + a `OnceCell<GenericSetInner>` +
+    /// two `usize`, and an enum is as wide as its widest variant -- it would set the
+    /// size of EVERY set in the keyspace, retained or not, on paths this lever never
+    /// touches. Behind one pointer the enum is the width it was, which the `const`
+    /// assert below pins. (Learned on the zset port, 3f6e8c0b9.)
+    Pending(Box<PendingGenericSet>),
+}
+
+// Lock the boxing in. Nothing else would fail if a later edit inlined it.
+const _: () = assert!(
+    std::mem::size_of::<GenericSet>() == std::mem::size_of::<GenericSetInner>(),
+    "GenericSetRepr::Pending must stay behind a Box: a retained set must not widen \
+     every set in the keyspace"
+);
+
+/// A set loaded from RDB and not yet decoded.
+#[derive(Debug, Clone)]
+struct PendingGenericSet {
+    /// The RDB-ENCODED string (length prefix, LZF framing and all), verbatim -- NOT
+    /// the decompressed listpack. Retaining the decompressed form would still leave
+    /// the save calling `rdb_encode_string`, which IS `lzf_compress`; the bytes on
+    /// disk are the bytes to write back.
+    raw: Box<[u8]>,
+    /// Filled by `inner()`. A `OnceCell` and not a `RefCell` because a read only ever
+    /// needs a shared borrow and the value is written exactly once.
+    decoded: std::cell::OnceCell<GenericSetInner>,
+    /// Member count, as the decoder counted it. Answers `len()` without materializing
+    /// -- load-bearing, not a convenience: the store asks a value its length while
+    /// storing it, which on the stream port materialized every retained record the
+    /// moment it landed and cost +31.7 pct (9e8536f11).
+    len: usize,
+    /// Longest member in bytes, so the save side can re-check the encoding thresholds
+    /// in O(1) rather than walking the members.
+    max_member_len: usize,
+}
+
+/// Decode a retained RDB string into the packed form.
+///
+/// The expects are sound HERE and only here: `RdbValue::SetListpackRetained` is built
+/// only after `listpack::set_listpack_shape` has accepted the decompressed payload,
+/// and `GenericSet::pending` is only reached from the apply path that carries such a
+/// value. Nothing else may build a `Pending`.
+///
+/// It ends in `from_unique_str_members`, which is EXACTLY the constructor the eager
+/// load path reaches for this shape (`SetValue::try_bulk_unique_strings`'s tail), so
+/// the two routes cannot produce different sets -- same members, same insertion order,
+/// same tier.
+fn materialize_pending_set(raw: &[u8]) -> GenericSetInner {
+    let (listpack, _) = fr_persist::rdb_decode_string_payload(raw)
+        .expect("validated retained set must decode its rdb string");
+    let spans = fr_persist::listpack::decode_value_spans(&listpack)
+        .expect("validated retained set must decode its listpack");
+    let members: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(&listpack)).collect();
+    GenericSet::from_unique_str_members(&members).into_inner()
+}
+
+impl GenericSet {
+    /// Every READ of the decoded form goes through here -- the single place the lazy
+    /// variant materializes.
+    #[inline]
+    fn inner(&self) -> &GenericSetInner {
+        match &self.repr {
+            GenericSetRepr::Ready(inner) => inner,
+            GenericSetRepr::Pending(pending) => pending
+                .decoded
+                .get_or_init(|| materialize_pending_set(&pending.raw)),
+        }
+    }
+
+    #[inline]
+    fn inner_mut(&mut self) -> &mut GenericSetInner {
+        // A write collapses the representation for good: take the already-decoded
+        // value if a read produced one, otherwise decode now. No clone either way,
+        // and the retained bytes are dropped with the old repr.
+        if let GenericSetRepr::Pending(pending) = &mut self.repr {
+            let inner = pending
+                .decoded
+                .take()
+                .unwrap_or_else(|| materialize_pending_set(&pending.raw));
+            self.repr = GenericSetRepr::Ready(inner);
+        }
+        match &mut self.repr {
+            GenericSetRepr::Ready(inner) => inner,
+            GenericSetRepr::Pending(_) => unreachable!("collapsed above"),
+        }
+    }
+
+    #[inline]
+    fn from_inner(inner: GenericSetInner) -> Self {
+        Self {
+            repr: GenericSetRepr::Ready(inner),
+        }
+    }
+
+    #[inline]
+    fn into_inner(self) -> GenericSetInner {
+        match self.repr {
+            GenericSetRepr::Ready(inner) => inner,
+            GenericSetRepr::Pending(pending) => pending
+                .decoded
+                .into_inner()
+                .unwrap_or_else(|| materialize_pending_set(&pending.raw)),
+        }
+    }
+
+    /// Retain an RDB-encoded set listpack string UNDECODED.
+    ///
+    /// CALLER CONTRACT: `listpack::set_listpack_shape` must already have accepted the
+    /// decompressed payload and reported neither a repeated member nor a
+    /// possibly-integer one, and the caller must have checked `len`/`max_member_len`
+    /// against the listpack thresholds. See [`materialize_pending_set`].
+    #[must_use]
+    pub fn pending(raw: Vec<u8>, len: usize, max_member_len: usize) -> Self {
+        Self {
+            repr: GenericSetRepr::Pending(Box::new(PendingGenericSet {
+                raw: raw.into_boxed_slice(),
+                decoded: std::cell::OnceCell::new(),
+                len,
+                max_member_len,
+            })),
+        }
+    }
+
+    /// The retained RDB string, when this set has not been decoded yet.
+    ///
+    /// `None` once anything has read or written it: a read fills the `OnceCell` and a
+    /// write collapses to `Ready`, so a `Some` here means the members are exactly as
+    /// the record spelled them. That is an OWNERSHIP guarantee, not a convention --
+    /// `inner()` / `inner_mut()` are the only doors to the value.
+    ///
+    /// Returns `(raw, len, max_member_len)`; the last two let a caller re-check the
+    /// encoding thresholds without walking a single member.
+    /// Is this set on the PACKED (listpack) tier rather than the hashtable one?
+    ///
+    /// Inherent and non-materializing: a retained record is only ever built inside
+    /// the listpack thresholds, so it decodes to `Packed` and can answer without
+    /// touching the payload. Keeps this off the eager-reader list.
+    #[must_use]
+    pub fn is_packed_storage(&self) -> bool {
+        if let GenericSetRepr::Pending(p) = &self.repr
+            && p.decoded.get().is_none()
+        {
+            return true;
+        }
+        matches!(self.inner(), GenericSetInner::Packed(_))
+    }
+
+    /// Would a set of exactly this shape land on the PACKED tier?
+    ///
+    /// The retention guard: `pending()` reports `is_packed_storage()` without looking
+    /// inside, so it may only be built for a shape `from_unique_str_members` would put
+    /// on that tier. Same conjunction that function uses, evaluated from the count and
+    /// longest member the record already carries.
+    #[must_use]
+    pub fn shape_lands_packed(member_count: usize, max_member_len: usize) -> bool {
+        member_count <= PACKED_MAX_ENTRIES && max_member_len <= PACKED_MAX_VALUE
+    }
+
+    /// Bench-only: the un-presized hashtable arm of `bench_build_set_algebra_hash`.
+    /// Exists because the variant it used to name directly is now behind the wrapper.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn unpresized_hash_for_bench() -> Self {
+        Self::from_inner(GenericSetInner::Hash(CompactStrSet::new()))
+    }
+
+    #[must_use]
+    pub fn retained_rdb_string(&self) -> Option<(&[u8], usize, usize)> {
+        match &self.repr {
+            GenericSetRepr::Pending(p) if p.decoded.get().is_none() => {
+                Some((&p.raw, p.len, p.max_member_len))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Default for GenericSetInner {
+    fn default() -> Self {
+        GenericSetInner::Packed(PackedStrSet::new())
+    }
+}
+
 impl Default for GenericSet {
     fn default() -> Self {
-        GenericSet::Packed(PackedStrSet::new())
+        Self::from_inner(GenericSetInner::default())
     }
 }
 
@@ -344,9 +543,11 @@ impl GenericSet {
             // (`SetValue::from_index_set`), so RAM stays at parity with redis's incrementally-grown
             // dst dict and transient (non-STORE) callers free the reservation on drop. `buf_bytes = 0`
             // lets the arena grow to exactly the members (no over-reserved payload).
-            GenericSet::Hash(CompactStrSet::with_capacity(n, 0))
+            Self::from_inner(GenericSetInner::Hash(CompactStrSet::with_capacity(n, 0)))
         } else {
-            GenericSet::Packed(PackedStrSet::with_capacity(n.saturating_mul(8)))
+            Self::from_inner(GenericSetInner::Packed(PackedStrSet::with_capacity(
+                n.saturating_mul(8),
+            )))
         }
     }
 
@@ -354,9 +555,9 @@ impl GenericSet {
     /// so any reply built from the set is byte-identical. Used on set-algebra `*STORE` results,
     /// which are pre-sized to an upper bound during the build. (cc_fr)
     pub(crate) fn shrink_to_fit(&mut self) {
-        match self {
-            GenericSet::Hash(h) => h.shrink_to_fit(),
-            GenericSet::Packed(_) => {}
+        match self.inner_mut() {
+            GenericSetInner::Hash(h) => h.shrink_to_fit(),
+            GenericSetInner::Packed(_) => {}
         }
     }
 
@@ -381,14 +582,27 @@ impl GenericSet {
                 added += 1;
             }
         }
-        Some((GenericSet::Hash(h), added))
+        Some((Self::from_inner(GenericSetInner::Hash(h)), added))
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        match self {
-            GenericSet::Packed(p) => p.len(),
-            GenericSet::Hash(h) => h.len(),
+        // Answered from the record's own count while the value is still retained.
+        // Routing this through `inner()` materializes every RDB-loaded set the moment
+        // the store asks how big it is -- and the store asks while STORING it, and
+        // again on the save side's threshold check. Measured: with `len()` going
+        // through `inner()`, the whole retention lever produced NO change at all
+        // (2.3403x -> 2.3631x, inside noise) because nothing was ever still retained
+        // by the time the save looked. Third time this exact trap has been paid
+        // (streams 9e8536f11, zset 3f6e8c0b9).
+        if let GenericSetRepr::Pending(p) = &self.repr
+            && p.decoded.get().is_none()
+        {
+            return p.len;
+        }
+        match self.inner() {
+            GenericSetInner::Packed(p) => p.len(),
+            GenericSetInner::Hash(h) => h.len(),
         }
     }
 
@@ -406,40 +620,40 @@ impl GenericSet {
     #[must_use]
     #[inline]
     pub fn contains(&self, member: &[u8]) -> bool {
-        match self {
-            GenericSet::Packed(p) => p.contains(member),
-            GenericSet::Hash(h) => h.contains(member),
+        match self.inner() {
+            GenericSetInner::Packed(p) => p.contains(member),
+            GenericSetInner::Hash(h) => h.contains(member),
         }
     }
 
     /// nth member in insertion order (powers SPOP/SRANDMEMBER index selection).
     #[must_use]
     pub fn get_index(&self, idx: usize) -> Option<&[u8]> {
-        match self {
-            GenericSet::Packed(p) => p.iter().nth(idx),
-            GenericSet::Hash(h) => h.get_index(idx),
+        match self.inner() {
+            GenericSetInner::Packed(p) => p.iter().nth(idx),
+            GenericSetInner::Hash(h) => h.get_index(idx),
         }
     }
 
     fn promote(&mut self) {
-        if let GenericSet::Packed(p) = self {
+        if let GenericSetInner::Packed(p) = self.inner_mut() {
             let mut h = CompactStrSet::new();
             for m in p.iter() {
                 h.insert(m);
             }
-            *self = GenericSet::Hash(h);
+            self.repr = GenericSetRepr::Ready(GenericSetInner::Hash(h));
         }
     }
 
     pub fn insert(&mut self, member: Vec<u8>) -> bool {
-        if let GenericSet::Packed(p) = self
+        if let GenericSetInner::Packed(p) = self.inner()
             && (p.len() >= PACKED_MAX_ENTRIES || member.len() > PACKED_MAX_VALUE)
         {
             self.promote();
         }
-        match self {
-            GenericSet::Packed(p) => p.insert(&member),
-            GenericSet::Hash(h) => h.insert(&member),
+        match self.inner_mut() {
+            GenericSetInner::Packed(p) => p.insert(&member),
+            GenericSetInner::Hash(h) => h.insert(&member),
         }
     }
 
@@ -453,16 +667,16 @@ impl GenericSet {
     /// promotion check fires under the identical condition as `insert`, so the
     /// observable encoding transition is unchanged.
     pub fn insert_borrowed(&mut self, member: &[u8]) -> bool {
-        if let GenericSet::Packed(p) = self
+        if let GenericSetInner::Packed(p) = self.inner()
             && (p.len() >= PACKED_MAX_ENTRIES || member.len() > PACKED_MAX_VALUE)
         {
             self.promote();
         }
-        match self {
-            GenericSet::Packed(p) => p.insert(member),
+        match self.inner_mut() {
+            GenericSetInner::Packed(p) => p.insert(member),
             // CompactStrSet::insert returns true iff newly added — exactly the
             // IndexSet contains-then-insert split, byte-for-byte.
-            GenericSet::Hash(h) => h.insert(member),
+            GenericSetInner::Hash(h) => h.insert(member),
         }
     }
 
@@ -501,20 +715,20 @@ impl GenericSet {
             for m in members {
                 p.append(m.as_ref());
             }
-            GenericSet::Packed(p)
+            Self::from_inner(GenericSetInner::Packed(p))
         } else {
             let mut h = CompactStrSet::with_capacity(n, bytes);
             for m in members {
                 h.insert(m.as_ref());
             }
-            GenericSet::Hash(h)
+            Self::from_inner(GenericSetInner::Hash(h))
         }
     }
 
     pub fn shift_remove(&mut self, member: &[u8]) -> bool {
-        match self {
-            GenericSet::Packed(p) => p.remove(member),
-            GenericSet::Hash(h) => h.shift_remove(member),
+        match self.inner_mut() {
+            GenericSetInner::Packed(p) => p.remove(member),
+            GenericSetInner::Hash(h) => h.shift_remove(member),
         }
     }
 
@@ -526,13 +740,13 @@ impl GenericSet {
     /// per element. The `Packed` (listpack) encoding keeps the order-preserving
     /// remove, matching redis's ordered listpack delete on small sets.
     pub fn pop_index(&mut self, idx: usize) -> Option<Vec<u8>> {
-        match self {
-            GenericSet::Packed(p) => {
+        match self.inner_mut() {
+            GenericSetInner::Packed(p) => {
                 let member = p.iter().nth(idx)?.to_vec();
                 p.remove(&member);
                 Some(member)
             }
-            GenericSet::Hash(h) => h.swap_remove_index(idx),
+            GenericSetInner::Hash(h) => h.swap_remove_index(idx),
         }
     }
 
@@ -542,15 +756,15 @@ impl GenericSet {
     /// unspecified (redis's `dict` is unordered). `Packed` (listpack) keeps the
     /// order-preserving remove to match redis's small-set listpack delete.
     pub fn swap_remove(&mut self, member: &[u8]) -> bool {
-        match self {
-            GenericSet::Packed(p) => p.remove(member),
-            GenericSet::Hash(h) => h.swap_remove(member),
+        match self.inner_mut() {
+            GenericSetInner::Packed(p) => p.remove(member),
+            GenericSetInner::Hash(h) => h.swap_remove(member),
         }
     }
 
     pub fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
-        match self {
-            GenericSet::Packed(p) => {
+        match self.inner_mut() {
+            GenericSetInner::Packed(p) => {
                 let survivors: Vec<Vec<u8>> =
                     p.iter().filter(|m| keep(m)).map(|m| m.to_vec()).collect();
                 let mut np = PackedStrSet::with_capacity(p.byte_len());
@@ -562,15 +776,15 @@ impl GenericSet {
                 }
                 *p = np;
             }
-            GenericSet::Hash(h) => h.retain(keep),
+            GenericSetInner::Hash(h) => h.retain(keep),
         }
     }
 
     #[must_use]
     pub fn iter(&self) -> GenericSetIter<'_> {
-        match self {
-            GenericSet::Packed(p) => GenericSetIter::Packed(p.iter()),
-            GenericSet::Hash(h) => GenericSetIter::Hash(h.iter()),
+        match self.inner() {
+            GenericSetInner::Packed(p) => GenericSetIter::Packed(p.iter()),
+            GenericSetInner::Hash(h) => GenericSetIter::Hash(h.iter()),
         }
     }
 }
@@ -598,9 +812,9 @@ impl IntoIterator for GenericSet {
     type Item = Vec<u8>;
     type IntoIter = std::vec::IntoIter<Vec<u8>>;
     fn into_iter(self) -> Self::IntoIter {
-        let owned: Vec<Vec<u8>> = match self {
-            GenericSet::Packed(p) => p.iter().map(<[u8]>::to_vec).collect(),
-            GenericSet::Hash(h) => h.iter().map(<[u8]>::to_vec).collect(),
+        let owned: Vec<Vec<u8>> = match self.into_inner() {
+            GenericSetInner::Packed(p) => p.iter().map(<[u8]>::to_vec).collect(),
+            GenericSetInner::Hash(h) => h.iter().map(<[u8]>::to_vec).collect(),
         };
         owned.into_iter()
     }
@@ -7560,7 +7774,7 @@ mod tests {
 
             let built = GenericSet::from_unique_str_members(members);
             assert_eq!(
-                matches!(built, GenericSet::Packed(_)),
+                built.is_packed_storage(),
                 expect_packed,
                 "{label}: set tier diverged from the two-walk predicate"
             );
@@ -8611,9 +8825,12 @@ mod tests {
                 loop_set.insert_borrowed(m);
             }
             let bulk_set = GenericSet::from_unique_str_members(&members);
+            // `GenericSet` is a wrapper now, so `discriminant` would compare the
+            // WRAPPER's shape (always Ready here) and pass vacuously. Compare the
+            // storage tier, which is what this assertion was ever about.
             assert_eq!(
-                std::mem::discriminant(&loop_set),
-                std::mem::discriminant(&bulk_set),
+                loop_set.is_packed_storage(),
+                bulk_set.is_packed_storage(),
                 "variant mismatch for {} members",
                 members.len()
             );

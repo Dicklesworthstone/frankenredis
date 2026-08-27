@@ -1695,6 +1695,108 @@ pub fn zset_listpack_shape(data: &[u8]) -> Result<ZsetListpackShape, ListpackErr
     })
 }
 
+/// What a `RDB_TYPE_SET_LISTPACK` payload looks like, WITHOUT materializing a
+/// single member.
+///
+/// (BlackThrush 2026-08-27) The set twin of [`ZsetListpackShape`]. The load side
+/// needs four facts to decide whether a set can be kept in its on-disk form:
+/// how many members it holds, how long its longest member is (the
+/// encoding-flag predicate), whether any member repeats (the store's bulk
+/// builder demands uniqueness), and whether any member could be read as an
+/// integer -- see [`SetListpackShape::has_possible_int_member`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetListpackShape {
+    /// Number of members.
+    pub member_count: usize,
+    /// Longest member in Redis-observable bytes.
+    pub max_member_len: usize,
+    /// True if some member appears twice.
+    pub has_duplicate_member: bool,
+    /// True if ANY member might be read as a canonical integer by the store.
+    ///
+    /// DELIBERATELY OVER-INCLUSIVE, and that is the whole point. The store's
+    /// `SetValue::try_bulk_unique_strings` bails the moment one member parses as an
+    /// `i64`, sending the whole set down a different constructor; a retained set
+    /// must materialize through the SAME constructor the eager path would have
+    /// used, or the two routes could disagree. Rather than duplicate the store's
+    /// hand-tuned `parse_i64` here (a predicate that can drift), this reports a
+    /// strict SUPERSET of it: an integer-ENCODED listpack entry, or a string entry
+    /// short enough to be an i64 and made only of digits with an optional leading
+    /// `-`. Over-reporting costs a retention that does not happen; under-reporting
+    /// would cost correctness.
+    pub has_possible_int_member: bool,
+}
+
+/// Conservative "could the store read this as an integer?" test. See
+/// [`SetListpackShape::has_possible_int_member`].
+#[inline]
+fn member_could_be_int(bytes: &[u8]) -> bool {
+    let digits = match bytes.first() {
+        Some(b'-') => &bytes[1..],
+        Some(_) => bytes,
+        None => return false,
+    };
+    // i64::MIN is 20 bytes with its sign; anything longer cannot parse.
+    bytes.len() <= 20 && !digits.is_empty() && digits.iter().all(u8::is_ascii_digit)
+}
+
+/// Duplicate-member probe over spans, allocation-free for the sizes that can be
+/// retained. Same table shape and reasoning as
+/// [`zset_member_spans_have_duplicate`].
+fn set_member_spans_have_duplicate(data: &[u8], spans: &[ListpackValueSpan]) -> bool {
+    if spans.len() > ZSET_STACK_DUP_MAX {
+        // Cold: such a payload cannot be listpack-encoded under any default config,
+        // so it is never retained and this answer only steers the fallback.
+        let mut seen: std::collections::HashSet<&[u8]> =
+            std::collections::HashSet::with_capacity(spans.len());
+        return !spans.iter().all(|m| seen.insert(m.as_bytes(data)));
+    }
+    const SLOTS: usize = ZSET_STACK_DUP_MAX * 2;
+    const _: () = assert!(SLOTS.is_power_of_two());
+    let mut table = [0u16; SLOTS];
+    for (index, member) in spans.iter().enumerate() {
+        let bytes = member.as_bytes(data);
+        let mut slot = (zset_member_probe_hash(bytes) as usize) & (SLOTS - 1);
+        loop {
+            let occupant = table[slot];
+            if occupant == 0 {
+                table[slot] = u16::try_from(index + 1).expect("index bounded by SLOTS/2");
+                break;
+            }
+            if spans[usize::from(occupant) - 1].as_bytes(data) == bytes {
+                return true;
+            }
+            slot = (slot + 1) & (SLOTS - 1);
+        }
+    }
+    false
+}
+
+/// Validate a `RDB_TYPE_SET_LISTPACK` payload and report its shape.
+///
+/// EXACTLY the acceptance the eager path applies -- it IS [`decode_value_spans`],
+/// which is what `decode_listpack` validates with -- minus the per-member
+/// `Vec<u8>`. Carrying a blob past the decoder must not make the decoder accept
+/// payloads it used to reject.
+pub fn set_listpack_shape(data: &[u8]) -> Result<SetListpackShape, ListpackError> {
+    let spans = decode_value_spans(data)?;
+    let mut max_member_len = 0_usize;
+    let mut has_possible_int_member = false;
+    for member in &spans {
+        max_member_len = max_member_len.max(member.byte_len());
+        has_possible_int_member |= match member {
+            ListpackValueSpan::Integer(_) => true,
+            ListpackValueSpan::String(_) => member_could_be_int(member.as_bytes(data)),
+        };
+    }
+    Ok(SetListpackShape {
+        member_count: spans.len(),
+        max_member_len,
+        has_duplicate_member: set_member_spans_have_duplicate(data, &spans),
+        has_possible_int_member,
+    })
+}
+
 #[cfg(test)]
 mod tests {
 

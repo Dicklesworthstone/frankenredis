@@ -50210,6 +50210,34 @@ fn store_to_rdb_entries_with_thresholds(
                 // owned form, as does an intset and anything the blob builder
                 // declines -- which is exactly the set of shapes the encoder would
                 // not have written as RDB_TYPE_SET_LISTPACK anyway.
+                //
+                // (BlackThrush 2026-08-27) VERBATIM FIRST, the port of the zset arm
+                // above. A set still holding the RDB string it was loaded from re-saves
+                // those exact bytes: `borrowed_generic_members()` would materialize the
+                // record only to hand its members to an encoder that reproduces the
+                // listpack, and `rdb_encode_string` would then re-run `lzf_compress` --
+                // 1,513,200 Ir/op, the largest frame in the reload arm.
+                //
+                // `retained_rdb_string()` is `Some` only while nothing has read or
+                // written the set, which is an OWNERSHIP guarantee: `inner()` and
+                // `inner_mut()` are the only doors to the members, and both close this
+                // one. A set has nothing outside the value to compare. The thresholds
+                // are re-checked in O(1) from the count and longest member the record
+                // carries, because CONFIG can have moved them since the load.
+                if let Some(thresholds) = compact
+                    && !store.set_is_hashtable_encoded(&key)
+                    && let Some((raw, member_count, max_member_len)) = s.retained_rdb_string()
+                    && member_count <= thresholds.set_max_listpack_entries
+                    && max_member_len <= thresholds.set_max_listpack_value
+                    && (fr_persist::rdb_compression_enabled()
+                        || !fr_persist::rdb_string_is_lzf_framed(raw))
+                {
+                    RdbValue::SetListpackRetained {
+                        raw: raw.to_vec(),
+                        member_count,
+                        max_member_len,
+                    }
+                } else {
                 let borrowed_blob = if store.set_is_hashtable_encoded(&key) {
                     None
                 } else {
@@ -50237,6 +50265,7 @@ fn store_to_rdb_entries_with_thresholds(
                     RdbValue::SetHashtable(members)
                 } else {
                     RdbValue::Set(members)
+                }
                 }
                 }
             }
@@ -50605,6 +50634,48 @@ fn apply_rdb_entries_to_store(
                 store
                     .load_rdb_quicklist2_packed_list(&key, nodes, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
+            RdbValue::SetListpackRetained {
+                raw,
+                member_count,
+                max_member_len,
+            } => {
+                // (BlackThrush 2026-08-27) Install the record's own bytes and decode
+                // NOTHING. The decoder already proved the payload valid, duplicate-free
+                // and free of integer-looking members, and reported its member count
+                // and longest member, so the store picks the encoding, sets the sticky
+                // flags and answers `len()` without ever looking inside.
+                //
+                // A shape the guard declines is handed straight back and takes the
+                // ordinary decode path below -- byte-identical to what this did before.
+                let raw = match store.set_load_retained_listpack(
+                    &key,
+                    raw,
+                    member_count,
+                    max_member_len,
+                    now_ms,
+                ) {
+                    Ok(_) => None,
+                    Err(raw) => Some(raw),
+                };
+                if let Some(raw) = raw {
+                    let (listpack, _) = fr_persist::rdb_decode_string_payload(&raw)
+                        .ok_or(PersistError::InvalidFrame)?;
+                    let spans = fr_persist::listpack::decode_value_spans(&listpack)
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                    let members: Vec<&[u8]> =
+                        spans.iter().map(|s| s.as_bytes(&listpack)).collect();
+                    store
+                        .sadd_loading(&key, &members, now_ms)
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                }
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
                         &key,
@@ -74454,9 +74525,18 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             loaded_manifest
                 .base_rdb_entries
                 .iter()
+                // (BlackThrush 2026-08-27) ...and a SET_LISTPACK set comes back as
+                // the retained on-disk string, so a SAVE that follows a load writes
+                // those bytes verbatim. Accept either spelling: what this assertion is
+                // about is that the db-3 set reached the base RDB.
                 .any(|entry| entry.db == 3
                     && entry.key == b"db3:set"
-                    && matches!(entry.value, RdbValue::Set(_))),
+                    && matches!(
+                        entry.value,
+                        RdbValue::Set(_)
+                            | RdbValue::SetListpack(_)
+                            | RdbValue::SetListpackRetained { .. }
+                    )),
             "SAVE manifest base RDB must include DB 3 set, got {:?}",
             loaded_manifest.base_rdb_entries
         );

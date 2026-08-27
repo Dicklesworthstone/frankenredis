@@ -4356,6 +4356,17 @@ impl SetValue {
 
     /// The underlying `IndexSet` for the generic encoding (used by the
     /// listpack-vs-hashtable encoding helpers); `None` for an intset.
+    /// The retained RDB string, when this set was loaded from RDB and nothing has
+    /// read or written it since. `None` for an intset, a decoded set, or one that
+    /// has been touched. Returns `(raw, member_count, max_member_len)`.
+    ///
+    /// Public because the SAVE side lives in another crate and this is the whole
+    /// question it asks; `as_generic` stays crate-private.
+    #[must_use]
+    pub fn retained_rdb_string(&self) -> Option<(&[u8], usize, usize)> {
+        self.as_generic()?.retained_rdb_string()
+    }
+
     pub(crate) fn as_generic(&self) -> Option<&GenericSet> {
         match self {
             SetValue::Generic(s) => Some(s),
@@ -15907,7 +15918,7 @@ impl Store {
                 foldhash::quality::RandomState::default(),
             )
         } else {
-            packed_set::GenericSet::Hash(packed_set::CompactStrSet::new())
+            packed_set::GenericSet::unpresized_hash_for_bench()
         };
         for member in members {
             set.insert(member.clone());
@@ -20981,6 +20992,68 @@ impl Store {
     /// fresh-key bulk build would otherwise construct and throw away. It only takes
     /// that path after PROVING uniqueness with the allocation-free stack probe, so a
     /// corrupt payload is de-duplicated exactly as it is today.
+    /// Install an RDB-loaded set WITHOUT decoding it.
+    ///
+    /// (BlackThrush 2026-08-27) The retaining twin of [`Self::sadd_loading`], and the
+    /// load half of the set verbatim-save lever -- the port of the zset one that took
+    /// that arm from 2.3747x to 0.8261x (3f6e8c0b9). `raw` is the RDB-ENCODED string
+    /// that followed the `RDB_TYPE_SET_LISTPACK` type byte; `member_count` and
+    /// `max_member_len` were taken by the decoder from the decompressed payload
+    /// (`listpack::set_listpack_shape`), which also proved it structurally valid, free
+    /// of repeated members, and free of any member the store might read as an integer.
+    ///
+    /// THE GUARD IS THE CONTRACT. Retention is only taken for the shapes whose eager
+    /// construction is `GenericSet::from_unique_str_members` on the PACKED tier --
+    /// `>= SET_BULK_BUILD_MIN` members (below it the eager path uses the insert loop),
+    /// a shape that lands packed, and inside the listpack thresholds. Materialization
+    /// then calls that same constructor, so the two routes cannot produce different
+    /// sets: same members, same insertion order, same tier.
+    ///
+    /// Returns the raw bytes back in `Err` when the payload does not qualify; the
+    /// caller then decodes and takes the ordinary path.
+    ///
+    /// # Errors
+    /// Never fails in the fallible sense; `Err` hands the untouched input back.
+    pub fn set_load_retained_listpack(
+        &mut self,
+        key: &[u8],
+        raw: Vec<u8>,
+        member_count: usize,
+        max_member_len: usize,
+        now_ms: u64,
+    ) -> Result<u64, Vec<u8>> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        let max_intset_entries = self.set_max_intset_entries;
+        let max_listpack_entries = self.set_max_listpack_entries;
+        let max_listpack_value = self.set_max_listpack_value;
+        if member_count < SET_BULK_BUILD_MIN
+            || member_count > max_listpack_entries
+            || max_member_len > max_listpack_value
+            || !GenericSet::shape_lands_packed(member_count, max_member_len)
+            || self.entries.contains_key(key)
+        {
+            return Err(raw);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let s = SetValue::Generic(GenericSet::pending(raw, member_count, max_member_len));
+        let mut entry = Entry::new(Value::Set(Box::new(s)), now_ms);
+        entry.touch_write(now_ms, lfu_tracking_enabled);
+        Self::refresh_set_encoding_flags_from_max_len(
+            &mut entry,
+            max_member_len,
+            max_intset_entries,
+            max_listpack_entries,
+            max_listpack_value,
+        );
+        self.internal_entries_insert(key.to_vec(), entry);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        let added = member_count as u64;
+        self.dirty = self.dirty.saturating_add(added);
+        Ok(added)
+    }
+
     pub fn sadd_loading<M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],

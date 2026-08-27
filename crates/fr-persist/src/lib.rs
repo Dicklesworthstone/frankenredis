@@ -1364,6 +1364,27 @@ pub enum RdbValue {
     /// is what separates this from the zset load-side blob experiment, which only
     /// moved the decode and measured -0.8 pct.
     SetListpack(Vec<u8>),
+    /// A set RETAINED in its on-disk form: the RDB-encoded string that followed the
+    /// `RDB_TYPE_SET_LISTPACK` type byte, verbatim -- length prefix, LZF framing and
+    /// all.
+    ///
+    /// (BlackThrush 2026-08-27) The LOAD-direction twin of [`RdbValue::SetListpack`],
+    /// and the exact shape [`RdbValue::ZsetListpackRetained`] took the zset reload arm
+    /// from 2.3747x to 0.8261x with (3f6e8c0b9). The RAW string rather than the
+    /// decompressed listpack ON PURPOSE: carrying the decompressed blob would still
+    /// leave the save re-running `rdb_encode_string` over it, and that is
+    /// `lzf_compress` -- 1,513,200 Ir/op, the single largest frame in the set reload
+    /// arm. The bytes on disk are the bytes to write back.
+    ///
+    /// `member_count` and `max_member_len` are taken at DECODE time from the
+    /// decompressed listpack (see [`listpack::set_listpack_shape`]), so the apply side
+    /// picks its encoding and sets the sticky flags WITHOUT decompressing anything.
+    SetListpackRetained {
+        /// The RDB-encoded string, exactly as it appeared after the type byte.
+        raw: Vec<u8>,
+        member_count: usize,
+        max_member_len: usize,
+    },
     Hash(Vec<(Vec<u8>, Vec<u8>)>),
     /// (frankenredis-aqkvk) A hash still in its RDB `HASH_LISTPACK` blob form.
     ///
@@ -2110,6 +2131,14 @@ fn encode_rdb_internal(
                     buf.push(RDB_TYPE_SET_LISTPACK);
                     rdb_encode_string(&mut buf, &entry.key);
                     rdb_encode_string(&mut buf, blob);
+                }
+                // VERBATIM, one level deeper: this blob is the ENCODED string, not
+                // the listpack, so it is spliced in whole. `rdb_encode_string` here
+                // would re-run `lzf_compress` to reproduce bytes already in the value.
+                RdbValue::SetListpackRetained { raw, .. } => {
+                    buf.push(RDB_TYPE_SET_LISTPACK);
+                    rdb_encode_string(&mut buf, &entry.key);
+                    buf.extend_from_slice(raw);
                 }
                 RdbValue::Set(members) => {
                     if let Some(thresholds) = options.compact.as_ref() {
@@ -4779,6 +4808,18 @@ pub fn canonicalise_rdb_value(value: &RdbValue) -> RdbValue {
             };
             RdbValue::Set(spans.iter().map(|s| s.as_bytes(blob).to_vec()).collect())
         }
+        // (BlackThrush 2026-08-27) A retained set holds the ENCODED string;
+        // decompress it first, then spell out the same members, so content comparison
+        // still sees every one.
+        RdbValue::SetListpackRetained { raw, .. } => {
+            let Some((listpack, _)) = rdb_decode_string(raw) else {
+                return value.clone();
+            };
+            let Ok(spans) = listpack::decode_value_spans(&listpack) else {
+                return value.clone();
+            };
+            RdbValue::Set(spans.iter().map(|s| s.as_bytes(&listpack).to_vec()).collect())
+        }
         // (BlackThrush) A zset handed to the encoder as its listpack blob spells the
         // same pairs; decode it back so a caller comparing CONTENT still compares
         // every member and score, and a blob whose contents drifted still differs.
@@ -5416,15 +5457,46 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                         }
                     }
                     RDB_TYPE_SET_LISTPACK => {
+                        let raw_start = cursor;
                         let (listpack, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let members = listpack::decode_listpack(&listpack)
-                            .map_err(|_| PersistError::InvalidFrame)?
-                            .into_iter()
-                            .map(listpack::ListpackEntry::into_bytes)
-                            .collect();
-                        RdbValue::Set(members)
+                        // (BlackThrush 2026-08-27) RETAIN THE ON-DISK STRING, the same
+                        // lever `RDB_TYPE_ZSET_LISTPACK` takes above. Redis writes a set
+                        // listpack back verbatim and never decodes it; fr decoded into
+                        // owned members, rebuilt a PackedStrSet, re-encoded a listpack
+                        // and re-COMPRESSED it -- and that compressor, 1,513,200 Ir/op,
+                        // is the largest frame in the arm.
+                        //
+                        // VALIDATION STAYS HERE: `set_listpack_shape` IS
+                        // `decode_value_spans`, the same validation `decode_listpack`
+                        // performs, minus the per-member `Vec<u8>`.
+                        //
+                        // TWO shapes decline and take the original path unchanged:
+                        // a REPEATED member (legal on the wire, but the store's bulk
+                        // builder wants uniqueness), and any member that could be read
+                        // as an INTEGER -- the store's builder bails on those and
+                        // constructs the set differently, so retaining one could make
+                        // the two routes disagree. See `SetListpackShape`.
+                        let shape = listpack::set_listpack_shape(&listpack)
+                            .map_err(|_| PersistError::InvalidFrame)?;
+                        if !shape.has_duplicate_member
+                            && !shape.has_possible_int_member
+                            && shape.member_count > 0
+                        {
+                            RdbValue::SetListpackRetained {
+                                raw: data[raw_start..cursor].to_vec(),
+                                member_count: shape.member_count,
+                                max_member_len: shape.max_member_len,
+                            }
+                        } else {
+                            let members = listpack::decode_listpack(&listpack)
+                                .map_err(|_| PersistError::InvalidFrame)?
+                                .into_iter()
+                                .map(listpack::ListpackEntry::into_bytes)
+                                .collect();
+                            RdbValue::Set(members)
+                        }
                     }
                     RDB_TYPE_HASH_LISTPACK => {
                         // Listpack of f1, v1, f2, v2, ... pairs.
@@ -9831,7 +9903,14 @@ mod tests {
         let bytes = finalize_rdb_blob(&mut blob);
 
         let (entries, _) = decode_rdb(&bytes).expect("decode set_listpack");
-        match &entries[0].value {
+        // The loader RETAINS the on-disk string (BlackThrush 2026-08-27); this test is
+        // about the MEMBERS it spells, so canonicalise the spelling away.
+        assert!(
+            matches!(&entries[0].value, RdbValue::SetListpackRetained { .. }),
+            "a valid duplicate-free non-integer set listpack must be retained undecoded, got {:?}",
+            &entries[0].value
+        );
+        match &canonicalise_rdb_value(&entries[0].value) {
             RdbValue::Set(members) => {
                 let mut got: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
                 got.sort();
@@ -9839,6 +9918,106 @@ mod tests {
             }
             other => panic!("expected RdbValue::Set, got {other:?}"),
         }
+    }
+
+    // (BlackThrush 2026-08-27) The set retention fallbacks. A retained set reports a
+    // member count and a PACKED tier without looking inside; if either of these shapes
+    // silently started being retained, that report could contradict the members.
+    #[test]
+    fn rdb_set_listpack_with_a_repeated_member_is_not_retained() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_SET_LISTPACK);
+        rdb_encode_string(&mut blob, b"dup");
+        let lp = build_listpack_for_test(&[b"alpha", b"beta", b"alpha"]);
+        append_rdb_wrapped_string(&mut blob, &lp);
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        let (entries, _) = decode_rdb(&bytes).expect("decode duplicate-member set");
+        match &entries[0].value {
+            RdbValue::Set(members) => assert_eq!(members.len(), 3, "the decode path spells every entry"),
+            other => panic!("a repeated member must NOT be retained, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rdb_set_listpack_with_an_integer_member_is_not_retained() {
+        // The store's bulk builder bails the moment one member parses as an i64 and
+        // constructs the set differently, so retention must decline first.
+        for member in [&b"42"[..], b"-7", b"0"] {
+            let mut blob = Vec::new();
+            blob.extend_from_slice(b"REDIS0011");
+            blob.push(RDB_TYPE_SET_LISTPACK);
+            rdb_encode_string(&mut blob, b"ints");
+            let lp = build_listpack_for_test(&[b"alpha", b"beta", member]);
+            append_rdb_wrapped_string(&mut blob, &lp);
+            let bytes = finalize_rdb_blob(&mut blob);
+
+            let (entries, _) = decode_rdb(&bytes).expect("decode int-member set");
+            assert!(
+                matches!(&entries[0].value, RdbValue::Set(_)),
+                "member {member:?} could be read as an integer and must NOT be retained, got {:?}",
+                &entries[0].value
+            );
+        }
+    }
+
+    #[test]
+    fn set_listpack_shape_reports_count_longest_member_duplicates_and_ints() {
+        let clean = build_listpack_for_test(&[b"a", b"bbbb", b"cc"]);
+        let shape = crate::listpack::set_listpack_shape(&clean).expect("valid payload");
+        assert_eq!(shape.member_count, 3);
+        assert_eq!(shape.max_member_len, 4);
+        assert!(!shape.has_duplicate_member);
+        assert!(!shape.has_possible_int_member);
+
+        let dup = build_listpack_for_test(&[b"a", b"a"]);
+        assert!(
+            crate::listpack::set_listpack_shape(&dup)
+                .expect("valid payload")
+                .has_duplicate_member
+        );
+
+        // Integer-ENCODED and numeric-STRING members both report, and the report is
+        // deliberately a superset: "007" is not a canonical i64 but still declines.
+        for numeric in [&b"42"[..], b"-7", b"007", b"0"] {
+            let lp = build_listpack_for_test(&[b"a", numeric]);
+            assert!(
+                crate::listpack::set_listpack_shape(&lp)
+                    .expect("valid payload")
+                    .has_possible_int_member,
+                "{numeric:?} must report as possibly-integer"
+            );
+        }
+        // ...and things that merely start numeric do not.
+        let lp = build_listpack_for_test(&[b"1a", b"-", b"1.5", b""]);
+        assert!(
+            !crate::listpack::set_listpack_shape(&lp)
+                .expect("valid payload")
+                .has_possible_int_member
+        );
+    }
+
+    #[test]
+    fn rdb_set_listpack_retained_string_re_encodes_byte_identically() {
+        let members: Vec<Vec<u8>> = (0..60)
+            .map(|i| format!("member-{i:03}").into_bytes())
+            .collect();
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"s".to_vec(),
+            value: RdbValue::Set(members),
+            expire_ms: None,
+        }];
+        let first = encode_rdb(&entries, &[]);
+        let (decoded, _) = decode_rdb(&first).expect("decode");
+        assert!(
+            matches!(decoded[0].value, RdbValue::SetListpackRetained { .. }),
+            "expected the loader to retain, got {:?}",
+            decoded[0].value
+        );
+        let second = encode_rdb(&decoded, &[]);
+        assert_eq!(first, second, "re-saving a retained set must be byte-identical");
     }
 
     #[test]
@@ -10255,6 +10434,14 @@ mod tests {
                     match super::canonicalise_rdb_value(&entries[0].value) {
                         RdbValue::SortedSet(members) => members.len(),
                         _ => panic!("seed {name}: retained zset string did not decode: {raw:?}"),
+                    },
+                ),
+                // ...and RDB_TYPE_SET_LISTPACK likewise. (BlackThrush 2026-08-27)
+                RdbValue::SetListpackRetained { raw, .. } => (
+                    "Set",
+                    match super::canonicalise_rdb_value(&entries[0].value) {
+                        RdbValue::Set(members) => members.len(),
+                        _ => panic!("seed {name}: retained set string did not decode: {raw:?}"),
                     },
                 ),
                 _ => ("Other", 0),
@@ -11630,6 +11817,11 @@ mod tests {
                 // decodes the listpack, so every member and score is still
                 // compared and only the variant stops being load-bearing.
                 if matches!(&entry.value, RdbValue::ZsetListpackRetained { .. }) {
+                    entry.value = super::canonicalise_rdb_value(&entry.value);
+                }
+                // (BlackThrush 2026-08-27) And for a set written as
+                // RDB_TYPE_SET_LISTPACK, retained by the loader for the same reason.
+                if matches!(&entry.value, RdbValue::SetListpackRetained { .. }) {
                     entry.value = super::canonicalise_rdb_value(&entry.value);
                 }
                 // (frankenredis-qj6jn) And for a list written as QUICKLIST_2, which now
