@@ -282,7 +282,21 @@ def main():
         if a.startswith("--redis="):
             redis = os.path.abspath(a.split("=", 1)[1])
 
+    keep = None
+    for a in sys.argv[1:]:
+        if a.startswith("--keep="):
+            keep = os.path.abspath(a.split("=", 1)[1])
+    if keep:
+        # Callgrind dumps live under <root>/<arm>.<point>/; keeping them is what
+        # lets frame_delta.py attribute the per-command cost by FUNCTION.
+        os.makedirs(keep, exist_ok=True)
+        return _run(binary, writes, aa, redis, keep)
     with tempfile.TemporaryDirectory(dir="/data/tmp") as root:
+        return _run(binary, writes, aa, redis, root)
+
+
+def _run(binary, writes, aa, redis, root):
+    if True:
         fr_per, fr_sha = arm(binary, "fr", writes, root)
         rd_per, rd_sha = arm(redis, "redis", writes, root)
         if aa:

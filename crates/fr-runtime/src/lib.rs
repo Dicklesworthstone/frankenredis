@@ -6919,8 +6919,24 @@ impl Runtime {
         }
         for (index, record) in records.iter().enumerate() {
             let replay_now_ms = now_ms.saturating_add(index as u64);
+            // (BlackThrush 2026-08-26) Replay from the record's OWN argv instead of
+            // rebuilding a `RespFrame` for it. `to_resp_frame()` deep-clones every
+            // argument into a fresh `RespFrame::BulkString(Some(arg.clone()))` plus a
+            // `Vec` for the array, and `execute_frame` -> `execute_frame_ref` then
+            // calls `frame_to_argv` to turn it straight back into argv -- so every
+            // byte of every replayed command was materialised THREE times (file ->
+            // AofRecord.argv -> RespFrame -> argv) before the store copied it a
+            // fourth. Measured on a 2,000-record AOF: 17.10 allocations per replayed
+            // command, with mimalloc at 919 Ir/op = 11.8 pct of the whole replay.
+            //
+            // `execute_dispatch` already takes the argv borrowed and the frame as an
+            // `Option`, so this is the same call `execute_frame_ref` makes, minus
+            // both materialisations. The frame is `None`: it exists so owned-frame
+            // callers can feed the exact wire structure to threat-evidence digests,
+            // which a trusted local AOF has no need of -- and `ServerState::load_aof`
+            // already replays through argv with no frame at all.
             let reply = self.with_execution_source(ExecutionSource::AofLoad, |runtime| {
-                runtime.execute_frame(record.to_resp_frame(), replay_now_ms)
+                runtime.execute_dispatch(None, Ok(&record.argv), replay_now_ms, None)
             });
             if matches!(reply, RespFrame::Error(_)) {
                 original_store.stat_total_error_replies = original_store

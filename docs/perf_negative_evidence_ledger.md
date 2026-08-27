@@ -68305,3 +68305,78 @@ Running total on the local-lever line, all with numbers:
 
 **The line is closed. The next move on this arm is the representation change or
 nothing.**
+
+## 2026-08-26 — AOF replay 1.3102x -> 1.0870x (-16.9 pct): the loader rebuilt a frame to hand it straight back
+
+Stream-vary RESTORE is still the worst DEFAULT ratio at 3.2184x, but its local-lever
+line is closed with numbers (`d537ded24`) and what remains touches `FieldsRef`, which
+reads fr's PACKED format while a retained blob is a LISTPACK -- a second decoder on
+every read path. So this turn took the next genuine loss instead, and it had never
+been profiled at all: AOF load, first measured last commit at 1.2823x.
+
+**The first profile of fr's AOF replay found a triple materialisation.**
+`Runtime::load_aof` replayed each record as
+
+    runtime.execute_frame(record.to_resp_frame(), replay_now_ms)
+
+`to_resp_frame()` deep-clones every argument into a fresh
+`RespFrame::BulkString(Some(arg.clone()))` plus a `Vec` for the array, and
+`execute_frame` -> `execute_frame_ref` immediately calls `frame_to_argv` to turn it
+straight back into argv. Every byte of every replayed command was materialised THREE
+times -- file -> `AofRecord.argv` -> `RespFrame` -> argv -- before the store copied it
+a fourth. Measured: **17.10 allocations per replayed command**, mimalloc 919 Ir/op =
+11.8 pct of the whole replay.
+
+`execute_dispatch` already takes the argv BORROWED and the frame as an `Option`, and
+`ServerState::load_aof` already replays through argv with no frame at all. So the fix
+is the same call `execute_frame_ref` makes, minus both materialisations.
+
+    AOF replay, 2000-record file, 8 paired draws
+      control    7,706.9 instr/replayed-command    ratio 1.3102x
+      candidate  6,402.4                           ratio 1.0870x
+                 -1,304.5 = -16.93 pct
+
+    DETERMINISTIC corroboration (callgrind Ir is exact):
+      frame total        7,769.9 -> 6,376.5 Ir/op   -17.9 pct
+      allocations/cmd       17.10 ->    9.03        -8.07
+      mi_free and _mi_page_malloc_zero leave the top frames; memcpy 345.3 -> 255.2
+
+    control ELF e8dceffe1325f49073beaa0259b5085a6f89a70f91d8ea3cd7821726ac050cb5
+    ship    ELF 771c89ebfb4f4459310f2ed6b5d0b02bc3a17a3417a0ec13ba10971041518b74
+    redis   ELF e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    python3 scripts/aof_load_instr_per_op.py <bin> 2000 --aa
+
+### THE A/A NULL IS TOO NOISY FOR THIS HARNESS, AND THE BAND WAS NOT WIDENED
+
+Across 8 paired draws **not one had BOTH arms' nulls inside the 0.005 band**, and the
+control arm alone spread 7,606-7,773 instr/command (2.2 pct). This harness measures a
+PROCESS STARTUP, and per-process randomised hash seeds plus allocator arena setup do
+not cancel in a two-point subtraction the way a steady-state RESTORE loop does. The
+0.005 band is right for `restore_instr_per_op.py` and too tight here.
+
+**Widening the band to make this row pass would be gate self-weakening, so it was not
+done.** What was done instead: every one of the 8 draws moved the same direction by
+1,200-1,400, and the DETERMINISTIC frame delta (-17.9 pct) and the allocation count
+(17.10 -> 9.03, an exact integer difference) corroborate the A/B to within a point.
+When an A/B is noisy, the frame you aimed at settles it -- the same method that
+decided the push-argument reject.
+
+**Owed:** the band for this harness should be re-derived from its own null
+distribution rather than inherited, and until that is done its rows carry this caveat.
+
+### Correctness
+
+All three AOF gates pass on the shipping ELF, including DEBUG DIGEST parity with live
+redis 7.2.4: `aof_appendonly_cli_restart_gate` (all 3 arms), `aof_roundtrip_digest_fuzz`,
+`aof_cross_compat_gate`. Dropping the frame is safe here because it exists to feed the
+exact wire structure to threat-evidence digests, which a trusted local AOF has no need
+of. Pre-existing and NOT from this change: `stale_replica_blocks_data_commands_...`
+and `stale_readonly_replica_uses_a_functions_effective_command_flags_3bda1` fail
+identically on HEAD's source.
+
+**Still open on this path, measured and untouched:** `classify_command` runs **5.00
+times per replayed command** (220 Ir) and `command_table_index` 2.00 times (278 Ir).
+Both survive this change unchanged. Note the standing tax before attacking them:
+threading an answer through dispatch has cost +8 to +16 instr/op on EVERY command,
+three times measured ([[feedback_threading_a_param_through_dispatch_costs_8_to_16]]).
