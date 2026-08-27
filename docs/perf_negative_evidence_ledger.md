@@ -68201,3 +68201,53 @@ finish a single row in 20 minutes under callgrind. 40 members x 200 keys is the 
 the historical reload board used and completes in minutes. The key count is what makes
 a reload measurement meaningful ([[project_reload_board_was_measured_at_one_key]]);
 the member count is what makes it affordable.
+
+## 2026-08-26 — THE 48-BYTE PAIR WAS NEVER THE COST: bounded at 10,292 Ir/op (1.4 pct)
+
+Four attempts have now been spent on the `(Cow<[u8]>, Cow<[u8]>)` pair in
+`decode_stream_listpack` -- streaming cursor +4.31 pct, cold-splitting the integer arm
++1.73 pct, an arena priced as writing the same bytes, and building the tuple as the
+push argument +0.22 pct. A fifth was queued: a SINK-based builder letting the decoder
+write straight into `PackedStreamLog`'s arena, deleting the intermediate entirely.
+That is a cross-crate refactor, so **bound the prize before paying for it.**
+
+BOUNDING PROBE, not a patch: keep the decode, the validation and both `Cow`s live and
+consumed, but do not WRITE the 48-byte pair. Read only `flat_entries`' self cost; the
+op's result is wrong by construction and no ratio was taken from it.
+
+    flat_entries WITH the pair write     102,899 Ir/op
+    flat_entries WITHOUT it               92,607 Ir/op
+                                          -------
+    the entire intermediate                10,292 Ir/op   = 12.9 Ir per pair
+                                                          = 1.4 pct of the op
+
+    probe ELF e7fbf47f4e0f1380213afd2ed7ccd81abc68c35a5587fc023c8d455a6de8d308
+    HEAD  ELF e8dceffe1325f49073beaa0259b5085a6f89a70f91d8ea3cd7821726ac050cb5 (reverted, reproduced)
+
+**Storing the pair costs 12.9 Ir. DECODING it costs ~116.** The other 92,607 Ir/op of
+`flat_entries` is the listpack walk that turns bytes into two `Cow`s -- work a sink
+would MOVE, not remove. So the fifth attempt is dead before it is written: it could
+recover at most ~10,292 plus the 7,238 of `StreamOut` drop glue, against a fusion
+overhead that cost the four previous attempts between 0.22 and 4.31 pct.
+
+**THE GENERALISABLE ERROR, and it is mine four times over.** Every one of those
+attempts priced the pair by its WIDTH -- 48 bytes, 800 of them, 38,400 B of traffic --
+and none asked what the WRITE actually costs against what the PRODUCER costs. A wide
+element is not automatically an expensive one when the thing that fills it is 9x
+dearer than the slot it goes into. **Before deleting an intermediate, delete only the
+STORE in a throwaway build and read the frame: that separates "this buffer is big"
+from "this buffer is expensive" in one measurement.** Same family as
+[[feedback_a_frame_total_is_not_the_recoverable_amount]] and
+[[feedback_a_memcpy_call_count_is_not_a_recoverable_cost]].
+
+### What it means for the arm
+
+It strengthens the case for the structural change rather than weakening it. If 92,607
+Ir/op goes on turning listpack bytes into `Cow`s, and Redis does not do that at all --
+it keeps the macro-node listpack VERBATIM -- then `VerbatimListpackStream` removes
+that 92,607 as well as the pair write, the arena build and the field dictionary. The
+prize is the DECODE, not the intermediate, and no local rewrite reaches it.
+
+**The local-lever line on stream RESTORE is now closed with numbers, not opinion:**
+two landed (`196499e3a` -1.61 pct, `67c00c337` -0.56 pct), four rejected, and the
+fifth bounded at 1.4 pct before being built.
