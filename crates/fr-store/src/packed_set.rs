@@ -2200,6 +2200,48 @@ impl FieldDict {
     }
 
     /// Append a name and return its index, which is what the entry arena stores.
+    /// (BlackThrush 2026-08-26) Pre-size for `names` total entries.
+    ///
+    /// The dictionary had NO hint at all while everything around it had one:
+    /// `from_sorted_entries_impl` reserves the VALUE arena from `arena_hint` and the
+    /// index from `field_hint`, but `FieldDict`'s own `spans` grew 0 -> 800 and its
+    /// `arena` 0 -> ~4,800 B on a 400-entry varying-schema stream. That is
+    /// ~log2(800) reallocations EACH, every one copying everything accumulated so
+    /// far -- measured at 12,665 Ir/op across ~34 grow/alloc calls in the builder.
+    /// The same accumulating-buffer bug already fixed at four other levels here
+    /// (per-entry, per-node, per-record vectors, and the index's table capacity).
+    ///
+    /// The arena is sized by EXTRAPOLATING from the names already interned rather
+    /// than by guessing a constant width: the caller only fires this once it holds
+    /// `RESERVE_AFTER` real names, so their mean length is evidence, not a guess.
+    ///
+    /// Capacity only. Contents, first-seen order and every assigned index are
+    /// untouched, so the emitted bytes are identical.
+    ///
+    /// `#[cold] #[inline(never)]` is LOAD-BEARING, not a hint. This fires ONCE per
+    /// build but is reached from `intern_indexed`, which runs once per FIELD (800
+    /// times per op on the shape this exists for). Inlined, it grew `intern_indexed`
+    /// past LLVM's inline threshold and the whole function -- plus
+    /// `HashMap::rustc_entry` behind it -- stopped being inlined into
+    /// `from_sorted_entries_impl`. Measured: `intern_indexed` 0 -> 79,431.9 and
+    /// `rustc_entry` 0 -> 61,047.2 Ir/op appearing as separate frames, for
+    /// +4.26 pct on the arm (745,824.7 -> 777,623.6 instr/op, six certified draws).
+    /// The lost inlining cost 2.5x what the saved allocations were worth.
+    #[cold]
+    #[inline(never)]
+    fn reserve(&mut self, names: usize) {
+        let have = self.spans.len();
+        if names <= have {
+            return;
+        }
+        let more = names - have;
+        self.spans.reserve(more);
+        if have > 0 {
+            let mean = self.arena.len().div_ceil(have);
+            self.arena.reserve(mean.saturating_mul(more));
+        }
+    }
+
     fn push(&mut self, name: &[u8]) -> usize {
         let off = u32::try_from(self.arena.len()).unwrap_or(u32::MAX);
         let len = u32::try_from(name.len()).unwrap_or(u32::MAX);
@@ -2339,6 +2381,13 @@ impl PackedStreamLog {
             // names repeat (answered by the address cache above) never allocates a
             // table sized for names it does not have.
             index.reserve(hint - RESERVE_AFTER);
+            // The dictionary accumulates on exactly the same schedule and had no
+            // hint at all. Same gate on purpose: a stream whose names repeat is
+            // answered by the address cache and never reaches here, so it does not
+            // get a dictionary sized for names it does not have. The disclosed trade
+            // is unchanged from the index reserve above -- a stream with just over
+            // RESERVE_AFTER distinct names among many pairs over-reserves both.
+            dict.reserve(hint);
         }
         match index.entry(name) {
             std::collections::hash_map::Entry::Occupied(slot) => *slot.get(),
@@ -7717,6 +7766,61 @@ mod tests {
             assert_eq!(PackedStreamFields::from_pairs(&refs), packed);
         }
     }
+    #[test]
+    fn packed_stream_dictionary_reserve_path_round_trips_many_distinct_names() {
+        // (BlackThrush 2026-08-26) Covers the branch `FieldDict::reserve` fires on.
+        // The reserve is gated on the NINTH distinct field name reaching the index
+        // (`RESERVE_AFTER = 8`), and nothing here exercised a stream with more
+        // distinct names than that -- so the gate, and the arena size it
+        // EXTRAPOLATES from the first eight names, were both untested.
+        //
+        // What this CAN and CANNOT catch, stated plainly: `reserve` is capacity-only,
+        // so a badly-extrapolated size cannot fail an assertion here -- it only
+        // costs a later reallocation. What it does catch is the gate corrupting the
+        // dictionary: a reserve that ran at the wrong moment, or against the wrong
+        // vector, would disturb first-seen order or the assigned indices, and every
+        // field would then resolve to the wrong span. Names are deliberately UNEVEN
+        // in length and grow well past the mean of the first eight so that any
+        // off-by-one in the span bookkeeping shows up as mismatched bytes rather
+        // than as a coincidentally-equal short name.
+        type Pairs = Vec<(Vec<u8>, Vec<u8>)>;
+        let mk = |i: u64| -> Pairs {
+            vec![
+                (
+                    format!("f{}{}", i, "x".repeat((i as usize % 37) * 3)).into_bytes(),
+                    format!("value_{i}").into_bytes(),
+                ),
+                (
+                    format!("g{}{}", i, "y".repeat(i as usize % 11)).into_bytes(),
+                    vec![0u8, 0xff, b'\n'],
+                ),
+            ]
+        };
+        let entries: Vec<((u64, u64), Pairs)> = (0..400u64).map(|i| ((i + 1, 1), mk(i))).collect();
+        let borrowed: Vec<((u64, u64), &[(Vec<u8>, Vec<u8>)])> =
+            entries.iter().map(|(id, p)| (*id, p.as_slice())).collect();
+
+        // Both hint shapes: an accurate hint (fires the reserve) and no hint at all
+        // (must behave identically -- the reserve is an optimisation, not a
+        // precondition).
+        for (arena_hint, field_hint) in [(0usize, 0usize), (16_384, 800)] {
+            let log = PackedStreamLog::from_sorted_entries_impl::<_, _, _, true>(
+                borrowed.iter().map(|(id, p)| (*id, *p)),
+                arena_hint,
+                field_hint,
+            );
+            assert_eq!(log.len(), entries.len(), "entry count (hint {field_hint})");
+            for (id, pairs) in &entries {
+                let got = log.get(*id).expect("entry present");
+                assert_eq!(
+                    got.to_pairs(),
+                    *pairs,
+                    "field/value round-trip for {id:?} (hint {field_hint})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn packed_stream_log_matches_btreemap_oracle_p8wd1() {
         use std::collections::BTreeMap;

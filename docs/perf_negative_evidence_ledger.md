@@ -67913,3 +67913,76 @@ that failed only under measurement load and pass on a quiet host. The other two
 (`galp1` skewed, `swapdb` enumeration) FAIL IDENTICALLY ON HEAD's SOURCE -- GALP1
 skewed 0.44x control vs 0.41x candidate, SWAPDB 1x both -- so they are not this
 change's. None of the four touch varint encoding.
+
+## 2026-08-26 — dictionary pre-sizing: a +4.26 pct LOSS turned into a -0.56 pct win by ONE inlining attribute
+
+`FieldDict` was the only accumulating buffer in the stream builder with NO hint.
+`from_sorted_entries_impl` reserves the VALUE arena from `arena_hint` and the index
+from `field_hint`, but the dictionary's own `spans` grew 0 -> 800 and its `arena`
+0 -> ~4,800 B on a 400-entry varying-schema stream: ~log2(800) reallocations EACH,
+every one copying everything accumulated so far. Measured at 12,665 Ir/op across ~34
+grow/alloc calls in the builder. The same accumulating-buffer bug already fixed at
+four other levels here.
+
+Reserving it behind the SAME evidence gate the index reserve uses (fire on the ninth
+DISTINCT name, so SAMEFIELDS streams never pay) made the arm **4.26 pct SLOWER**:
+
+    stream vary @400   745,824.7 -> 777,623.6 instr/op   3.2443x -> 3.3844x
+                       six draws, ALL A/A nulls PASS -- not noise
+
+### Why, and it is not allocation
+
+The frame table named it immediately. In the regressed build `intern_indexed`
+(79,431.9 Ir/op) and `HashMap::rustc_entry` (61,047.2) appear as SEPARATE FRAMES.
+In the control they do not exist at all -- they were INLINED into
+`from_sorted_entries_impl`. **A cold, once-per-build branch added to a function that
+runs once per FIELD (800x per op) pushed it past LLVM's inline threshold, and the lost
+inlining cost 2.5x what the saved allocations were worth.**
+
+`#[cold] #[inline(never)]` on `FieldDict::reserve` restored the inlining and flipped
+the sign. **A 4.6-point swing from one attribute, with the algorithm unchanged:**
+
+    +4.26 pct   reserve inlined into intern_indexed
+    -0.56 pct   reserve out of line and cold
+
+Confirmed in the frame table rather than inferred: RawVec growth calls inside the
+builder went **20/op -> 4/op**, churn 12,665 -> 6,040 Ir/op, with `FieldDict::reserve`
+itself costing 762 Ir/op. Note the saving is SMALLER than the churn it removed --
+`from_sorted_entries_impl` self rose 159,209 -> 161,462 absorbing part of it, which is
+[[feedback_a_frame_total_is_not_the_recoverable_amount]] again.
+
+### Certified result, shipping ELF
+
+    stream vary @400   744,534.2 -> 740,355.5 instr/op   3.2451x -> 3.2184x  -0.561 pct
+    five certified pairs, ALL negative: -0.641, -0.769, -0.709, -0.241, -0.445 pct
+    controls FLAT: same-fields +0.011 pct, hash -0.003 pct, list -0.017 pct
+
+    control ELF 35ed940c39b7ef811ef829cc21e1ce1d7107f99065e0dd4f05e58bb88ec7b9d6
+    ship    ELF 9928ecb30500988741a8854372ff1c0a423a91f099d2a3d8b4691b9c06b15ab6
+    redis   ELF e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    python3 scripts/restore_instr_per_op.py <bin> 400 100 --type=stream --varyfields --aa
+
+The host was noisy for this battery (loadavg peaked at 115 from peer builds); of 11
+paired draws only 5 had BOTH nulls inside the band. Quoted means are over those 5.
+
+### A TRAP THIS BATTERY WALKED INTO: a #[cfg(test)] edit CHANGED THE RELEASE ELF
+
+Adding the regression test below and correcting two doc comments -- nothing that
+reaches the shipping binary -- changed the release sha from `c3b24284...` to
+`9928ecb3...`, because panic metadata embeds LINE NUMBERS and inserting a test shifts
+every line after it. The -0.265 pct measured on `c3b24284` was therefore of an ELF
+that would never be committed, and the whole battery was re-run against the shipping
+one (which read -0.561 pct). **Finalise every source edit -- tests and comments
+included -- BEFORE the arm you intend to quote is built.** Same root cause as
+[[feedback_measure_the_elf_you_will_commit]], reached without touching rustfmt.
+
+### Coverage added
+
+`FieldDict::reserve`'s gate fires only past 8 distinct names and nothing exercised a
+stream with more than that. The new test states plainly what it can and cannot catch:
+`reserve` is capacity-only, so a badly-extrapolated SIZE cannot fail an assertion, it
+only costs a later realloc; what it catches is a reserve that ran at the wrong moment
+or against the wrong vector, which would disturb first-seen order or the assigned
+indices. Names are deliberately uneven and grow past the mean of the first eight so
+an off-by-one shows as mismatched bytes, not a coincidentally-equal short name.
