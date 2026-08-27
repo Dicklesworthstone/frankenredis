@@ -6802,10 +6802,82 @@ fn geo_point_in_box(cx: f64, cy: f64, lon: f64, lat: f64, half_w: f64, half_h: f
     geo_distance_m(lon, lat, cx, lat) <= half_w
 }
 
+/// `format!("{value:.4}")` for the GEO distance domain, without the bignum path.
+///
+/// (BlackThrush 2026-08-27) The 4-decimal twin of `format_coord_human`, and it exists
+/// for the same measured reason one level over: `{:.N}` on `f64` routes through Rust's
+/// exact-decimal path, which falls back to the `dragon` bignum algorithm. That comment
+/// records dragon dominating GEOSEARCH WITHCOORD/WITHDIST at ~55 pct self and fixes the
+/// COORD half; the DISTANCE half kept `format!`, and a `geodist_base` profile puts
+/// `dragon::format_exact` at 2,104 Ir/op -- 31.7 pct of the whole command -- with
+/// `grisu::format_exact_opt` 352, `Big32x40::mul_pow2` 311 and
+/// `float_to_decimal_common_exact` 132 behind it, against a redis `geodistCommand` that
+/// shows no formatting frame at all.
+///
+/// EXACT, not approximate. `value = m · 2^e` with `m < 2^53`, so `m · 10^4 < 2^67` fits
+/// an `i128` and the true decimal is `m · 10^4 / 2^-e`; the shift below is that exact
+/// division, rounded half-to-EVEN, which is what `{:.4}` does. Unlike a
+/// `(v * 1e4).round()` shortcut there is no intermediate float and so no double
+/// rounding.
+///
+/// Anything outside the geo domain -- non-finite, or `|value| >= 2^40` -- defers to the
+/// std path, so correctness never rests on the domain bound; the bound only decides
+/// which of two correct routes runs. Pinned byte-for-byte against `format!("{:.4}")` by
+/// `geo_distance_4dp_matches_std_formatting`.
+fn format_geo_distance_4dp(value: f64) -> String {
+    if !value.is_finite() {
+        return format!("{value:.4}");
+    }
+    const E4: i128 = 10_000;
+    let neg = value.is_sign_negative();
+    let bits = value.to_bits();
+    let exp_bits = ((bits >> 52) & 0x7ff) as i64;
+    let frac = (bits & ((1_u64 << 52) - 1)) as i128;
+    let (m, e) = if exp_bits == 0 {
+        (frac, -1074_i64)
+    } else {
+        (frac | (1_i128 << 52), exp_bits - 1075)
+    };
+    let scaled = m * E4; // m < 2^53, E4 < 2^14 => scaled < 2^67
+    let digits: i128 = if e >= 0 {
+        if e > 40 {
+            // |value| >= 2^40, outside the geo domain: defer, so the shift below can
+            // never overflow an i128.
+            return format!("{value:.4}");
+        }
+        scaled << e
+    } else {
+        let shift = (-e) as u32;
+        if shift >= 127 {
+            0
+        } else {
+            let q = scaled >> shift;
+            let rem = scaled & ((1_i128 << shift) - 1);
+            let half = 1_i128 << (shift - 1);
+            if rem > half || (rem == half && (q & 1) == 1) {
+                q + 1
+            } else {
+                q
+            }
+        }
+    };
+    // `{:.4}` always emits exactly four decimals -- no trailing-zero trim, unlike the
+    // 17-digit human form.
+    let int_part = digits / E4;
+    let frac_part = digits % E4;
+    let mut out = String::with_capacity(24);
+    if neg {
+        out.push('-');
+    }
+    use std::fmt::Write as _;
+    let _ = write!(out, "{int_part}.{frac_part:04}");
+    out
+}
+
 #[inline]
 pub fn geo_distance_reply(distance: f64) -> RespFrame {
     let normalized = if distance == 0.0 { 0.0 } else { distance };
-    RespFrame::BulkString(Some(format!("{normalized:.4}").into_bytes()))
+    RespFrame::BulkString(Some(format_geo_distance_4dp(normalized).into_bytes()))
 }
 
 #[inline]
@@ -7857,7 +7929,7 @@ fn geo_search_reply(
                 let d = dist / to_meter;
                 let normalized = if d == 0.0 { 0.0 } else { d };
                 parts.push(RespFrame::BulkString(Some(
-                    format!("{normalized:.4}").into_bytes(),
+                    format_geo_distance_4dp(normalized).into_bytes(),
                 )));
             }
             if withhash {
@@ -63004,6 +63076,59 @@ mod tests {
         assert!(format_coord_human(f64::NAN) == "nan");
         assert_eq!(format_coord_human(f64::INFINITY), "inf");
         assert_eq!(format_coord_human(f64::NEG_INFINITY), "-inf");
+    }
+
+    // (BlackThrush 2026-08-27) `format_geo_distance_4dp` replaces `format!("{:.4}")` on
+    // the GEODIST / WITHDIST reply path. Its ONLY claim is byte-identity with that
+    // formatter, so this drives it against exactly that oracle -- the same shape the
+    // 17-digit twin below uses, and the reason a wrong table would cost the speedup
+    // rather than the answer.
+    #[test]
+    fn geo_distance_4dp_matches_std_formatting() {
+        let mut checked = 0_u64;
+        let mut check = |v: f64| {
+            let got = super::format_geo_distance_4dp(v);
+            let want = format!("{v:.4}");
+            assert_eq!(got, want, "format_geo_distance_4dp({v:?}) diverged");
+            checked += 1;
+        };
+
+        // Edges and the exact-tie cases, where round-half-to-EVEN is the whole point.
+        for v in [
+            0.0, -0.0, 1.0, -1.0, 0.5, 0.00005, 0.00015, 0.00025, 0.00035,
+            -0.00005, -0.00015, 0.12345, 0.123449999, 0.99995, 0.99994999,
+            1e-8, -1e-8, 1e-300, f64::MIN_POSITIVE, 4.9e-324,
+            166274.1516, 3067.4157, 20037508.34, 40075016.68,
+            f64::NAN, f64::INFINITY, f64::NEG_INFINITY,
+            // outside the geo domain: must defer to std and still agree
+            2f64.powi(40), 2f64.powi(41), 2f64.powi(52), 2f64.powi(53),
+            1e15, 1e16, 1e17, f64::MAX, -f64::MAX,
+        ] {
+            check(v);
+        }
+
+        // The GEO distance domain, swept: metres up to half the Earth's circumference,
+        // and the same values divided by the unit divisors GEODIST accepts.
+        let mut x = 1e-6_f64;
+        while x < 2.1e7 {
+            for div in [1.0, 1000.0, 0.3048, 1609.34] {
+                check(x / div);
+                check(-(x / div));
+            }
+            x *= 1.0000191; // ~1.2M samples across the domain
+        }
+
+        // A deterministic bit-pattern sweep: mantissas that stress the tie logic at
+        // several exponents, including subnormals.
+        let mut state = 0x2026_08_27_u64;
+        for _ in 0..200_000 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let v = f64::from_bits(state);
+            if v.is_finite() {
+                check(v);
+            }
+        }
+        assert!(checked > 1_000_000, "sweep must be large: only {checked} values");
     }
 
     #[test]

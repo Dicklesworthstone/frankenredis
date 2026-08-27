@@ -70671,3 +70671,146 @@ client's SELECTed database.** Filed as `frankenredis-ekwyb` (P1, bug) with the m
 reproduced on `a9e91b7d3391fad0...`, the ELF at `839d14f38` before any of today's work.
 The probe now seeds with plain `SET` and asserts `DBSIZE` agrees on both engines before
 comparing a single reply.
+
+## 2026-08-27 — KEEP/LANDED — GEODIST: the distance half of the float formatter — fr 6,628.1 -> 3,514.5 instr/op (-47.0 pct), 1.1593x -> 0.6222x
+
+`geodist_base` was the worst remaining >1.0x cell I had a mechanism for. **31.7 pct of
+the whole command was `{:.4}`.**
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the
+live vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm,
+so the incumbent is measured against a live Redis and not against an earlier fr.
+
+    python3 scripts/shape_instr_per_op.py <bin> geodist_base
+
+    fr's OWN instr/op, five independent processes per ELF, arms INTERLEAVED
+    (control / ship / null, round-robin, so host drift cannot separate them):
+      control n=5  median 6,628.1  bootstrap 95% median CI [6,627.0, 6,645.8]
+      ship    n=5  median 3,514.5  bootstrap 95% median CI [3,514.1, 3,525.3]
+                                   -3,113.6 Ir/op, -46.98 pct   CIs DISJOINT
+
+    fr/redis ratio, n=10 per arm (two interleaved batches pooled):
+      control median 1.1593x  bootstrap 95% median CI [1.1374, 1.1738]
+      ship    median 0.6222x  bootstrap 95% median CI [0.6099, 0.6281]
+                              CIs DISJOINT -- a LOSS becomes a WIN
+
+    The A/A null arm is a BYTE-IDENTICAL COPY of the ship ELF (same SHA-256), run
+    in the same interleaved rotation, so the A/A and the A/B are measured inside one
+    invocation of the same harness against the same live redis arm. Paired per
+    round, ship/null:
+
+      A/A null median 0.99747 with bootstrap 95% median CI [0.99471, 1.00023]
+
+    Draws 0.99747 0.99471 0.99711 0.99838 1.00023 -- straddles 1.0, worst draw
+    0.53 pct off. The null PASSES. Against it the A/B effect is ship/control median
+    0.53020, i.e. the lever is 318x the measured noise floor: the same bytes
+    reproduce to 0.3 pct while the change moves the shape by 47 pct.
+
+    get_control, which must NOT move: 0.2847x -> 0.2885x, CIs [0.2812, 0.2975] vs
+    [0.2824, 0.2905] -- overlapping, i.e. indistinguishable. fr's own absolute on
+    that shape moved -0.22 pct.
+
+    ELF identity, quoted verbatim from the harness's own per-arm output key. It is
+    HARNESS-COMPUTED and RE-VERIFIED AFTER each arm -- the harness says so in the
+    same line, and it is explicitly NOT a /proc/self/exe self-report, which
+    callgrind makes impossible. Recorded as what it is, because the re-verification
+    (the file did not change under the run) is the guarantee that actually matters:
+
+      control  bench_elf_sha256=637f79a92bcf3f08f54d49a9ddf50381b082dd284e3ef5ba3f5d90a586ecf13c
+      ship     bench_elf_sha256=f4396f8f7cd3caafab54864f444f870137766e990bcc536976396502b6be49bb
+      null     bench_elf_sha256=f4396f8f7cd3caafab54864f444f870137766e990bcc536976396502b6be49bb
+      redis    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT IS GATED ON THE BOOTSTRAP MEDIAN-CI and on nothing else. CV is
+    diagnostic only and did not influence this verdict; never on CV. Spread is
+    quoted for provenance only (control 0.284 pct, ship 0.319 pct, null 0.278 pct).
+
+    Retry predicate: re-run on both SHA-256s; void if the ship arm's bootstrap 95%
+    median CI ever overlaps the control's, or if the A/A null band exceeds 0.005.
+
+### THE FRAME, AND WHY IT WAS STILL THERE
+
+    fr control (6,628.1 Ir/op)                     redis geodistCommand
+    2,104  flt2dec::strategy::dragon::format_exact  (no formatting frame at all)
+      352  flt2dec::strategy::grisu::format_exact_opt
+      311  bignum::Big32x40::mul_pow2
+      132  float_to_decimal_common_exact
+    -----
+    ~2,995  = 45 pct of the command, against a redis that spends ZERO there
+
+`{:.N}` on `f64` asks for an EXACT decimal expansion, so it takes Rust's exact path;
+grisu declines on hard inputs and it falls through to the `dragon` bignum algorithm.
+Redis calls `snprintf("%.4f")` and libc does not do this.
+
+**The lever already existed one level over, half-applied.** `format_coord_human` is an
+i128 fixed-point formatter in the same file whose comment records dragon "dominated
+GEOSEARCH WITHCOORD/WITHDIST profiles (~55 pct self)". It fixed the COORDINATE half.
+The DISTANCE half -- `geo_distance_reply` and the `WITHDIST` arm of `geo_search_reply`
+-- still called `format!("{normalized:.4}")`. `format_geo_distance_4dp` is its 4-decimal
+twin, wired into both sites.
+
+The delta measured (-3,113.6) slightly exceeds the attributed formatting frames
+(~2,995), which is the expected direction: the `String` machinery around the call goes
+with it.
+
+### WHY IT IS EXACT, NOT AN APPROXIMATION
+
+`value = m · 2^e` with `m < 2^53`, so `m · 10^4 < 2^67` fits an `i128` and the true
+decimal is `m · 10^4 / 2^-e`. The shift is that exact division, rounded half-to-EVEN,
+which is what `{:.4}` does. There is no intermediate float, so unlike a
+`(v * 1e4).round()` shortcut there is no double rounding. Non-finite values and
+`|value| >= 2^40` defer to the std path, so correctness never rests on the domain bound
+-- the bound only decides which of two CORRECT routes runs, and it also keeps the shift
+from overflowing an `i128`.
+
+`geo_distance_4dp_matches_std_formatting` drives it against `format!("{v:.4}")` over
+**more than 1.4M values**: the tie cases where half-to-even is the whole point, the geo
+domain swept geometrically and divided by each unit divisor GEODIST accepts, a
+deterministic LCG bit-pattern sweep including subnormals, and the out-of-domain values
+that must defer. The test asserts its own sweep size.
+
+### MEASURE THE ELF YOU WILL COMMIT
+
+The first ship ELF was `603a5a28...` and read 3,524.8 Ir/op. That binary was built
+BEFORE the oracle test was added, and **a `#[cfg(test)]` edit changes the release ELF**
+(panic line numbers move). So `603a5a28` is not the binary this commit produces and its
+number is not quotable for it. Every figure above is re-measured on `f4396f8f...`, the
+ELF the committed tree builds; it agrees (3,514.5 vs 3,524.8, inside the null band),
+which is the point -- the re-measurement was owed regardless of the answer.
+
+### GATES
+
+`geo_distance_4dp_matches_std_formatting` plus the ten other geo tests in `fr-command`
+pass. A GEODIST differential compares **17,604 replies byte-for-byte across all nine
+units** GEODIST accepts, over 129 members spread globally plus deliberate edges (the
+classic Palermo/Catania pair, sub-metre separations, the antimeridian, the latitude
+limits), and the nil paths (missing member, missing key, self-distance, bad unit). All
+identical to live redis 7.2.4. Distances are compared as STRINGS, never as floats -- a
+float comparison would hide exactly the last-digit divergence this change could
+introduce.
+
+`keyspace_accounting_gate` fails 3/225 on sinter/sunion/sdiff; it fails byte-identically
+on the control ELF, so it is pre-existing and not this change.
+
+### THE PROBE FOUND A SECOND fr-vs-REDIS DIVERGENCE THAT IS NOT MINE
+
+The `GEOSEARCH ... WITHDIST` arm of the probe diverged at radius 20000km and 20000mi.
+**It diverges identically on the control ELF `637f79a9...`**, which is the tell that it
+is not the change under test -- and this change only formats a number, so it cannot
+alter membership or ordering.
+
+Localised: the member is `p127`, at `(0.0, 85.05112878)`, the EXACT latitude limit. Both
+engines STORE it -- `ZCARD` is 129 on both -- but redis never returns it from GEOSEARCH
+at any radius, and fr does:
+
+    radius     fr   redis
+    19000km   128     127
+    20000km   129     128
+    20015km   129     128     (half the Earth's circumference)
+    21000km   129     128
+
+fr returns the strict superset. Recorded here rather than swept: the probe now compares
+the DISTANCE SEQUENCE in order and the `(member, distance)` SET, which pins everything
+this change could affect, and leaves the membership question to its own investigation.
+A member-ORDER difference among EQUAL distances is separately left unasserted -- ASC
+orders by distance and leaves ties unspecified.
