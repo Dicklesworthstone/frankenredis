@@ -69255,3 +69255,60 @@ Gates on the shipping ELF: stream reload+RESTORE fuzz 4 seeds x 6 cycles / 960
 commands, AOF CLI restart gate, fr-persist 240/240, fr-store 960 passed with the known
 `galp1`/`swapdb` pair, fr-runtime 656 passed with the known stale-replica pair. The
 RESTORE arm is unchanged at 2.1478x (null PASS), so this did not borrow from it.
+
+## 2026-08-27 — BOARD AFTER THE STREAM WIN: zset reload 2.3724x is the new worst, same structural cause
+
+Re-derived on HEAD (`caa66526...`), 40 members, 200 keys, every A/A null PASS:
+
+    reload zset    2.3724x   <- WORST
+    reload set     2.3383x
+    reload hash    2.1423x
+    RESTORE stream 2.1478x
+    reload list    1.2621x
+    reload stream  0.8849x   <- the win holds for the SAME-FIELDS shape too, not
+                                only the varying one it was measured on
+
+`python3 scripts/restore_instr_per_op.py <bin> 40 20 --type=<t> --op=reload --keys=200 --aa`
+
+### The zset arm profiled against the incumbent, SAME INVOCATION
+
+    fr 2.3717x (A/A null 0.999840x PASS)
+    fr ELF caa66526d51c280357170104feb3cb98909de5ddd3873ca8665bbf4a4d354149
+    redis ELF e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    redis                            fr
+    lzf_compress      1,598,646      lzf_compress_dispatch     2,118,400
+    lzf_decompress      730,800      lzf_decompress              693,200  <- fr FASTER
+    crcspeed64little    485,651      memcpy                    1,010,302
+    fwrite/fread/rio    ~360,000     decode_zset_listpack_pairs  919,800
+                                     PackedZSet::from_unique_pairs 760,800
+                                     encode_zset_score_listpack_blob 646,400
+                                     encode_listpack_string_entry  440,000
+                                     zadd_pairs_loading          430,000
+                                     PackedZSetIter::next        250,000
+
+**Redis has NO per-element encode/decode frames at all** -- it writes the listpack
+verbatim, exactly as it does for streams. fr's ~3.4M Ir/op of decode-and-re-encode has
+no counterpart, and on top of that fr pays `lzf_compress` **2,118,400 that a verbatim
+save would DELETE OUTRIGHT** -- the single biggest component of the stream win
+(`5d06ac9aa`), where the same frame vanished because a retained payload is already
+compressed.
+
+**So the lever that just took stream reload 2.5495x -> 0.8790x transfers directly, and
+both halves of the plumbing already exist:** the save side has a verbatim
+`RdbValue::ZsetListpack(blob)` arm, and the loader currently DECODES
+(`decode_zset_listpack_pairs` -> `RdbValue::SortedSet(members)`) where it could retain.
+
+**What it needs, and why it is not a one-turn port:** a lazy `SortedSet` wrapper on the
+same `Deref`/`DerefMut` pattern (~6 distinct constructors to forward -- `new` x20,
+`from_unique_pairs_with_limits` x14, `from_unique_pairs` x5, plus three smaller), the
+loader retaining, the save preferring the blob, and -- the part that actually costs
+turns -- **enumerating the EAGER READERS**. Streams needed three, each found with a
+caller table, each fixed by one inherent method shadowing `Deref`, and each one silently
+nullified the whole lever until it was found.
+
+**NO CODE CHANGE THIS TURN.** A sizing probe (rename the struct, count compiler errors
+-- the trick that unblocked the stream build) was malformed and produced a
+self-referential type rather than a usable count; it was reverted rather than debugged,
+so the wrapper surface here is still UNSIZED and that number is owed before the port
+starts.
