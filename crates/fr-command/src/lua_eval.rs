@@ -13055,10 +13055,44 @@ impl<'a> LuaState<'a> {
         {
             return Err("OOM command not allowed when used memory > 'maxmemory'.".to_string());
         }
+        // (BlackThrush 2026-08-27, frankenredis-ekwyb) NAMESPACE THE KEYS FOR THE CALLER'S
+        // SELECTed DATABASE.
+        //
+        // fr does not carry the db on the store; it applies it by REWRITING KEY POSITIONS IN
+        // ARGV before dispatch (`Runtime::namespace_argv_for_selected_db`), and
+        // `encode_db_key(0, k)` is the identity -- so an UNPREFIXED physical key IS a db-0
+        // key. This path called `dispatch_argv` directly and skipped that rewrite, so every
+        // key a SCRIPT names itself went to db 0 with a success reply. Only keys declared in
+        // `KEYS[..]` worked, because the runtime had namespaced EVAL's own argv and those
+        // positions are what `command_key_indexes` finds on the outer command.
+        //
+        // The rewrite is DISPATCH-ONLY and deliberately not in place: `argv` is still the
+        // logical command below, where `record_script_monitor` mirrors it to MONITOR and the
+        // propagation decision reads it. Upstream MONITOR shows the key the script wrote, not
+        // a storage-encoded one.
+        //
+        // db 0 borrows and copies NOTHING, matching the runtime's own `Cow::Borrowed`
+        // fast path -- the overwhelmingly common case pays only the `db == 0` test.
+        let selected_db = self.store.dispatch_client_ctx.db_index;
+        let namespaced: Option<Vec<Vec<u8>>> = if selected_db == 0 {
+            None
+        } else {
+            let mut rewritten = argv.to_vec();
+            for idx in crate::command_key_indexes(argv) {
+                if let Some(slot) = rewritten.get_mut(idx) {
+                    *slot = fr_store::encode_db_key(selected_db, slot);
+                }
+            }
+            Some(rewritten)
+        };
+        let dispatch_target: &[Vec<u8>] = namespaced.as_deref().unwrap_or(argv);
+
+        // The intercept chain handles MULTI/EXEC/ACL/AUTH/HELLO/SYNC only -- all keyless --
+        // so it reads the logical `argv` and is unaffected by the rewrite.
         let command_result = if let Some(intercepted) = script_command_intercept(argv) {
             intercepted
         } else {
-            match dispatch_argv(argv, self.store, self.now_ms) {
+            match dispatch_argv(dispatch_target, self.store, self.now_ms) {
                 Ok(frame) => Ok(frame),
                 Err(e) => {
                     let err_msg = match e.to_resp() {
@@ -17406,13 +17440,40 @@ fn eval_compiled_script_inner(
     // returns. Declared before `state` so the LuaState/Env drop first (reverse
     // declaration order), leaving only leaked cycle islands for the sweep.
     let _lua_gc = LuaGcScope::enter();
+    // Read before `state` takes its mutable borrow of the store.
+    let selected_db = store.dispatch_client_ctx.db_index;
     let mut state = if clone_globals_template {
         LuaState::new_with_cloned_globals_for_bench(store, now_ms)
     } else {
         LuaState::new(store, now_ms)
     };
 
-    let keys_vals: Vec<LuaValue> = keys.iter().map(|k| LuaValue::Str(k.clone())).collect();
+    // (frankenredis-ekwyb) A script sees the key it was GIVEN, on every database.
+    //
+    // The runtime applies the selected database by rewriting key positions in argv before
+    // dispatch, so on a non-zero db EVAL's own key arguments arrive here storage-encoded.
+    // Handing those straight to Lua leaks the encoding into script-visible state: `#KEYS[1]`
+    // counted the 14-byte prefix, `KEYS[1] == ARGV[1]` was false for one and the same key, and
+    // any script slicing or comparing a key name saw `\x00frdb...`. Upstream has no such
+    // encoding, so KEYS is built from the LOGICAL key and the single namespacing at dispatch
+    // then covers KEYS-derived and script-named keys alike.
+    //
+    // Only a key that decodes to the SELECTED db is stripped: on db 0 nothing was encoded, so a
+    // user key whose own bytes happen to begin with the prefix must survive verbatim.
+    let keys_vals: Vec<LuaValue> = keys
+        .iter()
+        .map(|k| {
+            let logical = if selected_db == 0 {
+                k.as_slice()
+            } else {
+                match fr_store::decode_db_key(k) {
+                    Some((db, logical)) if db == selected_db => logical,
+                    _ => k.as_slice(),
+                }
+            };
+            LuaValue::Str(logical.to_vec())
+        })
+        .collect();
     let argv_vals: Vec<LuaValue> = argv.iter().map(|a| LuaValue::Str(a.clone())).collect();
     state.set_keys_argv(keys_vals, argv_vals);
 

@@ -426,3 +426,117 @@ fn lua_ternary_pattern() {
     );
     assert_eq!(result, RespFrame::BulkString(Some(b"big".to_vec())));
 }
+
+// ── Scripts and the selected database (frankenredis-ekwyb) ──
+//
+// The runtime applies SELECT by rewriting key positions in argv with
+// `encode_db_key` before dispatch. Two things follow that a script can observe,
+// and both were wrong:
+//
+//   1. EVAL's own key arguments are rewritten too, so the Lua KEYS table was
+//      handed storage-encoded bytes. `#KEYS[1]` counted the 14-byte prefix and
+//      `KEYS[1] == ARGV[1]` was false for one and the same key.
+//   2. A key the SCRIPT names itself (a literal, or one built from ARGV) was
+//      never in argv when the runtime rewrote it, so it reached the store
+//      unprefixed -- i.e. in db 0 -- while the client sat on db 3.
+//
+// These drive `Runtime::execute_frame` on one client id rather than
+// `dispatch_argv`, because the namespacing under test is the runtime's: a test
+// that hand-encoded the key would be asserting against its own arithmetic.
+
+fn select(rt: &mut Runtime, db: &[u8]) -> RespFrame {
+    rt.execute_frame(command(&[b"SELECT", db]), 0)
+}
+
+fn get(rt: &mut Runtime, key: &[u8]) -> RespFrame {
+    rt.execute_frame(command(&[b"GET", key]), 0)
+}
+
+#[test]
+fn lua_keys_table_holds_the_logical_key_on_a_selected_db() {
+    let mut rt = Runtime::default_strict();
+    // db 0 is the identity encoding, so it is the control arm: what the script
+    // sees here is what it must also see on db 3.
+    assert_eq!(eval(&mut rt, r#"return #KEYS[1]"#, "1", &[b"mykey"]), RespFrame::Integer(5));
+
+    assert_eq!(select(&mut rt, b"3"), RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(eval(&mut rt, r#"return #KEYS[1]"#, "1", &[b"mykey"]), RespFrame::Integer(5));
+    assert_eq!(
+        eval(&mut rt, r#"return KEYS[1]"#, "1", &[b"mykey"]),
+        RespFrame::BulkString(Some(b"mykey".to_vec()))
+    );
+    // The comparison, not just the length: a prefix would make these differ.
+    assert_eq!(
+        eval(
+            &mut rt,
+            r#"if KEYS[1] == ARGV[1] then return 'same' else return 'DIFFERENT' end"#,
+            "1",
+            &[b"mykey", b"mykey"],
+        ),
+        RespFrame::BulkString(Some(b"same".to_vec()))
+    );
+    // And the leading bytes, which is where the encoding would show up first.
+    assert_eq!(
+        eval(&mut rt, r#"return string.sub(KEYS[1], 1, 2)"#, "1", &[b"mykey"]),
+        RespFrame::BulkString(Some(b"my".to_vec()))
+    );
+}
+
+#[test]
+fn lua_script_named_key_lands_in_the_selected_db() {
+    let mut rt = Runtime::default_strict();
+    assert_eq!(select(&mut rt, b"3"), RespFrame::SimpleString("OK".to_string()));
+
+    // A literal the script names itself, with no declared keys at all.
+    eval(&mut rt, r#"redis.call('SET', 'litkey', 'v') return 1"#, "0", &[]);
+    assert_eq!(get(&mut rt, b"litkey"), RespFrame::BulkString(Some(b"v".to_vec())));
+
+    // A key the script builds out of ARGV, which is likewise never rewritten.
+    eval(&mut rt, r#"redis.call('SET', ARGV[1], 'v') return 1"#, "0", &[b"argkey"]);
+    assert_eq!(get(&mut rt, b"argkey"), RespFrame::BulkString(Some(b"v".to_vec())));
+
+    // Neither may have leaked into db 0, which is where they used to go.
+    assert_eq!(select(&mut rt, b"0"), RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(get(&mut rt, b"litkey"), RespFrame::BulkString(None));
+    assert_eq!(get(&mut rt, b"argkey"), RespFrame::BulkString(None));
+}
+
+#[test]
+fn lua_keys_derived_write_is_namespaced_exactly_once() {
+    let mut rt = Runtime::default_strict();
+    assert_eq!(select(&mut rt, b"3"), RespFrame::SimpleString("OK".to_string()));
+
+    // Reading back through the same handle passes even when the key is encoded
+    // twice, so the load-bearing assertion is the one OUTSIDE the script: a
+    // double-prefixed key sits in db 3 under a name no client can reach.
+    assert_eq!(
+        eval(
+            &mut rt,
+            r#"redis.call('SET', KEYS[1], 'kv') return redis.call('GET', KEYS[1])"#,
+            "1",
+            &[b"mykey"],
+        ),
+        RespFrame::BulkString(Some(b"kv".to_vec()))
+    );
+    assert_eq!(get(&mut rt, b"mykey"), RespFrame::BulkString(Some(b"kv".to_vec())));
+
+    assert_eq!(select(&mut rt, b"0"), RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(get(&mut rt, b"mykey"), RespFrame::BulkString(None));
+}
+
+#[test]
+fn lua_db_zero_key_that_looks_encoded_is_left_alone() {
+    // The strip keys off the SELECTED db, not off the byte pattern: on db 0
+    // nothing was encoded, so a user key that merely starts with the namespace
+    // prefix is an ordinary key and must survive verbatim.
+    let mut rt = Runtime::default_strict();
+    let mut odd_key = b"\x00frdb".to_vec();
+    odd_key.extend_from_slice(&3_u64.to_be_bytes());
+    odd_key.extend_from_slice(b"mykey");
+
+    let len = rt.execute_frame(command(&[b"EVAL", b"return #KEYS[1]", b"1", &odd_key]), 0);
+    assert_eq!(len, RespFrame::Integer(odd_key.len() as i64));
+
+    eval(&mut rt, r#"redis.call('SET', KEYS[1], 'v') return 1"#, "1", &[&odd_key]);
+    assert_eq!(get(&mut rt, &odd_key), RespFrame::BulkString(Some(b"v".to_vec())));
+}
