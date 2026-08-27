@@ -738,13 +738,39 @@ impl UpstreamStreamSkeleton {
     /// instead of decoding them: fr must keep rejecting corrupt payloads that
     /// default-redis accepts (9a6f6c487), so the validation cannot simply be
     /// dropped along with the materialisation.
-    pub fn validate_entries(&self) -> Result<(), UpstreamStreamError> {
+    /// Returns the GREATEST entry id in the record, or None when it holds no live
+    /// entries.
+    ///
+    /// Handing this back is what keeps a retained (undecoded) stream undecoded:
+    /// RESTORE needs a last-generated-id when the record carries no watermark, and
+    /// reading it off the built log would materialize the very thing retention
+    /// exists to defer. The ids are already collected here for the duplicate check,
+    /// so the maximum is free.
+    pub fn validate_entries(&self) -> Result<Option<(u64, u64)>, UpstreamStreamError> {
         let mut sink: StreamOut<std::borrow::Cow<'_, [u8]>> = StreamOut::default();
         for (master_ms, master_seq, blob) in &self.nodes {
             let lp = decode_raw_values(blob)?;
             decode_stream_listpack::<_, true, true>(&lp, blob, *master_ms, *master_seq, &mut sink)?;
         }
-        Ok(())
+        // DUPLICATE IDS, checked here because a deferred materialisation cannot.
+        //
+        // The RESTORE caller rejects a payload whose ids repeat -- today that
+        // happens inside its build closure, where a non-monotonic payload falls
+        // back to a per-entry `insert` and a repeat is an error. A stream held
+        // UNDECODED has no such moment, so the check has to live with the rest of
+        // the validation or fr would start accepting malformed payloads it rejects
+        // now.
+        //
+        // Out-of-order but UNIQUE ids stay ACCEPTED, matching today's behaviour --
+        // the fallback path tolerates reordering and only duplicates are fatal.
+        // Sorting a copy of the ids is O(n log n) on 16-byte keys and touches none
+        // of the field data, which is the whole point of not materialising.
+        let mut ids: Vec<(u64, u64)> = sink.ids().collect();
+        ids.sort_unstable();
+        if ids.windows(2).any(|w| w[0] == w[1]) {
+            return Err(UpstreamStreamError::InconsistentEntryCount);
+        }
+        Ok(ids.last().copied())
     }
 
     /// The owned form, for callers that must outlive the blobs (`RdbValue::Stream`).
@@ -1288,8 +1314,10 @@ where
         let ms = combine_u64_i64(master_ms, ms_delta);
         let seq = combine_u64_i64(master_seq, seq_delta);
         if VALIDATE_ONLY {
-            // Counted, not materialised: the live-count check at the end of this
-            // function still has to see this entry.
+            // Ids ARE recorded -- `validate_entries` needs them for the duplicate
+            // check -- but no field bytes are. That is the whole saving: 16 bytes
+            // per entry instead of every name and value.
+            out.index.push((ms, seq, 0, 0));
         } else if FLAT {
             let len = u32::try_from(out.fields.len() - mark)
                 .map_err(|_| UpstreamStreamError::InvalidFieldCount)?;
@@ -1388,6 +1416,49 @@ fn combine_u64_i64(base: u64, delta: i64) -> u64 {
 mod tests {
     use super::*;
 
+    /// The duplicate-id REJECT branch, exercised directly.
+    ///
+    /// Byte corruption is unlikely to manufacture a repeated id, so the oracle test
+    /// above can pass without ever reaching this branch. An untested reject path in
+    /// the validator is exactly what would let a deferred materialisation start
+    /// accepting payloads RESTORE rejects today.
+    #[test]
+    fn validate_entries_rejects_duplicate_ids_and_accepts_reordered_unique_ones() {
+        let dup: Vec<StreamEntry> = vec![
+            (7, 1, vec![(b"f".to_vec(), b"a".to_vec())]),
+            (7, 1, vec![(b"f".to_vec(), b"b".to_vec())]),
+        ];
+        if let Some(payload) =
+            encode_upstream_stream_listpacks3(&dup, Some((7, 1)), &[], Some(2), None)
+            && let Ok((skeleton, _)) =
+                UpstreamStreamSkeleton::decode(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, &payload)
+        {
+            assert!(
+                skeleton.validate_entries().is_err(),
+                "a payload with two entries at 7-1 must be rejected"
+            );
+        }
+
+        // Out-of-order but UNIQUE must still be ACCEPTED -- today's fallback path
+        // tolerates reordering and only duplicates are fatal. Tightening this would
+        // be a silent compatibility regression on foreign payloads.
+        let reordered: Vec<StreamEntry> = vec![
+            (9, 1, vec![(b"f".to_vec(), b"a".to_vec())]),
+            (3, 1, vec![(b"f".to_vec(), b"b".to_vec())]),
+        ];
+        if let Some(payload) =
+            encode_upstream_stream_listpacks3(&reordered, Some((9, 1)), &[], Some(2), None)
+            && let Ok((skeleton, _)) =
+                UpstreamStreamSkeleton::decode(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, &payload)
+        {
+            assert_eq!(
+                skeleton.validate_entries().is_ok(),
+                skeleton.flat_entries().is_ok(),
+                "reordered-but-unique ids must be accepted exactly as before"
+            );
+        }
+    }
+
     /// `validate_entries` must be a pure ORACLE for `flat_entries`: same accepts,
     /// same rejects, on the same bytes.
     ///
@@ -1434,13 +1505,25 @@ mod tests {
                     // Rejected before either walk runs; nothing to compare.
                     continue;
                 };
-                let flat_ok = skeleton.flat_entries().is_ok();
+                // The reference predicate is what RESTORE ACTUALLY ACCEPTS, which is
+                // `flat_entries` succeeding AND the ids being unique -- the caller's
+                // build closure rejects a repeat. `validate_entries` folds both in,
+                // so it is compared against both, not against `flat_entries` alone.
+                let reference_ok = match skeleton.flat_entries() {
+                    Err(_) => false,
+                    Ok(flat) => {
+                        let mut ids: Vec<(u64, u64)> = flat.ids().collect();
+                        ids.sort_unstable();
+                        !ids.windows(2).any(|w| w[0] == w[1])
+                    }
+                };
                 let validate_ok = skeleton.validate_entries().is_ok();
                 assert_eq!(
-                    flat_ok, validate_ok,
-                    "validator disagrees with the materialising decode at byte {offset} ^ {xor:#04x}: \
-                     flat_entries ok={flat_ok} validate_entries ok={validate_ok}"
+                    reference_ok, validate_ok,
+                    "validator disagrees with RESTORE's acceptance at byte {offset} ^ {xor:#04x}: \
+                     reference ok={reference_ok} validate_entries ok={validate_ok}"
                 );
+                let flat_ok = reference_ok;
                 agreed += 1;
                 if !flat_ok {
                     both_rejected += 1;

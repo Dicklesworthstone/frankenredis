@@ -69034,3 +69034,60 @@ commands, AOF CLI restart gate, fr-runtime 656 passed. fr-store 959 passed; `gal
 `swapdb` are the known pre-existing pair and `zadd_insert_move` is the load-sensitive
 wall-clock class -- it failed while the measurement was loading the host and passes on
 a quiet one.
+
+## 2026-08-27 — LAZY RESTORE BUILT AND MEASURED: +31.7 pct. REVERTED. The trigger is located.
+
+The lazy (blob-retaining) RESTORE was built end to end -- `Pending` variant holding an
+owned `UpstreamStreamSkeleton`, `OnceCell` materialisation inside `deref`, `DerefMut`
+collapsing to `Ready`, and the RESTORE site storing the validated skeleton instead of
+rebuilding. **It is a LOSS and it is reverted.**
+
+    python3 scripts/restore_instr_per_op.py <bin> 400 100 --type=stream --varyfields --aa
+
+    ALL SIX DRAWS CERTIFIED (A/A nulls PASS)
+      wrapper (control)  743,432.5 / 741,531.3 / 740,319.4 -> 741,761.1   3.2266x
+      lazy               976,807.6 / 976,342.4 / 977,602.6 -> 976,917.5   4.2554x
+                                                   +235,156 Ir/op  +31.71 pct
+    control ELF 4e62c6ae26b6c836f72acd548c9ef3376511feaafe525eb1d5f388bfa82e08a2
+    lazy    ELF 7d006c8f8f719193de9beefb97fcbfd9891b83399f76f0cfc9d5a39da5e4eff9
+
+**IT MATERIALISES ANYWAY, EVERY TIME.** `materialize_pending` runs **1.00 times per
+op** and `decode_raw_values` DOUBLES, 141,044 -> 282,088 Ir/op: the record is walked
+once for validation and again for the decode that was supposed to be deferred. Nothing
+was saved and a whole validation pass was added -- which is exactly the +235,156.
+
+**THE TRIGGER, located by caller attribution:**
+`<fr_store::Store>::internal_entries_insert_with_expiry_impl::<true>` dereferences the
+stream while INSERTING it, 1.00 calls/op. The value is materialised before it is ever
+stored. A first guess -- the `watermark.or_else(|| entries.keys()...)` last-id fallback
+-- was wrong: routing that through the validator (which already collects every id for
+the duplicate check, so the maximum is free) left the count at 1.00. **Fixing the
+diagnosis I guessed instead of the one I measured cost a build; the caller table gave
+the real answer in one query.**
+
+**What the fix needs:** the insert path must not deref a `Pending`. `StreamEntries`
+needs INHERENT `len()` / `is_empty()` -- inherent methods shadow `Deref` -- answering
+from the skeleton's declared `stream_length`, plus whatever else that path touches
+(it is a helper inlined into `internal_entries_insert_with_expiry_impl`, not visible
+in its own body). **The design is not disproved; it is defeated by one eager reader,
+and the measured floor of 2.0525x still stands** (`747a1eff4`).
+
+### What is KEPT
+
+`validate_entries` now also rejects DUPLICATE IDS and returns the greatest id. That is
+not optional dressing: RESTORE rejects a repeated id today inside its build closure,
+and a deferred materialisation has no such moment, so the check has to live with the
+validation or fr silently starts accepting payloads it rejects now. Out-of-order but
+UNIQUE ids stay ACCEPTED, matching today's fallback, because tightening that would be a
+silent compatibility regression on foreign payloads.
+
+Both directions are tested: the byte-corruption oracle now compares against RESTORE's
+FULL acceptance predicate (`flat_entries` AND unique ids), and a separate test drives
+the duplicate branch directly -- byte corruption is unlikely to manufacture a repeated
+id, so the oracle alone could have passed without ever reaching it. Mutation-checked:
+an unconditional `Ok` validator fails the oracle.
+
+    ship ELF 90930685203a1474c130eecb3e1a9df9282cb71c3be1e9e01e7e1a597d23ae4e
+    fr-persist 240/240; fr-store 957-960 passed across runs, the 2 stable failures
+    being the known pre-existing `galp1` / `swapdb` pair and the rest the
+    load-sensitive wall-clock class.
