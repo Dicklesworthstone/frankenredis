@@ -71405,3 +71405,100 @@ re-run (ratio 0.97x), and `swapdb_db_enumeration` + `intersect_sorted_i64_gallop
 both already failing earlier today on an ELF where fr-store was provably unmodified (see
 the `985499ab2` row, where fr-store's independence from fr-command and fr-runtime was
 established). None of the three touches slowlog.
+
+## 2026-08-27 — ANALYSIS/SIZING — FCALL's remaining gap is 12 allocations vs redis's 4, and chasing them found a P1 non-determinism
+
+Nothing lands here. This sizes what is left on the worst cell after three levers
+(`985499ab2`, `72d8ec881`, `ebb6c402c`), and records a correctness defect the sizing
+turned up.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm; the
+allocation counts below are two-point call-count deltas from that run's own dumps.
+
+    python3 scripts/shape_instr_per_op.py <bin> fcall_lib1_pad --keep-dumps
+    python3 scripts/call_count_delta.py <dump> 2000 --callers __rust_alloc
+
+    fr/redis instructions per op on this shape is 1.4136x after the three levers.
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      fr     bench_elf_sha256=4a904af53e17b132ab9c757ccb0c6edf40ffddcf1c2fe3d8db395f7809edb126
+      redis  bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    A/A null, same invocation as the A/B arms, median 0.99887 bootstrap 95% median CI [0.99685, 1.00084]
+    -- carried over from the `ebb6c402c` run on this shape and this ELF pair, where the
+    null arm was a byte-identical copy of the fr arm. PASSES.
+
+    The VERDICT IS GATED ON THE BOOTSTRAP MEDIAN-CI and on nothing else. CV is diagnostic
+    only and did not influence this verdict; never on CV. This row is SIZING: it proposes
+    no lever it has measured.
+
+    Retry predicate: re-count on the same SHA-256s; void if `__rust_alloc` is not 12.00
+    calls/op on fcall_lib1_pad, or if redis's `zmalloc` is not 4.00.
+
+### THE COUNT, AND THE TRAP THAT WOULD HAVE INFLATED IT 3x
+
+A `malloc` glob reads **40.410 calls/op** on fr. That number is wrong to quote, and the
+caller table says why:
+
+    mi_theap_malloc_aligned  12.002      mi_malloc_aligned  12.002      __rustc::__rust_alloc  12.002
+
+Three nesting levels of the SAME twelve allocations
+([[feedback_malloc_glob_counts_nested_mimalloc_frames]]). Redis's glob is nested the same
+way (18.487) and its own wrapper `zmalloc` reads **4.0005**.
+
+**So the honest comparison is fr 12 allocations per FCALL against redis 4.** Where fr's go:
+
+    4.000  RawVecInner::finish_grow          (2.000 Vec<Scope>::grow_one, 1.000 Vec<bool>::grow_one, 2.002 do_reserve)
+    2.000  lua_eval::Scope::set_local_cell
+    2.000  lua_eval::LuaTable::new
+    2.000  lua_eval::Env::set_local
+    1.000  lua_eval::function_call_registered
+    1.000  Vec<Scope> SpecFromIterNested
+    0.003  record_slowlog*                   <- confirms ebb6c402c; it was ~1.0 before
+
+### A LEVER I PRICED AND DID NOT TAKE
+
+`Vec::with_capacity` on the two growing stacks looks obvious and mostly is not:
+`Vec<bool>` grows ONCE, so reserving trades one allocation for one allocation and saves
+only the growth branch. Only `Vec<Scope>` (two grows) saves an allocation. ~70 instr/op on
+a 10,535 instr/op command, which is not worth a commit here and is recorded so nobody
+re-derives it.
+
+### THE NAMED NEXT LEVER FROM THE LAST ROW WAS WRONG, AND THE CODE SAYS SO
+
+`ebb6c402c` closed by suggesting `record_latency_sample` had the same
+build-before-you-ask shape as `record_slowlog`. **It does not.** It tests
+`threshold_ms == 0` and `duration_ms <= threshold_ms` FIRST and returns, and only then
+builds its event name. That vein is clean; the suggestion was a guess and is withdrawn.
+
+### `Store::function_get` IS A LINEAR SCAN, AND ASKING WHY LED SOMEWHERE ELSE
+
+    for lib in self.function_libraries.values() {
+        for func in &lib.functions {
+            if func.name.eq_ignore_ascii_case(func_name) { return Some((lib, func)); } } }
+
+O(libraries x functions) per FCALL, 173.0 instr/op at one library with one function, and
+it is a candidate cause of the small lib1 -> lib32 slope. A name-keyed index is the
+obvious fix and there are only FOUR mutation sites (insert, remove, clear, clear).
+
+**It cannot be built yet, and that is the finding.** The load-time duplicate check is
+CASE-SENSITIVE (`existing.name == entry.name`, fr-store/src/lib.rs:35600) while this
+resolution is CASE-INSENSITIVE. An index has to pick one, and picking either changes
+observable behaviour -- because the current behaviour is already broken:
+
+    two libraries, one registering `myfunc`, one registering `MYFUNC`
+    fr:    BOTH load.  Over 5 FRESH servers on 4a904af5...:
+             rounds 0-3   FCALL myfunc -> 'FROM_A'   FCALL MYFUNC -> ERR Function not found
+             round  4     FCALL myfunc -> ERR ...    FCALL MYFUNC -> 'FROM_B'
+           TWO distinct outcomes across five identical servers.
+    redis: the second load is REJECTED, 'ERR Function MYFUNC already exists',
+           and resolution is consistent -- 1 distinct outcome across 5 runs.
+
+The non-determinism is the `HashMap` iteration order over `function_libraries`, seeded per
+PROCESS, so the same dataset answers differently depending on which process serves it --
+which also lets a replica disagree with its master. Filed as
+**`frankenredis-function-name-case-duplicate-73c03`** (P1). Repro `fnamecase.py`.
+
+Sizing, not a lever: the index is worth ~173 instr/op plus the `eq_ignore_ascii_case`
+memcmp, and it is BLOCKED on settling the case semantics, not on effort.
