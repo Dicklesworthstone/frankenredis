@@ -70558,3 +70558,116 @@ different job from a table entry, and it is not one to start at the end of a ses
 still holds, the magnitude `sf510` was missing, and a located residual with its cost
 split. The next person can skip building a library-text cache (2.5 pct) and go straight
 at generic dispatch (53 pct of the gap) knowing it is [C] work.
+
+## 2026-08-27 — KEYS: sort the SLICES, not the copies — keys_star_64 fr 45,581.7 -> 41,896.2 instr/op (-8.1 pct), 1.1330x -> 0.9949x
+
+The remaining >1.0x cells split two ways. `sort_ro_alpha` (1.2981x) has the worst ratio
+but its 2,482 gap is smaller than its 2,936 of DISPATCH -- the [C] wall
+`a8d1db0c3` documented. **`keys_star_64` was the largest ABSOLUTE gap (4,224 Ir/op) with
+dispatch at 1.1 pct**, so it is real work and attackable without touching dispatch.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the
+live vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> keys_star_64
+
+    fr's OWN instr/op, EIGHT independent processes per ELF:
+      control n=8  median 45,581.7  bootstrap 95% median CI [44,148.9, 47,134.7]
+      ship    n=8  median 41,896.2  bootstrap 95% median CI [40,708.9, 43,584.1]
+                                    -3,685.5 Ir/op, -8.09 pct   CIs DISJOINT
+
+    IN-PROCESS ELF SHA-256 (harness-computed and re-verified after each arm):
+      control ELF sha256 40f9db75e012664e9c712a2fd4c2862b878790c86a897e33e288c962037978ee
+      ship    ELF sha256 637f79a92bcf3f08f54d49a9ddf50381b082dd284e3ef5ba3f5d90a586ecf13c
+      redis   ELF sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    Retry predicate: re-run on both SHA-256s; void if the ship arm's bootstrap 95%
+    median CI ever overlaps the control's.
+
+### WHY EIGHT DRAWS, AND WHY A SINGLE DRAW LIED BY 3x
+
+My first draw read `46,073.0 -> 40,156.5`, **-12.8 pct**. Eight draws say **-8.09 pct**.
+The shape is genuinely noisy -- control spread 9.6 pct across draws -- and the cause is
+mechanical rather than environmental: **`self.entries.keys()` iterates a `HashMap` whose
+`foldhash::RandomState` is seeded per PROCESS, so each run hands the sort a different
+input permutation, and a comparison sort's work depends on that permutation.** The noise
+is therefore PROPORTIONAL TO THE THING BEING MEASURED, which is exactly the case where
+one draw is worthless. (The ship arm's spread is smaller, 12.0 vs 9.6 pct absolute but
+on a smaller base -- consistent with a cheaper sort.)
+
+### THE CHANGE, AND THE GUARANTEE IT DOES NOT TOUCH
+
+fr SORTS its `KEYS` reply; redis does not sort at all (`keysCommand` has no sort frame).
+That is deliberate and stays: the arm's own comment says the sorted output "is what the
+previous behaviour promised and several fixtures pin. Redis's own KEYS is unordered, so
+keeping the sort is a superset guarantee, not a divergence."
+
+So the lever is to make the sort cheap, not to delete it. It was running over
+`Vec<Vec<u8>>` -- every comparison chased two indirections and every move shuffled a
+24-byte `Vec` header for a key whose bytes never move. It now collects `&[u8]`, sorts
+those (16-byte fat pointers), and does the per-match `to_vec` ONCE afterwards in output
+order. Byte-identical by construction: `Ord` for `&[u8]` and `Vec<u8>` are both
+lexicographic over the same bytes.
+
+      fr control (41,992 Ir/op)          redis (40,459 Ir/op)
+      8,115.9  memcmp                    8,648  _addReplyProtoToList
+      6,457.0  small_sort_general        5,184  _addReplyToBufferOrList
+      3,392.0  RespFrame::encode_into    5,018  prepareClientToWrite
+      2,693.0  push_logical_key_if_match 4,822  keysCommand
+      2,382.0  quicksort                 3,226  memcpy
+
+Sort frames plus the memcmp they drive were 42.6 pct of the command, against a redis
+that does not sort. fr's REPLY path is roughly half redis's; the sort was giving the
+lead back.
+
+### THE TRADE, STATED NOT HIDDEN
+
+Sorting slices needs a second `Vec`, and at a tiny keyspace that allocation is pure cost:
+
+      keys_star (2 keys)   2,511.2 -> 2,656.2 Ir/op   +5.78 pct   CIs DISJOINT
+      keys_star_64         45,581.7 -> 41,896.2       -8.09 pct   CIs DISJOINT
+
+Both are real. This is a judgement about workloads, not a measurement: `KEYS` is
+O(keyspace) and the shapes that matter are the large ones, where fr went from a LOSS to
+parity; at two keys fr remains a 2.2x WIN over redis either way (0.4170x -> 0.4587x).
+
+### A SECOND STEP THAT MEASURED WORSE AND WAS BACKED OUT
+
+I then tried to kill the 8,115.9 `memcmp` with an order-preserving 8-byte prefix digest
+(`sort_unstable_by`, compare a zero-padded big-endian `u64` first, full compare on a
+tie). The ordering argument is sound and its exhaustive test passed. **It measured
+52,634.4 Ir/op -- 25 pct WORSE than doing nothing** -- and was reverted.
+
+Two causes, and the first is already in this ledger:
+`buf[..n].copy_from_slice(&key[..n])` with a RUNTIME `n` is a `memcpy` CALL
+([[project_variable_length_extend_is_a_memcpy_call]]), so the digest replaced one
+`memcmp` per comparison with two `memcpy`s. And `sort_unstable_by` with a closure gives
+up whatever specialisation `sort_unstable` has for `&[u8]`. **A comparator that is
+cheaper on paper can be more expensive per comparison AND cost the sort its fast path.**
+
+### GATES
+
+The battery passes: `glob_match_differ` (added for this row) plus the thirty existing
+differentials. `keyspace_accounting_gate` FAILS 3/225 on sinter/sunion/sdiff -- **it
+fails byte-identically on the control ELF**, so it is pre-existing and not this change.
+
+A KEYS probe over key sets built to break a sort (prefixes of one another, NUL-ish
+names, keys shorter/longer/exactly 8 bytes, keys sharing eight leading bytes, high
+bytes), across db 0 AND db 3 -- the walk has separate arms -- and across seven patterns
+including `*`, globs, a character class and a no-match. It asserts TWO different things:
+the reply is the same SET redis returns, and fr's own reply is SORTED (redis cannot
+witness that; it is fr's guarantee). PASS on both ELFs.
+
+fr-store, fr-server pass; fr-runtime 657 pass with the two failures already present on
+`7fb79f537`.
+
+### THE PROBE'S OWN FIRST RUN FOUND A REAL BUG — IN fr, NOT IN THIS CHANGE
+
+The probe's first version seeded its db-3 keyspace with one `EVAL`, and reported six
+fr-vs-redis divergences on db 3. **It reported them identically on the control ELF**,
+which is the tell that a differential is measuring its own harness. It was: the SEED had
+failed, because **fr routes an UNDECLARED key inside `EVAL` to db 0, ignoring the
+client's SELECTed database.** Filed as `frankenredis-ekwyb` (P1, bug) with the matrix;
+reproduced on `a9e91b7d3391fad0...`, the ELF at `839d14f38` before any of today's work.
+The probe now seeds with plain `SET` and asserts `DBSIZE` agrees on both engines before
+comparing a single reply.

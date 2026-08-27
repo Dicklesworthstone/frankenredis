@@ -13784,6 +13784,23 @@ impl Store {
     /// matches `pattern`. `is_star` (pattern == `*`) takes the redis allkeys
     /// fast path and skips `glob_match` entirely. Used by the full-DB-scan arm
     /// of `keys_matching_in_db`.
+    /// (BlackThrush 2026-08-27) The BORROWED twin, so the full-DB arm can sort before
+    /// it allocates. Same decode, same glob, same acceptance -- it differs only in
+    /// pushing the logical key's SLICE instead of a fresh `Vec`.
+    fn push_logical_key_ref_if_match<'k>(
+        result: &mut Vec<&'k [u8]>,
+        physical_key: &'k [u8],
+        glob: &PreparedGlob<'_>,
+        is_star: bool,
+    ) {
+        let logical = decode_db_key(physical_key)
+            .map(|(_, logical)| logical)
+            .unwrap_or(physical_key);
+        if is_star || glob.matches(logical) {
+            result.push(logical);
+        }
+    }
+
     fn push_logical_key_if_match(
         result: &mut Vec<Vec<u8>>,
         physical_key: &[u8],
@@ -13837,22 +13854,37 @@ impl Store {
             // behaviour promised and several fixtures pin. Redis's own KEYS is
             // unordered, so keeping the sort is a superset guarantee, not a
             // divergence.
-            let mut result: Vec<Vec<u8>> = Vec::new();
+            // (BlackThrush 2026-08-27) SORT THE SLICES, THEN ALLOCATE. The sort stays --
+            // it is the superset guarantee this arm's comment above promises and several
+            // fixtures pin -- but it was being run over `Vec<Vec<u8>>`, so every
+            // comparison chased two indirections and every move shuffled a 24-byte
+            // `Vec` header for a key whose bytes never move. Sorting `&[u8]` moves a
+            // 16-byte fat pointer instead, and the per-match `to_vec` happens ONCE,
+            // afterwards, in output order.
+            //
+            // Byte-identical by construction: `Ord` for `&[u8]` and for `Vec<u8>` are
+            // both lexicographic over the same bytes, so this sorts the same multiset
+            // into the same order and then copies it.
+            //
+            // Measured: `KEYS *` over 64 keys spent 6,457 Ir/op in `small_sort` plus
+            // 3,297 in `quicksort` plus the `memcmp` those drive, 42.6 pct of the whole
+            // command, against a redis `keysCommand` that does not sort at all.
+            let mut matched: Vec<&[u8]> = Vec::new();
             if db == 0 {
                 for key in self.entries.keys() {
                     if decode_db_key(key).is_some() {
                         continue;
                     }
-                    Self::push_logical_key_if_match(&mut result, key, &pg, is_star);
+                    Self::push_logical_key_ref_if_match(&mut matched, key, &pg, is_star);
                 }
             } else {
                 let prefix = encode_db_key(db, b"");
                 for key in self.entries.keys().filter(|k| k.starts_with(&prefix)) {
-                    Self::push_logical_key_if_match(&mut result, key, &pg, is_star);
+                    Self::push_logical_key_ref_if_match(&mut matched, key, &pg, is_star);
                 }
             }
-            result.sort_unstable();
-            return result;
+            matched.sort_unstable();
+            return matched.into_iter().map(<[u8]>::to_vec).collect();
         }
         // (frankenredis-uhthd step 2) The ordered range-prune is forfeited with the
         // side index (see `keys_matching`); candidates are now every key of the db,
