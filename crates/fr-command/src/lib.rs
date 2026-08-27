@@ -14252,6 +14252,24 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // The cache lookup needs no `Store` at all, so it can run inside this match against the
     // borrowed bytes; the copy is then paid only on a MISS, where the source is genuinely about
     // to be executed. On the hit path FCALL now copies nothing that scales with the library.
+    //
+    // (BlackThrush 2026-08-27) THAT SENTENCE IS TRUE OF COPIES AND FALSE OF COMPARES, and the
+    // difference is measurable. The cache is keyed on the library SOURCE, so a HIT still runs
+    // `HashMap`'s `Eq` over the whole body. Dose-response on ELF `86db6d21`, fr against live
+    // redis 7.2.4 in the same invocation:
+    //
+    //     __memcmp_avx2_movbe   197.7 instr/op at fcall_lib1  ->  494.9 at fcall_lib32
+    //     memcmp CALLS          9.0025 calls/op               ->  9.0000     (IDENTICAL)
+    //
+    // Constant call count with 2.5x the instructions is one call comparing a bigger buffer:
+    // +297.2 instr/op for a 32x library, paid on EVERY FCALL. Redis resolves a function by name
+    // through a dict and compares no body at all.
+    //
+    // Content-addressing is what buys invalidation for free here, so the fix is not to weaken
+    // the key but to replace what it buys: key on the library NAME plus a generation counter
+    // bumped at the four `function_libraries` mutation sites (insert/remove/clear/clear), and
+    // clear the cache when the generation moves. NOT done here -- a wrong cache executes a
+    // stale library, and that is not a change to land without room to gate it.
     let (library, has_no_writes, has_allow_oom, has_allow_stale, has_no_cluster) =
         match store.function_get(func_name) {
             Some((lib, func)) => {

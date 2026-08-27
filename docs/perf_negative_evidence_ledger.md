@@ -72281,3 +72281,70 @@ of the whole library. The shift-xor restores the mixing the per-byte multiply wa
 32 differentials pass; `keyspace_accounting_gate` fails 3/225 on sinter/sunion/sdiff and
 produced byte-identical output on a control ELF earlier today. `fr-runtime` 657 pass with
 the two stale-replica failures already present.
+
+## 2026-08-27 — ANALYSIS/SIZING (frankenredis-kbyhy) — the FCALL library cache compares the WHOLE library body on every hit: +297.2 instr/op per 32x of library, at constant call count
+
+No lever lands in this row. It measures an articulation point on the worst vs-incumbent
+ratio on the board and names the fix, and it CORRECTS a claim in the code it measures.
+
+`fcall_cmd`'s comment says the borrowed probe means "on the hit path FCALL now copies
+nothing that scales with the library". **True of copies, false of compares.** The cache is
+keyed on the library SOURCE, so every HIT runs `HashMap`'s `Eq` across the whole body.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> fcall_lib1 | fcall_lib32 --keep-dumps
+    python3 scripts/call_count_delta.py <dump> 2000 memcmp
+
+    DOSE-RESPONSE over library size, and the call count is what makes it attributable:
+
+      __memcmp_avx2_movbe   197.7 instr/op at fcall_lib1   ->   494.9 at fcall_lib32
+      memcmp CALLS           9.0025 calls/op               ->    9.0000    IDENTICAL
+
+    **Constant call count with 2.5x the instructions is one call comparing a bigger
+    buffer: +297.2 instr/op for a 32x library, paid on EVERY FCALL.** Redis resolves a
+    function by name through a dict and compares no body at all.
+
+    Context on the same ELF: fcall_lib1_pad fr 10,373.4 vs redis 7,417.5 instr/op,
+    fr/redis 1.3985x -- still the worst ratio on the board.
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      fr     bench_elf_sha256=86db6d21db02700de96765fada3c9abf7230a0b0903d89e3cb572fcb2f8345b9
+      redis  bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    A/A null, same invocation as the A/B arms, median 1.00013 bootstrap 95% median CI [0.99891, 1.00072]
+    on fcall_lib32 against a byte-identical copy of this ELF. PASSES.
+
+    The VERDICT rests on the BOOTSTRAP MEDIAN-CI plus the counted mechanism, and on nothing
+    else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-measure on the same SHA-256; void if memcmp CALLS stop being equal
+    across `fcall_lib1` and `fcall_lib32`, because then the instruction growth is not the
+    body compare and this sizing is wrong.
+
+### THE FIX, AND WHY IT IS NOT IN THIS ROW
+
+Content-addressing is what buys invalidation for free: a replaced library is a different
+key, so a stale entry is unreachable by construction. The fix is therefore NOT to weaken
+the key but to replace what it buys -- key on the library NAME plus a generation counter
+bumped at the four `function_libraries` mutation sites (insert, remove, clear, clear, all
+already enumerated on `frankenredis-cv3fm`'s successor work), clearing the cache when the
+generation moves.
+
+**Not landed here on purpose.** A wrong cache executes a STALE LIBRARY -- silently, with a
+success reply -- and that is the same failure class as `frankenredis-function-name-case-duplicate-73c03`,
+which took a five-server determinism probe to characterise. Landing a cache-invalidation
+redesign without room to build that gate would be trading a measured 297 instr/op for an
+unmeasured correctness risk. The sizing is banked; the change is not rushed.
+
+### WHY THE CALL COUNT IS THE LOAD-BEARING NUMBER
+
+The frame alone (197.7 vs 494.9) is consistent with several stories -- more comparisons,
+more expensive comparisons, or a different code path. The CALL COUNT being identical to
+four decimal places kills all but one of them. This is the same instrument that found the
+session's largest lever (`c037c333a`, SORT ALPHA's per-comparison `CString`), where fr and
+redis showed the IDENTICAL `strcoll_l` frame and unequal call counts. **Equal instructions
+with unequal calls, and unequal instructions with equal calls, are both per-call cost
+findings that a frame table alone reads as something else.**
