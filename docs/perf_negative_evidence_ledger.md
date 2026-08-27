@@ -71599,3 +71599,85 @@ today. `fr-store` reported three wall-clock "faster than" ratio asserts failing 
 7-82 -- and the FAILING SET ROTATES between runs (`zadd_insert_move`, then `diff_sorted`,
 then `foldhash_generic_set_membership`, with the earlier ones passing on re-run), which is
 the load-flake signature rather than a deterministic break. None touches functions.
+
+## 2026-08-27 — REJECT — the function-name index is NOT a lever: function_get's scan is 0.55 instr per skipped function, and I named it as ~173 twice
+
+`732c36a91` and `c6dfe2221` both closed by naming the same next lever: replace
+`Store::function_get`'s O(libraries x functions) linear scan with a name-keyed index,
+"worth ~173 instr/op". **That is the incumbent frame, not the recoverable amount, and the
+dose-response refutes it.**
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm; the
+frames below are two-point deltas from that run's own dumps.
+
+    python3 scripts/shape_instr_per_op.py <bin> fcall_lib1  --keep-dumps
+    python3 scripts/shape_instr_per_op.py <bin> fcall_lib32 --keep-dumps
+    python3 scripts/frame_delta.py <dump>/cg.fr.n.out <dump>/cg.fr.2n.out 2000 --all
+
+    COUNTED MECHANISM -- a dose-response over function count, 1 -> 32:
+
+      Store::function_get                173.0  ->  190.0     +17.0
+      lua_eval::function_call_registered 226.0  ->  226.0       0.0
+      whole op                        10,280.6  -> 10,625.9
+
+    **+17.0 instr/op for 31 additional functions = 0.548 instr per skipped entry.**
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      fr     bench_elf_sha256=50dbbce825e12e830513fae563b655ec1d94a0a339eec141d1c79a4c89df1435
+      redis  bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    A/A null, same invocation as the A/B arms, median 0.99937 bootstrap 95% median CI [0.99827, 1.00197]
+    on fcall_lib1_pad against a byte-identical copy of this ELF. PASSES. Instruction counts
+    are load-immune, so the dose-response above does not need a quiet window.
+
+    The VERDICT here rests on the BOOTSTRAP MEDIAN-CI plus the counted mechanism, and on
+    nothing else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-open ONLY for a shape with MANY LIBRARIES rather than many
+    functions in one library -- `function_get`'s outer loop is over
+    `function_libraries`, and no benchmark shape has more than one. Void this row if
+    `function_get` ever exceeds 0.55 instr per non-matching entry, or if a multi-library
+    shape puts it above 400 instr/op.
+
+### WHY THE SCAN IS ALREADY FREE
+
+Every `fcall_lib*` shape holds exactly ONE library, and each calls that library's FIRST
+function (`fcl32_f0`). So both loops terminate on their first iteration and the 173.0 is
+FIXED cost -- `HashMap::values()` iterator setup, one `eq_ignore_ascii_case`, and the
+`Option<(&FunctionLibrary, &FunctionEntry)>` plumbing -- not scanning. `function_call_registered`
+is 226.0 at BOTH rungs, flat to the instruction, which says the same thing about stage 2.
+
+**And the replacement is not cheaper than what it replaces.** An index lookup has to
+lowercase the queried name into a buffer, hash it, probe, then do a SECOND map lookup to
+reach the library, then still scan that library's functions. Against a 173.0 frame whose
+scan component is 17.0 at 32x, that is very unlikely to win and could easily regress --
+the same arithmetic that made the prefix-digest KEYS comparator measure 25 pct WORSE
+(`0c1b567bf`).
+
+### THE REPEATED ERROR, NAMED
+
+This is the SECOND lever this session I priced from an incumbent frame and had to withdraw:
+
+    1713d8ab5   "a floor-class entry for FCALL, ~1,700-2,200 Ir/op"
+                Actual recoverable: ~288. The cascade is never walked for FCALL.
+                Withdrawn in 985499ab2.
+    732c36a91   "a name-keyed index for function_get, ~173 Ir/op"
+                Actual recoverable: ~17 at 32 functions, ~0 at the shapes that exist.
+                Withdrawn here.
+
+Both times the frame was real and the recoverable amount was not, and both times a
+DOSE-RESPONSE settled it in one measurement
+([[feedback_dose_response_validates_a_marginal_lever]],
+[[feedback_a_frame_total_is_not_the_recoverable_amount]]). The rule that would have caught
+both before they were written down: **before naming a lever, state what REPLACES the frame
+and what that costs.** A frame is recoverable only when the work is DELETED, not moved.
+
+### WHAT IS ACTUALLY LEFT ON THIS SHAPE
+
+From `732c36a91`, unchanged and still the honest answer: fr does **12 allocations per FCALL
+against redis's 4**, spread across `RawVecInner::finish_grow` (4.000), `Scope::set_local_cell`
+(2.000), `LuaTable::new` (2.000), `Env::set_local` (2.000) and two singles. That is Lua
+environment construction, it is structural, and no single frame on this shape is worth a
+commit on its own.
