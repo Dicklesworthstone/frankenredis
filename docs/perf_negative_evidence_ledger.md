@@ -71195,3 +71195,100 @@ follow-on remains the one `[[project_commandstats_string_hash_per_command]]` wro
 and nobody has taken -- key the histogram by the COMMAND_TABLE INDEX and make it an array
 store. That index is now resolved exactly once per command (`985499ab2`), so the input
 that follow-on needs already exists.
+
+## 2026-08-27 — KEEP/LANDED — the two dispatch levers measured across the WHOLE loss board: 16 of 18 shapes WIN, client_list crosses 1.0, 7,504.4 instr/op removed
+
+Nothing new lands in this commit. This is the board-wide verification of `985499ab2`
+(one parent-table lookup) and `72d8ec881` (commandstats via the resolved canonical name),
+measured together, with **a per-shape A/A null** so no shape's delta is quoted against a
+noise floor borrowed from a different shape.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> <shape>     # 18 shapes, n=3 per arm
+    arms INTERLEAVED per draw: before / after / after's byte-identical twin
+
+    A/A null pooled over all 18 shapes, same invocation as the A/B arms, median 0.99981 bootstrap 95% median CI [0.99926, 1.00000]
+    n=54. PASSES. Per-shape nulls are used for the per-shape verdicts below, because the
+    pooled figure hides the one shape whose noise is 300x the rest.
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, explicitly NOT a /proc/self/exe self-report:
+      before  bench_elf_sha256=f4396f8f7cd3caafab54864f444f870137766e990bcc536976396502b6be49bb
+      after   bench_elf_sha256=94da1a5298869aa829a377e531cc443acab3a4efd61b90ebcd21efefefa72a5b
+      null    bench_elf_sha256=94da1a5298869aa829a377e531cc443acab3a4efd61b90ebcd21efefefa72a5b
+      redis   bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT IS GATED ON THE BOOTSTRAP MEDIAN-CI and on nothing else -- specifically, a
+    shape counts as a WIN only if its delta exceeds the worst deviation ITS OWN A/A pair
+    produced. CV is diagnostic only and did not influence this verdict; never on CV.
+
+    Retry predicate: re-run on both SHA-256s; void any per-shape verdict whose delta stops
+    exceeding that shape's own A/A CI band, and void the board claim if fewer than 14 of
+    the 18 shapes still win.
+
+### THE BOARD
+
+fr/redis instructions per op, before -> after, against the live Redis 7.2.4 arm in the
+same invocation. "band" is the worst deviation that shape's OWN byte-identical A/A pair
+produced, and it is the bar the delta had to clear:
+
+    shape              before      after      pct   band   fr/redis          verdict
+    pubsub_channels    5,079.2    4,394.3   -13.48  0.02%  1.1281x->1.0468x  WIN
+    config_get_one     7,270.5    6,752.9    -7.12  0.69%  1.1680x->1.0574x  WIN
+    lcs_2              7,097.2    6,705.1    -5.52  0.52%  1.1080x->1.0418x  WIN
+    keys_star_64      42,738.0   40,509.9    -5.21 10.32%  1.0612x->0.9999x  UNRESOLVED
+    sort_ro_alpha     10,809.2   10,289.5    -4.81  0.55%  1.2429x->1.1841x  WIN
+    evalsha_small     11,907.0   11,411.4    -4.16  0.14%  1.2891x->1.2126x  WIN
+    evalsha_large     11,900.7   11,406.7    -4.15  0.02%  1.3130x->1.2291x  WIN
+    fcall_lib8        10,979.6   10,547.9    -3.93  0.16%  1.4635x->1.4502x  WIN
+    fcall_lib1        10,912.1   10,484.3    -3.92  0.26%  1.4469x->1.4076x  WIN
+    fcall_lib1_pad    11,174.5   10,737.8    -3.91  0.31%  1.4596x->1.4203x  WIN
+    fcall_lib32       11,251.2   10,821.9    -3.82  0.13%  1.4767x->1.3881x  WIN
+    client_list       18,213.3   17,625.8    -3.23  0.03%  1.0322x->0.9861x  WIN, CROSSES 1.0
+    luapat_rep16      16,390.4   15,961.0    -2.62  0.32%  1.2262x->1.1889x  WIN
+    luapatq_16        21,592.3   21,161.0    -2.00  0.50%  1.2370x->1.2144x  WIN
+    luapat_16         20,004.1   19,610.2    -1.97  0.60%  1.1706x->1.1282x  WIN
+    luapatsp_16       20,298.2   19,900.6    -1.96  0.13%  1.1723x->1.1302x  WIN
+    luapatq_256       29,867.1   29,431.8    -1.46  0.26%  1.0286x->1.0146x  WIN
+    get_control          911.6      915.4    +0.42  0.31%  0.2850x->0.2860x  REGRESS
+
+**16 WIN, 1 REGRESS, 1 UNRESOLVED. 7,504.4 instr/op removed across the winning shapes**,
+counting only those. `client_list` crosses 1.0 (1.0322x -> 0.9861x) and comes off the loss
+board.
+
+### get_control MOVED THE WRONG WAY, AND IT IS RECORDED AS SUCH
+
+`get_control` moved **+3.8 instr/op (+0.42 pct) against its own 0.31 pct band**, so by the
+rule used for every other row here it is a REGRESSION, not noise, and is recorded as one.
+It is the front-classified control and the parameter threading is the likely source
+([[feedback_threading_a_param_through_dispatch_costs_8_to_16]] prices that at 8-16). The
+trade is 3.8 instr/op on a shape where fr is already 3.5x faster than redis, against
+7,504.4 removed from shapes where fr was LOSING. That is a judgement, not a measurement,
+and it is stated so the next reader can disagree with it.
+
+### THE ONE THAT CANNOT BE CALLED, AND WHY THE POOLED NULL WOULD HAVE HIDDEN IT
+
+`keys_star_64` reads -5.21 pct, and its ratio reads 1.0612x -> 0.9999x, which would be a
+second crossing. **It is UNRESOLVED and must not be quoted**: its own A/A pair -- the SAME
+BYTES, in the same rotation -- produced a 95% median CI of [0.89685, 0.99852], a band of
+**10.32 pct**, twice the delta being claimed.
+
+This is the mechanical noise `[[project_keys_sort_slices_not_copies]]` documents: KEYS
+iterates a `HashMap` whose seed is per PROCESS, so every run hands the sort a different
+input permutation and the noise is proportional to the thing being measured. That row
+needed n=8 to resolve -8.09 pct; n=3 cannot resolve -5.21 pct here.
+
+**The pooled null (0.99981, band 0.07 pct) would have licensed the claim.** Only the
+per-shape null refuses it. That is the reason the nulls are per-shape: a pooled A/A over
+18 shapes is dominated by the 17 quiet ones and silently certifies the loud one.
+
+### WHAT IS STILL LOSING
+
+15 shapes remain above 1.0. The FCALL family is still the worst by ratio -- fcall_lib8
+1.4502x, fcall_lib1_pad 1.4203x, fcall_lib1 1.4076x, fcall_lib32 1.3881x -- and its
+residual is still the per-call constant described in `1713d8ab5`, not a size slope. The
+named next lever is unchanged and its input now exists: key the command histogram by the
+COMMAND_TABLE INDEX and make it an array store, which removes the `HashMap<String,
+CommandHistogram>` probe still measuring 1.000 calls/op.
