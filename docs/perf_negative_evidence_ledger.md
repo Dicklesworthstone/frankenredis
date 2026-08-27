@@ -69191,3 +69191,67 @@ that matters; it did not make the whole payload reusable.**
 **RESTORE-side retention is unaffected and stays** -- a RESTOREd stream that is never
 read still never decodes. The loss is specific to an arm whose next action is always a
 full save.
+
+## 2026-08-27 — THE WORST ARM BECOMES A WIN: stream-vary RELOAD 2.5495x -> 0.8790x (-65.5 pct)
+
+`d9bbde6f8` showed load-side retention ALONE loses +15.2 pct, because `DEBUG RELOAD`
+is save-then-load and the save materialises whatever the load retained. **Paired with a
+verbatim save, it wins outright.**
+
+    python3 scripts/restore_instr_per_op.py <bin> 40 20 --type=stream --op=reload \
+        --keys=200 --varyfields --aa
+
+    ALL SIX DRAWS CERTIFIED (A/A nulls PASS)
+      control  34,376,612.0 / 34,382,952.9 / 34,379,405.1 -> 34,379,656.7   2.5495x
+      paired   11,836,978.8 / 11,843,202.9 / 11,849,625.0 -> 11,843,268.9   0.8790x
+                                                      -22,536,387.8 Ir/op  -65.55 pct
+
+    control ELF fbca4f1ede591e8eacac1d9b55d437c3a069249beaf04b23f39e5d0d1856a6fa
+    ship    ELF caa66526d51c280357170104feb3cb98909de5ddd3873ca8665bbf4a4d354149
+    redis   ELF e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+**fr is now FASTER than redis on the arm that was the worst loss on the board.**
+
+### What the frame table says, and why the win is bigger than the pieces
+
+`materialize_pending`, `append_member`, `flat_entries` and `from_sorted_entries_impl`
+are GONE -- and so is **`lzf_compress_dispatch`, 7,877,800 Ir/op**, the single largest
+frame in the arm. A retained payload is ALREADY COMPRESSED, so writing it verbatim
+skips the compressor entirely. That frame was chased for seven slices and closed as a
+codegen gap (`cc3b57653`); the representation change deletes it instead of narrowing
+it. **Attacking what the incumbent structurally does NOT do beat four turns of
+attacking where fr was slower at doing it.**
+
+### THREE eager readers, each found the same way
+
+Retention is worthless while anything dereferences the value. Each blocker was found
+with a CALLER TABLE, never by reading code, and each fix was one inherent method
+shadowing `Deref`:
+
+    len()      Store::internal_entries_insert_with_expiry_impl   (9e8536f11, +31.7 pct)
+    last_id()  Store::stream_watermark                           (this turn)
+
+and the third was the save path itself, which is what the verbatim arm removes.
+**A lazy representation is defeated by ONE eager reader, so the work is not designing
+it -- it is enumerating who touches the value.**
+
+### The safety argument, unchanged in shape
+
+The verbatim save fires only when `pending_skeleton()` is Some -- the stream has not
+been read or written since it was decoded, which is an OWNERSHIP guarantee: every path
+to the entries goes through `Deref` or `DerefMut`. It never compares the ENTRIES,
+because Pending IS the proof they are unchanged.
+
+It DOES compare everything the record describes that fr keeps OUTSIDE the value --
+groups, watermark, entries-added, max-deleted are Store side-maps that `DerefMut`
+cannot see -- and falls through to the full re-encode on any mismatch. That is the
+distinction `d9bbde6f8` said the completion required, and it is the whole safety
+argument.
+
+**A stream under active write never takes this path**; it costs exactly what it did
+before. The arm that gets faster is the one redis already optimises the same way.
+
+Gates on the shipping ELF: stream reload+RESTORE fuzz 4 seeds x 6 cycles / 960
+commands, AOF CLI restart gate, fr-persist 240/240, fr-store 960 passed with the known
+`galp1`/`swapdb` pair, fr-runtime 656 passed with the known stale-replica pair. The
+RESTORE arm is unchanged at 2.1478x (null PASS), so this did not borrow from it.
