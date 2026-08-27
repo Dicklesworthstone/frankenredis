@@ -68251,3 +68251,57 @@ prize is the DECODE, not the intermediate, and no local rewrite reaches it.
 **The local-lever line on stream RESTORE is now closed with numbers, not opinion:**
 two landed (`196499e3a` -1.61 pct, `67c00c337` -0.56 pct), four rejected, and the
 fifth bounded at 1.4 pct before being built.
+
+## 2026-08-26 — flat_entries DECOMPOSED: no local lever exceeds ~1.6 pct, and that is the case for the rewrite
+
+`9d760292b` bounded the 48-byte pair at 10,292 Ir/op and left 92,607 unexplained. Two
+more bounding probes split the whole frame. Probes only -- each produces a wrong
+result by construction, each read for ONE frame's self cost, no ratio taken, both
+reverted (HEAD ELF `e8dceffe...` reproduced).
+
+    flat_entries, full                                 102,899 Ir/op   257.2 /entry
+      per-ENTRY bookkeeping                             45,083          112.7 /entry
+        4x take_int + take_usize, lp_count validation,
+        expected_entry_lp_count, 2x combine_u64_i64,
+        2x u32::try_from, index.push
+      per-FIELD decode (2x take_string + Cow)           47,524           59.4 /pair
+      the 48-byte pair WRITE                            10,292           12.9 /pair
+
+    probe ELFs  no-pair-write e7fbf47f4e0f1380213afd2ed7ccd81abc68c35a5587fc023c8d455a6de8d308
+                no-field-loop (built, profiled, reverted)
+
+**The cost is spread thin and there is no dominant item.** The largest single block is
+per-entry bookkeeping at 43.8 pct of the frame, and it is ~11 small operations at
+~10 Ir each -- five bounds-checked `lp.get(*idx).ok_or(...)` accesses, two checked
+arithmetic conversions, two `u32::try_from`, a `checked_mul`/`checked_add` validation
+and a 24-byte push. Every one of them is REQUIRED to reject a malformed listpack.
+
+The only local lever visible in it is replacing the five per-access bounds checks with
+one per-entry check (split the entry's elements off as a slice, then index constants).
+**Priced honestly that is ~30 Ir/entry = 12,000 Ir/op = 1.6 pct of the arm, before the
+usual 3-14x optimism discount this ledger keeps recording** -- against a refactor of
+the validation path, where getting it wrong means accepting a truncated payload. Not
+taken; the risk/reward is upside down.
+
+### This is the completed case for `VerbatimListpackStream`
+
+Stream RESTORE's cost is not one expensive thing that can be deleted. It is ~257
+instructions per entry spent turning listpack bytes into owned structures, in ~15
+small pieces, none worth more than a couple of percent on its own. **Redis pays
+approximately none of it, because it keeps the macro-node listpack VERBATIM and
+decodes nothing.** That is why every local attempt on this arm has landed between
+-1.61 pct and +4.31 pct while the gap stayed at 3.2x.
+
+Running total on the local-lever line, all with numbers:
+
+    LANDED    196499e3a  two-byte varint arm          -1.61 pct
+    LANDED    67c00c337  dictionary pre-sizing        -0.56 pct
+    REJECT               cursor fusion                +4.31 pct
+    REJECT               cold-split integer arm       +1.73 pct
+    REJECT               push-argument tuple          +0.22 pct
+    REJECT               arena intermediate           priced: same bytes + a pass
+    BOUNDED              sink builder                 1.4 pct ceiling, unbuilt
+    BOUNDED              one-bounds-check-per-entry    1.6 pct ceiling, unbuilt
+
+**The line is closed. The next move on this arm is the representation change or
+nothing.**
