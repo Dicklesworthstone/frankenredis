@@ -5004,6 +5004,55 @@ fn main() -> ExitCode {
         }
     }
 
+    // (BlackThrush 2026-08-26) `appendonly yes` given as a COMMAND-LINE ARGUMENT
+    // enabled AOF WRITING but never set the LOAD path, so a restart came up empty
+    // and then TRUNCATED the AOF it had just failed to read. Measured against live
+    // redis 7.2.4, 200 keys seeded then a clean restart on the same --dir:
+    //
+    //     redis  --appendonly yes        200 -> 200   digest 44dd5517 -> 44dd5517
+    //     fr     --config <file>         200 -> 200   digest 44dd5517 -> 44dd5517
+    //     fr     --appendonly yes (CLI)  200 ->   0   digest 44dd5517 -> 00000000
+    //                                    incr.aof 6,380 B on disk -> 0 B after restart
+    //
+    // `configured_aof_path()` is consulted ONLY inside the config-file branch, which
+    // is exactly why `--config <file>` carrying `appendonly yes` survives and the
+    // bare flag does not. The write side was never the problem: fr writes a
+    // redis-shaped appendonlydir (manifest + base.rdb + incr.aof) and INFO reports
+    // aof_enabled:1, so the failure is silent and looks like success until a
+    // restart. `redis-server --appendonly yes` is a standard invocation.
+    //
+    // `appendonly`, `dir`, `appenddirname` and `appendfilename` are none of them
+    // flags fr-server names, so they land in the passthrough lists verbatim.
+    // Resolve them there, the same way `pidfile` is resolved below: file first then
+    // CLI, searched from the back so last-wins matches the order they were applied
+    // in. This runs AFTER the passthrough CONFIG SET loop and BEFORE the load.
+    if aof_path.is_none() {
+        let passthrough_value = |names: &[&str]| -> Option<String> {
+            file_passthrough
+                .iter()
+                .chain(cli_passthrough.iter())
+                .rev()
+                .find(|(name, _)| names.iter().any(|n| name.eq_ignore_ascii_case(n)))
+                .map(|(_, value)| value.clone())
+        };
+        if passthrough_value(&["appendonly"])
+            .is_some_and(|value| value.eq_ignore_ascii_case("yes"))
+        {
+            let dir = passthrough_value(&["dir"]).unwrap_or_else(|| ".".to_string());
+            let dirname =
+                passthrough_value(&["appenddirname"]).unwrap_or_else(|| "appendonlydir".to_string());
+            let filename = passthrough_value(&["appendfilename"])
+                .unwrap_or_else(|| "appendonly.aof".to_string());
+            aof_path = Some(
+                std::path::PathBuf::from(dir)
+                    .join(dirname)
+                    .join(filename)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+
     // Configure and load AOF persistence if requested.
     if let Some(path) = &aof_path {
         let aof = std::path::PathBuf::from(path);

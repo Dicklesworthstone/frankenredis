@@ -68029,3 +68029,63 @@ which demands MATERIALISED bytes; a listpack integer must be rendered to canonic
 decimal, so it must be owned, so it is a `Cow`. Nothing local to `decode_stream_listpack`
 gets past that. The remaining 213,688 Ir/op of rebuild needs the representation change
 ([[project_verbatim_listpack_precedent_for_streams]]), not another local rewrite here.
+
+## 2026-08-26 — `frankenredis --appendonly yes` LOST THE ENTIRE DATASET ON RESTART
+
+Found by following this ledger's own standing rule -- *check for surfaces with NO
+number before optimising the worst one*. The AOF load route had no number because
+`DEBUG LOADAOF` is a documented no-op, so the first question was not "how fast" but
+"does it work at all". It did not.
+
+Seed 200 keys under `appendonly yes`, shut down cleanly, restart on the same `--dir`:
+
+    redis  --appendonly yes (conf file)   200 -> 200   digest 44dd5517 -> 44dd5517
+    fr     --config <file>                200 -> 200   digest 44dd5517 -> 44dd5517
+    fr     --appendonly yes (CLI ARG)     200 ->   0   digest 44dd5517 -> 00000000
+                                          incr.aof 6,380 B on disk -> 0 B after restart
+
+**The AOF engine was never the problem. The CONFIG SURFACE was.** `appendonly yes`
+passed as a command-line argument is not a flag `fr-server` names, so it reaches the
+runtime through the passthrough `CONFIG SET` loop -- which enables AOF WRITING. The
+LOAD path is built by `configured_aof_path()`, and that was consulted only inside the
+config-file branch. So fr wrote a correct redis-shaped appendonlydir (manifest +
+base.rdb + 6,380 B incr.aof), reported `aof_enabled:1`, came up EMPTY, and then
+truncated the AOF it had just failed to read. `redis-server --appendonly yes` is a
+standard invocation; the failure is silent and looks like success until a restart.
+
+Fixed by resolving `appendonly`/`dir`/`appenddirname`/`appendfilename` from the
+passthrough lists when no AOF path is set -- the same last-wins resolution `pidfile`
+already uses two screens below, and placed after the passthrough `CONFIG SET` loop
+and before the load. All arms now survive, including a custom `--appenddirname`.
+
+### THE EXISTING GATE PASSED THROUGHOUT, AND WHY
+
+`aof_roundtrip_digest_fuzz.py` asserts precisely this property -- "KILLS and RESTARTS
+fr so it reloads purely from the AOF ... DEBUG DIGEST UNCHANGED by the restart and
+still equal to redis's" -- and it passes, before the fix and after. It starts fr with
+fr's OWN `--aof <path>` flag. **A gate that enables a feature exactly one way cannot
+see a second way that silently does not work**, however thorough it is about
+everything downstream of that switch. `aof_cross_compat_gate.py` has the same blind
+spot. Both were re-run against the fix and still pass.
+
+New `scripts/aof_appendonly_cli_restart_gate.py` covers the config SURFACE: CLI flag,
+`--config` file, and custom `appenddirname`, each compared against live redis on the
+identical sequence, failing closed on a non-starting engine, a digest that moves
+across the restart, or a digest that differs from redis's. **Mutation-checked both
+ways** -- it FAILS the two broken arms on the pre-fix ELF `9928ecb3...` and passes the
+`--config` arm, so it discriminates the actual bug rather than the binary.
+
+### Two wrong readings on the way, both caught by re-measuring
+
+1. "The WRITE side is broken too -- incr.aof is 0 bytes." It is not: fr writes 6,380 B
+   against redis's 6,403. I had listed the directory AFTER the restart, and the
+   restarted (empty) server had already rewritten the AOF. **Capture persistence
+   state BEFORE the restart, or you measure the damage instead of the cause.**
+2. "Maybe the gate kills rather than shuts down cleanly, and the shutdown path is what
+   truncates." Measured both: identical. Redis's kill-mode arm recovers only 1 key,
+   which is its `everysec` buffer not yet flushed -- correct behaviour, not a defect,
+   and worth not mistaking for one.
+
+Pre-existing and NOT from this change: `sharded_info_server_cpu_persistence_replication_are_not_multiplied`
+fails identically on HEAD's source ("CPU counters must register real work ... fr 0"),
+which is `used_cpu_*` accounting and nowhere near AOF.
