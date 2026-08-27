@@ -68715,3 +68715,69 @@ price/risk that is wrong while 41.7 pct sits untouched.
 ONE cause, now measured on both: 213,688 Ir/op on RESTORE (48.2 pct of that op) and
 14,328,224 Ir/op on reload (41.7 pct), against a redis that pays ~160,000 for the same
 work.
+
+## 2026-08-26 — A CORRECTNESS BUG THE PERF WORK WALKED INTO: fr DROPS AN EMPTY STREAM ON RDB RELOAD
+
+Chasing the save-side blob cache sized at 18.2 pct of the reload arm (`22f0e2a78`), the
+first question was whether its invalidation could be proven. It cannot be argued: an
+`XGROUP CREATE` alone moves a stream's DUMP from 108 B to 124 B, and `stream_groups`
+lives on the Store OUTSIDE `Value::Stream`, so the value's `modification_count` cannot
+gate a cache that must also invalidate on group mutations. A stale cached save is
+silent data loss, so the differential has to come first.
+
+**There was no differential.** `digest_state_fuzz.py` emits ZERO stream commands and
+never issues `DEBUG RELOAD`; `aof_roundtrip_digest_fuzz.py` reuses its generator and
+inherits the blind spot. **The stream RDB round trip had no randomized differential
+coverage at all.** New `scripts/stream_reload_digest_fuzz.py` supplies it: deterministic
+stream command stream (explicit IDs, fixed consumers), replies compared per command,
+and every round both engines `DEBUG RELOAD` and their whole-keyspace `DEBUG DIGEST` is
+compared.
+
+**It diverged on its first real run** (seed 4201, round 0). Narrowed to one command:
+
+    XADD s 1-1 f v ; XADD s 2-1 f v ; XGROUP CREATE s g 0 ; XTRIM s MAXLEN 0
+
+    BEFORE reload   redis EXISTS 1  XLEN 0  digest 5a456406...   fr IDENTICAL
+    AFTER  reload   redis EXISTS 1  XLEN 0  digest 5a456406...
+                    fr    EXISTS 0          digest 0000...   XINFO -> "no such key"
+
+**fr loses an empty-but-grouped stream across an RDB save/load, consumer groups and
+all.** That is a normal state -- upstream's XTRIM/XDEL never delete the key, only DEL
+does -- and losing it destroys group state, PELs and last-delivered ids on any restart.
+DUMP/RESTORE was NOT affected (37 B both engines, round-trips fine); the bug is
+specific to the RDB FILE path.
+
+### Root cause, and it was a TWIN
+
+    pub fn load_stream_entries(..) {  if entries.is_empty() { return; }   <-- key never created
+
+`load_stream_entries_borrowed` carried the identical `if entries.len() == 0 { return; }`.
+The RDB load arm calls one of them and THEN applies the watermark, entries-added,
+max-deleted-id and `restore_stream_groups_into` -- every one of which targets the key
+BY NAME, so all four silently wrote to a key that did not exist.
+
+The guard could not simply be deleted: the shared tail `finish_stream_bulk_load`
+did `.expect("non-empty stream has a maximum id")`, which is presumably why the early
+returns were there. Fixed all three together -- both twins create the key, and the tail
+sets `stream_last_ids` only when the map HAS a maximum id. Inserting a synthetic 0-0
+would have been worse than the bug: it would OVERWRITE the real last-generated-id that
+the RDB watermark carries and the caller applies immediately afterwards.
+
+    ship ELF 29ed9d2add27b6134cc33956d5b7f55f16fc5d03b6469093add184049f48a609
+
+### The gate is mutation-checked BOTH ways
+
+Fixed binary: `OK: 4 seeds x 6 reload cycles, 960 stream commands` -- reply-for-reply
+and digest-identical to live redis 7.2.4 across every reload. Pre-fix binary
+(`771c89eb...`): diverges at seed 4201 round 0. It discriminates the bug, not the
+binary.
+
+**Pre-existing, not from this change:** fr-store 958 passed with `galp1` and `swapdb`
+failing identically on the base source; `eviction_candidate_sampling` and
+`zadd_insert_move` also appeared in the full run but pass 3/3 and 2/2 in isolation --
+the wall-clock class failing under parallel-test load. fr-runtime 656 passed, the 2
+stale-replica failures are the known pair.
+
+**The perf lever that started this is still unbuilt** -- but it now has the safety net
+it needs, and the surface it would have been built on turned out to be losing data
+already.

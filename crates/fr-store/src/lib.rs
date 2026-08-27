@@ -28199,9 +28199,15 @@ impl Store {
         entries: &fr_persist::StreamOut<std::borrow::Cow<'_, [u8]>>,
         now_ms: u64,
     ) {
-        if entries.len() == 0 {
-            return;
-        }
+        // (BlackThrush 2026-08-26) NO EARLY RETURN ON AN EMPTY STREAM. An RDB
+        // record for a stream with zero entries still has to CREATE THE KEY: the
+        // caller applies the watermark, entries-added, max-deleted-id and the
+        // CONSUMER GROUPS immediately afterwards, and every one of those targets
+        // the key by name. Returning here left them writing to a key that did not
+        // exist, so XTRIM s MAXLEN 0 on a stream with a group survived until the
+        // next DEBUG RELOAD and then vanished -- EXISTS 1 -> 0, groups and all.
+        // Redis keeps it: XTRIM/XDEL never delete the key, only DEL does.
+        // An empty entries list builds an empty map through the ordinary path.
         self.stream_groups.remove(key);
         self.stream_max_deleted_ids.remove(key);
         let mut prev: Option<StreamId> = None;
@@ -28235,9 +28241,8 @@ impl Store {
         entries: Vec<(StreamId, Vec<StreamField>)>,
         now_ms: u64,
     ) {
-        if entries.is_empty() {
-            return;
-        }
+        // Same as the borrowed twin above: an empty stream must still create the
+        // key so the caller's metadata and consumer-group restore land on it.
         self.stream_groups.remove(key);
         self.stream_max_deleted_ids.remove(key);
         // RDB serializes entries strictly id-ascending, so build the node index
@@ -28265,11 +28270,15 @@ impl Store {
     /// owned and borrowed loaders cannot drift apart.
     fn finish_stream_bulk_load(&mut self, key: &[u8], map: StreamEntries, now_ms: u64) {
         let count = map.len() as u64;
-        let last_id = *map
-            .keys()
-            .next_back()
-            .expect("non-empty stream has a maximum id");
-        self.stream_last_ids.insert(key.to_vec(), last_id);
+        // An EMPTY stream has no maximum id, and this used to expect() one --
+        // which is why the callers guarded with an early return instead of
+        // creating the key. The last-generated-id of an emptied stream is carried
+        // by the RDB WATERMARK and applied by the caller right after this, so
+        // leaving it unset here is correct; inserting a synthetic 0-0 would
+        // OVERWRITE the real value on a stream that had been trimmed to nothing.
+        if let Some(last_id) = map.keys().next_back().copied() {
+            self.stream_last_ids.insert(key.to_vec(), last_id);
+        }
         self.stream_entries_added.insert(key.to_vec(), count);
         self.internal_entries_insert(
             key.to_vec(),
