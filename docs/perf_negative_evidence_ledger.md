@@ -69144,3 +69144,50 @@ stale-replica pair.
 **Two turns, and the second one only needed one method.** The +31.7 pct version was not
 a wrong design -- it was the right design with one eager reader left in it, and the
 caller table named that reader in a single query.
+
+## 2026-08-27 — NEW WORST ARM: stream-vary RELOAD 2.5435x. Load-side retention alone is a +15.2 pct LOSS.
+
+`001f91663` took stream-vary RESTORE to 2.1492x, so the worst measured ratio moved to
+the RELOAD arm, re-derived on HEAD:
+
+    python3 scripts/restore_instr_per_op.py <bin> 40 20 --type=stream --op=reload \
+        --keys=200 --varyfields --aa
+
+    fr 34,376,271.2   redis 13,515,201.8   2.5435x   A/A null 1.000062x PASS
+    fr ELF fbca4f1ede591e8eacac1d9b55d437c3a069249beaf04b23f39e5d0d1856a6fa
+
+Unchanged by the RESTORE work, as expected: RDB load is a separate route
+(`apply_rdb_entries_to_store`), not `restore_key_with_metadata`.
+
+**The same retention was applied there and it LOSES.** The RDB loader already hands the
+applier a `RdbValue::StreamSkeleton` rather than entries, so the port was direct --
+validate instead of decode, then `load_stream_pending`.
+
+    TWO CERTIFIED DRAWS (all four A/A nulls PASS)
+      control (RESTORE-only retention)  2.5479x / 2.5474x -> 2.5477x
+      + load-side retention             2.9326x / 2.9383x -> 2.9355x   +15.2 pct
+    probe ELF f31143eafdcde09d1191bcbdce1891a9984557ea3b5e1ba66b811871b6a5b8a6
+
+**WHY, and it is structural to this arm rather than a bug:** `materialize_pending` runs
+**200.00 times per op -- exactly once per KEY** -- and `decode_raw_values` doubles,
+2,840,200 -> 5,680,400 Ir/op. `DEBUG RELOAD` is SAVE-then-LOAD, so the save pass of the
+next reload iterates every stream and materialises what the previous load just
+retained. Retention buys nothing when the very next thing to touch the value is a full
+read; it only adds the validation walk.
+
+**The pairing that WOULD pay, and the obstacle:** the save side must write the retained
+blob instead of re-encoding it -- `RdbValue::StreamSkeleton` already has a verbatim
+arm. But the retained payload is only valid if NOTHING it describes has changed, and it
+describes the CONSUMER GROUPS too. Group state lives in `Store::stream_groups`, OUTSIDE
+`StreamEntries`, so `DerefMut` cannot see a group mutation and the ownership-enforced
+invalidation that makes the RESTORE retention safe does NOT extend to it.
+
+So the completion is the encoder split recorded earlier (`22f0e2a78`): cache/retain the
+NODE listpacks only, re-encode `[metadata][groups]` on every save. Nodes depend solely
+on entries, and entries are owned by `StreamEntries` -- which is exactly the boundary
+`DerefMut` already enforces. **Retention made the save-side reuse SAFE for the half
+that matters; it did not make the whole payload reusable.**
+
+**RESTORE-side retention is unaffected and stays** -- a RESTOREd stream that is never
+read still never decodes. The loss is specific to an arm whose next action is always a
+full save.
