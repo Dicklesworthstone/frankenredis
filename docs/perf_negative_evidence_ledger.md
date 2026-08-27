@@ -71681,3 +71681,77 @@ against redis's 4**, spread across `RawVecInner::finish_grow` (4.000), `Scope::s
 (2.000), `LuaTable::new` (2.000), `Env::set_local` (2.000) and two singles. That is Lua
 environment construction, it is structural, and no single frame on this shape is worth a
 commit on its own.
+
+## 2026-08-27 — REJECT — reserving the Lua scope stack measured WORSE on every Lua shape, and the CALL COUNTS said so before the timings did
+
+`luapatq_16` is the largest non-FCALL loss on the board and fr does **33.0 allocations per
+op against redis's 5.0** there. `RawVec<Scope>::grow_one` is 4.000 calls/op of that, so
+`Vec::with_capacity` on the scope stack is the textbook fix. **It regressed every Lua shape
+measured.**
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> luapatq_16 | luapat_16 | fcall_lib1_pad
+
+    n=3 per arm, three arms INTERLEAVED (control / candidate / candidate's twin):
+      luapatq_16      21,011.5 -> 21,165.9   +154.4  (+0.73 pct)  A/A band 0.38 pct  REGRESS
+      luapat_16       19,405.1 -> 19,577.7   +172.6  (+0.89 pct)  A/A band 0.05 pct  REGRESS
+      fcall_lib1_pad  10,530.6 -> 10,644.9   +114.3  (+1.09 pct)  A/A band 0.10 pct  REGRESS
+      get_control        914.7 ->    910.7     -4.0  (-0.44 pct)  A/A band 1.06 pct  flat
+
+    Every regressing shape's delta exceeds ITS OWN A/A band.
+
+    A/A null, same invocation as the A/B arms, median 1.00001 bootstrap 95% median CI [0.99946, 1.00004]
+    on luapat_16; 0.99816 CI [0.99615, 1.00046] on luapatq_16; 1.00022 CI [0.99924, 1.00103]
+    on fcall_lib1_pad. Null arm is a BYTE-IDENTICAL COPY of the candidate ELF. All PASS.
+
+    COUNTED MECHANISM, and this is the part that decides it:
+      __rust_alloc                        33.0010 -> 33.0010 calls/op   UNCHANGED
+      RawVec<Scope>::grow_one              4.0000 ->  3.0000 calls/op
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      control    bench_elf_sha256=50dbbce825e12e830513fae563b655ec1d94a0a339eec141d1c79a4c89df1435
+      candidate  bench_elf_sha256=37fb3eff30d1c51a406e89a2059cbfda59b1196496626ecb6855526a95ea4eae
+      redis      bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT rests on the BOOTSTRAP MEDIAN-CI plus the counted mechanism, and on nothing
+    else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: do not re-apply a capacity reserve here unless a change first makes
+    `__rust_alloc` actually FALL -- re-open only if total allocations/op drop below 33.0 on
+    `luapatq_16`. A `grow_one` count is not sufficient evidence; it was not last time.
+
+### THE COUNTS REFUTED IT BEFORE THE TIMINGS DID
+
+`__rust_alloc` is **33.0010/op on BOTH ELFs**. Reserving removed no allocation at all -- it
+MOVED one. `vec![Scope::new()]` allocates 24 bytes; `Vec::with_capacity(16)` allocates 384,
+a worse mimalloc size class, for the same single call. That is the whole regression, and it
+was visible in a call count taken before any A/B ran.
+
+**And `grow_one` only fell 4.000 -> 3.000**, which says the growth is not even mostly this
+`Vec`: three of the four growths come from the `Env` built by CAPTURE
+(`scopes: captured.map(..).collect()`), not from `Env::new()`. Reserving in `Env::new()`
+was aimed at the wrong constructor.
+
+This is the third lever this session refuted by pricing the REPLACEMENT rather than the
+incumbent frame ([[feedback_name_the_replacement_before_naming_a_lever]]) -- and the first
+where the replacement's cost was an ALLOCATOR SIZE CLASS rather than an instruction count.
+"Reserve the capacity" is not free; it is a different allocation.
+
+### THE VEIN IS REAL AND IS NOT THIS
+
+    luapatq_16   fr 33.0 allocations/op   redis 5.0   (fr 21,011.5 vs redis 17,461.4, 1.2026x)
+    fcall_lib1_pad  fr 12.0              redis 4.0
+
+fr's 33 on `luapatq_16`: `finish_grow` 10.001, `lua_check_string` 3.000, `box_new_uninit`
+3.000, `LuaTable::new` 2.000, `set_keys_argv` 2.000, then thirteen singles including
+`sha1_hex`, `script_load`, `lua_to_resp_at_depth` and `to_display_string`. Of the
+`finish_grow` 10.001, only 4.000 are the scope stack and 6.002 are explicit
+`reserve`-then-grow on Vecs that started empty -- those are one allocation each and are not
+recoverable by reserving harder.
+
+The gap is Lua environment and string construction, spread across a dozen sites at one or
+two allocations each. No single one is worth a commit, and the aggregate needs a structural
+change to how a Lua call builds its environment, not a capacity hint.

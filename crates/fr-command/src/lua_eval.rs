@@ -4066,6 +4066,17 @@ fn is_lua_yield_signal(err: &str) -> bool {
 
 impl Env {
     fn new() -> Self {
+        // Capacity ONE on purpose. `Vec::with_capacity(16)` here is the textbook fix for the
+        // `RawVec<Scope>::grow_one` that measures 4.000 calls/op on `luapatq_16`, and it was
+        // MEASURED WORSE on every Lua shape: luapatq_16 +154.4 instr/op (+0.73 pct, A/A band
+        // 0.38), luapat_16 +172.6 (+0.89, band 0.05), fcall_lib1_pad +114.3 (+1.09, band
+        // 0.10). Reverted; do not re-apply without new evidence.
+        //
+        // The call counts say why, and they say it before the timings do: total
+        // `__rust_alloc` was 33.0010/op BOTH WAYS -- reserving removed no allocation at all,
+        // it only moved one, and a 384-byte request lands in a worse size class than a
+        // 24-byte one. `grow_one` fell 4.000 -> 3.000, so the growth is not even mostly
+        // this Vec; the remaining three come from the `Env` built by capture, not here.
         Self {
             scopes: vec![Scope::new()],
             global_env: None,
