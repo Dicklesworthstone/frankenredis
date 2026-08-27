@@ -68649,3 +68649,69 @@ the gate), and the estimate prices the REPLACEMENT rather than the incumbent fra
 **NO CODE CHANGE THIS TURN.** The deliverable is the price and the mechanism: 8,510 Ir
 per compression, 7.58 pct of the reload arm, attributable to codegen rather than to
 any algorithm a source edit can reach.
+
+## 2026-08-26 — THE RELOAD ARM IS 41.7 pct REPRESENTATION COST: fr 14,328,224 vs redis 160,000 (89.6x)
+
+I had been attacking `lzf_compress` as "22.9 pct of the reload arm, the biggest frame".
+It is the biggest FRAME and it was the wrong target. Decomposing the same-invocation
+dumps (`e48870e92`) all the way down:
+
+    whole reload      fr 34,372,844   redis 13,469,957   2.5518x  (A/A null PASS)
+    lzf compress+decompress   11,422,600      8,681,420   gap  2,741,180
+    EVERYTHING ELSE           22,950,244      4,788,537   gap 18,161,707  = 4.79x
+
+**Redis does essentially NO per-entry stream work on a reload.** Its entire
+stream-specific cost is the radix tree of macro-node BLOBS plus shallow validation:
+
+    rdbSaveRawString 41,078 · rax* (Next/Insert/Compress/Seek/GetData/Free) ~104,000
+    lpValidateNext 8,400 · streamValidateListpackIntegrity 6,800   = ~160,000 Ir/op
+
+fr's counterpart, on the identical workload in the same invocation:
+
+    append_member                      3,351,800
+    from_sorted_entries_impl           3,145,424
+    decode_raw_values                  2,840,200
+    flat_entries                       2,095,600
+    store_to_rdb_entries iterator      1,213,800
+    encode_stream_listpacks3_blob        768,600
+    listpack_string_to_int64             758,400
+    Vec<(u64,u64,Vec<(&[u8],&[u8])>)>    154,400
+                                      ----------
+                                      14,328,224 Ir/op = 41.7 pct of the arm
+
+**89.6x on the portion, and it is the SAME ROOT CAUSE as the worst arm.** Redis keeps
+macro-node listpacks VERBATIM and copies them in and out of the RDB; fr decodes them
+into `PackedStreamLog` on load and re-encodes them on save, so a reload pays the
+conversion TWICE. Allocation counts confirm the shape: **fr 16,073 allocations per
+reload op against redis's 2,243** (7.2x), which at 8,000 entries is ~2.0 per entry
+against 0.28, and `listpack_string_to_int64` runs 31,600 times per op (~4 per entry).
+
+**Projected if the representation change lands:** fr 34,372,844 -> ~20,200,000, i.e.
+**2.5518x -> ~1.50x on the #2 arm**, on top of 3.2184x -> ~0.72x at equal posture on
+the worst arm ([[project_verbatim_listpack_precedent_for_streams]]). One change, both
+arms.
+
+### What this retires
+
+`lzf_compress` is a real 1.53x kernel gap worth 2,606,780 Ir/op, but it is **5.5x
+smaller than the representation cost sitting beside it** and, per `cc3b57653`, is
+codegen rather than algorithm. **It should not be the next lever, and neither should
+anything else inside the encode/decode pipeline** -- those frames do not want
+optimising, they want deleting.
+
+### One sized sub-lever, NOT taken, recorded so it is not re-derived
+
+The save path materialises a `Vec<(&[u8], &[u8])>` PER ENTRY because
+`encode_stream_listpacks3_blob_borrowed` takes `&[EncodableStreamEntry<F, V>]` -- a
+slice, so the caller must build every entry's fields into an owned `Vec` even though
+the pairs are already borrowed. That is ~8,000 allocations/op of the 16,073. At the
+measured ~67 Ir per alloc+free it prices at ~536,000 Ir/op = **1.56 pct**, before the
+3-14x optimism discount this file keeps recording, and it costs a signature change on
+a shared encoder with several callers. `PackedStreamLog::FieldsRef` already yields
+exactly the borrowed pairs the encoder wants, so the fix shape is known -- it is the
+price/risk that is wrong while 41.7 pct sits untouched.
+
+**NO CODE CHANGE THIS TURN.** The deliverable is that the board's two worst arms have
+ONE cause, now measured on both: 213,688 Ir/op on RESTORE (48.2 pct of that op) and
+14,328,224 Ir/op on reload (41.7 pct), against a redis that pays ~160,000 for the same
+work.
