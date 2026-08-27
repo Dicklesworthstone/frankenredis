@@ -35129,6 +35129,24 @@ impl Store {
         self.script_cache.get(&hex).map(Vec::as_slice)
     }
 
+    /// Fetch a script body by an ALREADY-normalised lowercase hex SHA.
+    ///
+    /// (BlackThrush 2026-08-27) `script_get` takes raw bytes and pays
+    /// `String::from_utf8_lossy(..).to_ascii_lowercase()` -- a UTF-8 walk AND an allocation --
+    /// on EVERY call. `evalsha_cmd` already normalises the SHA once for
+    /// `script_contains_hex` and then called `script_get` two more times on the hot path,
+    /// so an EVALSHA paid that conversion THREE times for a 40-byte ASCII SHA. Measured on
+    /// `evalsha_large`: `Utf8Chunks::next` 912.0 instr/op at 3.000 `from_utf8_lossy`
+    /// calls/op, 8.1 pct of the command, and identical on `evalsha_small` -- a FIXED cost,
+    /// not one that scales with the script.
+    ///
+    /// This is the same seam `script_contains_hex` opened for the same reason; it just
+    /// returns the body instead of a bool.
+    #[must_use]
+    pub fn script_get_hex(&self, sha_hex: &str) -> Option<&[u8]> {
+        self.script_cache.get(sha_hex).map(Vec::as_slice)
+    }
+
     /// (frankenredis-sf510) Existence check against an ALREADY-normalised hex SHA.
     ///
     /// `script_get` lowercases on every call. EVALSHA needs the normalised form anyway to probe

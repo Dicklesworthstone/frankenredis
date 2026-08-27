@@ -27144,7 +27144,7 @@ fn evalsha_cmd(
         None => {
             // MISS: materialise the body exactly once, then index it under the SHA so the next
             // call takes the branch above.
-            let script = match store.script_get(sha1) {
+            let script = match store.script_get_hex(&sha_hex) {
                 Some(s) => s.to_vec(),
                 None => {
                     return Ok(RespFrame::Error(
@@ -27180,7 +27180,7 @@ fn evalsha_cmd(
     // folded out. The borrow ends before the assignment, which needs `&mut store`.
     let allow_oom = no_writes
         || store
-            .script_get(sha1)
+            .script_get_hex(&sha_hex)
             .is_some_and(script_shebang_has_allow_oom_flag);
     store.script_allow_oom = allow_oom;
     // (frankenredis-obeyclient-strlen-qxdyn follow-up) Same prepare-time refusal as EVAL, and
@@ -27190,7 +27190,7 @@ fn evalsha_cmd(
     // Same shape as EVAL: resolved into a local so the immutable borrows end here rather than
     // spanning the body that restores `store`.
     let prepare_refusal = if store
-        .script_get(sha1)
+        .script_get_hex(&sha_hex)
         .is_some_and(|body| body.starts_with(b"#!"))
     {
         script_prepare_readonly_replica_refusal(store, no_writes)
@@ -27216,7 +27216,7 @@ fn evalsha_cmd(
         // The body is fetched HERE rather than held across the call: it is needed only to
         // render an error, so the hot path never materialises it.
         Err(e) => {
-            let body = store.script_get(sha1).map(<[u8]>::to_vec).unwrap_or_default();
+            let body = store.script_get_hex(&sha_hex).map(<[u8]>::to_vec).unwrap_or_default();
             Ok(eval_script_error_reply(&body, e, store.lua_error_line))
         }
     };

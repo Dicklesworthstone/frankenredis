@@ -72545,3 +72545,93 @@ This is a LAYERING cost, not a lever. Closing it means collapsing dispatch layer
 a design change with a correctness surface, not a frame to delete -- and it should not be
 attempted on the strength of a per-frame table, which is what
 [[feedback_name_the_replacement_before_naming_a_lever]] already cost this session twice.
+
+## 2026-08-27 — KEEP/LANDED (frankenredis-sf510) — EVALSHA converted its 40-byte SHA to a String THREE times per call: evalsha_large -989.5, evalsha_small -986.6 instr/op (1.2127x -> 1.1048x)
+
+With FCALL's residual declared structural, `evalsha_large` was the worst remaining
+vs-incumbent ratio. Its top frame was not Lua and not dispatch: **`Utf8Chunks::next` at
+912.0 instr/op, 8.1 pct of the command.**
+
+`Store::script_get(sha1: &[u8])` does `String::from_utf8_lossy(..).to_ascii_lowercase()`
+-- a UTF-8 walk AND an allocation -- on every call. `evalsha_cmd` already normalises the
+SHA once for `script_contains_hex`, then called `script_get` twice more on the hot path.
+Added `Store::script_get_hex(&str)` and used the value already in hand.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> evalsha_large | evalsha_small
+
+    fr's OWN instr/op, n=4 per arm, three arms INTERLEAVED (control/ship/null):
+      evalsha_large  11,193.8 -> 10,204.2   -989.5  (-8.84 pct)  A/A band 0.08 pct  DISJOINT
+      evalsha_small  11,199.5 -> 10,212.9   -986.6  (-8.81 pct)  A/A band 0.06 pct  DISJOINT
+      fcall_lib32    10,126.2 -> 10,137.1    +10.9  (+0.11 pct)  A/A band 0.27 pct  flat
+      get_control       910.9 ->    911.8     +0.9  (+0.10 pct)  A/A band 1.98 pct  flat
+
+    fr/redis instructions per op, against that live Redis 7.2.4 arm:
+      evalsha_large  fr/redis 1.2127x -> 1.1048x
+      evalsha_small  fr/redis 1.2201x -> 1.1058x
+
+    A/A null, same invocation as the A/B arms, median 1.00010 bootstrap 95% median CI [0.99923, 1.00023]
+    on evalsha_large; 1.00035 CI [1.00004, 1.00063] on evalsha_small. Null arm is a
+    BYTE-IDENTICAL COPY of the ship ELF. Both PASS.
+
+    COUNTED MECHANISM:
+      String::from_utf8_lossy   3.0000 -> 1.0000 calls/op
+      (callers before: Store::script_get 2.000, evalsha_cmd 1.000)
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      control  bench_elf_sha256=c855af57e4ca81d2599985e3305e9f956826555825a6d5f8bf4f9e3bdf754890
+      ship     bench_elf_sha256=ea85901f14241d801c47356d0a22273c15c4bbc6fc2f85746f630dbc54279e57
+      null     bench_elf_sha256=ea85901f14241d801c47356d0a22273c15c4bbc6fc2f85746f630dbc54279e57
+      redis    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT rests on the BOOTSTRAP MEDIAN-CI plus the counted mechanism, and on nothing
+    else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-run on both SHA-256s; void if either EVALSHA shape's delta stops
+    exceeding its own A/A band, or if `from_utf8_lossy` is not 1.000 calls/op on
+    `evalsha_large`.
+
+### IT IS A FIXED COST, NOT A SIZE ONE, AND THAT WAS CHECKED BEFORE THE FIX
+
+`Utf8Chunks::next` measured **912.0 instr/op on `evalsha_large` and 912.0 on
+`evalsha_small`** -- identical across a large and a small script. The conversion is of the
+40-byte ASCII SHA, not of the script body, so this is a per-CALL constant and both shapes
+pay it equally. That is exactly what the measurement shows: -989.5 and -986.6, the same
+absolute saving on both rungs.
+
+Pricing it as "large scripts convert more" would have predicted a slope that is not there,
+and would have made `evalsha_small` look like a control rather than an equal beneficiary.
+
+### THE SEAM ALREADY EXISTED, HALF-USED — THE THIRD SIGHTING THIS SESSION
+
+`script_contains_hex` was added by `frankenredis-sf510` for precisely this reason, and its
+comment says so: "`script_get` lowercases on every call. EVALSHA needs the normalised form
+anyway to probe the compiled-chunk index, so calling `script_get` as well allocated and
+lowercased the SHA twice per invocation." That fixed the EXISTENCE check and left the four
+BODY fetches on the raw-bytes entry point. `script_get_hex` is the same seam, returning the
+body instead of a bool.
+
+This is the third time this session a fix already existed and had been wired into only some
+of its call sites -- after the GEODIST i128 formatter (`8d547b26f`) and
+`record_command_histogram_canonical_with_kind` (`72d8ec881`). **When a helper's comment
+names the cost it was created to avoid, grep every caller that pays that cost, not just the
+one the comment mentions.**
+
+### GATES
+
+`fr-command` 1,295 pass. 31 of 32 differentials pass, including every script/EVAL/Lua gate
+-- `eval_semantics_differ`, `script_flag_gate_parity`, `eval_compile_error_line_differ`,
+`lua_semantics_differ`, `lua_lib_differ`, `lua_rediscall_error_differ`,
+`lua_load_func_differ` -- which is the coverage that matters for a change to EVALSHA's
+lookup path. `keyspace_accounting_gate` fails 3/225 and produced byte-identical output on a
+control ELF earlier today.
+
+`fr-store` reported three wall-clock ratio asserts failing. This change DOES touch fr-store
+(`script_get_hex`), so the structural dismissal does not apply: `zadd_insert_move` is the
+one that has passed on re-run every time it appeared, and
+`intersect_sorted_i64_galloping` + `swapdb_db_enumeration` have failed in EVERY run this
+session, including on ELFs where fr-store was provably untouched by this agent. None of the
+three reads a script.
