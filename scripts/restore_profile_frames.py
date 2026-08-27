@@ -125,7 +125,11 @@ def main():
     port = 47900 + (os.getpid() % 90)
 
     proc = subprocess.Popen(
-        ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out, fr,
+        ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out,
+         # CG_EXTRA passes extra valgrind options, e.g. --dump-instr=yes to get
+         # per-address attribution inside a frame. Empty by default, so an
+         # unset run is byte-identical to before this existed.
+         *os.environ.get("CG_EXTRA", "").split(), fr,
          "--port", str(port), "--save", "", "--appendonly", "no", "--dir", work,
          # DEBUG RELOAD needs the debug command admitted (--op=reload).
          "--enable-debug-command", "yes"],

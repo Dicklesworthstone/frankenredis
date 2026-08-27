@@ -67840,3 +67840,76 @@ first_key_value, from_sorted_entries x2, get, insert, is_empty, iter, keys, last
 last_key_value, len, new, range, remove, values), plus XADD append into a retained
 node, XRANGE across node boundaries, and the group/PEL state. `VerbatimListpackHash`
 is the working precedent one screen away in fr-store packed_set.rs.
+
+## 2026-08-26 — stream-vary RESTORE 3.2898x -> 3.2456x (-1.61 pct): a fast path whose premise a later caller broke
+
+WORST measured overhead ratio on the board. `write_varint`'s single-byte arm carries
+this premise: "every packed map holds at most `PACKED_MAX_ENTRIES` (128) entries, so
+the length is a single byte in essentially every call." True of `PackedStrMap`. FALSE
+of the caller added later -- `PackedStreamLog::from_sorted_entries_impl` writes a
+FIELD DICTIONARY INDEX bounded by the number of DISTINCT field names, which is 800 on
+a 400-entry varying-schema stream. The fast arm missed for ~84 pct of fields and each
+miss took the loop.
+
+Per-address profile (`--dump-instr=yes`, 400 entries, `--varyfields`) showed why that
+is expensive: the inlined loop is ~14 instructions PER BYTE, because `Vec::push`
+re-checks capacity and reloads the arena pointer and length from the stack on every
+byte -- the pre-`reserve`d arena cannot help, `push` still cannot prove the check
+away. There is even a `grow_one` call site per byte. The arena-write region is 47 pct
+of `from_sorted_entries_impl`'s self cost: 99.7 of its 212 instructions per field.
+
+Fix: a two-byte arm using a CONSTANT-LENGTH `extend_from_slice`, which lowers to one
+two-byte store under one capacity check and one length update. No `memcpy` call (the
+length is a compile-time 2), so this is not the rejected "kill the small memcpy calls"
+lever.
+
+    stream vary @400 RESTORE     control 755,623.6 -> candidate 743,435.4 instr/op
+                                 vs live redis 3.2898x -> 3.2456x     -1.61 pct
+    control   ELF 816145171998d36ea49ddd805fe200313b5f19388bf43e067f6a45eb91169814
+    candidate ELF 35ed940c39b7ef811ef829cc21e1ce1d7107f99065e0dd4f05e58bb88ec7b9d6
+    redis     ELF e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    python3 scripts/restore_instr_per_op.py <bin> 400 100 --type=stream --varyfields --aa
+
+Both arms built from ONE worktree into ONE target dir, ELFs differ, and the candidate
+ELF was REBUILT from the committed source and reproduced its sha exactly. Certified
+draws only (both A/A nulls inside the 0.005 band). **Discards, reported:** one draw
+where BOTH arms' nulls failed, one where the candidate's did, and three vary draws
+where the control's did. Quoted means are over the survivors (control n=3,
+candidate n=3).
+
+### DISCLOSED COST, and a NEGATIVE result on the fix for it
+
+    stream same-fields @400   443,256.2 -> 444,657.9 instr/op   +0.316 pct
+    hash @400                 189,838.8 -> 189,858.8            +0.011 pct  (flat)
+    list @400                  95,789.7 ->  95,859.0            +0.072 pct  (flat)
+
+The same-fields stream arm regresses ~0.32 pct across FOUR certified draws, all
+positive. It never EXECUTES the new branch -- its indices are 0 and 1 and its values
+are 5 bytes, so both varints take the single-byte arm and return. ~1.9 instructions
+per field with zero new instructions executed is pure CODE LAYOUT.
+
+**The obvious fix did not work, and that is worth recording.** Widening a shared
+`#[inline]` function changes the inlined body at every call site, so the change was
+re-shaped into a separate `write_varint_index` / `write_varint_impl<FAST, WIDE>`
+instantiation, leaving `write_varint::<true, false>` byte-identical for every other
+caller ([[feedback_split_the_call_site_not_the_function_body]]). Measured, that moved
+the sibling arm from +0.337 pct to +0.316 pct -- indistinguishable within the draws
+taken. **The layout effect is inside the stream builder itself, not spillover onto
+other callers.** The split is kept anyway because it makes non-stream callers
+provably unchanged rather than measured-unchanged, but it should not be credited with
+fixing the cost it was written to fix.
+
+Net is strongly positive in absolute terms: -12,188 instr/op on the target arm
+against +1,402 on the sibling.
+
+Gate: `write_varint_fast_path_is_byte_identical_and_round_trips` now also asserts the
+WIDE instantiation encodes identically to `FAST = false` for every input, so the
+arena encoding cannot drift silently.
+
+**Pre-existing test failures, checked not inherited:** the fr-store lib suite reports
+957 passed / 4 failed. Two (`sdf2`, `zdiff_resolve_once`) are wall-clock ratio gates
+that failed only under measurement load and pass on a quiet host. The other two
+(`galp1` skewed, `swapdb` enumeration) FAIL IDENTICALLY ON HEAD's SOURCE -- GALP1
+skewed 0.44x control vs 0.41x candidate, SWAPDB 1x both -- so they are not this
+change's. None of the four touch varint encoding.

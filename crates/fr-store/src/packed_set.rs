@@ -158,7 +158,27 @@ impl<'a> Iterator for PackedStrSetIter<'a> {
 /// listpack-eligible members ≤ 64 bytes), growing 7 bits at a time.
 #[inline]
 fn write_varint(buf: &mut Vec<u8>, n: usize) {
-    write_varint_impl::<true>(buf, n);
+    write_varint_impl::<true, false>(buf, n);
+}
+
+/// `write_varint` for a value that is NOT bounded by `PACKED_MAX_ENTRIES`.
+///
+/// (BlackThrush 2026-08-26) Only `PackedStreamLog::from_sorted_entries_impl`'s
+/// FIELD DICTIONARY INDEX needs this: it is bounded by the number of DISTINCT field
+/// names in the stream (800 on a 400-entry varying-schema stream), not by the 128
+/// that makes the single-byte arm above a near-certainty everywhere else.
+///
+/// It is a SEPARATE INSTANTIATION rather than a wider arm inside `write_varint`
+/// because `write_varint_impl` is `#[inline]` and widening it in place changed the
+/// inlined body at EVERY call site. Measured, that cost the same-fields stream arm
+/// +0.337 pct (443,358.7 -> 444,852.6 instr/op, three draws, all A/A nulls PASS)
+/// even though that arm never EXECUTES the wide branch -- its indices are 0 and 1.
+/// Pure code layout. Splitting the call site keeps `write_varint::<true, false>`
+/// byte-identical for every other caller instead of making them all pay for a
+/// branch only one caller reaches.
+#[inline]
+fn write_varint_index(buf: &mut Vec<u8>, n: usize) {
+    write_varint_impl::<true, true>(buf, n);
 }
 
 /// (frankenredis-33832) Write-side twin of [`read_varint_impl`]'s `FAST` arm.
@@ -178,9 +198,44 @@ fn write_varint(buf: &mut Vec<u8>, n: usize) {
 /// byte-identity gate can compare the two arms in one binary — the same convention
 /// `read_varint_impl` uses.
 #[inline]
-fn write_varint_impl<const FAST: bool>(buf: &mut Vec<u8>, mut n: usize) {
+fn write_varint_impl<const FAST: bool, const WIDE: bool>(buf: &mut Vec<u8>, mut n: usize) {
     if FAST && n < 0x80 {
         buf.push(n as u8);
+        return;
+    }
+    // (BlackThrush 2026-08-26) TWO-BYTE ARM. The single-byte arm's premise above --
+    // "every packed map holds at most PACKED_MAX_ENTRIES (128) entries, so the
+    // length is a single byte in essentially every call" -- is true of
+    // `PackedStrMap` and FALSE of the caller added later:
+    // `PackedStreamLog::from_sorted_entries_impl` writes a FIELD DICTIONARY INDEX,
+    // which is bounded by the number of DISTINCT field names in the stream, not by
+    // PACKED_MAX_ENTRIES. A 400-entry stream with a varying schema holds 800 names,
+    // so the index needs two bytes for ~84 pct of fields and every one of those
+    // fell through to the loop.
+    //
+    // Measured on that arm (400 entries, --varyfields, --dump-instr per-address):
+    // the loop body at +0x820 is ~1.7 executions per field and the whole
+    // arena-write region is 47 pct of `from_sorted_entries_impl`'s self cost, i.e.
+    // 99.7 of its 212 instructions per field. The loop costs ~14 instructions PER
+    // BYTE because `Vec::push` re-checks capacity and reloads the arena pointer and
+    // length from the stack on every byte -- the pre-`reserve`d arena cannot help,
+    // since `push` still cannot prove the check away.
+    //
+    // A CONSTANT-LENGTH `extend_from_slice` lowers to a single two-byte store under
+    // one capacity check and one length update, with no `memcpy` call (the length
+    // is a compile-time 2, so LLVM never emits one -- which is why this is not the
+    // rejected "kill the small memcpy calls" lever).
+    //
+    // Byte-identical by construction: for `0x80 <= n < 0x4000` LEB128 is
+    // `[(n & 0x7f) | 0x80, n >> 7]`, and `n >> 7 < 0x80` so the second byte's
+    // continuation bit is clear. `(n as u8) | 0x80` equals `(n & 0x7f) | 0x80`
+    // because the OR forces bit 7 regardless of what truncation left there.
+    // `write_varint_fast_path_is_byte_identical_and_round_trips` compares this arm
+    // against `FAST = false` in the same binary over 0..1000 plus 0x7f/0x80/0x3fff/
+    // 0x4000 and round-trips each through `read_varint`, so a mistake here fails a
+    // gate rather than silently changing the arena encoding.
+    if FAST && WIDE && n < 0x4000 {
+        buf.extend_from_slice(&[(n as u8) | 0x80, (n >> 7) as u8]);
         return;
     }
     loop {
@@ -2670,7 +2725,7 @@ impl PackedStreamLog {
                 } else {
                     Self::intern_indexed(&mut log.dict, &mut dict_index, name, field_hint)
                 };
-                write_varint(&mut log.arena, idx);
+                write_varint_index(&mut log.arena, idx);
                 write_varint(&mut log.arena, v.as_ref().len());
                 log.arena.extend_from_slice(v.as_ref());
             }
@@ -8148,10 +8203,16 @@ mod tests {
         let mut saw_multi = 0_u32;
         for n in cases {
             let mut fast = Vec::with_capacity(10);
-            super::write_varint_impl::<true>(&mut fast, n);
+            super::write_varint_impl::<true, false>(&mut fast, n);
             let mut slow = Vec::with_capacity(10);
-            super::write_varint_impl::<false>(&mut slow, n);
+            super::write_varint_impl::<false, false>(&mut slow, n);
             assert_eq!(fast, slow, "encoding diverged for {n}");
+
+            // The WIDE instantiation adds a two-byte arm for the stream field index
+            // and must encode identically to both of the above for EVERY input.
+            let mut wide = Vec::with_capacity(10);
+            super::write_varint_impl::<true, true>(&mut wide, n);
+            assert_eq!(wide, slow, "wide encoding diverged for {n}");
 
             // And it must still decode back to `n`, so a change making BOTH arms
             // wrong in the same way cannot pass.
