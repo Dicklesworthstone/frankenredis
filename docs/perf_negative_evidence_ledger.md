@@ -68985,3 +68985,52 @@ alone. Gates green on the shipping ELF
 `129b5d6f25e0f9c193e7f216ae28ff05f7d0a998839e36f8dbbadb8364640777`: fr-persist 239/239,
 stream reload+RESTORE fuzz 480 commands, AOF CLI restart gate; fr-store 960 passed with
 the 2 known pre-existing wall-clock failures.
+
+## 2026-08-27 — `StreamEntries` becomes a WRAPPER: the 17-shim problem was never real, `Deref` costs nothing
+
+Every previous note sized the lazy-RESTORE build as "~17 delegating methods" on
+`PackedStreamLog`'s public surface, and treated that as the reason it could not be
+started safely. **Measured, that framing was wrong twice over.**
+
+**Compiler-counted, not estimated.** Turning `pub type StreamEntries = PackedStreamLog`
+into a bare newtype produced **76 errors across only 13 DISTINCT methods** -- `keys` 10,
+`range` 8, `iter` 5, `remove` 4, `get` 4, `last_key_value` 3, `last_id` 3,
+`first_key_value` 3, `len` 2, and one each of `values` / `is_empty` / `insert` /
+`first_id`. And `Deref` + `DerefMut` collapse all 76 to **zero call-site changes**, so
+the seventeen shims never have to exist -- there is one place to put the future
+materialisation instead of seventeen to keep in sync.
+
+**And `PackedStreamLog` is untouched.** None of its 90 internal field references move.
+A `Value::StreamPending` variant would have forced **125 `Value::Stream` sites** (73 in
+fr-store); wrapping the payload type instead keeps `Value::Stream(Box<StreamEntries>)`
+structurally identical, so every one of those sites still matches.
+
+**The indirection is free**, which is the only thing that made it landable:
+
+    python3 scripts/restore_instr_per_op.py <bin> 400 100 --type=stream --varyfields --aa
+
+    certified pair (both A/A nulls PASS)
+      pre-wrapper  740,560.5 instr/op   3.2523x
+      wrapper      740,331.4            3.2258x     -229 Ir/op, -0.03 pct
+    second draw    742,123.2 -> 738,889.8 (-0.44 pct; control's ratio line did not parse)
+
+    control ELF 129b5d6f25e0f9c193e7f216ae28ff05f7d0a998839e36f8dbbadb8364640777
+    ship    ELF 4e62c6ae26b6c836f72acd548c9ef3376511feaafe525eb1d5f388bfa82e08a2
+
+**NO PERF CHANGE, and it is not churn:** it is the enabling step for a lever whose
+payoff is already MEASURED at 3.2230x -> 2.0525x (`747a1eff4`), and it converts the
+part everyone was afraid of -- a wide mechanical edit inside an 82k-line file that
+cannot be rustfmt'd -- into a 30-line wrapper the compiler verified in one pass.
+
+**What remains is now small and fully specified:** a `Pending` variant holding an
+`UpstreamStreamSkeleton` (which owns its decompressed nodes outright --
+`Vec<(u64, u64, Vec<u8>)>`, no lifetimes), a `OnceCell<PackedStreamLog>` materialised
+inside `deref`, an fr-persist entry point that hands the skeleton back instead of
+consuming it, and the save path preferring the retained blob. The validator that
+RESTORE must keep running is already shipped and oracle-tested (`747a1eff4`).
+
+Gates green on the shipping ELF: fr-persist 239/239, stream reload+RESTORE fuzz 480
+commands, AOF CLI restart gate, fr-runtime 656 passed. fr-store 959 passed; `galp1` and
+`swapdb` are the known pre-existing pair and `zadd_insert_move` is the load-sensitive
+wall-clock class -- it failed while the measurement was loading the host and passes on
+a quiet one.

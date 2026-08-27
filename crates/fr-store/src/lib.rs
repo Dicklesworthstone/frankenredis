@@ -249,7 +249,84 @@ pub type StreamField = (Vec<u8>, Vec<u8>);
 /// `PackedStreamFields` layout, so DUMP / DEBUG DIGEST / XRANGE output is
 /// unchanged; only the container shrinks. Reads hand back a `FieldsRef` view
 /// whose `to_pairs`/`iter` mirror the old type, so callers are unchanged.
-pub type StreamEntries = PackedStreamLog;
+/// (BlackThrush 2026-08-27) A WRAPPER, not an alias, so a stream can eventually be
+/// held UNDECODED after RESTORE.
+///
+/// Step one of the lazily-materialising RESTORE measured at 3.2230x -> 2.0525x
+/// (747a1eff4): fr decodes a macro-node listpack into `PackedStreamLog` on RESTORE
+/// where redis keeps the blob, and 269,580 instr/op of that is decode-and-rebuild
+/// this type will be able to defer. `UpstreamStreamSkeleton` owns its decompressed
+/// nodes outright (`Vec<(u64, u64, Vec<u8>)>`, no lifetimes), so a `Pending` variant
+/// can simply hold one.
+///
+/// `Deref` rather than seventeen delegating methods, and that choice is MEASURED:
+/// turning the alias into a bare newtype produced **76 compile errors across only 13
+/// distinct methods** (`keys` 10, `range` 8, `iter` 5, `remove`/`get` 4 each, ...).
+/// Delegating each would be seventeen shims to keep in sync with the inner type
+/// forever; `Deref` collapses all 76 call sites to zero changes and puts the future
+/// materialisation in ONE place. The inner type is untouched -- none of its 90
+/// internal field references move.
+#[derive(Clone, Debug, Default)]
+pub struct StreamEntries {
+    inner: PackedStreamLog,
+}
+
+impl StreamEntries {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: PackedStreamLog::new(),
+        }
+    }
+
+    pub fn from_sorted_entries<'a, F, V, I>(entries: I) -> Self
+    where
+        F: AsRef<[u8]> + 'a,
+        V: AsRef<[u8]> + 'a,
+        I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
+    {
+        Self {
+            inner: PackedStreamLog::from_sorted_entries(entries),
+        }
+    }
+
+    pub fn from_sorted_entries_repeated_fields<'a, F, V, I>(
+        entries: I,
+        arena_hint: usize,
+        field_hint: usize,
+    ) -> Self
+    where
+        F: AsRef<[u8]> + 'a,
+        V: AsRef<[u8]> + 'a,
+        I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
+    {
+        Self {
+            inner: PackedStreamLog::from_sorted_entries_repeated_fields(
+                entries, arena_hint, field_hint,
+            ),
+        }
+    }
+}
+
+impl std::ops::Deref for StreamEntries {
+    type Target = PackedStreamLog;
+
+    fn deref(&self) -> &PackedStreamLog {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for StreamEntries {
+    fn deref_mut(&mut self) -> &mut PackedStreamLog {
+        &mut self.inner
+    }
+}
+
+impl PartialEq for StreamEntries {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
 pub type StreamRecord = (StreamId, Vec<StreamField>);
 pub type StreamInfoBounds = (usize, Option<StreamRecord>, Option<StreamRecord>);
 /// (name, pending_count, idle_ms)
