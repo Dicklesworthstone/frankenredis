@@ -281,6 +281,13 @@ enum StreamRepr {
         /// Filled by deref. A OnceCell and not a RefCell because a read only ever
         /// needs a shared borrow and the value is written exactly once.
         decoded: std::cell::OnceCell<PackedStreamLog>,
+        /// The greatest entry id, as returned by validate_entries.
+        ///
+        /// Carried because Store::stream_watermark asks every stream for its
+        /// last_id, and answering that through Deref materialized every retained
+        /// record before anything could use it -- the same shape as the len() case
+        /// (9e8536f11), found the same way, with a caller table.
+        last_id: Option<StreamId>,
     },
 }
 
@@ -330,6 +337,27 @@ impl StreamEntries {
         }
     }
 
+    /// The retained upstream record, when this stream has not been decoded yet.
+    ///
+    /// None once anything has read or written the stream: a read fills the OnceCell
+    /// and a write collapses to Ready, so a Some here means the entries are exactly
+    /// as the record described them. That is an OWNERSHIP guarantee, not a
+    /// convention -- there is no path to the entries that does not go through Deref
+    /// or DerefMut.
+    ///
+    /// It says nothing about the stream's GROUPS, watermark, entries-added or
+    /// max-deleted: those live on the Store, outside this type, and a caller reusing
+    /// the record body has to compare them itself.
+    #[must_use]
+    pub fn pending_skeleton(&self) -> Option<&fr_persist::UpstreamStreamSkeleton> {
+        match &self.repr {
+            StreamRepr::Pending {
+                skeleton, decoded, ..
+            } if decoded.get().is_none() => Some(skeleton),
+            _ => None,
+        }
+    }
+
     /// Entry count WITHOUT materializing.
     ///
     /// Inherent, so it shadows the Deref to PackedStreamLog. This is load-bearing,
@@ -342,7 +370,9 @@ impl StreamEntries {
     pub fn len(&self) -> usize {
         match &self.repr {
             StreamRepr::Ready(log) => log.len(),
-            StreamRepr::Pending { skeleton, decoded } => match decoded.get() {
+            StreamRepr::Pending {
+                skeleton, decoded, ..
+            } => match decoded.get() {
                 Some(log) => log.len(),
                 None => skeleton.declared_len(),
             },
@@ -359,11 +389,26 @@ impl StreamEntries {
     /// CALLER CONTRACT: validate_entries must already have returned Ok for this
     /// skeleton. See materialize_pending.
     #[must_use]
-    pub fn pending(skeleton: fr_persist::UpstreamStreamSkeleton) -> Self {
+    pub fn pending(skeleton: fr_persist::UpstreamStreamSkeleton, last_id: Option<StreamId>) -> Self {
         Self {
             repr: StreamRepr::Pending {
                 skeleton: Box::new(skeleton),
                 decoded: std::cell::OnceCell::new(),
+                last_id,
+            },
+        }
+    }
+
+    /// Greatest entry id WITHOUT materializing. Inherent, so it shadows the Deref.
+    #[must_use]
+    pub fn last_id(&self) -> Option<StreamId> {
+        match &self.repr {
+            StreamRepr::Ready(log) => log.last_id(),
+            StreamRepr::Pending {
+                decoded, last_id, ..
+            } => match decoded.get() {
+                Some(log) => log.last_id(),
+                None => *last_id,
             },
         }
     }
@@ -403,9 +448,9 @@ impl std::ops::Deref for StreamEntries {
     fn deref(&self) -> &PackedStreamLog {
         match &self.repr {
             StreamRepr::Ready(log) => log,
-            StreamRepr::Pending { skeleton, decoded } => {
-                decoded.get_or_init(|| materialize_pending(skeleton))
-            }
+            StreamRepr::Pending {
+                skeleton, decoded, ..
+            } => decoded.get_or_init(|| materialize_pending(skeleton)),
         }
     }
 }
@@ -414,7 +459,10 @@ impl std::ops::DerefMut for StreamEntries {
     fn deref_mut(&mut self) -> &mut PackedStreamLog {
         // A write collapses the representation for good: take the already-decoded
         // value if a read produced one, otherwise decode now. No clone either way.
-        if let StreamRepr::Pending { skeleton, decoded } = &mut self.repr {
+        if let StreamRepr::Pending {
+            skeleton, decoded, ..
+        } = &mut self.repr
+        {
             let log = decoded
                 .take()
                 .unwrap_or_else(|| materialize_pending(skeleton));
@@ -28419,6 +28467,42 @@ impl Store {
         self.finish_stream_bulk_load(key, map, now_ms);
     }
 
+    /// Install a RDB-loaded stream WITHOUT decoding it.
+    ///
+    /// Mirror of load_stream_entries for the retained path: the record goes into the
+    /// keyspace in its upstream form and the packed log is built on the first READ.
+    /// The RDB loader already hands the applier a skeleton rather than entries, so
+    /// nothing had to be decoded to get here.
+    ///
+    /// CALLER CONTRACT: validate_entries must already have returned Ok, and last_id
+    /// must be the value it returned. Reading the last id off the log instead would
+    /// dereference the value and materialize it immediately -- the exact mistake
+    /// measured at +31.7 pct on the RESTORE path (9e8536f11).
+    pub fn load_stream_pending(
+        &mut self,
+        key: &[u8],
+        skeleton: fr_persist::UpstreamStreamSkeleton,
+        last_id: Option<StreamId>,
+        now_ms: u64,
+    ) {
+        self.stream_groups.remove(key);
+        self.stream_max_deleted_ids.remove(key);
+        let count = skeleton.declared_len() as u64;
+        if let Some(id) = last_id {
+            self.stream_last_ids.insert(key.to_vec(), id);
+        }
+        self.stream_entries_added.insert(key.to_vec(), count);
+        self.internal_entries_insert(
+            key.to_vec(),
+            Entry::new(
+                Value::Stream(Box::new(StreamEntries::pending(skeleton, last_id))),
+                now_ms,
+            ),
+        );
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(count);
+    }
+
     pub fn load_stream_entries(
         &mut self,
         key: &[u8],
@@ -36169,7 +36253,7 @@ impl Store {
                 // Last-id fallback comes from VALIDATION, not from the log: reading
                 // it off the log dereferences the value and materializes it.
                 restored_stream_last_id = watermark.or(validated_last_id);
-                Value::Stream(Box::new(StreamEntries::pending(skeleton)))
+                Value::Stream(Box::new(StreamEntries::pending(skeleton, validated_last_id)))
             }
             RDB_TYPE_LIST_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;

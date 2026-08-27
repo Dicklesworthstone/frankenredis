@@ -50343,10 +50343,6 @@ fn store_to_rdb_entries_with_thresholds(
                 // The owned build below still runs for any stream the listpacks3
                 // encoder declines -- exactly the streams `encode_stream_rdb_value`
                 // would have sent down `encode_private_stream_rdb_value` anyway.
-                let borrowed_entries: Vec<(u64, u64, Vec<(&[u8], &[u8])>)> = entries_map
-                    .iter()
-                    .map(|((ms, seq), fields)| (*ms, *seq, fields.iter().collect()))
-                    .collect();
                 let watermark = store.stream_watermark(&key).unwrap_or(None);
                 let entries_added = Some(store.stream_entries_added(&key, entries_map.len()));
                 let max_deleted = store.stream_max_deleted_id(&key);
@@ -50388,6 +50384,36 @@ fn store_to_rdb_entries_with_thresholds(
                             .collect()
                     })
                     .unwrap_or_default();
+                // (BlackThrush 2026-08-27) VERBATIM when the stream is still
+                // RETAINED. A Pending stream has not been read or written since it
+                // was decoded, so its original record body still describes the
+                // entries exactly -- and re-encoding it is 18.2 pct of this arm
+                // (append_member 3,351,800 + the blob encoder + listpack_string_to_int64
+                // + building borrowed_entries, 22f0e2a78).
+                //
+                // The retained body also describes GROUPS, watermark, entries-added
+                // and max-deleted, and NONE of those live inside StreamEntries --
+                // they are Store side-maps, so DerefMut cannot see them change.
+                // Each is therefore compared explicitly against what this save would
+                // have written. Anything unequal falls through to the full re-encode.
+                //
+                // Note what this does NOT rely on: it never compares the ENTRIES,
+                // because it does not have to. Pending IS the proof they are
+                // unchanged.
+                if let Some(skeleton) = entries_map.pending_skeleton()
+                    && skeleton.upstream_type_byte()
+                        == fr_persist::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3
+                    && skeleton.watermark() == watermark
+                    && Some(skeleton.entries_added()) == entries_added
+                    && skeleton.max_deleted() == max_deleted
+                    && skeleton.groups() == groups.as_slice()
+                {
+                    RdbValue::StreamListpacks3(skeleton.upstream_payload().to_vec())
+                } else {
+                let borrowed_entries: Vec<(u64, u64, Vec<(&[u8], &[u8])>)> = entries_map
+                    .iter()
+                    .map(|((ms, seq), fields)| (*ms, *seq, fields.iter().collect()))
+                    .collect();
                 if let Some(blob) = fr_persist::encode_stream_listpacks3_blob_borrowed(
                     &borrowed_entries,
                     watermark,
@@ -50418,6 +50444,7 @@ fn store_to_rdb_entries_with_thresholds(
                         entries_added,
                         max_deleted,
                     )
+                }
                 }
             }
         };
@@ -50784,15 +50811,26 @@ fn apply_rdb_entries_to_store(
             // made only so the entries could outlive that blob and cross
             // `RdbValue`. Same handling otherwise -- the metadata below is read
             // through the skeleton's accessors rather than the tuple's fields.
-            RdbValue::StreamSkeleton(ref skeleton) => {
-                let Ok(flat) = skeleton.flat_entries() else {
+            RdbValue::StreamSkeleton(skeleton) => {
+                // (BlackThrush 2026-08-27) RETAIN, do not decode -- the same change
+                // that took the RESTORE arm 3.2183x -> 2.1492x (001f91663), applied
+                // to the RDB LOAD arm, which is a separate route.
+                //
+                // Decoding here WAS the validation: flat_entries returning Err is
+                // what rejected a malformed record. Retention keeps the rejection
+                // and drops only the materialisation, so validate_entries takes its
+                // place -- it is oracle-tested byte-for-byte against exactly what
+                // this path accepted before, duplicate ids included.
+                let Ok(validated_last_id) = skeleton.validate_entries() else {
                     return Err(PersistError::InvalidFrame);
                 };
-                store.load_stream_entries_borrowed(&key, &flat, now_ms);
-                drop(flat);
                 let watermark = skeleton.watermark();
                 let entries_added = Some(skeleton.entries_added());
                 let max_deleted = skeleton.max_deleted();
+                // Groups are COPIED before the skeleton moves: stream METADATA, a
+                // handful per stream, not the entry data retention exists to defer.
+                let groups = skeleton.groups().to_vec();
+                store.load_stream_pending(&key, *skeleton, validated_last_id, now_ms);
                 if let Some((wm_ms, wm_seq)) = watermark {
                     let _ = store.xsetid_with_metadata(
                         &key,
@@ -50807,7 +50845,7 @@ fn apply_rdb_entries_to_store(
                 if let Some(md) = max_deleted {
                     store.restore_stream_max_deleted_id(&key, md);
                 }
-                restore_stream_groups_into(store, &key, skeleton.groups(), now_ms);
+                restore_stream_groups_into(store, &key, &groups, now_ms);
                 counts.loaded = counts.loaded.saturating_add(1);
                 if let Some(expires_at) = entry_expire_ms {
                     store.expire_at_milliseconds(
