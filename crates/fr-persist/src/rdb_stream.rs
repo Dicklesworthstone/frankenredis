@@ -730,6 +730,16 @@ impl UpstreamStreamSkeleton {
         Ok(out)
     }
 
+    /// The record's DECLARED live entry count.
+    ///
+    /// Authoritative once validate_entries has returned Ok: the decode compares the
+    /// number of live entries it walked against this and errors on a mismatch. That
+    /// is what lets a retained (undecoded) stream answer len() without decoding.
+    #[must_use]
+    pub fn declared_len(&self) -> usize {
+        self.stream_length
+    }
+
     /// Walk and VALIDATE every entry without materialising any of it.
     ///
     /// Accepts exactly what [`Self::flat_entries`] accepts and rejects exactly what

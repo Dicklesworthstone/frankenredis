@@ -268,14 +268,103 @@ pub type StreamField = (Vec<u8>, Vec<u8>);
 /// internal field references move.
 #[derive(Clone, Debug, Default)]
 pub struct StreamEntries {
-    inner: PackedStreamLog,
+    repr: StreamRepr,
+}
+
+/// Ready is a decoded log; Pending is a RESTOREd record still in its upstream form,
+/// decoded on first READ and never at all if the stream is only saved.
+#[derive(Clone, Debug)]
+enum StreamRepr {
+    Ready(PackedStreamLog),
+    Pending {
+        skeleton: Box<fr_persist::UpstreamStreamSkeleton>,
+        /// Filled by deref. A OnceCell and not a RefCell because a read only ever
+        /// needs a shared borrow and the value is written exactly once.
+        decoded: std::cell::OnceCell<PackedStreamLog>,
+    },
+}
+
+impl Default for StreamRepr {
+    fn default() -> Self {
+        Self::Ready(PackedStreamLog::default())
+    }
+}
+
+/// Decode a retained skeleton into the packed form.
+///
+/// The expect is sound HERE and only here: restore_key_with_metadata runs
+/// validate_entries -- oracle-tested byte-for-byte against exactly what RESTORE
+/// accepts, duplicate-id check included -- BEFORE constructing a Pending, so a
+/// skeleton that reaches this function has already been proven to materialize.
+/// Nothing else may build a Pending without that call.
+fn materialize_pending(skeleton: &fr_persist::UpstreamStreamSkeleton) -> PackedStreamLog {
+    let flat = skeleton
+        .flat_entries()
+        .expect("validated skeleton must materialize");
+    let mut prev: Option<(u64, u64)> = None;
+    let strictly_increasing = flat.ids().all(|id| {
+        let ok = prev.is_none_or(|p| p < id);
+        prev = Some(id);
+        ok
+    });
+    if strictly_increasing {
+        return PackedStreamLog::from_sorted_entries_repeated_fields(
+            flat.iter(),
+            flat.arena_hint(),
+            flat.field_count(),
+        );
+    }
+    let mut log = PackedStreamLog::new();
+    for (id, fields) in flat.iter() {
+        // Duplicates were rejected by validate_entries before this point.
+        log.insert(id, fields);
+    }
+    log
 }
 
 impl StreamEntries {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: PackedStreamLog::new(),
+            repr: StreamRepr::Ready(PackedStreamLog::new()),
+        }
+    }
+
+    /// Entry count WITHOUT materializing.
+    ///
+    /// Inherent, so it shadows the Deref to PackedStreamLog. This is load-bearing,
+    /// not a convenience: the store dereferences a stream while INSERTING it, which
+    /// materialized every retained record the moment it was stored and cost +31.7 pct
+    /// (measured, 9e8536f11). A Pending answers from the record's declared live
+    /// count, which validate_entries has already checked against the entries it
+    /// walked.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match &self.repr {
+            StreamRepr::Ready(log) => log.len(),
+            StreamRepr::Pending { skeleton, decoded } => match decoded.get() {
+                Some(log) => log.len(),
+                None => skeleton.declared_len(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Retain a RESTOREd record UNDECODED.
+    ///
+    /// CALLER CONTRACT: validate_entries must already have returned Ok for this
+    /// skeleton. See materialize_pending.
+    #[must_use]
+    pub fn pending(skeleton: fr_persist::UpstreamStreamSkeleton) -> Self {
+        Self {
+            repr: StreamRepr::Pending {
+                skeleton: Box::new(skeleton),
+                decoded: std::cell::OnceCell::new(),
+            },
         }
     }
 
@@ -286,7 +375,7 @@ impl StreamEntries {
         I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
     {
         Self {
-            inner: PackedStreamLog::from_sorted_entries(entries),
+            repr: StreamRepr::Ready(PackedStreamLog::from_sorted_entries(entries)),
         }
     }
 
@@ -301,9 +390,9 @@ impl StreamEntries {
         I: IntoIterator<Item = ((u64, u64), &'a [(F, V)])>,
     {
         Self {
-            inner: PackedStreamLog::from_sorted_entries_repeated_fields(
+            repr: StreamRepr::Ready(PackedStreamLog::from_sorted_entries_repeated_fields(
                 entries, arena_hint, field_hint,
-            ),
+            )),
         }
     }
 }
@@ -312,19 +401,37 @@ impl std::ops::Deref for StreamEntries {
     type Target = PackedStreamLog;
 
     fn deref(&self) -> &PackedStreamLog {
-        &self.inner
+        match &self.repr {
+            StreamRepr::Ready(log) => log,
+            StreamRepr::Pending { skeleton, decoded } => {
+                decoded.get_or_init(|| materialize_pending(skeleton))
+            }
+        }
     }
 }
 
 impl std::ops::DerefMut for StreamEntries {
     fn deref_mut(&mut self) -> &mut PackedStreamLog {
-        &mut self.inner
+        // A write collapses the representation for good: take the already-decoded
+        // value if a read produced one, otherwise decode now. No clone either way.
+        if let StreamRepr::Pending { skeleton, decoded } = &mut self.repr {
+            let log = decoded
+                .take()
+                .unwrap_or_else(|| materialize_pending(skeleton));
+            self.repr = StreamRepr::Ready(log);
+        }
+        match &mut self.repr {
+            StreamRepr::Ready(log) => log,
+            StreamRepr::Pending { .. } => unreachable!("collapsed above"),
+        }
     }
 }
 
 impl PartialEq for StreamEntries {
     fn eq(&self, other: &Self) -> bool {
-        self.inner == other.inner
+        // Compared as LOGS, not as representations: a Pending and a Ready holding
+        // the same stream are equal, which is what every caller means.
+        **self == **other
     }
 }
 pub type StreamRecord = (StreamId, Vec<StreamField>);
@@ -36025,56 +36132,44 @@ impl Store {
                 // value -- and copied both, purely so the entries could outlive
                 // the blob they came from, and this is the one caller that
                 // rebuilds a store representation and drops them immediately.
-                let (built, rest, consumed) = fr_persist::decode_upstream_stream_payload_borrowed(
+                // (BlackThrush 2026-08-27) RETAIN, do not rebuild. The record is
+                // VALIDATED and then stored in its upstream form; the packed log is
+                // built on the first READ, and never at all for a stream that is
+                // only saved again (replication fan-out, DUMP/RESTORE migration,
+                // RDB load then BGSAVE).
+                //
+                // Measured floor for exactly this, same ELF both arms, four
+                // certified draws: 3.2230x -> 2.0525x, -269,580 instr/op
+                // (747a1eff4). What is skipped is the decode-and-rebuild; what is
+                // KEPT is the validation, because fr rejects corrupt payloads that
+                // default-redis accepts (9a6f6c487) and that property is not for
+                // sale.
+                //
+                // validate_entries covers exactly what the old build closure
+                // rejected -- malformed listpacks AND duplicate ids -- and is
+                // oracle-tested byte-for-byte against that predicate. It is what
+                // makes the expect inside materialize_pending sound.
+                let (skeleton, consumed) = fr_persist::UpstreamStreamSkeleton::decode(
                     type_byte,
                     &payload[cursor..data_end],
-                    |stream_entries| -> Result<StreamEntries, StoreError> {
-                        // Upstream serializes stream entries in strictly
-                        // id-ascending order, so build the node index in bulk
-                        // (O(n)) instead of a BTree range lookup + in-node binary
-                        // search per entry (`node_key_for`, the RESTORE hot path).
-                        // Fall back to per-entry `insert` only if the payload is
-                        // NOT strictly increasing — that path tolerates reordering
-                        // and rejects duplicates.
-                        let mut prev: Option<(u64, u64)> = None;
-                        let strictly_increasing = stream_entries.ids().all(|id| {
-                            let ok = prev.is_none_or(|p| p < id);
-                            prev = Some(id);
-                            ok
-                        });
-                        if strictly_increasing {
-                            // `_repeated_fields`: these entries are the BORROWED
-                            // decode, so every entry's j-th field name is the same
-                            // `Cow::Borrowed` of the one master name in the node's
-                            // listpack. Interning them by address instead of by
-                            // bytes removes 118 of the 133 memcmp calls per op.
-                            return Ok(StreamEntries::from_sorted_entries_repeated_fields(
-                                stream_entries.iter(),
-                                stream_entries.arena_hint(),
-                                stream_entries.field_count(),
-                            ));
-                        }
-                        let mut entries = StreamEntries::new();
-                        for (id, fields) in stream_entries.iter() {
-                            // `insert` returns true if this id already appeared —
-                            // a duplicate in the DUMP payload is malformed.
-                            if entries.insert(id, fields) {
-                                return Err(StoreError::InvalidDumpPayload);
-                            }
-                        }
-                        Ok(entries)
-                    },
                 )
-                .ok_or(StoreError::InvalidDumpPayload)?;
+                .map_err(|_| StoreError::InvalidDumpPayload)?;
+                let validated_last_id = skeleton
+                    .validate_entries()
+                    .map_err(|_| StoreError::InvalidDumpPayload)?;
                 cursor += consumed;
-                let entries = built?;
-                restored_stream_last_id = rest
-                    .watermark
-                    .or_else(|| entries.keys().next_back().copied());
-                restored_stream_entries_added = rest.entries_added;
-                restored_stream_max_deleted_id = rest.max_deleted;
-                restored_stream_groups = Some(restore_stream_groups(rest.groups)?);
-                Value::Stream(Box::new(entries))
+                // Groups are COPIED out before the skeleton moves: they are stream
+                // METADATA (a handful per stream), not entry data, so this is not
+                // the cost the retention exists to avoid.
+                let groups = skeleton.groups().to_vec();
+                let watermark = skeleton.watermark();
+                restored_stream_entries_added = Some(skeleton.entries_added());
+                restored_stream_max_deleted_id = skeleton.max_deleted();
+                restored_stream_groups = Some(restore_stream_groups(groups)?);
+                // Last-id fallback comes from VALIDATION, not from the log: reading
+                // it off the log dereferences the value and materializes it.
+                restored_stream_last_id = watermark.or(validated_last_id);
+                Value::Stream(Box::new(StreamEntries::pending(skeleton)))
             }
             RDB_TYPE_LIST_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;

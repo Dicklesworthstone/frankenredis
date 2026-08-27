@@ -69091,3 +69091,56 @@ an unconditional `Ok` validator fails the oracle.
     fr-persist 240/240; fr-store 957-960 passed across runs, the 2 stable failures
     being the known pre-existing `galp1` / `swapdb` pair and the rest the
     load-sensitive wall-clock class.
+
+## 2026-08-27 — LAZY RESTORE LANDS: the worst arm 3.2183x -> 2.1492x (-33.5 pct)
+
+`9e8536f11` measured the same design at +31.7 pct and located the trigger:
+`Store::internal_entries_insert_with_expiry_impl` dereferenced the stream while
+INSERTING it, materialising every retained record the moment it was stored. **One
+inherent method fixed it.**
+
+`StreamEntries::len()` / `is_empty()` are now INHERENT, so they shadow the `Deref` to
+`PackedStreamLog` and a `Pending` answers from the record's DECLARED live count
+(`UpstreamStreamSkeleton::declared_len`) instead of decoding. That count is
+authoritative precisely because `validate_entries` has already compared the live
+entries it walked against it.
+
+    python3 scripts/restore_instr_per_op.py <bin> 400 100 --type=stream --varyfields --aa
+
+    TWO CERTIFIED PAIRS (all four A/A nulls PASS)
+      draw2  wrapper 742,826.1  3.2292x   ->  lazy 493,583.3  2.1494x   -33.55 pct
+      draw4  wrapper 741,094.5  3.2073x   ->  lazy 493,785.8  2.1489x   -33.37 pct
+      mean   wrapper 741,960.3  3.2183x   ->  lazy 493,684.6  2.1492x   -33.46 pct
+
+    control ELF 4e62c6ae26b6c836f72acd548c9ef3376511feaafe525eb1d5f388bfa82e08a2
+    ship    ELF fbca4f1ede591e8eacac1d9b55d437c3a069249beaf04b23f39e5d0d1856a6fa
+    redis   ELF e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+**Verified by frame table, not just by the ratio:** `materialize_pending` and
+`flat_entries` no longer appear at all, `decode_raw_values` is back to ONE walk
+(282,088 -> 141,044 Ir/op), and `from_sorted_entries_impl` and `hash_one` are gone.
+A RESTOREd stream is now decompressed, validated, and stored in its upstream form; the
+packed log is built on the first READ and never at all for a stream that is only saved
+again.
+
+**Landed 2.1492x against a measured floor of 2.0525x** (`747a1eff4`). The ~0.10x gap is
+explained and not slack: that floor was measured BEFORE `validate_entries` also
+collected and sorted ids for the duplicate check, which a deferred materialisation
+requires (`9e8536f11`).
+
+### The safety property is intact, which was the whole constraint
+
+fr still rejects corruption default-redis accepts -- byte@12 and byte@20 of a resealed
+hash payload are `-ERR Bad data format` on fr and `ACCEPTED, HLEN=20` on redis. For
+streams the guarantee is structural: RESTORE calls `validate_entries`, which is
+oracle-tested byte-for-byte against RESTORE's FULL acceptance predicate (`flat_entries`
+succeeding AND ids unique), mutation-checked so an unconditional `Ok` fails it.
+
+Gates on the shipping ELF: stream reload+RESTORE fuzz 480 commands, AOF CLI restart
+gate, fr-persist 240/240, fr-store 961 passed / 1 failed (`swapdb`, the known
+pre-existing one) with all 94 stream tests green, fr-runtime 656 passed with the known
+stale-replica pair.
+
+**Two turns, and the second one only needed one method.** The +31.7 pct version was not
+a wrong design -- it was the right design with one eager reader left in it, and the
+caller table named that reader in a single query.
