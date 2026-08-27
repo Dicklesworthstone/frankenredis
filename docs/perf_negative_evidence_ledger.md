@@ -72348,3 +72348,109 @@ session's largest lever (`c037c333a`, SORT ALPHA's per-comparison `CString`), wh
 redis showed the IDENTICAL `strcoll_l` frame and unequal call counts. **Equal instructions
 with unequal calls, and unequal instructions with equal calls, are both per-call cost
 findings that a frame table alone reads as something else.**
+
+## 2026-08-27 — KEEP/LANDED (frankenredis-kbyhy) — the FCALL library cache re-keyed from SOURCE to NAME+generation: fcall_lib32 -299.3, fcall_lib1_pad -275.9 instr/op, and fcall_lib1 FLAT as predicted
+
+The row above sized this and did not land it, because a wrong cache executes a stale
+library silently. The gate is built now, so it lands.
+
+**PROVENANCE, because it is not this row's own commit.** The SOURCE change landed as
+`8b2bed059`, a concurrent commit in this shared checkout that picked up the working tree
+while these measurements were running -- the third time today. Its diff is exactly the
+three crate edits plus a `.beads` sync, verified by reading it, so ELF `c855af57...`, built
+from that tree before the commit, is the code `8b2bed059` contains. This row supplies the
+measurements and the gate that commit does not carry.
+
+The cache was keyed on the library SOURCE, which bought invalidation for free -- a replaced
+library is a different key -- and charged an `Eq` over the whole body on every HIT. It is
+now keyed on the library NAME plus `Store::function_generation()`, a counter bumped at the
+four `function_libraries` mutation sites; a probe whose stored generation differs CLEARS the
+map before answering, so a stale entry stays unreachable.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> fcall_lib32 | fcall_lib1_pad | fcall_lib1
+
+    fr's OWN instr/op, n=4 per arm, three arms INTERLEAVED (control/ship/null):
+      fcall_lib32     10,426.8 -> 10,127.5   -299.3  (-2.87 pct)  A/A band 0.16 pct  DISJOINT
+      fcall_lib1_pad  10,355.5 -> 10,079.6   -275.9  (-2.66 pct)  A/A band 0.27 pct  DISJOINT
+      fcall_lib1      10,090.1 -> 10,087.8     -2.4  (-0.02 pct)  A/A band 0.41 pct  flat
+      get_control        910.8 ->    911.1     +0.4  (+0.04 pct)  A/A band 2.19 pct  flat
+
+    fr/redis instructions per op, against that live Redis 7.2.4 arm:
+      fcall_lib32     fr/redis 1.3438x -> 1.3302x
+      fcall_lib1_pad  fr/redis 1.3681x -> 1.3529x
+      fcall_lib1      fr/redis 1.3390x -> 1.3381x   (unchanged, and that is the point)
+
+    A/A null, same invocation as the A/B arms, median 0.99982 bootstrap 95% median CI [0.99961, 1.00159]
+    on fcall_lib32; 0.99984 CI [0.99786, 1.00271] on fcall_lib1_pad. Null arm is a
+    BYTE-IDENTICAL COPY of the ship ELF. Both PASS.
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      control  bench_elf_sha256=86db6d21db02700de96765fada3c9abf7230a0b0903d89e3cb572fcb2f8345b9
+      ship     bench_elf_sha256=c855af57e4ca81d2599985e3305e9f956826555825a6d5f8bf4f9e3bdf754890
+      null     bench_elf_sha256=c855af57e4ca81d2599985e3305e9f956826555825a6d5f8bf4f9e3bdf754890
+      redis    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT rests on the BOOTSTRAP MEDIAN-CI plus the counted mechanism, and on nothing
+    else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-run on both SHA-256s; void if `fcall_lib32`'s delta stops exceeding
+    its own A/A band, or if `libcache_differ.py` reports a divergence on any invalidation
+    path.
+
+### THE PREDICTION WAS MADE FIRST AND THE MEASUREMENT CONFIRMED IT
+
+The sizing row predicted **+297.2 instr/op for a 32x library**, from a memcmp dose-response
+at a CONSTANT call count. The lever measured **-299.3 on `fcall_lib32`**. And the third
+shape is the control the prediction implies: `fcall_lib1`'s library is one line, so its body
+compare was already cheap and it moved **-2.4, inside its own band**. A change that removed
+a fixed cost would have moved all three; this one pays in proportion to library size,
+exactly as the dose-response said it would.
+
+### THE GATE, BUILT BEFORE THE LEVER
+
+Re-keying gives up an invalidation guarantee that was free, and the failure mode is SILENT:
+FCALL would answer with the OLD function and a success reply. `libcache_differ.py` drives
+every way a cached library can be invalidated and asserts the answer CHANGES, against live
+redis 7.2.4 as the oracle -- LOAD REPLACE with a new body; DELETE then LOAD; FLUSH then
+LOAD; a second library, to prove invalidating one does not blind the other; reload with the
+SAME body, where the cache SHOULD hit; and six alternations, because a counter that bumps
+only once would pass the first three. It also asserts its own PRECONDITION -- that redis
+actually changes its answer across each mutation -- so it cannot pass vacuously on a
+permanently stale cache.
+
+Run on the control ELF first to establish the baseline, then on the ship: **PASS on both,
+all twelve cells identical to redis.**
+
+**IT IS NOT MUTATION-TESTED, and that is a deliberate constraint rather than an oversight.**
+This is a shared checkout in which peers have twice today committed my uncommitted working
+tree, so a deliberately-broken build must not exist in it. The teeth argument is by
+construction instead: without the generation check, case A (LOAD REPLACE, same library and
+function name, new body) hits under key `la` and returns `'v1'` where the gate demands
+`'v2'`, and the precondition check confirms redis genuinely changes its answer there.
+
+### WHY `wrapping_add`
+
+`saturating_add` would FREEZE the generation at `u64::MAX`, and a frozen generation is a
+cache that never invalidates again -- the exact failure this counter exists to prevent.
+The cache compares for INEQUALITY, so wrapping is safe, and 2^64 library mutations is not
+a thing a process does.
+
+### GATES
+
+`fr-command` 1,295 pass, including the updated
+`fcall_serves_a_repeat_call_from_the_retained_library_kbyhy` -- whose `Rc::ptr_eq`
+assertion is what separates "served from the cache" from "rebuilt and happened to match",
+and which now probes by name and generation. 31 of 32 differentials pass, INCLUDING every
+Lua/EVAL/script gate and `lua_load_func_differ`. `keyspace_accounting_gate` fails 3/225 and
+produced byte-identical output on a control ELF earlier today.
+
+`fr-store` reported four wall-clock ratio asserts failing; TWO passed on re-run
+(`zadd_insert_move` 0.89x, `zdiff_resolve_once` 1.47x) and the other two
+(`intersect_sorted_i64_galloping`, `swapdb_db_enumeration`) have failed in every run this
+session, including on ELFs where fr-store was provably untouched by this agent. This change
+DOES add a field to `Store`, so the structural dismissal used earlier does not apply and the
+evidence is the re-run plus that history instead.
