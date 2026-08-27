@@ -70462,3 +70462,99 @@ The FCALL family is now the worst, and it is a DIFFERENT bug from either of this
 session's two script/dispatch levers: a library must begin `#!lua name=...` so
 `b0f76b01e`'s early return never fires, and `fcall_lib1_pad` being the worst of the
 family -- a PADDED one-function library -- says the cost still scales with library SIZE.
+
+## 2026-08-27 — the FCALL and EVALSHA size ladders MEASURED: sf510 answered, kbyhy re-confirmed, and the residual located
+
+`8a1a1f80f` left the FCALL family as the worst cells on the surface and predicted the
+cost "still scales with library SIZE" from `fcall_lib1_pad` being the worst of them.
+**That prediction is WRONG, and the ladder says so.** No code changed in this row; it is
+measurement, and it redirects the next lever away from a fix that would recover 2.5 pct.
+
+### THE FCALL LADDER (fr's own instr/op, ELF 40f9db75e012664e..., 3 draws per rung)
+
+      rung             functions   text    fr instr/op    redis instr/op
+      fcall_lib1            1        1x      10,905.7        7,529.4
+      fcall_lib1_pad        1       32x      11,179.3        7,486.5
+      fcall_lib8            8        8x      10,981.0        7,645.9
+      fcall_lib32          32       32x      11,246.6        7,748.0
+
+fr's rungs are tight (spread <= 0.1 pct within a rung); redis's swing up to 15 pct
+within a rung, so only fr's ladder resolves.
+
+**The design-deciding comparison the shape was BUILT for** (`fcall_lib1_pad` has a
+32-function library's TEXT and a 1-function library's CLOSURES): it lands at 11,179.3,
+which is **273.6 above `lib1` and only 67.3 below `lib32`** -- four times closer to the
+32-function rung. So the residual slope is TEXT, not closure count, exactly as the
+shape's own comment said it would discriminate.
+
+**But the whole slope is +340.9 Ir/op across a 32x library -- 3.1 pct -- and the gap to
+redis is 3,376.** `kbyhy` closed on precisely this reading in 2026-08-19 ("fr moves
++3.1 pct across a 32x library against redis's +3.7 pct"), and this row re-confirms that
+closure holds on today's ELF, which nobody had re-run since. **There is no lever in the
+library-size slope.** `LibraryKeyHasher` already reads a bounded 56-byte sample instead
+of the whole library; that was the fix, and it is still working.
+
+### THE EVALSHA LADDER — sf510's MISSING MAGNITUDE, and it closes the bead
+
+`frankenredis-sf510` ("EVALSHA copies AND hashes the whole script body per call to probe
+a cache keyed on source bytes") was filed from SOURCE READING under a build hold and has
+been OPEN and UNMEASURED since 2026-08-18. Measured now, both sides of this session's
+`b0f76b01e`:
+
+      body            fr BEFORE (2ea08045...)   fr AFTER (40f9db75...)   redis
+      8 bytes              12,044.3                  11,904.4            ~9,300
+      4,011 bytes          32,053.1                  11,899.9            ~9,300
+
+      slope            +5.00 Ir per body byte     -0.001 Ir per body byte
+                                                   (-4.5 total: FLAT)
+
+**The body-size slope is not reduced, it is GONE**, and redis is flat across both rungs
+in both arms.
+
+**Two things sf510 got right and one it got wrong.** The bead was right that a per-call
+cost proportional to body size existed -- 5.00 Ir/byte is large, and at 4 KB it was
+20,009 Ir/op, 62 pct of the command. It was right that it was worth measuring. But **the
+MECHANISM it named was already fixed**: `evalsha_cmd`'s compiled-chunk index is keyed by
+SHA, and its own comment says so -- *"It is cheap for the same reason the old code was
+not: it hashes the 40-char SHA, not the [body]"*. The slope that actually survived came
+from `script_shebang_has_flag` re-scanning the body nine times per call, which sf510
+never names. `b0f76b01e` killed that.
+
+**So sf510 closes as ANSWERED-BY-ANOTHER-CAUSE.** Its premise (a body-size-proportional
+per-call cost in EVALSHA) was TRUE and is now measurably zero; its diagnosis was stale.
+*A bead filed from source reading can be right about the symptom and wrong about the
+line, and only the dose-response can tell you which.*
+
+### WHERE THE RESIDUAL ACTUALLY IS, and why this row stops here
+
+The FCALL gap is 3,376 Ir/op and it is FIXED-COST -- `kbyhy`'s closure said so and
+deferred it ("the flat ~1.45x that remains is a separate fixed-cost question and is not
+claimed here"). This row locates it:
+
+    fr dispatch share: 24.1 pct -- 2,630.0 of 10,897.9 instr/op deciding WHICH command,
+    and IDENTICAL (2,630.0) at every rung of the ladder.
+
+Against redis's ~852 (`processMultibulkBuffer` 392 + `siphash_nocase` 242 +
+`strcasecmp` 218). **Dispatch is 1,778 of the 3,376 gap: 53 pct.** fr's actual Lua
+execution is the other half and is a separate question again.
+
+**FCALL appears NOWHERE in `crates/fr-server/src/main.rs`** -- no floor class, no
+cascade arm -- so it takes the fully generic path. That is the same shape as the GEOHASH
+win in `8a1a1f80f`, but it is NOT the same job, and `corpus_coverage.py` says why:
+
+    [A] fast path EXISTS, only the floor entry missing:  0
+    [B] PARTIAL, parser or executor but not both:        0
+    [C] NO borrowed machinery, must be written first:   43
+
+**[A] AND [B] ARE BOTH EMPTY. The cheap floor-entry era is over** -- every remaining
+blind-spot command needs a borrowed parser AND executor written. For FCALL that means
+threading a borrowed argv through the SCRIPTING entry point, past nesting level, script
+flags, propagation and RESP3, and `fcall_cmd` takes `&[Vec<u8>]` today. That is a
+different job from a table entry, and it is not one to start at the end of a session.
+
+### What this row is and is not
+
+**No perf change landed here.** What landed is: a re-confirmation that `kbyhy`'s fix
+still holds, the magnitude `sf510` was missing, and a located residual with its cost
+split. The next person can skip building a library-text cache (2.5 pct) and go straight
+at generic dispatch (53 pct of the gap) knowing it is [C] work.
