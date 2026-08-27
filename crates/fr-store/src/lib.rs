@@ -35101,7 +35101,22 @@ impl Store {
 
     pub fn script_load(&mut self, script: &[u8]) -> String {
         let sha1_hex = sha1_hex(script);
-        self.script_cache.insert(sha1_hex.clone(), script.to_vec());
+        // (BlackThrush 2026-08-27) Only insert on a MISS. EVAL calls this on EVERY
+        // invocation to keep the script reachable by EVALSHA, and the insert was
+        // unconditional -- so a repeated EVAL of the SAME script re-cloned the 40-byte SHA
+        // String and re-copied the WHOLE BODY over an identical entry, every call. The copy
+        // is `script.to_vec()`, so its cost scales with the script.
+        //
+        // The cache is content-addressed by SHA1, so a hit means the stored bytes ARE these
+        // bytes and re-storing them cannot change what a later EVALSHA reads.
+        //
+        // `self.dirty` is bumped UNCONDITIONALLY, exactly as before. It feeds
+        // `rdb_changes_since_last_save` in INFO, so moving it inside the branch would be an
+        // observable change; whether EVAL of an already-cached script SHOULD count as a
+        // change is a separate question from this one and is not decided here.
+        if !self.script_cache.contains_key(&sha1_hex) {
+            self.script_cache.insert(sha1_hex.clone(), script.to_vec());
+        }
         self.dirty = self.dirty.saturating_add(1);
         sha1_hex
     }

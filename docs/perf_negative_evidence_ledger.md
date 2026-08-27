@@ -72635,3 +72635,101 @@ one that has passed on re-run every time it appeared, and
 `intersect_sorted_i64_galloping` + `swapdb_db_enumeration` have failed in EVERY run this
 session, including on ELFs where fr-store was provably untouched by this agent. None of the
 three reads a script.
+
+## 2026-08-27 — KEEP/LANDED (frankenredis-sf510) — EVAL re-copied the whole script body into the cache on EVERY call: luapatq_16 -263.7, luapat_rep16 -240.4 instr/op
+
+`Store::script_load` is called by EVAL on every invocation to keep the script reachable by
+EVALSHA, and its insert was UNCONDITIONAL:
+
+    let sha1_hex = sha1_hex(script);
+    self.script_cache.insert(sha1_hex.clone(), script.to_vec());
+
+So a repeated EVAL of the SAME script re-cloned the 40-byte SHA `String` and re-copied the
+WHOLE BODY over an identical entry, every call. Now inserted only on a miss. The cache is
+content-addressed by SHA1, so a hit means the stored bytes ARE these bytes and re-storing
+them cannot change what a later EVALSHA reads.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> luapatq_16 | luapat_rep16 | luapat_16
+
+    fr's OWN instr/op, n=4 per arm, three arms INTERLEAVED (control/ship/null):
+      luapatq_16     20,721.0 -> 20,457.3   -263.7  (-1.27 pct)  A/A band 0.12 pct  DISJOINT
+      luapat_rep16   15,646.2 -> 15,405.9   -240.4  (-1.54 pct)  A/A band 0.43 pct  DISJOINT
+      luapat_16      19,300.9 -> 18,863.8   -437.2  (-2.26 pct)  A/A band 2.29 pct  UNRESOLVED
+      evalsha_large  10,202.8 -> 10,204.4     +1.6  (+0.02 pct)  A/A band 0.02 pct  flat
+      get_control       907.0 ->    911.0     +4.0  (+0.45 pct)  A/A band 1.38 pct  flat
+
+    fr/redis instructions per op, against that live Redis 7.2.4 arm:
+      luapat_rep16  fr/redis 1.1578x -> 1.1538x
+      luapat_16     fr/redis 1.1130x -> 1.0912x
+      luapatq_16    fr/redis 1.1715x -> 1.1748x   (ratio WORSENED while the absolute fell)
+
+    A/A null, same invocation as the A/B arms, median 1.00048 bootstrap 95% median CI [0.99882, 1.00118]
+    on luapatq_16; 0.99833 CI [0.99568, 1.00066] on luapat_rep16; 1.00007 CI [0.99982,
+    1.00024] on evalsha_large. Null arm is a BYTE-IDENTICAL COPY of the ship ELF. All PASS.
+
+    COUNTED MECHANISM:
+      __rust_alloc                   30.0010 -> 28.0010 calls/op
+      Store::script_load as a caller   1.000 -> ZERO
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, NOT a /proc/self/exe self-report:
+      control  bench_elf_sha256=ea85901f14241d801c47356d0a22273c15c4bbc6fc2f85746f630dbc54279e57
+      ship     bench_elf_sha256=ebd903e20ed24962a62ee9a1666fe014fb012686cb057f8294e2baf0b06ae846
+      null     bench_elf_sha256=ebd903e20ed24962a62ee9a1666fe014fb012686cb057f8294e2baf0b06ae846
+      redis    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT rests on the BOOTSTRAP MEDIAN-CI plus the counted mechanism, and on nothing
+    else. CV is diagnostic only and did not influence it; never on CV.
+
+    Retry predicate: re-run on both SHA-256s; void if `luapatq_16`'s delta stops exceeding
+    its own A/A band, or if `script_load` reappears as an `__rust_alloc` caller.
+
+### `luapat_16` IS THE BIGGEST DELTA AND IS NOT CLAIMED
+
+It read **-437.2, the largest of the three, and its OWN A/A pair produced a 2.29 pct band**
+-- wider than the 2.26 pct delta. It is reported UNRESOLVED rather than as the headline,
+because on this run that shape could not tell the change from its own noise. The two shapes
+whose nulls were tight are the claim.
+
+### `evalsha_large` IS THE CONTROL THE MECHANISM PREDICTS
+
+EVALSHA does not call `script_load` -- it looks a script up by SHA and never re-caches a
+body. It measured **+1.6 instr/op against a 0.02 pct band**, flat to two decimals. A change
+that had touched the shared script path instead of EVAL's caching would have moved it.
+
+### THE RATIO WENT THE WRONG WAY ON THE SHAPE WITH THE TIGHTEST NULL
+
+`luapatq_16`'s absolute fell 263.7 while its fr/redis went 1.1715x -> 1.1748x, because the
+redis arm moved further in the same window. Every window here was UNFIT, so the absolutes
+are the certified claim and the ratios are directional -- the same caveat as the `-196.0`
+row on `luapatq_256`.
+
+### CORRECTNESS: THE FAILURE MODE IS A SCRIPT THAT NEVER GETS CACHED
+
+If the miss test were wrong, EVAL would stop populating the cache and a later EVALSHA would
+answer NOSCRIPT where redis returns the value. `scriptcache_differ.py` drives EVAL, then
+THREE REPEATS -- so the assertions land after the new HIT branch has run -- then
+`SCRIPT EXISTS`, `EVALSHA`, `EVALSHA` with an uppercase SHA, a 4 KB body where the skipped
+copy is size-proportional, `SCRIPT FLUSH` (EVALSHA must then fail like redis), and a reload
+after the flush. It asserts its own PRECONDITION, that redis reports the script cached.
+Run on the control ELF and the ship: **PASS on both, ten cells identical to redis.**
+
+### WHAT WAS DELIBERATELY NOT CHANGED
+
+`self.dirty` is still bumped UNCONDITIONALLY. It feeds `rdb_changes_since_last_save` in
+INFO, so moving it inside the branch is an OBSERVABLE change. Whether EVAL of an
+already-cached script should count as a change at all is a real question and a separate
+one; folding it into a perf commit would have hidden a behaviour change inside a
+measurement.
+
+### GATES
+
+`fr-command` 1,295 pass. 31 of 32 differentials pass, including every script/EVAL/Lua gate.
+`keyspace_accounting_gate` fails 3/225 and produced byte-identical output on a control ELF
+earlier today. `fr-store` reported exactly the two persistent wall-clock ratio asserts
+(`intersect_sorted_i64_galloping`, `swapdb_db_enumeration`) and NO flakes this run; both
+have failed in every run this session, including on ELFs where fr-store was provably
+untouched by this agent.
