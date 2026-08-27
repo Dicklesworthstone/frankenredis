@@ -68487,3 +68487,71 @@ not depend on fr-server. **So every internal caller -- AOF replay, replica apply
 instr/op. A 4.75x gap between fr's own two routes, reachable only by moving the floor
 dispatch into a crate the runtime can call.** That is the largest single item now
 visible on this surface.
+
+## 2026-08-26 — LZF COMPRESS: the remaining named slice is worth <=2.9 pct, and the MATCH PATH is 77 pct
+
+`lzf_compress_dispatch` is the LARGEST frame in the stream reload arm -- 7,877,800 of
+34,332,298 Ir/op, **22.9 pct**, more than twice `lzf_decompress` (3,544,800). It is a
+certified 1.5139x loss vs redis, so it is the biggest quantified vs-redis gap in the
+#2 arm. This ledger's slice list names the rolling `hval` update as the remaining
+sized slice. **Profiled at instruction level, that is wrong by an order of magnitude.**
+
+Shipping tuple, `stream_node_like` payload (the generator IS the stream macro-node
+listpack shape), 3,000 B x 400 reps, per compressor call (63,088 Ir, 21.0 Ir/byte):
+
+    region                        Ir/call   pct   exec/call
+    MATCH path (validate+emit)     48,556  77.0%   ~400
+    scan-loop head (hash+probe)    12,270  19.4%    613.5
+    literal push                    2,349   3.7%    213.5
+    `hval` update proper            1,840   2.9%    613.5   <- the named slice
+
+**Every slice this ledger still names lives in the minority.** The `hval` update is
+three instructions (`shl`, `movzbl`, `or`) at 613.5 exec/call. The literal push --
+which cost a whole slice and a "structural close" -- is 3.7 pct. Meanwhile the match
+path is 77 pct: ~50 Ir validating a candidate (distance bound plus a 3-byte compare)
+and ~71 Ir emitting the back-reference and doing the post-match double rehash, ~400
+times per call.
+
+**Closing `hval` with a number: <=2.9 pct of the compressor = <=0.67 pct of the reload
+arm.** Do not spend a turn on it. If this kernel is attacked again it must be the
+match path, and the 3-14x optimism discount applies to any estimate drawn from a frame
+total rather than a priced replacement.
+
+Also visible and NOT separately attackable in safe Rust: the scan loop RELOADS the
+input base, the htab base and the base offset from the stack on EVERY position
+(`mov 0x48(%rsp)`, `mov 0x68(%rsp)`, `mov 0x60(%rsp)`) and stores `out.len` back per
+literal byte -- register pressure, the same symptom `flat_entries` shows. That is
+LLVM's allocation, not a line of source.
+
+### SHIPPED-LEVER AUDIT: all six still pay, none has gone stale
+
+`lzf_sweep`'s own docstring records that the shipping tuple had never been compared
+against its one-flag neighbours on today's dominant payload. Done, same payload and
+reps, total process Ir (sweep ELF
+`3698e23e163aff065548812888a01435d6adf448ea4fb9cf066e39cb527fb8cc`; one combo per
+process, so the process total is exact even if LLVM folds two identical bodies):
+
+    SHIPPING  H1 B0 G0 X1 T1 W1   26,286,741   --
+    HOIST=0                       31,006,760   +17.96 pct
+    BATCH=1                       29,030,801   +10.44 pct
+    WIDETAG=0                     27,668,432    +5.26 pct
+    XORTAG=0                      27,360,232    +4.08 pct
+    GUARD=1                       27,031,804    +2.84 pct
+    TIER=0                        26,708,592    +1.61 pct
+
+**Every shipped slice is still positive on the shape that dominates today, and the
+shipping tuple is the minimum.** A shipped lever going stale under later levers is a
+real failure mode in a codebase with seven stacked slices; this one has not happened.
+
+### Standing caveat re-stated, because this turn's directive asks for it
+
+The certified **1.5139x is a two-invocation frame ratio**: `lzf_compressor_ratio.py`
+takes ONE ENGINE PER INVOCATION. A directive requiring "vs LIVE redis-server
+same-invocation" is NOT satisfied by that harness, and the preflight check passes it
+only because `incumbent_same_invocation` matches a PHRASE near a redis mention rather
+than the property. Treat 1.5139x as bracketed until the harness runs both arms in one
+invocation.
+
+**No perf change landed this turn.** The deliverable is a redirection: the named
+remaining slice is closed at <=2.9 pct, the real cost is located at 77 pct, and the
+seven shipped slices are audited as still-paying.
