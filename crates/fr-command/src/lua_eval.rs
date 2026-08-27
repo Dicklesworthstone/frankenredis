@@ -13071,10 +13071,16 @@ impl<'a> LuaState<'a> {
         // propagation decision reads it. Upstream MONITOR shows the key the script wrote, not
         // a storage-encoded one.
         //
+        // MOVE and COPY are EXCLUDED: they resolve keys against the selected db themselves,
+        // so they need the logical key and namespacing here would double-prefix it. See
+        // `command_resolves_keys_against_selected_db` for why that contract is theirs alone.
+        //
         // db 0 borrows and copies NOTHING, matching the runtime's own `Cow::Borrowed`
         // fast path -- the overwhelmingly common case pays only the `db == 0` test.
         let selected_db = self.store.dispatch_client_ctx.db_index;
-        let namespaced: Option<Vec<Vec<u8>>> = if selected_db == 0 {
+        let namespaced: Option<Vec<Vec<u8>>> = if selected_db == 0
+            || crate::command_resolves_keys_against_selected_db(argv)
+        {
             None
         } else {
             let mut rewritten = argv.to_vec();

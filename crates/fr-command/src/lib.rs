@@ -486,6 +486,32 @@ fn set_relative_expire_deadline_ms(opts: &[Vec<u8>], now: i64) -> Option<i64> {
     None
 }
 
+/// Does this command's `dispatch_argv` implementation resolve keys against the selected
+/// database ITSELF, and therefore require LOGICAL (unprefixed) keys?
+///
+/// (frankenredis-mvcpy) Nearly every command reached through `dispatch_argv` takes its key
+/// arguments as ALREADY namespaced, because `Runtime::namespace_argv_for_selected_db`
+/// rewrites the key positions before dispatch. `move_cmd` and `copy_cmd` are the exception:
+/// they read `dispatch_client_ctx.db_index` and call `encode_db_key` on argv themselves,
+/// because a cross-db command has to build a key for a database that is not the selected
+/// one. Handing them an already-encoded key double-prefixes it, and the transfer silently
+/// becomes a no-op reply of 0.
+///
+/// They can hold that contract because a plain client never reaches them: fr-runtime
+/// intercepts both with `handle_move_command` / `handle_copy_command` on the RAW argv. The
+/// only callers are AOF replay and Lua `redis.call`, and both pass logical keys.
+///
+/// DEBUG resolves its key the same way but is deliberately absent: upstream rejects DEBUG
+/// from a script ("This Redis command is not allowed from script") and so does fr, so no
+/// script route reaches it.
+#[must_use]
+pub fn command_resolves_keys_against_selected_db(argv: &[Vec<u8>]) -> bool {
+    let Some(cmd) = argv.first() else {
+        return false;
+    };
+    eq_ascii_command(cmd, b"MOVE") || eq_ascii_command(cmd, b"COPY")
+}
+
 /// Return the argv indexes that correspond to keys for the command.
 pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
     let Some(raw_cmd) = argv.first() else {

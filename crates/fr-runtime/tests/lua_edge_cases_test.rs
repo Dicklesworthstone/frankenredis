@@ -540,3 +540,95 @@ fn lua_db_zero_key_that_looks_encoded_is_left_alone() {
     eval(&mut rt, r#"redis.call('SET', KEYS[1], 'v') return 1"#, "1", &[&odd_key]);
     assert_eq!(get(&mut rt, &odd_key), RespFrame::BulkString(Some(b"v".to_vec())));
 }
+
+// ── Cross-database commands named by a script (frankenredis-mvcpy) ──
+//
+// MOVE and COPY are the one family that must NOT be namespaced on the way into
+// dispatch_argv. They read dispatch_client_ctx.db_index and call encode_db_key
+// themselves -- a cross-db command has to build a key for a database that is not
+// the selected one -- so an already-encoded key gets double-prefixed and the
+// transfer degrades to a silent `0`. They can hold that contract because a plain
+// client never reaches them: the runtime intercepts both on the raw argv.
+
+fn exists(rt: &mut Runtime, db: &[u8], key: &[u8]) -> RespFrame {
+    select(rt, db);
+    rt.execute_frame(command(&[b"EXISTS", key]), 0)
+}
+
+#[test]
+fn lua_script_move_transfers_out_of_the_selected_db() {
+    for src in [&b"0"[..], &b"3"[..]] {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(select(&mut rt, src), RespFrame::SimpleString("OK".to_string()));
+        rt.execute_frame(command(&[b"SET", b"mk", b"v"]), 0);
+
+        assert_eq!(
+            eval(&mut rt, r#"return redis.call('MOVE','mk',7)"#, "0", &[]),
+            RespFrame::Integer(1),
+            "script MOVE from db {}",
+            String::from_utf8_lossy(src)
+        );
+        assert_eq!(exists(&mut rt, b"7", b"mk"), RespFrame::Integer(1));
+        assert_eq!(exists(&mut rt, src, b"mk"), RespFrame::Integer(0));
+    }
+}
+
+#[test]
+fn lua_script_move_transfers_a_declared_key() {
+    // KEYS[1] now holds the LOGICAL key, so it must reach MOVE unprefixed just
+    // like a literal does. This arm was broken independently of the namespacing:
+    // before KEYS was made logical it carried encoded bytes that MOVE re-encoded.
+    for src in [&b"0"[..], &b"3"[..]] {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(select(&mut rt, src), RespFrame::SimpleString("OK".to_string()));
+        rt.execute_frame(command(&[b"SET", b"mk", b"v"]), 0);
+
+        assert_eq!(
+            eval(&mut rt, r#"return redis.call('MOVE',KEYS[1],7)"#, "1", &[b"mk"]),
+            RespFrame::Integer(1),
+            "script MOVE via KEYS from db {}",
+            String::from_utf8_lossy(src)
+        );
+        assert_eq!(exists(&mut rt, b"7", b"mk"), RespFrame::Integer(1));
+        assert_eq!(exists(&mut rt, src, b"mk"), RespFrame::Integer(0));
+    }
+}
+
+#[test]
+fn lua_script_copy_reaches_another_db_and_leaves_the_source() {
+    for src in [&b"0"[..], &b"3"[..]] {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(select(&mut rt, src), RespFrame::SimpleString("OK".to_string()));
+        rt.execute_frame(command(&[b"SET", b"mk", b"v"]), 0);
+
+        assert_eq!(
+            eval(&mut rt, r#"return redis.call('COPY','mk','mk2','DB',7)"#, "0", &[]),
+            RespFrame::Integer(1),
+            "script COPY from db {}",
+            String::from_utf8_lossy(src)
+        );
+        assert_eq!(exists(&mut rt, b"7", b"mk2"), RespFrame::Integer(1));
+        // COPY is not MOVE: the source must survive in the selected db.
+        assert_eq!(exists(&mut rt, src, b"mk"), RespFrame::Integer(1));
+    }
+}
+
+#[test]
+fn debug_is_refused_from_a_script_so_it_needs_no_logical_key_exemption() {
+    // debug_cmd resolves its key the same way MOVE and COPY do, and is deliberately
+    // absent from command_resolves_keys_against_selected_db. That is only sound while
+    // no script route can reach it -- upstream refuses DEBUG from a script and so does
+    // fr. If this ever starts succeeding, DEBUG needs adding to the exemption.
+    let mut rt = Runtime::default_strict();
+    assert_eq!(select(&mut rt, b"3"), RespFrame::SimpleString("OK".to_string()));
+    rt.execute_frame(command(&[b"SET", b"mk", b"v"]), 0);
+
+    let reply = eval(&mut rt, r#"return redis.call('DEBUG','OBJECT','mk')"#, "0", &[]);
+    let RespFrame::Error(message) = reply else {
+        panic!("DEBUG must be refused from a script, got {reply:?}"); // ubs:ignore — AI triage
+    };
+    assert!(
+        message.contains("not allowed from script"),
+        "unexpected refusal message: {message}"
+    );
+}
