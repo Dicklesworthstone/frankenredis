@@ -11516,11 +11516,11 @@ impl<'a> LuaState<'a> {
             }
             // ── String library ──────────────────────────────────────────
             "string.len" => {
-                let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "len")?;
+                let s = lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "len")?;
                 Ok(vec![LuaValue::Number(s.len() as f64)])
             }
             "string.sub" => {
-                let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "sub")?;
+                let s = lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "sub")?;
                 let len = s.len() as i64;
                 let mut i =
                     lua_check_number(self.current_invocation_name.as_deref(), args, 1, "sub")?
@@ -11559,7 +11559,7 @@ impl<'a> LuaState<'a> {
                 }
             }
             "string.rep" => {
-                let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "rep")?;
+                let s = lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "rep")?;
                 let n_val =
                     lua_check_number(self.current_invocation_name.as_deref(), args, 1, "rep")?;
                 if n_val < 0.0 {
@@ -11590,15 +11590,17 @@ impl<'a> LuaState<'a> {
             }
             "string.lower" => {
                 let s =
-                    lua_check_string(self.current_invocation_name.as_deref(), args, 0, "lower")?;
+                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "lower")?;
                 Ok(vec![LuaValue::Str(s.to_ascii_lowercase())])
             }
             "string.upper" => {
                 let s =
-                    lua_check_string(self.current_invocation_name.as_deref(), args, 0, "upper")?;
+                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "upper")?;
                 Ok(vec![LuaValue::Str(s.to_ascii_uppercase())])
             }
             "string.reverse" => {
+                // OWNING form on purpose: this reverses the buffer IN PLACE and returns it,
+                // so it needs a `Vec` it can mutate, not a borrow of the argument.
                 let mut s =
                     lua_check_string(self.current_invocation_name.as_deref(), args, 0, "reverse")?;
                 s.reverse();
@@ -11619,7 +11621,7 @@ impl<'a> LuaState<'a> {
                 // to_number().unwrap_or(default), silently masking the
                 // error.
                 let inv = self.current_invocation_name.as_deref();
-                let s = lua_check_string(inv, args, 0, "byte")?;
+                let s = lua_check_string_ref(inv, args, 0, "byte")?;
                 let len = s.len() as i64;
                 let mut i = lua_optional_integer_arg(inv, 2, args.get(1), 1)?;
                 let mut j = lua_optional_integer_arg(inv, 3, args.get(2), i)?;
