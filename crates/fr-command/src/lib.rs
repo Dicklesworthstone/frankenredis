@@ -19750,20 +19750,31 @@ pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str>
     let Some(idx) = command_table_index(name) else {
         return Err(""); // Unknown command — caller handles separately
     };
-    let (cmd_name, arity, ..) = COMMAND_TABLE[idx];
+    if command_arity_ok_at(idx, argc) {
+        Ok(())
+    } else {
+        Err(COMMAND_TABLE[idx].0)
+    }
+}
+
+/// The arity verdict for an ALREADY-RESOLVED `COMMAND_TABLE` index.
+///
+/// Exactly the test [`check_command_arity`] applies once it has an index: a positive
+/// table arity is exact, a non-positive one is a minimum on `-arity`.
+///
+/// It exists so a caller holding an index does not have to look the name up again to
+/// learn its arity. [`resolve_command_name_and_arity`] needed precisely that: it wanted
+/// the arity verdict AND the canonical name, and paid `command_table_index` twice for
+/// them — measured at 2.000 calls/op and 310.0 instr/op on `fcall_lib1_pad`.
+#[inline]
+fn command_arity_ok_at(idx: usize, argc: usize) -> bool {
+    let (_, arity, ..) = COMMAND_TABLE[idx];
     let argc = argc as i64;
     if arity > 0 {
-        // Exact arity required.
-        if argc != arity {
-            return Err(cmd_name);
-        }
+        argc == arity
     } else {
-        // Minimum arity (abs value).
-        if argc < -arity {
-            return Err(cmd_name);
-        }
+        argc >= -arity
     }
-    Ok(())
 }
 
 /// Like [`check_command_arity`] but also enforces the arity of a resolved
@@ -20440,7 +20451,26 @@ pub fn resolve_command_name_and_arity(argv: &[Vec<u8>]) -> (Option<&'static str>
     let Some(name) = argv.first() else {
         return (None, false, false);
     };
-    let parent_ok = check_command_arity(name, argv.len()).is_ok();
+    // ONE parent-table lookup, feeding BOTH the arity verdict and the canonical name.
+    //
+    // It was two: `check_command_arity` did its own `command_table_index(name)`, and the
+    // non-container tail below then looked the SAME name up again purely to name it —
+    // `command_table_index` measured 2.000 calls/op and 310.0 instr/op on
+    // `fcall_lib1_pad`, and 2.000 of that shape's 10.002 memcmp calls/op are its probes.
+    // This is the redundancy this function's own doc comment warns about for the
+    // SUBCOMMAND table ("Both answers fall out of one lookup, so a caller that needs both
+    // must take them together"); the rule was applied there and not to the parent.
+    //
+    // HGET keeps its short-circuit and its call count: `check_command_arity` returned
+    // before ever reaching the table for it, so HGET paid ONE lookup (the tail's) before
+    // and pays one now. Container commands also paid one and still do — the container
+    // branch never reached the tail.
+    let parent_idx = command_table_index(name);
+    let parent_ok = if is_hget_command(name) {
+        argv.len() == HGET_ARITY
+    } else {
+        parent_idx.is_some_and(|idx| command_arity_ok_at(idx, argv.len()))
+    };
     if argv.len() >= 2 && command_has_subcommands_bytes(name) {
         let mut key_buf = [0u8; 64];
         let Some(key) = write_container_key(&mut key_buf, name, &argv[1]) else {
@@ -20464,7 +20494,7 @@ pub fn resolve_command_name_and_arity(argv: &[Vec<u8>]) -> (Option<&'static str>
         };
     }
     (
-        command_table_index(name).map(|i| COMMAND_TABLE[i].0),
+        parent_idx.map(|i| COMMAND_TABLE[i].0),
         parent_ok,
         parent_ok,
     )

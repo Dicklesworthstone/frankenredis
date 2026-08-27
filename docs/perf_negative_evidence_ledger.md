@@ -70940,3 +70940,122 @@ replaced library MISSES naturally because the key is its content).
 take this shape from 1.4870x to roughly 1.2x. The known blocker is unchanged and is [C]
 work: the scripting entry point takes OWNED argv, and the floor path carries borrowed
 slices.
+
+## 2026-08-27 — KEEP/LANDED — one parent-table lookup instead of two: fcall_lib1_pad -177.4 and evalsha_small -197.9 instr/op; AND a CORRECTION to the lever I named yesterday
+
+**First, the correction, because it is the more useful half of this row.**
+
+`1713d8ab5` closed by naming the next lever as "a floor-class entry for FCALL, priced at
+~1,700-2,200 Ir/op, 1.4870x -> roughly 1.2x". **That price is WRONG and the profile
+disproves it.** I derived it from the DISPATCH SHARE (2,630 of 11,160) on the assumption
+that front-classifying removes the share. It does not. What a floor class removes is the
+CASCADE WALK, and for FCALL the cascade is not walked:
+
+    145.0  classify_borrowed_dispatch_floor_packet_impl::<true, true>
+     66.0  parse_borrowed_multibulk_action
+     39.0  parse_borrowed_plain_key_arg2_packet
+     38.0  parse_borrowed_plain_key_arg1_packet
+      0.0  parse_borrowed_plain_zscore_packet  ... and EVERY other cascade arm
+
+**288 Ir/op, not 1,700-2,200** -- an 6-8x over-estimate. The floor classifier already
+rejects FCALL for 145 Ir/op and the arms are never reached. This is exactly the error
+[[feedback_a_frame_total_is_not_the_recoverable_amount]] names: price the REPLACEMENT,
+not the incumbent frame. A floor class for FCALL is now a SMALL lever, not the top one,
+and no one should spend the [C]-work budget on it against that number.
+
+### THE ACTUAL LEVER, FOUND BY COUNTING CALLS INSTEAD OF READING FRAMES
+
+`command_table_index` measured **2.000 calls/op**. The caller table says why:
+
+    callers of *command_table_index*   total 2.000/op
+      1.000  fr_command::resolve_command_name_and_arity
+      1.000  fr_command::check_command_arity
+
+Both lookups are of the SAME name, in the same function, eight lines apart:
+`resolve_command_name_and_arity` calls `check_command_arity(name, ..)` -- which does its
+own `command_table_index(name)` -- and its non-container tail then looks the same name up
+AGAIN purely to name it. The fix hoists ONE lookup and derives both the arity verdict
+(via a new `command_arity_ok_at(idx, argc)`) and the canonical name from it.
+
+**The function's own doc comment already states the rule it breaks**: "Both answers fall
+out of one lookup, so a caller that needs both must take them together." That was written
+about the SUBCOMMAND table -- `write_container_key` + `subcommand_table_index` are taken
+together, correctly -- and never applied to the parent table two lines up.
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the live
+vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm.
+
+    python3 scripts/shape_instr_per_op.py <bin> fcall_lib1_pad
+    python3 scripts/shape_instr_per_op.py <bin> evalsha_small
+
+    fr's OWN instr/op, n=5 per arm, three arms INTERLEAVED (control/cand/null):
+      fcall_lib1_pad  control 11,165.4 [11,156.5, 11,167.0]
+                      ship    10,988.0 [10,978.3, 11,011.4]   -177.4  -1.59 pct  DISJOINT
+      evalsha_small   control 11,904.6 [11,901.6, 11,906.4]
+                      ship    11,706.7 [11,703.1, 11,713.3]   -197.9  -1.66 pct  DISJOINT
+                      (evalsha_small was FIT 5/5 on BOTH arms)
+
+    A/A null, same invocation as the A/B arms, median 1.00003 bootstrap 95% median CI [0.99973, 1.00050]
+    on evalsha_small, and 0.99950 CI [0.99852, 1.00127] on fcall_lib1_pad. The null arm is
+    a BYTE-IDENTICAL COPY of the ship ELF (same SHA-256) in the same rotation. Both PASS.
+
+    ELF identity, verbatim from the harness's own per-arm key -- HARNESS-COMPUTED and
+    RE-VERIFIED AFTER each arm, explicitly NOT a /proc/self/exe self-report, which
+    callgrind makes impossible:
+      control  bench_elf_sha256=f4396f8f7cd3caafab54864f444f870137766e990bcc536976396502b6be49bb
+      ship     bench_elf_sha256=48f5f4d1ceafec6e1876c160d3c3d332daf15fc341a6c10f8f8bef158a12e110
+      null     bench_elf_sha256=48f5f4d1ceafec6e1876c160d3c3d332daf15fc341a6c10f8f8bef158a12e110
+      redis    bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    The VERDICT IS GATED ON THE BOOTSTRAP MEDIAN-CI and on nothing else. CV is diagnostic
+    only and did not influence this verdict; never on CV.
+
+    Retry predicate: re-run on both SHA-256s; void if the ship arm's bootstrap 95% median
+    CI ever overlaps the control's on either shape, or if `command_table_index` is not
+    1.000 calls/op.
+
+### THE MECHANISM IS A COUNT, AND IT IS EXACT
+
+    command_table_index   2.0000 -> 1.0000 calls/op
+    memcmp               10.0010 -> 9.0015 calls/op
+
+One fewer table probe, and exactly one fewer `memcmp` -- the probe's own compare. A count
+that lands on the integer is the strongest form this evidence takes; nothing here rests
+on apportioning a shared frame.
+
+### RATIOS MOVE THE RIGHT WAY BUT THEIR CIs OVERLAP — SAY SO
+
+fr/redis instructions per op, against the live vendored Redis 7.2.4 arm the harness runs
+in the same invocation:
+
+      fcall_lib1_pad  fr/redis 1.4855x -> 1.4512x
+      evalsha_small   fr/redis 1.3004x -> 1.2734x
+
+fr's ABSOLUTE CIs are disjoint on both shapes; the RATIO CIs overlap, because the redis
+denominator carries roughly 8 pct spread against fr's 0.1-0.4 pct. The absolute is the
+certified claim here and the ratio is directional.
+
+### THE CONTROLS, INCLUDING THE ONE THAT COULD HAVE SHOWN A TAX
+
+      config_get_one (CONTAINER)      7,296.6 -> 7,300.4   +3.8   +0.05 pct   CIs OVERLAP
+      get_control (front-classified)    907.1 ->   909.0   +1.9   +0.21 pct   CIs OVERLAP
+
+The container arm is the one that matters. `[[project_commandstats_string_hash_per_command]]`
+records a change of this family shipping as a "clean win" only because a fall-through
+control was added that revealed a real tax, so a control that CAN show a tax was chosen
+deliberately rather than a control that cannot. There is none here, and the call counts
+say why in advance: HGET short-circuited before the table and paid ONE lookup before and
+one now; containers returned before the tail and paid one before and one now. Only the
+non-container, non-HGET path paid two, and only it changes.
+
+### GATES
+
+`fr-command` 1,294 pass. 31 of 32 differentials pass. `keyspace_accounting_gate` FAILS
+3/225 on sinter/sunion/sdiff -- **run on the control ELF it produces the byte-identical
+three lines**, so it is pre-existing; that was confirmed by running it rather than
+asserted. `fr-runtime` 657 pass with the two stale-replica failures already present.
+
+`fr-store` reported `swapdb_db_enumeration_isomorphic_and_faster_swapdb` failing at
+"expected >2x" having measured exactly 2x. That one needs no control run to dismiss:
+**fr-store does not depend on fr-command**, so its test binary is byte-identical with and
+without this change. It is a WALL-CLOCK ratio assert on a host carrying peer builds.
