@@ -68139,3 +68139,65 @@ seeded count. **That check is load-bearing, not decoration: until `edabd8760` fr
 up empty and truncated its AOF, and an unchecked harness would have reported that as
 an engine which replays an AOF very fast indeed.** A ratio means something only when
 both engines did the same work, and "did any work at all" has to be proven.
+
+## 2026-08-26 — THE RELOAD BOARD HAS THE SAME POSTURE ASYMMETRY, and the whole persistence surface is now characterised
+
+`9a6f6c487` established that every RESTORE ratio compared unequal safety postures.
+The RELOAD board was never re-measured that way, and it should have been: redis skips
+deep validation on an RDB load at its default `sanitize-dump-payload no` too. With the
+incumbent validating, its stream reload cost rises 37 pct and three more arms flip.
+
+Measured on `6c0a727f4`, fr ELF `e8dceffe...`, redis ELF `e837dbb2...`, 40 members,
+200 keys, `--op=reload`, EVERY A/A null PASS on both columns:
+
+    reload arm (k200)   default   redis ALSO validating
+    stream vary         2.5506x        1.8570x
+    stream              2.4055x        1.7502x
+    zset                2.3737x        0.8171x   <- fr 1.22x FASTER
+    hash                2.1392x        0.9223x   <- fr 1.08x FASTER
+    set                 2.3415x        0.7545x   <- fr 1.33x FASTER
+    list                1.2643x        1.1245x
+
+    python3 scripts/restore_instr_per_op.py <bin> 40 20 --type=<t> --op=reload \
+        --keys=200 [--varyfields] "--redis-extra=--sanitize-dump-payload yes" --aa
+
+### The whole persistence surface, in one place
+
+    surface          worst DEFAULT        worst at EQUAL POSTURE
+    RESTORE @400     stream vary 3.2184x  stream vary ~1.57x
+    RELOAD   k200    stream vary 2.5506x  stream vary  1.8570x
+    AOF load         1.2823x              n/a -- command replay, not payload decode
+
+**At equal safety posture the ONLY genuine losses across all of persistence are
+STREAM (1.38-1.86x), LIST (1.12-1.32x) and AOF load (1.28x). Every hash, set and zset
+arm on both surfaces is a WIN.** Anything in this ledger describing them as gaps is
+describing fr's validation, not fr's speed.
+
+### Worst arm CONFIRMED, not assumed
+
+Re-derived rather than inherited: the full reload board above is below stream-vary
+@400 RESTORE at **3.2184x**, which remains the worst measured overhead ratio.
+
+Its remaining 213,688 instr/op is the rebuild, and the LOCAL levers are exhausted --
+two landed this session (`196499e3a` -1.61 pct, `67c00c337` -0.56 pct) and four
+rejected with numbers (cursor fusion +4.31, cold-split +1.73, arena writes the same
+bytes, push-argument tuple +0.22). The remaining candidate is a SINK-based builder
+letting `decode_stream_listpack` write straight into `PackedStreamLog`'s arena,
+deleting the 48 B/element `StreamOut.fields` intermediate.
+
+**It is distinct from the rejected cursor fusion** -- that one deleted the 16 B/element
+`Vec<RawListpackValue>` on the LISTPACK side, this would delete the 48 B/element pair
+vector on the FIELD side. But it is the same SHAPE, and this ledger's own rule from
+that rejection applies against it: *fusing two loops that do DIFFERENT work per
+element costs the tight loop its uniformity*. Loop A extracts `Cow`s from a listpack;
+loop B interns names and copies values into an arena. Different work. Prior is poor,
+the honest estimate is a fifth reject, and it is worth building only as a deliberate
+attempt with that expectation stated in advance rather than as a hopeful lever.
+
+### A sizing note for whoever runs this next
+
+`--keys=200 --members=400` on a stream reload is 80,000 entries per op and did not
+finish a single row in 20 minutes under callgrind. 40 members x 200 keys is the shape
+the historical reload board used and completes in minutes. The key count is what makes
+a reload measurement meaningful ([[project_reload_board_was_measured_at_one_key]]);
+the member count is what makes it affordable.
