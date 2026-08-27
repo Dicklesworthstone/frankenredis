@@ -68380,3 +68380,49 @@ times per replayed command** (220 Ir) and `command_table_index` 2.00 times (278 
 Both survive this change unchanged. Note the standing tax before attacking them:
 threading an answer through dispatch has cost +8 to +16 instr/op on EVERY command,
 three times measured ([[feedback_threading_a_param_through_dispatch_costs_8_to_16]]).
+
+## 2026-08-26 — DISCHARGING THE OWED BAND: the AOF harness's null was mis-ORDERED, and its noise scales with ALLOCATION COUNT
+
+`603056898` landed with an explicit debt: its A/A nulls never both passed, the 0.005
+band was inherited from `restore_instr_per_op.py` rather than derived, and the row was
+carried on a deterministic frame delta instead. Derived now, from 12 null-only draws
+plus 12 paired A/B draws.
+
+**FINDING 1 — the band is fine; the ORDER was wrong.** Running the two same-ELF arms
+BACK-TO-BACK, the null lands inside 0.005 in **10 of 12 draws**:
+
+    0.977951  0.999517  1.001222  1.000629  0.998049  1.001787
+    0.996202  1.000795  1.002970  0.999899  1.000976  0.984026
+
+`--aa` ran them as fr -> redis -> fr_aa, separating the null from its subject by TWO
+callgrind startups of another engine. Fixed: the A/A arm now runs ADJACENT to the arm
+it nulls, before the incumbent.
+
+**FINDING 2, and it is why the reorder did not fully fix it — THE NULL'S QUALITY
+DEPENDS ON THE ARM.** After the reorder, over four paired draws the CANDIDATE arm
+nulled PASS 3/4 while the CONTROL arm managed 1/4. The control is the PRE-FIX binary,
+which does **17.10 allocations per replayed command against the candidate's 9.03**.
+Allocation-heavy work carries more run-to-run Ir variance, because mimalloc's
+page/segment decisions depend on arena state that a two-point subtraction does not
+cancel.
+
+**The consequence is a rule, not an excuse:** for a change whose whole mechanism is
+REMOVING ALLOCATIONS, the two arms have DIFFERENT null distributions by construction,
+so waiting for a draw where both land in band is waiting on the noisier arm's luck.
+For that class of change the DETERMINISTIC frame delta is the primary evidence and the
+A/B is corroboration -- the reverse of the usual order. Stated so the next agent does
+not read a missing both-pass as a missing result.
+
+**The landed row's evidence, restated on that basis:** 12 paired A/B draws, every one
+moving the same direction by 1,200-1,400 instr/command; frame total 7,769.9 -> 6,376.5
+Ir/op (-17.9 pct, exact); allocations 17.10 -> 9.03 per command (an exact integer
+difference). The two independent instruments agree to within a point.
+
+**The band was NOT widened at any stage**, which was the whole point of owing this.
+The two low outliers above (0.9780, 0.9840) are real and stay in the record; both came
+from a LOW second arm while the first sat at the usual ~6,455, i.e. an occasional
+~2 pct cheap excursion rather than symmetric jitter.
+
+Also fixed here: `--null-only` mode, which characterises this harness against itself
+with no incumbent -- the measurement that produced the 12 draws above and the only way
+to derive a band without an engine comparison contaminating it.

@@ -291,16 +291,35 @@ def main():
         # lets frame_delta.py attribute the per-command cost by FUNCTION.
         os.makedirs(keep, exist_ok=True)
         return _run(binary, writes, aa, redis, keep)
+    if "--null-only" in sys.argv:
+        # Characterise THIS harness's own null distribution: two independent arms of
+        # the SAME ELF, no incumbent. Used to DERIVE the band rather than inherit
+        # `restore_instr_per_op.py`'s 0.005, which was measured on a steady-state
+        # loop and is wrong for a harness whose unit of work is a PROCESS STARTUP.
+        with tempfile.TemporaryDirectory(dir="/data/tmp") as root:
+            a, _ = arm(binary, "nullA", writes, root)
+            b, _ = arm(binary, "nullB", writes, root)
+            print("  null %.6fx   (A=%.1f B=%.1f)" % (b / a, a, b))
+        return 0
     with tempfile.TemporaryDirectory(dir="/data/tmp") as root:
         return _run(binary, writes, aa, redis, root)
 
 
 def _run(binary, writes, aa, redis, root):
     if True:
+        # (BlackThrush 2026-08-26) ORDER IS LOAD-BEARING: the A/A arm runs ADJACENT
+        # to the arm it is nulling, before the incumbent, not after it.
+        #
+        # This used to run fr -> redis -> fr_aa, separating the null from its subject
+        # by TWO callgrind startups of another engine. Measured, that roughly halved
+        # the null's pass rate: back-to-back the null lands inside the 0.005 band in
+        # 10 of 12 draws, but separated by the incumbent only ~50 pct of arms passed
+        # and across 8 paired A/B draws not ONE had both arms in band. The band was
+        # never the problem; the interleaving was.
         fr_per, fr_sha = arm(binary, "fr", writes, root)
-        rd_per, rd_sha = arm(redis, "redis", writes, root)
         if aa:
             aa_per, aa_sha = arm(binary, "fr_aa", writes, root)
+        rd_per, rd_sha = arm(redis, "redis", writes, root)
         print("  fr     in-process ELF sha256 %s" % fr_sha)
         print("  redis  in-process ELF sha256 %s" % rd_sha)
         if aa:
