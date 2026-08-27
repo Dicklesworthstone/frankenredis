@@ -15958,9 +15958,21 @@ enum BorrowedDispatchFloorClass {
     Publish,
     /// (frankenredis-ozrro) `GETBIT key offset`.
     Getbit,
-    /// (frankenredis-ozrro) `GEOHASH key member` at one member; the multi-member
-    /// parser is a different arity and keeps the cascade.
+    /// (frankenredis-ozrro) `GEOHASH key member` at one member.
     GeohashSingle,
+    /// (BlackThrush 2026-08-27) `GEOHASH key m1 m2 [m ...]`, arity >= 4.
+    ///
+    /// Left on the cascade by `ozrro` because the single-member arm would have
+    /// DECLINED it onto the generic path -- a floor class is a promise its arm must
+    /// keep. This class keeps that promise with its OWN arm, which calls the same
+    /// parser and the same executor the cascade arm called, so it accepts exactly
+    /// what the cascade accepted and declines exactly what it declined.
+    ///
+    /// Why it is worth a class: `geohash_2` measured 65.4 pct DISPATCH -- 6,262 of
+    /// 9,576 instr/op deciding which command -- against a 38.2 pct reference for a
+    /// front-classified route, because the multi-member arm sits ~29 cascade arms
+    /// deep and every arm ahead of it is a real non-inlined parser call.
+    GeohashMulti,
     /// (frankenredis-ozrro) `GEOPOS key member` at one member.
     Geopos,
     /// (frankenredis-ozrro) `GEODIST key m1 m2`, with or without a unit token.
@@ -17495,6 +17507,14 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (3, BorrowedDispatchFloorCommand::Getbit) => Some(BorrowedDispatchFloorClass::Getbit),
         (3, BorrowedDispatchFloorCommand::Geohash) => {
             Some(BorrowedDispatchFloorClass::GeohashSingle)
+        }
+        // (BlackThrush 2026-08-27) DELIBERATELY UNBOUNDED ABOVE, the same reasoning
+        // the SINTER entry states: `parse_borrowed_plain_geohash_packet` re-derives
+        // the count from the packet and refuses anything past `max_array_len`, so the
+        // parser backstops the upper end and a class that over-reaches costs a fall to
+        // generic, not a wrong answer.
+        (arity, BorrowedDispatchFloorCommand::Geohash) if arity >= 4 => {
+            Some(BorrowedDispatchFloorClass::GeohashMulti)
         }
         (3, BorrowedDispatchFloorCommand::Geopos) => Some(BorrowedDispatchFloorClass::Geopos),
         (4..=5, BorrowedDispatchFloorCommand::Geodist) => Some(BorrowedDispatchFloorClass::Geodist),
@@ -25135,6 +25155,40 @@ fn try_dispatch_floor_classified_action(
                     consumed: packet.consumed,
                     response,
                 })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::GeohashMulti => {
+            // Mirrors the cascade arm this class replaces, term for term: same
+            // parser, same read-gate cache, same executor, same fallback. That is
+            // what makes the class a promise the arm keeps -- it cannot decline
+            // anything the cascade arm served.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
+            let hit = parse_borrowed_plain_geohash_packet(unparsed, &parser_config).and_then(
+                |packet| {
+                    runtime
+                        .execute_plain_geohash_borrowed(
+                            packet.key,
+                            &packet.members,
+                            ts,
+                            default_read_allowed,
+                        )
+                        .map(|response| (packet.consumed, response))
+                },
+            );
+            if let Some((consumed, response)) = hit {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -52045,15 +52099,30 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             ),
             Some(super::BorrowedDispatchFloorClass::GeohashSingle)
         );
-        // Multi-member GEOHASH has its own parser at a higher arity and must
-        // keep the cascade, or the single-member route would decline it onto the
-        // generic path instead of the arm that serves it.
+        // (BlackThrush 2026-08-27) Multi-member GEOHASH now has its OWN class. It
+        // used to assert `None` -- "must keep the cascade, or the single-member route
+        // would decline it onto the generic path instead of the arm that serves it"
+        // -- and that reasoning was right about the SINGLE-member arm. `GeohashMulti`
+        // satisfies it the other way: its arm runs the multi-member parser and
+        // executor, so it serves what the cascade served.
+        for packet in [
+            &b"*4\r\n$7\r\nGEOHASH\r\n$1\r\ng\r\n$2\r\nm1\r\n$2\r\nm2\r\n"[..],
+            &b"*5\r\n$7\r\nGEOHASH\r\n$1\r\ng\r\n$2\r\nm1\r\n$2\r\nm2\r\n$2\r\nm3\r\n"[..],
+            &b"*4\r\n$7\r\ngEoHaSh\r\n$1\r\ng\r\n$2\r\nm1\r\n$2\r\nm2\r\n"[..],
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(packet, &cfg),
+                Some(super::BorrowedDispatchFloorClass::GeohashMulti),
+                "multi-member GEOHASH must reach its own class"
+            );
+        }
+        // The single-member form must NOT drift into the multi class.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
-                b"*4\r\n$7\r\nGEOHASH\r\n$1\r\ng\r\n$2\r\nm1\r\n$2\r\nm2\r\n",
+                b"*3\r\n$7\r\nGEOHASH\r\n$1\r\ng\r\n$1\r\nm\r\n",
                 &cfg,
             ),
-            None
+            Some(super::BorrowedDispatchFloorClass::GeohashSingle)
         );
     }
 

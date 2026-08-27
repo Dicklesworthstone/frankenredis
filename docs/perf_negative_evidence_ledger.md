@@ -70328,3 +70328,137 @@ rediscovered.
 
 *The rule this cost:* a sweep launched in the background is not a sweep you have read.
 `wc -l` it against the shape count before ranking off it.
+
+## 2026-08-27 — GEOHASH multi-member: the worst remaining cell — fr 9,575.9 -> 3,598.1 instr/op (-62.4 pct), 1.5622x -> 0.5933x
+
+`a1f258810` corrected the surface table and named `geohash_2` the worst remaining cell.
+It is a DISPATCH row, not a geo row, and the shape's own registration comment said so
+before anyone measured it: *"the multi-member form has NO floor class at all, so it can
+only be reached through the cascade."*
+
+**Claim class: COMPETITIVE. Campaign output: yes.** `shape_instr_per_op.py` runs the
+live vendored redis 7.2.4 server as a second arm in the SAME INVOCATION as the fr arm,
+under one callgrind two-point subtraction, and prints
+`fr/redis instructions per op: 0.5933x` from that pair -- not an fr-before/fr-after
+self-speedup.
+
+    python3 scripts/shape_instr_per_op.py <bin> geohash_2
+
+    fr's OWN instr/op -- callgrind, load-immune, FIVE independent processes per ELF:
+      control n=5  median 9,575.9  CI [9,575.2, 9,576.6]   spread 0.015 pct
+      ship    n=5  median 3,598.1  CI [3,598.0, 3,599.7]   spread 0.047 pct
+                                   -5,977.8 Ir/op, -62.43 pct
+
+      fr dispatch share  65.4 pct (6,262 of 9,576)  ->  23.0 pct (828 of 3,597)
+      against a 38.2 pct reference for an already-front-classified route.
+
+    THE SHAPE THAT MUST NOT MOVE, measured the same way in the same passes:
+      get_control n=5  910.5 -> 905.7 Ir/op, -0.53 pct -- FLAT, and its own draw spread
+      is 1.0-1.4 pct, so that delta is inside its noise. A confound detector specific to
+      this change, which is what `project_cascade_arm_order_is_a_lever` says to carry.
+
+    vs-redis ratio, n=13 draws per arm:
+      control median 1.5622x  CI [1.5244, 1.5788]
+      ship    median 0.5933x  CI [0.5869, 0.6003]     CIs disjoint by 0.9241x
+
+    **THE RATIO IS SIZING, NOT CERTIFIED.** Every one of those 26 draws landed in a
+    window the harness marked UNFIT -- the host held a persistent 1min-vs-5min drift
+    from peer activity for the whole measurement session, and no FIT window was
+    available. Per this repo's own rule that is not a bound. **fr's own instr/op needs
+    no window** -- callgrind Ir is load-immune and the five same-ELF draws agree to
+    0.015 pct -- and it is what this row rests on. Anyone quoting the ratio must
+    re-take it in a FIT window first.
+
+    IN-PROCESS ELF SHA-256 (harness-computed and re-verified after each arm):
+      control ELF sha256 64ec1d1f9722b77716d9fe5ef4b1c2315bf99772bd29bb049319a969310829f1
+      ship    ELF sha256 40f9db75e012664e9c712a2fd4c2862b878790c86a897e33e288c962037978ee
+      redis   ELF sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+    Retry predicate: re-run the command above on both ELF SHA-256s named here; this row
+    is void if fr's own instr/op on the ship ELF exceeds 5,000, or if a FIT-window ratio
+    on it exceeds 1.0x.
+
+### WHY IT WAS LEFT ON THE CASCADE, AND WHY THAT WAS RIGHT AT THE TIME
+
+`ozrro` gave single-member GEOHASH a floor class and deliberately did NOT give one to
+the multi-member form. The test it left behind asserted `None` for `*4` with the reason
+written out: *"must keep the cascade, or the single-member route would decline it onto
+the generic path instead of the arm that serves it."*
+
+That reasoning is correct and is exactly
+`project_floor_class_is_a_promise_its_arm_must_keep`: a floor class whose arm declines
+falls to GENERIC, not back to the cascade, so mis-classifying is strictly worse than not
+classifying. What it ruled out was routing `*4` through the SINGLE-member arm. **It did
+not rule out giving the multi-member form its own arm**, which is what this does: the
+new `GeohashMulti` class runs `parse_borrowed_plain_geohash_packet` and
+`execute_plain_geohash_borrowed` -- the same parser and the same executor the cascade
+arm called, with the same read-gate cache and the same fallback. It therefore accepts
+exactly what the cascade accepted and declines exactly what it declined, and the promise
+is kept by construction rather than by testing.
+
+The class is DELIBERATELY UNBOUNDED ABOVE (`arity >= 4`), the same choice the SINTER
+entry documents: the parser re-derives the count from the packet and refuses anything
+past `max_array_len`, so the parser backstops the upper end.
+
+### WHAT THE CASCADE COST, IN FRAMES
+
+The multi-member arm sat ~29 `else if let Some(packet) = parse_borrowed_plain_*` arms
+deep, and the arms ahead of it are NOT cheap byte guards -- they are real non-inlined
+parser calls, which is what `project_cascade_arm_order_is_a_lever` measured at 40-50
+instr/op each and warned would be small only if a guard already existed:
+
+      fr control (9,576 Ir/op)                   redis (6,367 Ir/op)
+      1,634  process_buffered_frames               489  processMultibulkBuffer
+        663  memcmp                                360  je_malloc_usable_size
+        559  execute_plain_geohash_borrowed fold   300  _addReplyToBufferOrList
+        454  parse_borrowed_plain_key_arg2_packet  296  geohashCommand
+        264  parse_borrowed_plain_keys_multi       295  strcasecmp
+        219  parse_borrowed_plain_geohash_packet   244  geohashDecode
+        206  classify_borrowed_dispatch_floor      220  geohashEncode
+        184  parse_borrowed_plain_set_bulk
+        156  parse_borrowed_plain_key_arg3_packet
+        152  parse_borrowed_plain_key_arg1_packet
+        117  parse_borrowed_plain_key_arg5_packet
+        114  parse_borrowed_plain_key_arg4_packet
+
+The nine `parse_borrowed_plain_*` frames sum to 1,866 Ir/op and only ONE of them (219)
+is the parser that succeeds. **fr's actual GEOHASH work was never the problem** -- the
+executor fold plus the geo maths is comparable to redis's `geohashCommand` +
+`geohashDecode` + `geohashEncode`.
+
+### GATES
+
+The full battery -- now thirty differentials against live redis 7.2.4 -- passes, with
+four geo differentials added for this row: `geo_differ`, `geo_boundary_gate`,
+`geo_precision_differ`, `geo_wrongtype_golden`.
+
+A probe built for the newly-classified route specifically: 42 GEOHASH cases across
+**RESP2 AND RESP3**, compared byte-for-byte, covering every arity the class now claims
+(2..10 members), the arities on both sides of it (1 member, no member, bare `GEOHASH`),
+absent members, all-absent, repeats, reversed order, a missing key, a WRONGTYPE key, an
+empty member name, odd member bytes, and a one-member key asked for two -- plus the
+whole set replayed PIPELINED in both protocols, because the floor classifier runs per
+packet inside one read pass and the cascade it replaces amortised its gate cache across
+that pass. All PASS, and the probe PASSES on the incumbent ELF too, so it is a
+differential and not a rubber stamp.
+
+RESP3 is in there for a specific reason: the cascade arm this replaces did NOT pass a
+protocol-version flag while the SINGLE-member arm does. If that difference had mattered
+it would surface as a RESP3-only divergence, and it does not.
+
+fr-server 383+67+40+12+... all pass, including the class-table test, which now asserts
+`GeohashMulti` at three arities and re-asserts that the single-member form does NOT
+drift into the multi class.
+
+### The surface after this lands (ship ELF, UNFIT windows -- ranking only)
+
+      fcall_lib1_pad  1.5232x  <- NEW WORST
+      fcall_lib32     1.4030x
+      fcall_lib8      1.3918x
+      evalsha_large   1.2549x
+      geohash_2       0.5933x  was 1.5622x
+
+The FCALL family is now the worst, and it is a DIFFERENT bug from either of this
+session's two script/dispatch levers: a library must begin `#!lua name=...` so
+`b0f76b01e`'s early return never fires, and `fcall_lib1_pad` being the worst of the
+family -- a PADDED one-function library -- says the cost still scales with library SIZE.
