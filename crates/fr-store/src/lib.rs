@@ -14153,7 +14153,13 @@ impl Store {
             // owned copy per match (as redis does). Output order is unchanged
             // (ordered_keys is physical/logical sorted), so the final sort is
             // dropped. Byte-identical replies + identical eviction side effects.
-            self.expire_volatile_keys_in_db(db, now_ms);
+            // (frankenredis-keysnotify) FILTER, do not collect. This used to reap the due
+            // volatile keys before walking, which made a READ command delete keys: DBSIZE
+            // fell, subscribers received a `__keyevent@0__:expired` that upstream never
+            // sends, and the deletion propagated. Upstream's keysCommand calls keyIsExpired
+            // per candidate and deletes nothing. Gated on `expires_count` so a DB with no
+            // TTLs pays nothing, exactly as the old reap was.
+            let check_expiry = self.expires_count != 0;
             let is_star = pattern == b"*";
             // (cc_fr) Classify the glob ONCE for the whole full-DB walk (byte-identical to
             // per-key `glob_match`); `is_star` still short-circuits before it.
@@ -14185,11 +14191,17 @@ impl Store {
                     if decode_db_key(key).is_some() {
                         continue;
                     }
+                    if check_expiry && self.key_is_logically_expired(key, now_ms) {
+                        continue;
+                    }
                     Self::push_logical_key_ref_if_match(&mut matched, key, &pg, is_star);
                 }
             } else {
                 let prefix = encode_db_key(db, b"");
                 for key in self.entries.keys().filter(|k| k.starts_with(&prefix)) {
+                    if check_expiry && self.key_is_logically_expired(key, now_ms) {
+                        continue;
+                    }
                     Self::push_logical_key_ref_if_match(&mut matched, key, &pg, is_star);
                 }
             }
@@ -14229,12 +14241,13 @@ impl Store {
         // while `KEYS *` (a different branch) filtered it correctly.
         //
         // One value, read once, describing the state the filter's assumption is about.
+        // (frankenredis-keysnotify) FILTER, do not collect -- see the full-scan branch. The
+        // reap that stood here made KEYS delete keys and publish `expired`; upstream's
+        // keysCommand only checks. Nothing is mutated now, so the `contains_key` re-probe
+        // that used to undo the reap is gone with it, and with it the guard-ordering trap
+        // that `frankenredis-keysexpired` fixed: `no_ttl` no longer describes a state this
+        // function can change.
         let no_ttl = self.expires_count == 0;
-        if !no_ttl {
-            for key in &candidates {
-                self.drop_if_expired(key, now_ms);
-            }
-        }
 
         // (cc_fr) Classify the glob ONCE for the range-pruned candidates (byte-identical
         // to per-candidate `glob_match`).
@@ -14248,7 +14261,7 @@ impl Store {
         // here was the bug.
         let mut result: Vec<Vec<u8>> = candidates
             .into_iter()
-            .filter(|key| no_ttl || self.entries.contains_key(key.as_slice()))
+            .filter(|key| no_ttl || !self.key_is_logically_expired(key, now_ms))
             .filter_map(|key| {
                 let logical = decode_db_key(&key)
                     .map(|(_, logical)| logical)
@@ -14538,6 +14551,18 @@ impl Store {
         self.expiry_deadlines
             .get(key)
             .map(|deadline| deadline.get())
+    }
+
+    /// Has this key's TTL passed? A pure CHECK -- it never deletes and never notifies.
+    ///
+    /// (frankenredis-keysnotify) Upstream's `keysCommand` filters with `keyIsExpired`, which
+    /// is exactly this: the key stays in the dict, no `expired` event is published and no DEL
+    /// is propagated. Collecting instead is observable three ways -- DBSIZE falls, a
+    /// `__keyevent@0__:expired` message reaches subscribers, and the deletion propagates --
+    /// so a READ command must use this rather than `drop_if_expired`.
+    #[inline]
+    fn key_is_logically_expired(&self, key: &[u8], now_ms: u64) -> bool {
+        self.expiry_ms(key).is_some_and(|deadline| deadline <= now_ms)
     }
 
     #[inline]

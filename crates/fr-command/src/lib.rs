@@ -36073,6 +36073,90 @@ mod tests {
         );
     }
 
+    /// (frankenredis-keysnotify) KEYS must not PUBLISH anything, ever.
+    ///
+    /// Upstream's `keysCommand` filters candidates with `keyIsExpired`, a pure check: the
+    /// expired key stays in the dict, no `expired` event is published and no DEL propagates.
+    /// fr reaped instead, so a read-only introspection command deleted keys and pushed a
+    /// `__keyevent@0__:expired` to every subscriber -- an event upstream never sends. Against
+    /// redis 7.2.4 with active expiry off, `KEYS *` and `KEYS k` both produced `expired` on
+    /// fr and nothing on redis.
+    ///
+    /// The event queue is the real observable, so it is what is asserted; DBSIZE is checked
+    /// alongside because "did not publish" and "did not delete" are the same fact here.
+    #[test]
+    fn keys_neither_publishes_nor_collects_an_expired_key() {
+        let notify_all = fr_store::NOTIFY_KEYSPACE
+            | fr_store::NOTIFY_KEYEVENT
+            | fr_store::NOTIFY_GENERIC
+            | fr_store::NOTIFY_STRING
+            | fr_store::NOTIFY_EXPIRED;
+
+        // Both branches of the matcher: a literal prefix and a bare glob.
+        for pattern in [&b"*"[..], b"k", b"k*"] {
+            let mut store = Store::new();
+            store.notify_keyspace_events = notify_all;
+            store.set(b"k".to_vec(), b"42".to_vec(), Some(40), 0);
+            // Drop whatever the SET itself queued; only the KEYS call is under test.
+            let _ = store.drain_keyspace_notifications();
+
+            let out = dispatch_argv(&[b"KEYS".to_vec(), pattern.to_vec()], &mut store, 100_000)
+                .expect("keys");
+            assert_eq!(
+                out,
+                RespFrame::Array(Some(vec![])),
+                "KEYS {:?} must filter the expired key",
+                String::from_utf8_lossy(pattern)
+            );
+
+            let events = store.drain_keyspace_notifications();
+            assert!(
+                events.is_empty(),
+                "KEYS {:?} must publish nothing, got {:?}",
+                String::from_utf8_lossy(pattern),
+                events
+                    .iter()
+                    .map(|(ch, _)| String::from_utf8_lossy(ch).into_owned())
+                    .collect::<Vec<_>>()
+            );
+
+            let size = dispatch_argv(&[b"DBSIZE".to_vec()], &mut store, 100_000).expect("dbsize");
+            assert_eq!(
+                size,
+                RespFrame::Integer(1),
+                "KEYS {:?} must not collect the key it hid",
+                String::from_utf8_lossy(pattern)
+            );
+        }
+
+        // ANTI-VACUITY, and it is doing real work here: with the SAME mask and the SAME
+        // expired key, a lazy READ still collects and DOES publish. Without this the test
+        // above would pass just as happily on a build with notifications switched off.
+        let mut store = Store::new();
+        store.notify_keyspace_events = notify_all;
+        store.set(b"k".to_vec(), b"42".to_vec(), Some(40), 0);
+        let _ = store.drain_keyspace_notifications();
+        let got = dispatch_argv(&[b"GET".to_vec(), b"k".to_vec()], &mut store, 100_000)
+            .expect("get");
+        assert_eq!(got, RespFrame::BulkString(None));
+        let events = store.drain_keyspace_notifications();
+        assert!(
+            !events.is_empty(),
+            "GET on an expired key must still publish -- the mask has to be live for the \
+             assertions above to mean anything"
+        );
+
+        // And a LIVE key must still be listed, so "filter everything" is not a passing fix.
+        let mut store = Store::new();
+        store.notify_keyspace_events = notify_all;
+        store.set(b"k".to_vec(), b"42".to_vec(), Some(100_000), 0);
+        let out = dispatch_argv(&[b"KEYS".to_vec(), b"k*".to_vec()], &mut store, 1).expect("keys");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"k".to_vec()))]))
+        );
+    }
+
     /// (frankenredis-memexpired) MEMORY USAGE reports the object the server is HOLDING.
     ///
     /// Upstream's USAGE arm is a bare `dictFind(c->db->dict, key)` -- no `lookupKeyRead`,
