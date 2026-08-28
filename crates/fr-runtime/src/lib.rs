@@ -38558,10 +38558,20 @@ impl Runtime {
         special_command: Option<RuntimeSpecialCommand>,
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.command_requires_replica_write_quorum(argv, special_command) {
+        // (frankenredis-writegate2) ARGV-INDEPENDENT GUARD FIRST. Both tests are pure
+        // predicates and the reply needs BOTH, so the order cannot change the answer -- only
+        // which one gets to short-circuit. `replica_write_quorum_ok` is a role check and two
+        // integer compares that answer "no reason to refuse" on any server without
+        // min-replicas-to-write configured, i.e. essentially all of them;
+        // `command_requires_replica_write_quorum` classifies argv, and for EXEC walks the whole
+        // queued transaction. Asking the expensive question first threw its answer away on
+        // every command. The split this relies on already existed -- see the doc comment on
+        // `replica_write_quorum_ok`, which was factored out for exactly this reason and then
+        // used in that order by only the script gate.
+        if self.replica_write_quorum_ok(now_ms) {
             return None;
         }
-        if self.replica_write_quorum_ok(now_ms) {
+        if !self.command_requires_replica_write_quorum(argv, special_command) {
             return None;
         }
         Some(RespFrame::Error(fr_store::NOREPLICAS_ERROR.to_string()))
@@ -38672,6 +38682,20 @@ impl Runtime {
         now_ms: u64,
         packet_id: u64,
     ) -> Option<RespFrame> {
+        // (frankenredis-writegate2) ARGV-INDEPENDENT GUARDS FIRST, same reasoning as
+        // `reject_due_to_replica_write_quorum`: reaching the MISCONF reply needs all three
+        // tests to agree, all three are pure, so only the short-circuit order changes. The
+        // source check is two field reads and `active_disk_write_denial` is the three-term
+        // config test upstream spells out; both answer "nothing to refuse" on any server
+        // whose last BGSAVE did not fail, which is the steady state. Classifying argv first
+        // -- and for EXEC walking the queued transaction -- computed an answer that was then
+        // discarded on every write.
+        if self.server.applying_master_stream
+            || !matches!(self.execution_source, ExecutionSource::Client)
+        {
+            return None;
+        }
+        let denial = self.active_disk_write_denial()?;
         if !self.command_subject_to_disk_write_denial(argv, special_command) {
             return None;
         }
@@ -38692,12 +38716,9 @@ impl Runtime {
         // log-and-apply. Crashing a replica over a LOCAL disk error is a larger operational
         // hazard than is justified here, and applying is strictly better than the silent drop
         // this replaces. If fr ever models that directive, the panic arm belongs here.
-        if self.server.applying_master_stream
-            || !matches!(self.execution_source, ExecutionSource::Client)
-        {
-            return None;
-        }
-        let denial = self.active_disk_write_denial()?;
+        //
+        // The source exemption and the denial lookup both moved ABOVE the argv classification;
+        // they are not repeated here.
         let reply = RespFrame::Error(denial.error_message().to_string());
         self.record_threat_event(ThreatEventInput {
             now_ms,
@@ -73394,6 +73415,44 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 "save={save_value:?}: expected refusal={expect_refusal}, got {reply:?}"
             );
         }
+    }
+
+    /// (frankenredis-writegate2) MISCONF denies the WRITE and leaves the read alone.
+    ///
+    /// Both write-rejection gates reach their reply through a conjunction of three pure
+    /// tests, and the argv classification -- the one that answers "is this even a write" --
+    /// used to be evaluated FIRST and thrown away on every command. It now runs LAST, behind
+    /// the two cheap argv-independent guards. Reordering pure predicates cannot change the
+    /// verdict; DROPPING one silently would, and it would surface exactly here, as a read
+    /// refused with MISCONF because nothing was left to tell it from a write.
+    ///
+    /// The sibling assertion for the quorum gate already exists in
+    /// `noreplicas_blocks_writes_when_not_enough_replicas`, which checks a GET as well as a
+    /// SET; this is the missing half for the disk-error gate.
+    #[test]
+    fn misconf_denies_the_write_and_leaves_the_read_alone() {
+        let mut rt = Runtime::new(RuntimePolicy::default());
+        rt.set_rdb_path(std::path::PathBuf::from("dump.rdb"));
+        rt.execute_frame(command(&[b"SET", b"seeded", b"v"]), 0);
+        rt.execute_frame(command(&[b"CONFIG", b"SET", b"save", b"900 1"]), 0);
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"stop-writes-on-bgsave-error", b"yes"]),
+            0,
+        );
+        rt.server.store.stat_rdb_last_bgsave_ok = false;
+
+        let write = rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        assert!(
+            matches!(&write, RespFrame::Error(m) if m.starts_with("MISCONF")),
+            "a write must be refused while the disk-error denial is armed: {write:?}"
+        );
+
+        let read = rt.execute_frame(command(&[b"GET", b"seeded"]), 0);
+        assert_eq!(
+            read,
+            RespFrame::BulkString(Some(b"v".to_vec())),
+            "a READ must not be caught by the write denial"
+        );
     }
 
     #[test]
