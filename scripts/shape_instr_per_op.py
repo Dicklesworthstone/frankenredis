@@ -777,6 +777,14 @@ SHAPES = {
     "evalsha_small": (
         [["SCRIPT", "LOAD", _EVALSHA_BODY_SMALL]],
         ["EVALSHA", _sha1_hex(_EVALSHA_BODY_SMALL), "0"]),
+    # (frankenredis-scriptstats) Every other eval/fcall shape runs a script that touches NO
+    # keys -- `return 1`, or pure string work. That leaves the most common thing a real script
+    # does, `redis.call`, unmeasured: a change to the inner-dispatch path costs exactly zero
+    # on every shape above it. This one issues one inner command per op so that path is on the
+    # board at all.
+    "eval_rediscall": (
+        [["SET", "erc", "v"]],
+        ["EVAL", "redis.call('GET', KEYS[1]) return 1", "1", "erc"]),
     "evalsha_large": (
         [["SCRIPT", "LOAD", _EVALSHA_BODY_LARGE]],
         ["EVALSHA", _sha1_hex(_EVALSHA_BODY_LARGE), "0"]),

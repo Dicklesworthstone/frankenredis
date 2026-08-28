@@ -612,3 +612,163 @@ fn command_getkeysandflags_set_and_rename_match_upstream_roles() {
         ]))
     );
 }
+
+// ── commandstats counts what a SCRIPT ran (frankenredis-scriptstats) ──
+//
+// Upstream routes redis.call through the same call() a client command takes, so
+// `redis.call('GET', k)` lands in cmdstat_get exactly like a direct GET -- which is
+// what makes INFO commandstats usable for finding what a workload does when the
+// workload is scripts. fr dispatched straight into fr_command::dispatch_argv, which
+// the runtime's histogram recorder never sees, so a script-driven server reported
+// only cmdstat_eval and the inner commands were invisible.
+//
+// The three outcomes are separate counters and are NOT interchangeable:
+//   * admitted and succeeded  -> calls
+//   * admitted and errored    -> calls AND failed_calls
+//   * never admitted (arity)  -> rejected_calls ONLY, calls stays 0
+//   * unknown command         -> no row at all
+// Expected values are what redis 7.2.4 reported for the same sequences.
+
+/// One `cmdstat_<name>` field, or None when the row is absent entirely.
+fn cmdstat_field(rt: &mut Runtime, row: &str, field: &str) -> Option<String> {
+    let info = extract_bulk(&rt.execute_frame(command(&[b"INFO", b"commandstats"]), 0));
+    for line in info.lines() {
+        if let Some(rest) = line.strip_prefix(&format!("{row}:")) {
+            for part in rest.split(',') {
+                if let Some(v) = part.strip_prefix(&format!("{field}=")) {
+                    return Some(v.trim().to_string());
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
+fn resetstat(rt: &mut Runtime) {
+    rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 0);
+}
+
+#[test]
+fn commandstats_counts_commands_issued_by_a_script() {
+    let mut rt = Runtime::default_strict();
+
+    // A successful inner write is counted like a direct one.
+    resetstat(&mut rt);
+    rt.execute_frame(
+        command(&[b"EVAL", b"redis.call('SET', KEYS[1], 'v') return 1", b"1", b"k"]),
+        0,
+    );
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_set", "failed_calls").as_deref(),
+        Some("0")
+    );
+    // ...and the EVAL itself is still counted once, not replaced by the inner row.
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_eval", "calls").as_deref(), Some("1"));
+
+    // Every inner call counts, not just the first.
+    resetstat(&mut rt);
+    rt.execute_frame(
+        command(&[
+            b"EVAL",
+            b"for i=1,3 do redis.call('SET', KEYS[1], i) end return 1",
+            b"1",
+            b"k",
+        ]),
+        0,
+    );
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("3"));
+
+    // A container subcommand is keyed by its `parent|sub` fullname, as upstream does.
+    resetstat(&mut rt);
+    rt.execute_frame(
+        command(&[b"EVAL", b"return redis.call('OBJECT', 'ENCODING', KEYS[1])", b"1", b"k"]),
+        0,
+    );
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_object|encoding", "calls").as_deref(),
+        Some("1")
+    );
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_object", "calls"), None);
+
+    // A script that calls nothing must not invent rows -- the anti-vacuity half, since a
+    // fix that counted unconditionally would satisfy every assertion above.
+    resetstat(&mut rt);
+    rt.execute_frame(command(&[b"EVAL", b"return 1", b"0"]), 0);
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls"), None);
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_get", "calls"), None);
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_eval", "calls").as_deref(), Some("1"));
+
+    // A direct command is still counted exactly once, not twice.
+    resetstat(&mut rt);
+    rt.execute_frame(command(&[b"SET", b"direct", b"v"]), 0);
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("1"));
+}
+
+#[test]
+fn commandstats_separates_failed_and_rejected_inner_calls() {
+    let mut rt = Runtime::default_strict();
+
+    // Admitted, then errored: calls AND failed_calls, per upstream's call().
+    resetstat(&mut rt);
+    rt.execute_frame(command(&[b"LPUSH", b"l", b"a"]), 0);
+    rt.execute_frame(
+        command(&[b"EVAL", b"return redis.call('GET', KEYS[1])", b"1", b"l"]),
+        0,
+    );
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_get", "failed_calls").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_get", "rejected_calls").as_deref(),
+        Some("0")
+    );
+
+    // redis.pcall swallows the error, but the command still ran and still failed.
+    resetstat(&mut rt);
+    rt.execute_frame(
+        command(&[b"EVAL", b"redis.pcall('GET', KEYS[1]) return 1", b"1", b"l"]),
+        0,
+    );
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_get", "failed_calls").as_deref(),
+        Some("1")
+    );
+
+    // Wrong arity is REJECTED: it never ran, so calls stays 0. Classifying this from the
+    // error alone would read calls=1,failed_calls=1 -- the distinction this pins.
+    resetstat(&mut rt);
+    rt.execute_frame(
+        command(&[
+            b"EVAL",
+            b"local ok = pcall(function() redis.call('GET') end) return tostring(ok)",
+            b"0",
+        ]),
+        0,
+    );
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(), Some("0"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_get", "rejected_calls").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_get", "failed_calls").as_deref(),
+        Some("0")
+    );
+
+    // An unknown command has no table entry, so upstream has no row for it at all.
+    resetstat(&mut rt);
+    rt.execute_frame(
+        command(&[
+            b"EVAL",
+            b"local ok = pcall(function() redis.call('NOSUCHCMD') end) return tostring(ok)",
+            b"0",
+        ]),
+        0,
+    );
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_nosuchcmd", "calls"), None);
+}

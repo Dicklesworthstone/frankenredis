@@ -13249,6 +13249,19 @@ impl<'a> LuaState<'a> {
 
         // The intercept chain handles MULTI/EXEC/ACL/AUTH/HELLO/SYNC only -- all keyless --
         // so it reads the logical `argv` and is unaffected by the rewrite.
+        // (frankenredis-scriptstats) COUNT THE INNER COMMAND IN commandstats.
+        //
+        // Upstream routes redis.call through the same `call()` a client command takes, so
+        // `redis.call('GET', k)` lands in `cmdstat_get` exactly like a direct GET. fr
+        // dispatched straight into `dispatch_argv`, which the runtime's histogram recorder
+        // never sees, so a script-driven workload showed only `cmdstat_eval` and INFO
+        // commandstats could not answer what the scripts actually ran.
+        //
+        // Recorded UNCONDITIONALLY, as upstream does: `call()` always times the command and
+        // bumps its counters. fr's client path additionally gates this on `latency_tracking`,
+        // which upstream does not -- that is a separate, pre-existing divergence on that path
+        // and is deliberately not copied here.
+        let stats_started = std::time::Instant::now();
         let command_result = if let Some(intercepted) = script_command_intercept(argv) {
             intercepted
         } else {
@@ -13274,6 +13287,43 @@ impl<'a> LuaState<'a> {
             }
         };
         self.store.dispatch_client_ctx.resp_protocol_version = saved_resp_version;
+
+        // (frankenredis-scriptstats) Recorded against the LOGICAL argv, so the row is keyed
+        // by the command the script named -- `canonical_command_fullname` also produces the
+        // `parent|sub` form upstream uses for containers, so a script's OBJECT ENCODING
+        // lands in `cmdstat_object|encoding` and not `cmdstat_object`.
+        //
+        // An error is `Failed`, never `Rejected`: upstream reaches these through call(),
+        // which has already admitted the command, so it increments `calls` AND
+        // `failed_calls` -- which is why a script's failing GET reads calls=1,failed_calls=1
+        // rather than rejected_calls=1.
+        //
+        // The three outcomes are NOT interchangeable, and getting them from the error alone
+        // is wrong twice over:
+        //
+        //   * an UNKNOWN command has no table entry, so upstream has no cmdstat row for it
+        //     at all -- inventing `cmdstat_nosuchcmd` would report a command that does not
+        //     exist. `canonical` is None exactly there (and for an unknown SUBcommand).
+        //   * a WRONG-ARITY call never runs, so it is `Rejected`: upstream leaves `calls` at
+        //     0 and bumps only `rejected_calls`. Classifying it from `is_err()` would read
+        //     calls=1,failed_calls=1 against upstream's calls=0,rejected_calls=1.
+        //
+        // Only a command that was admitted and then returned an error is `Failed`.
+        let (canonical, arity_ok, _parent_arity_ok) =
+            crate::resolve_command_name_and_arity(argv);
+        if let Some(canonical) = canonical {
+            let kind = if !arity_ok {
+                fr_store::CommandRecordKind::Rejected
+            } else if command_result.is_err() {
+                fr_store::CommandRecordKind::Failed
+            } else {
+                fr_store::CommandRecordKind::Success
+            };
+            let elapsed =
+                u64::try_from(stats_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            self.store
+                .record_command_histogram_canonical_with_kind(canonical, elapsed, kind);
+        }
 
         match command_result {
             Ok(frame) => {
