@@ -28015,7 +28015,28 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
         let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
         let key = key_buf.as_slice();
-        let Some(encoding) = store.object_encoding(key, now_ms) else {
+        // (frankenredis-debugobjraw) EVERY field below comes from a RAW lookup.
+        //
+        // Upstream's arm opens `if ((de = dictFind(c->db->dict,c->argv[2]->ptr)) == NULL)`
+        // (debug.c:608) -- a bare dict probe, NOT `lookupKeyRead`, so no `expireIfNeeded`.
+        // DEBUG OBJECT describes the object the server is HOLDING, so a key whose TTL has
+        // passed but which nothing has collected yet is still reported in full, and is still
+        // there afterwards.
+        //
+        // fr composed this reply from four accessors that EACH ran their own
+        // `record_keyspace_lookup` / `drop_if_expired`, so an introspection command deleted
+        // the key it was asked about, published `__keyevent@0__:expired` for it, propagated a
+        // DEL, and then answered "ERR no such key" about a key upstream describes happily.
+        // Same defect and same rule as MEMORY USAGE (frankenredis-memexpired) -- this one had
+        // four call sites, and converting three of the four would have left the collection in
+        // place and changed nothing observable.
+        //
+        // The raw twins are deliberately NOT shared with OBJECT ENCODING / REFCOUNT /
+        // IDLETIME, nor with DEBUG LISTPACK / QUICKLIST / HTSTATS-KEY: those go through
+        // `objectCommandLookupOrReply` -> `lookupKeyReadWithFlags` upstream, which DOES run
+        // expireIfNeeded. Measured against redis 7.2.4, all three already agree with fr on
+        // collecting and announcing the expiry; only OBJECT and SDSLEN take the bare dictFind.
+        let Some(encoding) = store.object_encoding_raw(key) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
         // (frankenredis-xp6mu) Upstream debug.c::debugCommand emits
@@ -28024,13 +28045,13 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // version, no CRC) — not the in-memory footprint that
         // memory_usage_for_key returns. Store::rdb_serialized_object_len
         // computes the same byte count by inspecting dump_key output.
-        let serialized_len = store.rdb_serialized_object_len(key, now_ms).unwrap_or(0);
-        let idle_secs = store.object_idletime(key, now_ms).unwrap_or(0);
+        let serialized_len = store.rdb_serialized_object_len_raw(key).unwrap_or(0);
+        let idle_secs = store.object_idletime_raw(key, now_ms).unwrap_or(0);
         // (frankenredis-az4t9) Mirror upstream debug.c::debugCommand which
         // emits val->refcount — INT_MAX for shared integer objects in
         // [0, 10000), 1 otherwise. Reuses the same Store::object_refcount
         // helper that powers OBJECT REFCOUNT (frankenredis-ljrt6).
-        let refcount = store.object_refcount(key, now_ms).unwrap_or(1);
+        let refcount = store.object_refcount_raw(key).unwrap_or(1);
         // (frankenredis-debugobjlru) `lru` and `lru_seconds_idle` are
         // distinct fields in upstream debug.c::debugCommand:
         //   lru               = the per-object 24-bit LRU clock
@@ -28588,7 +28609,13 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
         let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
         let key = key_buf.as_slice();
-        let Some(encoding) = store.object_encoding(key, now_ms) else {
+        // (frankenredis-debugobjraw) A RAW lookup, for the same reason as DEBUG OBJECT above:
+        // upstream's SDSLEN arm is the other bare `dictFind(c->db->dict, ...)` in debug.c
+        // (:660), so it reports on the object the server is holding without collecting it.
+        // The observable difference was sharp -- on a dead int-encoded key redis answers
+        // "ERR Not an sds encoded string." (it FOUND the object and judged its encoding)
+        // where fr answered "ERR no such key" and deleted it.
+        let Some(encoding) = store.object_encoding_raw(key) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
         if !matches!(encoding, "embstr" | "raw") {
@@ -28599,7 +28626,10 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // key_sds_len reports the LOGICAL key the client passed (matching redis's
         // per-DB sds key), not the DB-namespaced physical key used for the lookup.
         let key_len = argv[2].len();
-        let val_len = store.strlen(key, now_ms).unwrap_or(0);
+        // Raw as well: the length comes off the object the dictFind already returned, so
+        // reaching for the collecting `strlen` here would re-introduce the deletion that the
+        // line above just avoided -- the "converting three of four" trap, one arm later.
+        let val_len = store.strlen_raw(key).unwrap_or(0);
         let key_header = sds_key_header_size(key_len);
         let val_header = sds_value_header_size(val_len);
         let key_zmalloc = jemalloc_small_size_class(key_header + key_len + 1);
@@ -36366,6 +36396,150 @@ mod tests {
             matches!(live, RespFrame::Integer(n) if n > 0),
             "a live key must still be sized, got {live:?}"
         );
+    }
+
+    /// (frankenredis-debugobjraw) The keyed DEBUG subcommands split TWO WAYS, and the split
+    /// is what this test pins.
+    ///
+    /// `DEBUG OBJECT` (debug.c:608) and `DEBUG SDSLEN` (debug.c:660) open with a bare
+    /// `dictFind(c->db->dict, ...)`. No `lookupKeyRead`, so no `expireIfNeeded`: they describe
+    /// the object the server is HOLDING, leave a logically expired key in place, and publish
+    /// nothing. `DEBUG LISTPACK` / `QUICKLIST` / `HTSTATS-KEY` instead go through
+    /// `objectCommandLookupOrReply` -> `lookupKeyReadWithFlags`, which DOES run
+    /// `expireIfNeeded` -- so those must collect the key and announce `expired`.
+    ///
+    /// fr routed all five through the same collecting accessors, so two introspection
+    /// commands deleted the key they were asked about, published `__keyevent@0__:expired`,
+    /// and then answered "ERR no such key" about an object upstream reports happily.
+    ///
+    /// Both halves are asserted here on purpose. The three collecting arms are the
+    /// anti-vacuity: they prove the notification mask is live and that the fix converted the
+    /// two arms that take the bare dictFind rather than making every DEBUG lookup raw.
+    #[test]
+    fn debug_object_and_sdslen_report_an_expired_key_while_the_lookupkeyread_arms_collect_it() {
+        let notify_all = fr_store::NOTIFY_KEYSPACE
+            | fr_store::NOTIFY_KEYEVENT
+            | fr_store::NOTIFY_GENERIC
+            | fr_store::NOTIFY_STRING
+            | fr_store::NOTIFY_LIST
+            | fr_store::NOTIFY_EXPIRED;
+
+        fn expired_events(store: &mut Store) -> Vec<String> {
+            store
+                .drain_keyspace_notifications()
+                .iter()
+                .map(|(ch, _)| String::from_utf8_lossy(ch).into_owned())
+                .filter(|ch| ch.ends_with(":expired"))
+                .collect()
+        }
+
+        // ---- the bare-dictFind arms: report, keep, stay silent --------------------------
+        // "hello" rather than an integer so the value is embstr and SDSLEN renders its full
+        // report; on an int-encoded value SDSLEN's own encoding check would answer first and
+        // the lookup under test would not be what the assertion reads.
+        for sub in [&b"OBJECT"[..], b"SDSLEN"] {
+            let name = String::from_utf8_lossy(sub).into_owned();
+            let mut store = Store::new();
+            store.active_expire_enabled = false;
+            store.notify_keyspace_events = notify_all;
+            store.set(b"k".to_vec(), b"hello".to_vec(), Some(40), 0);
+            let _ = store.drain_keyspace_notifications();
+
+            let out = dispatch_argv(
+                &[b"DEBUG".to_vec(), sub.to_vec(), b"k".to_vec()],
+                &mut store,
+                100_000,
+            )
+            .expect("debug subcommand");
+            assert!(
+                matches!(&out, RespFrame::SimpleString(_)),
+                "DEBUG {name} must REPORT on a logically expired key the way a bare dictFind \
+                 does, not answer about a key it deleted itself, got {out:?}"
+            );
+            assert!(
+                expired_events(&mut store).is_empty(),
+                "DEBUG {name} must publish no `expired` -- its lookup never runs expireIfNeeded"
+            );
+            let size = dispatch_argv(&[b"DBSIZE".to_vec()], &mut store, 100_000).expect("dbsize");
+            assert_eq!(
+                size,
+                RespFrame::Integer(1),
+                "DEBUG {name} must leave the key it reported on in the keyspace"
+            );
+        }
+
+        // ---- the lookupKeyRead arms: collect, announce, answer "no such key" -------------
+        // These are the arms deliberately NOT converted. Without them a fix that made every
+        // keyed DEBUG lookup raw would pass everything above.
+        for sub in [&b"LISTPACK"[..], b"QUICKLIST", b"HTSTATS-KEY"] {
+            let name = String::from_utf8_lossy(sub).into_owned();
+            let mut store = Store::new();
+            store.active_expire_enabled = false;
+            store.notify_keyspace_events = notify_all;
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"k".to_vec(), b"a".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("rpush");
+            dispatch_argv(
+                &[b"PEXPIRE".to_vec(), b"k".to_vec(), b"40".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("pexpire");
+            let _ = store.drain_keyspace_notifications();
+
+            let out = dispatch_argv(
+                &[b"DEBUG".to_vec(), sub.to_vec(), b"k".to_vec()],
+                &mut store,
+                100_000,
+            )
+            .expect("debug subcommand");
+            assert_eq!(
+                out,
+                RespFrame::Error("ERR no such key".to_string()),
+                "DEBUG {name} goes through lookupKeyRead upstream, so an expired key is gone \
+                 by the time it looks"
+            );
+            assert!(
+                !expired_events(&mut store).is_empty(),
+                "DEBUG {name} must still COLLECT and announce the expiry -- if this arm went \
+                 raw too, the fix converted more than the two bare-dictFind arms"
+            );
+            let size = dispatch_argv(&[b"DBSIZE".to_vec()], &mut store, 100_000).expect("dbsize");
+            assert_eq!(
+                size,
+                RespFrame::Integer(0),
+                "DEBUG {name}'s lookupKeyRead must have collected the key"
+            );
+        }
+
+        // ---- a LIVE key must still be described normally by the converted arms ----------
+        let mut store = Store::new();
+        store.active_expire_enabled = false;
+        store.set(b"live".to_vec(), b"hello".to_vec(), None, 0);
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"live".to_vec()],
+            &mut store,
+            100_000,
+        )
+        .expect("debug object live");
+        let RespFrame::SimpleString(info) = out else {
+            panic!("DEBUG OBJECT on a live key must still report"); // ubs:ignore — AI triage
+        };
+        assert!(
+            info.contains("encoding:embstr") && info.contains("serializedlength:"),
+            "the raw accessors must render the same fields as before, got {info}"
+        );
+        // And a genuinely absent key still gets the error, so "report unconditionally" fails.
+        let missing = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"nope".to_vec()],
+            &mut store,
+            100_000,
+        )
+        .expect("debug object missing");
+        assert_eq!(missing, RespFrame::Error("ERR no such key".to_string()));
     }
 
     /// (frankenredis-keysexpired) KEYS must never return a logically expired key, on ANY

@@ -11080,6 +11080,18 @@ impl Store {
         self.append_impl::<false>(key, value, now_ms)
     }
 
+    /// (frankenredis-debugobjraw) String length straight off the stored object: no
+    /// `expireIfNeeded`, no keyspace-stat bump, and no LRU touch. For `DEBUG SDSLEN`, whose
+    /// upstream lookup is a bare `dictFind` (debug.c:660) and which therefore neither
+    /// collects the key nor counts as an access. `None` when the key is absent or not a
+    /// string; the caller has already established the encoding.
+    ///
+    /// NOT for the STRLEN command, which is a real `lookupKeyRead` and keeps the twin below.
+    #[must_use]
+    pub fn strlen_raw(&self, key: &[u8]) -> Option<usize> {
+        self.entries.get(key)?.value.string_len()
+    }
+
     pub fn strlen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
         // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
         if !self.lfu_tracking_enabled() {
@@ -13568,6 +13580,20 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return None;
         }
+        self.object_encoding_raw(key)
+    }
+
+    /// (frankenredis-debugobjraw) `object_encoding` for a caller that must NOT run
+    /// `expireIfNeeded` and must NOT count a keyspace hit -- upstream's `DEBUG OBJECT`, whose
+    /// lookup is a bare `dictFind(c->db->dict, ...)` (debug.c:608). It reports the object the
+    /// server is HOLDING, so a key whose TTL has passed but which has not been collected is
+    /// still described rather than hidden or deleted.
+    ///
+    /// The split is the point: `OBJECT ENCODING` uses `lookupKeyRead` upstream and MUST
+    /// collect, so the two callers cannot share one lookup. Same shape as
+    /// `memory_usage_for_key` (frankenredis-memexpired).
+    #[must_use]
+    pub fn object_encoding_raw(&self, key: &[u8]) -> Option<&'static str> {
         // Redis 7.4: any hash carrying a per-field TTL flips its encoding
         // from listpack/hashtable to the listpack_ex / hashtable_ex variant.
         // (br-frankenredis-omff)
@@ -13732,6 +13758,14 @@ impl Store {
         if !self.drop_if_expired(key, now_ms) {
             return None;
         }
+        self.object_idletime_raw(key, now_ms)
+    }
+
+    /// (frankenredis-debugobjraw) `object_idletime` without `expireIfNeeded`, for `DEBUG
+    /// OBJECT`'s bare `dictFind`. See `object_encoding_raw`. (The public twin already skips
+    /// the keyspace-stat bump; only the collection differs.)
+    #[must_use]
+    pub fn object_idletime_raw(&self, key: &[u8], now_ms: u64) -> Option<u64> {
         self.entries.get(key).map(|entry| {
             if entry.redis_lfu_clock_field_active() {
                 entry.redis_lfu_as_idle_seconds(now_ms)
@@ -13771,6 +13805,13 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return None;
         }
+        self.object_refcount_raw(key)
+    }
+
+    /// (frankenredis-debugobjraw) `object_refcount` without `expireIfNeeded` and without the
+    /// keyspace-hit bump, for `DEBUG OBJECT`'s bare `dictFind`. See `object_encoding_raw`.
+    #[must_use]
+    pub fn object_refcount_raw(&self, key: &[u8]) -> Option<i64> {
         let entry = self.entries.get(key)?;
         if entry.has_flag(ENTRY_FORCE_RAW_ENCODING) || entry.has_flag(ENTRY_FORCE_STRING_ENCODING) {
             return Some(1);
@@ -36636,6 +36677,12 @@ impl Store {
         self.dump_key(key, now_ms).map(|bytes| bytes.len() - 11)
     }
 
+    /// (frankenredis-debugobjraw) `rdb_serialized_object_len` without `expireIfNeeded` and
+    /// without the keyspace-stat bump, for `DEBUG OBJECT`. See `dump_key_raw`.
+    pub fn rdb_serialized_object_len_raw(&mut self, key: &[u8]) -> Option<usize> {
+        self.dump_key_raw(key).map(|bytes| bytes.len() - 11)
+    }
+
     /// (frankenredis DEBUG OBJECT quicklist fields) For a list value, return
     /// `(ql_nodes, element_count, ql_uncompressed_size)` from the same
     /// synthesized quicklist node layout DUMP emits. Read-only (no keyspace
@@ -36659,6 +36706,17 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return None;
         }
+        self.dump_key_raw(key)
+    }
+
+    /// (frankenredis-debugobjraw) `dump_key` without `expireIfNeeded` and without the
+    /// keyspace-stat bump. `DEBUG OBJECT` reaches this through
+    /// `rdb_serialized_object_len_raw` to render `serializedlength`, and upstream computes
+    /// that field from the object it already found with a bare `dictFind` -- it neither
+    /// collects nor counts. Still `&mut self`: the payload cache below is a write.
+    ///
+    /// NOT for DUMP itself, which is a real `lookupKeyRead` and keeps the public twin.
+    pub fn dump_key_raw(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         let entry = self.entries.get(key)?;
         let modification_count = entry.modification_count;
         if let Some(cache) = self.dump_payload_cache.get(key).filter(|cache| {
