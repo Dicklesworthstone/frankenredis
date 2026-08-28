@@ -16666,7 +16666,31 @@ fn apply_expiry_with_options(
     // current TTL for the NX/XX/GT/LT comparison must NOT bump keyspace_hits, so
     // use the non-counting PTTL. (frankenredis-934ax)
     let current_remaining_ms = match store.pttl_no_stats(key, now_ms) {
-        PttlValue::KeyMissing => return false,
+        PttlValue::KeyMissing => {
+            // (frankenredis-expirenotify) THE WRITE LOOKUP'S SIDE EFFECT.
+            //
+            // Upstream's expire.c::expireGenericCommand starts with
+            // `if (lookupKeyWrite(c->db, key) == NULL) { addReply(czero); return; }`, and
+            // lookupKeyWrite runs expireIfNeeded: a key whose TTL has already passed is
+            // DELETED right here, firing `__keyevent@0__:expired` and propagating a DEL,
+            // and the command then replies 0 because the lookup came back NULL.
+            //
+            // fr reached the same 0 by TESTING the deadline and collecting nothing, so
+            // EXPIRE on a dead key was silent -- a subscriber waiting on `expired` never
+            // heard about a key EXPIRE had itself just observed to be dead. The reply is
+            // unchanged; what was missing is the collection and all that hangs off it.
+            //
+            // It belongs INSIDE this arm, not above the match. `pttl_no_stats` reports
+            // KeyMissing for exactly two states -- absent, and present-but-past-deadline --
+            // and its test (`now_ms > deadline`) is the same predicate, equality included,
+            // that `evaluate_expiry` gives `drop_if_expired` (`deadline < now_ms`). So a key
+            // that survives the match has provably nothing to collect, and hoisting this
+            // call above it only buys a duplicate lookup on the live-key path: measured at
+            // +226.3 instr/op on the expire_same shape, 10.7 pct of the whole command, paid
+            // on every EXPIRE to serve the one case that was already replying 0.
+            store.collect_expired_for_write(key, now_ms);
+            return false;
+        }
         PttlValue::NoExpiry => None,
         PttlValue::Remaining(ms) => Some(ms),
     };
@@ -36154,6 +36178,116 @@ mod tests {
         assert_eq!(
             out,
             RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"k".to_vec()))]))
+        );
+    }
+
+    /// (frankenredis-expirenotify) EXPIRE COLLECTS a dead key -- the exact opposite of the
+    /// KEYS test directly above, about the same key in the same state.
+    ///
+    /// Upstream's expire.c::expireGenericCommand opens with
+    /// `if (lookupKeyWrite(c->db,key) == NULL) { addReply(czero); return; }`. lookupKeyWrite
+    /// runs expireIfNeeded, so a key whose TTL has already passed is DELETED right there --
+    /// publishing `expired`, propagating a DEL -- and the command then replies 0 because the
+    /// lookup came back NULL. fr reached the same 0 by TESTING the deadline and collecting
+    /// nothing, so a subscriber never heard about a key EXPIRE had itself just observed dead.
+    ///
+    /// The pairing with `keys_neither_publishes_nor_collects_an_expired_key` is the point:
+    /// one demands the key be hidden and kept, this one demands it be collected and
+    /// announced. Any shared "is this key alive" helper between the two is wrong by
+    /// construction, and the two tests together will say so.
+    #[test]
+    fn expire_family_collects_and_publishes_for_a_logically_expired_key() {
+        let notify_all = fr_store::NOTIFY_KEYSPACE
+            | fr_store::NOTIFY_KEYEVENT
+            | fr_store::NOTIFY_GENERIC
+            | fr_store::NOTIFY_STRING
+            | fr_store::NOTIFY_EXPIRED;
+
+        // One fix at the shared apply_expiry_with_options covers all four spellings.
+        for argv in [
+            vec![b"EXPIRE".to_vec(), b"k".to_vec(), b"100".to_vec()],
+            vec![b"PEXPIRE".to_vec(), b"k".to_vec(), b"100000".to_vec()],
+            vec![b"EXPIREAT".to_vec(), b"k".to_vec(), b"200".to_vec()],
+            vec![b"PEXPIREAT".to_vec(), b"k".to_vec(), b"200000".to_vec()],
+        ] {
+            let name = String::from_utf8_lossy(&argv[0]).into_owned();
+            let mut store = Store::new();
+            store.active_expire_enabled = false;
+            store.notify_keyspace_events = notify_all;
+            store.set(b"k".to_vec(), b"42".to_vec(), Some(40), 0);
+            // Drop what the SET queued; only the expiry command is under test.
+            let _ = store.drain_keyspace_notifications();
+            let expired_before = store.stat_expired_keys;
+
+            let out = dispatch_argv(&argv, &mut store, 100_000).expect("expiry command");
+            assert_eq!(
+                out,
+                RespFrame::Integer(0),
+                "{name} on a dead key replies 0 -- the write lookup came back NULL"
+            );
+
+            let events: Vec<String> = store
+                .drain_keyspace_notifications()
+                .iter()
+                .map(|(ch, _)| String::from_utf8_lossy(ch).into_owned())
+                .collect();
+            assert!(
+                events.iter().any(|ch| ch.ends_with(":expired")),
+                "{name} must publish `expired` for the key it just observed dead, got {events:?}"
+            );
+
+            let size = dispatch_argv(&[b"DBSIZE".to_vec()], &mut store, 100_000).expect("dbsize");
+            assert_eq!(
+                size,
+                RespFrame::Integer(0),
+                "{name} must COLLECT the dead key, not merely test its deadline"
+            );
+            assert_eq!(
+                store.stat_expired_keys,
+                expired_before + 1,
+                "{name}'s collection is an expiry and must be counted as one"
+            );
+        }
+
+        // ANTI-VACUITY: the same command on a LIVE key must still take its new TTL, reply 1,
+        // collect nothing and announce no expiry. Without this half, "collect and publish
+        // unconditionally" would pass every assertion above.
+        let mut store = Store::new();
+        store.active_expire_enabled = false;
+        store.notify_keyspace_events = notify_all;
+        store.set(b"k".to_vec(), b"42".to_vec(), None, 0);
+        let _ = store.drain_keyspace_notifications();
+        let expired_before = store.stat_expired_keys;
+
+        let out = dispatch_argv(
+            &[b"EXPIRE".to_vec(), b"k".to_vec(), b"100".to_vec()],
+            &mut store,
+            100_000,
+        )
+        .expect("expire");
+        assert_eq!(
+            out,
+            RespFrame::Integer(1),
+            "EXPIRE on a live key must still apply the TTL and reply 1"
+        );
+        let events: Vec<String> = store
+            .drain_keyspace_notifications()
+            .iter()
+            .map(|(ch, _)| String::from_utf8_lossy(ch).into_owned())
+            .collect();
+        assert!(
+            !events.iter().any(|ch| ch.ends_with(":expired")),
+            "a live key's EXPIRE must not announce an expiry, got {events:?}"
+        );
+        let size = dispatch_argv(&[b"DBSIZE".to_vec()], &mut store, 100_000).expect("dbsize");
+        assert_eq!(
+            size,
+            RespFrame::Integer(1),
+            "EXPIRE must not collect a key that is still alive"
+        );
+        assert_eq!(
+            store.stat_expired_keys, expired_before,
+            "a live key's EXPIRE must not count as an expiry"
         );
     }
 

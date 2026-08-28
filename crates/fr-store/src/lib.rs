@@ -32164,6 +32164,23 @@ impl Store {
         exists
     }
 
+    /// Upstream's `lookupKeyWrite` side effect: collect the key if its TTL has passed.
+    ///
+    /// (frankenredis-expirenotify) `expireIfNeeded` is not a predicate -- reaching a dead key
+    /// through a WRITE lookup deletes it, which bumps `stat_expired_keys`, queues the DEL for
+    /// replicas and the AOF, and publishes `__keyevent@0__:expired`. A command that only
+    /// TESTS the deadline gets the same reply and none of that, so a subscriber never hears
+    /// about a key the command itself just observed to be dead.
+    ///
+    /// This is deliberately the opposite of `key_is_logically_expired`, which is the pure
+    /// check a READ command wants (see `keys_matching_in_db`). Picking the wrong one of the
+    /// two is the whole bug class here.
+    ///
+    /// Returns whether the key is present and live afterwards.
+    pub fn collect_expired_for_write(&mut self, key: &[u8], now_ms: u64) -> bool {
+        self.drop_if_expired(key, now_ms)
+    }
+
     /// (frankenredis-1d2xf) Drain the keys lazily expired during the current
     /// command, for the runtime to propagate as `DEL`/`UNLINK`.
     pub fn take_lazy_expired_propagation(&mut self) -> Vec<Vec<u8>> {

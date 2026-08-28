@@ -21360,7 +21360,25 @@ impl Runtime {
         // non-counting PTTL so the comparison read does not bump keyspace_hits).
         let applied = {
             let current_remaining_ms = match self.server.store.pttl_no_stats(key, now_ms) {
-                fr_store::PttlValue::KeyMissing => None,
+                fr_store::PttlValue::KeyMissing => {
+                    // (frankenredis-expirenotify) The WRITE lookup's side effect -- the twin
+                    // of the same arm in fr_command::apply_expiry_with_options, placed
+                    // identically so the two cannot drift. Upstream's expireGenericCommand
+                    // opens with `lookupKeyWrite`, which runs expireIfNeeded and DELETES a key
+                    // whose TTL has already passed before the command replies 0.
+                    //
+                    // Fixing only the generic arm fixes nothing a default server can see:
+                    // this borrowed arm is the one taken when notifications, AOF, replicas
+                    // and tracking are all off, so it serves the DEFAULT configuration while
+                    // the generic arm serves the configured one. Without this the dead key
+                    // stayed counted by DBSIZE and INFO keyspace and expired_keys never moved.
+                    //
+                    // The gate's premise still holds: it pins keyspace events inactive, so
+                    // the collection publishes nothing here, and the DEL it queues is drained
+                    // by the take_lazy_expired_propagation this path already performs below.
+                    self.server.store.collect_expired_for_write(key, now_ms);
+                    None
+                }
                 fr_store::PttlValue::NoExpiry => Some(None),
                 fr_store::PttlValue::Remaining(ms) => Some(Some(ms)),
             };
@@ -53793,6 +53811,100 @@ mod tests {
                 .is_none()
         );
         // flagged form is rejected by the fr-server recognizer (argc 3 only).
+    }
+
+    #[test]
+    fn expire_family_borrowed_collects_a_logically_expired_key_like_lookupkeywrite() {
+        // (frankenredis-expirenotify) Upstream's expire.c::expireGenericCommand opens with
+        // `if (lookupKeyWrite(c->db,key) == NULL) { addReply(czero); return; }`, and
+        // lookupKeyWrite runs expireIfNeeded: a key whose TTL has already passed is DELETED
+        // right there -- bumping expired_keys and propagating a DEL -- and the command then
+        // replies 0 because the lookup came back NULL. fr reached the same 0 by merely
+        // TESTING the deadline, so a dead key stayed counted by DBSIZE and INFO keyspace and
+        // expired_keys never moved.
+        //
+        // This pins the BORROWED arm, which is the half that matters most: it is the one
+        // taken when notifications, AOF, replicas and tracking are all off -- the DEFAULT
+        // configuration -- while the generic arm serves the configured one. Fixing either
+        // alone leaves a server that diverges in one of its two modes.
+        //
+        // Active expiry is off deliberately. This path runs a fast expire cycle before the
+        // lookup, and that cycle collects the dead key on its own; with it enabled the
+        // assertions below pass whether or not the write lookup collects anything, which
+        // would make the whole test vacuous.
+        type Arm = fn(&mut Runtime, &[u8], u64) -> Option<RespFrame>;
+        let arms: [(&str, Arm); 4] = [
+            ("EXPIRE", |rt, k, now| {
+                rt.execute_plain_expire_borrowed(k, b"100", now, None)
+            }),
+            ("PEXPIRE", |rt, k, now| {
+                rt.execute_plain_pexpire_borrowed(k, b"100000", now, None)
+            }),
+            ("EXPIREAT", |rt, k, now| {
+                rt.execute_plain_expireat_borrowed(k, b"200", now, None)
+            }),
+            ("PEXPIREAT", |rt, k, now| {
+                rt.execute_plain_pexpireat_borrowed(k, b"200000", now, None)
+            }),
+        ];
+        // The key is written at t=1000 with a 40ms TTL, so it is long dead by t=100_000
+        // while still physically present -- the state upstream's lookupKeyWrite collects.
+        const DEAD_AT_MS: u64 = 100_000;
+
+        for (label, arm) in arms {
+            let mut rt = Runtime::default_strict();
+            rt.server.store.active_expire_enabled = false;
+            rt.execute_frame(command(&[b"SET", b"dead", b"v", b"PX", b"40"]), 1000);
+            assert_eq!(
+                rt.server.store.dbsize_in_db(0),
+                1,
+                "{label}: the key must still be physically present before the command runs, \
+                 or this case proves nothing"
+            );
+            let expired_before = rt.server.store.stat_expired_keys;
+
+            assert_eq!(
+                arm(&mut rt, b"dead", DEAD_AT_MS),
+                Some(RespFrame::Integer(0)),
+                "{label} on a logically expired key replies 0 -- the write lookup came back \
+                 NULL. Some(..) also pins that the BORROWED arm engaged: a deferral is None."
+            );
+            // Read the counter directly rather than issuing DBSIZE: DBSIZE has a fast path of
+            // its own that runs an expire cycle, which would collect the key itself.
+            assert_eq!(
+                rt.server.store.dbsize_in_db(0),
+                0,
+                "{label} must COLLECT the dead key like lookupKeyWrite, not merely test its \
+                 deadline and leave it counted"
+            );
+            assert_eq!(
+                rt.server.store.stat_expired_keys,
+                expired_before + 1,
+                "{label}'s collection is an expiry and must be counted as one"
+            );
+        }
+
+        // Anti-vacuity: the same call on a LIVE key must still take its new TTL, reply 1, and
+        // collect nothing. Without this half, "collect everything unconditionally" would pass
+        // every assertion above.
+        let mut rt = Runtime::default_strict();
+        rt.server.store.active_expire_enabled = false;
+        rt.execute_frame(command(&[b"SET", b"live", b"v"]), 1000);
+        let expired_before = rt.server.store.stat_expired_keys;
+        assert_eq!(
+            rt.execute_plain_expire_borrowed(b"live", b"100", DEAD_AT_MS, None),
+            Some(RespFrame::Integer(1)),
+            "EXPIRE on a live key must still apply the TTL and reply 1"
+        );
+        assert_eq!(
+            rt.server.store.dbsize_in_db(0),
+            1,
+            "EXPIRE must not collect a key that is still alive"
+        );
+        assert_eq!(
+            rt.server.store.stat_expired_keys, expired_before,
+            "a live key's EXPIRE must not count as an expiry"
+        );
     }
 
     #[test]
