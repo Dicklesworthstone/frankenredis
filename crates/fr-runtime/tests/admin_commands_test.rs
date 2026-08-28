@@ -772,3 +772,81 @@ fn commandstats_separates_failed_and_rejected_inner_calls() {
     );
     assert_eq!(cmdstat_field(&mut rt, "cmdstat_nosuchcmd", "calls"), None);
 }
+
+// ── latency-tracking gates the PERCENTILES, and a toggle discards them ──
+//
+// (frankenredis-trackgate) Upstream frees a command's latency histogram when
+// `latency-tracking` goes off and allocates a fresh one on the next command once it
+// is back on. fr recorded the buckets under the same flag but never cleared them and
+// never gated the section, so percentiles collected while tracking was ON stayed
+// visible after it was turned OFF -- redis reports the section absent immediately.
+//
+// Expected values are what redis 7.2.4 reported for the same sequences.
+
+fn latencystats_has(rt: &mut Runtime, cmd: &str) -> bool {
+    let info = extract_bulk(&rt.execute_frame(command(&[b"INFO", b"latencystats"]), 0));
+    info.lines()
+        .any(|line| line.starts_with(&format!("latency_percentiles_usec_{cmd}:")))
+}
+
+fn set_tracking(rt: &mut Runtime, on: bool) {
+    let value: &[u8] = if on { b"yes" } else { b"no" };
+    rt.execute_frame(command(&[b"CONFIG", b"SET", b"latency-tracking", value]), 0);
+}
+
+#[test]
+fn latency_tracking_toggle_discards_the_percentiles() {
+    let mut rt = Runtime::default_strict();
+
+    // Collected while ON: the section is there.
+    set_tracking(&mut rt, true);
+    resetstat(&mut rt);
+    rt.execute_frame(command(&[b"SET", b"a", b"v"]), 0);
+    assert!(latencystats_has(&mut rt, "set"), "percentiles expected while tracking");
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("1"));
+
+    // Turned OFF: the percentiles go immediately, WITHOUT waiting for another command.
+    // fr kept showing them.
+    set_tracking(&mut rt, false);
+    assert!(
+        !latencystats_has(&mut rt, "set"),
+        "percentiles must vanish as soon as tracking is off"
+    );
+    // ...and the command counters are untouched by the toggle: this is the half of the
+    // flag that must NOT change, so a fix that simply reset everything would fail here.
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("1"));
+
+    // Back ON, before any new command: still absent, because the old buckets were
+    // discarded rather than merely hidden. This is what separates clearing from gating.
+    set_tracking(&mut rt, true);
+    assert!(
+        !latencystats_has(&mut rt, "set"),
+        "discarded percentiles must not reappear when tracking is re-enabled"
+    );
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("1"));
+
+    // One more command and the section is rebuilt.
+    rt.execute_frame(command(&[b"SET", b"b", b"v"]), 0);
+    assert!(latencystats_has(&mut rt, "set"), "percentiles rebuild after a command");
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("2"));
+}
+
+#[test]
+fn latencystats_is_absent_while_tracking_is_off() {
+    let mut rt = Runtime::default_strict();
+    set_tracking(&mut rt, false);
+    resetstat(&mut rt);
+    for _ in 0..5 {
+        rt.execute_frame(command(&[b"SET", b"c", b"v"]), 0);
+    }
+    assert!(
+        !latencystats_has(&mut rt, "set"),
+        "no percentiles may accumulate while tracking is off"
+    );
+    // Re-enabling must not surface anything gathered during the untracked window.
+    set_tracking(&mut rt, true);
+    assert!(
+        !latencystats_has(&mut rt, "set"),
+        "the untracked window must leave no percentiles behind"
+    );
+}

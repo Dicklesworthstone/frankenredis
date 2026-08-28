@@ -6725,6 +6725,15 @@ impl Runtime {
     /// the two settings of a real, supported config knob rather than a code
     /// variant that ships to nobody.
     pub fn set_latency_tracking(&mut self, enabled: bool) {
+        // (frankenredis-trackgate) A CHANGE discards the percentile data, matching upstream,
+        // where the per-command latency histogram is freed when tracking goes off and
+        // allocated afresh by the next command once it is back on. Without the clear,
+        // turning it off then on again would resurrect percentiles from the untracked
+        // window: redis reports the section absent until a new command arrives, fr would
+        // have shown the old numbers.
+        if self.server.latency_tracking != enabled {
+            self.server.store.clear_command_latency_buckets();
+        }
         self.server.latency_tracking = enabled;
     }
 
@@ -45670,7 +45679,10 @@ impl Runtime {
             self.server.store.latency_tracker.threshold_ms = threshold_ms;
         }
         if let Some(tracking) = next_latency_tracking {
-            self.server.latency_tracking = tracking;
+            // (frankenredis-trackgate) Through the setter, not a bare field write: the
+            // setter is what discards the percentile buckets on a toggle, and this CONFIG
+            // SET path used to assign the field directly and skip that.
+            self.set_latency_tracking(tracking);
         }
         if let Some(percentiles) = next_latency_percentiles {
             self.server.latency_percentiles = percentiles;
@@ -48192,7 +48204,21 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
     }
 
     fn handle_info_latencystats_section(&mut self) -> RespFrame {
-        let histograms = self.server.store.all_command_histograms();
+        // (frankenredis-trackgate) THIS is what `latency-tracking` gates -- the percentile
+        // section, not the command counters. Two conditions, because they hide different
+        // things: the flag suppresses the section while tracking is off, and the per-command
+        // sample test suppresses a command that has counters but no histogram, which is how
+        // upstream behaves immediately after tracking is switched back on.
+        let histograms: Vec<_> = if self.server.latency_tracking {
+            self.server
+                .store
+                .all_command_histograms()
+                .into_iter()
+                .filter(|(_, hist)| hist.has_latency_samples())
+                .collect()
+        } else {
+            Vec::new()
+        };
         RespFrame::BulkString(Some(render_latencystats_section(
             &histograms,
             &self.server.latency_percentiles,

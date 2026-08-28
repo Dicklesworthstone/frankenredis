@@ -5839,6 +5839,25 @@ impl CommandHistogram {
         self.buckets[bucket_idx] += 1;
     }
 
+    /// Does this command have any LATENCY samples, as opposed to merely call counters?
+    ///
+    /// (frankenredis-trackgate) INFO latencystats emits a row per command that HAS a latency
+    /// histogram; upstream allocates one lazily and frees it when `latency-tracking` goes
+    /// off, so a command with calls but no histogram prints nothing. Counters and buckets
+    /// are collected on different conditions, so "has calls" is not the same question.
+    #[must_use]
+    pub fn has_latency_samples(&self) -> bool {
+        self.buckets.iter().any(|&count| count != 0)
+    }
+
+    /// Drop the latency buckets, keeping calls / usec / failed / rejected.
+    ///
+    /// (frankenredis-trackgate) This is what `latency-tracking` toggling does upstream: the
+    /// percentile data goes away, the command counters do not.
+    pub fn clear_latency_buckets(&mut self) {
+        self.buckets = [0; 24];
+    }
+
     /// Get histogram data as (bucket_start_us, count) pairs for non-zero buckets.
     #[must_use]
     pub fn to_buckets(&self) -> Vec<(u64, u64)> {
@@ -6366,6 +6385,24 @@ impl CommandHistogramTracker {
                 })
             })
             .sum()
+    }
+
+    /// Drop every command's latency buckets, keeping all call counters.
+    ///
+    /// (frankenredis-trackgate) Toggling `latency-tracking` discards the percentile data
+    /// upstream while commandstats keeps counting, so this deliberately is NOT `reset`.
+    pub fn clear_latency_buckets(&mut self) {
+        macro_rules! clear_direct {
+            ($($name:literal => $field:ident),* $(,)?) => {{
+                $(if let Some(histogram) = self.$field.as_mut() {
+                    histogram.clear_latency_buckets();
+                })*
+            }};
+        }
+        with_direct_histogram_fields!(clear_direct);
+        for histogram in self.histograms.values_mut() {
+            histogram.clear_latency_buckets();
+        }
     }
 }
 
@@ -8381,6 +8418,12 @@ impl Store {
     }
 
     /// Reset command histograms for specified commands, or all if empty.
+    /// Drop every command's latency buckets while keeping the commandstats counters.
+    /// (frankenredis-trackgate) See `CommandHistogramTracker::clear_latency_buckets`.
+    pub fn clear_command_latency_buckets(&mut self) {
+        self.command_histograms.clear_latency_buckets();
+    }
+
     pub fn reset_command_histograms(&mut self, commands: &[&str]) -> usize {
         self.command_histograms.reset(commands)
     }
