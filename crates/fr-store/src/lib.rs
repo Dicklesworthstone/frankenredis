@@ -5547,6 +5547,224 @@ pub enum SortWeight {
     NotNumber,
 }
 
+/// Convert a SORT element or BY-weight to a score exactly as upstream does.
+///
+/// (frankenredis-sortstrtod) `sort.c` is one line and three rejections:
+///
+/// ```c
+/// vector[j].u.score = strtod(byval->ptr, &eptr);
+/// if (eptr[0] != '\0' || errno == ERANGE || isnan(vector[j].u.score)) -> error
+/// ```
+///
+/// So the accepted set is *strtod's*, minus NaN, minus anything that set ERANGE, minus any
+/// input with a byte left over. fr used `str::trim().parse::<f64>()`, which differs from
+/// that in five ways, in BOTH directions -- verified against redis 7.2.4 over 121 cells:
+///
+/// | input      | strtod rule | `trim().parse()` |
+/// |------------|-------------|------------------|
+/// | `nan`      | reject      | accepted as NaN  |
+/// | `" 1 "`    | reject (trailing space is junk; strtod skips only LEADING) | accepted |
+/// | `1e400`    | reject (ERANGE overflow) | accepted as inf |
+/// | `1e-320`   | reject (ERANGE underflow -- a SUBNORMAL result counts) | accepted |
+/// | `""`       | ACCEPT as 0 (no conversion performed, so endptr == nptr and `eptr[0]`
+/// |            | is the terminating NUL) | rejected |
+/// | `0x10`     | ACCEPT as 16 (strtod parses hex floats) | rejected |
+///
+/// `inf` stays valid: it is a literal, so no ERANGE. The int-encoded fast path in
+/// `get_sort_weight` bypasses this entirely, which is upstream's `OBJ_ENCODING_INT` cast.
+///
+/// Returns `None` for "one or more scores can't be converted into double".
+#[must_use]
+pub fn sort_score_from_bytes(raw: &[u8]) -> Option<f64> {
+    // An EMPTY input performs no conversion, so endptr == nptr and `eptr[0]` is the
+    // terminating NUL: not an error, and the score is strtod's 0.
+    if raw.is_empty() {
+        return Some(0.0);
+    }
+    let text = std::str::from_utf8(raw).ok()?;
+    let bytes = text.as_bytes();
+
+    // strtod skips LEADING whitespace only. C's isspace also covers vertical tab, which
+    // Rust's `is_ascii_whitespace` omits.
+    let mut i = 0;
+    while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == 0x0B) {
+        i += 1;
+    }
+    // Whitespace-only: no conversion, endptr rewinds to the original start, so the first
+    // space is left over and it IS an error -- unlike the empty case above.
+    if i == bytes.len() {
+        return None;
+    }
+
+    let negative = match bytes[i] {
+        b'-' => {
+            i += 1;
+            true
+        }
+        b'+' => {
+            i += 1;
+            false
+        }
+        _ => false,
+    };
+    let rest = &text[i..];
+    let lower = rest.to_ascii_lowercase();
+
+    // Infinity and NaN literals. NaN is parsed so the trailing-junk rule still applies to
+    // it, and is then rejected by the isnan check below, exactly as upstream orders them.
+    for (word, value) in [
+        ("infinity", f64::INFINITY),
+        ("inf", f64::INFINITY),
+        ("nan", f64::NAN),
+    ] {
+        if lower.starts_with(word) {
+            if lower.len() != word.len() {
+                return None; // trailing junk after the literal
+            }
+            if value.is_nan() {
+                return None; // isnan(...) -> error
+            }
+            return Some(if negative { -value } else { value });
+        }
+    }
+
+    let magnitude = if lower.starts_with("0x") {
+        parse_hex_float(&rest[2..])?
+    } else {
+        parse_decimal_float(rest)?
+    };
+
+    // errno == ERANGE covers BOTH ends. Overflow: a finite literal that reached infinity.
+    // Underflow: a nonzero literal that landed on zero or in the subnormal range -- glibc
+    // sets ERANGE there too, which is why redis rejects 5e-324.
+    if magnitude.value.is_infinite()
+        || (magnitude.significand_nonzero
+            && (magnitude.value == 0.0 || magnitude.value.abs() < f64::MIN_POSITIVE))
+    {
+        return None;
+    }
+    Some(if negative {
+        -magnitude.value
+    } else {
+        magnitude.value
+    })
+}
+
+/// A parsed magnitude plus whether its significand had any nonzero digit, which is what
+/// separates "underflowed to zero" (ERANGE) from "the input really was zero".
+struct SortMagnitude {
+    value: f64,
+    significand_nonzero: bool,
+}
+
+/// `strtod`'s decimal form, consuming the WHOLE remaining input or failing.
+fn parse_decimal_float(rest: &str) -> Option<SortMagnitude> {
+    let bytes = rest.as_bytes();
+    let mut idx = 0;
+    let mut digits = 0;
+    let mut nonzero = false;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        nonzero |= bytes[idx] != b'0';
+        digits += 1;
+        idx += 1;
+    }
+    if idx < bytes.len() && bytes[idx] == b'.' {
+        idx += 1;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            nonzero |= bytes[idx] != b'0';
+            digits += 1;
+            idx += 1;
+        }
+    }
+    if digits == 0 {
+        return None; // no conversion performed
+    }
+    let mantissa_end = idx;
+    // An exponent is only consumed when at least one digit follows it; otherwise strtod
+    // stops before the `e` and leaves it as trailing junk.
+    if idx < bytes.len() && (bytes[idx] == b'e' || bytes[idx] == b'E') {
+        let mut probe = idx + 1;
+        if probe < bytes.len() && (bytes[probe] == b'+' || bytes[probe] == b'-') {
+            probe += 1;
+        }
+        if probe < bytes.len() && bytes[probe].is_ascii_digit() {
+            while probe < bytes.len() && bytes[probe].is_ascii_digit() {
+                probe += 1;
+            }
+            idx = probe;
+        }
+    }
+    if idx != bytes.len() {
+        return None; // eptr[0] != '\0'
+    }
+    // Rust's own parser handles the whole consumed slice, so the rounding is correct; the
+    // scan above exists to decide the EXTENT and reject leftovers, which is the part that
+    // differs from `parse::<f64>()`.
+    let value: f64 = rest[..mantissa_end].parse().ok().and_then(|_: f64| rest.parse().ok())?;
+    Some(SortMagnitude {
+        value,
+        significand_nonzero: nonzero,
+    })
+}
+
+/// `strtod`'s hex form: `0x` hexdigits [`.` hexdigits] [`p` [sign] decdigits].
+/// Rust's float parser rejects these outright, which is why fr refused `0x10`.
+fn parse_hex_float(rest: &str) -> Option<SortMagnitude> {
+    let bytes = rest.as_bytes();
+    let mut idx = 0;
+    let mut mantissa: f64 = 0.0;
+    let mut digits = 0;
+    let mut nonzero = false;
+    while idx < bytes.len() && bytes[idx].is_ascii_hexdigit() {
+        let digit = (bytes[idx] as char).to_digit(16)?;
+        nonzero |= digit != 0;
+        mantissa = mantissa * 16.0 + f64::from(digit);
+        digits += 1;
+        idx += 1;
+    }
+    let mut exponent: i32 = 0;
+    if idx < bytes.len() && bytes[idx] == b'.' {
+        idx += 1;
+        while idx < bytes.len() && bytes[idx].is_ascii_hexdigit() {
+            let digit = (bytes[idx] as char).to_digit(16)?;
+            nonzero |= digit != 0;
+            mantissa = mantissa * 16.0 + f64::from(digit);
+            digits += 1;
+            exponent -= 4;
+            idx += 1;
+        }
+    }
+    if digits == 0 {
+        // `0x` with no hex digits: strtod converts the leading `0` and leaves `x...`, so the
+        // caller sees trailing junk rather than a hex number.
+        return None;
+    }
+    if idx < bytes.len() && (bytes[idx] == b'p' || bytes[idx] == b'P') {
+        let mut probe = idx + 1;
+        let mut negative = false;
+        if probe < bytes.len() && (bytes[probe] == b'+' || bytes[probe] == b'-') {
+            negative = bytes[probe] == b'-';
+            probe += 1;
+        }
+        if probe < bytes.len() && bytes[probe].is_ascii_digit() {
+            let start = probe;
+            while probe < bytes.len() && bytes[probe].is_ascii_digit() {
+                probe += 1;
+            }
+            let magnitude: i32 = rest[start..probe].parse().unwrap_or(i32::MAX);
+            exponent = exponent.saturating_add(if negative { -magnitude } else { magnitude });
+            idx = probe;
+        }
+    }
+    if idx != bytes.len() {
+        return None;
+    }
+    Some(SortMagnitude {
+        value: mantissa * (2.0_f64).powi(exponent),
+        significand_nonzero: nonzero,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveExpireCycleResult {
     pub sampled_keys: usize,
@@ -9123,12 +9341,10 @@ impl Store {
                     entry.touch_access(now_ms, false, lfu_decay, lfu_log_factor, 0);
                     match &entry.value {
                         Value::Integer(n) => SortWeight::Number(*n as f64),
-                        Value::String(b) => match std::str::from_utf8(b) {
-                            Ok(text) => match text.trim().parse::<f64>() {
-                                Ok(f) => SortWeight::Number(f),
-                                Err(_) => SortWeight::NotNumber,
-                            },
-                            Err(_) => SortWeight::NotNumber,
+                        // (frankenredis-sortstrtod) strtod's rule, not Rust's parser.
+                        Value::String(b) => match sort_score_from_bytes(b) {
+                            Some(f) => SortWeight::Number(f),
+                            None => SortWeight::NotNumber,
                         },
                         _ => SortWeight::Missing,
                     }
@@ -9163,12 +9379,11 @@ impl Store {
                 );
                 match &entry.value {
                     Value::Integer(n) => SortWeight::Number(*n as f64),
-                    Value::String(b) => match std::str::from_utf8(b) {
-                        Ok(text) => match text.trim().parse::<f64>() {
-                            Ok(f) => SortWeight::Number(f),
-                            Err(_) => SortWeight::NotNumber,
-                        },
-                        Err(_) => SortWeight::NotNumber,
+                    // (frankenredis-sortstrtod) strtod's rule, not Rust's parser. The
+                    // UTF-8 check lives inside the helper, so there is no outer match.
+                    Value::String(b) => match sort_score_from_bytes(b) {
+                        Some(f) => SortWeight::Number(f),
+                        None => SortWeight::NotNumber,
                     },
                     _ => SortWeight::Missing,
                 }

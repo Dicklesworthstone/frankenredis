@@ -31645,15 +31645,11 @@ fn sort_generic<const MOVE: bool>(
                     None => &elements[idx],
                     Some(keys) => keys[idx].as_deref().unwrap_or(b"0"),
                 };
-                let s = match std::str::from_utf8(val) {
-                    Ok(text) => text,
-                    Err(_) => {
-                        return Ok(RespFrame::Error(
-                            "ERR One or more scores can't be converted into double".to_string(),
-                        ));
-                    }
-                };
-                let Ok(score) = s.trim().parse::<f64>() else {
+                // (frankenredis-sortstrtod) strtod's rule, shared with the BY-weight path in
+                // fr-store so the element and the weight cannot disagree about what a
+                // number is. `trim().parse::<f64>()` accepted nan / " 1 " / 1e400 / 1e-320
+                // that upstream rejects, and rejected "" / 0x10 that upstream accepts.
+                let Some(score) = fr_store::sort_score_from_bytes(val) else {
                     return Ok(RespFrame::Error(
                         "ERR One or more scores can't be converted into double".to_string(),
                     ));
@@ -65613,6 +65609,137 @@ mod tests {
                 assert!(msg.contains("scores can't be converted into double"));
             }
             _ => panic!("expected error for non-numeric sort"), // ubs:ignore — AI triage
+        }
+    }
+
+    /// (frankenredis-sortstrtod) SORT converts scores with strtod's rule, not Rust's.
+    ///
+    /// `sort.c` is `strtod` plus three rejections -- trailing junk, `errno == ERANGE`, and
+    /// `isnan`. fr used `str::trim().parse::<f64>()`, which disagrees in five value classes
+    /// in BOTH directions. Every expectation below is what redis 7.2.4 answered for the same
+    /// input, as an element AND as a BY weight (one shared rule, so both must agree).
+    ///
+    /// A naive `trim().parse::<f64>()` implementation fails this test on its first case.
+    #[test]
+    fn sort_score_conversion_follows_strtod_not_rust_parse() {
+        // (accepted?, value, why it is interesting)
+        let cases: &[(bool, &[u8], &str)] = &[
+            (false, b"nan", "isnan rejection"),
+            (false, b"NaN", "isnan is case-insensitive in strtod"),
+            (false, b"-nan", "signed NaN is still NaN"),
+            (false, b" 1 ", "strtod skips LEADING space only; the trailing one is junk"),
+            (false, b"1\n", "same, for a trailing newline"),
+            (false, b"1e400", "ERANGE on overflow, even though the value is a finite literal"),
+            (false, b"1e-320", "ERANGE on underflow: a SUBNORMAL result counts"),
+            (false, b"5e-324", "the smallest subnormal is still ERANGE"),
+            (true, b"", "no conversion performed, so endptr == nptr and it is NOT an error"),
+            (true, b"0x10", "strtod parses hex floats; Rust's parser refuses them"),
+            (true, b"0x1.8p1", "hex with a fraction and a binary exponent"),
+            (true, b"inf", "an infinity LITERAL sets no ERANGE, so it stays valid"),
+            (true, b"-inf", "and so does a negative one"),
+            (true, b"1.5", "the ordinary case must keep working"),
+            (true, b"-0", "negative zero is not underflow"),
+            (false, b"abc", "no digits at all"),
+            (false, b"1abc", "trailing junk after a good number"),
+            (false, b" ", "whitespace only: endptr rewinds, so the space is left over"),
+            (false, b"0x", "`0x` converts the leading 0 and leaves `x` as junk"),
+        ];
+
+        for &(accepted, value, why) in cases {
+            // As the sorted ELEMENT.
+            let mut store = Store::new();
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"l".to_vec(), value.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("rpush");
+            let element = dispatch_argv(&[b"SORT".to_vec(), b"l".to_vec()], &mut store, 0)
+                .expect("sort element");
+            let element_raised = matches!(&element, RespFrame::Error(m)
+                if m.contains("scores can't be converted into double"));
+            assert_eq!(
+                element_raised, !accepted,
+                "element {:?} ({why}): got {element:?}",
+                String::from_utf8_lossy(value)
+            );
+
+            // As a BY WEIGHT, which is the path that was silently accepting everything.
+            let mut store = Store::new();
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"l".to_vec(), b"1".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("rpush");
+            dispatch_argv(
+                &[b"SET".to_vec(), b"w_1".to_vec(), value.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("set weight");
+            let weight = dispatch_argv(
+                &[
+                    b"SORT".to_vec(),
+                    b"l".to_vec(),
+                    b"BY".to_vec(),
+                    b"w_*".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("sort by weight");
+            let weight_raised = matches!(&weight, RespFrame::Error(m)
+                if m.contains("scores can't be converted into double"));
+            assert_eq!(
+                weight_raised, !accepted,
+                "weight {:?} ({why}): got {weight:?}",
+                String::from_utf8_lossy(value)
+            );
+        }
+    }
+
+    /// (frankenredis-sortstrtod) The conversion must not run where upstream never calls it.
+    ///
+    /// This is the anti-vacuity half: an implementation that simply rejected more inputs
+    /// would satisfy most of the test above and fail here, because ALPHA and `BY nosort`
+    /// never convert anything at all -- an unparseable weight is fine under both.
+    #[test]
+    fn sort_skips_conversion_under_alpha_and_nosort() {
+        for extra in [
+            vec![b"ALPHA".to_vec()],
+            vec![],
+        ] {
+            let mut store = Store::new();
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"l".to_vec(), b"1".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("rpush");
+            dispatch_argv(
+                &[b"SET".to_vec(), b"w_1".to_vec(), b"nan".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("set weight");
+            let mut argv = vec![
+                b"SORT".to_vec(),
+                b"l".to_vec(),
+                b"BY".to_vec(),
+                if extra.is_empty() {
+                    b"nosort".to_vec()
+                } else {
+                    b"w_*".to_vec()
+                },
+            ];
+            argv.extend(extra.clone());
+            let out = dispatch_argv(&argv, &mut store, 0).expect("sort");
+            assert!(
+                !matches!(&out, RespFrame::Error(m)
+                    if m.contains("scores can't be converted into double")),
+                "argv {argv:?} must not convert the weight, got {out:?}"
+            );
         }
     }
 
