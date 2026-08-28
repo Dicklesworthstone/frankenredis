@@ -14219,7 +14219,18 @@ impl Store {
         // (perf) Skip the reap loop when nothing can expire (`expires_count == 0`) — each
         // `drop_if_expired` is a discarded `contains_key`, O(candidates) waste on a no-TTL DB.
         // Byte-identical (no eviction with no TTL). Same CrimsonHawk guard as keys_matching.
-        if self.expires_count != 0 {
+        //
+        // (frankenredis-keysexpired) READ THE GUARD BEFORE THE REAP RUNS. `no_ttl` was
+        // computed AFTER this loop, and the loop is exactly what can drive `expires_count`
+        // to zero: reaping the db's last volatile key made `no_ttl` true, which then told
+        // the filter below "there were no TTLs, so the reap evicted nothing, skip the
+        // re-probe" -- and the candidate the reap had just deleted was emitted. `KEYS k`
+        // and `KEYS k*` returned a logically expired key where redis returns nothing,
+        // while `KEYS *` (a different branch) filtered it correctly.
+        //
+        // One value, read once, describing the state the filter's assumption is about.
+        let no_ttl = self.expires_count == 0;
+        if !no_ttl {
             for key in &candidates {
                 self.drop_if_expired(key, now_ms);
             }
@@ -14233,7 +14244,8 @@ impl Store {
         // candidates were read straight out of `entries` moments ago, so every one is still
         // present — the re-probe is always true. Skip it there; this completes the no-TTL guard
         // so a range KEYS over a no-TTL DB does ZERO redundant keyspace probes. Byte-identical.
-        let no_ttl = self.expires_count == 0;
+        // `no_ttl` is captured above, before the reap; see the note there for why reading it
+        // here was the bug.
         let mut result: Vec<Vec<u8>> = candidates
             .into_iter()
             .filter(|key| no_ttl || self.entries.contains_key(key.as_slice()))

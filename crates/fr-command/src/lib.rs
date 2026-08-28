@@ -36073,6 +36073,76 @@ mod tests {
         );
     }
 
+    /// (frankenredis-keysexpired) KEYS must never return a logically expired key, on ANY
+    /// pattern -- including one with a literal prefix, which takes a different branch.
+    ///
+    /// Upstream `keysCommand` calls `keyIsExpired` on every candidate, so the pattern shape
+    /// cannot change the answer. fr range-prunes by the pattern's literal prefix, and that
+    /// branch reaps the due keys and then re-probes `entries` to drop what it evicted --
+    /// except the `no_ttl` guard controlling that re-probe was read AFTER the reap. Reaping
+    /// the db's LAST volatile key drove `expires_count` to 0, the guard then read "no TTLs
+    /// existed, so nothing was evicted, skip the re-probe", and the just-deleted key was
+    /// emitted. `KEYS *` took the other branch and filtered correctly.
+    ///
+    /// Time is a parameter here, so expiry is exact rather than slept for: the key is
+    /// written with a TTL at t=0 and the KEYS runs at t=100_000.
+    ///
+    /// The naive implementation -- reading the guard after the reap -- fails the very first
+    /// assertion, and ONLY when the expired key is the sole volatile one, which is why the
+    /// keyspace below is built that way.
+    #[test]
+    fn keys_never_returns_a_logically_expired_key_on_any_pattern() {
+        // Every pattern that matches `k`, across both the literal-prefix branch (`k`, `k*`)
+        // and the full-scan branch (`*`, `?`, `[k]`, `*k`).
+        for pattern in [
+            &b"k"[..], b"k*", b"*", b"?", b"[k]", b"*k", b"\\k",
+        ] {
+            let mut store = Store::new();
+            // The ONLY volatile key in the db, so the reap takes expires_count to zero.
+            store.set(b"k".to_vec(), b"42".to_vec(), Some(40), 0);
+            let out = dispatch_argv(
+                &[b"KEYS".to_vec(), pattern.to_vec()],
+                &mut store,
+                100_000,
+            )
+            .expect("keys");
+            assert_eq!(
+                out,
+                RespFrame::Array(Some(vec![])),
+                "KEYS {:?} must not report an expired key",
+                String::from_utf8_lossy(pattern)
+            );
+        }
+
+        // Anti-vacuity: the same patterns must still FIND a live key. A fix that simply
+        // returned nothing, or that reaped too eagerly, passes the loop above and fails here.
+        for pattern in [&b"k"[..], b"k*", b"*", b"?", b"[k]", b"*k"] {
+            let mut store = Store::new();
+            store.set(b"k".to_vec(), b"42".to_vec(), Some(100_000), 0);
+            let out = dispatch_argv(&[b"KEYS".to_vec(), pattern.to_vec()], &mut store, 1)
+                .expect("keys");
+            assert_eq!(
+                out,
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"k".to_vec()))])),
+                "KEYS {:?} must still match a live key",
+                String::from_utf8_lossy(pattern)
+            );
+        }
+
+        // A live key alongside the expired one must survive the same call -- the expired
+        // entry is filtered, not the whole reply.
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"42".to_vec(), Some(40), 0);
+        store.set(b"kalive".to_vec(), b"1".to_vec(), None, 0);
+        let out = dispatch_argv(&[b"KEYS".to_vec(), b"k*".to_vec()], &mut store, 100_000)
+            .expect("keys");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"kalive".to_vec()))])),
+            "the live sibling must remain while the expired key is filtered"
+        );
+    }
+
     #[test]
     fn keys_command_glob_class_edge_semantics() {
         let mut store = Store::new();
