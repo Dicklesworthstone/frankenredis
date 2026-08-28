@@ -3730,7 +3730,12 @@ pub struct LuaState<'a> {
     /// maintains the rest. `error(msg, level)` reads the slot at
     /// `len - 1 - level` (skipping the error builtin's own top entry) to
     /// decide whether to prepend the `user_script:1: ` source-location.
-    lua_frame_kinds: Vec<bool>,
+    /// (frankenredis-lualine) Each entry also carries the line that was executing when
+    /// the frame was pushed -- i.e. the CALL SITE. `luaL_where(level)` reports the line
+    /// currently executing in the frame at `level`, which is exactly the call-site line
+    /// recorded by the frame one closer to the top, so `error(msg, N)` reads
+    /// `lua_frame_kinds[len - N].1`.
+    lua_frame_kinds: Vec<(bool, u32)>,
     iterations: u64,
     rng_seed: u64,
     /// (frankenredis-lwj8o) Lua math.random must produce values
@@ -5823,7 +5828,7 @@ impl<'a> LuaState<'a> {
         // (frankenredis-0k259) The script top-level chunk is a Lua function
         // frame for the purposes of luaL_where; push before exec_block so
         // error(msg, N) at the bottom of the call stack can find it.
-        self.lua_frame_kinds.push(true);
+        self.lua_frame_kinds.push((true, self.current_line));
         let outcome = self.exec_block(&compiled.top_level, &mut env, &mut varargs);
         self.lua_frame_kinds.pop();
         match outcome {
@@ -7973,7 +7978,7 @@ impl<'a> LuaState<'a> {
             // interpreter-raised ones were the exception rather than the rule.
             return Err("user_script:1: stack overflow".to_string());
         }
-        self.lua_frame_kinds.push(false);
+        self.lua_frame_kinds.push((false, self.current_line));
         let is_pcall = matches!(intrinsic, RedisIntrinsic::PCall);
         // (frankenredis-zsbhn) This frame does NOT set `current_invocation_name`.
         //
@@ -8113,7 +8118,7 @@ impl<'a> LuaState<'a> {
             self.call_depth -= 1;
             return Err("user_script:1: stack overflow".to_string());
         }
-        self.lua_frame_kinds.push(false);
+        self.lua_frame_kinds.push((false, self.current_line));
         // (frankenredis-zsbhn) No `current_invocation_name` write here either —
         // see the argument on `call_redis_intrinsic`, which this twin mirrors.
         let is_pcall = matches!(intrinsic, RedisIntrinsic::PCall);
@@ -8939,7 +8944,7 @@ impl<'a> LuaState<'a> {
         // (frankenredis-0k259) The coroutine body is a Lua function but it
         // doesn't enter through call_function — push the kind frame here
         // so error()/assert() inside the body see a Lua frame at level 1.
-        self.lua_frame_kinds.push(true);
+        self.lua_frame_kinds.push((true, self.current_line));
         let run_result = if let Some(continuation) = continuation {
             self.resume_coroutine_continuation(
                 continuation,
@@ -9644,7 +9649,7 @@ impl<'a> LuaState<'a> {
         // an empty kind stack also yields "caller is Lua". A C caller
         // (RustFunction frame, e.g. pcall invoking a non-callable)
         // hides the source.
-        let caller_is_lua_frame = match self.lua_frame_kinds.last() {
+        let caller_is_lua_frame = match self.lua_frame_kinds.last().map(|f| f.0) {
             None => true,
             Some(true) => true,
             Some(false) => false,
@@ -9654,7 +9659,7 @@ impl<'a> LuaState<'a> {
         // whether to prepend the user_script:1 source-location prefix.
         // LuaValue::Function is the only kind that counts as a Lua frame.
         self.lua_frame_kinds
-            .push(matches!(func, LuaValue::Function(_)));
+            .push((matches!(func, LuaValue::Function(_)), self.current_line));
         // (frankenredis-2c7hj) Tables with a callable `__call` metamethod
         // act like the underlying function with the table prepended as
         // the first arg. Handled here so internal callers (iterators,
@@ -10383,11 +10388,30 @@ impl<'a> LuaState<'a> {
                         .lua_frame_kinds
                         .len()
                         .checked_sub(1 + level as usize)
-                        .and_then(|i| self.lua_frame_kinds.get(i).copied())
+                        .and_then(|i| self.lua_frame_kinds.get(i).map(|f| f.0))
                         .unwrap_or(false);
                     let msg = String::from_utf8_lossy(&raw.to_display_string()).to_string();
                     if level_is_lua {
-                        return Err(format!("user_script:1: {msg}"));
+                        // (frankenredis-lualine) `luaL_where(level)` reports the line
+                        // CURRENTLY EXECUTING in the frame at `level`, which is the call-site
+                        // line recorded by the frame one closer to the top -- hence
+                        // `len - level`, not `len - 1 - level` as the kind lookup above uses.
+                        // For the default level 1 that is error()'s own frame, i.e. the line
+                        // error() was called on; for level 2 it is the line the caller was on,
+                        // which is the whole point of asking for level 2.
+                        let where_line = self
+                            .lua_frame_kinds
+                            .len()
+                            .checked_sub(level as usize)
+                            .and_then(|i| self.lua_frame_kinds.get(i).map(|f| f.1))
+                            .unwrap_or(self.current_line);
+                        // Report the error AT that line: the pcall/uncaught stamps rewrite a
+                        // `user_script:1:` prefix using `current_line`, and a level >1 error
+                        // is deliberately NOT positioned at the raising statement. Moving
+                        // `current_line` keeps every later stamp agreeing with the prefix
+                        // written here instead of overwriting it.
+                        self.current_line = where_line;
+                        return Err(format!("user_script:{where_line}: {msg}"));
                     }
                     return Err(msg);
                 }
@@ -10662,7 +10686,16 @@ impl<'a> LuaState<'a> {
                             self.pending_error_value.take().unwrap()
                         } else {
                             self.pending_error_value = None;
-                            LuaValue::Str(msg.into_bytes())
+                            // (frankenredis-lualine) Stamp the raising statement's line
+                            // HERE as well as at the uncaught boundary in
+                            // `execute_compiled`. An error caught by pcall/xpcall never
+                            // reaches that boundary, so every caught message read
+                            // `user_script:1:` however deep in the script it was raised.
+                            // Upstream builds the position at RAISE time via luaL_where,
+                            // so the caught value and the uncaught envelope agree.
+                            LuaValue::Str(
+                                stamp_user_script_line(msg, self.current_line).into_bytes(),
+                            )
                         };
                         // The raw-body marker only matters for uncaught
                         // top-level errors — pcall has already converted
@@ -10718,7 +10751,16 @@ impl<'a> LuaState<'a> {
                             self.pending_error_value.take().unwrap()
                         } else {
                             self.pending_error_value = None;
-                            LuaValue::Str(msg.into_bytes())
+                            // (frankenredis-lualine) Stamp the raising statement's line
+                            // HERE as well as at the uncaught boundary in
+                            // `execute_compiled`. An error caught by pcall/xpcall never
+                            // reaches that boundary, so every caught message read
+                            // `user_script:1:` however deep in the script it was raised.
+                            // Upstream builds the position at RAISE time via luaL_where,
+                            // so the caught value and the uncaught envelope agree.
+                            LuaValue::Str(
+                                stamp_user_script_line(msg, self.current_line).into_bytes(),
+                            )
                         };
                         self.pending_error_is_raw_body = false;
                         let mut handler_args = vec![err_val.clone()];
@@ -26378,8 +26420,13 @@ end
             result,
             Ok(RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"false".to_vec())),
+                // (frankenredis-lualine) Line 3, not 1: the script literal opens with a
+                // newline, so `error(...)` sits on its third line. This read
+                // `user_script:1:` only because every caught error used to. Verified
+                // against redis 7.2.4 with this byte-identical script -- it answers
+                // `false user_script:3: __frankenredis_lua_coroutine_yield__ dead`.
                 RespFrame::BulkString(Some(
-                    b"user_script:1: __frankenredis_lua_coroutine_yield__".to_vec()
+                    b"user_script:3: __frankenredis_lua_coroutine_yield__".to_vec()
                 )),
                 RespFrame::BulkString(Some(b"dead".to_vec())),
             ])))
@@ -26405,8 +26452,11 @@ end
             result,
             Ok(RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"false".to_vec())),
+                // (frankenredis-lualine) Line 3 for the same reason as the coroutine twin
+                // above; redis 7.2.4 answers `false user_script:3: __frankenredis_lua_
+                // coroutine_yield__` for this exact script.
                 RespFrame::BulkString(Some(
-                    b"user_script:1: __frankenredis_lua_coroutine_yield__".to_vec()
+                    b"user_script:3: __frankenredis_lua_coroutine_yield__".to_vec()
                 )),
             ])))
         );

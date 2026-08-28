@@ -939,3 +939,157 @@ fn lua_table_sort_matches_auxsort_tie_order_and_call_count() {
         "1,2,3"
     );
 }
+
+// ── Script errors report the line they happened on (frankenredis-lualine) ──
+//
+// fr built its error messages with a hardcoded `user_script:1:` and rewrote the 1
+// to the real line at ONE place: the uncaught boundary in execute_compiled. An
+// error caught by pcall never reaches that boundary, so every caught message
+// claimed line 1 however deep in the script it was raised -- while the SAME error
+// left uncaught reported correctly. Upstream has no such split: luaL_where builds
+// the position when the error is raised, so both agree by construction.
+//
+// Every script here is multi-line on purpose. A single-line script cannot tell a
+// correct implementation from one that always answers 1, which is exactly how this
+// survived a 133-case Lua sweep.
+//
+// Expected values are what redis 7.2.4 answered for the same scripts.
+
+#[test]
+fn lua_caught_runtime_errors_report_their_own_line() {
+    let mut rt = Runtime::default_strict();
+    for (line, script) in [
+        (1, "local ok,e = pcall(function() return {} + 1 end) return tostring(e)"),
+        (2, "local ok,e = pcall(function()\nreturn {} + 1 end) return tostring(e)"),
+        (3, "local ok,e = pcall(function()\n\nreturn {} + 1 end) return tostring(e)"),
+        (5, "local ok,e = pcall(function()\n\n\n\nreturn {} + 1 end) return tostring(e)"),
+    ] {
+        assert_eq!(
+            lua_str(&mut rt, script),
+            format!("user_script:{line}: attempt to perform arithmetic on a table value"),
+        );
+    }
+    // The line is where it RAISED, not where the raising function was called: `inner`
+    // is invoked from line 6 but fails on line 2.
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local function inner()\nreturn {} + 1\nend\n\
+             local ok,e = pcall(function()\n\ninner() end) return tostring(e)",
+        ),
+        "user_script:2: attempt to perform arithmetic on a table value"
+    );
+    // Blank lines, comments and multi-line string literals all have to advance it.
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local ok,e = pcall(function()\n-- a comment\n--[[ block\ncomment ]]\n\
+             return {} + 1 end) return tostring(e)",
+        ),
+        "user_script:5: attempt to perform arithmetic on a table value"
+    );
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local ok,e = pcall(function()\nlocal s = [[a\nb\nc]]\n\
+             return {} + 1 end) return tostring(e)",
+        ),
+        "user_script:5: attempt to perform arithmetic on a table value"
+    );
+    // A builtin's bad-argument error carries a position too.
+    assert_eq!(
+        lua_str(&mut rt, "local ok,e = pcall(function()\nreturn table.sort(1) end) \
+                          return tostring(e)"),
+        "user_script:2: bad argument #1 to 'sort' (table expected, got number)"
+    );
+}
+
+#[test]
+fn lua_error_levels_pick_the_right_frames_line() {
+    let mut rt = Runtime::default_strict();
+    // `thrower` is defined on lines 1-3 and called from line 5.
+    let two_deep = |lvl: i32| {
+        format!(
+            "local function thrower()\nerror('boom', {lvl})\nend\n\
+             local ok,e = pcall(function()\nthrower() end) return tostring(e)"
+        )
+    };
+    // level 1 (the default) blames the line error() was called on...
+    assert_eq!(lua_str(&mut rt, &two_deep(1)), "user_script:2: boom");
+    // ...level 2 blames the CALLER, which is the entire reason to pass 2. This is the
+    // assertion that a fix stamping "wherever we are now" cannot satisfy.
+    assert_eq!(lua_str(&mut rt, &two_deep(2)), "user_script:5: boom");
+    // level 0 suppresses the position entirely.
+    assert_eq!(lua_str(&mut rt, &two_deep(0)), "boom");
+    // Higher levels alternate, and that is the point of pinning them: luaL_where emits a
+    // position only when the frame at that level is a LUA frame. Level 3 lands on pcall's
+    // own C frame and so carries none, while level 4 lands on the script's top-level Lua
+    // frame and reports line 4. A model that just walked back N lines would produce a
+    // monotonic answer and fail here. Level 5 is past the bottom, so no position again.
+    assert_eq!(lua_str(&mut rt, &two_deep(3)), "boom");
+    assert_eq!(lua_str(&mut rt, &two_deep(4)), "user_script:4: boom");
+    assert_eq!(lua_str(&mut rt, &two_deep(5)), "boom");
+
+    // Three frames deep: inner (1-3) is called by outer (4-7) from line 6, and outer
+    // is called from line 9.
+    let three_deep = |lvl: i32| {
+        format!(
+            "local function inner()\nerror('boom', {lvl})\nend\n\
+             local function outer()\n\ninner()\nend\n\
+             local ok,e = pcall(function()\nouter() end) return tostring(e)"
+        )
+    };
+    assert_eq!(lua_str(&mut rt, &three_deep(1)), "user_script:2: boom");
+    assert_eq!(lua_str(&mut rt, &three_deep(2)), "user_script:6: boom");
+    assert_eq!(lua_str(&mut rt, &three_deep(3)), "user_script:9: boom");
+    // The same C-frame alternation one level deeper.
+    assert_eq!(lua_str(&mut rt, &three_deep(4)), "boom");
+    assert_eq!(lua_str(&mut rt, &three_deep(5)), "user_script:8: boom");
+
+    // assert() positions its message the same way error(msg) does.
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local function t()\nassert(false, 'amsg')\nend\n\
+             local ok,e = pcall(function()\nt() end) return tostring(e)",
+        ),
+        "user_script:2: amsg"
+    );
+}
+
+#[test]
+fn lua_uncaught_and_caught_errors_agree_on_the_line() {
+    // The two paths were stamped in different places, so they could disagree. They
+    // must not: upstream builds the position once, at the raise.
+    let mut rt = Runtime::default_strict();
+    let caught = lua_str(
+        &mut rt,
+        "local ok,e = pcall(function()\n\nreturn {} + 1 end) return tostring(e)",
+    );
+    assert_eq!(
+        caught,
+        "user_script:3: attempt to perform arithmetic on a table value"
+    );
+
+    let uncaught = eval(&mut rt, "\n\nreturn {} + 1", "0", &[]);
+    let RespFrame::Error(message) = uncaught else {
+        panic!("expected an error reply, got {uncaught:?}"); // ubs:ignore — AI triage
+    };
+    assert!(
+        message.contains("user_script:3:"),
+        "uncaught error should also report line 3: {message}"
+    );
+
+    // A caught error must not disturb the line reported for a LATER one -- the fix
+    // moves `current_line` in the error() path, so this pins that it is re-established.
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local ok1,e1 = pcall(function()\n\nreturn {} + 1 end)\n\
+             local ok2,e2 = pcall(function()\nreturn nil + 1 end)\n\
+             return tostring(e1)..' // '..tostring(e2)",
+        ),
+        "user_script:3: attempt to perform arithmetic on a table value \
+         // user_script:5: attempt to perform arithmetic on a nil value"
+    );
+}
