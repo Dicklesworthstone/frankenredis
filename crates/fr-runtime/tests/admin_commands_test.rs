@@ -831,6 +831,55 @@ fn latency_tracking_toggle_discards_the_percentiles() {
     assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("2"));
 }
 
+/// (frankenredis-trackgate2) `latency-tracking no` must NOT stop commandstats.
+///
+/// Upstream gates only the percentile histogram with this knob; calls, usec, failed_calls
+/// and rejected_calls keep moving. fr had the config wired to the RECORDING switch -- the
+/// one the shared-nothing partition build uses to keep histogram work off its hot path --
+/// so turning the knob off silently emptied INFO commandstats as well.
+///
+/// A naive implementation that simply reuses one flag for both passes every latencystats
+/// assertion in this file and fails here on the very first line.
+#[test]
+fn commandstats_keeps_counting_while_latency_tracking_is_off() {
+    let mut rt = Runtime::default_strict();
+    set_tracking(&mut rt, false);
+    resetstat(&mut rt);
+
+    for _ in 0..20 {
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+    }
+    rt.execute_frame(command(&[b"GET", b"k"]), 0);
+
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(),
+        Some("20"),
+        "commandstats must count while latency-tracking is off"
+    );
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(), Some("1"));
+    // usec is part of the same row and must be real, not a placeholder zero.
+    let usec = cmdstat_field(&mut rt, "cmdstat_set", "usec").expect("usec field");
+    assert!(
+        usec.parse::<u64>().is_ok_and(|v| v > 0),
+        "usec must be populated while tracking is off, got {usec:?}"
+    );
+    // ...while the percentile section stays gone, which is what the knob DOES gate.
+    assert!(
+        !latencystats_has(&mut rt, "set"),
+        "latencystats must remain absent while tracking is off"
+    );
+
+    // A failure is still classified correctly with the knob off.
+    rt.execute_frame(command(&[b"LPUSH", b"l", b"a"]), 0);
+    resetstat(&mut rt);
+    rt.execute_frame(command(&[b"GET", b"l"]), 0);
+    assert_eq!(cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_get", "failed_calls").as_deref(),
+        Some("1")
+    );
+}
+
 #[test]
 fn latencystats_is_absent_while_tracking_is_off() {
     let mut rt = Runtime::default_strict();

@@ -4508,8 +4508,24 @@ pub struct ServerState {
     pub shutdown_deadline_ms: Option<u64>,
     /// Command time budget in ms (CONFIG SET busy-reply-threshold / lua-time-limit).
     command_time_budget_ms: u64,
-    /// Whether command latency histograms should be recorded for INFO latencystats.
+    /// Whether command histograms are RECORDED at all.
+    ///
+    /// (frankenredis-trackgate2) This is a TOPOLOGY switch, not the `latency-tracking`
+    /// config. The shared-nothing partition build turns it off because recording on that
+    /// reactor path "nearly triples the hottest path in the server" (see fr-server's
+    /// partition setup, which then refuses the INFO sections outright rather than serving
+    /// empty ones). Nothing else turns it off, so an ordinary server records always --
+    /// which is what upstream does.
     latency_tracking: bool,
+    /// The user-visible `latency-tracking` config, which gates ONLY the INFO latencystats
+    /// percentile section.
+    ///
+    /// (frankenredis-trackgate2) Upstream's `latency-tracking` does not gate commandstats:
+    /// `CONFIG SET latency-tracking no` leaves calls/usec/failed/rejected counting and only
+    /// stops the percentile histogram being reported. fr had the config driving the
+    /// RECORDING switch above, so turning it off silently emptied INFO commandstats too.
+    /// Two concepts, two fields -- collapsing them is what caused the divergence.
+    latency_stats_enabled: bool,
     /// (frankenredis-fpqns) Reused buffer for the canonical `parent|sub` histogram key of
     /// CONTAINER commands. byq16 removed the per-command String allocation for ordinary
     /// commands but left every container command (PUBSUB, CLIENT, OBJECT, MEMORY, ACL,
@@ -4735,6 +4751,7 @@ impl Default for ServerState {
             command_time_budget_ms: 5000,
             last_save_time_sec: 0,
             latency_tracking: true,
+            latency_stats_enabled: true,
             dispatch_fullname_scratch: String::new(),
             latency_percentiles: vec![50.0, 99.0, 99.9],
             aof_path: None,
@@ -6719,22 +6736,35 @@ impl Runtime {
         self.server.store.server_port = port;
     }
 
-    /// Set the `latency-tracking` knob, which gates command-histogram recording.
+    /// Turn command-histogram RECORDING off entirely, for a topology that cannot afford it.
     ///
-    /// (frankenredis-ktcqz) Exposed so an A/B can hold BOTH arms in one binary:
-    /// the two settings of a real, supported config knob rather than a code
-    /// variant that ships to nobody.
+    /// (frankenredis-ktcqz) Exposed so an A/B can hold BOTH arms in one binary rather than a
+    /// code variant that ships to nobody. (frankenredis-trackgate2) This is NOT the
+    /// `latency-tracking` config -- see `set_latency_stats_enabled` for that. The only
+    /// production caller is the shared-nothing partition build, which measured recording at
+    /// nearly triple the hot path and then refuses the INFO sections rather than serving
+    /// them empty. Wiring the config to this is what emptied INFO commandstats, because
+    /// upstream's knob does not gate the counters.
     pub fn set_latency_tracking(&mut self, enabled: bool) {
-        // (frankenredis-trackgate) A CHANGE discards the percentile data, matching upstream,
-        // where the per-command latency histogram is freed when tracking goes off and
-        // allocated afresh by the next command once it is back on. Without the clear,
-        // turning it off then on again would resurrect percentiles from the untracked
-        // window: redis reports the section absent until a new command arrives, fr would
-        // have shown the old numbers.
         if self.server.latency_tracking != enabled {
             self.server.store.clear_command_latency_buckets();
         }
         self.server.latency_tracking = enabled;
+    }
+
+    /// Apply the user-visible `latency-tracking` config, which gates ONLY the percentile
+    /// section of INFO latencystats.
+    ///
+    /// (frankenredis-trackgate) A CHANGE discards the percentile data, matching upstream,
+    /// where the per-command latency histogram is freed when tracking goes off and allocated
+    /// afresh by the next command once it is back on. Without the clear, an off/on cycle
+    /// would resurrect percentiles gathered during the untracked window: redis reports the
+    /// section absent until a new command arrives.
+    pub fn set_latency_stats_enabled(&mut self, enabled: bool) {
+        if self.server.latency_stats_enabled != enabled {
+            self.server.store.clear_command_latency_buckets();
+        }
+        self.server.latency_stats_enabled = enabled;
     }
 
     /// Turn cluster mode on at boot.
@@ -45700,10 +45730,12 @@ impl Runtime {
             self.server.store.latency_tracker.threshold_ms = threshold_ms;
         }
         if let Some(tracking) = next_latency_tracking {
-            // (frankenredis-trackgate) Through the setter, not a bare field write: the
-            // setter is what discards the percentile buckets on a toggle, and this CONFIG
-            // SET path used to assign the field directly and skip that.
-            self.set_latency_tracking(tracking);
+            // (frankenredis-trackgate2) The CONFIG knob drives the STATS field, never the
+            // recording switch. Pointing it at the recording switch is what made
+            // `latency-tracking no` empty INFO commandstats, which upstream keeps counting.
+            // Through the setter, not a bare field write: the setter is what discards the
+            // percentile buckets on a toggle.
+            self.set_latency_stats_enabled(tracking);
         }
         if let Some(percentiles) = next_latency_percentiles {
             self.server.latency_percentiles = percentiles;
@@ -48230,7 +48262,7 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
         // things: the flag suppresses the section while tracking is off, and the per-command
         // sample test suppresses a command that has counters but no histogram, which is how
         // upstream behaves immediately after tracking is switched back on.
-        let histograms: Vec<_> = if self.server.latency_tracking {
+        let histograms: Vec<_> = if self.server.latency_stats_enabled {
             self.server
                 .store
                 .all_command_histograms()
@@ -74615,7 +74647,17 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             ),
             RespFrame::SimpleString("OK".to_string())
         );
-        assert!(!rt.server.latency_tracking);
+        // (frankenredis-trackgate2) The config drives the STATS field. This used to assert
+        // `!rt.server.latency_tracking`, i.e. that the knob turned RECORDING off -- the
+        // conflation that emptied INFO commandstats, which upstream keeps counting while
+        // `latency-tracking` is no. The recording switch belongs to the partition topology
+        // and must be untouched here; everything this test actually checks (the section
+        // disappears, then returns with p50/p99.9) is unchanged and still passes.
+        assert!(!rt.server.latency_stats_enabled);
+        assert!(
+            rt.server.latency_tracking,
+            "the config knob must not touch the recording switch"
+        );
         assert_eq!(rt.server.latency_percentiles, vec![50.0, 99.9]);
 
         assert_eq!(
