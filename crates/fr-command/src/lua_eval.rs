@@ -9292,6 +9292,160 @@ impl<'a> LuaState<'a> {
     /// the `user_script:1:` source prefix. When invoked indirectly
     /// (e.g. `pcall(select, ...)`), the C closure has no debug name —
     /// vendored emits `'?'` and no source prefix. (frankenredis-557p3)
+    /// `sort_comp`: is `a` ordered before `b`?
+    ///
+    /// `comp` is `None` for `table.sort(t)`, where upstream falls back to `lua_lessthan`.
+    /// (frankenredis-b2cmq) Comparable pairs are (Number, Number) and (Str, Str); anything
+    /// else raises the wording the `<` operator emits, which is what upstream propagates out
+    /// of the C-level default sort. (frankenredis-u45ul) The default comparator IS
+    /// `lua_lessthan`, so it collates -- sorting and comparing must not disagree.
+    fn lua_sort_less(
+        &mut self,
+        comp: Option<&LuaValue>,
+        env: &mut Env,
+        a: &LuaValue,
+        b: &LuaValue,
+    ) -> Result<bool, String> {
+        let Some(comp) = comp else {
+            let order = match (a, b) {
+                (LuaValue::Number(x), LuaValue::Number(y)) => {
+                    // (frankenredis-b2cmq) Errors from the C-level default sort do NOT carry
+                    // the user_script:1 prefix; vendored emits the bare wording.
+                    x.partial_cmp(y)
+                        .ok_or_else(|| "attempt to compare two number values".to_string())?
+                }
+                (LuaValue::Str(x), LuaValue::Str(y)) => lua_str_collate(x, y),
+                (x, y) => {
+                    return Err(format!(
+                        "attempt to compare {} with {}",
+                        x.type_name(),
+                        y.type_name()
+                    ));
+                }
+            };
+            return Ok(order == std::cmp::Ordering::Less);
+        };
+        let mut cmp_args = vec![a.clone(), b.clone()];
+        let result = self.call_function(comp, &mut cmp_args, env, &mut Vec::new())?;
+        Ok(result.first().map(|v| v.is_truthy()).unwrap_or(false))
+    }
+
+    /// Faithful port of Lua 5.1 `ltablib.c::auxsort`, kept 1-based like the original.
+    ///
+    /// (frankenredis-luasort) fr previously sorted with a stable insertion sort. Both it and
+    /// auxsort are correct sorts, so every sorted RESULT matched and no reply differential
+    /// could see a problem -- but three things a script CAN observe did not match upstream:
+    ///
+    ///   * the order of elements the comparator calls EQUAL (fr was stable, auxsort is not:
+    ///     redis answers `a3,a1,a2,b2,b3,b1` where fr answered `a1,a2,a3,b1,b2,b3`),
+    ///   * the NUMBER of comparator calls, which a side-effecting comparator counts
+    ///     (9 vs 4 for five sorted elements), and
+    ///   * upstream's "invalid order function for sorting" guard, which insertion sort can
+    ///     never trip because it never scans past the ends of the array.
+    ///
+    /// Porting auxsort fixes all three at once; a targeted guard would have fixed one.
+    ///
+    /// Indices are `isize` because the partition scans deliberately step one position past
+    /// each end BEFORE their bound check fires, exactly as the C does.
+    fn lua_auxsort(
+        &mut self,
+        arr: &mut [LuaValue],
+        comp: Option<&LuaValue>,
+        env: &mut Env,
+        mut l: isize,
+        mut u: isize,
+    ) -> Result<(), String> {
+        /// `lua_rawgeti` semantics: out of range reads as nil rather than panicking, which
+        /// is what lets the scans below step past the end and be caught by the guard.
+        fn at(arr: &[LuaValue], idx: isize) -> LuaValue {
+            if idx < 1 {
+                return LuaValue::Nil;
+            }
+            arr.get((idx - 1) as usize)
+                .cloned()
+                .unwrap_or(LuaValue::Nil)
+        }
+        fn swap_at(arr: &mut [LuaValue], i: isize, j: isize) {
+            if i == j || i < 1 || j < 1 {
+                return;
+            }
+            let (a, b) = ((i - 1) as usize, (j - 1) as usize);
+            if a < arr.len() && b < arr.len() {
+                arr.swap(a, b);
+            }
+        }
+        // Upstream raises this with `luaL_error`, which prepends `luaL_where` -- so unlike
+        // the bare default-comparison wording above, this one carries a position. The
+        // literal `1` is the crate convention; `stamp_user_script_line` rewrites it to the
+        // statement's real line as the error propagates.
+        const INVALID_ORDER: &str = "user_script:1: invalid order function for sorting";
+
+        while l < u {
+            // Sort a[l], a[(l+u)/2] and a[u] into order.
+            if self.lua_sort_less(comp, env, &at(arr, u), &at(arr, l))? {
+                swap_at(arr, l, u);
+            }
+            if u - l == 1 {
+                break;
+            }
+            let mut i = (l + u) / 2;
+            if self.lua_sort_less(comp, env, &at(arr, i), &at(arr, l))? {
+                swap_at(arr, i, l);
+            } else if self.lua_sort_less(comp, env, &at(arr, u), &at(arr, i))? {
+                swap_at(arr, i, u);
+            }
+            if u - l == 2 {
+                break;
+            }
+            // Park the pivot at u-1; a[l] <= P == a[u-1] <= a[u].
+            let pivot = at(arr, i);
+            swap_at(arr, i, u - 1);
+            i = l;
+            let mut j = u - 1;
+            loop {
+                // Advance i until a[i] >= P.
+                loop {
+                    i += 1;
+                    if !self.lua_sort_less(comp, env, &at(arr, i), &pivot)? {
+                        break;
+                    }
+                    if i > u {
+                        return Err(INVALID_ORDER.to_string());
+                    }
+                }
+                // Retreat j until a[j] <= P.
+                loop {
+                    j -= 1;
+                    if !self.lua_sort_less(comp, env, &pivot, &at(arr, j))? {
+                        break;
+                    }
+                    if j < l {
+                        return Err(INVALID_ORDER.to_string());
+                    }
+                }
+                if j < i {
+                    break;
+                }
+                swap_at(arr, i, j);
+            }
+            swap_at(arr, u - 1, i);
+            // Recurse into the SMALLER half and loop on the larger, so the recursion depth
+            // stays logarithmic -- upstream's tail-call trick, spelled out.
+            let (rec_l, rec_u);
+            if i - l < u - i {
+                rec_l = l;
+                rec_u = i - 1;
+                l = i + 1;
+            } else {
+                rec_l = i + 1;
+                rec_u = u;
+                u = i - 1;
+            }
+            self.lua_auxsort(arr, comp, env, rec_l, rec_u)?;
+        }
+        Ok(())
+    }
+
     fn format_builtin_argerror(
         &self,
         _fallback_name: &str,
@@ -12334,73 +12488,19 @@ impl<'a> LuaState<'a> {
                     } else {
                         return Ok(vec![LuaValue::Nil]);
                     };
-                    if let Some(comp) = comp_fn {
-                        // Custom comparator: use insertion sort since we need
-                        // to call self.call_function for each comparison
-                        for i in 1..arr.len() {
-                            let key = arr[i].clone();
-                            let mut j = i;
-                            while j > 0 {
-                                let mut cmp_args = vec![key.clone(), arr[j - 1].clone()];
-                                let result =
-                                    self.call_function(&comp, &mut cmp_args, env, &mut Vec::new())?;
-                                let key_before =
-                                    result.first().map(|v| v.is_truthy()).unwrap_or(false);
-                                if !key_before {
-                                    break;
-                                }
-                                arr[j] = arr[j - 1].clone();
-                                j -= 1;
-                            }
-                            arr[j] = key;
-                        }
-                    } else {
-                        // (frankenredis-b2cmq) Default sort: comparable
-                        // pairs are (Number, Number) or (Str, Str).
-                        // Anything else (nil, table, bool, mixed-type)
-                        // raises the same "attempt to compare X with Y"
-                        // wording the < operator emits at runtime — that
-                        // is exactly what upstream propagates from the
-                        // C-level luaO_str2d-driven default sort.
-                        for i in 1..arr.len() {
-                            let key = arr[i].clone();
-                            let mut j = i;
-                            while j > 0 {
-                                let order = match (&key, &arr[j - 1]) {
-                                    (LuaValue::Number(a), LuaValue::Number(b)) => {
-                                        a.partial_cmp(b).ok_or_else(|| {
-                                            // (frankenredis-b2cmq) Errors from the
-                                            // C-level default sort do NOT carry the
-                                            // user_script:1 prefix; vendored emits
-                                            // the bare wording.
-                                            "attempt to compare two number values".to_string()
-                                        })?
-                                    }
-                                    // (frankenredis-u45ul) table.sort's DEFAULT comparator is
-                                    // `lua_lessthan`, so it collates too. Sorting and comparing
-                                    // must not disagree with each other.
-                                    (LuaValue::Str(a), LuaValue::Str(b)) => lua_str_collate(a, b),
-                                    (a, b) => {
-                                        return Err(format!(
-                                            "attempt to compare {} with {}",
-                                            a.type_name(),
-                                            b.type_name()
-                                        ));
-                                    }
-                                };
-                                if order != std::cmp::Ordering::Less {
-                                    break;
-                                }
-                                arr[j] = arr[j - 1].clone();
-                                j -= 1;
-                            }
-                            arr[j] = key;
-                        }
-                    }
-                    // Put array back
+                    let len = arr.len() as isize;
+                    let outcome = self.lua_auxsort(&mut arr, comp_fn.as_ref(), env, 1, len);
+                    // (frankenredis-luasort) PUT THE ARRAY BACK BEFORE PROPAGATING. Upstream
+                    // sorts the table in place, so a comparator that raises leaves the
+                    // elements where they are; fr took the array out with `mem::take` and
+                    // returned through `?` without restoring it, which silently emptied the
+                    // table. `#t` read 0 against upstream's 3. The invalid-order guard below
+                    // is a new early return down this same path, so the restore has to be
+                    // unconditional, not merely on the success arm.
                     if let LuaValue::Table(ref mut t) = args[0] {
                         t.inner.borrow_mut().array = arr;
                     }
+                    outcome?;
                 }
                 Ok(vec![LuaValue::Nil])
             }

@@ -763,3 +763,179 @@ fn lua_void_bindings_still_do_their_work() {
     };
     assert!(message.contains("RESP version must be 2 or 3"), "got {message}");
 }
+
+// ── table.sort must be Lua 5.1's auxsort (frankenredis-luasort) ──
+//
+// fr sorted with a stable insertion sort. Every sorted RESULT matched redis, so no
+// reply comparison could see a problem, but three observable things did not match:
+// the order of elements the comparator calls equal, the number of comparator calls,
+// and upstream's "invalid order function for sorting" guard -- which insertion sort
+// can never trip, because it never scans past the ends of the array.
+//
+// Restoring the array was a fourth, worse bug on the same path: fr took the array out
+// of the table with mem::take and returned through `?` without putting it back, so a
+// comparator that RAISED silently emptied the table.
+//
+// Every expected value below is what redis 7.2.4 produced for the same script.
+
+fn lua_str(rt: &mut Runtime, script: &str) -> String {
+    match eval(rt, script, "0", &[]) {
+        RespFrame::BulkString(Some(b)) => String::from_utf8_lossy(&b).into_owned(),
+        RespFrame::Integer(n) => n.to_string(),
+        other => panic!("unexpected reply {other:?} for {script}"), // ubs:ignore — AI triage
+    }
+}
+
+#[test]
+fn lua_table_sort_rejects_an_invalid_order_function() {
+    let mut rt = Runtime::default_strict();
+    // A comparator that is true for every pair violates a strict weak ordering; upstream's
+    // partition scan runs off the array and raises. Checked at three sizes because the
+    // guard sits inside the partition loop, which a small array can break out of early.
+    for n in [12, 100, 1000] {
+        let script = format!(
+            "local t={{}} for i=1,{n} do t[i]=i end \
+             local ok, e = pcall(function() table.sort(t, function(a,b) return true end) end) \
+             return tostring(ok)..'|'..tostring(e)"
+        );
+        assert_eq!(
+            lua_str(&mut rt, &script),
+            "false|user_script:1: invalid order function for sorting",
+            "n={n}",
+        );
+    }
+    // A truthy NON-boolean is just as invalid -- the comparator's result is taken for its
+    // truthiness, so `return 1` is the always-true comparator in disguise.
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local t={} for i=1,50 do t[i]=i end \
+             local ok, e = pcall(function() table.sort(t, function(a,b) return 1 end) end) \
+             return tostring(ok)..'|'..tostring(e)",
+        ),
+        "false|user_script:1: invalid order function for sorting"
+    );
+    // An always-FALSE comparator is degenerate but valid -- everything compares equal -- and
+    // must NOT raise. Without this the fix could be "raise whenever the comparator is odd".
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local t={} for i=1,100 do t[i]=i end \
+             local ok = pcall(function() table.sort(t, function(a,b) return false end) end) \
+             return tostring(ok)",
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn lua_table_sort_survives_a_raising_comparator_with_the_table_intact() {
+    let mut rt = Runtime::default_strict();
+    // The elements must still be there afterwards. fr answered 0 here.
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local t={3,1,2} \
+             pcall(function() table.sort(t, function(a,b) error('x') end) end) \
+             return #t",
+        ),
+        "3"
+    );
+    // ...and they must be the SAME elements, not merely the same count.
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local t={3,1,2} \
+             pcall(function() table.sort(t, function(a,b) error('x') end) end) \
+             local s={} for i=1,#t do s[i]=tostring(t[i]) end table.sort(s) \
+             return table.concat(s, ',')",
+        ),
+        "1,2,3"
+    );
+    // A comparator that raises part-way through, once the sort is already moving elements.
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local n=0 local t={5,4,3,2,1} \
+             pcall(function() table.sort(t, function(a,b) n=n+1 \
+                 if n>2 then error('x') end return a<b end) end) \
+             return #t",
+        ),
+        "5"
+    );
+    // The invalid-order guard is a raise too, and must leave the table whole.
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local t={} for i=1,12 do t[i]=i end \
+             pcall(function() table.sort(t, function(a,b) return true end) end) \
+             local s={} for i=1,#t do s[i]=t[i] end table.sort(s) \
+             return table.concat(s, ',')",
+        ),
+        "1,2,3,4,5,6,7,8,9,10,11,12"
+    );
+}
+
+#[test]
+fn lua_table_sort_matches_auxsort_tie_order_and_call_count() {
+    let mut rt = Runtime::default_strict();
+    // Ties: sort by the first character only, so the digits report which of the equal
+    // elements ended up where. A stable sort answers a1,a2,a3,b1,b2,b3 instead.
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local t={'b1','a1','b2','a2','b3','a3'} \
+             table.sort(t, function(x,y) return string.sub(x,1,1) < string.sub(y,1,1) end) \
+             return table.concat(t, ',')",
+        ),
+        "a3,a1,a2,b2,b3,b1"
+    );
+    // Comparator call counts, which any side-effecting comparator can read. Insertion sort
+    // answered 4 on already-sorted input, where auxsort always pays its partition passes.
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local n=0 local t={1,2,3,4,5} \
+             table.sort(t, function(a,b) n=n+1 return a<b end) return n",
+        ),
+        "9"
+    );
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local n=0 local t={3,1,4,1,5,9,2,6,5,3} \
+             table.sort(t, function(a,b) n=n+1 return a<b end) return n",
+        ),
+        "28"
+    );
+    // None of which is allowed to break sorting. This is the anti-vacuity half: an
+    // implementation that matched the counts by not sorting would fail here.
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local t={3,1,4,1,5,9,2,6,5,3} table.sort(t, function(a,b) return a<b end) \
+             return table.concat(t, ',')",
+        ),
+        "1,1,2,3,3,4,5,5,6,9"
+    );
+    assert_eq!(
+        lua_str(&mut rt, "local t={3,1,4,1,5,9,2,6,5,3} table.sort(t) \
+             return table.concat(t, ',')"),
+        "1,1,2,3,3,4,5,5,6,9"
+    );
+    assert_eq!(
+        lua_str(&mut rt, "local t={'pear','apple','fig'} table.sort(t) \
+             return table.concat(t, ',')"),
+        "apple,fig,pear"
+    );
+    // Degenerate sizes still work, and a hole still bounds the sort at #t.
+    assert_eq!(lua_str(&mut rt, "local t={7} table.sort(t) return table.concat(t, ',')"), "7");
+    assert_eq!(
+        lua_str(&mut rt, "local t={} table.sort(t) return '['..table.concat(t, ',')..']'"),
+        "[]"
+    );
+    assert_eq!(
+        lua_str(&mut rt, "local t={3,1,2} t[5]=0 table.sort(t) return table.concat(t, ',')"),
+        "1,2,3"
+    );
+}
