@@ -9797,7 +9797,11 @@ impl<'a> LuaState<'a> {
                 if !level_f.is_finite() || !(0..=3).contains(&level_i) {
                     return Err("ERR Invalid debug level.".to_string());
                 }
-                Ok(vec![LuaValue::Nil])
+                // (frankenredis-luavoid) NO return values, not one nil. `luaLogCommand`
+                // ends in `return 0`, and Lua distinguishes the two: `select('#', ...)`
+                // reports 0 against fr's 1, and a trailing call in a multiple assignment
+                // binds differently.
+                Ok(Vec::new())
             }
             "redis.replicate_commands" => {
                 // No-op: effects replication was removed in Redis 7.0+
@@ -9835,7 +9839,8 @@ impl<'a> LuaState<'a> {
                     return Err("ERR Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.".to_string());
                 }
                 self.store.script_propagation_mode = flags_i as u8;
-                Ok(vec![LuaValue::Nil])
+                // (frankenredis-luavoid) `luaRedisSetReplCommand` ends in `return 0`.
+                Ok(Vec::new())
             }
             "redis.breakpoint" => {
                 // Redis returns false when the Lua debugger is inactive.
@@ -9864,7 +9869,8 @@ impl<'a> LuaState<'a> {
                 // redis.call/redis.pcall dispatch with it and materialize
                 // replies via the matching RESP2/RESP3 Lua conversion.
                 self.resp_version = v;
-                Ok(vec![LuaValue::Nil])
+                // (frankenredis-luavoid) `luaSetResp` ends in `return 0`.
+                Ok(Vec::new())
             }
             "redis.acl_check_cmd" => {
                 // Upstream script_lua.c::luaRedisAclCheckCmdCommand
@@ -9915,7 +9921,11 @@ impl<'a> LuaState<'a> {
             "redis.debug" => {
                 // Redis emits debugger console output only when the Lua debugger is active.
                 // Outside that mode the call is a no-op.
-                Ok(vec![LuaValue::Nil])
+                //
+                // (frankenredis-luavoid) A no-op that returns NOTHING. Upstream documents it
+                // as "Nothing is returned to the caller" and `luaRedisDebugCommand` returns 0
+                // on BOTH branches, so this is not a debugger-only detail.
+                Ok(Vec::new())
             }
             "redis.sha1hex" => {
                 // Upstream script_lua.c::luaRedisSha1hexCommand
@@ -11462,7 +11472,9 @@ impl<'a> LuaState<'a> {
                 let seed_i32 = n as i32; // matches C int cast
                 self.lua_random.srand(seed_i32);
                 self.rng_seed = n_f.to_bits();
-                Ok(vec![LuaValue::Nil])
+                // (frankenredis-luavoid) lmathlib.c::math_randomseed is `srand(...); return 0`
+                // -- unlike math.random, which returns its one number.
+                Ok(Vec::new())
             }
             // ── OS library ───────────────────────────────────────────────
             "os.clock" => {

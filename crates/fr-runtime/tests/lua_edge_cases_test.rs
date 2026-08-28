@@ -632,3 +632,134 @@ fn debug_is_refused_from_a_script_so_it_needs_no_logical_key_exemption() {
         "unexpected refusal message: {message}"
     );
 }
+
+// ── Bindings that return NOTHING, not nil (frankenredis-luavoid) ──
+//
+// Lua distinguishes "no values" from "one nil value", and upstream's C bindings
+// use both: `redis.call` ends in `return 1`, while `luaLogCommand`, `luaSetResp`,
+// `luaRedisSetReplCommand`, `luaRedisDebugCommand` and `lmathlib.c::math_randomseed`
+// all end in `return 0`. fr returned a nil from each of those five, which is
+// invisible to `tostring()` and to a table constructor but not to `select('#')`,
+// nor to a trailing call in a multiple assignment.
+//
+// upstream's own comment on redis.debug says it outright: "Nothing is returned to
+// the caller".
+
+/// `select('#', <call>)` -- the number of values a binding actually returns.
+fn returned_value_count(rt: &mut Runtime, call: &str) -> RespFrame {
+    let script = format!("return select('#', {call})");
+    eval(rt, &script, "0", &[])
+}
+
+#[test]
+fn lua_void_bindings_return_no_values_at_all() {
+    let mut rt = Runtime::default_strict();
+    for call in [
+        "redis.log(redis.LOG_WARNING, 'x')",
+        "redis.setresp(2)",
+        "redis.set_repl(redis.REPL_ALL)",
+        "redis.debug('x')",
+        "redis.debug()",
+        "redis.debug('a', 'b')",
+        "math.randomseed(1)",
+    ] {
+        assert_eq!(
+            returned_value_count(&mut rt, call),
+            RespFrame::Integer(0),
+            "{call} must return no values",
+        );
+    }
+}
+
+#[test]
+fn lua_value_returning_bindings_still_return_exactly_one() {
+    // The anti-vacuity half. Without it, an implementation that returned nothing from
+    // EVERY binding would satisfy the test above while breaking redis.call entirely.
+    let mut rt = Runtime::default_strict();
+    for call in [
+        "redis.call('PING')",
+        "redis.pcall('PING')",
+        "redis.replicate_commands()",
+        "redis.breakpoint()",
+        "redis.sha1hex('')",
+        "redis.status_reply('x')",
+        "redis.error_reply('x')",
+        "redis.acl_check_cmd('GET', 'k')",
+        "math.random()",
+    ] {
+        assert_eq!(
+            returned_value_count(&mut rt, call),
+            RespFrame::Integer(1),
+            "{call} must return exactly one value",
+        );
+    }
+}
+
+#[test]
+fn lua_void_bindings_still_do_their_work() {
+    // Returning nothing must not turn them into no-ops: each still has to have its
+    // side effect, or "parity" would have been bought by deleting the feature.
+    let mut rt = Runtime::default_strict();
+
+    // setresp(3) still switches redis.call's conversion to the RESP3 shapes. HGETALL, not
+    // CONFIG GET: CONFIG is `noscript` upstream, so a script cannot call it at all and the
+    // assertion would pass on two identical refusals without ever reaching a map.
+    assert_eq!(
+        eval(
+            &mut rt,
+            r#"redis.call('HSET', 'h', 'f', 'v')
+               redis.setresp(3)
+               local r = redis.call('HGETALL', 'h')
+               return type(r) .. ',' .. tostring(r.map ~= nil) .. ',' .. tostring(r.map.f)"#,
+            "0",
+            &[],
+        ),
+        RespFrame::BulkString(Some(b"table,true,v".to_vec()))
+    );
+    // RESP2 is still the default shape, so the switch above was real and not the baseline.
+    assert_eq!(
+        eval(
+            &mut rt,
+            r#"redis.call('HSET', 'h2', 'f', 'v')
+               local r = redis.call('HGETALL', 'h2')
+               return type(r) .. ',' .. tostring(r.map ~= nil) .. ',' .. tostring(#r)"#,
+            "0",
+            &[],
+        ),
+        RespFrame::BulkString(Some(b"table,false,2".to_vec()))
+    );
+
+    // randomseed still seeds: the same seed must reproduce the same draw.
+    assert_eq!(
+        eval(
+            &mut rt,
+            r#"math.randomseed(1) local a = math.random()
+               math.randomseed(1) local b = math.random()
+               return tostring(a == b)"#,
+            "0",
+            &[],
+        ),
+        RespFrame::BulkString(Some(b"true".to_vec()))
+    );
+
+    // set_repl still accepts its flags and leaves the script able to write.
+    assert_eq!(
+        eval(
+            &mut rt,
+            r#"redis.set_repl(redis.REPL_NONE)
+               redis.call('SET', 'k', 'v')
+               redis.set_repl(redis.REPL_ALL)
+               return redis.call('GET', 'k')"#,
+            "0",
+            &[],
+        ),
+        RespFrame::BulkString(Some(b"v".to_vec()))
+    );
+
+    // And the argument validation each one had is untouched.
+    let bad = eval(&mut rt, r#"return redis.setresp(4)"#, "0", &[]);
+    let RespFrame::Error(message) = bad else {
+        panic!("redis.setresp(4) must be an error, got {bad:?}"); // ubs:ignore — AI triage
+    };
+    assert!(message.contains("RESP version must be 2 or 3"), "got {message}");
+}

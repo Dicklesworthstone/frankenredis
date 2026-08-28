@@ -59215,15 +59215,23 @@ mod tests {
         // diverged from vendored which silently coerces.
         let mut store = Store::new();
 
-        // set_repl: non-numeric → flags=0 → silently accepted (returns nil).
+        // set_repl: non-numeric → flags=0 → silently accepted.
+        //
+        // (frankenredis-luavoid) These used to read `type(redis.set_repl(x))` and assert
+        // "nil". That vehicle was pinning fr's OWN bug: upstream's luaRedisSetReplCommand
+        // returns NO values, so on redis 7.2.4 that script is an error --
+        //   ERR user_script:1: bad argument #1 to 'type' (value expected)
+        // -- verified against the live oracle, which now agrees with fr cell for cell. The
+        // property this test is actually about is the COERCION, so it is observed the way
+        // upstream lets you observe it: the script completing without an error.
         for body in &[
-            b"return type(redis.set_repl('abc'))".as_slice(),
-            b"return type(redis.set_repl(nil))",
-            b"return type(redis.set_repl({}))",
-            b"return type(redis.set_repl(true))",
-            b"return type(redis.set_repl(1.5))",
-            b"return type(redis.set_repl(0))",
-            b"return type(redis.set_repl(0.5))",
+            b"redis.set_repl('abc') return 'accepted'".as_slice(),
+            b"redis.set_repl(nil) return 'accepted'",
+            b"redis.set_repl({}) return 'accepted'",
+            b"redis.set_repl(true) return 'accepted'",
+            b"redis.set_repl(1.5) return 'accepted'",
+            b"redis.set_repl(0) return 'accepted'",
+            b"redis.set_repl(0.5) return 'accepted'",
         ] {
             let out = dispatch_argv(
                 &[b"EVAL".to_vec(), body.to_vec(), b"0".to_vec()],
@@ -59233,7 +59241,7 @@ mod tests {
             .expect("eval");
             assert_eq!(
                 out,
-                RespFrame::BulkString(Some(b"nil".to_vec())),
+                RespFrame::BulkString(Some(b"accepted".to_vec())),
                 "body={:?}",
                 String::from_utf8_lossy(body)
             );
@@ -59258,18 +59266,19 @@ mod tests {
             "expected invalid flags error, got {msg}"
         );
 
-        // setresp: 2.5 → truncate to 2 → accepted.
+        // setresp: 2.5 → truncate to 2 → accepted. Same vehicle change as above; luaSetResp
+        // is another of the bindings that returns no values.
         let out = dispatch_argv(
             &[
                 b"EVAL".to_vec(),
-                b"return type(redis.setresp(2.5))".to_vec(),
+                b"redis.setresp(2.5) return 'accepted'".to_vec(),
                 b"0".to_vec(),
             ],
             &mut store,
             0,
         )
         .expect("eval");
-        assert_eq!(out, RespFrame::BulkString(Some(b"nil".to_vec())));
+        assert_eq!(out, RespFrame::BulkString(Some(b"accepted".to_vec())));
 
         // setresp: 'abc' → 0 → rejected.
         // setresp: nil → 0 → rejected.
