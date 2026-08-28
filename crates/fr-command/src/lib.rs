@@ -36073,6 +36073,83 @@ mod tests {
         );
     }
 
+    /// (frankenredis-memexpired) MEMORY USAGE reports the object the server is HOLDING.
+    ///
+    /// Upstream's USAGE arm is a bare `dictFind(c->db->dict, key)` -- no `lookupKeyRead`,
+    /// so no `expireIfNeeded`. A key whose TTL has passed but which has not been collected
+    /// is still in the dict, so upstream sizes it (48 bytes for a small string) and leaves
+    /// it alone. fr ran `drop_if_expired` first and so answered nil AND deleted the key.
+    ///
+    /// This is deliberately the OPPOSITE of what the neighbouring KEYS test demands, and
+    /// that is the point: KEYS filters logically expired keys, MEMORY USAGE does not,
+    /// because they are different lookups. An implementation that routes both through one
+    /// "is it alive" helper cannot satisfy both tests.
+    ///
+    /// Time is a parameter, so no sleeping: the key is written with a TTL at t=0 and read
+    /// back at t=100_000.
+    #[test]
+    fn memory_usage_reports_a_logically_expired_key_and_does_not_collect_it() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"42".to_vec(), Some(40), 0);
+
+        let usage = dispatch_argv(
+            &[b"MEMORY".to_vec(), b"USAGE".to_vec(), b"k".to_vec()],
+            &mut store,
+            100_000,
+        )
+        .expect("memory usage");
+        let RespFrame::Integer(bytes) = usage else {
+            panic!("MEMORY USAGE must size a physically present key, got {usage:?}"); // ubs:ignore — AI triage
+        };
+        assert!(bytes > 0, "size must be positive, got {bytes}");
+
+        // ...and it must NOT have collected the key: upstream's DBSIZE still counts it.
+        let after = dispatch_argv(&[b"DBSIZE".to_vec()], &mut store, 100_000).expect("dbsize");
+        assert_eq!(
+            after,
+            RespFrame::Integer(1),
+            "MEMORY USAGE must not evict the key it reported on"
+        );
+
+        // The SAMPLES form takes the same path and must agree.
+        let sampled = dispatch_argv(
+            &[
+                b"MEMORY".to_vec(),
+                b"USAGE".to_vec(),
+                b"k".to_vec(),
+                b"SAMPLES".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            100_000,
+        )
+        .expect("memory usage samples");
+        assert_eq!(sampled, RespFrame::Integer(bytes));
+
+        // Anti-vacuity: a key that is genuinely ABSENT still reports nil, so the fix cannot
+        // be "always return a number". A live key must report a size too.
+        let mut store = Store::new();
+        let missing = dispatch_argv(
+            &[b"MEMORY".to_vec(), b"USAGE".to_vec(), b"nokey".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("memory usage missing");
+        assert_eq!(missing, RespFrame::BulkString(None));
+
+        store.set(b"live".to_vec(), b"42".to_vec(), None, 0);
+        let live = dispatch_argv(
+            &[b"MEMORY".to_vec(), b"USAGE".to_vec(), b"live".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("memory usage live");
+        assert!(
+            matches!(live, RespFrame::Integer(n) if n > 0),
+            "a live key must still be sized, got {live:?}"
+        );
+    }
+
     /// (frankenredis-keysexpired) KEYS must never return a logically expired key, on ANY
     /// pattern -- including one with a literal prefix, which takes a different branch.
     ///

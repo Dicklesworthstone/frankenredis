@@ -34887,8 +34887,29 @@ impl Store {
         self.dirty = self.dirty.saturating_add(1);
     }
 
-    pub fn memory_usage_for_key(&mut self, key: &[u8], now_ms: u64) -> Option<usize> {
-        self.drop_if_expired(key, now_ms);
+    /// Size of the key's entry, or `None` when the key is not PHYSICALLY present.
+    ///
+    /// (frankenredis-memexpired) A RAW LOOKUP, deliberately. Upstream's
+    /// `object.c::memoryCommand` USAGE arm is:
+    ///
+    /// ```c
+    /// if ((de = dictFind(c->db->dict, c->argv[2]->ptr)) == NULL) { addReplyNull(c); return; }
+    /// ```
+    ///
+    /// -- `dictFind` on the dict itself, with no `lookupKeyRead` and so no `expireIfNeeded`.
+    /// A key whose TTL has passed but which has not been collected yet is still in the dict,
+    /// so upstream reports its size; MEMORY USAGE is an introspection command that answers
+    /// for the object the server is actually holding.
+    ///
+    /// fr called `drop_if_expired` first, which got BOTH halves wrong: it deleted the key
+    /// (so DBSIZE fell, where upstream's stays put) and then reported nil for a key upstream
+    /// sizes at 48 bytes. Verified against redis 7.2.4 with active expiry off.
+    ///
+    /// `now_ms` is kept for call-site symmetry with the other keyspace accessors and is
+    /// deliberately unread: consulting the clock here is exactly the bug.
+    #[must_use]
+    pub fn memory_usage_for_key(&self, key: &[u8], now_ms: u64) -> Option<usize> {
+        let _ = now_ms;
         self.entries
             .get(key)
             .map(|entry| self.cached_entry_memory_usage_bytes(key, entry))
