@@ -10703,8 +10703,11 @@ fn xclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     // simply hands the first unparseable token to the option parser
     // for the 'Unrecognized XCLAIM option …' fallthrough.
 
-    let mut idle_ms: Option<u64> = None;
-    let mut time_ms: Option<u64> = None;
+    // (frankenredis-xcidt) ONE delivery time, matching upstream's single `deliverytime`:
+    // IDLE writes `now - value`, TIME writes `value`, and whichever option appears LAST
+    // wins. Keeping a field per option cannot express that, and the two-field version both
+    // rejected the pair outright and let TIME win regardless of order.
+    let mut delivery_time_ms: Option<u64> = None;
     let mut retry_count: Option<u64> = None;
     let mut force = false;
     let mut justid = false;
@@ -10742,7 +10745,11 @@ fn xclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                 return Err(unrecognized(&argv[idx]));
             }
             let parsed = parse_i64_arg(&argv[idx + 1]).map_err(|_| invalid_opt_arg("IDLE"))?;
-            idle_ms = Some(u64::try_from(parsed.max(0)).unwrap_or(u64::MAX));
+            // IDLE is RELATIVE, and the subtraction is signed: an idle larger than the
+            // clock lands before the epoch, which the clamp turns back into `now`.
+            delivery_time_ms = Some(fr_store::stream_claim_delivery_time_from_idle(
+                now_ms, parsed,
+            ));
             idx += 2;
             continue;
         }
@@ -10751,7 +10758,8 @@ fn xclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                 return Err(unrecognized(&argv[idx]));
             }
             let parsed = parse_i64_arg(&argv[idx + 1]).map_err(|_| invalid_opt_arg("TIME"))?;
-            time_ms = Some(u64::try_from(parsed.max(0)).unwrap_or(u64::MAX));
+            // TIME is ABSOLUTE; the same clamp rejects negatives and future times.
+            delivery_time_ms = Some(fr_store::clamp_stream_claim_delivery_time(now_ms, parsed));
             idx += 2;
             continue;
         }
@@ -10790,10 +10798,6 @@ fn xclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(unrecognized(&argv[idx]));
     }
 
-    if idle_ms.is_some() && time_ms.is_some() {
-        return Err(CommandError::SyntaxError);
-    }
-
     let Some(reply) = store.xclaim(
         &argv[1],
         &argv[2],
@@ -10801,8 +10805,7 @@ fn xclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         &ids,
         StreamClaimOptions {
             min_idle_time_ms,
-            idle_ms,
-            time_ms,
+            delivery_time_ms,
             retry_count,
             force,
             justid,
@@ -48616,6 +48619,123 @@ mod tests {
             err,
             CommandError::Custom("ERR Invalid IDLE option argument for XCLAIM".to_string())
         );
+    }
+
+    /// Claim `1-1` away from `c1` with `opts`, then report the idle time the entry ends up
+    /// with. A fixed `now_ms` makes idle exact rather than approximate: upstream stores an
+    /// absolute delivery time, and XPENDING reports `now - delivery`.
+    #[cfg(test)]
+    fn xclaim_resulting_idle_ms(opts: &[&[u8]], now_ms: u64) -> i64 {
+        let argv = |parts: &[&[u8]]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.to_vec()).collect()
+        };
+        let mut store = Store::new();
+        dispatch_argv(&argv(&[b"XADD", b"s", b"1-1", b"f", b"v"]), &mut store, now_ms)
+            .expect("xadd");
+        dispatch_argv(&argv(&[b"XGROUP", b"CREATE", b"s", b"g", b"0"]), &mut store, now_ms)
+            .expect("xgroup create");
+        dispatch_argv(
+            &argv(&[
+                b"XREADGROUP", b"GROUP", b"g", b"c1", b"COUNT", b"10", b"STREAMS", b"s", b">",
+            ]),
+            &mut store,
+            now_ms,
+        )
+        .expect("xreadgroup");
+
+        let mut claim: Vec<&[u8]> = vec![
+            b"XCLAIM".as_slice(),
+            b"s".as_slice(),
+            b"g".as_slice(),
+            b"c2".as_slice(),
+            b"0".as_slice(),
+            b"1-1".as_slice(),
+        ];
+        claim.extend_from_slice(opts);
+        claim.push(b"JUSTID".as_slice());
+        let reply = dispatch_argv(&argv(&claim), &mut store, now_ms)
+            .unwrap_or_else(|e| panic!("XCLAIM {opts:?} was rejected: {e:?}"));
+        assert_eq!(
+            reply,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"1-1".to_vec()))])),
+            "XCLAIM {opts:?} did not claim the entry",
+        );
+
+        // XPENDING detail rows are [id, consumer, idle, deliveries].
+        let pending = dispatch_argv(
+            &argv(&[b"XPENDING", b"s", b"g", b"-", b"+", b"10"]),
+            &mut store,
+            now_ms,
+        )
+        .expect("xpending");
+        let RespFrame::Array(Some(rows)) = pending else {
+            panic!("XPENDING did not reply with an array: {pending:?}"); // ubs:ignore — AI triage
+        };
+        let [RespFrame::Array(Some(fields))] = rows.as_slice() else {
+            panic!("expected exactly one pending row, got {rows:?}"); // ubs:ignore — AI triage
+        };
+        let RespFrame::Integer(idle) = fields[2] else {
+            panic!("pending idle field was not an integer: {fields:?}"); // ubs:ignore — AI triage
+        };
+        idle
+    }
+
+    #[test]
+    fn xclaim_idle_and_time_share_one_delivery_time_and_the_last_one_wins_xcidt() {
+        // (frankenredis-xcidt) Upstream t_stream.c::xclaimCommand parses IDLE and TIME into
+        // ONE `deliverytime`: IDLE writes `now - value`, TIME writes `value`. So the pair is
+        // legal and whichever comes LAST wins. fr rejected the pair with a syntax error and,
+        // when only one was given, let TIME win regardless of order.
+        const NOW: u64 = 1_000_000;
+
+        assert_eq!(xclaim_resulting_idle_ms(&[], NOW), 0, "no option means idle 0");
+        assert_eq!(xclaim_resulting_idle_ms(&[b"IDLE", b"5"], NOW), 5);
+        assert_eq!(xclaim_resulting_idle_ms(&[b"TIME", b"1000"], NOW), 999_000);
+
+        // The pair, both orders. These are the cells that used to be a syntax error.
+        assert_eq!(
+            xclaim_resulting_idle_ms(&[b"IDLE", b"5", b"TIME", b"1000"], NOW),
+            999_000,
+            "TIME came last, so TIME must win",
+        );
+        assert_eq!(
+            xclaim_resulting_idle_ms(&[b"TIME", b"1000", b"IDLE", b"5"], NOW),
+            5,
+            "IDLE came last, so IDLE must win",
+        );
+        // Stated once more as the property itself: order is the discriminator, so the two
+        // orderings cannot agree. A TIME-always-wins implementation passes neither.
+        assert_ne!(
+            xclaim_resulting_idle_ms(&[b"IDLE", b"5", b"TIME", b"1000"], NOW),
+            xclaim_resulting_idle_ms(&[b"TIME", b"1000", b"IDLE", b"5"], NOW),
+        );
+        // A repeated option follows the same rule.
+        assert_eq!(xclaim_resulting_idle_ms(&[b"IDLE", b"5", b"IDLE", b"7"], NOW), 7);
+    }
+
+    #[test]
+    fn xclaim_delivery_time_is_clamped_into_the_past_of_now_xcidt() {
+        // Upstream: "if deliverytime < 0 || deliverytime > now, deliverytime = now" -- it
+        // declines to error because a client computes idle from ITS OWN clock and a small
+        // skew is not a reason to fail. Every case here therefore lands on idle 0.
+        const NOW: u64 = 1_000_000;
+
+        // IDLE larger than the clock puts the delivery time before the epoch.
+        assert_eq!(xclaim_resulting_idle_ms(&[b"IDLE", b"99999999999999"], NOW), 0);
+        // A negative IDLE pushes it into the future.
+        assert_eq!(xclaim_resulting_idle_ms(&[b"IDLE", b"-5"], NOW), 0);
+        // TIME is absolute, so negative and future both clamp.
+        assert_eq!(xclaim_resulting_idle_ms(&[b"TIME", b"-1"], NOW), 0);
+        assert_eq!(xclaim_resulting_idle_ms(&[b"TIME", b"1050000"], NOW), 0);
+        // Clamping applies to whichever option won, not merely to the first seen.
+        assert_eq!(
+            xclaim_resulting_idle_ms(&[b"IDLE", b"5", b"IDLE", b"99999999999999"], NOW),
+            0,
+        );
+
+        // A TIME in the past is NOT clamped -- otherwise the assertions above would pass
+        // on an implementation that simply pinned every delivery time to now.
+        assert_eq!(xclaim_resulting_idle_ms(&[b"TIME", b"1000"], NOW), 999_000);
     }
 
     #[test]

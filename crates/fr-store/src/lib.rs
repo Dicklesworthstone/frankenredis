@@ -613,12 +613,40 @@ pub struct StreamPendingEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamClaimOptions {
     pub min_idle_time_ms: u64,
-    pub idle_ms: Option<u64>,
-    pub time_ms: Option<u64>,
+    /// Absolute last-delivery time to stamp on the claimed entries, already resolved from
+    /// XCLAIM's IDLE / TIME options and clamped. `None` means "no IDLE or TIME was given",
+    /// which upstream turns into `now` so the entry's idle time becomes zero.
+    ///
+    /// (frankenredis-xcidt) ONE field, not one per option, because upstream parses both
+    /// into a single `deliverytime`: IDLE writes `now - value`, TIME writes `value`, and
+    /// whichever appears LAST wins. Two fields cannot express that ordering.
+    pub delivery_time_ms: Option<u64>,
     pub retry_count: Option<u64>,
     pub force: bool,
     pub justid: bool,
     pub last_id: Option<StreamId>,
+}
+
+/// Resolve XCLAIM's IDLE option to an absolute delivery time, as upstream does.
+///
+/// IDLE is relative: `deliverytime = now - idle`. The subtraction is signed upstream and
+/// may land in the past-of-epoch, which the clamp then rejects.
+#[must_use]
+pub fn stream_claim_delivery_time_from_idle(now_ms: u64, idle_ms: i64) -> u64 {
+    clamp_stream_claim_delivery_time(now_ms, i64::try_from(now_ms).unwrap_or(i64::MAX).saturating_sub(idle_ms))
+}
+
+/// Clamp a resolved XCLAIM delivery time the way `t_stream.c::xclaimCommand` does.
+///
+/// Upstream: "if deliverytime < 0 || deliverytime > now, deliverytime = now". It declines to
+/// raise an error because a client computes idle from ITS OWN clock, and a small skew into
+/// the future is not a reason to fail the command.
+#[must_use]
+pub fn clamp_stream_claim_delivery_time(now_ms: u64, delivery_time_ms: i64) -> u64 {
+    match u64::try_from(delivery_time_ms) {
+        Ok(value) if value <= now_ms => value,
+        _ => now_ms,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30413,13 +30441,9 @@ impl Store {
 
             let old_consumer = pending_entry.consumer.clone();
             pending_entry.consumer = consumer_vec.clone();
-            pending_entry.last_delivered_ms = if let Some(time_ms) = options.time_ms {
-                time_ms
-            } else if let Some(idle_ms) = options.idle_ms {
-                now_ms.saturating_sub(idle_ms)
-            } else {
-                now_ms
-            };
+            // Upstream: with no IDLE/TIME the delivery time is `now`, so the entry's idle
+            // time reads as zero. Any resolution and clamping already happened at parse.
+            pending_entry.last_delivered_ms = options.delivery_time_ms.unwrap_or(now_ms);
 
             if let Some(retry_count) = options.retry_count {
                 pending_entry.deliveries = retry_count;
@@ -69579,8 +69603,7 @@ mod tests {
                 &[(1000, 0)],
                 StreamClaimOptions {
                     min_idle_time_ms: 5,
-                    idle_ms: None,
-                    time_ms: None,
+                    delivery_time_ms: None,
                     retry_count: None,
                     force: false,
                     justid: false,
@@ -69617,8 +69640,7 @@ mod tests {
                 &[(1000, 1)],
                 StreamClaimOptions {
                     min_idle_time_ms: 5,
-                    idle_ms: None,
-                    time_ms: None,
+                    delivery_time_ms: None,
                     retry_count: None,
                     force: false,
                     justid: true,
@@ -70372,8 +70394,7 @@ mod tests {
                 &[(1000, 0), (1000, 1)],
                 StreamClaimOptions {
                     min_idle_time_ms: 0,
-                    idle_ms: None,
-                    time_ms: None,
+                    delivery_time_ms: None,
                     retry_count: None,
                     force: false,
                     justid: false,
@@ -70399,8 +70420,7 @@ mod tests {
                 &[(1000, 2)],
                 StreamClaimOptions {
                     min_idle_time_ms: 0,
-                    idle_ms: None,
-                    time_ms: None,
+                    delivery_time_ms: None,
                     retry_count: None,
                     force: false,
                     justid: false,
@@ -70674,8 +70694,7 @@ mod tests {
                 &[(1000, 0)],
                 StreamClaimOptions {
                     min_idle_time_ms: 0,
-                    idle_ms: None,
-                    time_ms: None,
+                    delivery_time_ms: None,
                     retry_count: None,
                     force: false,
                     justid: false,
@@ -78784,8 +78803,7 @@ mod tests {
                 &[(1, 0)],
                 StreamClaimOptions {
                     min_idle_time_ms: 0,
-                    idle_ms: None,
-                    time_ms: Some(250),
+                    delivery_time_ms: Some(250),
                     retry_count: Some(7),
                     force: false,
                     justid: false,
@@ -79040,8 +79058,7 @@ mod tests {
         let before = store.dirty;
         let opts = StreamClaimOptions {
             min_idle_time_ms: 0,
-            idle_ms: None,
-            time_ms: None,
+            delivery_time_ms: None,
             retry_count: None,
             force: true,
             justid: false,
@@ -82135,8 +82152,7 @@ mod tests {
 
                     let mut options = StreamClaimOptions {
                         min_idle_time_ms: parse_u64_arg(&argv[4]),
-                        idle_ms: None,
-                        time_ms: None,
+                        delivery_time_ms: None,
                         retry_count: None,
                         force: false,
                         justid: false,
@@ -82145,10 +82161,23 @@ mod tests {
 
                     while idx < argv.len() {
                         if eq_ascii_ci(&argv[idx], b"IDLE") {
-                            options.idle_ms = Some(parse_u64_arg(&argv[idx + 1]));
+                            // Same single-slot, last-wins resolution as the real parser:
+                            // this mirror exists to agree with it, so it must not keep a
+                            // field per option either.
+                            options.delivery_time_ms =
+                                Some(crate::stream_claim_delivery_time_from_idle(
+                                    METAMORPHIC_NOW_MS,
+                                    i64::try_from(parse_u64_arg(&argv[idx + 1]))
+                                        .unwrap_or(i64::MAX),
+                                ));
                             idx += 2;
                         } else if eq_ascii_ci(&argv[idx], b"TIME") {
-                            options.time_ms = Some(parse_u64_arg(&argv[idx + 1]));
+                            options.delivery_time_ms =
+                                Some(crate::clamp_stream_claim_delivery_time(
+                                    METAMORPHIC_NOW_MS,
+                                    i64::try_from(parse_u64_arg(&argv[idx + 1]))
+                                        .unwrap_or(i64::MAX),
+                                ));
                             idx += 2;
                         } else if eq_ascii_ci(&argv[idx], b"RETRYCOUNT") {
                             options.retry_count = Some(parse_u64_arg(&argv[idx + 1]));
@@ -83002,8 +83031,7 @@ mod tests {
                         &[pending_entry_id],
                         StreamClaimOptions {
                             min_idle_time_ms: 0,
-                            idle_ms: None,
-                            time_ms: Some(u64::from(delivery_time_ms)),
+                            delivery_time_ms: Some(u64::from(delivery_time_ms)),
                             retry_count: Some(u64::from(retry_count)),
                             force: false,
                             justid: false,
