@@ -657,10 +657,25 @@ fn redis_server_bin() -> PathBuf {
         .unwrap_or_else(|| {
             let local = Path::new("legacy_redis_code/redis/src/redis-server");
             if local.exists() {
-                local.to_path_buf()
-            } else {
-                PathBuf::from("/dp/frankenredis/legacy_redis_code/redis/src/redis-server")
+                return local.to_path_buf();
             }
+            // (frankenredis-h2hworker) Resolve relative to the MANIFEST, not the CWD.
+            //
+            // The two candidates above and below only work on the dev host: cargo runs a
+            // bench with its CWD set to the package root, so the relative path misses
+            // whenever the tree is not the repo root, and `/dp/frankenredis` is a path that
+            // exists on this machine and nowhere else. Both fail on an rch worker, where the
+            // checkout lives under /data/tmp/rch/<hash>/ -- and the worker is exactly where
+            // the head-to-head has to run now that builds are remote.
+            //
+            // CARGO_MANIFEST_DIR is baked in at compile time and points at crates/fr-bench,
+            // so `../..` is the repo root of whatever checkout compiled this bench.
+            let from_manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../legacy_redis_code/redis/src/redis-server");
+            if from_manifest.exists() {
+                return from_manifest;
+            }
+            PathBuf::from("/dp/frankenredis/legacy_redis_code/redis/src/redis-server")
         })
 }
 
