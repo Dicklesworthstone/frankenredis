@@ -223,6 +223,19 @@
       }
     },
     {
+      "name": "replconf_rdb_filter_only_malformed_keeps_err_prefix",
+      "now_ms": 0,
+      "argv": [
+        "REPLCONF",
+        "rdb-filter-only",
+        "\""
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Missing rdb-filter-only values"
+      }
+    },
+    {
       "name": "replconf_wrong_arity",
       "now_ms": 0,
       "argv": [

@@ -13120,6 +13120,64 @@ fn cluster_cmd(
 
 // ── REPLCONF ────────────────────────────────────────────────────────
 
+/// Match Redis `sdssplitargs`' rejection boundary used by
+/// `REPLCONF RDB-FILTER-ONLY`: an unterminated quote, or a closing quote
+/// immediately followed by a non-whitespace byte, makes the filter argument
+/// malformed. The runtime owns a second REPLCONF dispatch path, so it calls
+/// this shared guard as well.
+#[must_use]
+pub fn replconf_rdb_filter_only_is_malformed(value: &[u8]) -> bool {
+    let mut index = 0;
+    while index < value.len() {
+        while index < value.len() && value[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index == value.len() {
+            return false;
+        }
+
+        let mut quote = None;
+        loop {
+            if index == value.len() {
+                return quote.is_some();
+            }
+
+            let byte = value[index];
+            match quote {
+                Some(b'"') if byte == b'\\' && index + 1 < value.len() => index += 2,
+                Some(b'"') if byte == b'"' => {
+                    index += 1;
+                    if index < value.len() && !value[index].is_ascii_whitespace() {
+                        return true;
+                    }
+                    break;
+                }
+                Some(b'\'') if byte == b'\\'
+                    && index + 1 < value.len()
+                    && value[index + 1] == b'\'' =>
+                {
+                    index += 2;
+                }
+                Some(b'\'') if byte == b'\'' => {
+                    index += 1;
+                    if index < value.len() && !value[index].is_ascii_whitespace() {
+                        return true;
+                    }
+                    break;
+                }
+                Some(_) => index += 1,
+                None if byte.is_ascii_whitespace() => break,
+                None if byte == b'"' || byte == b'\'' => {
+                    quote = Some(byte);
+                    index += 1;
+                }
+                None => index += 1,
+            }
+        }
+    }
+    false
+}
+
 fn replconf_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     if argv.len().is_multiple_of(2) {
         return Err(CommandError::SyntaxError);
@@ -13160,6 +13218,18 @@ fn replconf_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErr
             }
         } else if option.eq_ignore_ascii_case("capa") {
             // Accept configuration pairs silently.
+        } else if option.eq_ignore_ascii_case("rdb-filter-only") {
+            // Redis parses this filter argument before it applies the filter to
+            // a replication snapshot. FrankenRedis does not implement filtered
+            // snapshots yet, but it must preserve the reachable parser error.
+            if replconf_rdb_filter_only_is_malformed(&argv[idx + 1]) {
+                return Err(CommandError::Custom(
+                    "ERR Missing rdb-filter-only values".to_string(),
+                ));
+            }
+            return Err(CommandError::Custom(format!(
+                "ERR Unrecognized REPLCONF option: {option}"
+            )));
         } else {
             return Err(CommandError::Custom(format!(
                 "ERR Unrecognized REPLCONF option: {option}"
@@ -81802,6 +81872,28 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn replconf_rdb_filter_only_malformed_value_uses_redis_error_text() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"REPLCONF".to_vec(),
+                b"rdb-filter-only".to_vec(),
+                b"\"".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("unterminated RDB-FILTER-ONLY quote must error");
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Missing rdb-filter-only values".to_string())
+        );
+        assert!(super::replconf_rdb_filter_only_is_malformed(b"\""));
+        assert!(super::replconf_rdb_filter_only_is_malformed(b"'functions'nope"));
+        assert!(!super::replconf_rdb_filter_only_is_malformed(b"functions"));
     }
 
     #[test]

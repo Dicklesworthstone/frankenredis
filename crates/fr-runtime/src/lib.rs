@@ -3907,6 +3907,7 @@ enum ReplconfOption {
     ListeningPort,
     IpAddress,
     Capa,
+    RdbFilterOnly,
 }
 
 #[inline]
@@ -3923,6 +3924,8 @@ fn classify_replconf_option(option: &[u8]) -> Option<ReplconfOption> {
         Some(ReplconfOption::IpAddress)
     } else if eq_ascii_token(option, b"capa") {
         Some(ReplconfOption::Capa)
+    } else if eq_ascii_token(option, b"rdb-filter-only") {
+        Some(ReplconfOption::RdbFilterOnly)
     } else {
         None
     }
@@ -3944,6 +3947,8 @@ fn classify_replconf_option_owned_reference(option: &[u8]) -> Option<ReplconfOpt
         Some(ReplconfOption::IpAddress)
     } else if option.eq_ignore_ascii_case("capa") {
         Some(ReplconfOption::Capa)
+    } else if option.eq_ignore_ascii_case("rdb-filter-only") {
+        Some(ReplconfOption::RdbFilterOnly)
     } else {
         None
     }
@@ -49325,6 +49330,15 @@ replica_announced:1\r\n",
                         .ensure_replica(self.session.client_id)
                         .psync2_capable = true;
                 }
+            } else if option == Some(ReplconfOption::RdbFilterOnly) {
+                // Keep the TCP path aligned with fr-command and Redis's
+                // `sdssplitargs` guard before any unsupported snapshot-filter
+                // behavior is considered.
+                if fr_command::replconf_rdb_filter_only_is_malformed(&argv[idx + 1]) {
+                    return RespFrame::Error("ERR Missing rdb-filter-only values".to_string());
+                }
+                let option = String::from_utf8_lossy(&argv[idx]);
+                return RespFrame::Error(format!("ERR Unrecognized REPLCONF option: {option}"));
             } else {
                 let option = String::from_utf8_lossy(&argv[idx]);
                 return RespFrame::Error(format!("ERR Unrecognized REPLCONF option: {option}"));
@@ -51946,6 +51960,8 @@ mod tests {
             b"ip-address",
             b"CAPA",
             b"capa",
+            b"RDB-FILTER-ONLY",
+            b"rdb-filter-only",
             b"unknown",
             b"",
             b"\xffACK",
@@ -52003,6 +52019,16 @@ mod tests {
                 "ERR REPLCONF ip-address provided by replica instance is too long: 256 bytes"
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn replconf_rdb_filter_only_malformed_value_uses_redis_error_text() {
+        let mut runtime = Runtime::default_strict();
+        let argv = [b"REPLCONF".as_slice(), b"rdb-filter-only", b"\""];
+        assert_eq!(
+            runtime.execute_frame(command(&argv), 0),
+            fr_protocol::RespFrame::Error("ERR Missing rdb-filter-only values".to_string())
         );
     }
 
