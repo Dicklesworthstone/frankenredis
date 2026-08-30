@@ -47403,7 +47403,10 @@ mod tests {
     /// ~4x and was measured at 3.46x.
     #[test]
     fn eviction_candidate_sampling_does_not_scale_with_keyspace_uhthd() {
-        fn evict_cost(n: usize) -> std::time::Duration {
+        /// Repetitions per size for the min-of-k estimator below.
+        const TRIALS: usize = 5;
+
+        fn evict_cost_once(n: usize) -> std::time::Duration {
             let mut store = Store::new();
             store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
             for idx in 0..n {
@@ -47431,16 +47434,46 @@ mod tests {
             elapsed
         }
 
+        /// MIN of `TRIALS`, not a single sample and not a mean.
+        ///
+        /// (frankenredis-uhthd) This test took ONE timing per size and compared them.
+        /// On a shared host that is noise-dominated: it was observed FAILING at 2.5x
+        /// during a parallel suite run at loadavg 17, while passing 3/3 at 0.82-0.95x
+        /// run alone on the same commit -- and passing 3/3 on clean HEAD too. A gate
+        /// that flips with the neighbours is not a gate, and this one guards the -OOM
+        /// defect, so a false RED here gets somebody's correct change reverted.
+        ///
+        /// The minimum is the right estimator and not merely a bigger hammer:
+        /// contention can only ever ADD time to a run, never remove it, so the
+        /// smallest of several trials is the sample least contaminated by whatever
+        /// else the box was doing. A mean or a single draw carries every stall; the
+        /// min converges on the cost this test actually means to measure. See
+        /// `worst_of_n_is_noisy_not_conservative` reasoning in the perf ledger -- the
+        /// same argument in the opposite direction, because here LARGER is the
+        /// contaminated tail.
+        fn evict_cost(n: usize) -> std::time::Duration {
+            (0..TRIALS)
+                .map(|_| evict_cost_once(n))
+                .min()
+                .expect("TRIALS is non-zero")
+        }
+
         let small = evict_cost(5_000);
         let large = evict_cost(20_000);
         let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
-        println!("same eviction count, 4x the keyspace: {small:?} -> {large:?} ({ratio:.2}x)");
+        println!(
+            "same eviction count, 4x the keyspace: {small:?} -> {large:?} ({ratio:.2}x, \
+             min of {TRIALS})"
+        );
         assert!(
             ratio < 2.5,
             "eviction candidate selection looks LINEAR again ({ratio:.2}x for 4x the \
-             keys; the O(n) walk measured 3.46x and O(1) bucket sampling ~1.1x). A \
-             regression here silently reintroduces the -OOM defect, because the \
-             eviction budget is sized on selection being cheap."
+             keys, min of {TRIALS} trials per size; the O(n) walk measured 3.46x and \
+             O(1) bucket sampling ~1.1x). A regression here silently reintroduces the \
+             -OOM defect, because the eviction budget is sized on selection being \
+             cheap. Both figures are MINIMA, so host contention cannot manufacture \
+             this failure -- it can only inflate a single trial, and the min discards \
+             it."
         );
     }
 
