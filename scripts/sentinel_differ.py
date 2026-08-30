@@ -27,6 +27,8 @@ import tempfile
 import re
 import sys
 import time
+from _respread import cmd as resp_cmd
+from _respread import conn
 
 def free_port():
     """(frankenredis-olwad) Fixed ports 21840-21842 are shared-box hazards: anyone can
@@ -141,25 +143,10 @@ class Conn:
 
 def reply_type(port, args, hello3=False):
     """First byte of the reply to `args` (RESP3 if hello3)."""
-    s = socket.create_connection(("127.0.0.1", port), 3)
-    s.settimeout(2.0)
-    if hello3:
-        s.sendall(b"*2\r\n$5\r\nHELLO\r\n$1\r\n3\r\n")
-        time.sleep(0.15)
-        s.recv(4096)
-    out = b"*%d\r\n" % len(args)
-    for x in args:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        out += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(out)
-    time.sleep(0.1)
-    d = b""
-    try:
-        d = s.recv(16)
-    except OSError:
-        pass
-    s.close()
-    return d[:1]
+    with conn(port, timeout=2) as s:
+        if hello3:
+            resp_cmd(s, "HELLO", "3", deadline=2)
+        return resp_cmd(s, *args, deadline=2)[:1]
 
 
 def _contains_map(v):

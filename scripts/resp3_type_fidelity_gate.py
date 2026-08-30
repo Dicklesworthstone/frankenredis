@@ -26,6 +26,8 @@ import tempfile
 import subprocess
 import sys
 import time
+from _respread import cmd as resp_cmd
+from _respread import conn
 
 def _free_port():
     """(frankenredis-7afsd) Ephemeral ports: a fixed pair on a shared box can be
@@ -67,31 +69,10 @@ def find_redis():
 
 
 def raw(port, hello3, *cmd):
-    s = socket.create_connection(("127.0.0.1", port), 3)
-    s.settimeout(4)
-    if hello3:
-        s.sendall(b"*2\r\n$5\r\nHELLO\r\n$1\r\n3\r\n")
-        time.sleep(0.03)
-        s.recv(1 << 16)
-    out = b"*%d\r\n" % len(cmd)
-    for x in cmd:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        out += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(out)
-    time.sleep(0.05)
-    d = b""
-    while True:
-        try:
-            c = s.recv(1 << 20)
-        except socket.timeout:
-            break
-        if not c:
-            break
-        d += c
-        if len(c) < 65536:
-            break
-    s.close()
-    return d
+    with conn(port, timeout=4) as s:
+        if hello3:
+            resp_cmd(s, "HELLO", "3", deadline=4)
+        return resp_cmd(s, *cmd, deadline=4)
 
 
 def wait_up(port):

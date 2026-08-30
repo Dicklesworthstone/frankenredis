@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from _respread import read_frame
 
 S = "/data/tmp/claude-1000/-data-projects-frankenredis/f82d025c-b982-4760-a679-f7e31fe91efe/scratchpad"
 NEW = ["bitfield_get", "bitfield_ro_2get", "hscan_zero", "sscan_zero", "zscan_zero",
@@ -65,10 +66,9 @@ try:
         seed, cmd = shape_of(name)
         for sc in seed:
             s.sendall(enc(sc.split()))
-            s.recv(65536)
+            read_frame(s, deadline=3)
         s.sendall(enc(cmd))
-        time.sleep(0.05)
-        rep = s.recv(65536)
+        rep = read_frame(s, deadline=3)
         head = rep.split(b"\r\n")[0]
         flag = ""
         if rep.startswith(b"-"):

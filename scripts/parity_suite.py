@@ -24,6 +24,7 @@ carrying two Lua FUNCTION libraries made resp3_reply_type_gate report two
 divergences that belonged to the oracle, not to fr (frankenredis-1zpr7).
 """
 import sys, os, time, socket, subprocess, tempfile
+from _respread import cmd as resp_cmd
 
 REDIS_BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "legacy_redis_code/redis/src/redis-server")
 FR_BIN = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else "/tmp/fr_rdb")
@@ -71,9 +72,7 @@ def enc(a):
 def ping(port):
     try:
         s = socket.create_connection(("127.0.0.1", port), timeout=1)
-        s.sendall(enc(["PING"]))
-        time.sleep(0.03)
-        ok = b"PONG" in s.recv(64)
+        ok = resp_cmd(s, "PING", deadline=1) == b"+PONG\r\n"
         s.close()
         return ok
     except Exception:
@@ -395,9 +394,7 @@ def main():
         if pair_ok:
             try:
                 c = socket.create_connection(("127.0.0.1", ORACLE_PORT), timeout=2)
-                c.sendall(enc(["COMMAND", "COUNT"]))
-                time.sleep(0.05)
-                reply = c.recv(64)
+                reply = resp_cmd(c, "COMMAND", "COUNT", deadline=2)
                 c.close()
                 n = int(reply[1:reply.index(b"\r\n")]) if reply[:1] == b":" else 0
                 if n < 200:

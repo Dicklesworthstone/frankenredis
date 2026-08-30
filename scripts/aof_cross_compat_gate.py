@@ -19,6 +19,7 @@ under /tmp.
 Usage: aof_cross_compat_gate.py <redis-server-bin> <fr-bin> [base_port]
 """
 import socket, sys, time, os, subprocess
+from _respread import cmd, conn
 
 REDIS_BIN = sys.argv[1] if len(sys.argv) > 1 else "legacy_redis_code/redis/src/redis-server"
 FR_BIN = sys.argv[2] if len(sys.argv) > 2 else "/tmp/fr_aof"
@@ -34,12 +35,8 @@ def enc(a):
 
 
 def q(port, a):
-    s = socket.create_connection(("127.0.0.1", port))
-    s.sendall(enc(a))
-    time.sleep(0.05)
-    d = s.recv(8000)
-    s.close()
-    return d
+    with conn(port, timeout=5) as s:
+        return cmd(s, *a, deadline=5)
 
 
 def wait_up(port, deadline=8):

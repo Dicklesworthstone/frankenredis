@@ -43,6 +43,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from _respread import read_frame
 
 OOM_PREFIX = b"-OOM"
 
@@ -133,15 +134,13 @@ def run_arm(label, binary, port, maxmemory, keys, value_len):
 
     def query(*parts):
         sock.sendall(enc(*parts))
-        time.sleep(0.2)
-        return sock.recv(1 << 20)
+        return read_frame(sock, deadline=300)
 
     dbsize = int(query("DBSIZE").decode().strip().lstrip(":"))
 
     def info_field(section, field):
         sock.sendall(enc("INFO", section))
-        time.sleep(0.25)
-        blob = sock.recv(1 << 22).decode("utf-8", "replace")
+        blob = read_frame(sock, deadline=300).decode("utf-8", "replace")
         for line in blob.splitlines():
             if line.startswith(field + ":"):
                 return int(line.split(":", 1)[1].strip())

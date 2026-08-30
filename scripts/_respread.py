@@ -47,6 +47,7 @@ sys.path[0] and a plain `import _respread` resolves.
 """
 import socket
 import sys
+import time
 
 __all__ = ["conn", "cmd", "cmd_n", "read_frame", "encode_arg", "encode_command",
            "frame_len", "assert_seed", "assert_ok"]
@@ -116,7 +117,7 @@ def conn(port, host="127.0.0.1", timeout=10):
     return socket.create_connection((host, port), timeout=timeout)
 
 
-def read_frame(sock):
+def read_frame(sock, deadline=10):
     """Read until ONE complete RESP frame is buffered; return its raw bytes.
 
     The read half of `cmd`, exposed separately for the gates that build their own
@@ -124,22 +125,34 @@ def read_frame(sock):
     send and receive as separate steps. Those had each hand-rolled this loop,
     which is exactly the drift `_respread` exists to prevent.
     """
+    expires_at = time.monotonic() + deadline
+    prior_timeout = sock.gettimeout() if hasattr(sock, "gettimeout") else None
+    can_set_timeout = hasattr(sock, "settimeout")
     buf = b""
-    while True:
-        try:
-            if buf and frame_len(buf) is not None:
+    try:
+        while True:
+            try:
+                if buf and frame_len(buf) is not None:
+                    return buf
+            except ValueError:
+                # Not RESP we recognise — hand it back rather than spinning; the
+                # caller's comparison will surface it.
                 return buf
-        except ValueError:
-            # Not RESP we recognise — hand it back rather than spinning; the
-            # caller's comparison will surface it.
-            return buf
-        chunk = sock.recv(1 << 20)
-        if not chunk:
-            raise OSError("server closed the connection mid-reply")
-        buf += chunk
+            remaining = expires_at - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"timed out after {deadline}s waiting for complete RESP reply")
+            if can_set_timeout:
+                sock.settimeout(remaining)
+            chunk = sock.recv(1 << 20)
+            if not chunk:
+                raise OSError("server closed the connection mid-reply")
+            buf += chunk
+    finally:
+        if can_set_timeout:
+            sock.settimeout(prior_timeout)
 
 
-def cmd(sock, *args):
+def cmd(sock, *args, deadline=10):
     """Send one command; return the COMPLETE raw reply bytes.
 
     Raw bytes rather than a decoded value is deliberate: a decoded comparison
@@ -147,10 +160,10 @@ def cmd(sock, *args):
     order) that a client would actually observe.
     """
     sock.sendall(encode_command(args))
-    return read_frame(sock)
+    return read_frame(sock, deadline=deadline)
 
 
-def cmd_n(sock, n, *args):
+def cmd_n(sock, n, *args, deadline=10):
     """Send one command; return the COMPLETE raw bytes of its FIRST `n` frames.
 
     A fourth way a gate reads less than it thinks (frankenredis-tesrb/gpry6): some
@@ -165,24 +178,36 @@ def cmd_n(sock, n, *args):
     is the only correct shape — see the drain() docstrings in the pub/sub gates.
     """
     sock.sendall(encode_command(args))
+    expires_at = time.monotonic() + deadline
+    prior_timeout = sock.gettimeout() if hasattr(sock, "gettimeout") else None
+    can_set_timeout = hasattr(sock, "settimeout")
     buf = b""
-    while True:
-        pos = got = 0
-        try:
-            while got < n:
-                ln = frame_len(buf, pos)
-                if ln is None:
-                    break
-                pos += ln
-                got += 1
-        except ValueError:
-            return buf  # not RESP we recognise — hand it back, don't spin
-        if got >= n:
-            return buf
-        chunk = sock.recv(1 << 20)
-        if not chunk:
-            raise OSError("server closed the connection mid-reply")
-        buf += chunk
+    try:
+        while True:
+            pos = got = 0
+            try:
+                while got < n:
+                    ln = frame_len(buf, pos)
+                    if ln is None:
+                        break
+                    pos += ln
+                    got += 1
+            except ValueError:
+                return buf  # not RESP we recognise — hand it back, don't spin
+            if got >= n:
+                return buf
+            remaining = expires_at - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"timed out after {deadline}s waiting for {n} RESP replies")
+            if can_set_timeout:
+                sock.settimeout(remaining)
+            chunk = sock.recv(1 << 20)
+            if not chunk:
+                raise OSError("server closed the connection mid-reply")
+            buf += chunk
+    finally:
+        if can_set_timeout:
+            sock.settimeout(prior_timeout)
 
 
 def assert_ok(reply, label, exit_code=1):
@@ -283,6 +308,13 @@ def _self_test() -> int:
         failures.append("known-count reader did not catch the planted wrong reply")
     if not multi_oracle_sock.sent or not multi_wrong_sock.sent:
         failures.append("known-count reader did not send its command")
+
+    try:
+        read_frame(_ChunkedSocket([]), deadline=0)
+    except TimeoutError:
+        pass
+    else:
+        failures.append("reader did not enforce its bounded deadline")
 
     if not _expect_seed_failure(assert_seed, b":0\r\n", 1, "planted seed"):
         failures.append("assert_seed accepted a deliberately wrong reply")

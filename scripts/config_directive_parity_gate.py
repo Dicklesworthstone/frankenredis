@@ -26,6 +26,7 @@ Usage: config_directive_parity_gate.py <redis-bin> <fr-bin> [base_port]
        Exit 0 = parity, 1 = divergence.
 """
 import os, socket, subprocess, sys, tempfile, time
+from _respread import cmd as resp_cmd
 
 REDIS_BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else
                             "legacy_redis_code/redis/src/redis-server")
@@ -58,13 +59,7 @@ def cmd(port, *args):
     except OSError:
         return None
     try:
-        out = bytearray(b"*%d\r\n" % len(args))
-        for a in args:
-            b = a.encode()
-            out += b"$%d\r\n%s\r\n" % (len(b), b)
-        s.sendall(bytes(out))
-        time.sleep(0.05)
-        return s.recv(65536)
+        return resp_cmd(s, *args, deadline=5)
     finally:
         s.close()
 
