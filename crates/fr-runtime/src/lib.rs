@@ -49332,10 +49332,20 @@ replica_announced:1\r\n",
                 }
             } else if option == Some(ReplconfOption::RdbFilterOnly) {
                 // Keep the TCP path aligned with fr-command and Redis's
-                // `sdssplitargs` guard before any unsupported snapshot-filter
+                // `sdssplitargs` parsing before any unsupported snapshot-filter
                 // behavior is considered.
-                if fr_command::replconf_rdb_filter_only_is_malformed(&argv[idx + 1]) {
+                let Some(filters) = fr_command::replconf_rdb_filter_only_filters(&argv[idx + 1])
+                else {
                     return RespFrame::Error("ERR Missing rdb-filter-only values".to_string());
+                };
+                if let Some(unsupported) = filters
+                    .iter()
+                    .find(|filter| !filter.eq_ignore_ascii_case(b"functions"))
+                {
+                    return RespFrame::Error(format!(
+                        "ERR Unsupported rdb-filter-only option: {}",
+                        String::from_utf8_lossy(unsupported)
+                    ));
                 }
                 let option = String::from_utf8_lossy(&argv[idx]);
                 return RespFrame::Error(format!("ERR Unrecognized REPLCONF option: {option}"));
@@ -52029,6 +52039,18 @@ mod tests {
         assert_eq!(
             runtime.execute_frame(command(&argv), 0),
             fr_protocol::RespFrame::Error("ERR Missing rdb-filter-only values".to_string())
+        );
+    }
+
+    #[test]
+    fn replconf_rdb_filter_only_unsupported_value_uses_redis_error_text() {
+        let mut runtime = Runtime::default_strict();
+        let argv = [b"REPLCONF".as_slice(), b"rdb-filter-only", b"bogus"];
+        assert_eq!(
+            runtime.execute_frame(command(&argv), 0),
+            fr_protocol::RespFrame::Error(
+                "ERR Unsupported rdb-filter-only option: bogus".to_string()
+            )
         );
     }
 

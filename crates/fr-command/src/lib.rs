@@ -13120,62 +13120,81 @@ fn cluster_cmd(
 
 // ── REPLCONF ────────────────────────────────────────────────────────
 
-/// Match Redis `sdssplitargs`' rejection boundary used by
-/// `REPLCONF RDB-FILTER-ONLY`: an unterminated quote, or a closing quote
-/// immediately followed by a non-whitespace byte, makes the filter argument
-/// malformed. The runtime owns a second REPLCONF dispatch path, so it calls
-/// this shared guard as well.
-#[must_use]
-pub fn replconf_rdb_filter_only_is_malformed(value: &[u8]) -> bool {
+/// Parse the `sdssplitargs` subset used by Redis for
+/// `REPLCONF RDB-FILTER-ONLY`. An unterminated quote, or a closing quote
+/// immediately followed by a non-whitespace byte, makes the argument
+/// malformed. The runtime owns a second REPLCONF dispatch path, so it uses
+/// this shared parser as well.
+pub fn replconf_rdb_filter_only_filters(value: &[u8]) -> Option<Vec<Vec<u8>>> {
     let mut index = 0;
+    let mut filters = Vec::new();
     while index < value.len() {
         while index < value.len() && value[index].is_ascii_whitespace() {
             index += 1;
         }
         if index == value.len() {
-            return false;
+            break;
         }
 
         let mut quote = None;
+        let mut filter = Vec::new();
         loop {
             if index == value.len() {
-                return quote.is_some();
+                if quote.is_some() {
+                    return None;
+                }
+                break;
             }
 
             let byte = value[index];
             match quote {
-                Some(b'"') if byte == b'\\' && index + 1 < value.len() => index += 2,
+                Some(b'"') if byte == b'\\' && index + 1 < value.len() => {
+                    filter.push(value[index + 1]);
+                    index += 2;
+                }
                 Some(b'"') if byte == b'"' => {
                     index += 1;
                     if index < value.len() && !value[index].is_ascii_whitespace() {
-                        return true;
+                        return None;
                     }
-                    break;
+                    quote = None;
                 }
-                Some(b'\'') if byte == b'\\'
-                    && index + 1 < value.len()
-                    && value[index + 1] == b'\'' =>
+                Some(b'\'')
+                    if byte == b'\\' && index + 1 < value.len() && value[index + 1] == b'\'' =>
                 {
+                    filter.push(b'\'');
                     index += 2;
                 }
                 Some(b'\'') if byte == b'\'' => {
                     index += 1;
                     if index < value.len() && !value[index].is_ascii_whitespace() {
-                        return true;
+                        return None;
                     }
-                    break;
+                    quote = None;
                 }
-                Some(_) => index += 1,
+                Some(_) => {
+                    filter.push(byte);
+                    index += 1;
+                }
                 None if byte.is_ascii_whitespace() => break,
                 None if byte == b'"' || byte == b'\'' => {
                     quote = Some(byte);
                     index += 1;
                 }
-                None => index += 1,
+                None => {
+                    filter.push(byte);
+                    index += 1;
+                }
             }
         }
+        filters.push(filter);
     }
-    false
+    Some(filters)
+}
+
+#[must_use]
+pub fn replconf_rdb_filter_only_is_malformed(value: &[u8]) -> bool {
+    replconf_rdb_filter_only_filters(value).is_none()
 }
 
 fn replconf_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
@@ -13221,11 +13240,21 @@ fn replconf_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErr
         } else if option.eq_ignore_ascii_case("rdb-filter-only") {
             // Redis parses this filter argument before it applies the filter to
             // a replication snapshot. FrankenRedis does not implement filtered
-            // snapshots yet, but it must preserve the reachable parser error.
-            if replconf_rdb_filter_only_is_malformed(&argv[idx + 1]) {
+            // snapshots yet, but it must preserve the reachable parser and
+            // unsupported-filter errors.
+            let Some(filters) = replconf_rdb_filter_only_filters(&argv[idx + 1]) else {
                 return Err(CommandError::Custom(
                     "ERR Missing rdb-filter-only values".to_string(),
                 ));
+            };
+            if let Some(unsupported) = filters
+                .iter()
+                .find(|filter| !filter.eq_ignore_ascii_case(b"functions"))
+            {
+                return Err(CommandError::Custom(format!(
+                    "ERR Unsupported rdb-filter-only option: {}",
+                    String::from_utf8_lossy(unsupported)
+                )));
             }
             return Err(CommandError::Custom(format!(
                 "ERR Unrecognized REPLCONF option: {option}"
@@ -81894,6 +81923,29 @@ mod tests {
         assert!(super::replconf_rdb_filter_only_is_malformed(b"\""));
         assert!(super::replconf_rdb_filter_only_is_malformed(b"'functions'nope"));
         assert!(!super::replconf_rdb_filter_only_is_malformed(b"functions"));
+    }
+
+    #[test]
+    fn replconf_rdb_filter_only_unsupported_value_uses_redis_error_text() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"REPLCONF".to_vec(),
+                b"rdb-filter-only".to_vec(),
+                b"bogus".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("unsupported RDB-FILTER-ONLY value must error");
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Unsupported rdb-filter-only option: bogus".to_string())
+        );
+        assert_eq!(
+            super::replconf_rdb_filter_only_filters(b"functions bogus"),
+            Some(vec![b"functions".to_vec(), b"bogus".to_vec()])
+        );
     }
 
     #[test]
