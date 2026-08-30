@@ -5276,6 +5276,104 @@ fn tcp_replconf_internal_control_frames_match_legacy_redis_no_reply_behavior() {
     send_shutdown_nosave(franken_port);
 }
 
+fn pending_output_sync_reply(
+    spawn: impl FnOnce(u16) -> ManagedChild,
+    command: &[&[u8]],
+) -> RespFrame {
+    let port = reserve_port();
+    let _server = spawn(port);
+    let mut client = connect_client(port);
+
+    // These frames deliberately share one write.  `PING` leaves a reply in the
+    // client's output buffer when SYNC/PSYNC is dispatched, which is the state
+    // upstream replication.c::syncCommand refuses rather than interleaving the
+    // old reply into a new replication stream.
+    let mut pipeline = encode_command(&[b"PING"]);
+    pipeline.extend_from_slice(&encode_command(command));
+    client
+        .write_all(&pipeline)
+        .expect("write PING plus replication command");
+    assert_eq!(
+        read_response(&mut client),
+        RespFrame::SimpleString("PONG".to_string()),
+        "the leading command must have produced the pending output"
+    );
+    let reply = read_response(&mut client);
+    send_shutdown_nosave(port);
+    reply
+}
+
+#[test]
+fn tcp_sync_and_psync_reject_pending_output_like_legacy_redis_6lzih() {
+    for command in [
+        vec![b"SYNC".as_slice()],
+        vec![b"PSYNC".as_slice(), b"?", b"-1"],
+    ] {
+        let parts = command.as_slice();
+        let legacy = pending_output_sync_reply(spawn_legacy_redis, parts);
+        let franken = pending_output_sync_reply(|port| spawn_frankenredis(port, None), parts);
+        assert_eq!(
+            franken, legacy,
+            "pending-output reply drifted for {parts:?}"
+        );
+        assert_eq!(
+            franken,
+            RespFrame::Error("ERR SYNC and PSYNC are invalid with pending output".to_string()),
+            "vendored Redis's pending-output guard must be exercised for {parts:?}"
+        );
+    }
+}
+
+fn replica_ack_during_client_pause_offset(
+    spawn: impl FnOnce(u16) -> ManagedChild,
+) -> String {
+    let port = reserve_port();
+    let _server = spawn(port);
+    let mut replica = connect_client(port);
+    assert_eq!(
+        send_command(&mut replica, &[b"REPLCONF", b"listening-port", b"6380"]),
+        RespFrame::SimpleString("OK".to_string()),
+        "REPLCONF listening-port must register the connection as a replica"
+    );
+
+    let mut pauser = connect_client(port);
+    assert_eq!(
+        send_command(&mut pauser, &[b"CLIENT", b"PAUSE", b"1200", b"ALL"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+
+    // An ACK has no direct reply.  The following INFO is issued by the same
+    // replica connection, so upstream's CLIENT_SLAVE exemption must let both
+    // commands through before the 1.2s global pause expires.
+    replica
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .expect("set replica timeout");
+    send_command_expect_no_response(&mut replica, &[b"REPLCONF", b"ACK", b"42"]);
+    let started = Instant::now();
+    let info = send_command(&mut replica, &[b"INFO", b"replication"]);
+    assert!(
+        started.elapsed() < Duration::from_millis(600),
+        "replica INFO was deferred by CLIENT PAUSE instead of being exempt"
+    );
+    send_shutdown_nosave(port);
+    match info {
+        RespFrame::BulkString(Some(bytes)) => String::from_utf8(bytes).expect("INFO utf8"),
+        other => panic!("expected INFO replication bulk reply, got {other:?}"),
+    }
+}
+
+#[test]
+fn tcp_client_pause_does_not_defer_replica_replconf_ack_like_legacy_redis_sitf1() {
+    let legacy = replica_ack_during_client_pause_offset(spawn_legacy_redis);
+    let franken = replica_ack_during_client_pause_offset(|port| spawn_frankenredis(port, None));
+    for info in [&legacy, &franken] {
+        assert!(
+            info.contains("offset=42"),
+            "replica ACK was not applied during CLIENT PAUSE: {info}"
+        );
+    }
+}
+
 #[test]
 fn tcp_sync_matches_legacy_redis_snapshot_streaming_shape() {
     let franken_port = reserve_port();

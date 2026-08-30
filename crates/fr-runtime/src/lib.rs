@@ -70865,10 +70865,10 @@ mod tests {
 redis.register_function('writefn', function(keys, args) return 1 end)\n\
 redis.register_function{function_name='readonlyfn', callback=function(keys, args) return 1 end, flags={'no-writes'}}\n\
 redis.register_function{function_name='allowstalefn', callback=function(keys, args) return 1 end, flags={'no-writes','allow-stale'}}";
-        assert!(matches!(
+        assert_eq!(
             rt.execute_frame(command(&[b"FUNCTION", b"LOAD", library]), 0),
-            RespFrame::SimpleString(_)
-        ));
+            RespFrame::BulkString(Some(b"staleflags".to_vec()))
+        );
         assert_eq!(
             rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1),
             RespFrame::SimpleString("OK".to_string())
