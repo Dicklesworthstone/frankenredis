@@ -13908,6 +13908,29 @@ fn lua_pattern_state(pat: &[u8], pi: usize) -> (LuaPatternState<'_>, usize) {
     }
 }
 
+/// Return the run of literal bytes that can be consumed without entering any
+/// Lua-pattern control path. This keeps the normal matcher responsible for
+/// captures, classes, escapes, anchors, and quantifiers, while letting the
+/// overwhelmingly common literal prefix use one slice comparison instead of
+/// repeatedly re-decoding one byte at a time.
+fn lua_literal_prefix_end(pat: &[u8], start: usize) -> usize {
+    let mut end = start;
+    while end < pat.len() {
+        let byte = pat[end];
+        if matches!(byte, 0 | b'(' | b')' | b'$' | b'%' | b'[' | b'.' | b'*' | b'+' | b'-' | b'?')
+        {
+            break;
+        }
+        // A suffix quantifies this byte, so it must remain visible to the
+        // regular element decoder rather than becoming part of this prefix.
+        if end + 1 < pat.len() && matches!(pat[end + 1], b'*' | b'+' | b'-' | b'?') {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
 /// How many pattern bytes does a single element consume?
 /// Validate a Lua pattern eagerly, returning the upstream wording when
 /// the pattern is malformed. Mirrors lstrlib.c's two-class of errors:
@@ -14228,6 +14251,20 @@ fn lua_pat_match(
         // `string.find('a\0b', '\0')` is 2,2 on both engines, and was already so.
         if pi >= pat.len() || pat[pi] == 0 {
             return Some(si);
+        }
+
+        // A literal prefix has no captures, classes, escapes, anchors, or
+        // quantifiers to decode. Comparing its bytes as a slice avoids the
+        // per-byte matcher dispatch and does not allocate.
+        let literal_end = lua_literal_prefix_end(pat, pi);
+        if literal_end > pi {
+            let literal = &pat[pi..literal_end];
+            if s.get(si..).is_some_and(|remaining| remaining.starts_with(literal)) {
+                si += literal.len();
+                pi = literal_end;
+                continue 'match_pattern;
+            }
+            return None;
         }
 
         // Handle captures: (
@@ -30012,7 +30049,7 @@ end
     }
 
     #[test]
-    fn lua_pattern_state_machine_preserves_quantified_byte_classes_25uop() {
+    fn lua_pattern_state_machine_preserves_quantified_byte_classes_and_literal_prefix_25uop() {
         // The state machine decodes an ordinary matcher element once before
         // consuming a quantified run. These rows cover each stateless state
         // (literal, dot, class, and set) plus a negative no-match control.
@@ -30044,6 +30081,43 @@ end
                 .unwrap_or_else(|err| panic!("{}: {err}", String::from_utf8_lossy(body)));
             assert_eq!(frame, *expected, "body={}", String::from_utf8_lossy(body));
         }
+
+        // Literal prefixes bypass per-byte state decoding, but must still hand
+        // control back at a class or a mismatching final byte.
+        let literal_prefix = eval_script(
+            b"local s=string.rep('a',256)..'b'; return string.match(s, string.rep('a',256)..'b')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("long literal prefix must match");
+        let mut expected = vec![b'a'; 256];
+        expected.push(b'b');
+        assert_eq!(literal_prefix, RespFrame::BulkString(Some(expected)));
+
+        let literal_mismatch = eval_script(
+            b"local s=string.rep('a',256)..'b'; return string.match(s, string.rep('a',256)..'c')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("long literal mismatch must not error");
+        assert_eq!(literal_mismatch, RespFrame::BulkString(None));
+
+        let prefix_then_class = eval_script(
+            b"return string.match('prefix123', 'prefix%d+')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("literal prefix followed by class must match");
+        assert_eq!(
+            prefix_then_class,
+            RespFrame::BulkString(Some(b"prefix123".to_vec()))
+        );
     }
 
     #[test]

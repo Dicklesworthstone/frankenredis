@@ -710,6 +710,16 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
          ["EVAL", "local s = string.rep('a', 256) return (string.find(s, s))", "0"]),
         ("get_control", ["SET k val"], ["GET", "k"]),
     ],
+    # (frankenredis-25uop) A literal string.match must use the Lua matcher;
+    # unlike string.find, it has no no-SPECIALS plain-search escape hatch.
+    # This is therefore the 256-byte throughput row for the literal-prefix
+    # state-machine fast path, while the existing luapat set remains the
+    # string.find/plain-search row it was designed to measure.
+    "lua_matcher": [
+        ("lua_matcher_256", [],
+         ["EVAL", "local s = string.rep('a', 256) return (string.match(s, s))", "0"]),
+        ("get_control", ["SET k val"], ["GET", "k"]),
+    ],
     # Commands that MUTATE their key, measured on their NO-OP path so the square is
     # valid at all. (frankenredis-va5me, frankenredis-5yhyh, frankenredis-wgrny)
     #
