@@ -43949,14 +43949,24 @@ impl Runtime {
             if parameter.eq_ignore_ascii_case("slowlog-log-slower-than") {
                 // Upstream config.c declares as INTEGER_CONFIG.
                 // (br-frankenredis-cfgmemvalue)
-                let parsed = match parse_i64_arg(&pair[1]) {
+                //
+                // (frankenredis-cfgbounds-mwils) WITH ITS LOWER BOUND. config.c:3204 is
+                // `createLongLongConfig("slowlog-log-slower-than", ..., -1, LLONG_MAX, ...)`,
+                // so -1 (the "disabled" sentinel) is the floor and anything below it is
+                // refused. fr parsed the integer and enforced nothing, so `CONFIG SET
+                // slowlog-log-slower-than -2` was accepted here and rejected by redis.
+                //
+                // parse_int_config_value already renders the exact upstream wording, and the
+                // neighbouring slowlog-max-len arm already bounds itself at [0, i64::MAX];
+                // this arm was the one that skipped it.
+                let parsed = match parse_int_config_value(
+                    "slowlog-log-slower-than",
+                    &pair[1],
+                    -1,
+                    i64::MAX,
+                ) {
                     Ok(value) => value,
-                    Err(_) => {
-                        return config_set_failed(
-                            "slowlog-log-slower-than",
-                            "argument couldn't be parsed into an integer",
-                        );
-                    }
+                    Err(resp) => return resp,
                 };
                 next_slowlog_slower_than = Some(parsed);
                 continue;
@@ -44680,6 +44690,43 @@ impl Runtime {
                 }
                 let value = String::from_utf8_lossy(value_bytes).to_string();
                 static_override_updates.push(("cluster-announce-hostname".to_string(), value));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("cluster-announce-human-nodename") {
+                // (frankenredis-cfgbounds-mwils) THE HOSTNAME VALIDATOR'S TWIN, declared one line
+                // below it in upstream's table (config.c:3108) and missed when the arm above
+                // was written: createStringConfig(..., isValidAnnouncedNodename, ...).
+                //
+                // Its rule is NOT the hostname rule and must not be copied from it.
+                // isValidAnnouncedNodename defers to isValidAuxString -> isValidAuxChar
+                // (cluster.c:238), which is
+                //
+                //     isalnum(c) || (strchr("!#$%&()*+:;<>?@[]^{|}~", c) == NULL)
+                //
+                // i.e. a byte is invalid ONLY when it appears in that punctuation set. That
+                // is a DENYLIST, where the hostname is an allowlist of [A-Za-z0-9.-]: a
+                // space, a dot, a comma, a slash and a newline are all accepted here and
+                // three of those are refused there. Reusing the hostname check would reject
+                // values redis accepts, which is the opposite defect and just as visible.
+                //
+                // NUL is the one denied byte that is NOT written in the literal: `strchr`
+                // matches the search string's OWN terminator and returns a non-NULL pointer
+                // for c == 0, so isValidAuxChar('\0') is false. The value is an sds walked by
+                // sdslen, so an embedded NUL really does reach the loop and really is
+                // refused; the denylist below has to spell that byte out.
+                const INVALID_AUX_CHARS: &[u8] = b"!#$%&()*+:;<>?@[]^{|}~";
+                let value_bytes = &pair[1];
+                if value_bytes.iter().any(|c| {
+                    !c.is_ascii_alphanumeric() && (*c == 0 || INVALID_AUX_CHARS.contains(c))
+                }) {
+                    return config_set_failed(
+                        "cluster-announce-human-nodename",
+                        "Announced human node name contained invalid character",
+                    );
+                }
+                let value = String::from_utf8_lossy(value_bytes).to_string();
+                static_override_updates
+                    .push(("cluster-announce-human-nodename".to_string(), value));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("maxmemory-clients") {
@@ -73861,6 +73908,105 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         );
         // No pending rebind is queued when there is no event loop (bind_addr empty).
         assert_eq!(rt.take_pending_bind_change(), None);
+    }
+
+    /// (frankenredis-cfgbounds-mwils) Two CONFIG SET validators that fr accepted anything for.
+    ///
+    /// `slowlog-log-slower-than` is `createLongLongConfig(..., -1, LLONG_MAX, ...)`
+    /// (config.c:3204): -1 is the "disabled" sentinel and the floor. fr parsed the integer
+    /// and enforced no bound, so -2 was accepted where redis refuses it.
+    ///
+    /// `cluster-announce-human-nodename` is `createStringConfig(...,
+    /// isValidAnnouncedNodename, ...)` (config.c:3108), declared one line below
+    /// `cluster-announce-hostname`, whose validator fr already had. The two rules are NOT the
+    /// same and the test says so on purpose: the hostname is an ALLOWLIST of [A-Za-z0-9.-],
+    /// while the nodename is a DENYLIST of `!#$%&()*+:;<>?@[]^{|}~` (isValidAuxChar,
+    /// cluster.c:238). Copying the hostname check to the new arm -- the obvious wrong fix --
+    /// would reject a space, a dot-free label, a comma or a slash that redis accepts, so the
+    /// cases below assert acceptance of exactly those.
+    #[test]
+    fn config_set_enforces_the_slowlog_floor_and_the_nodename_denylist_cfgbounds() {
+        let mut rt = Runtime::default_strict();
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let err = |field: &str, detail: &str| {
+            RespFrame::Error(format!(
+                "ERR CONFIG SET failed (possibly related to argument '{field}') - {detail}"
+            ))
+        };
+        const SLOWLOG: &str = "slowlog-log-slower-than";
+        const RANGE: &str = "argument must be between -1 and 9223372036854775807 inclusive";
+
+        // -1 is the floor and is the DISABLED sentinel, so it must still be accepted; 0 and a
+        // large positive are ordinary values.
+        for good in [&b"-1"[..], b"0", b"10000", b"9223372036854775807"] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", SLOWLOG.as_bytes(), good]), 0),
+                ok,
+                "{} must remain a legal value",
+                String::from_utf8_lossy(good)
+            );
+        }
+        // Anything below the floor is refused with the INTEGER_CONFIG range wording.
+        for bad in [&b"-2"[..], b"-12345", b"-9223372036854775808"] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", SLOWLOG.as_bytes(), bad]), 0),
+                err(SLOWLOG, RANGE),
+                "{} is below the -1 floor and must be refused",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        // A non-integer still reports the parse wording, not the range wording.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", SLOWLOG.as_bytes(), b"abc"]), 0),
+            err(SLOWLOG, "argument couldn't be parsed into an integer"),
+        );
+
+        const NODENAME: &str = "cluster-announce-human-nodename";
+        // Every byte of the upstream denylist is rejected, one at a time -- plus NUL, which
+        // `strchr` denies via its own terminator and which no literal denylist spells out.
+        for c in b"!#$%&()*+:;<>?@[]^{|}~\0" {
+            let value = vec![b'n', *c, b'1'];
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", NODENAME.as_bytes(), &value]),
+                    0
+                ),
+                err(NODENAME, "Announced human node name contained invalid character"),
+                "byte {:?} is in isValidAuxChar's denylist and must be refused",
+                *c as char
+            );
+        }
+        // THE ANTI-VACUITY, and it is the whole point: these are refused by the HOSTNAME
+        // validator and accepted by this one. A fix that reused the hostname allowlist passes
+        // every assertion above and fails here.
+        for good in [
+            &b"node one"[..], // space
+            b"node_one",      // underscore
+            b"node,one",      // comma
+            b"node/one",      // slash
+            b"node=one",      // equals
+            b"node'one",      // quote
+            b"",              // empty clears it
+            b"plain-node.1",  // and the hostname-legal shape still works
+        ] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"CONFIG", b"SET", NODENAME.as_bytes(), good]), 0),
+                ok,
+                "{:?} contains no denylisted byte, so redis accepts it",
+                String::from_utf8_lossy(good)
+            );
+        }
+        // The hostname twin keeps its own, stricter rule -- the two must not converge.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"cluster-announce-hostname", b"node one"]),
+                0
+            ),
+            err(
+                "cluster-announce-hostname",
+                "Hostnames may only contain alphanumeric characters, hyphens or dots"
+            ),
+        );
     }
 
     /// (frankenredis-zyx9q) CONFIG SET port is MODIFIABLE_CONFIG in redis
