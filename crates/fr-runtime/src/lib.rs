@@ -52055,6 +52055,18 @@ mod tests {
     }
 
     #[test]
+    fn replconf_rdb_filter_only_escaped_unsupported_value_uses_redis_error_text() {
+        let mut runtime = Runtime::default_strict();
+        let argv = [b"REPLCONF".as_slice(), b"rdb-filter-only", b"\"\\x62ogus\""];
+        assert_eq!(
+            runtime.execute_frame(command(&argv), 0),
+            fr_protocol::RespFrame::Error(
+                "ERR Unsupported rdb-filter-only option: bogus".to_string()
+            )
+        );
+    }
+
+    #[test]
     fn replica_ack_snapshot_capacity_reuse_matches_owned_reference() {
         use super::{ReplOffset, ServerState};
 

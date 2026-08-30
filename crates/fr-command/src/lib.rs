@@ -13120,6 +13120,15 @@ fn cluster_cmd(
 
 // ── REPLCONF ────────────────────────────────────────────────────────
 
+fn ascii_hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Parse the `sdssplitargs` subset used by Redis for
 /// `REPLCONF RDB-FILTER-ONLY`. An unterminated quote, or a closing quote
 /// immediately followed by a non-whitespace byte, makes the argument
@@ -13148,8 +13157,30 @@ pub fn replconf_rdb_filter_only_filters(value: &[u8]) -> Option<Vec<Vec<u8>>> {
 
             let byte = value[index];
             match quote {
+                Some(b'"')
+                    if byte == b'\\' && index + 3 < value.len() && value[index + 1] == b'x' =>
+                {
+                    if let (Some(high), Some(low)) = (
+                        ascii_hex_value(value[index + 2]),
+                        ascii_hex_value(value[index + 3]),
+                    ) {
+                        filter.push((high << 4) | low);
+                        index += 4;
+                    } else {
+                        filter.push(value[index + 1]);
+                        index += 2;
+                    }
+                }
                 Some(b'"') if byte == b'\\' && index + 1 < value.len() => {
-                    filter.push(value[index + 1]);
+                    let escaped = match value[index + 1] {
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        b'b' => 0x08,
+                        b'a' => 0x07,
+                        other => other,
+                    };
+                    filter.push(escaped);
                     index += 2;
                 }
                 Some(b'"') if byte == b'"' => {
@@ -81945,6 +81976,29 @@ mod tests {
         assert_eq!(
             super::replconf_rdb_filter_only_filters(b"functions bogus"),
             Some(vec![b"functions".to_vec(), b"bogus".to_vec()])
+        );
+    }
+
+    #[test]
+    fn replconf_rdb_filter_only_escaped_unsupported_value_uses_redis_error_text() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"REPLCONF".to_vec(),
+                b"rdb-filter-only".to_vec(),
+                b"\"\\x62ogus\"".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("escaped unsupported RDB-FILTER-ONLY value must error");
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Unsupported rdb-filter-only option: bogus".to_string())
+        );
+        assert_eq!(
+            super::replconf_rdb_filter_only_filters(b"\"\\x62ogus\""),
+            Some(vec![b"bogus".to_vec()])
         );
     }
 

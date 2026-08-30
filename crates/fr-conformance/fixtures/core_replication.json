@@ -249,6 +249,19 @@
       }
     },
     {
+      "name": "replconf_rdb_filter_only_escaped_unsupported_keeps_err_prefix",
+      "now_ms": 0,
+      "argv": [
+        "REPLCONF",
+        "rdb-filter-only",
+        "\"\\x62ogus\""
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unsupported rdb-filter-only option: bogus"
+      }
+    },
+    {
       "name": "replconf_wrong_arity",
       "now_ms": 0,
       "argv": [

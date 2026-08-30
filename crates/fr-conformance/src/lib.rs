@@ -10655,6 +10655,31 @@ mod tests {
     }
 
     #[test]
+    fn live_redis_replconf_rdb_filter_only_escaped_unsupported_keeps_err_prefix() {
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+        let report = crate::run_live_redis_diff_for_cases(
+            &cfg,
+            "core_replication.json",
+            &["replconf_rdb_filter_only_escaped_unsupported_keeps_err_prefix"],
+            &oracle,
+        )
+        .expect("REPLCONF RDB-FILTER-ONLY live oracle transport");
+        assert_eq!(
+            report.total, 1,
+            "live oracle must execute the REPLCONF case"
+        );
+        assert_eq!(
+            report.passed, 1,
+            "REPLCONF RDB-FILTER-ONLY escaped unsupported value must match vendored Redis: {:?}",
+            report.failed
+        );
+    }
+
+    #[test]
     fn live_redis_fr_p2c_006_replication_journey_matches_runtime() {
         let cfg = HarnessConfig::default_paths();
         let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
