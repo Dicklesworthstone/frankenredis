@@ -33375,12 +33375,23 @@ impl Store {
         let batch = count.max(1);
         let is_star = pattern.is_none() || pattern == Some(b"*".as_slice());
         let prepared_glob = pattern.map(glob_prepare);
-        // The physical bytes of DB 0 are the logical key bytes, so a literal
-        // prefix can safely reject KeyDict buckets whose first-byte fingerprint
-        // cannot contain a match. DB-encoded keys deliberately retain the normal
-        // walk: their physical first byte names the database, not the user key.
+        // Prefix-filter the RAW physical key before decoding its logical form or
+        // invoking the glob matcher. `encode_db_key` makes this one prefix work
+        // for DB 0 (where physical == logical) and for DB-scoped keys alike.
+        // The allocation is once per SCAN call, never once per candidate.
+        let physical_literal_prefix = pattern
+            .map(glob_literal_prefix)
+            .filter(|prefix| !prefix.is_empty())
+            .map(|prefix| encode_db_key(db, prefix));
+        // KeyDict can additionally skip whole buckets for DB 0, whose physical
+        // first byte is the logical first byte. DB-encoded keys retain the normal
+        // walk because their first byte names the database rather than the key.
         let prefix_first_byte = (db == 0)
-            .then(|| pattern.and_then(|p| glob_literal_prefix(p).first().copied()))
+            .then(|| {
+                physical_literal_prefix
+                    .as_deref()
+                    .and_then(|prefix| prefix.first().copied())
+            })
             .flatten();
         let db_prefix = encode_db_key(db, b"");
 
@@ -33398,6 +33409,12 @@ impl Store {
                     return;
                 }
             } else if !physical.starts_with(db_prefix.as_slice()) {
+                return;
+            }
+            if physical_literal_prefix
+                .as_deref()
+                .is_some_and(|prefix| !physical.starts_with(prefix))
+            {
                 return;
             }
             let logical = decode_db_key(physical).map(|(_, l)| l).unwrap_or(physical);
@@ -37237,9 +37254,7 @@ impl Store {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
                 let mut list = VecDeque::new();
-                for item in decode_ziplist_strings(&ziplist)? {
-                    list.push_back(item);
-                }
+                decode_ziplist_each(&ziplist, |item| list.push_back(item))?;
                 if list.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
@@ -37350,9 +37365,7 @@ impl Store {
                 for _ in 0..node_count {
                     let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += consumed;
-                    for item in decode_ziplist_strings(&ziplist)? {
-                        list.push_back(item);
-                    }
+                    decode_ziplist_each(&ziplist, |item| list.push_back(item))?;
                 }
                 if list.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
@@ -37401,7 +37414,7 @@ impl Store {
             RDB_TYPE_HASH_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                let hash = hash_from_flat_entries(decode_ziplist_strings(&ziplist)?)?;
+                let hash = hash_from_ziplist(&ziplist)?;
                 if hash.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
@@ -37479,7 +37492,7 @@ impl Store {
             RDB_TYPE_ZSET_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                let zs = zset_from_flat_entries(decode_ziplist_strings(&ziplist)?)?;
+                let zs = zset_from_ziplist(&ziplist)?;
                 if zs.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
@@ -39177,6 +39190,7 @@ fn decode_listpack_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
         .map_err(|_| StoreError::InvalidDumpPayload)
 }
 
+#[cfg(test)]
 fn hash_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<HashFieldMap, StoreError> {
     // (frankenredis-qxfmr) The listpack/ziplist RESTORE path. The former
     // `for { hash.insert(pair[0].clone(), pair[1].clone()) }` was O(n²) (each
@@ -39206,7 +39220,34 @@ fn hash_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<HashFieldMap, StoreEr
     Ok(HashFieldMap::from_unique_pairs(pairs))
 }
 
-/// Span-based (zero-copy) twin of [`hash_from_flat_entries`] for the listpack
+/// Legacy ziplist RESTORE twin of the former flat-entry builder. Pair entries while
+/// decoding, so the target builder receives its `(field, value)` representation
+/// directly instead of first materialising `Vec<Vec<u8>>`.
+fn hash_from_ziplist(data: &[u8]) -> Result<HashFieldMap, StoreError> {
+    let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut pending_field = None;
+    decode_ziplist_each(data, |entry| {
+        if let Some(field) = pending_field.take() {
+            pairs.push((field, entry));
+        } else {
+            pending_field = Some(entry);
+        }
+    })?;
+    if pending_field.is_some() {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
+        std::collections::HashSet::with_capacity_and_hasher(
+            pairs.len(),
+            foldhash::quality::RandomState::default(),
+        );
+    if !pairs.iter().all(|(field, _)| seen.insert(field.as_slice())) {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    Ok(HashFieldMap::from_unique_pairs(pairs))
+}
+
+/// Span-based (zero-copy) twin of the former flat-entry builder for the listpack
 /// RESTORE path. Decodes the listpack to borrowed spans and bulk-builds via
 /// `from_unique_pairs_borrowed` instead of exploding to N owned `Vec<u8>` that
 /// the builder would only copy and drop. Byte-identical for a valid
@@ -39408,6 +39449,7 @@ pub fn bench_hash_restore_keep_listpack(listpack: &[u8]) -> usize {
     raw.len()
 }
 
+#[cfg(test)]
 fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError> {
     let (chunks, remainder) = entries.as_chunks::<2>();
     if !remainder.is_empty() {
@@ -39434,6 +39476,38 @@ fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError
     }
     // RESTORE rejects a duplicate member (the per-member insert returned false for
     // an already-present member); from_unique_pairs_with_limits requires uniqueness.
+    if restore_items_have_duplicate_key(&pairs, |(member, _)| member.as_slice()) {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    Ok(SortedSet::from_unique_pairs_with_limits(
+        pairs,
+        SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES,
+        SORTED_SET_PACKED_DEFAULT_MAX_VALUE,
+    ))
+}
+
+/// Legacy ziplist RESTORE twin of the former flat-entry builder. Scores are parsed
+/// as soon as their matching member arrives, avoiding a temporary flat vector.
+fn zset_from_ziplist(data: &[u8]) -> Result<SortedSet, StoreError> {
+    let mut pairs: Vec<(Vec<u8>, f64)> = Vec::new();
+    let mut pending_member = None;
+    let mut parse_error = false;
+    decode_ziplist_each(data, |entry| {
+        if let Some(member) = pending_member.take() {
+            let score = std::str::from_utf8(&entry)
+                .ok()
+                .and_then(|raw| raw.parse::<f64>().ok());
+            match score.filter(|score| !score.is_nan()) {
+                Some(score) => pairs.push((member, score)),
+                None => parse_error = true,
+            }
+        } else {
+            pending_member = Some(entry);
+        }
+    })?;
+    if pending_member.is_some() || parse_error {
+        return Err(StoreError::InvalidDumpPayload);
+    }
     if restore_items_have_duplicate_key(&pairs, |(member, _)| member.as_slice()) {
         return Err(StoreError::InvalidDumpPayload);
     }
@@ -39592,7 +39666,10 @@ fn decode_zipmap_len(
     }
 }
 
-fn decode_ziplist_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
+/// Decode a legacy ziplist straight into its consumer. RESTORE needs owned
+/// bytes in the target representation, but it never needs a temporary
+/// `Vec<Vec<u8>>` merely to iterate them a second time.
+fn decode_ziplist_each<F: FnMut(Vec<u8>)>(data: &[u8], mut visit: F) -> Result<(), StoreError> {
     const ZIPLIST_HEADER_SIZE: usize = 10;
     const ZIP_END: u8 = 0xFF;
 
@@ -39614,14 +39691,15 @@ fn decode_ziplist_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
     let mut cursor = ZIPLIST_HEADER_SIZE;
     let mut prev_entry_len = 0usize;
     let mut last_entry_start = None;
-    let mut entries = Vec::new();
+    let mut entry_count = 0usize;
     while cursor < end {
         let entry_start = cursor;
         let encoded_prev_len = decode_ziplist_prevlen(data, &mut cursor, end)?;
         if !ziplist_usize_eq(encoded_prev_len, prev_entry_len) {
             return Err(StoreError::InvalidDumpPayload);
         }
-        entries.push(decode_ziplist_entry(data, &mut cursor, end)?);
+        visit(decode_ziplist_entry(data, &mut cursor, end)?);
+        entry_count = entry_count.saturating_add(1);
         prev_entry_len = cursor
             .checked_sub(entry_start)
             .ok_or(StoreError::InvalidDumpPayload)?;
@@ -39632,10 +39710,17 @@ fn decode_ziplist_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
     if !ziplist_usize_eq(tail_offset, expected_tail) {
         return Err(StoreError::InvalidDumpPayload);
     }
-    if !matches!(zllen, u16::MAX) && !ziplist_usize_eq(usize::from(zllen), entries.len()) {
+    if !matches!(zllen, u16::MAX) && !ziplist_usize_eq(usize::from(zllen), entry_count) {
         return Err(StoreError::InvalidDumpPayload);
     }
 
+    Ok(())
+}
+
+#[cfg(test)]
+fn decode_ziplist_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
+    let mut entries = Vec::new();
+    decode_ziplist_each(data, |entry| entries.push(entry))?;
     Ok(entries)
 }
 
@@ -66631,6 +66716,50 @@ mod tests {
             "expected >2x"
         );
     }
+
+    /// A literal MATCH prefix is checked on the physical key before SCAN
+    /// decodes it to a logical key. This must preserve the same DB-local result
+    /// set for both unencoded DB 0 and encoded nonzero databases.
+    #[test]
+    fn scan_in_db_raw_prefix_filter_matches_glob_ground_truth_hwcm1() {
+        use super::{Store, encode_db_key, glob_match};
+
+        for db in [0usize, 1] {
+            let mut store = Store::new();
+            for key in [
+                b"tenant:needle:one".as_slice(),
+                b"tenant:other",
+                b"other:needle",
+            ] {
+                store.set(encode_db_key(db, key), b"v".to_vec(), None, 0);
+            }
+            store.set(
+                encode_db_key(2, b"tenant:needle:other-db"),
+                b"v".to_vec(),
+                None,
+                0,
+            );
+
+            let pattern = b"tenant:needle:*";
+            let mut cursor = 0;
+            let mut got = Vec::new();
+            loop {
+                let (next, batch) = store.scan_in_db(db, cursor, Some(pattern), None, 1, 0);
+                got.extend(batch);
+                if next == 0 {
+                    break;
+                }
+                cursor = next;
+            }
+            got.sort();
+            assert_eq!(
+                got,
+                vec![b"tenant:needle:one".to_vec()],
+                "DB {db}: raw prefix filter must not leak or omit keys"
+            );
+            assert!(glob_match(pattern, b"tenant:needle:one"));
+        }
+    }
     // (frankenredis-377jl) Frozen fingerprint of the grouped PEL AOF corpus.
     const AOFPEL_GOLDEN: u64 = 0xa82a_4b22_ca56_1dc1;
 
@@ -77047,6 +77176,35 @@ mod tests {
         }
     }
 
+    /// The direct legacy-ziplist builder must agree with the former flat-vector
+    /// route. The reference intentionally materializes `Vec<Vec<u8>>`; the
+    /// production path must not, while preserving all target-map contents.
+    #[test]
+    fn legacy_ziplist_direct_hash_decode_matches_flat_reference_33832() -> Result<(), String> {
+        let ziplist = encode_test_ziplist_strings(&[
+            b"field".as_slice(),
+            b"value",
+            b"count",
+            b"42",
+            b"binary\0field",
+            b"\xff",
+        ])
+        .ok_or_else(|| "encode legacy hash ziplist".to_string())?;
+        let direct = super::hash_from_ziplist(&ziplist)
+            .map_err(|err| format!("direct ziplist decode: {err:?}"))?;
+        let reference = super::hash_from_flat_entries(
+            super::decode_ziplist_strings(&ziplist)
+                .map_err(|err| format!("flat ziplist decode: {err:?}"))?,
+        )
+        .map_err(|err| format!("flat hash builder: {err:?}"))?;
+
+        assert_eq!(direct.len(), reference.len());
+        for field in [b"field".as_slice(), b"count", b"binary\0field"] {
+            assert_eq!(direct.get(field), reference.get(field), "field={field:?}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn restore_rejects_duplicate_legacy_hash_ziplist_fields() -> Result<(), String> {
         let ziplist = encode_test_ziplist_strings(&[b"field".as_slice(), b"one", b"field", b"two"])
@@ -77123,6 +77281,39 @@ mod tests {
                 "legacy zset ziplist restored wrong score: {other:?}"
             )),
         }
+    }
+
+    /// The direct legacy-ziplist zset builder must preserve the former
+    /// flat-vector route's member/score mapping, including negative scores.
+    #[test]
+    fn legacy_ziplist_direct_zset_decode_matches_flat_reference_33832() -> Result<(), String> {
+        let ziplist = encode_test_ziplist_strings(&[
+            b"one".as_slice(),
+            b"1.5",
+            b"two",
+            b"-2",
+            b"binary\0member",
+            b"0",
+        ])
+        .ok_or_else(|| "encode legacy zset ziplist".to_string())?;
+        let direct = super::zset_from_ziplist(&ziplist)
+            .map_err(|err| format!("direct ziplist decode: {err:?}"))?;
+        let reference = super::zset_from_flat_entries(
+            super::decode_ziplist_strings(&ziplist)
+                .map_err(|err| format!("flat ziplist decode: {err:?}"))?,
+        )
+        .map_err(|err| format!("flat zset builder: {err:?}"))?;
+
+        assert_eq!(direct.len(), reference.len());
+        for (member, score) in [
+            (b"one".as_slice(), 1.5),
+            (b"two", -2.0),
+            (b"binary\0member", 0.0),
+        ] {
+            assert_eq!(direct.get_score(member), reference.get_score(member));
+            assert_eq!(direct.get_score(member), Some(score));
+        }
+        Ok(())
     }
 
     #[test]
