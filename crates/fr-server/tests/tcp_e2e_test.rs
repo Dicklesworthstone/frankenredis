@@ -5337,6 +5337,41 @@ fn replica_ack_during_client_pause_offset(
         "REPLCONF listening-port must register the connection as a replica"
     );
 
+    // CLIENT_SLAVE is set by the PSYNC path, not merely by REPLCONF. Complete
+    // a minimal full-resync handshake and drain its RDB bulk frame so the same
+    // TCP connection is a real replica when it later sends its ACK.
+    replica
+        .write_all(&encode_command(&[b"PSYNC", b"?", b"-1"]))
+        .expect("write PSYNC handshake");
+    let read_line = |stream: &mut TcpStream| {
+        let mut line = Vec::new();
+        loop {
+            let mut byte = [0_u8; 1];
+            stream.read_exact(&mut byte).expect("read replication line");
+            line.push(byte[0]);
+            if line.ends_with(b"\r\n") {
+                line.truncate(line.len() - 2);
+                return line;
+            }
+            assert!(line.len() < 1024, "replication line was unbounded");
+        }
+    };
+    let fullresync = read_line(&mut replica);
+    assert!(
+        fullresync.starts_with(b"+FULLRESYNC "),
+        "expected FULLRESYNC, got {:?}",
+        String::from_utf8_lossy(&fullresync)
+    );
+    let bulk_header = read_line(&mut replica);
+    let bulk_len = std::str::from_utf8(&bulk_header)
+        .expect("RDB bulk header utf8")
+        .strip_prefix('$')
+        .expect("RDB bulk marker")
+        .parse::<usize>()
+        .expect("RDB bulk length");
+    let mut rdb = vec![0_u8; bulk_len];
+    replica.read_exact(&mut rdb).expect("drain full-resync RDB");
+
     let mut pauser = connect_client(port);
     assert_eq!(
         send_command(&mut pauser, &[b"CLIENT", b"PAUSE", b"1200", b"ALL"]),
