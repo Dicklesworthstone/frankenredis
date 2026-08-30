@@ -5284,18 +5284,19 @@ fn pending_output_sync_reply(
     let _server = spawn(port);
     let mut client = connect_client(port);
 
-    // These frames deliberately share one write.  `PING` leaves a reply in the
-    // client's output buffer when SYNC/PSYNC is dispatched, which is the state
-    // upstream replication.c::syncCommand refuses rather than interleaving the
-    // old reply into a new replication stream.
-    let mut pipeline = encode_command(&[b"PING"]);
+    // These frames deliberately share one write. A multi-megabyte ECHO reply
+    // cannot drain before the following SYNC/PSYNC is dispatched, which is the
+    // state upstream replication.c::syncCommand refuses rather than
+    // interleaving the old reply into a new replication stream.
+    let payload = vec![b'x'; 4 * 1024 * 1024];
+    let mut pipeline = encode_command(&[b"ECHO", &payload]);
     pipeline.extend_from_slice(&encode_command(command));
     client
         .write_all(&pipeline)
-        .expect("write PING plus replication command");
+        .expect("write ECHO plus replication command");
     assert_eq!(
         read_response(&mut client),
-        RespFrame::SimpleString("PONG".to_string()),
+        RespFrame::BulkString(Some(payload)),
         "the leading command must have produced the pending output"
     );
     let reply = read_response(&mut client);
