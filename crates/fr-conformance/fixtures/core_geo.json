@@ -1066,6 +1066,43 @@
       }
     },
     {
+      "name": "geosearch_missing_distance_shape_keeps_err_prefix",
+      "now_ms": 200,
+      "argv": [
+        "GEOSEARCH",
+        "geo2",
+        "FROMLONLAT",
+        "15",
+        "37",
+        "ASC",
+        "COUNT",
+        "5"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR exactly one of BYRADIUS and BYBOX can be specified for GEOSEARCH"
+      }
+    },
+    {
+      "name": "geosearchstore_missing_distance_shape_keeps_err_prefix",
+      "now_ms": 200,
+      "argv": [
+        "GEOSEARCHSTORE",
+        "geo_shape_dest",
+        "geo2",
+        "FROMLONLAT",
+        "15",
+        "37",
+        "ASC",
+        "COUNT",
+        "5"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR exactly one of BYRADIUS and BYBOX can be specified for GEOSEARCHSTORE"
+      }
+    },
+    {
       "name": "geosearch_desc_order",
       "now_ms": 200,
       "argv": [
