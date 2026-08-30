@@ -56,6 +56,191 @@ use std::hash::BuildHasher;
 /// 4.29e9 of them is over 300 GB of keyspace index before any values.
 const NIL: u32 = u32::MAX;
 
+/// Nodes per [`NodeArena`] chunk.
+///
+/// 4096 cells is ~288 KB at the live `Node<Entry>` width, so the outer `Vec` of chunk
+/// pointers is 245 entries (under 2 KB, permanently cache-resident) at a million keys,
+/// while the tail chunk wastes at most 4095 cells -- 0.3 B/key at 1M, against the 3.5
+/// B/key a doubling `Vec` leaves stranded above its high-water mark at the same size.
+const ARENA_CHUNK_SHIFT: u32 = 12;
+const ARENA_CHUNK_LEN: usize = 1 << ARENA_CHUNK_SHIFT;
+const ARENA_CHUNK_MASK: usize = ARENA_CHUNK_LEN - 1;
+
+/// The node arena, as FIXED-SIZE CHUNKS that are allocated once and never reallocated.
+///
+/// (frankenredis-uhthd) This was a single `Vec<Option<Node<V>>>`, which grows by
+/// DOUBLING, so its capacity is a power of two while the key count is not. The
+/// stranded remainder is charged at the full node width: at 1M keys the arena holds
+/// 1,048,576 slots for 1,000,000 live nodes, and 48,576 x 72 B is **3.5 B/key** of
+/// reserved-but-never-used arena. That is a best case, not a typical one -- just past
+/// a doubling the same policy strands close to HALF the arena, which at this node
+/// width is tens of bytes per key.
+///
+/// THE STRANDED CAPACITY IS THE SMALL HALF. The large one is the DOUBLING GARBAGE:
+/// reaching 2^20 slots frees a 37.7 MB region, the growth before it frees 18.9 MB,
+/// and so on. Under the server's allocator those freed regions are not returned --
+/// they are retained in mimalloc's arena, and the instrument samples RSS immediately
+/// after the load, which is when they are all still resident. Chunking never creates
+/// them. Measured on a live server, 1M keys, against Redis 7.2.4 in the same
+/// invocation: **145.2 -> 115.9 B/key, 1.7580x -> 1.4005x, -29.3 B/key**, three
+/// interleaved pairs, every A/A null within 0.9971-1.0009.
+///
+/// DO NOT TRY TO SEE THIS IN `keydict_byte_attribution_uhthd`. That instrument reads
+/// 110.4 B/key resident against 91.7 accounted and shows NO retained block, which is
+/// how this lever was very nearly sized at -3.2 B/key and dropped as marginal. The
+/// reason is that `#[global_allocator]` lives in `fr-server/src/main.rs` alone, so
+/// the fr-store TEST binary runs on system malloc, which munmaps a large free
+/// immediately, while the shipping server runs mimalloc, which does not. The
+/// instrument is measuring a different allocator from the one that ships, and is
+/// blind to every retention effect by construction.
+///
+/// Chunking removes the growth copy rather than hiding it: a slot index is
+/// `(chunk, offset)` by construction, so growth never moves a live node and never
+/// touches a byte of one. That also makes the arena index STABLE, which the bucket
+/// heads and `next` links already depend on, and it takes an O(n) memcpy off the
+/// insert path that crosses a power of two.
+///
+/// The trade is one extra load per node access -- `chunks[i >> SHIFT][i & MASK]`
+/// instead of `nodes[i]`. The outer vector is small enough to stay in L1 while the
+/// node itself is a near-certain cache miss at these sizes, so the added dependent
+/// load lands in the shadow of the miss it precedes.
+///
+/// `#![forbid(unsafe_code)]` holds: chunks are ordinary boxed slices.
+struct NodeArena<V> {
+    chunks: Vec<Box<[Option<Node<V>>]>>,
+    /// High-water mark of allocated slots, the analogue of `Vec::len`. Slots at or
+    /// above this are `None` and have never been handed out.
+    len: usize,
+}
+
+impl<V> NodeArena<V> {
+    fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            len: 0,
+        }
+    }
+
+    /// One chunk of `None`s. `repeat_with` reports an exact size hint, so the `Vec`
+    /// is allocated at exactly `ARENA_CHUNK_LEN` and `into_boxed_slice` never
+    /// reallocates -- a chunk carries no spare capacity.
+    fn new_chunk() -> Box<[Option<Node<V>>]> {
+        std::iter::repeat_with(|| None)
+            .take(ARENA_CHUNK_LEN)
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+
+    /// Pre-allocate whole chunks for `capacity` cells. Only ever called before the
+    /// first insert (see [`KeyDict::with_capacity`]) or from `reserve`.
+    fn reserve_slots(&mut self, capacity: usize) {
+        let needed = capacity.div_ceil(ARENA_CHUNK_LEN);
+        while self.chunks.len() < needed {
+            self.chunks.push(Self::new_chunk());
+        }
+    }
+
+    #[inline]
+    fn slot(&self, idx: u32) -> &Option<Node<V>> {
+        let i = idx as usize;
+        &self.chunks[i >> ARENA_CHUNK_SHIFT][i & ARENA_CHUNK_MASK]
+    }
+
+    #[inline]
+    fn slot_mut(&mut self, idx: u32) -> &mut Option<Node<V>> {
+        let i = idx as usize;
+        &mut self.chunks[i >> ARENA_CHUNK_SHIFT][i & ARENA_CHUNK_MASK]
+    }
+
+    #[inline]
+    fn get(&self, idx: u32) -> &Node<V> {
+        self.slot(idx)
+            .as_ref()
+            .expect("bucket chain points at live node")
+    }
+
+    #[inline]
+    fn get_mut(&mut self, idx: u32) -> &mut Node<V> {
+        self.slot_mut(idx)
+            .as_mut()
+            .expect("bucket chain points at live node")
+    }
+
+    /// Append a node at the high-water mark, allocating one chunk if it lands past
+    /// the last. Returns its stable slot index.
+    fn push(&mut self, node: Node<V>) -> u32 {
+        let i = self.len;
+        if (i >> ARENA_CHUNK_SHIFT) == self.chunks.len() {
+            self.chunks.push(Self::new_chunk());
+        }
+        self.chunks[i >> ARENA_CHUNK_SHIFT][i & ARENA_CHUNK_MASK] = Some(node);
+        self.len += 1;
+        i as u32
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Slots reserved across all chunks, the analogue of `Vec::capacity`.
+    #[inline]
+    fn capacity(&self) -> usize {
+        self.chunks.len() * ARENA_CHUNK_LEN
+    }
+
+    /// Drop every node, keeping the chunks -- `Vec::clear` semantics, which
+    /// `KeyDict::clear` relies on to retain its allocation like `HashMap::clear`.
+    ///
+    /// Only the live prefix is walked, not the whole reserved capacity: slots at or
+    /// above the high-water mark are already `None`, and touching them would make
+    /// FLUSHALL cost the arena's capacity rather than its length.
+    fn clear(&mut self) {
+        for (_, slot) in self.slots_mut() {
+            *slot = None;
+        }
+        self.len = 0;
+    }
+
+    /// Every live slot below the high-water mark, with its index. Slots at or above
+    /// `len` were never handed out and are skipped, so a caller enumerating this sees
+    /// exactly what a `Vec<Option<_>>::iter_mut().enumerate()` used to show it.
+    fn slots_mut(&mut self) -> impl Iterator<Item = (usize, &mut Option<Node<V>>)> {
+        let len = self.len;
+        self.chunks
+            .iter_mut()
+            .flat_map(|chunk| chunk.iter_mut())
+            .take(len)
+            .enumerate()
+    }
+
+    /// Squeeze the `None` holes out, preserving relative order and RENUMBERING every
+    /// surviving node to a dense prefix. The caller must rebuild the bucket heads and
+    /// `next` links afterwards, because every index it held is now stale.
+    fn compact(&mut self) {
+        let mut write = 0usize;
+        for read in 0..self.len {
+            if self.slot(read as u32).is_some() {
+                if write != read {
+                    let node = self.slot_mut(read as u32).take();
+                    *self.slot_mut(write as u32) = node;
+                }
+                write += 1;
+            }
+        }
+        // Every `Some` now lives below `write`: a slot at or above it either held
+        // `None` already or was moved down by the `take` above.
+        self.len = write;
+    }
+
+    /// Hand back whole chunks that hold nothing. Only chunks entirely above the
+    /// high-water mark can go, so this is meaningful after [`Self::compact`].
+    fn shrink_to_fit(&mut self) {
+        self.chunks.truncate(self.len.div_ceil(ARENA_CHUNK_LEN));
+        self.chunks.shrink_to_fit();
+    }
+}
+
 /// One key/value cell; `next` chains collisions in the same bucket.
 struct Node<V> {
     /// Low 32 bits of the key's hash, kept as a cheap pre-filter before the byte
@@ -118,7 +303,9 @@ pub struct KeyDict<V> {
     /// non-null pointer, so the `None` discriminant lives in that niche. Pinned by
     /// `node_layout_is_compact_uhthd` so a future field reorder cannot silently add
     /// a word per key.
-    nodes: Vec<Option<Node<V>>>,
+    ///
+    /// Held in fixed-size chunks rather than one doubling `Vec` -- see [`NodeArena`].
+    nodes: NodeArena<V>,
     free: Vec<u32>,
     /// `buckets.len() - 1`; bucket index = `hash & mask`.
     mask: u64,
@@ -198,7 +385,11 @@ impl<V> KeyDict<V> {
         Self {
             buckets,
             first_byte_bits: vec![0; n],
-            nodes: Vec::with_capacity(capacity),
+            nodes: {
+                let mut arena = NodeArena::new();
+                arena.reserve_slots(capacity);
+                arena
+            },
             free: Vec::new(),
             mask: (n as u64) - 1,
             count: 0,
@@ -221,7 +412,7 @@ impl<V> KeyDict<V> {
             self.resize_buckets(Self::bucket_count_for_capacity(needed));
         }
         self.nodes
-            .reserve(additional.saturating_sub(self.free.len()));
+            .reserve_slots(self.nodes.len() + additional.saturating_sub(self.free.len()));
     }
 
     #[inline]
@@ -285,9 +476,7 @@ impl<V> KeyDict<V> {
         let mut bits = 0;
         let mut node = self.buckets[bucket];
         while node != NIL {
-            let current = self.nodes[node as usize]
-                .as_ref()
-                .expect("bucket chain points at live node");
+            let current = self.nodes.get(node);
             bits |= Self::first_byte_bit(&current.key);
             node = current.next;
         }
@@ -301,7 +490,7 @@ impl<V> KeyDict<V> {
     /// fails loudly instead of aliasing a live node with the sentinel.
     fn alloc_node(&mut self, node: Node<V>) -> u32 {
         if let Some(idx) = self.free.pop() {
-            self.nodes[idx as usize] = Some(node);
+            *self.nodes.slot_mut(idx) = Some(node);
             idx
         } else {
             assert!(
@@ -309,8 +498,7 @@ impl<V> KeyDict<V> {
                 "KeyDict node arena exceeded u32 addressing ({} slots)",
                 self.nodes.len()
             );
-            self.nodes.push(Some(node));
-            (self.nodes.len() - 1) as u32
+            self.nodes.push(node)
         }
     }
 
@@ -319,9 +507,7 @@ impl<V> KeyDict<V> {
         let h = self.hash_key(key);
         let mut cur = self.buckets[self.bucket_of(h)];
         while cur != NIL {
-            let node = self.nodes[cur as usize]
-                .as_ref()
-                .expect("bucket chain points at live node");
+            let node = self.nodes.get(cur);
             if node.hash == h && *node.key == *key {
                 return Some(&node.value);
             }
@@ -336,16 +522,9 @@ impl<V> KeyDict<V> {
         let b = self.bucket_of(h);
         let mut cur = self.buckets[b];
         while cur != NIL {
-            let node = self.nodes[cur as usize]
-                .as_ref()
-                .expect("bucket chain points at live node");
+            let node = self.nodes.get(cur);
             if node.hash == h && *node.key == *key {
-                return Some(
-                    &mut self.nodes[cur as usize]
-                        .as_mut()
-                        .expect("bucket chain points at live node")
-                        .value,
-                );
+                return Some(&mut self.nodes.get_mut(cur).value);
             }
             cur = node.next;
         }
@@ -369,9 +548,7 @@ impl<V> KeyDict<V> {
         let h = self.hash_key(key);
         let mut cur = self.buckets[self.bucket_of(h)];
         while cur != NIL {
-            let node = self.nodes[cur as usize]
-                .as_ref()
-                .expect("bucket chain points at live node");
+            let node = self.nodes.get(cur);
             if node.hash == h && *node.key == *key {
                 return Some((&node.key, &node.value));
             }
@@ -409,14 +586,14 @@ impl<V> KeyDict<V> {
     /// reverse-binary cursor, which derives everything from `hash & mask`.
     pub fn shrink_to_fit(&mut self) {
         if !self.free.is_empty() {
-            self.nodes.retain(|slot| slot.is_some());
+            self.nodes.compact();
             self.free.clear();
             self.free.shrink_to_fit();
             debug_assert_eq!(self.nodes.len(), self.count);
             // Every index moved, so relink from scratch rather than patching.
             let mask = self.mask;
             self.buckets.fill(NIL);
-            for (idx, node) in self.nodes.iter_mut().enumerate() {
+            for (idx, node) in self.nodes.slots_mut() {
                 let node = node.as_mut().expect("holes were just compacted out");
                 let b = (u64::from(node.hash) & mask) as usize;
                 node.next = self.buckets[b];
@@ -441,9 +618,7 @@ impl<V> KeyDict<V> {
         // Overwrite in place if present.
         let mut cur = self.buckets[b];
         while cur != NIL {
-            let node = self.nodes[cur as usize]
-                .as_mut()
-                .expect("bucket chain points at live node");
+            let node = self.nodes.get_mut(cur);
             if node.hash == h && *node.key == *key {
                 return Some(std::mem::replace(&mut node.value, value));
             }
@@ -468,12 +643,7 @@ impl<V> KeyDict<V> {
             next: head,
         });
         self.buckets[b] = idx;
-        self.first_byte_bits[b] |= Self::first_byte_bit(
-            &self.nodes[idx as usize]
-                .as_ref()
-                .expect("fresh node is live")
-                .key,
-        );
+        self.first_byte_bits[b] |= Self::first_byte_bit(&self.nodes.get(idx).key);
         self.count += 1;
         if self.count > self.buckets.len() {
             self.grow();
@@ -488,19 +658,16 @@ impl<V> KeyDict<V> {
         let mut prev = NIL;
         let mut cur = self.buckets[b];
         while cur != NIL {
-            let node = self.nodes[cur as usize]
-                .as_ref()
-                .expect("bucket chain points at live node");
+            let node = self.nodes.get(cur);
             let next = node.next;
             if node.hash == h && *node.key == *key {
-                let removed = self.nodes[cur as usize]
+                let removed = self
+                    .nodes
+                    .slot_mut(cur)
                     .take()
                     .expect("bucket chain points at live node");
                 if prev != NIL {
-                    self.nodes[prev as usize]
-                        .as_mut()
-                        .expect("bucket chain points at live node")
-                        .next = removed.next;
+                    self.nodes.get_mut(prev).next = removed.next;
                 } else {
                     self.buckets[b] = removed.next;
                 }
@@ -566,7 +733,7 @@ impl<V> KeyDict<V> {
         }
         let new_mask = (new_len as u64) - 1;
         let mut buckets: Vec<u32> = vec![NIL; new_len];
-        for (idx, node) in self.nodes.iter_mut().enumerate() {
+        for (idx, node) in self.nodes.slots_mut() {
             if let Some(node) = node {
                 let b = (u64::from(node.hash) & new_mask) as usize;
                 node.next = buckets[b];
@@ -618,9 +785,7 @@ impl<V> KeyDict<V> {
             let b = (v & self.mask) as usize;
             let mut node = self.buckets[b];
             while node != NIL {
-                let n = self.nodes[node as usize]
-                    .as_ref()
-                    .expect("bucket chain points at live node");
+                let n = self.nodes.get(node);
                 emit(&n.key, &n.value);
                 emitted += 1;
                 node = n.next;
@@ -655,9 +820,7 @@ impl<V> KeyDict<V> {
             if self.first_byte_bits[b] & wanted != 0 {
                 let mut node = self.buckets[b];
                 while node != NIL {
-                    let n = self.nodes[node as usize]
-                        .as_ref()
-                        .expect("bucket chain points at live node");
+                    let n = self.nodes.get(node);
                     emit(&n.key, &n.value);
                     emitted += 1;
                     node = n.next;
@@ -696,15 +859,9 @@ impl<V> KeyDict<V> {
         // sentinel. `successors` needs an `Option`, so the sentinel is mapped to
         // `None` here rather than being represented as one in the node.
         let chain = |head: u32| {
-            std::iter::successors(Some(head), |&idx| {
-                match self.nodes[idx as usize]
-                    .as_ref()
-                    .expect("bucket chain points at live node")
-                    .next
-                {
-                    NIL => None,
-                    next => Some(next),
-                }
+            std::iter::successors(Some(head), |&idx| match self.nodes.get(idx).next {
+                NIL => None,
+                next => Some(next),
             })
         };
         for _ in 0..64 {
@@ -714,9 +871,7 @@ impl<V> KeyDict<V> {
                 let chain_len = chain(head).count();
                 let pick = reduce(next_rand(), chain_len);
                 let chosen = chain(head).nth(pick).expect("pick is within chain length");
-                let chosen = self.nodes[chosen as usize]
-                    .as_ref()
-                    .expect("bucket chain points at live node");
+                let chosen = self.nodes.get(chosen);
                 return Some((&chosen.key, &chosen.value));
             }
         }
@@ -726,9 +881,7 @@ impl<V> KeyDict<V> {
             let b = (start + i) % self.buckets.len();
             let head = self.buckets[b];
             if head != NIL {
-                let head = self.nodes[head as usize]
-                    .as_ref()
-                    .expect("bucket chain points at live node");
+                let head = self.nodes.get(head);
                 return Some((&head.key, &head.value));
             }
         }
@@ -749,9 +902,7 @@ impl<'a, V> Iterator for KeyDictIter<'a, V> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.current != NIL {
-                let node = self.dict.nodes[self.current as usize]
-                    .as_ref()
-                    .expect("bucket chain points at live node");
+                let node = self.dict.nodes.get(self.current);
                 self.current = node.next;
                 return Some((&node.key, &node.value));
             }
@@ -1308,6 +1459,90 @@ mod tests {
             presized.bucket_count(),
             presized.storage_slots()
         );
+    }
+
+    /// (frankenredis-uhthd) COMPACTION ACROSS A CHUNK BOUNDARY.
+    ///
+    /// The node arena is fixed-size chunks, so a slot index is `(i >> SHIFT, i & MASK)`
+    /// and `compact` moves survivors DOWN across chunk boundaries -- from chunk 2 into
+    /// chunk 0 -- before `shrink_to_fit` hands whole chunks back. Every index the
+    /// bucket heads and `next` links hold is stale afterwards.
+    ///
+    /// `shrink_to_fit_preserves_every_surviving_key_uhthd` already covers renumbering,
+    /// but it uses 4,000 keys, which is UNDER `ARENA_CHUNK_LEN` -- it lives entirely in
+    /// chunk 0 and therefore cannot see a boundary bug at all. This one is deliberately
+    /// sized past three chunks and asserts that it really got there, so it cannot
+    /// silently decay into the single-chunk case the other test already covers.
+    ///
+    /// The wrong implementations this fails: reading a moved node through the read
+    /// index instead of the write index; allocating the next chunk one push late (which
+    /// corrupts exactly slot `ARENA_CHUNK_LEN`); truncating chunks before compacting;
+    /// and enumerating `slots_mut` over chunk CAPACITY rather than the live prefix,
+    /// which renumbers survivors past the holes at the end of every chunk.
+    #[test]
+    fn compaction_moves_survivors_across_chunk_boundaries_uhthd() {
+        const N: u32 = (ARENA_CHUNK_LEN as u32) * 3 + 517;
+        let mut d: KeyDict<u32> = KeyDict::new();
+        for i in 0..N {
+            d.insert(format!("key:{i:07}").into_bytes().into_boxed_slice(), i);
+        }
+        assert!(
+            d.storage_slots() > ARENA_CHUNK_LEN,
+            "ANTI-VACUITY: this test is only meaningful if the arena spans several \
+             chunks, but it holds {} slots against a {ARENA_CHUNK_LEN}-slot chunk",
+            d.storage_slots()
+        );
+
+        // Keep one key in every 7. The survivors are spread over every chunk, so
+        // compaction has to pull them down across boundaries rather than within one.
+        let survives = |i: u32| i % 7 == 0;
+        for i in 0..N {
+            if !survives(i) {
+                assert_eq!(d.remove(format!("key:{i:07}").as_bytes()), Some(i));
+            }
+        }
+        let expected: Vec<u32> = (0..N).filter(|i| survives(*i)).collect();
+        assert_eq!(d.len(), expected.len());
+
+        d.shrink_to_fit();
+
+        // 1. Every survivor is still reachable by lookup, and nothing else is.
+        for i in 0..N {
+            let got = d.get(format!("key:{i:07}").as_bytes()).copied();
+            assert_eq!(
+                got,
+                survives(i).then_some(i),
+                "key:{i:07} after cross-chunk compaction"
+            );
+        }
+        // 2. And by iteration -- which walks the bucket chains, so a stale `next`
+        //    link shows up here even when `get` happens to land right.
+        let mut seen: Vec<u32> = d.iter().map(|(_, v)| *v).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, expected, "iteration after cross-chunk compaction");
+        // 3. And by a full reverse-binary SCAN.
+        let mut scanned: Vec<u32> = Vec::new();
+        let mut cursor = 0u64;
+        loop {
+            cursor = d.scan(cursor, 16, |_, v| scanned.push(*v));
+            if cursor == 0 {
+                break;
+            }
+        }
+        scanned.sort_unstable();
+        assert_eq!(scanned, expected, "SCAN after cross-chunk compaction");
+
+        // 4. The chunks the survivors vacated were actually handed back: the arena
+        //    keeps only the chunks its dense prefix needs.
+        assert_eq!(
+            d.capacity(),
+            expected.len().div_ceil(ARENA_CHUNK_LEN) * ARENA_CHUNK_LEN,
+            "shrink_to_fit must release whole vacated chunks"
+        );
+
+        // 5. The dict still accepts new keys, reusing the compacted arena.
+        d.insert(k("after"), 12345);
+        assert_eq!(d.get(b"after"), Some(&12345));
     }
 
     #[test]
