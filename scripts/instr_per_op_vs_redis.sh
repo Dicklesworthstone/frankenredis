@@ -52,6 +52,42 @@ for f in "$BENCH" "$REDIS" "$CLI"; do
   [ -x "$f" ] || { echo "FAIL: missing vendored $f" >&2; exit 3; }
 done
 command -v perf >/dev/null || { echo "FAIL: perf not installed" >&2; exit 3; }
+# `perf` being INSTALLED is not `perf` being able to COUNT. With
+# kernel.perf_event_paranoid >= 3 an unprivileged user gets no counters at all,
+# and this script's own `${instr:-0}` fallbacks then render a complete,
+# well-formatted table of `0.0` instr/op for every row AND EXIT 0 -- a
+# clean-looking pass that measured nothing. That is exactly the failure this
+# repo's ledger calls a printed check that nothing gates on. Observed on
+# thinkstation1 2026-08-30 at paranoid=4.
+#
+# So prove a counter actually increments on a trivial job before measuring.
+#
+# Written WITHOUT a pipeline on purpose: this script runs under `set -euo
+# pipefail`, so `perf ... | awk ...` inside a command substitution aborts the
+# whole script on perf's non-zero exit BEFORE the check below can report
+# anything -- turning a diagnosable failure into a silent exit 1. Route perf's
+# output through a file and read it separately.
+_perf_tmp=$(mktemp)
+perf stat -e instructions:u -x, -o "$_perf_tmp" -- true >/dev/null 2>&1 || true
+_perf_probe=$(awk -F, '/instructions/{print $1}' "$_perf_tmp" 2>/dev/null || true)
+rm -f "$_perf_tmp"
+# `0` is rejected as well as empty and non-numeric: `true` really does retire
+# instructions, so a zero here means the counter is present but not counting,
+# which is the same broken state as no counter at all.
+case "${_perf_probe:-}" in
+  ''|0|*[!0-9]*)
+    {
+      echo "FAIL: perf cannot count on this host -- instructions:u returned '${_perf_probe:-<nothing>}'."
+      echo "      kernel.perf_event_paranoid = $(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo '?')"
+      echo "      >=3 denies unprivileged counting entirely; this script would otherwise"
+      echo "      print a table of 0.0 and exit 0. Use callgrind for instruction counts"
+      echo "      (deterministic, needs no counters, immune to host load), or run where"
+      echo "      paranoid <= 2."
+    } >&2
+    exit 4
+    ;;
+esac
+unset _perf_probe
 for p in $FR_PORT $RD_PORT $RD1_PORT; do
   ss -ltn 2>/dev/null | grep -q ":$p " && { echo "PREFLIGHT FAIL: port $p bound" >&2; exit 5; }
 done
@@ -114,7 +150,20 @@ syscalls:sys_enter_read,syscalls:sys_enter_write \
   rd=$(awk -F, '/sys_enter_read/{print $1}' "$out")
   wr=$(awk -F, '/sys_enter_write/{print $1}' "$out")
   rm -f "$out"
-  awk -v i="${instr:-0}" -v f="${futex:-0}" -v s="${sysall:-0}" -v r="${rd:-0}" \
+  # A MISSING OR ZERO INSTRUCTION COUNT IS A FAILED MEASUREMENT, NOT A ZERO COST.
+  # The `${instr:-0}` default below used to turn "perf gave us nothing" into a
+  # printed `0.0` that reads as data. A real job always retires instructions, so
+  # an empty or zero count can only mean the counter did not run -- the pid
+  # vanished, the event was rejected, or paranoid blocked it mid-run despite the
+  # preflight. Fail the row loudly instead of rendering it.
+  case "${instr:-}" in
+    ''|0)
+      echo "FAIL: no instruction count for pid $pid (got '${instr:-<nothing>}')." \
+           "perf produced no usable counter; refusing to print a 0.0 row." >&2
+      exit 4
+      ;;
+  esac
+  awk -v i="$instr" -v f="${futex:-0}" -v s="${sysall:-0}" -v r="${rd:-0}" \
       -v w="${wr:-0}" -v n="$ops" 'BEGIN{
     printf "%.1f %.4f %.3f %.3f %.3f", i/n, f/n, s/n, r/n, w/n
   }'
