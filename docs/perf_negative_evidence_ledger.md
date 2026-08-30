@@ -72922,3 +72922,45 @@ admissible if (a) the node stays 72 bytes, which means finding 8 bytes elsewhere
 new cap — a 23-byte cap tested against 20-26 byte keys is testing the wrong thing, and
 that mis-design is why this row exists. Any retry must carry BOTH a short and a long
 arm, since this shape can only ever trade one against the other.
+
+## 2026-08-30 FoggyOrchid: DO NOT BUILD — shrinking `Node` below 72 bytes returns ZERO, so the `modification_count` side-table refactor is not worth starting (`frankenredis-uhthd`)
+
+**One line:** node width 72 -> 64 measures **0.0 B/key** at the shipped
+`ARENA_CHUNK_SHIFT` 10, so the only remaining "obvious" keyspace lever -- moving
+`Entry.modification_count` to a side table to free 8 bytes -- would buy nothing for a
+multi-hour WATCH-correctness refactor. Sized BEFORE building; nothing was written.
+
+    arm (long keys, 20-26 B)   node 72        node 64        redis    72 x       64 x
+    rep 1                      128.3 / 128.5  128.6 / 128.3  99.2   1.2949x   1.2954x
+    rep 2                      128.7 / 128.9  128.4 / 128.8  99.2   1.2999x   1.2974x
+
+    A/A null control, fr_a vs fr_b, in the SAME invocation as each ratio:
+      node 72   0.9987 / 0.9981      node 64   1.0027 / 0.9965
+    All four nulls inside 0.4%; the effect being sought was 8 B/key (6.2%), i.e. ~15x
+    the null, and it is absent. base f2323a8d0 for BOTH arms, only keyspace_dict.rs
+    overlaid. harness scripts/keyspace_ram_vs_redis.py --keys 1000000
+    --prefix averylongkeyprefix: ; host thinkstation1; rch clean-overlay, -j 2.
+
+**How one build isolated node width with no confound.** `NODE_KEY_INLINE_CAP` 15 -> 7
+takes `NodeKey` 24 -> 16 and `Node` 72 -> 64 (pinned by `==` asserts that had to hold for
+the build to compile). The probe keys are 20-26 bytes, so NOTHING inlines at cap 7 or at
+cap 15 -- both arms allocate an identical heap block per key and differ ONLY in node
+width. That is why the long arm, not the short one, is the right instrument here.
+
+**COUNTED MECHANISM.** Structurally the two arenas differ by 977 chunks x 8 KB = 7.8 MB
+(7.8 B/key) and the per-key allocation COUNT is unchanged -- same one block per key, same
+sizes. No work was removed; the bytes simply never reach RSS, which on this server is
+mimalloc's `committed` (measured to ~1% by MIMALLOC_SHOW_STATS=1 in the comment thread on
+this bead).
+
+**This CONFIRMS an earlier result at a second operating point, which is why it is
+trustworthy now.** The same 72 -> 64 comparison read 0.0 B/key at `ARENA_CHUNK_SHIFT` 12
+(288 KB chunks, mimalloc's large-object path). I expected shift 10 (72 KB chunks, normal
+page path) to behave differently and re-measured rather than inherit the old note. It
+does not.
+
+**Retry predicate.** Do not size any keyspace lever from `size_of::<Node<_>>()`. Node
+width has now measured free at two chunk sizes in two different mimalloc allocation
+paths. A width lever is admissible only if a measurement at the CURRENT shift shows the
+width reaching RSS first -- and if that ever changes, the cheap probe is this one: flip
+`NODE_KEY_INLINE_CAP` and read the long-key arm.
