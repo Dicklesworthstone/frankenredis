@@ -5839,6 +5839,15 @@ pub struct ClientSession {
     /// (frankenredis-tepuj) Pending write bytes in write_buf — used
     /// for CLIENT INFO `obl=` (output buffer length).
     pub output_buffer_bytes: usize,
+    /// Actual allocation capacity of this connection's reply buffer.  Redis allocates a
+    /// 16 KiB static reply buffer at client creation; the server samples the backing Vec on
+    /// every dispatch so CLIENT INFO reports a real per-client allocation rather than a
+    /// format-string default.
+    pub reply_buffer_size: usize,
+    /// Largest reply-buffer allocation observed for this connection.  This is the FrankenRedis
+    /// analogue of Redis's `client->buf_peak`: it records an allocation high-water mark even
+    /// after the pending reply itself drains.
+    pub reply_buffer_peak: usize,
     /// Connection acceptance timestamp in ms since epoch.
     pub connected_at_ms: u64,
     /// Last command interaction timestamp in ms since epoch.
@@ -5876,6 +5885,8 @@ impl Clone for ClientSession {
             qbuf_bytes: self.qbuf_bytes,
             qbuf_free_bytes: self.qbuf_free_bytes,
             output_buffer_bytes: self.output_buffer_bytes,
+            reply_buffer_size: self.reply_buffer_size,
+            reply_buffer_peak: self.reply_buffer_peak,
             connected_at_ms: self.connected_at_ms,
             last_interaction_ms: self.last_interaction_ms,
             last_command_name: self.last_command_name,
@@ -5989,6 +6000,8 @@ impl ClientSession {
         self.qbuf_bytes = source.qbuf_bytes;
         self.qbuf_free_bytes = source.qbuf_free_bytes;
         self.output_buffer_bytes = source.output_buffer_bytes;
+        self.reply_buffer_size = source.reply_buffer_size;
+        self.reply_buffer_peak = source.reply_buffer_peak;
         self.last_interaction_ms = source.last_interaction_ms;
         self.last_argv_len_sum = source.last_argv_len_sum;
     }
@@ -6191,6 +6204,8 @@ impl Default for ClientSession {
             qbuf_bytes: 0,
             qbuf_free_bytes: 0,
             output_buffer_bytes: 0,
+            reply_buffer_size: 16_384,
+            reply_buffer_peak: 16_384,
             connected_at_ms: 0,
             last_interaction_ms: 0,
             last_command_name: None,
@@ -41337,12 +41352,7 @@ impl Runtime {
         // releases was dropped in 7.2; (2) fr does not track per-client
         // input/output-buffer accounting, so argv-mem and multi-mem are
         // always 0 — consistent with fr's existing 0-value fields
-        // (qbuf, qbuf-free, obl, oll, omem, tot-mem). (3) rbs and rbp
-        // (read-buffer size + peak) are pinned to PROTO_REPLY_CHUNK_BYTES
-        // (16384) to mirror upstream's default-allocation idle baseline
-        // — vendored emits 16384 even on a freshly-connected client
-        // because createClient assigns c->buf_usable_size during
-        // initClientReplyBuffer. (br-frankenredis-4upy, frankenredis-22v4o)
+        // (qbuf, qbuf-free, obl, oll, omem, tot-mem).
         format!(
             // (frankenredis-cudmd) Upstream networking.c::catClientInfoString
             // builds the per-client info string with sdscatfmt and
@@ -41351,7 +41361,7 @@ impl Runtime {
             // single LF). Earlier versions emitted CRLF here, leaving
             // a stray 0x0d byte in the bulk-string payload that broke
             // raw-byte parsers diffing against vendored.
-            "id={} addr={} laddr={} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem={} multi-mem={} rbs=16384 rbp=16384 obl={} oll={} omem={} tot-mem={} events={} cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
+            "id={} addr={} laddr={} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem={} multi-mem={} rbs={} rbp={} obl={} oll={} omem={} tot-mem={} events={} cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
             session.client_id,
             peer,
             // (frankenredis-edwnn) upstream getClientSockname(c). The port was already
@@ -41383,6 +41393,8 @@ impl Runtime {
             session.qbuf_free_bytes,
             argv_mem,
             multi_mem,
+            session.reply_buffer_size,
+            session.reply_buffer_peak,
             // (frankenredis-edwnn) obl / oll / omem, all three derived from the one
             // quantity fr actually has: `session.output_buffer_bytes`, which is
             // `conn.pending_output_bytes()` -- pending UNDRAINED write bytes.

@@ -56,10 +56,6 @@ FIELD_RE = re.compile(r"([a-z][a-z0-9-]*)=(\S*)")
 # call site documents it as a lower-bound estimate (frankenredis-tepuj). A declared
 # approximation of a computed field is a different thing from a hardcoded constant.
 DECLARED_LITERALS = {
-    "rbs": ("client->buf_usable_size",
-            "fr grows a reply-buffer mechanism at all -- see STRUCTURAL_LITERALS below"),
-    "rbp": ("client->buf_peak",
-            "fr grows a reply-buffer mechanism at all -- see STRUCTURAL_LITERALS below"),
     # (frankenredis-edwnn) `oll` and `omem` were hardcoded to 0 and are now COMPUTED from
     # session.output_buffer_bytes as the spill past the 16384-byte static buffer, so they are
     # deliberately NOT declared here any more. Re-adding either would re-allow the constant
@@ -78,31 +74,7 @@ DECLARED_LITERALS = {
 # declared here any more. Re-adding it would re-allow the hardcoded host this gate exists to catch.
 PARTIAL_LITERALS: dict[str, tuple[str, str]] = {}
 
-# (frankenredis-edwnn) The last two constants are NOT the same kind of thing as the four that
-# were fixed, and reporting them identically sent at least one agent looking for the workload
-# that would expose them. There is none, because there is nothing behind them.
-#
-# `oll`, `omem`, `events` and `laddr` were all latent divergences over a quantity fr ALREADY
-# HAD: pending output bytes for the first three, the accepted socket's local address for the
-# fourth. Each was computable the moment someone looked.
-#
-# `rbs` and `rbp` describe upstream's per-client STATIC REPLY BUFFER and the cron that resizes
-# it (`clientsCronResizeOutputBuffer`, `server.reply_buffer_peak_reset_time`). fr has no such
-# buffer: replies go into a growable Vec drained by a writer thread, so there is no usable size
-# to report and no peak-with-decay to track. fr says so in its own source -- DEBUG REPLYBUFFER
-# PEAK-RESET-TIME / RESIZING are accept-and-OK precisely because "fr-command has no reply-buffer
-# mechanism" (frankenredis-53n6u, fr-command/src/lib.rs).
-#
-# So 16384 here is not "upstream's default value" as the other four were -- it is
-# PROTO_REPLY_CHUNK_BYTES used as a MODEL constant, and the same constant `obl`/`oll`/`omem` are
-# already defined against. Computing either field piecemeal would be worse than the constant:
-# inventing a resize or decay policy fr implements nowhere else, and making DEBUG REPLYBUFFER's
-# accept-and-ignore into a fresh lie, since a peak that no PEAK-RESET-TIME can reset diverges
-# from upstream in a way an operator can actually drive.
-#
-# They stay declared, and the "declared-hardcoded field is now computed" failure still guards
-# them -- if fr ever does model a reply buffer, this gate makes someone update the declaration.
-STRUCTURAL_LITERALS = frozenset({"rbs", "rbp"})
+STRUCTURAL_LITERALS = frozenset()
 
 
 def upstream_fields():

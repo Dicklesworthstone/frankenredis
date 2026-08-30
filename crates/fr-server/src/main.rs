@@ -868,7 +868,9 @@ impl ClientConnection {
             read_buf: Vec::with_capacity(4096),
             large_set_read: None,
             owned_plain_sets: VecDeque::new(),
-            write_buf: Vec::new(),
+            // Redis gives every client a 16 KiB static reply buffer.  Keep the same initial
+            // allocation and publish its actual capacity through CLIENT INFO rbs/rbp.
+            write_buf: Vec::with_capacity(16_384),
             write_pos: 0,
             main_registered: true,
             main_writable_armed: false,
@@ -7358,6 +7360,11 @@ fn handle_readable(
     conn.session.qbuf_bytes = conn.read_buf.len();
     conn.session.qbuf_free_bytes = conn.read_buf.capacity().saturating_sub(conn.read_buf.len());
     conn.session.output_buffer_bytes = conn.pending_output_bytes();
+    conn.session.reply_buffer_size = conn.write_buf.capacity().max(16_384);
+    conn.session.reply_buffer_peak = conn
+        .session
+        .reply_buffer_peak
+        .max(conn.session.reply_buffer_size);
     // (frankenredis-jrqgd) Sample the *pre-dispatch* read/write buffer
     // sizes into the server-wide recent-max accumulators. We must do
     // this BEFORE the dispatch drains read_buf — by the time we get
@@ -7396,6 +7403,11 @@ fn handle_readable(
     conn.session.qbuf_bytes = conn.read_buf.len();
     conn.session.qbuf_free_bytes = conn.read_buf.capacity().saturating_sub(conn.read_buf.len());
     conn.session.output_buffer_bytes = conn.pending_output_bytes();
+    conn.session.reply_buffer_size = conn.write_buf.capacity().max(16_384);
+    conn.session.reply_buffer_peak = conn
+        .session
+        .reply_buffer_peak
+        .max(conn.session.reply_buffer_size);
     // (frankenredis-jrqgd) Observe the *post-dispatch* write buffer
     // here as well: handle_writable may drain it before the next
     // handle_readable runs, so this is the only moment we see the
