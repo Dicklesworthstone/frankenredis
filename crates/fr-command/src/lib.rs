@@ -13151,7 +13151,14 @@ fn replconf_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErr
         if option.eq_ignore_ascii_case("listening-port") {
             let parsed = parse_i64_arg(&argv[idx + 1])?;
             u16::try_from(parsed).map_err(|_| CommandError::InvalidInteger)?;
-        } else if option.eq_ignore_ascii_case("ip-address") || option.eq_ignore_ascii_case("capa") {
+        } else if option.eq_ignore_ascii_case("ip-address") {
+            let address_len = argv[idx + 1].len();
+            if address_len >= 256 {
+                return Err(CommandError::Custom(format!(
+                    "ERR REPLCONF ip-address provided by replica instance is too long: {address_len} bytes"
+                )));
+            }
+        } else if option.eq_ignore_ascii_case("capa") {
             // Accept configuration pairs silently.
         } else {
             return Err(CommandError::Custom(format!(
@@ -81773,6 +81780,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn replconf_overlong_ip_address_uses_redis_error_text() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"REPLCONF".to_vec(),
+                b"ip-address".to_vec(),
+                vec![b'a'; 256],
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR REPLCONF ip-address provided by replica instance is too long: 256 bytes"
+                    .to_string()
+            )
+        );
     }
 
     #[test]

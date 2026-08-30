@@ -145,6 +145,19 @@
       }
     },
     {
+      "name": "replconf_ip_address_256_bytes_keeps_err_prefix",
+      "now_ms": 0,
+      "argv": [
+        "REPLCONF",
+        "ip-address",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR REPLCONF ip-address provided by replica instance is too long: 256 bytes"
+      }
+    },
+    {
       "name": "replconf_getack_returns_ack_array",
       "now_ms": 0,
       "argv": [

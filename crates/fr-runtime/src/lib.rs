@@ -49308,6 +49308,12 @@ replica_announced:1\r\n",
                     .ensure_replica(self.session.client_id)
                     .listening_port = port;
             } else if option == Some(ReplconfOption::IpAddress) {
+                let address_len = argv[idx + 1].len();
+                if address_len >= 256 {
+                    return RespFrame::Error(format!(
+                        "ERR REPLCONF ip-address provided by replica instance is too long: {address_len} bytes"
+                    ));
+                }
                 self.server
                     .replication_runtime_state
                     .ensure_replica(self.session.client_id)
@@ -51983,6 +51989,20 @@ mod tests {
         assert_eq!(
             runtime.execute_frame(command(&argv), 0),
             fr_protocol::RespFrame::Error("ERR Unrecognized REPLCONF option: �".to_string()),
+        );
+    }
+
+    #[test]
+    fn replconf_overlong_ip_address_uses_redis_error_text() {
+        let mut runtime = Runtime::default_strict();
+        let address = vec![b'a'; 256];
+        let argv = [b"REPLCONF".as_slice(), b"ip-address", address.as_slice()];
+        assert_eq!(
+            runtime.execute_frame(command(&argv), 0),
+            fr_protocol::RespFrame::Error(
+                "ERR REPLCONF ip-address provided by replica instance is too long: 256 bytes"
+                    .to_string()
+            )
         );
     }
 

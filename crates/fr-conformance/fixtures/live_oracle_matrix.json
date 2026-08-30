@@ -279,6 +279,7 @@
         "replconf_ip_address_ok",
         "replconf_ip_address_ipv6",
         "replconf_ip_address_localhost",
+        "replconf_ip_address_256_bytes_keeps_err_prefix",
         "replconf_getack_returns_ack_array",
         "replconf_getack_lowercase",
         "replconf_unknown_subcommand_accepts",
