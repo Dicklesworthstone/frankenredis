@@ -10220,6 +10220,12 @@ mod tests {
         let runtime_sections =
             super::parse_info_sections(&runtime_info).expect("parse runtime INFO");
         for field in [
+            "aof_current_size",
+            "aof_base_size",
+            "aof_pending_rewrite",
+            "aof_buffer_length",
+            "aof_pending_bio_fsync",
+            "aof_delayed_fsync",
             "aof_rewrite_in_progress",
             "aof_last_bgrewrite_status",
             "aof_rewrites",
