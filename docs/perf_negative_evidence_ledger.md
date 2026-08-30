@@ -72875,3 +72875,50 @@ a recorded cause:
 on this corpus is the dispatch layering, which is a design change with a correctness
 surface rather than a frame to delete, and it should not be started from a frame table --
 that mistake has already cost this session two withdrawn levers.
+
+## 2026-08-30 FoggyOrchid: REJECT — raising `NODE_KEY_INLINE_CAP` 15 -> 23 loses on BOTH key lengths (`frankenredis-uhthd`)
+
+**One line:** widening the inline key to 23 bytes costs **+14.7 B/key on short keys**
+(95.3 -> 110.0, 1.1525x -> 1.3300x) and **+10.2 B/key on long keys** (128.6 -> 138.8,
+1.2988x -> 1.4004x) vs live Redis 7.2.4; reverted, never committed.
+
+    arm     cap 15 (shipped)   cap 23      redis    cap15 x    cap23 x
+    short    95.3 / 95.3       109.9 / 110.0  82.7   1.1525x    1.3300x
+    long    128.5 / 128.8      138.7 / 138.9  99.2   1.2988x    1.4004x
+
+    A/A null control, fr_a vs fr_b, measured IN THE SAME INVOCATION as each ratio
+    above (the harness starts two independent identical fr processes and loads them
+    the same way, precisely so a vs-redis ratio is only read against a null taken in
+    the same window):
+
+      arm     cap 15 A/A null   cap 23 A/A null
+      short      0.9997            0.9994
+      long       0.9981            0.9990
+
+    Every null is inside 0.2%, and the smallest effect claimed above is +10.2 B/key
+    (7.9%), i.e. roughly 40x the null. base e5394d9e2 for both arms, only
+    keyspace_dict.rs overlaid; harness scripts/keyspace_ram_vs_redis.py --keys 1000000
+    [--prefix averylongkeyprefix:]; host thinkstation1; rch clean-overlay build.
+
+    COUNTED MECHANISM, independent of the ratios: mimalloc's own committed-byte
+    accounting (MIMALLOC_SHOW_STATS=1), which tracks this server's RSS to ~1%. The
+    allocations did not merely get slower to account for, they got bigger: Node goes
+    72 -> 80 bytes and the arena chunk with it, so the per-key allocation count is
+    UNCHANGED while committed bytes rise. No work was removed anywhere; this is a
+    pure size regression.
+
+**Why it loses even on the arm it was designed for.** `NodeKey` goes 24 -> 32 bytes
+(the `Inline` payload must fit past the `Heap` pointer niche), so `Node<Entry>` goes
+72 -> 80 and EVERY key pays 8 bytes. The long-key probe uses `averylongkeyprefix:N`,
+which is 20-26 bytes, so a cap of 23 still spills the longest of them to the heap and
+they pay the 8 bytes for nothing. The short arm's loss (+14.7) exceeds the +8 of node
+width because at `ARENA_CHUNK_SHIFT` 10 the chunk moves 72 KB -> 80 KB and mimalloc's
+commit quantization charges more than the raw delta — the same effect that made the
+chunk-size sweep worth running.
+
+**Retry predicate.** Do NOT retry a wider inline cap as a global default. It is only
+admissible if (a) the node stays 72 bytes, which means finding 8 bytes elsewhere in
+`Node`/`Entry` first, or (b) it is measured on a workload whose keys actually FIT the
+new cap — a 23-byte cap tested against 20-26 byte keys is testing the wrong thing, and
+that mis-design is why this row exists. Any retry must carry BOTH a short and a long
+arm, since this shape can only ever trade one against the other.
