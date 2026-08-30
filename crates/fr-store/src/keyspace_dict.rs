@@ -963,24 +963,27 @@ mod tests {
             pages * 4096
         }
 
-        // A 48-byte payload stands in for `Store`'s `Entry`.
+        // A 40-byte payload stands in for `Store`'s `Entry`, which IS 40 (pinned by
+        // a const assert next to its definition). This read `[u64; 6]` -- 48 -- for a
+        // long time, and an 8-byte-wide stand-in overstates the node arena by 8 B/key,
+        // which is one whole lever's worth on the line this instrument exists to rank.
         #[derive(Clone)]
-        struct FortyEight([u64; 6]);
+        struct EntrySized([u64; 5]);
 
         let n = 1_000_000usize;
         let r0 = rss_bytes();
-        let mut kd: KeyDict<FortyEight> = KeyDict::new();
+        let mut kd: KeyDict<EntrySized> = KeyDict::new();
         for i in 0..n {
             // Same shape DEBUG POPULATE uses: key:N
             kd.insert(
                 format!("key:{i}").into_bytes().into_boxed_slice(),
-                FortyEight([0; 6]),
+                EntrySized([0; 5]),
             );
         }
         let r1 = rss_bytes();
         let resident = r1 - r0;
 
-        let node = size_of::<Option<Node<FortyEight>>>();
+        let node = size_of::<Option<Node<EntrySized>>>();
         let nodes_bytes = kd.nodes.capacity() * node;
         let buckets_bytes = kd.buckets.capacity() * size_of::<u32>();
         let free_bytes = kd.free.capacity() * size_of::<u32>();
@@ -994,7 +997,7 @@ mod tests {
 
         let per = |b: usize| b as f64 / n as f64;
         println!(
-            "KeyDict byte attribution (N={n}, 48-byte value, key:N keys)\n  resident            {:8.1} B/key  ({:.1} MB)\n  node arena          {:8.1} B/key  (cap {} x {} B/node)\n  bucket table        {:8.1} B/key  (cap {})\n  free list           {:8.1} B/key\n  SCAN first-byte     {:8.1} B/key  (hwcm1 prefilter, 2 B/bucket)\n  key PAYLOAD         {:8.1} B/key  (k.len() only -- NOT footprint)\n  accounted           {:8.1} B/key\n  UNACCOUNTED         {:8.1} B/key  <- per-allocation overhead on {} key blocks",
+            "KeyDict byte attribution (N={n}, 40-byte value, key:N keys)\n  resident            {:8.1} B/key  ({:.1} MB)\n  node arena          {:8.1} B/key  (cap {} x {} B/node)\n  bucket table        {:8.1} B/key  (cap {})\n  free list           {:8.1} B/key\n  SCAN first-byte     {:8.1} B/key  (hwcm1 prefilter, 2 B/bucket)\n  key PAYLOAD         {:8.1} B/key  (k.len() only -- NOT footprint)\n  accounted           {:8.1} B/key\n  UNACCOUNTED         {:8.1} B/key  <- per-allocation overhead on {} key blocks",
             per(resident),
             resident as f64 / 1e6,
             per(nodes_bytes),
@@ -1101,22 +1104,28 @@ mod tests {
     fn node_layout_is_compact_uhthd() {
         use std::mem::size_of;
 
-        /// Stand-in for `Store`'s `Entry`, which is pinned at <= 48 bytes. The
-        /// payload exists to give the type its size; nothing reads it.
+        /// Stand-in for `Store`'s `Entry`, which is pinned at EXACTLY 40 bytes by a
+        /// const assert beside its definition. The payload exists to give the type its
+        /// size; nothing reads it.
+        ///
+        /// This was `[u64; 6]` against a `<= 48` budget on `Entry`. Both numbers were
+        /// loose in the same direction, so the node came out 72 here while the real
+        /// `Node<Entry>` is 64 -- an 8 B/key overstatement on the single line this
+        /// module exists to keep honest. Pinned with `==`, not `<=`, for that reason.
         #[allow(dead_code)]
-        struct FortyEight([u64; 6]);
-        assert_eq!(size_of::<FortyEight>(), 48);
+        struct EntrySized([u64; 5]);
+        assert_eq!(size_of::<EntrySized>(), 40);
 
         assert_eq!(size_of::<u32>(), 4, "bucket slot must stay 4 bytes");
         assert_eq!(
-            size_of::<Option<Node<FortyEight>>>(),
-            size_of::<Node<FortyEight>>(),
+            size_of::<Option<Node<EntrySized>>>(),
+            size_of::<Node<EntrySized>>(),
             "arena Option must ride the Box<[u8]> niche, not add a word per key"
         );
-        assert!(
-            size_of::<Node<FortyEight>>() <= 72,
-            "node with a 48-byte value must fit in 72 bytes, got {}",
-            size_of::<Node<FortyEight>>()
+        assert_eq!(
+            size_of::<Node<EntrySized>>(),
+            64,
+            "hash 4 + next 4 + key Box<[u8]> 16 + value 40; a change here is bytes per key"
         );
     }
 

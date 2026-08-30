@@ -5113,7 +5113,19 @@ struct Entry {
     entry_flags: u8,
 }
 
-const _: () = assert!(std::mem::size_of::<Entry>() <= 48);
+/// (frankenredis-uhthd) 40, and the bound is written TIGHT on purpose.
+///
+/// It read `<= 48` for a long time, which is 8 bytes looser than the truth, and that
+/// slack cost a whole pass: the keyspace-RAM work planned an "Entry 48 -> 40" lever --
+/// move `modification_count` to a side table, ~25 bump sites, a WATCH-correctness
+/// surface -- against a target the struct had ALREADY reached. `Value` is 24 (its
+/// `SmallStr::Heap(Vec<u8>)` pointer niche absorbs the outer tag), plus 16 bytes of
+/// metadata, and that is the whole 40.
+///
+/// A `<=` budget cannot tell you where you are, only where you are not. Anyone sizing
+/// a per-key lever should read this number, not the budget it used to have.
+const _: () = assert!(std::mem::size_of::<Entry>() == 40);
+const _: () = assert!(std::mem::size_of::<Value>() == 24);
 
 /// How many global random draws RANDOMKEY makes before abandoning rejection
 /// sampling and counting the target db exactly.
