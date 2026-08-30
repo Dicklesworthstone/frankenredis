@@ -56,13 +56,44 @@ use std::hash::BuildHasher;
 /// 4.29e9 of them is over 300 GB of keyspace index before any values.
 const NIL: u32 = u32::MAX;
 
-/// Nodes per [`NodeArena`] chunk.
+/// Nodes per [`NodeArena`] chunk. 1024 cells, i.e. a ~72 KB chunk at the live
+/// `Node<Entry>` width -- CHOSEN BY MEASUREMENT, not by taste.
 ///
-/// 4096 cells is ~288 KB at the live `Node<Entry>` width, so the outer `Vec` of chunk
-/// pointers is 245 entries (under 2 KB, permanently cache-resident) at a million keys,
-/// while the tail chunk wastes at most 4095 cells -- 0.3 B/key at 1M, against the 3.5
-/// B/key a doubling `Vec` leaves stranded above its high-water mark at the same size.
-const ARENA_CHUNK_SHIFT: u32 = 12;
+/// (frankenredis-uhthd) This was 4096 because it looked like a sensible round number
+/// when the chunked arena was written. It is not a free choice: RSS on this server is
+/// mimalloc's `committed`, and committed is QUANTIZED at the size of the allocation
+/// the chunk asks for, so the chunk size is worth several bytes per key by itself.
+/// Swept against the live three-server harness at 1M keys, vs Redis 7.2.4:
+///
+///     shift  cells  chunk    B/key   vs redis   mimalloc committed
+///        8     256   18 KB    95.0    1.1500x       94.8 MiB
+///        9     512   36 KB    95.4    1.1552x       95.6 MiB
+///       10    1024   72 KB    95.2    1.1533x       94.5 MiB   <- here
+///       11    2048  144 KB    99.4    1.2043x       97.9 MiB
+///       12    4096  288 KB   103.7    1.2559x      102.0 MiB   <- was here
+///       13    8192  576 KB   101.0    1.2227x      100.1 MiB
+///
+/// `committed` tracks B/key row for row, which is what identifies the allocator as the
+/// thing being measured rather than anything in this file.
+///
+/// THE CLIFF IS BETWEEN 72 KB AND 144 KB and the curve is FLAT below it -- 8, 9 and 10
+/// are indistinguishable. That places the boundary where mimalloc stops serving an
+/// allocation from its normal page path and starts treating it as a large object,
+/// which is documented at 128 KB; the cliff's LOCATION is measured, the attribution to
+/// that specific threshold is inference from where it sits, and no per-bin allocator
+/// stats were read to confirm it (this mimalloc is built without them).
+///
+/// 10 rather than 8: everything below 11 buys the same RAM, so take the LARGEST chunk
+/// in the flat region. That is the fewest chunks, the smallest outer `Vec`, and the
+/// fewest allocations, for identical bytes per key. At 1M keys it is 977 chunks, an
+/// outer `Vec` of ~16 KB, and the tail wastes at most 1023 cells (0.07 B/key).
+///
+/// CPU is unchanged, which had to be checked because a smaller chunk means a bigger
+/// outer vector on every node access. Callgrind, fixed 20k populate + 20,000 GETs, two
+/// runs per arm: shift 12 reads 106,424,590 / 106,390,779 Ir and shift 10 reads
+/// 106,369,087 / 106,251,338 -- a 0.09 pct difference against a 0.11 pct run-to-run
+/// spread, i.e. inside the noise.
+const ARENA_CHUNK_SHIFT: u32 = 10;
 const ARENA_CHUNK_LEN: usize = 1 << ARENA_CHUNK_SHIFT;
 const ARENA_CHUNK_MASK: usize = ARENA_CHUNK_LEN - 1;
 
