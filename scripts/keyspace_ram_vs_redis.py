@@ -187,6 +187,13 @@ def main():
     ap.add_argument("--keys", type=int, default=1_000_000)
     ap.add_argument("--settle", type=float, default=0.0,
                     help="seconds to wait after load before sampling (default 0)")
+    ap.add_argument("--prefix", default="",
+                    help="DEBUG POPULATE key prefix (upstream default 'key:' when empty). "
+                         "The point of this knob is KEY LENGTH: any keyspace that stores "
+                         "short keys inline is flattered by the default 'key:N', which is "
+                         "5-10 bytes, so a long prefix is how the other side of that trade "
+                         "gets measured instead of assumed. Both engines take the same "
+                         "prefix, so the comparison stays like-for-like.")
     ap.add_argument("--json", default="")
     args = ap.parse_args()
 
@@ -209,7 +216,10 @@ def main():
         rows = {}
         for srv in servers:
             empty_rss = vmrss_bytes(srv.proc.pid)
-            reply = call(srv.port, "DEBUG", "POPULATE", str(args.keys))
+            populate = ["DEBUG", "POPULATE", str(args.keys)]
+            if args.prefix:
+                populate.append(args.prefix)
+            reply = call(srv.port, *populate)
             if not reply.startswith(b"+OK"):
                 raise SystemExit(f"{srv.label}: DEBUG POPULATE failed: {reply[:120]!r}")
             if args.settle:
@@ -249,6 +259,10 @@ def main():
         prov = {
             "host": platform.node(),
             "keys": args.keys,
+            # Recorded because it changes what the number MEANS: key length decides
+            # whether an inline-key keyspace is being measured on its good side or its
+            # bad one, and a row without this field cannot be compared to one with it.
+            "key_prefix": args.prefix or "key:",
             # Self-reported from inside the running processes (/proc/<pid>/exe),
             # not hashed from the paths passed in. See `running_elf_sha256`.
             "fr_elf_sha256_running": rows["fr_a"]["running_elf_sha256"],

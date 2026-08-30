@@ -241,6 +241,72 @@ impl<V> NodeArena<V> {
     }
 }
 
+/// Longest key held inside the node instead of in its own heap block.
+///
+/// 15 and not 16: [`NodeKey`] is laid out with `Heap`'s pointer as the niche that
+/// carries the discriminant, so the `Inline` payload has to fit in the 16 bytes that
+/// follow it -- one length byte plus fifteen of key.
+const NODE_KEY_INLINE_CAP: usize = 15;
+
+/// The key bytes of one node, inline when short enough.
+///
+/// (frankenredis-uhthd) A `Box<[u8]>` key costs the node a 16-byte fat pointer AND a
+/// separate heap block. Measured on the live 1M-key probe, that block is 9.9 B/key of
+/// payload carried in 28.6 B/key of footprint -- the allocator rounds a ~10-byte
+/// request up and charges its own per-block overhead -- so the key name costs ~44.6
+/// B/key all in, against the ~24 Redis pays for a pointer plus one sds. It is the
+/// largest single line left in this table.
+///
+/// Inlining trades node WIDTH for that block: the node grows 8 bytes (the enum is 24
+/// where the fat pointer was 16) and the block disappears entirely for keys of 15
+/// bytes or fewer. Keys longer than that keep their block and pay the 8 bytes for
+/// nothing, which is the honest cost of this shape and is why a long-key arm is
+/// measured alongside the short-key one rather than assumed away.
+///
+/// Redis keys reach this table DB-ENCODED, but `encode_db_key` returns db 0 keys
+/// VERBATIM and only prefixes db != 0, so the common single-database server inlines on
+/// the real key length, not on a padded one.
+///
+/// WHY THE PRIOR REJECT DOES NOT TRANSFER: an inline-small key enum was measured and
+/// rejected on 2026-06-20 (keyspace 1.169x -> 1.465x, 6 of 7 RSS cells worse), with the
+/// retry gate "not without table-entry-size proof". That was the PRE-KeyDict keyspace,
+/// where the key was an `Arc<[u8]>` SHARED by the entries map and three side indices --
+/// inlining copied the bytes into every one of them, which is exactly why it lost.
+/// Those indices were deleted with the KeyDict wiring and this table owns the key ONCE.
+/// The table-entry-size proof the gate asks for is the `==` assertion below.
+enum NodeKey {
+    Inline { len: u8, bytes: [u8; NODE_KEY_INLINE_CAP] },
+    Heap(Box<[u8]>),
+}
+
+/// The layout this lever is built on, asserted rather than assumed -- a `<=` budget on
+/// `Entry` is what sent the previous pass after a shrink the struct had already made.
+const _: () = assert!(std::mem::size_of::<NodeKey>() == 24);
+
+impl NodeKey {
+    #[inline]
+    fn from_slice(key: &[u8]) -> Self {
+        if key.len() <= NODE_KEY_INLINE_CAP {
+            let mut bytes = [0u8; NODE_KEY_INLINE_CAP];
+            bytes[..key.len()].copy_from_slice(key);
+            Self::Inline {
+                len: key.len() as u8,
+                bytes,
+            }
+        } else {
+            Self::Heap(Box::from(key))
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
+            Self::Heap(bytes) => bytes,
+        }
+    }
+}
+
 /// One key/value cell; `next` chains collisions in the same bucket.
 struct Node<V> {
     /// Low 32 bits of the key's hash, kept as a cheap pre-filter before the byte
@@ -251,9 +317,10 @@ struct Node<V> {
     /// a bucket count above 2^32 would require more than `u32::MAX` nodes, which
     /// [`KeyDict::alloc_node`] refuses. As a pre-filter it is a probabilistic
     /// accelerator, never a decision: a collision here still falls through to the
-    /// full `*node.key == *key` compare, so a 32-bit match cannot return a wrong key.
+    /// full `node.key.as_slice() == key` compare, so a 32-bit match cannot return a
+    /// wrong key.
     hash: u32,
-    key: Box<[u8]>,
+    key: NodeKey,
     value: V,
     /// Index of the next node in this bucket's chain, or [`NIL`].
     next: u32,
@@ -477,7 +544,7 @@ impl<V> KeyDict<V> {
         let mut node = self.buckets[bucket];
         while node != NIL {
             let current = self.nodes.get(node);
-            bits |= Self::first_byte_bit(&current.key);
+            bits |= Self::first_byte_bit(current.key.as_slice());
             node = current.next;
         }
         self.first_byte_bits[bucket] = bits;
@@ -508,7 +575,7 @@ impl<V> KeyDict<V> {
         let mut cur = self.buckets[self.bucket_of(h)];
         while cur != NIL {
             let node = self.nodes.get(cur);
-            if node.hash == h && *node.key == *key {
+            if node.hash == h && node.key.as_slice() == key {
                 return Some(&node.value);
             }
             cur = node.next;
@@ -523,7 +590,7 @@ impl<V> KeyDict<V> {
         let mut cur = self.buckets[b];
         while cur != NIL {
             let node = self.nodes.get(cur);
-            if node.hash == h && *node.key == *key {
+            if node.hash == h && node.key.as_slice() == key {
                 return Some(&mut self.nodes.get_mut(cur).value);
             }
             cur = node.next;
@@ -549,8 +616,8 @@ impl<V> KeyDict<V> {
         let mut cur = self.buckets[self.bucket_of(h)];
         while cur != NIL {
             let node = self.nodes.get(cur);
-            if node.hash == h && *node.key == *key {
-                return Some((&node.key, &node.value));
+            if node.hash == h && node.key.as_slice() == key {
+                return Some((node.key.as_slice(), &node.value));
             }
             cur = node.next;
         }
@@ -611,15 +678,28 @@ impl<V> KeyDict<V> {
     }
 
     /// Insert `key`/`value`, returning the previous value if the key existed.
-    /// The key bytes are owned once (`Box<[u8]>`), with no `Arc` header.
-    pub fn insert(&mut self, key: Box<[u8]>, value: V) -> Option<V> {
-        let h = self.hash_key(&key);
+    /// The key bytes are owned once, inline in the node when short enough
+    /// ([`NodeKey`]), with no `Arc` header and no separate block.
+    ///
+    /// (frankenredis-uhthd) TAKES A BORROW, and that is load-bearing rather than
+    /// stylistic. This read `key: Box<[u8]>`, so the caller allocated a block and
+    /// handed it over; an inline key would then COPY out of that block and drop it,
+    /// paying for the allocation anyway and adding a copy. That is the exact shape
+    /// that made the earlier key-arena attempt measure a LOSS, and its retry predicate
+    /// says so: retry only with the caller-side allocation removed. `Store`'s single
+    /// insert site now passes a slice and `store_key_from_slice` is gone from it.
+    ///
+    /// `AsRef<[u8]>` rather than `&[u8]` so the existing owned-key callers in tests
+    /// still compile unchanged; only the production path had an allocation to lose.
+    pub fn insert(&mut self, key: impl AsRef<[u8]>, value: V) -> Option<V> {
+        let key = key.as_ref();
+        let h = self.hash_key(key);
         let b = self.bucket_of(h);
         // Overwrite in place if present.
         let mut cur = self.buckets[b];
         while cur != NIL {
             let node = self.nodes.get_mut(cur);
-            if node.hash == h && *node.key == *key {
+            if node.hash == h && node.key.as_slice() == key {
                 return Some(std::mem::replace(&mut node.value, value));
             }
             cur = node.next;
@@ -638,12 +718,12 @@ impl<V> KeyDict<V> {
         let head = self.buckets[b];
         let idx = self.alloc_node(Node {
             hash: h,
-            key,
+            key: NodeKey::from_slice(key),
             value,
             next: head,
         });
         self.buckets[b] = idx;
-        self.first_byte_bits[b] |= Self::first_byte_bit(&self.nodes.get(idx).key);
+        self.first_byte_bits[b] |= Self::first_byte_bit(self.nodes.get(idx).key.as_slice());
         self.count += 1;
         if self.count > self.buckets.len() {
             self.grow();
@@ -660,7 +740,7 @@ impl<V> KeyDict<V> {
         while cur != NIL {
             let node = self.nodes.get(cur);
             let next = node.next;
-            if node.hash == h && *node.key == *key {
+            if node.hash == h && node.key.as_slice() == key {
                 let removed = self
                     .nodes
                     .slot_mut(cur)
@@ -786,7 +866,7 @@ impl<V> KeyDict<V> {
             let mut node = self.buckets[b];
             while node != NIL {
                 let n = self.nodes.get(node);
-                emit(&n.key, &n.value);
+                emit(n.key.as_slice(), &n.value);
                 emitted += 1;
                 node = n.next;
             }
@@ -821,7 +901,7 @@ impl<V> KeyDict<V> {
                 let mut node = self.buckets[b];
                 while node != NIL {
                     let n = self.nodes.get(node);
-                    emit(&n.key, &n.value);
+                    emit(n.key.as_slice(), &n.value);
                     emitted += 1;
                     node = n.next;
                 }
@@ -872,7 +952,7 @@ impl<V> KeyDict<V> {
                 let pick = reduce(next_rand(), chain_len);
                 let chosen = chain(head).nth(pick).expect("pick is within chain length");
                 let chosen = self.nodes.get(chosen);
-                return Some((&chosen.key, &chosen.value));
+                return Some((chosen.key.as_slice(), &chosen.value));
             }
         }
         // Fallback: first non-empty bucket from a random origin.
@@ -882,7 +962,7 @@ impl<V> KeyDict<V> {
             let head = self.buckets[b];
             if head != NIL {
                 let head = self.nodes.get(head);
-                return Some((&head.key, &head.value));
+                return Some((head.key.as_slice(), &head.value));
             }
         }
         None
@@ -904,7 +984,7 @@ impl<'a, V> Iterator for KeyDictIter<'a, V> {
             if self.current != NIL {
                 let node = self.dict.nodes.get(self.current);
                 self.current = node.next;
-                return Some((&node.key, &node.value));
+                return Some((node.key.as_slice(), &node.value));
             }
             if self.bucket >= self.dict.buckets.len() {
                 return None;
@@ -1117,15 +1197,21 @@ mod tests {
         assert_eq!(size_of::<EntrySized>(), 40);
 
         assert_eq!(size_of::<u32>(), 4, "bucket slot must stay 4 bytes");
+        // NESTED NICHE, and this is the assertion that makes the inline-key lever pay
+        // rather than cost. `NodeKey` already spends the `Heap(Box<[u8]>)` pointer's
+        // null value on its OWN discriminant. If the outer `Option` could not find a
+        // second niche in that same pointer it would add a whole word to every node,
+        // turning a -20.6 B/key lever into a -12.6 one silently.
         assert_eq!(
             size_of::<Option<Node<EntrySized>>>(),
             size_of::<Node<EntrySized>>(),
-            "arena Option must ride the Box<[u8]> niche, not add a word per key"
+            "arena Option must ride the NodeKey pointer niche, not add a word per key"
         );
+        assert_eq!(size_of::<NodeKey>(), 24, "len 1 + 15 inline, or a 16-byte Box");
         assert_eq!(
             size_of::<Node<EntrySized>>(),
-            64,
-            "hash 4 + next 4 + key Box<[u8]> 16 + value 40; a change here is bytes per key"
+            72,
+            "hash 4 + next 4 + key NodeKey 24 + value 40; a change here is bytes per key"
         );
     }
 

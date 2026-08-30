@@ -14794,19 +14794,24 @@ impl Store {
                 self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
             }
         }
-        // For a NEW persistent key, allocate only the canonical boxed key bytes.
-        // Ordered-key and RANDOMKEY side indexes are lazy caches now; new keys only
-        // dirty them. For an OVERWRITE there is no new key allocation at all — the
-        // value is replaced in place below, keeping the existing boxed key.
-        let canonical_key: Option<StoreKey> = if is_new_key {
-            let canonical_key = store_key_from_slice(key.as_slice());
+        // For a NEW key there is NO key allocation on this path at all any more.
+        //
+        // (frankenredis-uhthd) This used to build a `StoreKey` (`Box<[u8]>`) here and
+        // hand it to `entries.insert`. `KeyDict` now stores a key of 15 bytes or fewer
+        // INLINE in its node, so an owned box handed in would be copied out and
+        // immediately dropped -- the allocation paid for, the copy added, and nothing
+        // saved. That is precisely the shape the earlier key-arena attempt measured a
+        // LOSS on, and its retry predicate names removing the caller-side allocation as
+        // the condition for trying again. `insert` takes the borrow and owns the bytes
+        // once, inline or boxed as the length decides.
+        //
+        // For an OVERWRITE there was never an allocation: the value is replaced in
+        // place below, keeping the node's existing key.
+        if is_new_key {
             // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
             // resume points.
             self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
-            Some(canonical_key)
-        } else {
-            None
-        };
+        }
         // (cc_fr) The cloned owned key is consumed ONLY by the `expiry_deadlines.insert`
         // below — i.e. only when this write sets a TTL AND the key is not already in the
         // deadline map. A SET without a TTL (the common case) took a `StoreKey`
@@ -14820,14 +14825,18 @@ impl Store {
         // (`false`) keeps the unconditional clone (so `set_no_ttl_insert`/re-arm A/B measure it).
         let is_ttl_rearm = new_expiry.is_some() && old_expiry.is_some() && !is_new_key;
         let expiry_key: Option<StoreKey> = if !GATE || (new_expiry.is_some() && !is_ttl_rearm) {
-            canonical_key.as_ref().map_or_else(
-                || {
-                    self.entries
-                        .get_key_value(key.as_slice())
-                        .map(|(key, _)| store_key_from_slice(key))
-                },
-                |canonical_key| Some(canonical_key.clone()),
-            )
+            // (frankenredis-uhthd) `expiry_deadlines` is a separate map that still owns
+            // its own boxed key, so THIS is now the only place on the path that may
+            // allocate one -- and only when the write actually arms a TTL. A new key
+            // builds it from the argument; an overwrite still reads the dict's stored
+            // copy so the deadline map and the keyspace agree byte for byte.
+            if is_new_key {
+                Some(store_key_from_slice(key.as_slice()))
+            } else {
+                self.entries
+                    .get_key_value(key.as_slice())
+                    .map(|(key, _)| store_key_from_slice(key))
+            }
         } else {
             None
         };
@@ -14868,15 +14877,15 @@ impl Store {
         } else {
             self.invalidate_write_side_caches_scalar(&key);
         }
-        let old_entry = match canonical_key {
-            // New key: insert the boxed bytes as the canonical key.
-            Some(canonical_key) => self.entries.insert(canonical_key, entry),
-            // Overwrite: replace the value in place, reusing the existing boxed key
-            // (no new key allocation on the hot SET-existing path).
-            None => self
-                .entries
+        let old_entry = if is_new_key {
+            // New key: the dict owns the bytes, inline in its node when short enough.
+            self.entries.insert(key.as_slice(), entry)
+        } else {
+            // Overwrite: replace the value in place, reusing the node's existing key
+            // (no key allocation on the hot SET-existing path).
+            self.entries
                 .get_mut(key.as_slice())
-                .map(|slot| std::mem::replace(slot, entry)),
+                .map(|slot| std::mem::replace(slot, entry))
         };
         // (frankenredis-keymiss-oqhbi sibling) Upstream fires `new` from dbAddInternal
         // (db.c:206), AFTER the key enters the dict and ONLY on creation -- the
