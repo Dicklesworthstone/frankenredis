@@ -101,9 +101,19 @@ const ARENA_CHUNK_MASK: usize = ARENA_CHUNK_LEN - 1;
 /// insert path that crosses a power of two.
 ///
 /// The trade is one extra load per node access -- `chunks[i >> SHIFT][i & MASK]`
-/// instead of `nodes[i]`. The outer vector is small enough to stay in L1 while the
-/// node itself is a near-certain cache miss at these sizes, so the added dependent
-/// load lands in the shadow of the miss it precedes.
+/// instead of `nodes[i]` -- and it is NOT free. Measured under callgrind on a fixed
+/// 20k-key populate plus 20,000 GETs, two runs per arm, the same job on both
+/// (`dbsize` 20000 on every run):
+///
+///     pre-arena  (37daa064f)  107,480,532 / 107,580,605 Ir
+///     chunked    (169d32e68)  108,149,944 / 108,201,231 Ir   +0.60 pct
+///
+/// The two bases differ in exactly one `.rs` file, this one, so that number is this
+/// change and nothing else. 0.60 pct of retired instructions buys -29.2 B/key of
+/// keyspace RSS; the trade is worth making and is recorded rather than waved at. An
+/// earlier draft of this comment argued the added load would hide in the shadow of
+/// the cache miss it precedes -- that was a guess, and the measurement says it costs
+/// something real, if small.
 ///
 /// `#![forbid(unsafe_code)]` holds: chunks are ordinary boxed slices.
 struct NodeArena<V> {
@@ -262,6 +272,20 @@ const NODE_KEY_INLINE_CAP: usize = 15;
 /// bytes or fewer. Keys longer than that keep their block and pay the 8 bytes for
 /// nothing, which is the honest cost of this shape and is why a long-key arm is
 /// measured alongside the short-key one rather than assumed away.
+///
+/// MEASURED, and the long-key half did not cost what the arithmetic said. Short keys
+/// 115.8 -> 103.2 B/key (1.4032x -> 1.2542x vs live Redis 7.2.4); long keys 130.7 ->
+/// 130.6, i.e. NEUTRAL, where node width alone predicted +8 B/key. A three-binary
+/// isolation (this shape with inlining forced off) puts node 64 -> 72 at +0.0 B/key
+/// across four key counts and node 64 -> 112 at +39.9, so arena residency is simply
+/// not linear near 64 bytes. Do not re-derive a width cost by multiplying
+/// `size_of::<Node<_>>()` by the key count; it has been wrong every time.
+///
+/// It is also CHEAPER on CPU, which was not the goal: callgrind on a fixed 20k
+/// populate plus 20,000 GETs reads 108,010,679 / 108,088,523 Ir without inlining
+/// against 106,530,902 / 106,583,482 with it -- **-1.38 pct**, roughly 19x the
+/// instrument's own 0.07 pct run-to-run spread. Reading the key out of the node the
+/// hash already pulled in beats chasing a pointer to it.
 ///
 /// Redis keys reach this table DB-ENCODED, but `encode_db_key` returns db 0 keys
 /// VERBATIM and only prefixes db != 0, so the common single-database server inlines on
