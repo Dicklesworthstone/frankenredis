@@ -27322,7 +27322,26 @@ fn evalsha_cmd(
     // script body.
     // Normalise ONCE and use it for both the existence check and the index probe. Calling
     // `script_get` here as well would lowercase and allocate the SHA a second time.
-    let sha_hex = String::from_utf8_lossy(sha1).to_ascii_lowercase();
+    // (frankenredis-evalshafmt-ex06m) `from_utf8_lossy` costs a CHUNK WALK, and this
+    // argument is a 40-byte ASCII hex SHA every time it is well-formed.
+    //
+    // Callgrind on an EVALSHA profile puts `<core::str::lossy::Utf8Chunks as
+    // Iterator>::next` at 18.24M Ir (2.16 pct, ~304 instr/op) with 60,004 calls for
+    // 60,000 operations -- one per command, and independent of connection count
+    // (18,240,910 at -c 32 vs 18,240,875 at -c 1), so it is genuinely per-op.
+    // `from_utf8_lossy` has to iterate Utf8Chunks because it is contracted to SPLICE
+    // U+FFFD into invalid input; `str::from_utf8` only has to answer yes/no and takes a
+    // word-at-a-time ASCII fast path.
+    //
+    // Exactly equivalent, not merely similar: for valid UTF-8 `from_utf8_lossy` returns
+    // `Cow::Borrowed(s)` with the same `s` that `from_utf8` yields, so lowercasing
+    // either produces the same String. Invalid input keeps the lossy path verbatim, so
+    // a malformed SHA still gets the replacement-character rendering it had before --
+    // which matters because that value is what the NOSCRIPT branch reports on.
+    let sha_hex = match std::str::from_utf8(sha1) {
+        Ok(valid) => valid.to_ascii_lowercase(),
+        Err(_) => String::from_utf8_lossy(sha1).to_ascii_lowercase(),
+    };
     if !store.script_contains_hex(&sha_hex) {
         return Ok(RespFrame::Error(
             "NOSCRIPT No matching script. Please use EVAL.".to_string(),
@@ -32249,6 +32268,64 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::time::Instant;
+
+    /// (frankenredis-evalshafmt-ex06m) The EVALSHA SHA normalisation swapped
+    /// `String::from_utf8_lossy(b).to_ascii_lowercase()` for a `str::from_utf8` fast path
+    /// with the lossy call kept only for invalid input. This pins that the two are
+    /// EXACTLY equivalent on every input class, not merely on well-formed SHAs.
+    ///
+    /// The invalid-UTF-8 branch is the one that matters and the one an "optimisation"
+    /// would quietly break: that string is what the NOSCRIPT reply is derived from, so
+    /// dropping the U+FFFD splice would change a client-visible error for a malformed
+    /// SHA. A test that only fed it 40 hex characters would pass while doing that.
+    #[test]
+    fn evalsha_sha_normalisation_matches_the_lossy_form_ex06m() {
+        fn old(b: &[u8]) -> String {
+            String::from_utf8_lossy(b).to_ascii_lowercase()
+        }
+        fn new(b: &[u8]) -> String {
+            match std::str::from_utf8(b) {
+                Ok(valid) => valid.to_ascii_lowercase(),
+                Err(_) => String::from_utf8_lossy(b).to_ascii_lowercase(),
+            }
+        }
+
+        let cases: Vec<Vec<u8>> = vec![
+            b"e0e1f9fabfc9d4800c877a703b823ac0578ff8db".to_vec(), // a real sha, lower
+            b"E0E1F9FABFC9D4800C877A703B823AC0578FF8DB".to_vec(), // upper -> must fold
+            b"E0e1F9fa".to_vec(),                                 // mixed case, short
+            b"".to_vec(),                                         // empty
+            b"not-a-sha".to_vec(),                                // ascii, non-hex
+            "\u{00e9}\u{4e2d}\u{1f600}".as_bytes().to_vec(),       // valid multi-byte
+            vec![0xff, 0xfe, 0xfd],                               // wholly invalid
+            vec![b'a', 0xff, b'B'],                               // invalid mid-string
+            vec![0xe2, 0x82],                                     // truncated 3-byte seq
+            vec![0xc3],                                           // lone continuation lead
+            vec![b'A'; 40],                                       // all-upper ascii run
+            vec![0x00, b'x', 0x7f],                               // NUL and DEL are ascii
+        ];
+        for c in &cases {
+            assert_eq!(
+                new(c),
+                old(c),
+                "normalisation diverged for {c:?}"
+            );
+        }
+
+        // ANTI-VACUITY: the invalid cases must actually exercise the fallback, otherwise
+        // this test proves only that the ASCII path works.
+        let invalid = cases
+            .iter()
+            .filter(|c| std::str::from_utf8(c).is_err())
+            .count();
+        assert!(invalid >= 4, "only {invalid} invalid-UTF-8 cases reached the fallback");
+        // And at least one of them must really contain the replacement character, i.e.
+        // the lossy behaviour is preserved rather than bypassed.
+        assert!(
+            new(&[b'a', 0xff, b'B']).contains('\u{fffd}'),
+            "invalid input lost its U+FFFD splice"
+        );
+    }
 
     // (frankenredis-yx1wa) The SORT full-key-access rows build a DispatchClientContext by hand;
     // these three live in fr-store and were never imported here, so `cargo test -p fr-command`
