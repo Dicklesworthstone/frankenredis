@@ -28328,10 +28328,25 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             Ok(val)
         };
         let count = positive_arg(&argv[2])?;
+        // (frankenredis-dbgpopdb-bvqss) FOUR divergences lived in this loop, all
+        // confirmed against live 7.2.4 rather than read off the C:
+        //
+        //   axis            upstream debug.c:724-742        fr, before
+        //   prefix "foo"    foo:0 foo:1 foo:2               foo0 foo1 foo2
+        //   size=12         key p:0, "value:0" + NUL pad    key p0, "AAAAAAAAAAAA"
+        //   existing key    left ALONE (lookupKeyWrite)     overwritten
+        //   SELECT 1        lands in db 1                   landed in db 0
+        //
+        // The db one is the reason this matters beyond a debug command: DEBUG POPULATE
+        // is how this repo seeds benchmarks, so a multi-DB harness seeding db 1 was
+        // measuring an EMPTY db 1 on fr and a full one on redis, with both engines
+        // replying +OK.
         let prefix = if argv.len() >= 4 {
             std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?
         } else {
-            "key:"
+            // Upstream's default is the bare word; the ':' comes from the format below,
+            // which is why the DEFAULT rendering was right while a user prefix was not.
+            "key"
         };
         let size = if argv.len() == 5 {
             positive_arg(&argv[4])? as usize
@@ -28339,14 +28354,33 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             0
         };
 
+        // Keys are DB-namespaced in this store, so a raw key is a db-0 key. Upstream
+        // adds to `c->db`; the equivalent here is encoding with the selected index, the
+        // same way the neighbouring DEBUG arms do.
+        let db_index = store.dispatch_client_ctx.db_index;
         for i in 0..count {
-            let key = format!("{prefix}{i}");
+            // `snprintf(buf, "%s:%lu", prefix, j)` -- the separator is unconditional.
+            let key = format!("{prefix}:{i}");
+            let physical = fr_store::encode_db_key(db_index, key.as_bytes());
+            // `if (lookupKeyWrite(c->db,key) != NULL) continue;` -- an existing key is
+            // left untouched, value and TTL both. A logically expired key is not
+            // "existing", which `exists_no_touch` already honours.
+            if store.exists_no_touch(&physical, now_ms) {
+                continue;
+            }
+            // `createStringObject(NULL, valsize)` then memcpy of the first
+            // `min(valsize, len("value:N"))` bytes: the value is "value:N" TRUNCATED or
+            // NUL-PADDED to valsize, never a fill byte.
+            let body = format!("value:{i}").into_bytes();
             let value = if size > 0 {
-                vec![b'A'; size]
+                let mut v = vec![0u8; size];
+                let n = size.min(body.len());
+                v[..n].copy_from_slice(&body[..n]);
+                v
             } else {
-                format!("value:{i}").into_bytes()
+                body
             };
-            store.set(key.into_bytes(), value, None, now_ms);
+            store.set(physical, value, None, now_ms);
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("HELP") {
@@ -32268,6 +32302,94 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::time::Instant;
+
+    /// (frankenredis-dbgpopdb-bvqss) DEBUG POPULATE had FOUR divergences from 7.2.4 in
+    /// one loop. Each was confirmed against a live redis-server before being fixed, and
+    /// each is pinned here, because three of them are invisible on the default form
+    /// (`DEBUG POPULATE n` with no prefix, no size, on db 0) that every existing caller
+    /// uses.
+    ///
+    /// The db one is why this is not merely a debug-command bug: DEBUG POPULATE seeds
+    /// the benchmarks in `scripts/`, so a harness seeding db 1 was measuring an EMPTY
+    /// db 1 on fr against a full one on redis, with both engines replying +OK and the
+    /// total key count across databases unchanged. Nothing in such a row looks wrong.
+    #[test]
+    fn debug_populate_matches_upstream_on_all_four_axes_dbgpopdb() {
+        use fr_store::Store;
+
+        fn populate(store: &mut Store, db: usize, args: &[&[u8]]) {
+            store.dispatch_client_ctx.db_index = db;
+            let mut argv: Vec<Vec<u8>> = vec![b"DEBUG".to_vec(), b"POPULATE".to_vec()];
+            argv.extend(args.iter().map(|a| a.to_vec()));
+            super::debug_cmd(&argv, store, 1).expect("DEBUG POPULATE should succeed");
+        }
+        let phys = |db: usize, k: &str| fr_store::encode_db_key(db, k.as_bytes());
+
+        // 1. SELECTED DB. Upstream adds to c->db; fr namespaces keys, so a raw key is a
+        //    db-0 key. Before the fix `-n 1 DEBUG POPULATE 5` put all five in db 0.
+        let mut s = Store::new();
+        populate(&mut s, 1, &[b"5"]);
+        assert!(
+            s.exists_no_touch(&phys(1, "key:0"), 1),
+            "populate must land in the SELECTED db"
+        );
+        assert!(
+            !s.exists_no_touch(&phys(0, "key:0"), 1),
+            "populate must NOT leak into db 0"
+        );
+
+        // 2. PREFIX SEPARATOR. `snprintf(buf,"%s:%lu",prefix,j)` inserts ':'
+        //    unconditionally, so "foo" yields foo:0 -- not foo0. The DEFAULT rendering
+        //    was already correct, which is exactly why this hid.
+        let mut s = Store::new();
+        populate(&mut s, 0, &[b"3", b"foo"]);
+        for i in 0..3 {
+            assert!(
+                s.exists_no_touch(&phys(0, &format!("foo:{i}")), 1),
+                "user prefix must render foo:{i}"
+            );
+            assert!(
+                !s.exists_no_touch(&phys(0, &format!("foo{i}")), 1),
+                "user prefix must NOT render foo{i}"
+            );
+        }
+        // And the default still renders key:N.
+        let mut s = Store::new();
+        populate(&mut s, 0, &[b"2"]);
+        assert!(s.exists_no_touch(&phys(0, "key:0"), 1), "default prefix is key:N");
+
+        // 3. SIZE. `createStringObject(NULL,valsize)` + memcpy of min(valsize,len) bytes
+        //    of "value:N" -- the body TRUNCATED or NUL-PADDED, never a fill byte. fr
+        //    used vec![b'A'; size].
+        let mut s = Store::new();
+        populate(&mut s, 0, &[b"1", b"p", b"12"]);
+        let v = s.get(&phys(0, "p:0"), 1).expect("get ok").expect("p:0 exists");
+        assert_eq!(
+            v,
+            b"value:0\0\0\0\0\0".to_vec(),
+            "size pads the body with NUL, it does not fill with 'A'"
+        );
+        // Truncation when valsize is shorter than the body.
+        let mut s = Store::new();
+        populate(&mut s, 0, &[b"1", b"p", b"3"]);
+        let v = s.get(&phys(0, "p:0"), 1).expect("get ok").expect("p:0 exists");
+        assert_eq!(v, b"val".to_vec(), "size shorter than the body truncates it");
+
+        // 4. EXISTING KEYS ARE LEFT ALONE. `if (lookupKeyWrite(..) != NULL) continue;`
+        //    fr overwrote, which silently destroys whatever a test had staged.
+        let mut s = Store::new();
+        s.set(phys(0, "key:0"), b"ORIGINAL".to_vec(), None, 1);
+        populate(&mut s, 0, &[b"2"]);
+        assert_eq!(
+            s.get(&phys(0, "key:0"), 1).expect("get ok").expect("key:0 exists"),
+            b"ORIGINAL".to_vec(),
+            "an existing key must survive DEBUG POPULATE untouched"
+        );
+        assert!(
+            s.exists_no_touch(&phys(0, "key:1"), 1),
+            "the non-colliding key must still be created"
+        );
+    }
 
     /// (frankenredis-evalshafmt-ex06m) The EVALSHA SHA normalisation swapped
     /// `String::from_utf8_lossy(b).to_ascii_lowercase()` for a `str::from_utf8` fast path
