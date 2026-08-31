@@ -72964,3 +72964,5 @@ width has now measured free at two chunk sizes in two different mimalloc allocat
 paths. A width lever is admissible only if a measurement at the CURRENT shift shows the
 width reaching RSS first -- and if that ever changes, the cheap probe is this one: flip
 `NODE_KEY_INLINE_CAP` and read the long-key arm.
+
+- 2026-08-30 LOSS (loss survey, no production change to revert): live Redis 7.2.4 `SWAPDB 0 1` over 16 keys in each DB, c16/P1, two-point Callgrind slope (1k->3k) on `thinkstation1` measured FrankenRedis/Redis **16.139824x** (89,456.808 vs 5,542.614 Ir/op), with same-invocation FrankenRedis A/A **0.995162x**; fr SHA `6ef3c9c71c4295eb3f6c06d8030d4ac070618bafc9189832aa5bb356bace5dd8`, Redis SHA `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`, rch worker N/A.
