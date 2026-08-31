@@ -13132,9 +13132,14 @@ fn ascii_hex_value(byte: u8) -> Option<u8> {
 /// Parse the `sdssplitargs` subset used by Redis for
 /// `REPLCONF RDB-FILTER-ONLY`. An unterminated quote, or a closing quote
 /// immediately followed by a non-whitespace byte, makes the argument
-/// malformed. The runtime owns a second REPLCONF dispatch path, so it uses
-/// this shared parser as well.
+/// malformed. `sdssplitargs` receives a C string, so an embedded NUL ends the
+/// input before tokenization. The runtime owns a second REPLCONF dispatch
+/// path, so it uses this shared parser as well.
 pub fn replconf_rdb_filter_only_filters(value: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let value = value
+        .split(|byte| *byte == b'\0')
+        .next()
+        .expect("splitting a slice always yields one segment");
     let mut index = 0;
     let mut filters = Vec::new();
     while index < value.len() {
@@ -81998,6 +82003,29 @@ mod tests {
         );
         assert_eq!(
             super::replconf_rdb_filter_only_filters(b"\"\\x62ogus\""),
+            Some(vec![b"bogus".to_vec()])
+        );
+    }
+
+    #[test]
+    fn replconf_rdb_filter_only_stops_at_nul_before_rendering_unsupported_filter() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"REPLCONF".to_vec(),
+                b"rdb-filter-only".to_vec(),
+                b"bogus\0ignored".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("an unsupported RDB-FILTER-ONLY value before NUL must error");
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Unsupported rdb-filter-only option: bogus".to_string())
+        );
+        assert_eq!(
+            super::replconf_rdb_filter_only_filters(b"bogus\0ignored"),
             Some(vec![b"bogus".to_vec()])
         );
     }
