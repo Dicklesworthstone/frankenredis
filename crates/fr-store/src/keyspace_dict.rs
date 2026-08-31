@@ -432,6 +432,11 @@ pub struct KeyDict<V> {
     /// `buckets.len() - 1`; bucket index = `hash & mask`.
     mask: u64,
     count: usize,
+    /// While set, [`maybe_shrink`](Self::maybe_shrink) is a no-op. Held for the span of
+    /// a bulk remove-then-reinsert whose net key count is unchanged, so the table does
+    /// not shrink into the drain and grow back out of the refill. See the note on
+    /// `maybe_shrink`. (frankenredis-4f8vx)
+    shrink_suspended: bool,
     hasher: foldhash::quality::RandomState,
 }
 
@@ -515,6 +520,7 @@ impl<V> KeyDict<V> {
             free: Vec::new(),
             mask: (n as u64) - 1,
             count: 0,
+            shrink_suspended: false,
             hasher: foldhash::quality::RandomState::default(),
         }
     }
@@ -560,6 +566,24 @@ impl<V> KeyDict<V> {
     #[allow(dead_code)]
     pub fn storage_slots(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Suspend or resume the shrink policy for the span of a BULK operation whose net
+    /// key count is unchanged. (frankenredis-4f8vx)
+    ///
+    /// Resuming does NOT retroactively shrink; call [`Self::shrink_if_sparse`] once
+    /// afterwards if the caller genuinely ended smaller than it started. Keeping those
+    /// two separate is deliberate: a caller that swaps N keys for N wants neither, and
+    /// one that net-removes wants exactly one shrink, not one per removed key.
+    #[inline]
+    pub fn set_shrink_suspended(&mut self, suspended: bool) {
+        self.shrink_suspended = suspended;
+    }
+
+    /// Apply the shrink policy once, now. No-op while suspended.
+    #[inline]
+    pub fn shrink_if_sparse(&mut self) {
+        self.maybe_shrink();
     }
 
     /// Low 32 bits of the key's hash. See [`Node::hash`] for why 32 is exact for
@@ -831,6 +855,19 @@ impl<V> KeyDict<V> {
     /// across growth (a stale larger cursor masked by the new smaller mask re-visits
     /// the merged bucket — a permitted duplicate — and never skips).
     fn maybe_shrink(&mut self) {
+        // (frankenredis-4f8vx) A BULK operation that removes N keys and puts N back has
+        // a net-zero effect on the table, but the removal half drives `count` toward
+        // zero first, so the shrink policy fires, halves the table repeatedly, and then
+        // the insert half grows it back through the same doublings. Every one of those
+        // resizes rehashes every surviving node.
+        //
+        // SWAPDB is exactly that shape: it drains both databases and refills them.
+        // Measured with callgrind on a SWAPDB-only workload at 1,000 keys/DB,
+        // `resize_buckets` was 5.39 pct of the whole profile -- a frame that should be
+        // ~0 when the key count never actually changes.
+        if self.shrink_suspended {
+            return;
+        }
         if self.buckets.len() <= Self::INITIAL_BUCKETS {
             return;
         }

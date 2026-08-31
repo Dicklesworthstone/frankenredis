@@ -15783,6 +15783,30 @@ impl Store {
         let left_count = left_keys.len();
         let right_count = right_keys.len();
 
+        // (frankenredis-4f8vx) A swap takes N keys out and puts N back, so the table
+        // ends exactly the size it started. Without this the DRAIN half drives `count`
+        // toward zero, the shrink policy halves the bucket array repeatedly, and the
+        // REFILL half grows it back through the same doublings -- every one of those
+        // resizes rehashing every surviving node, for a net-zero change.
+        //
+        // Callgrind on a SWAPDB-only workload at 1,000 keys/DB measured
+        // `KeyDict::resize_buckets` at 5.39 pct of the entire profile. A frame that
+        // should not appear at all when the key count is unchanged.
+        //
+        // This does NOT fix the real problem -- the swap is O(n) because a database's
+        // identity is a prefix on every key, where Redis swaps two dict pointers and is
+        // O(1) (measured 39.76x at 1,000 keys/DB, 491.23x at 10,000). It removes churn
+        // from the constant. The complexity fix is a logical->physical db indirection
+        // and is tracked separately.
+        //
+        // NOTE: no `reserve` here, and that is not an omission. `KeyDict::reserve` sizes
+        // for `count + additional`, and at this point the keys are STILL PRESENT -- so
+        // reserving for them a second time doubles the table, which is the very resize
+        // this guard exists to avoid. The table already holds exactly these keys, so the
+        // refill cannot outgrow it. My first version called reserve and the bucket-count
+        // assertion below caught it.
+        self.entries.set_shrink_suspended(true);
+
         let mut left_entries = Vec::with_capacity(left_count);
         for key in left_keys {
             let max_deleted_id = self.stream_max_deleted_ids.remove(key.as_slice());
@@ -15870,6 +15894,13 @@ impl Store {
                 self.stream_max_deleted_ids.insert(swapped, max_deleted_id);
             }
         }
+
+        // (frankenredis-4f8vx) Resume the policy. NOT followed by a shrink call: a swap
+        // puts back exactly what it took out, so the table is the size it was and there
+        // is nothing to shrink -- which is why `set_shrink_suspended(false)` is
+        // deliberately not retroactive. There is no early return between the suspend
+        // above and here, so the flag cannot be left stuck on.
+        self.entries.set_shrink_suspended(false);
 
         let touched = (left_count + right_count) as u64;
         self.dirty = self.dirty.saturating_add(touched.max(1));
@@ -55413,6 +55444,73 @@ mod tests {
     // index instead of scanning the whole keyspace twice. The enumerated set must
     // be byte-identical to the old `entries.keys().filter(db)` set, and finding a
     // small DB in a large keyspace must be O(log n + db_size), not O(total).
+    /// (frankenredis-4f8vx) SWAPDB must not churn the bucket table.
+    ///
+    /// A swap takes N keys out and puts N back, so the table ends the size it started.
+    /// Before the shrink guard the DRAIN half drove `count` toward zero, the shrink
+    /// policy halved the bucket array repeatedly, and the REFILL half grew it back
+    /// through the same doublings -- each resize rehashing every surviving node, for a
+    /// net-zero change. Callgrind on a SWAPDB-only workload put `resize_buckets` at
+    /// 5.39 pct of the whole profile.
+    ///
+    /// This asserts the bucket count is IDENTICAL across the swap. It fails on the
+    /// pre-guard code, which is the point: a test that only checked the keys landed in
+    /// the right database passes either way and says nothing about the churn.
+    #[test]
+    fn swapdb_does_not_churn_the_bucket_table_4f8vx() {
+        let mut store = Store::new();
+        // Enough keys that the table has grown well past its floor, so a shrink has
+        // somewhere to go and would be visible.
+        let n = 2_000usize;
+        for i in 0..n {
+            store.set(encode_db_key(0, format!("a:{i}").as_bytes()), vec![b'v'], None, 1);
+            store.set(encode_db_key(1, format!("b:{i}").as_bytes()), vec![b'v'], None, 1);
+        }
+        let buckets_before = store.entries.bucket_count();
+        let len_before = store.entries.len();
+        assert!(
+            buckets_before > 64,
+            "ANTI-VACUITY: the table must be well past its floor for a shrink to be \
+             observable, but it holds {buckets_before} buckets"
+        );
+
+        store.swap_databases(0, 1);
+
+        assert_eq!(
+            store.entries.bucket_count(),
+            buckets_before,
+            "SWAPDB resized the bucket table despite a net-zero key count"
+        );
+        assert_eq!(store.entries.len(), len_before, "SWAPDB changed the key count");
+
+        // The swap itself must still be correct: every key changed database.
+        for i in 0..n {
+            assert!(
+                store.exists_no_touch(&encode_db_key(1, format!("a:{i}").as_bytes()), 1),
+                "a:{i} should have moved to db 1"
+            );
+            assert!(
+                store.exists_no_touch(&encode_db_key(0, format!("b:{i}").as_bytes()), 1),
+                "b:{i} should have moved to db 0"
+            );
+        }
+
+        // And the guard must not be left stuck on: a genuine bulk delete afterwards
+        // still shrinks. This is the failure mode of a suspend flag that never resumes.
+        let mut victims: Vec<Vec<u8>> = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            victims.push(encode_db_key(1, format!("a:{i}").as_bytes()));
+            victims.push(encode_db_key(0, format!("b:{i}").as_bytes()));
+        }
+        store.del(&victims, 1);
+        assert!(
+            store.entries.bucket_count() < buckets_before,
+            "the shrink policy must resume after the swap: {} buckets for {} keys",
+            store.entries.bucket_count(),
+            store.entries.len()
+        );
+    }
+
     #[test]
     fn swapdb_db_enumeration_isomorphic_and_faster_swapdb() {
         use super::{Store, encode_db_key};
