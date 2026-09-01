@@ -311,6 +311,30 @@ pub struct RetainedListpackSpans {
 }
 
 impl RetainedListpackSpans {
+    /// An empty sink pre-sized for `data`'s declared element count.
+    ///
+    /// (frankenredis-gvm6z) Mirrors `decode_value_spans_impl`'s presize, for the
+    /// same reason: without it the entry vector grows from empty and pays
+    /// ~log2(n) realloc+copies per decode on the RESTORE hot path. A malformed or
+    /// oversized header only mis-sizes an allocation — the walk still validates
+    /// every entry and cross-checks the final count — so this deliberately does
+    /// not fail on a bad header, it just declines to presize.
+    ///
+    /// `integer_bytes` stays empty: a listpack of strings (the common list and
+    /// hash shape) must not allocate an arena at all.
+    fn with_entry_capacity_for(data: &[u8]) -> Self {
+        let entries = match parse_header(data) {
+            Ok((_, num_elements)) if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN => {
+                Vec::with_capacity(usize::from(num_elements))
+            }
+            _ => Vec::new(),
+        };
+        Self {
+            entries,
+            integer_bytes: Vec::new(),
+        }
+    }
+
     #[must_use]
     pub fn entries(&self) -> &[RetainedListpackValueSpan] {
         &self.entries
@@ -1089,6 +1113,84 @@ fn decode_string_entry_range(
     }
 }
 
+/// Where one decoded listpack entry goes.
+///
+/// (frankenredis-gvm6z) THE WALK IS THE SAME; ONLY THE THING IT BUILDS DIFFERS.
+/// `decode_value_spans` builds `Vec<ListpackValueSpan>` (32 bytes/entry, integer
+/// decimals inline); `decode_retained_listpack_spans` builds
+/// `Vec<RetainedListpackValueSpan>` (12 bytes/entry, integer decimals in a side
+/// arena). Before this trait the retained form was produced by running the FIRST
+/// decoder and then converting its output — a second allocation and a second pass
+/// over every entry, which is what made the retained representation a measured
+/// 17.2 pct LIST RESTORE regression (`edcbf8b66`) despite the span itself being
+/// 2.7x smaller. The size win only pays if it is not bought with a second walk.
+///
+/// `push_integer` takes the `i64` rather than rendered bytes on purpose: the two
+/// sinks render it to different places (inline buffer vs arena), and handing them
+/// a pre-rendered `ListpackIntegerBytes` would put the 20-byte inline buffer back
+/// on the retained path — the exact cost the retained span exists to avoid.
+///
+/// Both methods return `Result` so the arena sink can reject an offset past
+/// `u32::MAX` at the same point `narrow_span` rejects one for a string; the `Vec`
+/// sink is infallible and its `Ok` folds away.
+trait ListpackSpanSink {
+    /// A string entry, as a range into the ORIGINAL listpack payload.
+    fn push_string(&mut self, range: Range<u32>) -> Result<(), ListpackError>;
+    /// An integer entry, as the number. The sink decides where the canonical
+    /// decimal bytes live.
+    fn push_integer(&mut self, value: i64) -> Result<(), ListpackError>;
+    /// Entries decoded so far — the element-count cross-check reads this.
+    fn span_count(&self) -> usize;
+}
+
+impl ListpackSpanSink for Vec<ListpackValueSpan> {
+    #[inline]
+    fn push_string(&mut self, range: Range<u32>) -> Result<(), ListpackError> {
+        self.push(ListpackValueSpan::String(range));
+        Ok(())
+    }
+    #[inline]
+    fn push_integer(&mut self, value: i64) -> Result<(), ListpackError> {
+        self.push(ListpackValueSpan::integer(value));
+        Ok(())
+    }
+    #[inline]
+    fn span_count(&self) -> usize {
+        self.len()
+    }
+}
+
+impl ListpackSpanSink for RetainedListpackSpans {
+    #[inline]
+    fn push_string(&mut self, range: Range<u32>) -> Result<(), ListpackError> {
+        self.entries.push(RetainedListpackValueSpan::String(range));
+        Ok(())
+    }
+
+    /// Render the decimal ONCE, straight into the arena that will keep it.
+    ///
+    /// `decimal_i64_into` writes right-aligned into a zeroed 20-byte scratch and
+    /// returns the first rendered index; only `scratch[start..]` reaches the
+    /// arena, so `i64::MIN` contributes its full 20 bytes and a small integer
+    /// contributes one or two. The scratch never escapes.
+    #[inline]
+    fn push_integer(&mut self, value: i64) -> Result<(), ListpackError> {
+        let mut scratch = [0u8; 20];
+        let start = crate::decimal_i64_into(&mut scratch, value);
+        let begin = self.integer_bytes.len();
+        self.integer_bytes.extend_from_slice(&scratch[start..]);
+        let end = self.integer_bytes.len();
+        self.entries
+            .push(RetainedListpackValueSpan::Integer(narrow_span(begin, end)?));
+        Ok(())
+    }
+
+    #[inline]
+    fn span_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 // (frankenredis-qj6jn) Decode ONE entry straight into the caller's `Vec` and return
 // only the consumed length.
 //
@@ -1112,10 +1214,10 @@ fn decode_string_entry_range(
 // is unobservable — every error path discards the whole `Vec` — but keeping it true
 // means the reference oracle can compare pushes as well as results.)
 #[inline]
-fn decode_entry_value_span_into(
+fn decode_entry_value_span_into<S: ListpackSpanSink>(
     data: &[u8],
     cursor: usize,
-    out: &mut Vec<ListpackValueSpan>,
+    out: &mut S,
 ) -> Result<usize, ListpackError> {
     let first = *data.get(cursor).ok_or(ListpackError::TruncatedEntry)?;
 
@@ -1123,7 +1225,7 @@ fn decode_entry_value_span_into(
         let value = i64::from(first & 0x7F);
         let data_len = 1;
         let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
-        out.push(ListpackValueSpan::integer(value));
+        out.push_integer(value)?;
         return Ok(entry_len);
     }
     if first & 0xC0 == 0x80 {
@@ -1137,7 +1239,7 @@ fn decode_entry_value_span_into(
         }
         let data_len = 1 + slen;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        out.push(ListpackValueSpan::String(narrow_span(start, end)?));
+        out.push_string(narrow_span(start, end)?)?;
         return Ok(entry_len);
     }
     if first & 0xE0 == 0xC0 {
@@ -1150,7 +1252,7 @@ fn decode_entry_value_span_into(
         };
         let data_len = 2;
         let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
-        out.push(ListpackValueSpan::integer(signed));
+        out.push_integer(signed)?;
         return Ok(entry_len);
     }
     if first & 0xF0 == 0xE0 {
@@ -1165,7 +1267,7 @@ fn decode_entry_value_span_into(
         }
         let data_len = 2 + slen;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        out.push(ListpackValueSpan::String(narrow_span(start, end)?));
+        out.push_string(narrow_span(start, end)?)?;
         return Ok(entry_len);
     }
     match first {
@@ -1188,7 +1290,7 @@ fn decode_entry_value_span_into(
             }
             let data_len = 5 + slen;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            out.push(ListpackValueSpan::String(narrow_span(start, end)?));
+            out.push_string(narrow_span(start, end)?)?;
             Ok(entry_len)
         }
         0xF1 => {
@@ -1198,7 +1300,7 @@ fn decode_entry_value_span_into(
             let raw = i16::from_le_bytes([data[cursor + 1], data[cursor + 2]]);
             let data_len = 3;
             let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
-            out.push(ListpackValueSpan::integer(i64::from(raw)));
+            out.push_integer(i64::from(raw))?;
             Ok(entry_len)
         }
         0xF2 => {
@@ -1214,7 +1316,7 @@ fn decode_entry_value_span_into(
             };
             let data_len = 4;
             let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
-            out.push(ListpackValueSpan::integer(signed));
+            out.push_integer(signed)?;
             Ok(entry_len)
         }
         0xF3 => {
@@ -1229,7 +1331,7 @@ fn decode_entry_value_span_into(
             ]);
             let data_len = 5;
             let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
-            out.push(ListpackValueSpan::integer(i64::from(raw)));
+            out.push_integer(i64::from(raw))?;
             Ok(entry_len)
         }
         0xF4 => {
@@ -1248,7 +1350,7 @@ fn decode_entry_value_span_into(
             ]);
             let data_len = 9;
             let entry_len = entry_len_one_byte_backlen(data, cursor, data_len)?;
-            out.push(ListpackValueSpan::integer(raw));
+            out.push_integer(raw)?;
             Ok(entry_len)
         }
         _ => Err(ListpackError::InvalidEncoding(first)),
@@ -1296,10 +1398,42 @@ pub fn decode_string_ranges_if_all_strings(
 /// retain that arena with the spans; extending `data` instead would change the
 /// payload length used by the quicklist fill policy.
 pub fn decode_retained_listpack_spans(data: &[u8]) -> Result<RetainedListpackSpans, ListpackError> {
-    // The generic decoder already walks every entry once and preserves string
-    // ranges plus the canonical decimal bytes for integer encodings.  Reusing
-    // it here keeps the compact retained representation without paying a
-    // second raw-entry decode on RESTORE's list path.
+    // (frankenredis-gvm6z) ONE WALK, BUILDING THE RETAINED FORM DIRECTLY.
+    //
+    // This used to call `decode_value_spans` and then convert its output. That
+    // allocated a `Vec<ListpackValueSpan>` at 32 bytes/entry, walked it a second
+    // time, and allocated the 12-byte retained vector beside it -- so the compact
+    // span was bought with an extra allocation and an extra per-entry pass, and
+    // `edcbf8b66` certified the whole lever as a 17.2 pct LIST RESTORE REGRESSION
+    // against live Redis 7.2.4 even though its `size_of` assertion passed.
+    //
+    // The walk is shared with `decode_value_spans` through `ListpackSpanSink`
+    // rather than duplicated, because `frankenredis-c92f6` refused deriving a
+    // structural rule twice: two decoders that agree today are two decoders that
+    // can disagree later.
+    decode_spans_into(data, RetainedListpackSpans::with_entry_capacity_for(data))
+}
+
+/// Same-binary A/B reference: the TWO-PASS retained decode this replaced.
+///
+/// (frankenredis-gvm6z) docs/BENCH_METHODOLOGY section 3 requires both arms of an
+/// A/B to live in ONE binary and ONE invocation, because `rch exec` picks workers
+/// non-deterministically and an ORIG/CAND ratio is not worker-invariant. So the
+/// pre-change implementation stays here, byte-for-byte as it shipped, rather than
+/// being reconstructed from memory in a bench file where it could drift from what
+/// was actually measured.
+///
+/// It decodes with the GENERIC decoder and then converts: a `Vec<ListpackValueSpan>`
+/// at 32 bytes/entry, a second walk over every entry, and the 12-byte retained
+/// vector allocated beside it. `decode_retained_listpack_spans` now does the same
+/// work in one walk with one entry vector.
+///
+/// Not dead code and not a duplicate rule: nothing in the engine calls this, and
+/// the bench asserts it produces output identical to the production path.
+#[doc(hidden)]
+pub fn bench_decode_retained_spans_two_pass(
+    data: &[u8],
+) -> Result<RetainedListpackSpans, ListpackError> {
     let decoded = decode_value_spans(data)?;
     let mut entries = Vec::with_capacity(decoded.len());
     let mut integer_bytes = Vec::new();
@@ -1555,21 +1689,33 @@ pub fn decode_raw_values(data: &[u8]) -> Result<Vec<RawListpackValue>, ListpackE
 fn decode_value_spans_impl<const PRESIZE: bool>(
     data: &[u8],
 ) -> Result<Vec<ListpackValueSpan>, ListpackError> {
-    let (total_bytes, num_elements) = parse_header(data)?;
-    let end = (total_bytes as usize) - 1;
-    let mut cursor = LISTPACK_HEADER_SIZE;
+    let (_, num_elements) = parse_header(data)?;
     // Pre-size from the header's exact element count (the common compact case) so the spans are
     // collected in one allocation instead of growing from empty (~log2(n) realloc+copies per
     // decode) — this is the RESTORE hot path (hash/zset/set/list `*_from_listpack_spans`). The
     // UNKNOWN sentinel (> 65534 elements) keeps the default. Capacity never affects content, so
     // the decoded spans are byte-identical. Mirrors `decode_listpack`.
-    let mut values = if PRESIZE && num_elements != LISTPACK_HDR_NUMELE_UNKNOWN {
+    let values = if PRESIZE && num_elements != LISTPACK_HDR_NUMELE_UNKNOWN {
         Vec::with_capacity(usize::from(num_elements))
     } else {
         Vec::new()
     };
+    decode_spans_into(data, values)
+}
+
+/// The listpack entry walk, once, over any [`ListpackSpanSink`].
+///
+/// (frankenredis-gvm6z) Structure, bounds checking, terminator handling and the
+/// element-count cross-check are identical for both span representations; only
+/// the per-entry destination differs. Monomorphisation gives each sink its own
+/// copy, so the `Vec<ListpackValueSpan>` path compiles to what it did before this
+/// was factored out.
+fn decode_spans_into<S: ListpackSpanSink>(data: &[u8], mut sink: S) -> Result<S, ListpackError> {
+    let (total_bytes, num_elements) = parse_header(data)?;
+    let end = (total_bytes as usize) - 1;
+    let mut cursor = LISTPACK_HEADER_SIZE;
     while cursor < end {
-        let consumed = decode_entry_value_span_into(data, cursor, &mut values)?;
+        let consumed = decode_entry_value_span_into(data, cursor, &mut sink)?;
         cursor = cursor
             .checked_add(consumed)
             .ok_or(ListpackError::TruncatedEntry)?;
@@ -1580,10 +1726,11 @@ fn decode_value_spans_impl<const PRESIZE: bool>(
     if cursor != end {
         return Err(ListpackError::MissingTerminator);
     }
-    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && values.len() != usize::from(num_elements) {
+    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && sink.span_count() != usize::from(num_elements)
+    {
         return Err(ListpackError::ElementCountMismatch);
     }
-    Ok(values)
+    Ok(sink)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -2938,6 +3085,109 @@ mod tests {
             retained.entries()[3].byte_len(),
             19,
             "i64::MAX must retain every decimal digit"
+        );
+    }
+
+    /// The two decoders now SHARE their walk, so they must also share its errors.
+    ///
+    /// (frankenredis-gvm6z) Before the sink refactor `decode_retained_listpack_spans`
+    /// got its errors for free: it literally called `decode_value_spans` and
+    /// propagated. Now each sink drives the walk itself, and the retained sink has
+    /// an extra fallible step (`narrow_span` over the arena) that the `Vec` sink
+    /// does not. That is exactly the shape where two paths drift: the structural
+    /// rejection could stay identical while the ORDER a malformed entry hits it
+    /// changes, and the only symptom would be a different `ListpackError` reaching
+    /// RESTORE's reply. Pinned per-input rather than as a count, so a swap between
+    /// two error kinds fails.
+    #[test]
+    fn retained_and_generic_decoders_reject_the_same_malformed_listpacks_gvm6z() {
+        let good = crate::encode_listpack_strings_blob(&[
+            b"alpha".as_slice(),
+            b"-17".as_slice(),
+            b"omega".as_slice(),
+        ])
+        .expect("fixture encodes");
+
+        let mut cases: Vec<(&str, Vec<u8>)> = vec![
+            ("empty buffer", Vec::new()),
+            ("header only", good[..LISTPACK_HEADER_SIZE].to_vec()),
+            ("short header", good[..3].to_vec()),
+            ("truncated body", good[..good.len() - 3].to_vec()),
+        ];
+        let mut no_terminator = good.clone();
+        *no_terminator.last_mut().expect("blob is non-empty") = 0x00;
+        cases.push(("terminator overwritten", no_terminator));
+        let mut bad_encoding = good.clone();
+        bad_encoding[LISTPACK_HEADER_SIZE] = 0xFE;
+        cases.push(("invalid encoding byte", bad_encoding));
+        let mut wrong_count = good.clone();
+        wrong_count[4] = 0x63;
+        cases.push(("element count disagrees", wrong_count));
+
+        for (label, blob) in cases {
+            let generic = decode_value_spans(&blob).map(|spans| spans.len());
+            let retained = decode_retained_listpack_spans(&blob).map(|r| r.entries().len());
+            assert_eq!(
+                generic.err(),
+                retained.err(),
+                "{label}: retained and generic decoders disagreed on the error"
+            );
+        }
+
+        // The well-formed input still decodes to the same values through both.
+        let generic = decode_value_spans(&good).expect("good blob decodes");
+        let retained = decode_retained_listpack_spans(&good).expect("good blob decodes");
+        let got: Vec<&[u8]> = retained
+            .entries()
+            .iter()
+            .map(|s| s.as_bytes(&good, retained.integer_bytes()))
+            .collect();
+        let want: Vec<&[u8]> = generic.iter().map(|s| s.as_bytes(&good)).collect();
+        assert_eq!(got, want);
+    }
+
+    /// An all-string listpack must not allocate an integer arena at all.
+    ///
+    /// (frankenredis-gvm6z) This is the whole point of the retained form on the
+    /// common list and hash shape: string entries cost 12 bytes of span and
+    /// nothing else. A future edit that renders every entry through the arena --
+    /// or that pre-reserves it "just in case" -- would keep every other assertion
+    /// in this file green while giving back the win, so the empty arena is pinned
+    /// as a property rather than left implicit.
+    #[test]
+    fn retained_spans_allocate_no_integer_arena_for_an_all_string_listpack_gvm6z() {
+        let blob = crate::encode_listpack_strings_blob(&[
+            b"alpha".as_slice(),
+            b"bravo".as_slice(),
+            b"charlie".as_slice(),
+        ])
+        .expect("fixture encodes");
+        let retained = decode_retained_listpack_spans(&blob).expect("fixture decodes");
+
+        assert!(
+            retained.integer_bytes().is_empty(),
+            "an all-string listpack must carry an empty arena, got {} bytes",
+            retained.integer_bytes().len()
+        );
+        assert!(
+            retained.entries().iter().all(|s| s.is_string_encoded()),
+            "every entry of an all-string listpack is string-encoded"
+        );
+
+        // And the sink IS pre-sized from the header, one allocation for the entries
+        // and none for the arena. Read off the constructor rather than the decoded
+        // result: `capacity` is not on the public `&[T]` accessors, and this is the
+        // exact place the presize decision is made.
+        let empty = RetainedListpackSpans::with_entry_capacity_for(&blob);
+        assert_eq!(
+            empty.entries.capacity(),
+            3,
+            "entry vector must be presized from the header element count"
+        );
+        assert_eq!(
+            empty.integer_bytes.capacity(),
+            0,
+            "the arena must not be allocated before an integer entry is seen"
         );
     }
 

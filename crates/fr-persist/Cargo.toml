@@ -109,3 +109,11 @@ required-features = ["bench-reference"]
 name = "legacy_hash_ziplist_move"
 harness = false
 required-features = ["bench-reference"]
+
+# (frankenredis-gvm6z) Same-binary A/B for the retained listpack span decode:
+# TWO-PASS (decode generic spans, then convert) vs SINGLE-PASS (one walk into the
+# retained form). Instruction-counted under Callgrind by
+# scripts/retained_spans_pass_ab.py rather than timed -- see the bench's header.
+[[bench]]
+name = "retained_spans_single_pass"
+harness = false

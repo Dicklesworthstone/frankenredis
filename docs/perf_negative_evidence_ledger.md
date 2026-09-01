@@ -72966,3 +72966,85 @@ width reaching RSS first -- and if that ever changes, the cheap probe is this on
 `NODE_KEY_INLINE_CAP` and read the long-key arm.
 
 - 2026-08-30 LOSS (loss survey, no production change to revert): live Redis 7.2.4 `SWAPDB 0 1` over 16 keys in each DB, c16/P1, two-point Callgrind slope (1k->3k) on `thinkstation1` measured FrankenRedis/Redis **16.139824x** (89,456.808 vs 5,542.614 Ir/op), with same-invocation FrankenRedis A/A **0.995162x**; fr SHA `6ef3c9c71c4295eb3f6c06d8030d4ac070618bafc9189832aa5bb356bace5dd8`, Redis SHA `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`, rch worker N/A.
+
+- 2026-09-01 WIN, DECODER-LEVEL ONLY (BlackThrush, `frankenredis-gvm6z`): the retained
+  listpack span decode goes SINGLE-PASS. Same-ELF two-arm Callgrind slope,
+  bench ELF sha256 `7510147196daa6b58d594e0e1921526d276c149da5a90051ee03fe1bdba4e284`,
+  200-entry listpack, N=200 / 2N=400 iterations, host `thinkstation1` at loadavg 92.
+
+        shape       two_pass      single_pass        delta    cand/orig
+        strings      15,552.0         11,972.0     -3,580.0     0.7698x
+        integers     32,602.0         24,939.0     -7,663.0     0.7650x
+        mixed        25,192.0         19,269.0     -5,923.0     0.7649x
+
+    Instructions per DECODE of one 200-entry listpack, i.e. -23.0 / -23.5 / -23.5 pct.
+    A/A on the candidate arm read 1.0000 on all three shapes -- Callgrind is
+    deterministic, so that is a wiring assertion, NOT a noise estimate, and it is quoted
+    as such. Arm-equivalence gate ran BEFORE the timing arms and passed: both arms
+    produce identical spans, identical integer arena and identical decoded values on
+    strings/integers/mixed at n=1,2,3,16,200,512.
+
+  MECHANISM, and it is the one `edcbf8b66` named. That certification found `39f1e314f`
+  ("retain compact listpack spans on RESTORE") to be a **17.2 pct LIST RESTORE
+  regression** vs live Redis 7.2.4 (1.7819x -> 2.1050x) and attributed it precisely: the
+  lever ADDED a decode pass instead of replacing one, taking total span-decode work from
+  ~827k to ~1,609k. `decode_retained_listpack_spans` ran the generic decoder -- a
+  `Vec<ListpackValueSpan>` at 32 bytes/entry -- and then walked its output again to build
+  the 12-byte retained vector beside it. The walk is now shared through a
+  `ListpackSpanSink` trait, so the retained form is built directly in ONE walk with ONE
+  entry vector. The 12-byte span survives; the second pass does not.
+
+  WHY IT IS MEASURED IN INSTRUCTIONS AND NOT TIME. This crate's other same-binary A/Bs
+  (`value_spans_presize.rs`) interleave arms and take a median of wall-clock ratios,
+  which needs a host whose noise is under the effect. This host was at loadavg 656 when
+  the work started and 92 at the end. Retired instructions are load-immune (this repo's
+  instrument audit bounded a 34 pct MHz swing at 0.64 pct on instr/op), so no wall-clock
+  number was taken and none should be read into this row.
+
+  **WHAT THIS ROW DOES NOT SAY, stated plainly because the bead it closes is about
+  exactly this mistake.** `39f1e314f` shipped a `size_of` assertion and no measurement,
+  and the assertion passed while the lever lost. This row is a measurement of the DECODER,
+  not of the route: there is NO whole-route LIST RESTORE ratio against live Redis 7.2.4
+  here, before or after. It is not claimed that the 2.1050x is back to 1.7819x or below.
+  The decoder is 14.92 pct of that op by the bead's own attribution, so a -23 pct decoder
+  is worth roughly -3.4 pct of the route if nothing else moves -- an ARITHMETIC
+  expectation, not a measurement, and it is not banked.
+
+  BLOCKER FOR THE WHOLE-ROUTE ARM, so the next pane does not re-derive it. The route
+  needs two `fr-server` ELFs differing only by this patch, built in ONE invocation on ONE
+  worker, then driven by `scripts/restore_instr_per_op.py <elf> 200 40 --type=list --aa`
+  with live Redis in the same invocation. Neither retrieval path was available:
+    * working-tree `rch exec` + scp from the persistent pool (BENCH_METHODOLOGY section 2)
+      FAILS TO BUILD `fr-server` at all -- `.rchignore` excludes `legacy_redis_code/`, and
+      `fr-command`'s build script needs `legacy_redis_code/redis/src/commands`, so the
+      build dies at "failed to run custom build command for fr-command". The fr-persist
+      bench above builds this way only because fr-persist does not depend on fr-command.
+    * `--base HEAD --clean-overlay --overlay-path legacy_redis_code/redis/src/commands`
+      BUILDS correctly, but its tree under `/data/tmp/rch/frankenredis/<hash>/` is REAPED
+      before an scp can reach it (confirmed twice: `f10f72e1011129a9`, `5fb06c313123191a`,
+      both "No such file or directory" immediately after a successful build).
+    * `rch exec --job --result-dir <dir>` is the one path that both builds and returns the
+      binaries, and it was refused for the whole session with
+      `no admissible workers: critical_pressure=1,insufficient_slots=1,insufficient_total_slots=10`
+      while compile-classified invocations were being admitted to hz4 with 8-10 free slots.
+      `--job` evidently needs a far larger free-slot reservation than a compile does.
+  `scripts/paired_arm_build.sh` is the one-invocation two-arm builder, written and ready;
+  it needs only a worker that admits `--job`.
+
+  ENGAGING THE **RESTORE-in-isolation** STANDING LAW (ledger:72926, FoggyOrchid
+  2026-08-30): "RESTORE-in-isolation flatters redis: fr decodes eagerly, redis attaches
+  the listpack shallowly and walks it on EVERY read, so an isolation ratio is not a
+  deficit -- run `scripts/hash_restore_read_premise_run.sh` and quote the break-even."
+  IT DOES NOT BIND THIS ROW, and the reason is that this row has no incumbent in it at
+  all. The law governs fr/redis RESTORE ratios, whose error is comparing fr's eager
+  decode against a decode redis has deferred rather than avoided. Every number above is
+  fr-vs-fr: two arms of FrankenRedis's own decoder, same ELF, same workload, selected by
+  argv. No redis process was started, no fr/redis ratio is quoted, and the decision the
+  row supports -- does the retained span need a second pass -- does not change under any
+  break-even, because the eager decode happens identically in both arms.
+
+  The law WILL bind the whole-route arm named above, which is a live-Redis LIST RESTORE
+  ratio. When that is run, quote the break-even from
+  `scripts/hash_restore_read_premise_run.sh` beside it; the 1.7819x / 2.1050x figures
+  this row cites from `edcbf8b66` are inherited under the same caveat and are used here
+  only as the DELTA between two fr builds, which is the form the law leaves intact.
