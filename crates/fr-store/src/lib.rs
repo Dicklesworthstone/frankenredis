@@ -8119,7 +8119,25 @@ impl Store {
     /// O(n) or worse, so the asymptotics of the callers are unchanged and the
     /// returned bytes are identical.
     fn ordered_physical_keys_in_db(&mut self, db: usize) -> Vec<Vec<u8>> {
-        let mut keys: Vec<&[u8]> = if db == 0 {
+        let mut keys = self.physical_keys_in_db_unordered(db);
+        keys.sort_unstable();
+        keys
+    }
+
+    /// Physical keys of one db in ARBITRARY order.
+    ///
+    /// (frankenredis-4f8vx) Split out because the sort is the expensive half and most
+    /// callers do not need it. Sorting `Vec<Vec<u8>>` is a byte-slice comparison per
+    /// step, and on a SWAPDB-only profile `__memcmp_avx2_movbe` was the LARGEST frame at
+    /// 8.94 pct -- larger than the KeyDict insert, remove and lookup that do the actual
+    /// work. SWAPDB needs the SET of keys to move, never their order: it removes each
+    /// into a vector and re-inserts under the opposite prefix, and the two sides cannot
+    /// collide because they target different databases.
+    ///
+    /// KEYS still sorts, via `ordered_physical_keys_in_db` -- its output order is
+    /// observable and pinned by fixtures.
+    fn physical_keys_in_db_unordered(&mut self, db: usize) -> Vec<Vec<u8>> {
+        let keys: Vec<&[u8]> = if db == 0 {
             self.entries
                 .keys()
                 .filter(|key| decode_db_key(key).is_none())
@@ -8131,7 +8149,6 @@ impl Store {
                 .filter(|key| key.starts_with(&prefix))
                 .collect()
         };
-        keys.sort_unstable();
         keys.into_iter().map(<[u8]>::to_vec).collect()
     }
 
@@ -15771,14 +15788,28 @@ impl Store {
             return 0;
         }
 
-        // (frankenredis-x8kef) Enumerate each DB's physical keys via the ordered
-        // index instead of scanning the WHOLE keyspace twice. For a non-zero DB
-        // this is an O(log n + db_size) prefix-range walk rather than O(total),
-        // so SWAPDB between small DBs in a large keyspace no longer touches the
-        // unrelated DBs. Byte-identical key set (ordered_physical_keys_in_db
-        // applies the SAME db-membership predicate).
-        let left_keys: Vec<Vec<u8>> = self.ordered_physical_keys_in_db(left_db);
-        let right_keys: Vec<Vec<u8>> = self.ordered_physical_keys_in_db(right_db);
+        // (frankenredis-4f8vx) THE x8kef COMMENT THAT USED TO SIT HERE WAS STALE AND IS
+        // CORRECTED RATHER THAN DELETED, because it described a guarantee callers may
+        // still be relying on. It claimed:
+        //
+        //   "Enumerate each DB's physical keys via the ordered index instead of scanning
+        //    the WHOLE keyspace twice ... an O(log n + db_size) prefix-range walk rather
+        //    than O(total)"
+        //
+        // That was true when a permanently-maintained `BTreeSet` side index existed. The
+        // KeyDict wiring (uhthd step 2) DELETED that index, and
+        // `ordered_physical_keys_in_db` became an on-demand full-keyspace filter plus a
+        // sort. So the prefix-range walk x8kef bought is gone: this is O(total) again,
+        // and SWAPDB of two small DBs in a large keyspace does touch the unrelated ones.
+        // Restoring O(db_size) needs an index and is not attempted here.
+        //
+        // What IS fixed here is the sort. SWAPDB needs the SET of keys, never their
+        // order -- it removes each into a vector and re-inserts under the opposite
+        // prefix, and the two sides cannot collide because they target different
+        // databases. Sorting them was the single largest frame on a SWAPDB-only profile
+        // (`__memcmp_avx2_movbe`, 8.94 pct), above the KeyDict work that does the job.
+        let left_keys: Vec<Vec<u8>> = self.physical_keys_in_db_unordered(left_db);
+        let right_keys: Vec<Vec<u8>> = self.physical_keys_in_db_unordered(right_db);
 
         let left_count = left_keys.len();
         let right_count = right_keys.len();
