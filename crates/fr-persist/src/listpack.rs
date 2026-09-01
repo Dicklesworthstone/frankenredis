@@ -1966,19 +1966,66 @@ pub struct HashListpackShape {
     pub has_duplicate_field: bool,
 }
 
-/// Duplicate-FIELD probe over a hash listpack's spans (every other entry), the
-/// same table shape and reasoning as [`zset_member_spans_have_duplicate`].
-fn hash_field_spans_have_duplicate(data: &[u8], spans: &[ListpackValueSpan]) -> bool {
-    let pair_count = spans.len() / 2;
-    if pair_count > ZSET_STACK_DUP_MAX {
-        // Cold: over any default threshold, so never retained; the answer only
-        // steers the fallback.
-        let mut seen: std::collections::HashSet<&[u8]> =
-            std::collections::HashSet::with_capacity(pair_count);
-        return !(0..pair_count).all(|i| seen.insert(spans[i * 2].as_bytes(data)));
-    }
-    const SLOTS: usize = ZSET_STACK_DUP_MAX * 2;
-    const _: () = assert!(SLOTS.is_power_of_two());
+/// Slot ceiling for the HASH stack duplicate probe.
+///
+/// (frankenredis-8l29u) 512, NOT `ZSET_STACK_DUP_MAX`. That constant is 128 and is
+/// shared by three probes, and it is right for exactly two of them: Redis 7.2.4's
+/// `config.c` defaults are `zset-max-listpack-entries` 128, `set-max-listpack-entries`
+/// 128 -- and **`hash-max-listpack-entries` 512**. So the shared ceiling was wrong by
+/// 4x for hashes alone, and the branch it guards is documented "cold: over any default
+/// threshold, so never retained". For a hash of 129..512 fields that is FALSE: such a
+/// hash is listpack-encoded and IS retained under the stock default, so the supposedly
+/// cold `std::collections::HashSet` -- i.e. SipHash -- sat on the hot reload path.
+///
+/// Measured at 200 fields it was **38.5 pct of the whole op**: `hash_one::<&&[u8]>`
+/// 4,160,000.0 + `DefaultHasher::write` 3,520,000.0 + `HashMap<&[u8], ()>::insert`
+/// 3,243,888.1 of 28,392,783.8 instr/op. That is the marginal per-field cost that made
+/// hash reload cross from 0.8396x at 40 fields to 1.3116x at 200.
+const HASH_STACK_DUP_MAX: usize = 512;
+
+/// Field count below which the NARROW (256-slot) probe table wins.
+///
+/// (frankenredis-8l29u) The table is a zeroed stack array, so widening it trades a
+/// fixed zeroing cost against fewer probe collisions -- and the two directions cross.
+/// Measured, same ELF pair, hash reload `--keys=200`:
+///
+/// ```text
+/// n     256 slots      1024 slots     winner
+///  40    5,057,957.8    5,086,412.2   narrow by 0.56 pct
+/// 128   17,021,875.8   12,937,410.6   WIDE by 24.0 pct
+/// ```
+///
+/// At n=40 a 256-slot table is a quarter loaded and the 1536 extra bytes of zeroing are
+/// not repaid; at n=128 it is HALF loaded, probe chains lengthen, and the wide table
+/// repays them many times over. 64 keeps the narrow table at or under a quarter load,
+/// which is where it was measured to win.
+const HASH_NARROW_PROBE_MAX: usize = 64;
+
+/// The probe itself, over a table of `SLOTS` slots.
+///
+/// (frankenredis-8l29u) Const-generic over the table size so the small-hash path can
+/// keep the EXACT table it has today. The table is a zeroed stack array, so its cost is
+/// paid per call whether or not the entries are used -- widening one shared table from
+/// 256 to 1024 slots would have made every small hash zero 2 KB instead of 512 B to buy
+/// a band it never enters. A hash reload is dominated by small hashes, so that is the
+/// arm a careless version of this lever would have regressed.
+///
+/// `#[inline(never)]` DELIBERATELY, and it is worth 0.45 pct. With `#[inline]` both
+/// monomorphisations get inlined into `hash_field_spans_have_duplicate`, which puts BOTH
+/// stack tables -- 512 B and 2 KB -- in ONE frame, so the small-hash path pays the big
+/// band's frame setup on every call. Measured: n=128 read 17,222,903 instr/op inlined
+/// against 17,145,227 before this lever, a +0.45 pct regression on a band this change is
+/// supposed to leave alone, disjoint over four draws each. Out-of-line, each SLOTS gets
+/// its own frame and its own array, and the cost is one call per hash key against 128+
+/// probes inside it.
+#[inline(never)]
+fn hash_field_spans_probe<const SLOTS: usize>(
+    data: &[u8],
+    spans: &[ListpackValueSpan],
+    pair_count: usize,
+) -> bool {
+    debug_assert!(SLOTS.is_power_of_two());
+    debug_assert!(pair_count * 2 <= SLOTS, "load factor must stay at 2x");
     let mut table = [0u16; SLOTS];
     for pair_index in 0..pair_count {
         let field = spans[pair_index * 2].as_bytes(data);
@@ -1996,6 +2043,37 @@ fn hash_field_spans_have_duplicate(data: &[u8], spans: &[ListpackValueSpan]) -> 
         }
     }
     false
+}
+
+/// Duplicate-FIELD probe over a hash listpack's spans (every other entry), the
+/// same table shape and reasoning as [`zset_member_spans_have_duplicate`].
+///
+/// (frankenredis-8l29u) THREE BANDS, not two, and the split point is chosen so the
+/// common case cannot regress:
+///   * `<= 64` fields  -- the 256-slot table, kept at or under a quarter load, which is
+///                        where it was MEASURED to beat the wide one (see
+///                        [`HASH_NARROW_PROBE_MAX`]).
+///   * `65..=512`      -- a 1024-slot table. The upper half of this band previously fell
+///                        through to a `std::collections::HashSet` on the claim that it
+///                        was never retained, which is false at
+///                        `hash-max-listpack-entries`' default of 512.
+///   * `> 512`         -- the allocating set, which is now genuinely cold.
+/// Every boundary here is a measured crossover, not a guess; both of them were found by
+/// building the alternative and reading both arms.
+fn hash_field_spans_have_duplicate(data: &[u8], spans: &[ListpackValueSpan]) -> bool {
+    let pair_count = spans.len() / 2;
+    if pair_count <= HASH_NARROW_PROBE_MAX {
+        return hash_field_spans_probe::<{ ZSET_STACK_DUP_MAX * 2 }>(data, spans, pair_count);
+    }
+    if pair_count <= HASH_STACK_DUP_MAX {
+        return hash_field_spans_probe::<{ HASH_STACK_DUP_MAX * 2 }>(data, spans, pair_count);
+    }
+    // Genuinely cold: a hash of more than 512 fields is over
+    // `hash-max-listpack-entries`' default, so it is not listpack-encoded and not
+    // retained, and this answer only steers the fallback.
+    let mut seen: std::collections::HashSet<&[u8]> =
+        std::collections::HashSet::with_capacity(pair_count);
+    !(0..pair_count).all(|i| seen.insert(spans[i * 2].as_bytes(data)))
 }
 
 /// Validate a `RDB_TYPE_HASH_LISTPACK` payload and report its shape.
@@ -3188,6 +3266,94 @@ mod tests {
             empty.integer_bytes.capacity(),
             0,
             "the arena must not be allocated before an integer entry is seen"
+        );
+    }
+
+    /// The hash duplicate probe must give the SAME answer in all three bands.
+    ///
+    /// (frankenredis-8l29u) The 129..=512 band used to take a different ALGORITHM -- a
+    /// `std::collections::HashSet` rather than the open-addressed table -- and now takes
+    /// the table with a wider mask. Two implementations of one predicate is exactly the
+    /// shape that drifts, so both the duplicate and no-duplicate answers are pinned on
+    /// each side of BOTH boundaries (128/129 and 512/513), not just in the middle of a
+    /// band. The `>512` band still uses the set, so 513 also pins set-vs-table agreement.
+    #[test]
+    fn hash_field_duplicate_probe_agrees_across_all_three_bands_8l29u() {
+        // Distinct fields, and a value between each: the probe reads every OTHER span.
+        let unique = |n: usize| -> Vec<Vec<u8>> {
+            let mut out = Vec::with_capacity(n * 2);
+            for i in 0..n {
+                out.push(format!("f{i:06}").into_bytes());
+                out.push(format!("v{i:06}").into_bytes());
+            }
+            out
+        };
+        // Same, but the LAST field repeats the first -- the duplicate must be found
+        // however far apart the two copies are, which is the case a too-small mask or a
+        // wrong band boundary breaks.
+        let dup = |n: usize| -> Vec<Vec<u8>> {
+            let mut out = unique(n);
+            let last_field = out.len() - 2;
+            out[last_field] = b"f000000".to_vec();
+            out
+        };
+
+        for n in [1usize, 2, 127, 128, 129, 130, 511, 512, 513, 700] {
+            let owned = unique(n);
+            let refs: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+            let blob = crate::encode_listpack_strings_blob(&refs).expect("unique encodes");
+            let spans = decode_value_spans(&blob).expect("unique decodes");
+            assert!(
+                !hash_field_spans_have_duplicate(&blob, &spans),
+                "n={n}: {} distinct fields reported as duplicated",
+                n
+            );
+
+            if n < 2 {
+                continue;
+            }
+            let owned = dup(n);
+            let refs: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+            let blob = crate::encode_listpack_strings_blob(&refs).expect("dup encodes");
+            let spans = decode_value_spans(&blob).expect("dup decodes");
+            assert!(
+                hash_field_spans_have_duplicate(&blob, &spans),
+                "n={n}: a repeated first/last field was not detected"
+            );
+        }
+    }
+
+    /// The band ceilings must track UPSTREAM's config defaults, not each other.
+    ///
+    /// (frankenredis-8l29u) `ZSET_STACK_DUP_MAX` was shared by the zset, set and hash
+    /// probes on the reasoning that above it "the payload is not listpack-encodable
+    /// under any default config". Redis 7.2.4 `config.c` defaults are
+    /// zset-max-listpack-entries 128, set-max-listpack-entries 128 and
+    /// **hash-max-listpack-entries 512** -- so the shared value was silently wrong by 4x
+    /// for hashes, and put SipHash on the retained path for a 4x-wide band of real
+    /// hashes. Pinned as `==` so that if anyone re-unifies these constants, or upstream's
+    /// defaults are re-vendored, this fails instead of quietly reopening the hole.
+    #[test]
+    fn stack_dup_ceilings_match_upstream_listpack_entry_defaults_8l29u() {
+        assert_eq!(
+            ZSET_STACK_DUP_MAX, 128,
+            "zset-max-listpack-entries and set-max-listpack-entries default to 128"
+        );
+        assert_eq!(
+            HASH_STACK_DUP_MAX, 512,
+            "hash-max-listpack-entries defaults to 512, NOT 128 -- that 4x is the bug"
+        );
+        assert_eq!(
+            HASH_NARROW_PROBE_MAX, 64,
+            "the narrow/wide probe crossover is measured, not derived -- see its doc"
+        );
+        assert!(
+            HASH_NARROW_PROBE_MAX * 4 <= ZSET_STACK_DUP_MAX * 2,
+            "the narrow band must stay at or under a quarter load, which is where it wins"
+        );
+        assert!(
+            HASH_STACK_DUP_MAX > ZSET_STACK_DUP_MAX,
+            "the hash ceiling is deliberately its own constant"
         );
     }
 

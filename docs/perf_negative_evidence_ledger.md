@@ -73219,3 +73219,76 @@ width reaching RSS first -- and if that ever changes, the cheap probe is this on
 
   Only the hash arm is a deficit. `frankenredis-qj6jn` is titled around a 3.31x
   list/zset transcode deficit that no longer exists on this ELF.
+
+- 2026-09-01 WIN, and it CLOSES the deficit the row above opened (BlackThrush,
+  `frankenredis-8l29u`). Hash reload is now faster than Redis 7.2.4 at EVERY field count
+  measured; the crossover at ~95 fields is gone.
+
+  ROOT CAUSE: A SHARED CONSTANT THAT WAS RIGHT FOR TWO OF ITS THREE USERS.
+  `ZSET_STACK_DUP_MAX = 128` gated the stack duplicate probe for zsets, sets AND hashes,
+  on the documented reasoning that above it "the payload is not listpack-encodable under
+  any default config, so the answer stops mattering". Redis 7.2.4 `config.c`:
+  `zset-max-listpack-entries` 128, `set-max-listpack-entries` 128, and
+  **`hash-max-listpack-entries` 512**. So for hashes the ceiling was wrong by 4x, and the
+  branch it guarded -- documented as cold -- was the HOT retained path for every hash of
+  129..512 fields. What sat there was `std::collections::HashSet`, i.e. SipHash:
+  `hash_one::<&&[u8]>` 4,160,000.0 + `DefaultHasher::write` 3,520,000.0 +
+  `HashMap<&[u8], ()>::insert` 3,243,888.1 = **38.5 pct of a 28,392,783.8 instr/op
+  reload** at 200 fields.
+
+  ORIG `5ca021e83798166...`, CAND `bfdec42836cd5ed...`, both built on hz4 through the
+  working-tree route differing only by `fr-persist/src/listpack.rs`; vendored Redis 7.2.4
+  live in the same invocation. `--keys=200`, ops=20. EVERY A/A NULL PASSED (band 0.005):
+
+        fields    ORIG fr Ir/op    CAND fr Ir/op     delta    ORIG      CAND
+            40      5,065,795.3      5,056,919.7    -0.18%   0.8396x   0.8379x
+            64      7,290,474.3      7,269,115.3    -0.29%   0.8454x   0.8427x
+            96     12,099,588.0     10,177,502.7   -15.89%   1.0298x   0.8650x
+           128     17,147,361.6     12,917,880.6   -24.66%   1.1471x   0.8657x
+           160     23,114,780.9     15,780,161.7   -31.73%   1.2907x   0.8813x
+           200     28,388,114.2     19,163,860.1   -32.49%   1.3115x   0.8853x
+           600    164,214,431.9    164,208,686.0   +0.00 pct 0.3578x   0.3590x
+
+  n=600 is the CONTROL: above 512 the hash is not listpack-encoded, takes a different arm
+  and this change does not touch it. It reads identical, which is the property that says
+  the win came from the band claimed and not from somewhere unaccounted.
+
+  **TWO BOUNDARIES, BOTH FOUND BY BUILDING THE ALTERNATIVE AND READING BOTH ARMS.** The
+  first version widened the table for everything <=512 and was a LOSS on small hashes:
+  n=40 5,086,412.2 wide vs 5,057,957.8 narrow, +0.56 pct, because the table is a zeroed
+  stack array and 1024 slots means zeroing 2 KB instead of 512 B on every call. The
+  second version kept the narrow table to 128 and left n=128 at 1.1405x -- still a loss,
+  because a 256-slot table is HALF loaded at 128 entries and the probe chains cost more
+  than the zeroing saves. `HASH_NARROW_PROBE_MAX = 64` is the measured crossover between
+  those two effects, not a guess, and both numbers are in the constant's doc comment.
+
+  A THIRD ARM WAS FOUND THE SAME WAY AND IT IS THE REUSABLE PART: `#[inline]` on the
+  const-generic probe helper cost +0.45 pct at n=128 (17,222,903 vs 17,145,227, disjoint
+  over four draws each). Inlining BOTH monomorphisations into the caller puts both stack
+  tables -- 512 B and 2 KB -- in ONE frame, so the small-hash path pays the big band's
+  frame setup on every call. `#[inline(never)]` removed that AND went 0.7 pct better than
+  the original, because the pre-existing single table had been inlined into the caller
+  too. **A const-generic function with a large stack array is a frame-size decision, not
+  just a code-size one.**
+
+  fr-persist tests 254 pass (was 252; two added). One of them caught a rustdoc failure
+  first: a 4-space-indented results table in a doc comment is a Rust code block, and
+  rustdoc tried to compile "40 5,057,957.8 ..." -- fence measurement tables as text.
+
+  ENGAGING THE **medium-zset threshold** STANDING LAW (ledger:72926 /
+  NEGATIVE_EVIDENCE.md:22581): "Compact(Vec) beats BTreeMap for BOTH build and read below
+  n=2048 -- the O(n^2)-looking `Vec::insert` is a hardware memmove that wins on constant
+  factors. Lowering the threshold or moving medium zsets to a tree regresses both
+  dimensions." IT DOES NOT BIND THIS ROW. That law governs the STORE's container choice
+  for zset VALUES -- flat vector versus tree -- and forbids moving medium zsets to a tree
+  or lowering the threshold that keeps them flat. Nothing here touches a zset, a stored
+  container, or a tree: `HASH_NARROW_PROBE_MAX` sizes a transient open-addressed
+  duplicate-detection table used once during HASH payload ingestion and discarded before
+  the value is built. No container type changes, no zset threshold moves, and
+  `ZSET_STACK_DUP_MAX` keeps its value of 128 -- the point of the change is that hashes
+  stop borrowing it.
+
+  If anything the two agree: the law's finding is that a flat array with good constant
+  factors beats a smarter structure at these sizes, and this row replaces a hashbrown
+  `HashSet` with a flat stack array for exactly that reason, then picks its size by
+  measuring the constant factors rather than by reasoning about load factors.
