@@ -7975,13 +7975,15 @@ fn process_buffered_frames(
                     // `SET key value EX|PX <n>` unconditionally replies +OK; route the
                     // non-allocating `_ok` twin to FastOkReply so no `SimpleString("OK")`
                     // reply frame is allocated on this expiring-SET write path.
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if runtime
-                        .execute_plain_set_relexpire_borrowed_ok(
+                        .execute_plain_set_relexpire_borrowed_ok_with_default_write_gate(
                             is_seconds,
                             packet.key,
                             packet.start,
                             packet.end,
                             ts,
+                            default_write_allowed,
                         )
                         .is_some()
                     {
@@ -8002,12 +8004,14 @@ fn process_buffered_frames(
                     && let Some((is_seconds, packet)) =
                         parse_borrowed_plain_set_relexpire_get_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_set_relexpire_get_borrowed(
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_set_relexpire_get_borrowed_with_default_write_gate(
                         is_seconds,
                         packet.key,
                         packet.start,
                         packet.end,
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8027,11 +8031,13 @@ fn process_buffered_frames(
                     && let Some(packet) =
                         parse_borrowed_plain_set_opt_get_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_set_opt_get_borrowed(
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_set_opt_get_borrowed_with_default_write_gate(
                         packet.key,
                         packet.start,
                         packet.end,
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8054,13 +8060,15 @@ fn process_buffered_frames(
                     // `SET key value EXAT|PXAT <ts>` unconditionally replies +OK; route the
                     // non-allocating `_ok` twin to FastOkReply so no `SimpleString("OK")` reply
                     // frame is allocated on this absolute-expiry SET write path.
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if runtime
-                        .execute_plain_set_absexpire_borrowed_ok(
+                        .execute_plain_set_absexpire_borrowed_ok_with_default_write_gate(
                             is_seconds,
                             packet.key,
                             packet.start,
                             packet.end,
                             ts,
+                            default_write_allowed,
                         )
                         .is_some()
                     {
@@ -8083,7 +8091,8 @@ fn process_buffered_frames(
                 {
                     // SET NX replies a constant +OK when it writes → FastOkReply (no reply-frame
                     // alloc); when the key already exists it replies nil, routed through FastReply.
-                    match runtime.execute_plain_set_nx_borrowed(packet.key, packet.value, ts) {
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    match runtime.execute_plain_set_nx_borrowed_with_default_write_gate(packet.key, packet.value, ts, default_write_allowed) {
                         Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
                         }),
@@ -8106,7 +8115,8 @@ fn process_buffered_frames(
                 {
                     // SET XX replies a constant +OK when the key existed and was overwritten →
                     // FastOkReply (no reply-frame alloc); an absent key replies nil via FastReply.
-                    match runtime.execute_plain_set_xx_borrowed(packet.key, packet.value, ts) {
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    match runtime.execute_plain_set_xx_borrowed_with_default_write_gate(packet.key, packet.value, ts, default_write_allowed) {
                         Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
                             consumed: packet.consumed,
                         }),
@@ -8127,13 +8137,15 @@ fn process_buffered_frames(
                     && let Some((is_xx, is_seconds, packet)) =
                         parse_borrowed_plain_set_cond_relexpire_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_set_cond_relexpire_borrowed(
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_set_cond_relexpire_borrowed_with_default_write_gate(
                         is_xx,
                         is_seconds,
                         packet.key,
                         packet.start,
                         packet.end,
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -19386,12 +19398,13 @@ fn try_dispatch_floor_classified_action(
             if let Some((packet, which)) =
                 parse_borrowed_plain_set_opt4_packet(unparsed, &parser_config)
             {
+                let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
                 let outcome = match which {
                     BorrowedPlainSetOpt4::Nx => {
-                        runtime.execute_plain_set_nx_borrowed(packet.key, packet.value, ts)
+                        runtime.execute_plain_set_nx_borrowed_with_default_write_gate(packet.key, packet.value, ts, default_write_allowed)
                     }
                     BorrowedPlainSetOpt4::Xx => {
-                        runtime.execute_plain_set_xx_borrowed(packet.key, packet.value, ts)
+                        runtime.execute_plain_set_xx_borrowed_with_default_write_gate(packet.key, packet.value, ts, default_write_allowed)
                     }
                 };
                 match outcome {
@@ -19426,13 +19439,15 @@ fn try_dispatch_floor_classified_action(
             if let Some((is_seconds, packet)) =
                 parse_borrowed_plain_set_relexpire_packet(unparsed, &parser_config)
             {
+                let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
                 if runtime
-                    .execute_plain_set_relexpire_borrowed_ok(
+                    .execute_plain_set_relexpire_borrowed_ok_with_default_write_gate(
                         is_seconds,
                         packet.key,
                         packet.start,
                         packet.end,
                         ts,
+                        default_write_allowed,
                     )
                     .is_some()
                 {
@@ -19452,11 +19467,13 @@ fn try_dispatch_floor_classified_action(
             } else if let Some(packet) =
                 parse_borrowed_plain_set_opt_get_packet(unparsed, &parser_config)
             {
-                if let Some(response) = runtime.execute_plain_set_opt_get_borrowed(
+                let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+                if let Some(response) = runtime.execute_plain_set_opt_get_borrowed_with_default_write_gate(
                     packet.key,
                     packet.start,
                     packet.end,
                     ts,
+                    default_write_allowed,
                 ) {
                     Ok(BorrowedMultibulkAction::FastReply {
                         consumed: packet.consumed,
@@ -19475,13 +19492,15 @@ fn try_dispatch_floor_classified_action(
             } else if let Some((is_seconds, packet)) =
                 parse_borrowed_plain_set_absexpire_packet(unparsed, &parser_config)
             {
+                let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
                 if runtime
-                    .execute_plain_set_absexpire_borrowed_ok(
+                    .execute_plain_set_absexpire_borrowed_ok_with_default_write_gate(
                         is_seconds,
                         packet.key,
                         packet.start,
                         packet.end,
                         ts,
+                        default_write_allowed,
                     )
                     .is_some()
                 {
@@ -19513,13 +19532,15 @@ fn try_dispatch_floor_classified_action(
             if let Some((is_xx, is_seconds, packet)) =
                 parse_borrowed_plain_set_cond_relexpire_packet(unparsed, &parser_config)
             {
-                if let Some(response) = runtime.execute_plain_set_cond_relexpire_borrowed(
+                let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+                if let Some(response) = runtime.execute_plain_set_cond_relexpire_borrowed_with_default_write_gate(
                     is_xx,
                     is_seconds,
                     packet.key,
                     packet.start,
                     packet.end,
                     ts,
+                    default_write_allowed,
                 ) {
                     Ok(BorrowedMultibulkAction::FastReply {
                         consumed: packet.consumed,
@@ -19538,12 +19559,14 @@ fn try_dispatch_floor_classified_action(
             } else if let Some((is_seconds, packet)) =
                 parse_borrowed_plain_set_relexpire_get_packet(unparsed, &parser_config)
             {
-                if let Some(response) = runtime.execute_plain_set_relexpire_get_borrowed(
+                let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+                if let Some(response) = runtime.execute_plain_set_relexpire_get_borrowed_with_default_write_gate(
                     is_seconds,
                     packet.key,
                     packet.start,
                     packet.end,
                     ts,
+                    default_write_allowed,
                 ) {
                     Ok(BorrowedMultibulkAction::FastReply {
                         consumed: packet.consumed,

@@ -10375,12 +10375,46 @@ impl Runtime {
     /// and reply the old value (nil if absent). Reuses store.get / set_plain_borrowed
     /// / get_expires_at_ms / set_with_abs_expiry (NO new store code). `opt` is the
     /// exact NX/XX/KEEPTTL token (already validated by the parser).
+    /// (frankenredis-6ncz0) Twin of [`Self::execute_plain_set_opt_get_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads
+    /// it into the floor dispatcher. Measured on the ZADD family (`frankenredis-1vfyv`): a fixed
+    /// ~90-108 instr/op per converted route, flat across shapes spanning 2348-3300 total.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES -- literally, here. The gate reads session and server
+    /// CONFIG state only, and it plus all four helpers it calls are pure, so evaluating it in this
+    /// position cannot move anything. The uncached entry point is KEPT for any caller that is not
+    /// the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_set_opt_get_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        opt: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_set_opt_get_borrowed_inner(key, value, opt, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_set_opt_get_borrowed(
         &mut self,
         key: &[u8],
         value: &[u8],
         opt: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_set_opt_get_borrowed_inner(key, value, opt, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_set_opt_get_borrowed_inner(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        opt: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"SET".len()
@@ -10395,7 +10429,7 @@ impl Runtime {
         if !(is_nx || is_xx || is_keepttl) {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -10551,11 +10585,43 @@ impl Runtime {
     /// `SimpleString("OK")` reply-frame allocation; `Some(Some(nil))` when the key was absent (XX
     /// declines) — the `$-1` reply is routed through the ordinary `FastReply` path (the nil frame
     /// itself allocates nothing); and `None` when the borrowed fast path declined entirely.
+    /// (frankenredis-6ncz0) Twin of [`Self::execute_plain_set_xx_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads
+    /// it into the floor dispatcher. Measured on the ZADD family (`frankenredis-1vfyv`): a fixed
+    /// ~90-108 instr/op per converted route, flat across shapes spanning 2348-3300 total.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES -- literally, here. The gate reads session and server
+    /// CONFIG state only, and it plus all four helpers it calls are pure, so evaluating it in this
+    /// position cannot move anything. The uncached entry point is KEPT for any caller that is not
+    /// the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_set_xx_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<Option<RespFrame>> {
+        self.execute_plain_set_xx_borrowed_inner(key, value, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_set_xx_borrowed(
         &mut self,
         key: &[u8],
         value: &[u8],
         now_ms: u64,
+    ) -> Option<Option<RespFrame>> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_set_xx_borrowed_inner(key, value, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_set_xx_borrowed_inner(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<Option<RespFrame>> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"SET".len()
@@ -10564,7 +10630,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -10674,11 +10740,43 @@ impl Runtime {
     /// `SimpleString("OK")` reply-frame allocation; `Some(Some(nil))` when the key already existed
     /// (NX declines) — the `$-1` reply is routed through the ordinary `FastReply` path (the nil
     /// frame itself allocates nothing); and `None` when the borrowed fast path declined entirely.
+    /// (frankenredis-6ncz0) Twin of [`Self::execute_plain_set_nx_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads
+    /// it into the floor dispatcher. Measured on the ZADD family (`frankenredis-1vfyv`): a fixed
+    /// ~90-108 instr/op per converted route, flat across shapes spanning 2348-3300 total.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES -- literally, here. The gate reads session and server
+    /// CONFIG state only, and it plus all four helpers it calls are pure, so evaluating it in this
+    /// position cannot move anything. The uncached entry point is KEPT for any caller that is not
+    /// the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_set_nx_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<Option<RespFrame>> {
+        self.execute_plain_set_nx_borrowed_inner(key, value, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_set_nx_borrowed(
         &mut self,
         key: &[u8],
         value: &[u8],
         now_ms: u64,
+    ) -> Option<Option<RespFrame>> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_set_nx_borrowed_inner(key, value, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_set_nx_borrowed_inner(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<Option<RespFrame>> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"SET".len()
@@ -10687,7 +10785,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -10797,6 +10895,30 @@ impl Runtime {
     /// XX/GET/KEEPTTL/EXAT/PXAT/conflicts fall through to the generic. Recorded as
     /// `set`. Gated by the WRITE predicate.
     #[allow(clippy::too_many_arguments)]
+    /// (frankenredis-6ncz0) Twin of [`Self::execute_plain_set_cond_relexpire_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads
+    /// it into the floor dispatcher. Measured on the ZADD family (`frankenredis-1vfyv`): a fixed
+    /// ~90-108 instr/op per converted route, flat across shapes spanning 2348-3300 total.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES -- literally, here. The gate reads session and server
+    /// CONFIG state only, and it plus all four helpers it calls are pure, so evaluating it in this
+    /// position cannot move anything. The uncached entry point is KEPT for any caller that is not
+    /// the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_set_cond_relexpire_borrowed_with_default_write_gate(
+        &mut self,
+        is_xx: bool,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_set_cond_relexpire_borrowed_inner(is_xx, is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_set_cond_relexpire_borrowed(
         &mut self,
         is_xx: bool,
@@ -10806,6 +10928,20 @@ impl Runtime {
         time_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_set_cond_relexpire_borrowed_inner(is_xx, is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_set_cond_relexpire_borrowed_inner(
+        &mut self,
+        is_xx: bool,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 6
             || self.policy.gate.max_bulk_len < b"SET".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -10813,7 +10949,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let raw = parse_i64_arg(time_arg).ok()?;
@@ -10973,6 +11109,29 @@ impl Runtime {
     /// buffer (via `BorrowedMultibulkAction::FastOkReply`) instead of heap-allocating a
     /// `SimpleString("OK")` reply frame. `None` means the borrowed fast path declined and the
     /// caller must fall back to the generic argv path.
+    /// (frankenredis-6ncz0) Twin of [`Self::execute_plain_set_absexpire_borrowed_ok`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads
+    /// it into the floor dispatcher. Measured on the ZADD family (`frankenredis-1vfyv`): a fixed
+    /// ~90-108 instr/op per converted route, flat across shapes spanning 2348-3300 total.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES -- literally, here. The gate reads session and server
+    /// CONFIG state only, and it plus all four helpers it calls are pure, so evaluating it in this
+    /// position cannot move anything. The uncached entry point is KEPT for any caller that is not
+    /// the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_set_absexpire_borrowed_ok_with_default_write_gate(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        self.execute_plain_set_absexpire_borrowed_ok_inner(is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_set_absexpire_borrowed_ok(
         &mut self,
         is_seconds: bool,
@@ -10981,6 +11140,19 @@ impl Runtime {
         time_arg: &[u8],
         now_ms: u64,
     ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_set_absexpire_borrowed_ok_inner(is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_set_absexpire_borrowed_ok_inner(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<()> {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"SET".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -10988,7 +11160,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let raw = parse_i64_arg(time_arg).ok()?;
@@ -11055,6 +11227,29 @@ impl Runtime {
     /// connection buffer (via `BorrowedMultibulkAction::FastOkReply`) instead of heap-
     /// allocating a `SimpleString("OK")` reply frame on every expiring SET. `None` means the
     /// borrowed fast path declined and the caller must fall back to the generic argv path.
+    /// (frankenredis-6ncz0) Twin of [`Self::execute_plain_set_relexpire_borrowed_ok`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads
+    /// it into the floor dispatcher. Measured on the ZADD family (`frankenredis-1vfyv`): a fixed
+    /// ~90-108 instr/op per converted route, flat across shapes spanning 2348-3300 total.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES -- literally, here. The gate reads session and server
+    /// CONFIG state only, and it plus all four helpers it calls are pure, so evaluating it in this
+    /// position cannot move anything. The uncached entry point is KEPT for any caller that is not
+    /// the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_set_relexpire_borrowed_ok_with_default_write_gate(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        self.execute_plain_set_relexpire_borrowed_ok_inner(is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_set_relexpire_borrowed_ok(
         &mut self,
         is_seconds: bool,
@@ -11063,6 +11258,19 @@ impl Runtime {
         time_arg: &[u8],
         now_ms: u64,
     ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_set_relexpire_borrowed_ok_inner(is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_set_relexpire_borrowed_ok_inner(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<()> {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"SET".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -11070,7 +11278,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         // Same validation as generic set()/getExpireMillisecondsOrReply for EX/PX;
@@ -11195,6 +11403,29 @@ impl Runtime {
     /// key WITHOUT writing) of execute_plain_set_get_borrowed. Reply is the old value
     /// (nil if absent). Invalid/<=0/overflowing time defers to the generic (exact
     /// error). NX/XX/KEEPTTL/EXAT/PXAT + GET and the GET-first order fall through.
+    /// (frankenredis-6ncz0) Twin of [`Self::execute_plain_set_relexpire_get_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads
+    /// it into the floor dispatcher. Measured on the ZADD family (`frankenredis-1vfyv`): a fixed
+    /// ~90-108 instr/op per converted route, flat across shapes spanning 2348-3300 total.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES -- literally, here. The gate reads session and server
+    /// CONFIG state only, and it plus all four helpers it calls are pure, so evaluating it in this
+    /// position cannot move anything. The uncached entry point is KEPT for any caller that is not
+    /// the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_set_relexpire_get_borrowed_with_default_write_gate(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_set_relexpire_get_borrowed_inner(is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_set_relexpire_get_borrowed(
         &mut self,
         is_seconds: bool,
@@ -11202,6 +11433,19 @@ impl Runtime {
         value: &[u8],
         time_arg: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_set_relexpire_get_borrowed_inner(is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_set_relexpire_get_borrowed_inner(
+        &mut self,
+        is_seconds: bool,
+        key: &[u8],
+        value: &[u8],
+        time_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 6
             || self.policy.gate.max_bulk_len < b"SET".len()
@@ -11211,7 +11455,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         // Same EX/PX validation as the generic set()/getExpireMillisecondsOrReply;
@@ -71292,6 +71536,197 @@ mod tests {
     /// The `false` arm matters as much as the `true` arm: a twin that ignored its parameter
     /// would pass an equality-only test, so each form is also asked to refuse and then checked
     /// for having written nothing.
+    /// (frankenredis-6ncz0) The SET family's `_with_default_write_gate` twins must be
+    /// indistinguishable from the uncached entry points they replace on the borrowed batch.
+    ///
+    /// Written per form rather than as a table because this cluster spans THREE return types --
+    /// `Option<()>` for the non-allocating `_ok` twins, `Option<Option<RespFrame>>` for NX/XX
+    /// (outer None = fast path declined, `Some(None)` = wrote and the caller emits a constant
+    /// `+OK`), and `Option<RespFrame>` for the rest. A transformation or a test written for one
+    /// shape silently mis-handles the others.
+    ///
+    /// Each form is driven BOTH ways in identical runtime state and compared on the return value
+    /// AND on the resulting key, then asked to refuse with a closed gate and checked for having
+    /// written nothing -- a twin that ignored its parameter would pass an equality-only test.
+    #[test]
+    fn set_borrowed_default_write_gate_twins_match_the_uncached_entry_points() {
+        fn state(rt: &mut Runtime) -> (RespFrame, RespFrame) {
+            (
+                rt.execute_frame(command(&[b"GET", b"k"]), 900),
+                rt.execute_frame(command(&[b"PTTL", b"k"]), 901),
+            )
+        }
+        fn fresh() -> Runtime {
+            Runtime::default_strict()
+        }
+        // Prove the precondition rather than assuming it.
+        assert!(
+            fresh().plain_borrowed_default_key_write_allows(500),
+            "default_strict must open the borrowed write gate"
+        );
+
+        // --- Option<()> forms: SET k v EX|PX n  and  SET k v EXAT|PXAT ts ---
+        for (label, is_seconds, time_arg) in [("relexpire_s", true, b"100".as_slice())] {
+            let (mut a, mut b, mut c) = (fresh(), fresh(), fresh());
+            let ra = a.execute_plain_set_relexpire_borrowed_ok(is_seconds, b"k", b"v", time_arg, 500);
+            let rb = b.execute_plain_set_relexpire_borrowed_ok_with_default_write_gate(
+                is_seconds, b"k", b"v", time_arg, 500, true,
+            );
+            assert!(ra.is_some(), "{label}: uncached path must take the fast path");
+            assert_eq!(ra, rb, "{label}: return");
+            assert_eq!(state(&mut a), state(&mut b), "{label}: state");
+            assert_eq!(
+                c.execute_plain_set_relexpire_borrowed_ok_with_default_write_gate(
+                    is_seconds, b"k", b"v", time_arg, 500, false,
+                ),
+                None,
+                "{label}: closed gate must fall through"
+            );
+            assert_eq!(
+                c.execute_frame(command(&[b"EXISTS", b"k"]), 902),
+                RespFrame::Integer(0),
+                "{label}: closed gate must not write"
+            );
+        }
+        {
+            // EXAT takes an absolute unix time in seconds; 500 ms of runtime clock is well before it.
+            let (mut a, mut b, mut c) = (fresh(), fresh(), fresh());
+            let ra = a.execute_plain_set_absexpire_borrowed_ok(true, b"k", b"v", b"99999999999", 500);
+            let rb = b.execute_plain_set_absexpire_borrowed_ok_with_default_write_gate(
+                true, b"k", b"v", b"99999999999", 500, true,
+            );
+            assert!(ra.is_some(), "absexpire: uncached path must take the fast path");
+            assert_eq!(ra, rb, "absexpire: return");
+            assert_eq!(state(&mut a), state(&mut b), "absexpire: state");
+            assert_eq!(
+                c.execute_plain_set_absexpire_borrowed_ok_with_default_write_gate(
+                    true, b"k", b"v", b"99999999999", 500, false,
+                ),
+                None
+            );
+            assert_eq!(
+                c.execute_frame(command(&[b"EXISTS", b"k"]), 902),
+                RespFrame::Integer(0)
+            );
+        }
+
+        // --- Option<Option<RespFrame>> forms: SET k v NX / XX, on BOTH branches ---
+        // NX on an absent key writes; NX on a present key declines to write but still fast-paths.
+        // XX is the mirror. Both branches are exercised because they return different shapes.
+        for preset in [false, true] {
+            for nx in [false, true] {
+                let label = format!("set_{} preset={preset}", if nx { "nx" } else { "xx" });
+                let (mut a, mut b, mut c) = (fresh(), fresh(), fresh());
+                for rt in [&mut a, &mut b, &mut c] {
+                    if preset {
+                        rt.execute_frame(command(&[b"SET", b"k", b"old"]), 400);
+                    }
+                }
+                let ra = if nx {
+                    a.execute_plain_set_nx_borrowed(b"k", b"v", 500)
+                } else {
+                    a.execute_plain_set_xx_borrowed(b"k", b"v", 500)
+                };
+                let rb = if nx {
+                    b.execute_plain_set_nx_borrowed_with_default_write_gate(b"k", b"v", 500, true)
+                } else {
+                    b.execute_plain_set_xx_borrowed_with_default_write_gate(b"k", b"v", 500, true)
+                };
+                assert!(ra.is_some(), "{label}: uncached path must take the fast path");
+                assert_eq!(ra, rb, "{label}: return");
+                assert_eq!(state(&mut a), state(&mut b), "{label}: state");
+
+                let rc = if nx {
+                    c.execute_plain_set_nx_borrowed_with_default_write_gate(b"k", b"v", 500, false)
+                } else {
+                    c.execute_plain_set_xx_borrowed_with_default_write_gate(b"k", b"v", 500, false)
+                };
+                assert_eq!(rc, None, "{label}: closed gate must fall through");
+                assert_eq!(
+                    c.execute_frame(command(&[b"GET", b"k"]), 902),
+                    if preset {
+                        RespFrame::BulkString(Some(b"old".to_vec()))
+                    } else {
+                        RespFrame::BulkString(None)
+                    },
+                    "{label}: closed gate must not write"
+                );
+            }
+        }
+
+        // --- Option<RespFrame> forms ---
+        {
+            let (mut a, mut b, mut c) = (fresh(), fresh(), fresh());
+            let ra = a.execute_plain_set_cond_relexpire_borrowed(false, true, b"k", b"v", b"100", 500);
+            let rb = b.execute_plain_set_cond_relexpire_borrowed_with_default_write_gate(
+                false, true, b"k", b"v", b"100", 500, true,
+            );
+            assert!(ra.is_some(), "cond_relexpire: uncached path must take the fast path");
+            assert_eq!(ra, rb, "cond_relexpire: return");
+            assert_eq!(state(&mut a), state(&mut b), "cond_relexpire: state");
+            assert_eq!(
+                c.execute_plain_set_cond_relexpire_borrowed_with_default_write_gate(
+                    false, true, b"k", b"v", b"100", 500, false,
+                ),
+                None
+            );
+            assert_eq!(
+                c.execute_frame(command(&[b"EXISTS", b"k"]), 902),
+                RespFrame::Integer(0)
+            );
+        }
+        {
+            let (mut a, mut b, mut c) = (fresh(), fresh(), fresh());
+            let ra = a.execute_plain_set_relexpire_get_borrowed(true, b"k", b"v", b"100", 500);
+            let rb = b.execute_plain_set_relexpire_get_borrowed_with_default_write_gate(
+                true, b"k", b"v", b"100", 500, true,
+            );
+            assert!(ra.is_some(), "relexpire_get: uncached path must take the fast path");
+            assert_eq!(ra, rb, "relexpire_get: return");
+            assert_eq!(state(&mut a), state(&mut b), "relexpire_get: state");
+            assert_eq!(
+                c.execute_plain_set_relexpire_get_borrowed_with_default_write_gate(
+                    true, b"k", b"v", b"100", 500, false,
+                ),
+                None
+            );
+            assert_eq!(
+                c.execute_frame(command(&[b"EXISTS", b"k"]), 902),
+                RespFrame::Integer(0)
+            );
+        }
+        // `SET k v <opt> GET`, where the executor admits exactly NX, XX and KEEPTTL as `opt`
+        // (anything else declines the fast path -- which is how this test first caught itself
+        // passing b"GET" and measuring the decline rather than the twin).
+        for opt in [b"NX".as_slice(), b"XX".as_slice(), b"KEEPTTL".as_slice()] {
+            let label = String::from_utf8_lossy(opt).to_string();
+            // XX and KEEPTTL only write over an existing key, so seed one for every option and
+            // compare the arms on identical state.
+            let (mut a, mut b, mut c) = (fresh(), fresh(), fresh());
+            for rt in [&mut a, &mut b, &mut c] {
+                rt.execute_frame(command(&[b"SET", b"k", b"old"]), 400);
+            }
+            let ra = a.execute_plain_set_opt_get_borrowed(b"k", b"v", opt, 500);
+            let rb =
+                b.execute_plain_set_opt_get_borrowed_with_default_write_gate(b"k", b"v", opt, 500, true);
+            assert!(ra.is_some(), "opt_get {label}: uncached path must take the fast path");
+            assert_eq!(ra, rb, "opt_get {label}: return");
+            assert_eq!(state(&mut a), state(&mut b), "opt_get {label}: state");
+            assert_eq!(
+                c.execute_plain_set_opt_get_borrowed_with_default_write_gate(
+                    b"k", b"v", opt, 500, false,
+                ),
+                None,
+                "opt_get {label}: closed gate must fall through"
+            );
+            assert_eq!(
+                c.execute_frame(command(&[b"GET", b"k"]), 902),
+                RespFrame::BulkString(Some(b"old".to_vec())),
+                "opt_get {label}: closed gate must not write"
+            );
+        }
+    }
+
     #[test]
     fn zadd_borrowed_default_write_gate_twins_match_the_uncached_entry_points() {
         fn zscore(rt: &mut Runtime, key: &[u8], member: &[u8]) -> RespFrame {

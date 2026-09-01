@@ -73397,3 +73397,121 @@ fr-server 383 passed / 0 failed.
 4. A future count that disagrees with 31 should first check whether it is counting converted routes'
    surviving `unwrap_or_else` fallback calls, which is the error that made this number wrong four
    times before.
+
+## 2026-09-01 BlackThrush: KEEP (SELF-SPEEDUP) — the SET cluster stops re-deriving a gate main.rs already caches: **set_nx_opt −6.68 pct**, set_xx_opt −3.92, set_ex_opt −3.11, and the already-converted `set_base` control does not move (`frankenredis-6ncz0`, continues `frankenredis-1vfyv`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no. fr-before against fr-after; no incumbent arm ran in
+these invocations and none is claimed.
+
+RETRY PREDICATE, in brief here and in full at the end: reopen this surface only if
+`write_gate_coverage.py` shows CONVERTIBLE above 24, and take the next batch only when its cluster
+shares a command family; refuse the batch unless CONVERTIBLE falls by exactly the batch size after
+it lands. Predict the win in instr/op (~85-95 net of the layout floor), never in pct — and if a
+future run shows the control shapes moving more than ~3 instr/op, treat the harness as suspect
+rather than the lever as larger.
+
+### The measurement
+
+A/A NULL, same-invocation, six draws of the ORIG ELF paired into six ratios across two shapes,
+interleaved in the same routine as the A/B: **A/A null median 0.998549, bootstrap 95% median CI
+[0.997177, 1.000517]** (20,000 percentile resamples, seed 20260901), half-width 0.001670. GATE: that
+bootstrap median-CI is the decision rule for this row; an A/B inside the null's interval is refused
+however it reads. **CV is diagnostic only and was never a gate here** — it is not computed.
+
+Medians of three interleaved rounds, arms alternating A,B / B,A within the loop:
+
+    shape             orig      cand     delta    ratio   null half-widths from 1.0
+    set_nx_opt      1451.0    1354.1     -96.9   0.9332      40.0x
+    set_xx_opt      2403.7    2309.5     -94.2   0.9608      23.5x
+    set_ex_opt      2823.4    2735.6     -87.8   0.9689      18.6x
+    set_base        1542.4    1539.1      -3.3   0.9979       1.3x   <- CONTROL, already converted
+    get_control      935.8     933.0      -2.8   0.9970       1.8x   <- GUARD, no write gate
+
+**HONEST NOTE ON THE TWO CONTROLS: neither is exactly 1.0000, and `get_control` at 0.9970 sits
+marginally OUTSIDE the null's lower bound of 0.997177.** I am not going to call that a clean null.
+What it is, is a **code-layout floor of about −3 instr/op (−0.2 to −0.3 pct) shared by every shape**,
+which is the same order as the ~40-instr layout term this ledger has recorded before. It does not
+threaten the verdict: the three SET shapes move 87.8 to 96.9 instr/op, roughly **thirty times** the
+controls' movement, and net of the floor the saving is ~85-94 instr/op — squarely the same constant
+`frankenredis-1vfyv` measured on ZADD. A reader who wants the conservative number should subtract
+3 instr/op from each delta. Quoting these controls as "null" without the caveat would be the kind of
+rounding this ledger exists to prevent.
+
+`set_base` is in the table for a second reason: that route was converted BEFORE this batch, so it is
+a control that specifically proves this edit did not disturb the already-threaded SET path.
+
+BINARIES, both built on ONE worker (hz4) in ONE pool dir, per BENCH_METHODOLOGY section 3:
+
+    cand  bench_elf_sha256=7dc359185da6184d6090b8b3f135b2fc0310cd7c18f639cd871fb6f93407539e
+    orig  bench_elf_sha256=ad0d527cca05bdb5fc37008b5d9a86b155f4873033203956d6b3a55bef113fc1
+
+The ORIG hash is the CAND of the ZADD row above, which is the expected consistency check: HEAD now
+contains that lever, so this batch's baseline IS that binary.
+
+SYMBOL-CHECKED, AND DISCRIMINATING: `strings -a` finds
+`execute_plain_set_nx_borrowed_with_default_write_gate` **0 times in the ORIG ELF and 1 in the CAND**.
+
+### The prediction this row was written to test, and it holds
+
+`frankenredis-1vfyv` closed with an explicit retry predicate: *the saving is a fixed ~90-108
+instr/op and its PERCENTAGE is set by the denominator, so a cheaper command shows a larger share —
+predict in instr/op and convert afterwards.* Registered before this batch was measured: SET shapes
+are cheaper than ZADD's, so the same absolute saving should read as a LARGER pct.
+
+    delivered deltas   -96.9 / -94.2 / -87.8 instr/op   (ZADD's were -90 to -108)
+    delivered pcts     -6.68 / -3.92 / -3.11
+    set_nx_opt is the cheapest shape measured (1451.0) and shows the biggest pct yet seen on this
+    vein; set_ex_opt is the most expensive (2823.4) and shows the smallest.
+
+The absolute constant transferred across two unrelated command families; the percentage did not.
+**Anyone quoting −6.68 pct at another route is quoting the denominator, not the lever.**
+
+### What changed
+
+Seven executors — `execute_plain_set_absexpire_borrowed_ok`, `_relexpire_borrowed_ok`,
+`_nx_borrowed`, `_xx_borrowed`, `_cond_relexpire_borrowed`, `_opt_get_borrowed`,
+`_relexpire_get_borrowed` — each split into a private `_inner` taking `default_write_allowed: bool`,
+a public `_with_default_write_gate` twin, and the original uncached entry point, KEPT for callers
+outside the borrowed batch. 14 call sites across `process_buffered_frames` and
+`try_dispatch_floor_classified_action` now supply `cached_plain_write_gate(...)`.
+
+**THREE DISTINCT RETURN TYPES in one cluster**, which the ZADD batch did not have and which is the
+trap here: `Option<()>` for the non-allocating `_ok` twins, `Option<Option<RespFrame>>` for NX/XX
+(outer `None` = fast path declined, `Some(None)` = wrote and the caller emits a constant `+OK`), and
+`Option<RespFrame>` for the rest. A transformation keyed on the literal string `Option<RespFrame>`
+silently skips two of the seven and leaves them looking converted.
+
+MECHANICAL COVERAGE CHECK: `scripts/write_gate_coverage.py` CONVERTIBLE **31 -> 24**, a drop of
+exactly the batch size, with VIA-WRAPPER unchanged at 21 and FLOOR-HELPER unchanged at 3.
+
+STANDING LAW ENGAGED — **per-element buffer pooling** (NEGATIVE_EVIDENCE.md:26372: pool the
+CONTAINER not its elements; a recycling lever pays only when it removes an allocation without adding
+a per-element pass, and once the bookkeeping is per-element mimalloc's fast path beats it). **That
+law does not bind this row, because this lever allocates and recycles nothing.** It removes a
+recomputation of a boolean predicate over session and server CONFIG state — no buffer is pooled, no
+element is reused, no per-element pass is added, and the allocation behaviour of every route is
+byte-for-byte what it was. The words "non-allocating" and "no reply-frame alloc" appear above only
+in the pre-existing doc comments on the `_ok` twins, describing a FastOkReply choice that predates
+this batch and is untouched by it. The saving is a fixed per-CALL constant, not a per-element one,
+which is exactly why it is flat across shapes whose element counts differ.
+
+Correctness is pinned by tests that drive each of the seven forms BOTH ways in identical runtime
+state and compare the return value AND the resulting key, then ask each to refuse with a closed gate
+and check it wrote nothing. NX and XX are exercised on BOTH branches (key absent and key present),
+since those return different shapes. `set_opt_get` admits exactly NX, XX and KEEPTTL as its option
+token and declines anything else — the first draft of the test passed `GET` there and was measuring
+the decline rather than the twin, which the "uncached path must take the fast path" assertion caught.
+fr-runtime 672 passed / 0 failed, fr-server 383 passed / 0 failed.
+
+### RETRY PREDICATE in full
+
+1. 24 CONVERTIBLE routes remain, plus 21 VIA-WRAPPER and 3 FLOOR-HELPER. Next by cluster size:
+   zmpop/zpop (5), lmpop (4). Require CONVERTIBLE to drop by EXACTLY the batch size.
+2. Predict in instr/op (~85-95 net of the layout floor), never in pct. This row is the evidence.
+3. Match the return type GENERICALLY when transforming; this cluster proved a single family can span
+   three of them.
+4. Inspect every call site's shape before bulk-editing. Single-line calls, `.method(` continuations,
+   `match` scrutinees and `if let ... && let ...` chains all appear; a statement cannot be inserted
+   into a let-chain, and a binding inserted between `match x {` and its first arm does not compile.
+5. If a future run shows the controls moving MORE than ~3 instr/op, stop and treat the harness as
+   suspect rather than the lever as larger.
