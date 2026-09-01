@@ -73048,3 +73048,62 @@ width reaching RSS first -- and if that ever changes, the cheap probe is this on
   `scripts/hash_restore_read_premise_run.sh` beside it; the 1.7819x / 2.1050x figures
   this row cites from `edcbf8b66` are inherited under the same caveat and are used here
   only as the DELTA between two fr builds, which is the form the law leaves intact.
+
+- 2026-09-01 WHOLE-ROUTE ARM FOR THE ABOVE, now unblocked (BlackThrush, `frankenredis-gvm6z`).
+  The retrieval blocker was `.rchignore`, not the fleet -- fixed in `13e34418f`, which is
+  what made this measurable. Two `fr-server` ELFs differing ONLY by `listpack.rs`, both
+  built on hz4 through the same route with the same toolchain
+  (`cargo 1.100.0-nightly e8cb624d5`), then driven by
+  `restore_instr_per_op.py <elf> 200 40 --type=list --aa` with the vendored Redis 7.2.4
+  live in the SAME invocation (`redis-server` sha `d2c8a4b9` == vendored HEAD, verified
+  in-run on every draw). ORIG `8d859804bcb32570...`, CAND `6ba1c7fcdaba2201...`. Host
+  `thinkstation1`, loadavg 2.5-13.5.
+
+  SIX DRAWS PER ARM. Only null-passing draws are quoted; the harness's own A/A band is
+  0.005 and it refuses to print a quotable ratio outside it.
+
+        arm    draw   fr instr/op   A/A null    quotable
+        ORIG      1      48,793.6   0.998880    yes
+        ORIG      2      48,941.5   0.994356    NO
+        ORIG      3      48,730.3   1.002299    yes
+        ORIG      4      48,900.4   0.996937    yes
+        ORIG      5      52,843.6   0.921489    NO  (contaminated draw, 8 pct high)
+        ORIG      6      48,645.7   1.000104    yes
+        CAND      1      47,710.9   1.011558    NO
+        CAND      2      48,573.2   0.990036    NO
+        CAND      3      48,286.1   0.995686    yes
+        CAND      4      48,476.5   0.997622    yes
+        CAND      5      48,470.9   0.990833    NO
+        CAND      6      48,219.0   0.999214    yes
+
+  On the quotable draws the two arms are DISJOINT: ORIG [48,645.7 .. 48,900.4],
+  CAND [48,219.0 .. 48,476.5]. That is the result. Sized three ways so nobody quotes the
+  friendliest one by accident:
+
+        worst bound (highest CAND vs lowest ORIG)   -169.2 instr/op    -0.35 pct
+        median to median                            -476   instr/op    -0.98 pct
+        best bound  (lowest CAND vs highest ORIG)   -681.4 instr/op    -1.39 pct
+
+  **THE ARITHMETIC EXPECTATION WAS 3 TO 10x TOO BIG, AND THAT IS THE REUSABLE PART.**
+  The row above projected "-23 pct of a frame worth 14.92 pct of the op = ~-3.4 pct of
+  the route" and explicitly declined to bank it. Measured, it is -0.35 pct worst-bound.
+  The 14.92 pct attribution came from `decode_value_spans` on a HASH RESTORE profile;
+  this is a 200-entry LETTER-LEADING LIST, where the retained decode is a smaller share
+  of a bigger op. A frame share measured on one workload does not weight a lever on
+  another, even when both are "RESTORE" -- which is the same shape of error as
+  certifying this lever against a hash harness (`edcbf8b66`) when it only runs on the
+  list arm.
+
+  fr/redis ratios from the quotable draws: ORIG 1.7397 / 1.7471 / 1.5571 / 1.7327,
+  CAND 1.7083 / 1.7292 / 1.7233. Median 1.7362x -> 1.7233x. QUOTE THE fr-SIDE ABSOLUTE,
+  NOT THIS: the redis denominator moved 27,871.7 -> 28,265.1 across draws and ORIG draw 4
+  produced 1.5571x from a redis arm that wandered, which is the serverCron contaminant
+  the harness docstring warns about. The ratio column is shown for continuity with the
+  board, not as the finding.
+
+  NOT COMPARABLE TO `edcbf8b66`'s 1.7819x / 2.1050x PAIR. That certification predates
+  835d05854, f8fa7dd6c, 3f6e8c0b9, 26b7d8242, 74d7fe8b3, 9d7be9b44 and 8c7acc79c, all of
+  which moved this path. Today's ORIG arm is HEAD~1, not the pre-gvm6z tree, so this row
+  does NOT say "2.1050x is now 1.72x" and no such recovery is claimed. It says only that
+  on today's tree, removing the second pass is worth -0.35 pct of the route at worst
+  bound, with disjoint null-passing ranges.
