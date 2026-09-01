@@ -73637,3 +73637,113 @@ fr-runtime 673 passed / 0 failed, fr-server 383 passed / 0 failed.
    correctly on the uncached entry point; that is why the uncached entry points are kept.
 5. If a future run shows the control shapes moving more than ~3 instr/op, treat the harness as
    suspect rather than the lever as larger.
+
+## 2026-09-01 BlackThrush: REJECT (and REVERTED; the revert FOLLOWED the measurement) — threading the cached write gate into the six counter/append/getdel call sites in `process_buffered_frames` buys NOTHING, because the floor classifier reaches those commands first and already passes it (`frankenredis-8bi4s`)
+
+Claim class: SELF-SPEEDUP measurement, rejected. Campaign output: no. fr-before against fr-after; no
+incumbent arm ran and none is claimed. **This row REFUTES THE PREMISE OF THE BEAD I FILED AN HOUR
+EARLIER**, which is why it exists.
+
+RETRY PREDICATE, in brief here and in full at the end: do not retry a `None`-to-cached conversion on
+any call site in `process_buffered_frames` unless it is first shown that the command has NO
+`BorrowedDispatchFloorClass` arm, or that the floor arm declines on the shape being measured. The
+measurable condition is a call count: instrument the site and require it to be non-zero on the shape
+before spending a build on it.
+
+### What was claimed, and why it looked right
+
+`scripts/write_gate_coverage.py` counts a route as CONVERTED once its signature TAKES the gate
+parameter. A converted route can still be CALLED with `None` from a function that HOLDS the cache,
+and the tool cannot see that — it classifies ROUTES, and this is a property of CALL SITES. A scan
+found **45 such sites, all in `process_buffered_frames`**, seventeen of them on WRITE-gate routes:
+incr, incrby, decrby, decr, append, getdel, the seven expire forms and the three getex forms.
+`execute_plain_incr_borrowed` was the clean case — `try_dispatch_floor_classified_action` passes the
+cached value, `parse_borrowed_multibulk_action` correctly passes `None` (it holds no cache), and
+`process_buffered_frames` passed `None` while threading the same cache into fourteen ZADD/SET/pop
+sites a few hundred lines away.
+
+INCR is one of the fifteen commands `redis-benchmark` issues, so this looked like the highest-value
+site left on the vein.
+
+### The measurement says no
+
+Six sites converted (incr, incrby, decr, decrby, append, getdel). Medians of three interleaved
+rounds, arms alternating A,B / B,A within the loop:
+
+    shape             orig      cand    delta    ratio   null half-widths   verdict
+    incr_base       1211.6    1212.6     +1.0   1.0008        0.3           INSIDE null
+    incrby_base     1490.7    1494.2     +3.5   1.0023        1.0           at the null edge
+    decr_base       1340.7    1342.9     +2.2   1.0016        0.7           INSIDE null
+    append_base     1537.7    1533.0     -4.7   0.9969        1.3           INSIDE null
+    getdel_base     1221.0    1217.6     -3.4   0.9972        1.2           INSIDE null
+    set_base        1582.2    1586.7     +4.5   1.0028        1.2           CONTROL
+    get_control      936.5     934.5     -2.0   0.9979        0.9           GUARD
+
+A/A NULL, same-invocation, six draws of the ORIG ELF paired into six ratios across two shapes,
+interleaved in the same routine as the A/B: **A/A null median 0.998559, bootstrap 95% median CI
+[0.996257, 1.001074]** (20,000 percentile resamples, seed 20260901), half-width 0.002409. GATE: that
+bootstrap median-CI is the decision rule for this row. **CV is diagnostic only and was never a gate
+here** — it is not computed.
+
+Every shape lands within ±4.7 instr/op, which is the same magnitude as the two controls' own
+movement (+4.5 and −2.0). **The ~90 instr/op this lever pays on every other route on this vein did
+not appear at all.** For scale, the twenty routes converted earlier today all landed between −74 and
+−109 instr/op.
+
+### The mechanism, verified in source rather than guessed
+
+**The floor classifier reaches these commands FIRST and already passes the cached gate.**
+`BorrowedDispatchFloorClass::Incr` is produced by the classifier at main.rs:18057 and dispatched at
+main.rs:24247, and that arm has passed `default_write_allowed` since before this batch. Likewise
+`::Incrby` at 17587/20100. The `process_buffered_frames` sites at 8907 and its neighbours are the
+CASCADE fallback, reached only when the floor DECLINES — which on these shapes it never does. The
+harness corroborates it independently: it labels `incr_base` a *"classified route"*.
+
+So the six edits were real source changes on a path the benchmark does not execute. This is the
+mirror of the ledger's standing warning that **a 0.000 call count is evidence only if the bench
+reaches the function**: here the bench does not reach the edit, so a null is the only thing the
+measurement could have produced, and it is NOT evidence that caching the gate is worthless.
+
+REVERTED. **The revert FOLLOWED the measurement** (BENCH_METHODOLOGY section 5 requires this be
+stated): the arms below were built from the change, measured, and only then was main.rs restored to
+HEAD. The change was neutral rather than harmful, but a neutral edit on a dead path is churn.
+
+BINARIES, both built on ONE worker (hz4) in ONE pool dir:
+
+    cand  bench_elf_sha256=845cfc18bd22afebdd3ff72cec1705feef59fe0db046ad37e771cb257d570715
+    orig  bench_elf_sha256=c8520c5b211293f92ecd7124185d83f914fd3ac37eb41ca98d36fafd2d037c35
+
+PROVENANCE NOTE, because the usual symbol check CANNOT work here: this lever adds no function, it
+changes `None` to `Some(...)` at six call sites, so `strings -a` cannot discriminate the arms. The
+substitute is stronger than a symbol check rather than weaker: the ORIG ELF's sha256 is
+**byte-identical to the CAND built from HEAD for `frankenredis-lguus` earlier in the session**, which
+proves the ORIG arm is HEAD, on the same worker and toolchain, while the CAND differs. A first ORIG
+build for this pair landed on **hz2** instead of hz4 and was DISCARDED unmeasured, per
+BENCH_METHODOLOGY section 3 — the ratio is not worker-invariant.
+
+### What was kept
+
+The six shapes `incr_base`, `incrby_base`, `decr_base`, `decrby_base`, `append_base`, `getdel_base`
+are added to `scripts/shape_instr_per_op.py` and KEPT. This command family had **no shape at all**,
+which is a large part of why these call sites went unexamined for so long: there was no way to price
+them. They are now measurable by anyone.
+
+### RETRY PREDICATE in full
+
+1. Do NOT convert a `None` call site in `process_buffered_frames` for any command that has a
+   `BorrowedDispatchFloorClass` arm — the floor arm gets there first and already carries the cache.
+   Check `classify_borrowed_dispatch_floor_*` for the command before spending a build.
+2. The remaining `None` sites are worth revisiting ONLY for commands with NO floor class, or where a
+   profile shows the floor arm declining on a realistic shape. The measurable condition is a
+   non-zero call count at the site on the shape under test.
+3. Eleven of the 45 sites are READ routes (bitcount, strlen, llen, scard, getbit, sismember, dbsize,
+   touch, zcount, zlexcount, sintercard and friends) whose `None` is the READ gate, a different
+   predicate with its own cache. This row says nothing about them; classify before assuming.
+4. **The coverage tool's CONVERTIBLE count is still the right gate for the ROUTE work**, and this row
+   does not disturb it: CONVERTIBLE 13 at `b81236593`. What this row kills is the idea that the 45
+   call sites are 45 units of remaining VALUE.
+
+STANDING LAW ENGAGED — **per-element buffer pooling** (NEGATIVE_EVIDENCE.md:26372). It does not bind
+this row: nothing is pooled, recycled or reused, and allocation behaviour is unchanged. The lever
+under test was the removal of a boolean recomputation, and it was rejected for being on a dead path,
+not for its allocation behaviour.

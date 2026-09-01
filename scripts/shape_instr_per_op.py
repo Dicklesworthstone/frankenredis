@@ -1516,6 +1516,17 @@ SHAPES = {
     "hrandfield_base": (["HSET h f1 v1"], ["HRANDFIELD", "h"]),
     "hrandfield_count": (["HSET h f1 v1"], ["HRANDFIELD", "h", "1"]),
     "getex_base": (["SET gx abcdefghijklmnop"], ["GETEX", "gx"]),
+    # (frankenredis-8bi4s) The counter/append/getdel family had NO shape at all, which is
+    # why its write-gate call sites went unmeasured long after the routes themselves were
+    # converted: the executors take the cached gate, but `process_buffered_frames` was
+    # still passing `None` at these six sites and no shape existed to show the cost.
+    # INCR is one of the fifteen commands redis-benchmark issues.
+    "incr_base": (["SET ctr 100"], ["INCR", "ctr"]),
+    "incrby_base": (["SET ctr 100"], ["INCRBY", "ctr", "7"]),
+    "decr_base": (["SET ctr 100"], ["DECR", "ctr"]),
+    "decrby_base": (["SET ctr 100"], ["DECRBY", "ctr", "7"]),
+    "append_base": (["SET ap abcdefghijklmnop"], ["APPEND", "ap", "xyz"]),
+    "getdel_base": (["SET gd abcdefghijklmnop"], ["GETDEL", "gd"]),
     # (frankenredis-6iq5i) More BASE/OPTION pairs, widening the ranked list for the
     # family the front-classification lever structurally skips.
     "set_base": ([], ["SET", "sk", "vvvvvvvvvvvvvvvv"]),
