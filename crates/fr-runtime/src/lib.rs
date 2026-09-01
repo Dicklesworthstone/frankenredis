@@ -71084,34 +71084,126 @@ mod tests {
 
     #[test]
     fn stale_replica_blocks_data_commands_when_replica_serve_stale_data_is_disabled() {
-        let mut rt = Runtime::default_strict();
-
-        assert_eq!(
-            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
-            RespFrame::SimpleString("OK".to_string())
-        );
-        assert_eq!(
-            rt.execute_frame(
-                command(&[b"CONFIG", b"SET", b"replica-serve-stale-data", b"no"]),
-                1,
-            ),
-            RespFrame::SimpleString("OK".to_string())
-        );
-
-        let expected = RespFrame::Error(
+        // (frankenredis-nxqmm) This test used to assert MASTERDOWN for BOTH the read and the
+        // write, and had been failing on main for the write. The expectation was wrong, not the
+        // implementation: upstream server.c::processCommand runs the read-only-replica gate
+        // (server.c:4056, shared.roslaveerr) BEFORE the stale-data gate (server.c:4088,
+        // shared.masterdownerr), so a write to a stale READ-ONLY replica answers READONLY and
+        // never reaches MASTERDOWN.
+        //
+        // A single row cannot tell "write gate first" apart from "the stale gate never fires for
+        // writes", so the matrix below is the whole 2x2 of the two configs, measured against
+        // vendored redis-server 7.2.4 on a replica whose master link is down:
+        //
+        //   read-only  stale-data | GET          SET          PING
+        //   yes        yes        | nil          READONLY     PONG
+        //   yes        no         | MASTERDOWN   READONLY     MASTERDOWN
+        //   no         yes        | nil          OK           PONG
+        //   no         no         | MASTERDOWN   MASTERDOWN   MASTERDOWN
+        //
+        // PING is in the matrix because it is the cell that proves the stale gate reads the
+        // command table's `stale` flag rather than an allowlist of data commands: PING is NOT
+        // CMD_STALE in 7.2.4 and upstream does refuse it.
+        let masterdown = RespFrame::Error(
             "MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'."
                 .to_string(),
         );
-        assert_eq!(
-            rt.execute_frame(command(&[b"GET", b"blocked"]), 2),
-            expected
+        let readonly = RespFrame::Error(
+            "READONLY You can't write against a read only replica.".to_string(),
         );
-        assert_eq!(
-            rt.execute_frame(command(&[b"SET", b"blocked", b"value"]), 3),
-            expected
-        );
-    }
+        let ok = RespFrame::SimpleString("OK".to_string());
+        let pong = RespFrame::SimpleString("PONG".to_string());
 
+        for (read_only, serve_stale, expected_get, expected_set, expected_ping) in [
+            (
+                "yes",
+                "yes",
+                RespFrame::BulkString(None),
+                readonly.clone(),
+                pong.clone(),
+            ),
+            (
+                "yes",
+                "no",
+                masterdown.clone(),
+                readonly.clone(),
+                masterdown.clone(),
+            ),
+            (
+                "no",
+                "yes",
+                RespFrame::BulkString(None),
+                ok.clone(),
+                pong.clone(),
+            ),
+            (
+                "no",
+                "no",
+                masterdown.clone(),
+                masterdown.clone(),
+                masterdown.clone(),
+            ),
+        ] {
+            let mut rt = Runtime::default_strict();
+            let label = format!("replica-read-only={read_only} replica-serve-stale-data={serve_stale}");
+
+            // REPLICAOF with nothing listening leaves the link in a non-"connected" state,
+            // which is exactly the stale precondition the gate tests.
+            assert_eq!(
+                rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
+                ok,
+                "{label}: REPLICAOF"
+            );
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"CONFIG",
+                        b"SET",
+                        b"replica-read-only",
+                        read_only.as_bytes(),
+                    ]),
+                    1,
+                ),
+                ok,
+                "{label}: CONFIG SET replica-read-only"
+            );
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[
+                        b"CONFIG",
+                        b"SET",
+                        b"replica-serve-stale-data",
+                        serve_stale.as_bytes(),
+                    ]),
+                    2,
+                ),
+                ok,
+                "{label}: CONFIG SET replica-serve-stale-data"
+            );
+            // Prove the precondition rather than assuming it: the gates below are only
+            // meaningful while the master link is actually down.
+            assert!(
+                rt.stale_replica_active() == (serve_stale == "no"),
+                "{label}: stale precondition"
+            );
+
+            assert_eq!(
+                rt.execute_frame(command(&[b"GET", b"blocked"]), 3),
+                expected_get,
+                "{label}: GET"
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", b"blocked", b"value"]), 4),
+                expected_set,
+                "{label}: SET"
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"PING"]), 5),
+                expected_ping,
+                "{label}: PING"
+            );
+        }
+    }
     #[test]
     fn stale_readonly_replica_uses_a_functions_effective_command_flags_3bda1() {
         // The table marks both FCALL forms STALE and FCALL as WRITE. That is deliberately NOT
