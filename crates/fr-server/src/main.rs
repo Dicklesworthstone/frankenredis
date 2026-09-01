@@ -7928,8 +7928,9 @@ fn process_buffered_frames(
                     // SPOP is the canonical `*2 $4 SPOP key` packet, and paying
                     // the whole values ladder before reaching this parser showed
                     // up in the SPOP perf profile.
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if let Some(response) =
-                        runtime.execute_plain_keyed_pop_borrowed(cmd, packet.key, ts)
+                        runtime.execute_plain_keyed_pop_borrowed_with_default_write_gate(cmd, packet.key, ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10574,8 +10575,10 @@ fn process_buffered_frames(
                 ) {
                     // LMPOP 1 key LEFT|RIGHT COUNT n: key=numkeys, a=key, b=direction,
                     // c=COUNT keyword, d=count.
-                    if let Some(response) = runtime.execute_plain_lmpop1_count_borrowed(
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_lmpop1_count_borrowed_with_default_write_gate(
                         packet.key, packet.a, packet.b, packet.c, packet.d, ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10597,8 +10600,9 @@ fn process_buffered_frames(
                     b"*4\r\n$5\r\n",
                     b"LMPOP",
                 ) {
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if let Some(response) =
-                        runtime.execute_plain_lmpop1_borrowed(packet.key, packet.a, packet.b, ts)
+                        runtime.execute_plain_lmpop1_borrowed_with_default_write_gate(packet.key, packet.a, packet.b, ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10796,8 +10800,10 @@ fn process_buffered_frames(
                 ) {
                     // LMPOP 2 k1 k2 LEFT|RIGHT COUNT n: key=numkeys, a=k1, b=k2,
                     // c=direction, d=COUNT keyword, e=count.
-                    if let Some(response) = runtime.execute_plain_lmpop2_count_borrowed(
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_lmpop2_count_borrowed_with_default_write_gate(
                         packet.key, packet.a, packet.b, packet.c, packet.d, packet.e, ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10820,8 +10826,9 @@ fn process_buffered_frames(
                     b"LMPOP",
                 ) {
                     // LMPOP 2 k1 k2 LEFT|RIGHT: key=numkeys, a=k1, b=k2, c=direction.
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if let Some(response) = runtime
-                        .execute_plain_lmpop2_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
+                        .execute_plain_lmpop2_borrowed_with_default_write_gate(packet.key, packet.a, packet.b, packet.c, ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10897,8 +10904,10 @@ fn process_buffered_frames(
                 ) {
                     // ZMPOP 1 key MIN|MAX COUNT n: key=numkeys, a=key, b=direction,
                     // c=COUNT keyword, d=count.
-                    if let Some(response) = runtime.execute_plain_zmpop1_count_borrowed(
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zmpop1_count_borrowed_with_default_write_gate(
                         packet.key, packet.a, packet.b, packet.c, packet.d, ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10920,8 +10929,9 @@ fn process_buffered_frames(
                     b"*4\r\n$5\r\n",
                     b"ZMPOP",
                 ) {
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if let Some(response) =
-                        runtime.execute_plain_zmpop1_borrowed(packet.key, packet.a, packet.b, ts)
+                        runtime.execute_plain_zmpop1_borrowed_with_default_write_gate(packet.key, packet.a, packet.b, ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10945,8 +10955,10 @@ fn process_buffered_frames(
                 ) {
                     // ZMPOP 2 z1 z2 MIN|MAX COUNT n: key=numkeys, a=z1, b=z2,
                     // c=direction, d=COUNT keyword, e=count.
-                    if let Some(response) = runtime.execute_plain_zmpop2_count_borrowed(
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zmpop2_count_borrowed_with_default_write_gate(
                         packet.key, packet.a, packet.b, packet.c, packet.d, packet.e, ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10968,8 +10980,9 @@ fn process_buffered_frames(
                     b"*5\r\n$5\r\n",
                     b"ZMPOP",
                 ) {
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if let Some(response) = runtime
-                        .execute_plain_zmpop2_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
+                        .execute_plain_zmpop2_borrowed_with_default_write_gate(packet.key, packet.a, packet.b, packet.c, ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13286,8 +13299,9 @@ fn process_buffered_frames(
                 ) {
                     // ZPOPMIN key count: key=zset, arg=count. Neither ZPOPMIN nor
                     // ZPOPMAX had a borrowed fast path — the COUNT form fell to generic.
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if let Some(response) =
-                        runtime.execute_plain_zpop_count_borrowed(true, packet.key, packet.arg, ts)
+                        runtime.execute_plain_zpop_count_borrowed_with_default_write_gate(true, packet.key, packet.arg, ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13310,8 +13324,9 @@ fn process_buffered_frames(
                     b"ZPOPMAX",
                 ) {
                     // ZPOPMAX key count.
+                    let default_write_allowed = cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if let Some(response) =
-                        runtime.execute_plain_zpop_count_borrowed(false, packet.key, packet.arg, ts)
+                        runtime.execute_plain_zpop_count_borrowed_with_default_write_gate(false, packet.key, packet.arg, ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -19673,12 +19688,13 @@ fn try_dispatch_floor_classified_action(
         // Mirrors the cascade arm at ~9687 exactly -- same parser, same executor, same
         // generic fallthrough; only the walk to reach it is removed.
         BorrowedDispatchFloorClass::Lmpop1 => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
                 b"*4\r\n$5\r\n",
                 b"LMPOP",
-            ) && let Some(response) = runtime.execute_plain_lmpop1_borrowed(packet.key, packet.a, packet.b, ts)
+            ) && let Some(response) = runtime.execute_plain_lmpop1_borrowed_with_default_write_gate(packet.key, packet.a, packet.b, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -19697,12 +19713,13 @@ fn try_dispatch_floor_classified_action(
         }
         // (frankenredis-p98mw) `LMPOP 2 k1 k2 LEFT|RIGHT`: key=numkeys, a=k1, b=k2, c=direction. Mirrors ~9908.
         BorrowedDispatchFloorClass::Lmpop2 => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
                 unparsed,
                 &parser_config,
                 b"*5\r\n$5\r\n",
                 b"LMPOP",
-            ) && let Some(response) = runtime.execute_plain_lmpop2_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
+            ) && let Some(response) = runtime.execute_plain_lmpop2_borrowed_with_default_write_gate(packet.key, packet.a, packet.b, packet.c, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -19721,12 +19738,13 @@ fn try_dispatch_floor_classified_action(
         }
         // (frankenredis-p98mw) `LMPOP 1 key LEFT|RIGHT COUNT n`: c=COUNT keyword, d=count. Mirrors ~9662. THIS is the measured shape: 1.3786x, 69.2 pct dispatch share.
         BorrowedDispatchFloorClass::Lmpop1Count => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
                 unparsed,
                 &parser_config,
                 b"*6\r\n$5\r\n",
                 b"LMPOP",
-            ) && let Some(response) = runtime.execute_plain_lmpop1_count_borrowed(packet.key, packet.a, packet.b, packet.c, packet.d, ts)
+            ) && let Some(response) = runtime.execute_plain_lmpop1_count_borrowed_with_default_write_gate(packet.key, packet.a, packet.b, packet.c, packet.d, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -19745,12 +19763,13 @@ fn try_dispatch_floor_classified_action(
         }
         // (frankenredis-p98mw) `LMPOP 2 k1 k2 LEFT|RIGHT COUNT n`: d=COUNT keyword, e=count. Mirrors ~9883.
         BorrowedDispatchFloorClass::Lmpop2Count => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
                 unparsed,
                 &parser_config,
                 b"*7\r\n$5\r\n",
                 b"LMPOP",
-            ) && let Some(response) = runtime.execute_plain_lmpop2_count_borrowed(packet.key, packet.a, packet.b, packet.c, packet.d, packet.e, ts)
+            ) && let Some(response) = runtime.execute_plain_lmpop2_count_borrowed_with_default_write_gate(packet.key, packet.a, packet.b, packet.c, packet.d, packet.e, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -19932,6 +19951,7 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zmpop => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             // Same parser and executor the deep cascade arm used; only the position
             // changes, so the reply bytes and every side effect are unchanged. A
             // declining executor falls through to the generic path exactly as before.
@@ -19941,7 +19961,7 @@ fn try_dispatch_floor_classified_action(
                 b"*4\r\n$5\r\n",
                 b"ZMPOP",
             ) && let Some(response) =
-                runtime.execute_plain_zmpop1_borrowed(packet.key, packet.a, packet.b, ts)
+                runtime.execute_plain_zmpop1_borrowed_with_default_write_gate(packet.key, packet.a, packet.b, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20046,6 +20066,7 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::ZsetPopCount { min } => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             let hit = parse_borrowed_plain_key_arg1_packet(
                 unparsed,
                 &parser_config,
@@ -20054,7 +20075,7 @@ fn try_dispatch_floor_classified_action(
             )
             .and_then(|packet| {
                 runtime
-                    .execute_plain_zpop_count_borrowed(min, packet.key, packet.arg, ts)
+                    .execute_plain_zpop_count_borrowed_with_default_write_gate(min, packet.key, packet.arg, ts, default_write_allowed)
                     .map(|response| (packet.consumed, response))
             });
             if let Some((consumed, response)) = hit {
@@ -23282,12 +23303,13 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Spop => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             // (frankenredis-ozrro) Write path: the executor's own guard refuses replicas,
             // AOF, keyspace notifications, tracking and MONITOR, so a SERVED SPOP has no
             // consumer that would need it rewritten as SREM <key> <member>. Declines reach
             // the generic path SPOP uses today.
             if let Some(packet) = parse_borrowed_plain_spop_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_spop_borrowed(packet.key, ts)
+                && let Some(response) = runtime.execute_plain_spop_borrowed_with_default_write_gate(packet.key, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,

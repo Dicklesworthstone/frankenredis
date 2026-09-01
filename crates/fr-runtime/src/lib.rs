@@ -15483,11 +15483,43 @@ impl Runtime {
     /// no-op in plain mode. These are write commands, counted once. The COUNT
     /// form (argc > 2) is handled by the caller falling back to the generic path.
     /// (frankenredis-ev067 — the pop analog of the keyed-values fast path.)
+    /// (frankenredis-lguus) Twin of [`Self::execute_plain_keyed_pop_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads it
+    /// into the floor dispatcher. Measured at a fixed ~85-95 instr/op per converted route across two
+    /// unrelated command families (`frankenredis-1vfyv` ZADD, `frankenredis-6ncz0` SET); the
+    /// PERCENTAGE that represents is set by the shape's own cost, not by the lever.
+    ///
+    /// The gate reads session and server CONFIG state only, and it plus all four helpers it calls
+    /// are pure, so evaluating it in this position cannot move anything. The uncached entry point is
+    /// KEPT for any caller that is not the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_keyed_pop_borrowed_with_default_write_gate(
+        &mut self,
+        cmd: PlainKeyedPopCmd,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_keyed_pop_borrowed_inner(cmd, key, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_keyed_pop_borrowed(
         &mut self,
         cmd: PlainKeyedPopCmd,
         key: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_keyed_pop_borrowed_inner(cmd, key, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_keyed_pop_borrowed_inner(
+        &mut self,
+        cmd: PlainKeyedPopCmd,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < cmd.name_upper().len()
@@ -15495,7 +15527,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -28190,14 +28222,34 @@ impl Runtime {
     /// ever connected, AOF is enabled, keyspace notifications are on, MONITOR is attached
     /// or client tracking is active — every consumer that would need SPOP logged as
     /// SREM <key> <member>. Outside that envelope this path is never taken.
+    /// (frankenredis-lguus) Twin of [`Self::execute_plain_spop_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads it
+    /// into the floor dispatcher. Measured at a fixed ~85-95 instr/op per converted route across two
+    /// unrelated command families (`frankenredis-1vfyv` ZADD, `frankenredis-6ncz0` SET); the
+    /// PERCENTAGE that represents is set by the shape's own cost, not by the lever.
+    ///
+    /// The gate reads session and server CONFIG state only, and it plus all four helpers it calls
+    /// are pure, so evaluating it in this position cannot move anything. The uncached entry point is
+    /// KEPT for any caller that is not the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_spop_borrowed_with_default_write_gate(&mut self, key: &[u8], now_ms: u64, default_write_allowed: bool) -> Option<RespFrame> {
+        self.execute_plain_spop_borrowed_inner(key, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_spop_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_spop_borrowed_inner(key, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_spop_borrowed_inner(&mut self, key: &[u8], now_ms: u64, default_write_allowed: bool) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"SPOP".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let packet_id =
@@ -28704,12 +28756,46 @@ impl Runtime {
     /// empty/missing → nil array `Array(None)`; WRONGTYPE error. Fires only when
     /// numkeys==1 and the direction is LEFT/RIGHT; every other numkeys / COUNT /
     /// bad-direction form falls through to the generic handler.
+    /// (frankenredis-lguus) Twin of [`Self::execute_plain_lmpop1_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads it
+    /// into the floor dispatcher. Measured at a fixed ~85-95 instr/op per converted route across two
+    /// unrelated command families (`frankenredis-1vfyv` ZADD, `frankenredis-6ncz0` SET); the
+    /// PERCENTAGE that represents is set by the shape's own cost, not by the lever.
+    ///
+    /// The gate reads session and server CONFIG state only, and it plus all four helpers it calls
+    /// are pure, so evaluating it in this position cannot move anything. The uncached entry point is
+    /// KEPT for any caller that is not the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_lmpop1_borrowed_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_lmpop1_borrowed_inner(numkeys_arg, key, dir_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_lmpop1_borrowed(
         &mut self,
         numkeys_arg: &[u8],
         key: &[u8],
         dir_arg: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_lmpop1_borrowed_inner(numkeys_arg, key, dir_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_lmpop1_borrowed_inner(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"LMPOP".len()
@@ -28729,7 +28815,7 @@ impl Runtime {
         } else {
             return None;
         };
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let packet_id = self.plain_zremrange_write_preamble(
@@ -28787,6 +28873,30 @@ impl Runtime {
     /// frankenredis-0ui1o). Byte-identical to `fr_command::lmpop`; any non-conforming
     /// shape returns `None` so the generic path renders the exact error.
     #[allow(clippy::too_many_arguments)]
+    /// (frankenredis-lguus) Twin of [`Self::execute_plain_lmpop1_count_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads it
+    /// into the floor dispatcher. Measured at a fixed ~85-95 instr/op per converted route across two
+    /// unrelated command families (`frankenredis-1vfyv` ZADD, `frankenredis-6ncz0` SET); the
+    /// PERCENTAGE that represents is set by the shape's own cost, not by the lever.
+    ///
+    /// The gate reads session and server CONFIG state only, and it plus all four helpers it calls
+    /// are pure, so evaluating it in this position cannot move anything. The uncached entry point is
+    /// KEPT for any caller that is not the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_lmpop1_count_borrowed_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_lmpop1_count_borrowed_inner(numkeys_arg, key, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_lmpop1_count_borrowed(
         &mut self,
         numkeys_arg: &[u8],
@@ -28795,6 +28905,20 @@ impl Runtime {
         count_kw: &[u8],
         count_arg: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_lmpop1_count_borrowed_inner(numkeys_arg, key, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_lmpop1_count_borrowed_inner(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 6
             || self.policy.gate.max_bulk_len < b"LMPOP".len()
@@ -28823,7 +28947,7 @@ impl Runtime {
             Ok(v) if v > 0 => usize::try_from(v).ok()?,
             _ => return None,
         };
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let packet_id = self.plain_zremrange_write_preamble(
@@ -28886,6 +29010,29 @@ impl Runtime {
     /// Mirrors fr-command::lmpop: probe k1 then k2 (llen_no_stat, no keyspace bump),
     /// pop one from the first non-empty list -> [key, [elem]]; both empty/missing -> nil;
     /// first wrong-type key -> WRONGTYPE error. COUNT form + >2 keys fall to generic.
+    /// (frankenredis-lguus) Twin of [`Self::execute_plain_lmpop2_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads it
+    /// into the floor dispatcher. Measured at a fixed ~85-95 instr/op per converted route across two
+    /// unrelated command families (`frankenredis-1vfyv` ZADD, `frankenredis-6ncz0` SET); the
+    /// PERCENTAGE that represents is set by the shape's own cost, not by the lever.
+    ///
+    /// The gate reads session and server CONFIG state only, and it plus all four helpers it calls
+    /// are pure, so evaluating it in this position cannot move anything. The uncached entry point is
+    /// KEPT for any caller that is not the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_lmpop2_borrowed_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_lmpop2_borrowed_inner(numkeys_arg, k1, k2, dir_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_lmpop2_borrowed(
         &mut self,
         numkeys_arg: &[u8],
@@ -28893,6 +29040,19 @@ impl Runtime {
         k2: &[u8],
         dir_arg: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_lmpop2_borrowed_inner(numkeys_arg, k1, k2, dir_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_lmpop2_borrowed_inner(
+        &mut self,
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"LMPOP".len()
@@ -28913,7 +29073,7 @@ impl Runtime {
         } else {
             return None;
         };
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let packet_id = self.plain_zremrange_write_preamble(
@@ -28985,6 +29145,31 @@ impl Runtime {
     /// shape (bad/zero count, wrong keyword, numkeys != 2, bad direction) returns
     /// `None` so the generic path renders the exact error wording.
     #[allow(clippy::too_many_arguments)]
+    /// (frankenredis-lguus) Twin of [`Self::execute_plain_lmpop2_count_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads it
+    /// into the floor dispatcher. Measured at a fixed ~85-95 instr/op per converted route across two
+    /// unrelated command families (`frankenredis-1vfyv` ZADD, `frankenredis-6ncz0` SET); the
+    /// PERCENTAGE that represents is set by the shape's own cost, not by the lever.
+    ///
+    /// The gate reads session and server CONFIG state only, and it plus all four helpers it calls
+    /// are pure, so evaluating it in this position cannot move anything. The uncached entry point is
+    /// KEPT for any caller that is not the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_lmpop2_count_borrowed_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_lmpop2_count_borrowed_inner(numkeys_arg, k1, k2, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_lmpop2_count_borrowed(
         &mut self,
         numkeys_arg: &[u8],
@@ -28994,6 +29179,21 @@ impl Runtime {
         count_kw: &[u8],
         count_arg: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_lmpop2_count_borrowed_inner(numkeys_arg, k1, k2, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_lmpop2_count_borrowed_inner(
+        &mut self,
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 7
             || self.policy.gate.max_bulk_len < b"LMPOP".len()
@@ -29026,7 +29226,7 @@ impl Runtime {
             Ok(v) if v > 0 => usize::try_from(v).ok()?,
             _ => return None,
         };
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let packet_id = self.plain_zremrange_write_preamble(
@@ -29108,12 +29308,46 @@ impl Runtime {
     /// 0's type-checked empty array). A negative / non-integer count returns `None`
     /// so the generic path emits the exact
     /// "value is out of range, must be positive" error.
+    /// (frankenredis-lguus) Twin of [`Self::execute_plain_zpop_count_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads it
+    /// into the floor dispatcher. Measured at a fixed ~85-95 instr/op per converted route across two
+    /// unrelated command families (`frankenredis-1vfyv` ZADD, `frankenredis-6ncz0` SET); the
+    /// PERCENTAGE that represents is set by the shape's own cost, not by the lever.
+    ///
+    /// The gate reads session and server CONFIG state only, and it plus all four helpers it calls
+    /// are pure, so evaluating it in this position cannot move anything. The uncached entry point is
+    /// KEPT for any caller that is not the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_zpop_count_borrowed_with_default_write_gate(
+        &mut self,
+        use_min: bool,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zpop_count_borrowed_inner(use_min, key, count_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_zpop_count_borrowed(
         &mut self,
         use_min: bool,
         key: &[u8],
         count_arg: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zpop_count_borrowed_inner(use_min, key, count_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_zpop_count_borrowed_inner(
+        &mut self,
+        use_min: bool,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         let (name_lc, name_uc): (&str, &str) = if use_min {
             ("zpopmin", "ZPOPMIN")
@@ -29134,7 +29368,7 @@ impl Runtime {
             Ok(v) if v >= 0 => usize::try_from(v).ok()?,
             _ => return None,
         };
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let packet_id = self.plain_zremrange_write_preamble(
@@ -29185,12 +29419,46 @@ impl Runtime {
     /// where the score frame is RESP3 Double / RESP2 bulk (inlined zpop_score_frame);
     /// empty/missing → nil array; WRONGTYPE error; pop-last autodeletes. Fires only
     /// when numkeys==1 and the direction is MIN/MAX; other forms fall through.
+    /// (frankenredis-lguus) Twin of [`Self::execute_plain_zmpop1_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads it
+    /// into the floor dispatcher. Measured at a fixed ~85-95 instr/op per converted route across two
+    /// unrelated command families (`frankenredis-1vfyv` ZADD, `frankenredis-6ncz0` SET); the
+    /// PERCENTAGE that represents is set by the shape's own cost, not by the lever.
+    ///
+    /// The gate reads session and server CONFIG state only, and it plus all four helpers it calls
+    /// are pure, so evaluating it in this position cannot move anything. The uncached entry point is
+    /// KEPT for any caller that is not the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_zmpop1_borrowed_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zmpop1_borrowed_inner(numkeys_arg, key, dir_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_zmpop1_borrowed(
         &mut self,
         numkeys_arg: &[u8],
         key: &[u8],
         dir_arg: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zmpop1_borrowed_inner(numkeys_arg, key, dir_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_zmpop1_borrowed_inner(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"ZMPOP".len()
@@ -29210,7 +29478,7 @@ impl Runtime {
         } else {
             return None;
         };
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let packet_id = self.plain_zremrange_write_preamble(
@@ -29277,6 +29545,29 @@ impl Runtime {
     /// pop one min/max from the first non-empty zset -> [key, [[member, score]]] (score
     /// RESP3 Double / RESP2 bulk); both empty/missing -> nil; first wrong-type -> WRONGTYPE.
     /// COUNT form + >2 keys fall to generic.
+    /// (frankenredis-lguus) Twin of [`Self::execute_plain_zmpop2_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads it
+    /// into the floor dispatcher. Measured at a fixed ~85-95 instr/op per converted route across two
+    /// unrelated command families (`frankenredis-1vfyv` ZADD, `frankenredis-6ncz0` SET); the
+    /// PERCENTAGE that represents is set by the shape's own cost, not by the lever.
+    ///
+    /// The gate reads session and server CONFIG state only, and it plus all four helpers it calls
+    /// are pure, so evaluating it in this position cannot move anything. The uncached entry point is
+    /// KEPT for any caller that is not the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_zmpop2_borrowed_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        z1: &[u8],
+        z2: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zmpop2_borrowed_inner(numkeys_arg, z1, z2, dir_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_zmpop2_borrowed(
         &mut self,
         numkeys_arg: &[u8],
@@ -29284,6 +29575,19 @@ impl Runtime {
         z2: &[u8],
         dir_arg: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zmpop2_borrowed_inner(numkeys_arg, z1, z2, dir_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_zmpop2_borrowed_inner(
+        &mut self,
+        numkeys_arg: &[u8],
+        z1: &[u8],
+        z2: &[u8],
+        dir_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"ZMPOP".len()
@@ -29304,7 +29608,7 @@ impl Runtime {
         } else {
             return None;
         };
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let packet_id = self.plain_zremrange_write_preamble(
@@ -29384,6 +29688,30 @@ impl Runtime {
     /// (score = RESP3 Double / RESP2 bulk, identical to `fr_command::zmpop`); any
     /// non-conforming shape returns `None` for the generic path's exact error.
     #[allow(clippy::too_many_arguments)]
+    /// (frankenredis-lguus) Twin of [`Self::execute_plain_zmpop1_count_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads it
+    /// into the floor dispatcher. Measured at a fixed ~85-95 instr/op per converted route across two
+    /// unrelated command families (`frankenredis-1vfyv` ZADD, `frankenredis-6ncz0` SET); the
+    /// PERCENTAGE that represents is set by the shape's own cost, not by the lever.
+    ///
+    /// The gate reads session and server CONFIG state only, and it plus all four helpers it calls
+    /// are pure, so evaluating it in this position cannot move anything. The uncached entry point is
+    /// KEPT for any caller that is not the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_zmpop1_count_borrowed_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zmpop1_count_borrowed_inner(numkeys_arg, key, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_zmpop1_count_borrowed(
         &mut self,
         numkeys_arg: &[u8],
@@ -29392,6 +29720,20 @@ impl Runtime {
         count_kw: &[u8],
         count_arg: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zmpop1_count_borrowed_inner(numkeys_arg, key, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_zmpop1_count_borrowed_inner(
+        &mut self,
+        numkeys_arg: &[u8],
+        key: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 6
             || self.policy.gate.max_bulk_len < b"ZMPOP".len()
@@ -29420,7 +29762,7 @@ impl Runtime {
             Ok(v) if v > 0 => usize::try_from(v).ok()?,
             _ => return None,
         };
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let packet_id = self.plain_zremrange_write_preamble(
@@ -29500,6 +29842,31 @@ impl Runtime {
     /// `count` from the first non-empty zset → `[key, [[member, score]..]]`.
     /// Byte-identical to `fr_command::zmpop`; invalid shapes return `None`.
     #[allow(clippy::too_many_arguments)]
+    /// (frankenredis-lguus) Twin of [`Self::execute_plain_zmpop2_count_borrowed`] that takes the default-key
+    /// write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and threads it
+    /// into the floor dispatcher. Measured at a fixed ~85-95 instr/op per converted route across two
+    /// unrelated command families (`frankenredis-1vfyv` ZADD, `frankenredis-6ncz0` SET); the
+    /// PERCENTAGE that represents is set by the shape's own cost, not by the lever.
+    ///
+    /// The gate reads session and server CONFIG state only, and it plus all four helpers it calls
+    /// are pure, so evaluating it in this position cannot move anything. The uncached entry point is
+    /// KEPT for any caller that is not the borrowed batch (`parse_borrowed_multibulk_action`).
+    pub fn execute_plain_zmpop2_count_borrowed_with_default_write_gate(
+        &mut self,
+        numkeys_arg: &[u8],
+        z1: &[u8],
+        z2: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zmpop2_count_borrowed_inner(numkeys_arg, z1, z2, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_zmpop2_count_borrowed(
         &mut self,
         numkeys_arg: &[u8],
@@ -29509,6 +29876,21 @@ impl Runtime {
         count_kw: &[u8],
         count_arg: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zmpop2_count_borrowed_inner(numkeys_arg, z1, z2, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_zmpop2_count_borrowed_inner(
+        &mut self,
+        numkeys_arg: &[u8],
+        z1: &[u8],
+        z2: &[u8],
+        dir_arg: &[u8],
+        count_kw: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 7
             || self.policy.gate.max_bulk_len < b"ZMPOP".len()
@@ -29538,7 +29920,7 @@ impl Runtime {
             Ok(v) if v > 0 => usize::try_from(v).ok()?,
             _ => return None,
         };
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let packet_id = self.plain_zremrange_write_preamble(
@@ -71548,6 +71930,168 @@ mod tests {
     /// Each form is driven BOTH ways in identical runtime state and compared on the return value
     /// AND on the resulting key, then asked to refuse with a closed gate and checked for having
     /// written nothing -- a twin that ignored its parameter would pass an equality-only test.
+    /// (frankenredis-lguus) The pop family's `_with_default_write_gate` twins must be
+    /// indistinguishable from the uncached entry points they replace on the borrowed batch.
+    ///
+    /// `execute_plain_keyed_pop_borrowed` is the reason this batch matters -- it is the shared
+    /// executor for LPOP, RPOP and SPOP -- so all five of its `PlainKeyedPopCmd` variants are
+    /// driven, not just one.
+    ///
+    /// Every arm asserts the uncached call actually TOOK the fast path before comparing. Without
+    /// that, an arm whose input the executor declines compares `None` to `None` and passes while
+    /// proving nothing, which is exactly how the SET batch's first draft fooled itself.
+    #[test]
+    fn pop_borrowed_default_write_gate_twins_match_the_uncached_entry_points() {
+        // Seed one of each collection type so every pop form has something to remove.
+        fn seeded() -> Runtime {
+            let mut rt = Runtime::default_strict();
+            rt.execute_frame(command(&[b"RPUSH", b"l", b"a", b"b", b"c"]), 100);
+            rt.execute_frame(command(&[b"SADD", b"s", b"m1", b"m2", b"m3"]), 101);
+            rt.execute_frame(
+                command(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"3", b"c"]),
+                102,
+            );
+            rt.execute_frame(
+                command(&[b"ZADD", b"z2", b"1", b"a", b"2", b"b", b"3", b"c"]),
+                103,
+            );
+            rt.execute_frame(command(&[b"RPUSH", b"l2", b"x", b"y", b"z"]), 104);
+            rt
+        }
+        fn snapshot(rt: &mut Runtime) -> Vec<RespFrame> {
+            vec![
+                rt.execute_frame(command(&[b"LRANGE", b"l", b"0", b"-1"]), 900),
+                rt.execute_frame(command(&[b"LRANGE", b"l2", b"0", b"-1"]), 901),
+                rt.execute_frame(command(&[b"SCARD", b"s"]), 902),
+                rt.execute_frame(command(&[b"ZRANGE", b"z", b"0", b"-1", b"WITHSCORES"]), 903),
+                rt.execute_frame(command(&[b"ZRANGE", b"z2", b"0", b"-1", b"WITHSCORES"]), 904),
+            ]
+        }
+        assert!(
+            seeded().plain_borrowed_default_key_write_allows(500),
+            "default_strict must open the borrowed write gate"
+        );
+
+        macro_rules! check {
+            ($label:expr, $uncached:expr, $twin:expr) => {{
+                let label: &str = $label;
+                #[allow(unused_mut)]
+                let (mut a, mut b, mut c) = (seeded(), seeded(), seeded());
+                let ra = { let rt = &mut a; $uncached(rt) };
+                let rb = { let rt = &mut b; $twin(rt, true) };
+                assert!(ra.is_some(), "{label}: uncached path must take the fast path");
+                assert_eq!(ra, rb, "{label}: reply");
+                assert_eq!(snapshot(&mut a), snapshot(&mut b), "{label}: state");
+
+                let before = snapshot(&mut c);
+                let rc = { let rt = &mut c; $twin(rt, false) };
+                assert_eq!(rc, None, "{label}: closed gate must fall through");
+                assert_eq!(snapshot(&mut c), before, "{label}: closed gate must not write");
+            }};
+        }
+
+        // The shared LPOP/RPOP/SPOP/ZPOPMIN/ZPOPMAX executor, every variant.
+        for (cmd, key) in [
+            (crate::PlainKeyedPopCmd::Lpop, b"l".as_slice()),
+            (crate::PlainKeyedPopCmd::Rpop, b"l".as_slice()),
+            (crate::PlainKeyedPopCmd::Spop, b"s".as_slice()),
+            (crate::PlainKeyedPopCmd::Zpopmin, b"z".as_slice()),
+            (crate::PlainKeyedPopCmd::Zpopmax, b"z".as_slice()),
+        ] {
+            check!(
+                "keyed_pop",
+                |rt: &mut Runtime| rt.execute_plain_keyed_pop_borrowed(cmd, key, 500),
+                |rt: &mut Runtime, g: bool| rt
+                    .execute_plain_keyed_pop_borrowed_with_default_write_gate(cmd, key, 500, g)
+            );
+        }
+
+        check!(
+            "spop",
+            |rt: &mut Runtime| rt.execute_plain_spop_borrowed(b"s", 500),
+            |rt: &mut Runtime, g: bool| rt
+                .execute_plain_spop_borrowed_with_default_write_gate(b"s", 500, g)
+        );
+        for use_min in [true, false] {
+            check!(
+                "zpop_count",
+                |rt: &mut Runtime| rt.execute_plain_zpop_count_borrowed(use_min, b"z", b"2", 500),
+                |rt: &mut Runtime, g: bool| rt
+                    .execute_plain_zpop_count_borrowed_with_default_write_gate(
+                        use_min, b"z", b"2", 500, g
+                    )
+            );
+        }
+
+        // LMPOP / ZMPOP, one-key and two-key, with and without COUNT.
+        check!(
+            "lmpop1",
+            |rt: &mut Runtime| rt.execute_plain_lmpop1_borrowed(b"1", b"l", b"LEFT", 500),
+            |rt: &mut Runtime, g: bool| rt
+                .execute_plain_lmpop1_borrowed_with_default_write_gate(b"1", b"l", b"LEFT", 500, g)
+        );
+        check!(
+            "lmpop1_count",
+            |rt: &mut Runtime| rt
+                .execute_plain_lmpop1_count_borrowed(b"1", b"l", b"LEFT", b"COUNT", b"2", 500),
+            |rt: &mut Runtime, g: bool| rt
+                .execute_plain_lmpop1_count_borrowed_with_default_write_gate(
+                    b"1", b"l", b"LEFT", b"COUNT", b"2", 500, g
+                )
+        );
+        check!(
+            "lmpop2",
+            |rt: &mut Runtime| rt.execute_plain_lmpop2_borrowed(b"2", b"l", b"l2", b"LEFT", 500),
+            |rt: &mut Runtime, g: bool| rt
+                .execute_plain_lmpop2_borrowed_with_default_write_gate(
+                    b"2", b"l", b"l2", b"LEFT", 500, g
+                )
+        );
+        check!(
+            "lmpop2_count",
+            |rt: &mut Runtime| rt.execute_plain_lmpop2_count_borrowed(
+                b"2", b"l", b"l2", b"LEFT", b"COUNT", b"2", 500
+            ),
+            |rt: &mut Runtime, g: bool| rt
+                .execute_plain_lmpop2_count_borrowed_with_default_write_gate(
+                    b"2", b"l", b"l2", b"LEFT", b"COUNT", b"2", 500, g
+                )
+        );
+        check!(
+            "zmpop1",
+            |rt: &mut Runtime| rt.execute_plain_zmpop1_borrowed(b"1", b"z", b"MIN", 500),
+            |rt: &mut Runtime, g: bool| rt
+                .execute_plain_zmpop1_borrowed_with_default_write_gate(b"1", b"z", b"MIN", 500, g)
+        );
+        check!(
+            "zmpop1_count",
+            |rt: &mut Runtime| rt
+                .execute_plain_zmpop1_count_borrowed(b"1", b"z", b"MIN", b"COUNT", b"2", 500),
+            |rt: &mut Runtime, g: bool| rt
+                .execute_plain_zmpop1_count_borrowed_with_default_write_gate(
+                    b"1", b"z", b"MIN", b"COUNT", b"2", 500, g
+                )
+        );
+        check!(
+            "zmpop2",
+            |rt: &mut Runtime| rt.execute_plain_zmpop2_borrowed(b"2", b"z", b"z2", b"MIN", 500),
+            |rt: &mut Runtime, g: bool| rt
+                .execute_plain_zmpop2_borrowed_with_default_write_gate(
+                    b"2", b"z", b"z2", b"MIN", 500, g
+                )
+        );
+        check!(
+            "zmpop2_count",
+            |rt: &mut Runtime| rt.execute_plain_zmpop2_count_borrowed(
+                b"2", b"z", b"z2", b"MIN", b"COUNT", b"2", 500
+            ),
+            |rt: &mut Runtime, g: bool| rt
+                .execute_plain_zmpop2_count_borrowed_with_default_write_gate(
+                    b"2", b"z", b"z2", b"MIN", b"COUNT", b"2", 500, g
+                )
+        );
+    }
+
     #[test]
     fn set_borrowed_default_write_gate_twins_match_the_uncached_entry_points() {
         fn state(rt: &mut Runtime) -> (RespFrame, RespFrame) {

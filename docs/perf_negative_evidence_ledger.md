@@ -73515,3 +73515,125 @@ fr-runtime 672 passed / 0 failed, fr-server 383 passed / 0 failed.
    into a let-chain, and a binding inserted between `match x {` and its first arm does not compile.
 5. If a future run shows the controls moving MORE than ~3 instr/op, stop and treat the harness as
    suspect rather than the lever as larger.
+
+## 2026-09-01 BlackThrush: KEEP (SELF-SPEEDUP) — the pop family stops re-deriving a gate main.rs already caches: **spop_missing −7.74 pct**, lpop_nocount_missing −6.13, zpopmin_nocount_missing −6.00, lmpop_missing −3.54, and BOTH controls land on 1.000 (`frankenredis-lguus`, continues `frankenredis-6ncz0`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no. fr-before against fr-after; no incumbent arm ran in
+these invocations and none is claimed.
+
+RETRY PREDICATE, in brief here and in full at the end: reopen this surface only if
+`write_gate_coverage.py` shows CONVERTIBLE above 13, and take a further batch only when the routes
+still share a command family; refuse the batch unless CONVERTIBLE falls by exactly the batch size
+after it lands. The remaining 13 are singletons and pairs, so the cluster argument that justified
+the first three batches no longer applies — the next agent should decide on route VALUE, not count.
+
+### The measurement
+
+A/A NULL, same-invocation, six draws of the ORIG ELF paired into six ratios across two shapes,
+interleaved in the same routine as the A/B: **A/A null median 0.995777, bootstrap 95% median CI
+[0.985110, 1.000186]** (20,000 percentile resamples, seed 20260901), half-width 0.007538. GATE: that
+bootstrap median-CI is the decision rule for this row; an A/B inside the null's interval is refused
+however it reads. **CV is diagnostic only and was never a gate here** — it is not computed.
+
+This null is FOUR TIMES WIDER than the previous two batches' (0.00754 vs 0.00167 and 0.00296), and
+the width is `lmpop_missing`'s: its six ORIG draws spanned 2103.1-2137.2 while `lpop_nocount_missing`
+spanned 1372.0-1387.7. The verdict is quoted against the wider interval rather than the shape-matched
+one, which is the conservative choice.
+
+Medians of three interleaved rounds, arms alternating A,B / B,A within the loop:
+
+    shape                           orig      cand    delta    ratio   null half-widths from 1.0
+    spop_missing                  1334.1    1230.8   -103.3   0.9226      10.3x
+    lpop_nocount_missing          1375.8    1291.5    -84.3   0.9387       8.1x
+    zpopmin_nocount_missing       1405.0    1320.7    -84.3   0.9400       8.0x
+    lmpop_missing                 2106.2    2031.7    -74.5   0.9646       4.7x
+    set_base                      1542.3    1542.1     -0.2   0.9999       0.0x   <- CONTROL
+    get_control                    935.4     936.2     +0.8   1.0009       0.1x   <- GUARD
+
+**CORRECTING MY OWN PREVIOUS ROW: the "code-layout floor" I described one row above is NOT
+systematic.** The SET pair's two controls read 0.9979 and 0.9970 and I called that a shared layout
+floor of ~3 instr/op. On THIS pair the same two controls read 0.9999 and 1.0009 — a movement of
+0.2 and 0.8 instr/op, i.e. nothing. So the honest statement is that **inter-ELF layout drift on the
+control shapes is PAIR-SPECIFIC and can be anywhere from ~0 to ~3 instr/op**, not a constant to be
+subtracted. Read it off the controls of the pair in front of you; do not carry a previous row's
+figure. The SET row's conservative-subtraction advice was right in spirit and wrong to generalise.
+
+BINARIES, both built on ONE worker (hz4) in ONE pool dir, per BENCH_METHODOLOGY section 3:
+
+    cand  bench_elf_sha256=c8520c5b211293f92ecd7124185d83f914fd3ac37eb41ca98d36fafd2d037c35
+    orig  bench_elf_sha256=7dc359185da6184d6090b8b3f135b2fc0310cd7c18f639cd871fb6f93407539e
+
+The ORIG hash is the CAND of the SET row above — the expected consistency check, since HEAD now
+contains that lever.
+
+SYMBOL-CHECKED, AND DISCRIMINATING: `strings -a` finds
+`execute_plain_keyed_pop_borrowed_with_default_write_gate` **0 times in the ORIG ELF and 1 in the
+CAND**.
+
+### The fixed-constant rule now has three families behind it
+
+    batch   deltas (instr/op)              shapes              pcts
+    ZADD    -108.4 -100.3 -99.4 -97.4 -90.3  2348-3300         -2.95 .. -4.62
+    SET      -96.9  -94.2 -87.8              1451-2823         -3.11 .. -6.68
+    POP     -103.3  -84.3 -84.3 -74.5        1334-2106         -3.54 .. -7.74
+
+Twenty routes across three unrelated command families, every delta in a −74 to −109 instr/op band,
+and the percentage tracking the denominator every time: `spop_missing` is the cheapest shape measured
+on this vein (1334.1) and posts the biggest pct on it (−7.74), while `lmpop_missing` is the most
+expensive in this batch (2106.2) and posts the smallest (−3.54). **Predict in instr/op. A pct quoted
+from another route is a statement about that route's cost, not about this lever.**
+
+### What changed
+
+Eleven executors — `execute_plain_keyed_pop_borrowed`, `_spop_borrowed`, `_zpop_count_borrowed`, the
+four `lmpop` forms and the four `zmpop` forms — each split into a private `_inner` taking
+`default_write_allowed: bool`, a public `_with_default_write_gate` twin, and the original uncached
+entry point. 18 call sites across `process_buffered_frames` and `try_dispatch_floor_classified_action`
+now supply `cached_plain_write_gate(...)`; seven of those are `if let ... && let ...` chains or an
+`.and_then(|packet| ...)` closure, so the binding is hoisted to the top of the enclosing
+`BorrowedDispatchFloorClass` match arm.
+
+`execute_plain_keyed_pop_borrowed` is why this batch was taken first among what remained: it is the
+shared executor for **LPOP, RPOP and SPOP**, three of the fifteen commands `redis-benchmark` issues.
+
+**FOUR CALL SITES WERE DELIBERATELY LEFT ON THE UNCACHED ENTRY POINT.** They are the
+`execute_plain_keyed_pop_borrowed` calls inside `parse_borrowed_multibulk_action`, which is the
+FALLBACK-PATH class in the coverage tool and holds no cache — converting them would mean inventing
+one, which is a different lever. This is the case the earlier rows' retry predicates warned about,
+and it is the first batch where it actually bit.
+
+TRAP THIS BATCH ADDED: `execute_plain_spop_borrowed` has a **single-line signature** while the other
+ten are multi-line. A transformation that reads parameters from the lines between `fn(` and `) ->`
+extracts an EMPTY parameter list for it and emits a call with no arguments. Match the signature
+shape, do not assume it.
+
+MECHANICAL COVERAGE CHECK: `scripts/write_gate_coverage.py` CONVERTIBLE **24 -> 13**, a drop of
+exactly the batch size, with VIA-WRAPPER unchanged at 21 and FLOOR-HELPER unchanged at 3.
+
+STANDING LAW ENGAGED — **per-element buffer pooling** (NEGATIVE_EVIDENCE.md:26372: pool the CONTAINER
+not its elements; a recycling lever pays only when it removes an allocation without adding a
+per-element pass). **It does not bind this row: nothing is pooled, recycled or reused.** The lever
+removes a recomputation of a boolean predicate over session and server CONFIG state; allocation
+behaviour is byte-for-byte unchanged, and the saving is a fixed per-CALL constant rather than a
+per-element one — which is why it is flat across shapes whose popped-element counts differ.
+
+Correctness is pinned by tests driving all eleven forms both ways in identical runtime state,
+comparing reply AND the resulting collections, with a closed-gate arm that must refuse and leave
+every collection byte-identical. All five `PlainKeyedPopCmd` variants are exercised, not one. Every
+arm asserts the uncached call actually TOOK the fast path first — without that an arm whose input the
+executor declines compares `None` to `None` and passes while proving nothing.
+fr-runtime 673 passed / 0 failed, fr-server 383 passed / 0 failed.
+
+### RETRY PREDICATE in full
+
+1. 13 CONVERTIBLE routes remain, plus 21 VIA-WRAPPER and 3 FLOOR-HELPER. They are singletons and
+   pairs (bitop, geoadd, msetnx, publish, spublish, wait, xadd, zdiffstore, zincrby, zrangestore,
+   hmset_ok, keyed_values fallbacks), so batch them by VALUE — does the route serve a command anyone
+   issues — rather than by cluster size, which is what ranked the first three batches.
+2. Predict in instr/op (−74 to −109 observed across twenty routes), never in pct.
+3. Read the layout drift off the CURRENT pair's control shapes. It was ~3 instr/op on one pair and
+   ~0 on the next; it is not a constant.
+4. Do NOT convert a call site in `parse_borrowed_multibulk_action`. It holds no cache and is
+   correctly on the uncached entry point; that is why the uncached entry points are kept.
+5. If a future run shows the control shapes moving more than ~3 instr/op, treat the harness as
+   suspect rather than the lever as larger.
