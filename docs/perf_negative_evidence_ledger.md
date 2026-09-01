@@ -73292,3 +73292,108 @@ width reaching RSS first -- and if that ever changes, the cheap probe is this on
   factors beats a smarter structure at these sizes, and this row replaces a hashbrown
   `HashSet` with a flat stack array for exactly that reason, then picks its size by
   measuring the constant factors rather than by reasoning about load factors.
+
+## 2026-09-01 BlackThrush: KEEP (SELF-SPEEDUP) — the ZADD family stops re-deriving a gate main.rs already caches: **zadd_base −4.62 pct**, zadd_incr −3.62, zadd_xx_opt −3.47, zadd_2flag −3.42, zadd_2pair −2.95, and a shared guard shape moves 2.1 instr/op (`frankenredis-1vfyv`, continues `frankenredis-ghmgp`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no. fr-before against fr-after; no incumbent arm ran in
+these invocations and none is claimed. (The harness does verify the vendored incumbent it did not
+run: `redis-server sha=d2c8a4b9 == vendored source HEAD, clean`.)
+
+RETRY PREDICATE, in brief here and in full at the end: the 31 CONVERTIBLE routes still open are
+worth taking in clusters that share a command family, but do NOT quote this row's per-shape pct at
+another route without re-measuring — the saving is a fixed ~90-108 instr/op and its PERCENTAGE is
+set by the denominator, so a cheaper command shows a larger share and an expensive one a smaller.
+Do not migrate a route without auditing its callers for paths outside the borrowed batch
+(`parse_borrowed_multibulk_action` still needs the uncached entry point, which is why it is KEPT).
+
+### The measurement
+
+A/A NULL, same-invocation, ten draws of the ORIG ELF paired into ten ratios across three shapes and
+interleaved in the same routine as the A/B: **A/A null median 0.999492, bootstrap 95% median CI
+[0.997146, 1.003055]** (20,000 percentile resamples, seed 20260901), half-width 0.002955. GATE: that
+bootstrap median-CI is the decision rule for this row; an A/B inside the null's interval is refused
+however it reads. **CV is diagnostic only and was never a gate here** — it is not computed.
+
+Medians of three interleaved rounds, arms alternating A,B / B,A within the loop:
+
+    shape             orig      cand     delta    ratio   null half-widths from 1.0
+    zadd_base       2348.6    2240.2    -108.4   0.9538      15.6x
+    zadd_2pair      3300.5    3203.1     -97.4   0.9705      10.0x
+    zadd_incr       2767.5    2667.2    -100.3   0.9638      12.3x
+    zadd_2flag      2640.3    2550.0     -90.3   0.9658      11.6x
+    zadd_xx_opt     2861.1    2761.7     -99.4   0.9653      11.8x
+    get_control      935.9     933.8      -2.1   0.9978       0.8x   <- GUARD, shared path
+
+Every ZADD shape is outside the null interval by 10 to 15.6 half-widths. **The guard shape is
+INSIDE it** (0.8 half-widths), which is the point of including it: `get_control` shares the
+borrowed dispatch path with every shape above and touches no write gate, so a harness that moved it
+too would be lying about the lever rather than measuring it.
+
+BINARIES, both built on ONE worker (hz4) in ONE pool dir, per BENCH_METHODOLOGY section 3:
+
+    cand  bench_elf_sha256=ad0d527cca05bdb5fc37008b5d9a86b155f4873033203956d6b3a55bef113fc1
+    orig  bench_elf_sha256=3671140f26b12b5bac671c855e0d0823f670e3ef0ca391e87330c10d9cc0010e
+
+Both hashes are the harness's own re-verified figure for the ELF it executed, not a post-hoc
+`sha256sum` from the outer shell.
+
+SYMBOL-CHECKED, AND DISCRIMINATING: `strings -a` finds
+`execute_plain_zadd_borrowed_with_default_write_gate` **0 times in the ORIG ELF and 1 in the CAND**.
+This lever ADDS functions, so the check fires; a symbol check proves contamination when it fires and
+proves nothing when it does not.
+
+### The mechanism, and a correction to the size ghmgp predicted
+
+`frankenredis-ghmgp` registered `zadd_base 2729.7 -> ~2543 (-6.9 pct)` before any edit, sized from a
+gate it measured at **187.0 instr/op**. The delta actually delivered is **90-108 instr/op**, and it
+is strikingly flat across five shapes whose totals span 2348 to 3300 — which is what a fixed
+per-call constant looks like, and it is the constant the ACL-cache work already cut the gate down
+to. So the prediction's DIRECTION was right and its SIZE was stale by roughly a factor of two: the
+write gate is ~98 instr/op, not 187, and any row still quoting 187 is quoting a superseded number.
+
+zadd_base's own dispatch share moved 632.0 -> 637.0 across the arms, i.e. the saving is in
+EXECUTION, not dispatch — which is what threading a cached bool into the executor should do.
+
+### What changed
+
+Five executors — `execute_plain_zadd_borrowed`, `_flag_borrowed`, `_flag2_borrowed`,
+`_flag_multi_borrowed`, `_incr_borrowed` — each split into a private `_inner` taking
+`default_write_allowed: bool`, a public `_with_default_write_gate` twin, and the original uncached
+entry point, KEPT for callers outside the borrowed batch. 14 call sites across
+`process_buffered_frames` and `try_dispatch_floor_classified_action` now supply
+`cached_plain_write_gate(...)`. Three of those sit inside `if let ... && let ...` chains where a
+statement cannot be inserted, so the binding is hoisted to the top of the enclosing
+`BorrowedDispatchFloorClass` match arm.
+
+MECHANICAL COVERAGE CHECK, which is the vein's own stated contract: `scripts/write_gate_coverage.py`
+CONVERTIBLE **36 -> 31**, a drop of exactly the batch size, with VIA-WRAPPER unchanged at 21 and
+FLOOR-HELPER unchanged at 3.
+
+SEMANTICS ARE SET'S, NOT NEW ONES. The gate reads session and server CONFIG state only, and
+`plain_borrowed_default_key_write_allows` plus all four of its helpers were read and are PURE — no
+assignment, push, insert, remove, clear or take anywhere in them — so evaluating it earlier in the
+entry point than the old code did cannot move anything. If this cached gate were unsound, SET would
+be unsound today, since `execute_plain_keyed_values_write_borrowed` has computed it in exactly this
+position since `ghmgp`.
+
+Correctness is pinned by new tests rather than left to the server route: all six ZADD forms are
+driven BOTH ways in identical runtime state and compared on reply and on the resulting sorted set,
+and each is also asked to refuse with a closed gate and checked for having written nothing — a twin
+that ignored its parameter would pass an equality-only test. fr-runtime 671 passed / 0 failed,
+fr-server 383 passed / 0 failed.
+
+### RETRY PREDICATE in full
+
+1. The vein is NOT closed: 31 CONVERTIBLE routes remain, plus 21 VIA-WRAPPER (one in-runtime hop
+   first) and 3 FLOOR-HELPER. Take CONVERTIBLE clusters that share a command family, and require
+   `write_gate_coverage.py` CONVERTIBLE to drop by EXACTLY the batch size — that check is what
+   catches a route that was renamed rather than converted.
+2. Do NOT quote −4.62 pct, or any pct in the table, at another route. The saving is a fixed
+   ~90-108 instr/op; the percentage is entirely the denominator's doing. Predict in instr/op and
+   convert afterwards.
+3. Do not migrate a route whose callers include a path outside the borrowed batch without keeping
+   the uncached entry point, and check `parse_borrowed_multibulk_action` specifically — it is the
+   FALLBACK-PATH class in the coverage tool and it legitimately passes no cache.
+4. A future count that disagrees with 31 should first check whether it is counting converted routes'
+   surviving `unwrap_or_else` fallback calls, which is the error that made this number wrong four
+   times before.

@@ -13122,11 +13122,48 @@ impl Runtime {
     /// newly added members. Skips argv materialization + generic
     /// dispatch + the post-Ok bookkeeping block (all no-op in plain mode).
     /// (frankenredis-ev067)
+    /// (frankenredis-ghmgp continuation) Twin of [`Self::execute_plain_zadd_borrowed`] that takes the
+    /// default-key write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and
+    /// threads it into the floor dispatcher; the SET, HSET, MSET, HMSET and keyed-values
+    /// executors have consumed it that way since `ozrro`/`ghmgp`. The ZADD family never
+    /// adopted it, so every ZADD paid the gate fresh.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES. The gate reads session and server CONFIG state
+    /// only -- auth/ACL, selected db, no-touch, transaction, subscription, client pause,
+    /// disk-write denial, `maxmemory_bytes != 0` (a CONFIG test, so no mid-batch memory
+    /// edge), min-replicas, AOF path, replication role. No command with a borrowed fast
+    /// path can move any of them, and main.rs clears the cache before every owned or
+    /// generic execution. If this cached gate were unsound, SET would be unsound today.
+    ///
+    /// The uncached entry point is KEPT for any caller that is not the borrowed batch.
+    pub fn execute_plain_zadd_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zadd_borrowed_inner(key, pairs, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_zadd_borrowed(
         &mut self,
         key: &[u8],
         pairs: &[&[u8]],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zadd_borrowed_inner(key, pairs, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_zadd_borrowed_inner(
+        &mut self,
+        key: &[u8],
+        pairs: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"ZADD".len()
@@ -13144,7 +13181,7 @@ impl Runtime {
             let score = fr_command::parse_score_f64_arg(pair[0]).ok()?;
             members.push((score, pair[1].to_vec()));
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -14320,12 +14357,51 @@ impl Runtime {
     /// ZINCRBY (same store.zincrby, same NaN wording, same RESP2-bulk/RESP3-Double score
     /// reply) EXCEPT cmdstat/argv are "zadd". Conditional INCR (with NX/XX/GT/LT) is *6+
     /// and falls to the generic path.
+    /// (frankenredis-ghmgp continuation) Twin of [`Self::execute_plain_zadd_incr_borrowed`] that takes the
+    /// default-key write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and
+    /// threads it into the floor dispatcher; the SET, HSET, MSET, HMSET and keyed-values
+    /// executors have consumed it that way since `ozrro`/`ghmgp`. The ZADD family never
+    /// adopted it, so every ZADD paid the gate fresh.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES. The gate reads session and server CONFIG state
+    /// only -- auth/ACL, selected db, no-touch, transaction, subscription, client pause,
+    /// disk-write denial, `maxmemory_bytes != 0` (a CONFIG test, so no mid-batch memory
+    /// edge), min-replicas, AOF path, replication role. No command with a borrowed fast
+    /// path can move any of them, and main.rs clears the cache before every owned or
+    /// generic execution. If this cached gate were unsound, SET would be unsound today.
+    ///
+    /// The uncached entry point is KEPT for any caller that is not the borrowed batch.
+    pub fn execute_plain_zadd_incr_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zadd_incr_borrowed_inner(key, delta_arg, member, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_zadd_incr_borrowed(
         &mut self,
         key: &[u8],
         delta_arg: &[u8],
         member: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zadd_incr_borrowed_inner(key, delta_arg, member, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_zadd_incr_borrowed_inner(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"ZADD".len()
@@ -14336,7 +14412,7 @@ impl Runtime {
             return None;
         }
         let delta = fr_command::parse_score_f64_arg(delta_arg).ok()?;
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -14471,6 +14547,35 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-ghmgp continuation) Twin of [`Self::execute_plain_zadd_flag2_borrowed`] that takes the
+    /// default-key write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and
+    /// threads it into the floor dispatcher; the SET, HSET, MSET, HMSET and keyed-values
+    /// executors have consumed it that way since `ozrro`/`ghmgp`. The ZADD family never
+    /// adopted it, so every ZADD paid the gate fresh.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES. The gate reads session and server CONFIG state
+    /// only -- auth/ACL, selected db, no-touch, transaction, subscription, client pause,
+    /// disk-write denial, `maxmemory_bytes != 0` (a CONFIG test, so no mid-batch memory
+    /// edge), min-replicas, AOF path, replication role. No command with a borrowed fast
+    /// path can move any of them, and main.rs clears the cache before every owned or
+    /// generic execution. If this cached gate were unsound, SET would be unsound today.
+    ///
+    /// The uncached entry point is KEPT for any caller that is not the borrowed batch.
+    pub fn execute_plain_zadd_flag2_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        flag1: &[u8],
+        flag2: &[u8],
+        score_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zadd_flag2_borrowed_inner(key, flag1, flag2, score_arg, member, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_zadd_flag2_borrowed(
         &mut self,
         key: &[u8],
@@ -14479,6 +14584,20 @@ impl Runtime {
         score_arg: &[u8],
         member: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zadd_flag2_borrowed_inner(key, flag1, flag2, score_arg, member, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_zadd_flag2_borrowed_inner(
+        &mut self,
+        key: &[u8],
+        flag1: &[u8],
+        flag2: &[u8],
+        score_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 6
             || self.policy.gate.max_bulk_len < b"ZADD".len()
@@ -14517,7 +14636,7 @@ impl Runtime {
             return None;
         }
         let score = fr_command::parse_score_f64_arg(score_arg).ok()?;
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -14654,6 +14773,34 @@ impl Runtime {
     /// non-CH/non-INCR flag, one pair). Mirrors the generic: maps the flag to ZaddOptions,
     /// calls zadd_with_options, replies Integer(added). CH (added+changed), INCR (score),
     /// flag combos (*6+), and multi-pair fall to the generic path. cmdstat "zadd".
+    /// (frankenredis-ghmgp continuation) Twin of [`Self::execute_plain_zadd_flag_borrowed`] that takes the
+    /// default-key write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and
+    /// threads it into the floor dispatcher; the SET, HSET, MSET, HMSET and keyed-values
+    /// executors have consumed it that way since `ozrro`/`ghmgp`. The ZADD family never
+    /// adopted it, so every ZADD paid the gate fresh.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES. The gate reads session and server CONFIG state
+    /// only -- auth/ACL, selected db, no-touch, transaction, subscription, client pause,
+    /// disk-write denial, `maxmemory_bytes != 0` (a CONFIG test, so no mid-batch memory
+    /// edge), min-replicas, AOF path, replication role. No command with a borrowed fast
+    /// path can move any of them, and main.rs clears the cache before every owned or
+    /// generic execution. If this cached gate were unsound, SET would be unsound today.
+    ///
+    /// The uncached entry point is KEPT for any caller that is not the borrowed batch.
+    pub fn execute_plain_zadd_flag_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        flag_arg: &[u8],
+        score_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zadd_flag_borrowed_inner(key, flag_arg, score_arg, member, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_zadd_flag_borrowed(
         &mut self,
         key: &[u8],
@@ -14661,6 +14808,19 @@ impl Runtime {
         score_arg: &[u8],
         member: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zadd_flag_borrowed_inner(key, flag_arg, score_arg, member, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_zadd_flag_borrowed_inner(
+        &mut self,
+        key: &[u8],
+        flag_arg: &[u8],
+        score_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"ZADD".len()
@@ -14714,7 +14874,7 @@ impl Runtime {
             return None;
         };
         let score = fr_command::parse_score_f64_arg(score_arg).ok()?;
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -14852,12 +15012,51 @@ impl Runtime {
     /// code). Any invalid flag combination, INCR, or bad score returns None so the
     /// generic path produces the exact error reply. `flags` is 1-2 elements,
     /// `pairs` is 2*N interleaved score/member bulks (N >= 2).
+    /// (frankenredis-ghmgp continuation) Twin of [`Self::execute_plain_zadd_flag_multi_borrowed`] that takes the
+    /// default-key write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and
+    /// threads it into the floor dispatcher; the SET, HSET, MSET, HMSET and keyed-values
+    /// executors have consumed it that way since `ozrro`/`ghmgp`. The ZADD family never
+    /// adopted it, so every ZADD paid the gate fresh.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES. The gate reads session and server CONFIG state
+    /// only -- auth/ACL, selected db, no-touch, transaction, subscription, client pause,
+    /// disk-write denial, `maxmemory_bytes != 0` (a CONFIG test, so no mid-batch memory
+    /// edge), min-replicas, AOF path, replication role. No command with a borrowed fast
+    /// path can move any of them, and main.rs clears the cache before every owned or
+    /// generic execution. If this cached gate were unsound, SET would be unsound today.
+    ///
+    /// The uncached entry point is KEPT for any caller that is not the borrowed batch.
+    pub fn execute_plain_zadd_flag_multi_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        flags: &[&[u8]],
+        pairs: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zadd_flag_multi_borrowed_inner(key, flags, pairs, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_zadd_flag_multi_borrowed(
         &mut self,
         key: &[u8],
         flags: &[&[u8]],
         pairs: &[&[u8]],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zadd_flag_multi_borrowed_inner(key, flags, pairs, now_ms, default_write_allowed)
+    }
+
+    fn execute_plain_zadd_flag_multi_borrowed_inner(
+        &mut self,
+        key: &[u8],
+        flags: &[&[u8]],
+        pairs: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_bulk_len < b"ZADD".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -14906,7 +15105,7 @@ impl Runtime {
             let score = fr_command::parse_score_f64_arg(pair[0]).ok()?;
             members.push((score, pair[1].to_vec()));
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -71079,6 +71278,150 @@ mod tests {
                 RespFrame::BulkString(Some(b"slave-serve-stale-data".to_vec())),
                 RespFrame::BulkString(Some(b"no".to_vec())),
             ]))
+        );
+    }
+
+    /// (frankenredis-ghmgp continuation) The ZADD family's `_with_default_write_gate` twins must
+    /// be indistinguishable from the uncached entry points they replace on the borrowed batch.
+    ///
+    /// This is the contract the whole write-gate migration rests on, and nothing tested it
+    /// directly before: the twins were covered only transitively, through whichever server-side
+    /// route happened to call them. Here each of the five ZADD executors is driven BOTH ways in
+    /// identical runtime state and the replies plus the resulting sorted set are compared.
+    ///
+    /// The `false` arm matters as much as the `true` arm: a twin that ignored its parameter
+    /// would pass an equality-only test, so each form is also asked to refuse and then checked
+    /// for having written nothing.
+    #[test]
+    fn zadd_borrowed_default_write_gate_twins_match_the_uncached_entry_points() {
+        fn zscore(rt: &mut Runtime, key: &[u8], member: &[u8]) -> RespFrame {
+            rt.execute_frame(command(&[b"ZSCORE", key, member]), 900)
+        }
+        fn zcard(rt: &mut Runtime, key: &[u8]) -> RespFrame {
+            rt.execute_frame(command(&[b"ZCARD", key]), 901)
+        }
+
+        // Prove the precondition rather than assuming it: on a strict default runtime the
+        // borrowed write gate is OPEN, so `true` below is the value the uncached path derives.
+        let mut probe = Runtime::default_strict();
+        assert!(
+            probe.plain_borrowed_default_key_write_allows(500),
+            "default_strict must open the borrowed write gate for this test to mean anything"
+        );
+
+        // (label, uncached call, twin call) -- each closure pair runs the SAME command.
+        type Call = fn(&mut Runtime, bool) -> Option<RespFrame>;
+        let cases: [(&str, Call, Call); 5] = [
+            (
+                "zadd_base",
+                |rt, _| rt.execute_plain_zadd_borrowed(b"z", &[b"1.5", b"m"], 500),
+                |rt, g| {
+                    rt.execute_plain_zadd_borrowed_with_default_write_gate(
+                        b"z",
+                        &[b"1.5", b"m"],
+                        500,
+                        g,
+                    )
+                },
+            ),
+            (
+                "zadd_multi_pair",
+                |rt, _| rt.execute_plain_zadd_borrowed(b"z", &[b"1", b"a", b"2", b"b"], 500),
+                |rt, g| {
+                    rt.execute_plain_zadd_borrowed_with_default_write_gate(
+                        b"z",
+                        &[b"1", b"a", b"2", b"b"],
+                        500,
+                        g,
+                    )
+                },
+            ),
+            (
+                "zadd_incr",
+                |rt, _| rt.execute_plain_zadd_incr_borrowed(b"z", b"3", b"m", 500),
+                |rt, g| {
+                    rt.execute_plain_zadd_incr_borrowed_with_default_write_gate(b"z", b"3", b"m", 500, g)
+                },
+            ),
+            (
+                "zadd_flag",
+                |rt, _| rt.execute_plain_zadd_flag_borrowed(b"z", b"NX", b"4", b"m", 500),
+                |rt, g| {
+                    rt.execute_plain_zadd_flag_borrowed_with_default_write_gate(
+                        b"z", b"NX", b"4", b"m", 500, g,
+                    )
+                },
+            ),
+            (
+                "zadd_flag2",
+                |rt, _| rt.execute_plain_zadd_flag2_borrowed(b"z", b"NX", b"CH", b"5", b"m", 500),
+                |rt, g| {
+                    rt.execute_plain_zadd_flag2_borrowed_with_default_write_gate(
+                        b"z", b"NX", b"CH", b"5", b"m", 500, g,
+                    )
+                },
+            ),
+        ];
+
+        for (label, uncached, twin) in cases {
+            // 1. Same reply, same resulting state.
+            let mut a = Runtime::default_strict();
+            let mut b = Runtime::default_strict();
+            let reply_a = uncached(&mut a, true);
+            let reply_b = twin(&mut b, true);
+            assert!(reply_a.is_some(), "{label}: uncached path must take the fast path");
+            assert_eq!(reply_a, reply_b, "{label}: reply");
+            assert_eq!(zcard(&mut a, b"z"), zcard(&mut b, b"z"), "{label}: zcard");
+            for member in [b"m".as_slice(), b"a".as_slice(), b"b".as_slice()] {
+                assert_eq!(
+                    zscore(&mut a, b"z", member),
+                    zscore(&mut b, b"z", member),
+                    "{label}: zscore {}",
+                    String::from_utf8_lossy(member)
+                );
+            }
+
+            // 2. The parameter is actually READ: a closed gate refuses and writes nothing.
+            let mut c = Runtime::default_strict();
+            assert_eq!(twin(&mut c, false), None, "{label}: closed gate must fall through");
+            assert_eq!(
+                zcard(&mut c, b"z"),
+                RespFrame::Integer(0),
+                "{label}: closed gate must not write"
+            );
+        }
+    }
+
+    // The zadd_flag_multi form is separated out: it borrows slices-of-slices, which the
+    // `fn` pointer table above cannot express without naming a lifetime.
+    #[test]
+    fn zadd_flag_multi_borrowed_default_write_gate_twin_matches_the_uncached_entry_point() {
+        let flags: [&[u8]; 1] = [b"NX"];
+        let pairs: [&[u8]; 4] = [b"1", b"a", b"2", b"b"];
+
+        let mut a = Runtime::default_strict();
+        let mut b = Runtime::default_strict();
+        let reply_a = a.execute_plain_zadd_flag_multi_borrowed(b"z", &flags, &pairs, 500);
+        let reply_b = b.execute_plain_zadd_flag_multi_borrowed_with_default_write_gate(
+            b"z", &flags, &pairs, 500, true,
+        );
+        assert!(reply_a.is_some(), "uncached path must take the fast path");
+        assert_eq!(reply_a, reply_b);
+        assert_eq!(
+            a.execute_frame(command(&[b"ZRANGE", b"z", b"0", b"-1", b"WITHSCORES"]), 900),
+            b.execute_frame(command(&[b"ZRANGE", b"z", b"0", b"-1", b"WITHSCORES"]), 900)
+        );
+
+        let mut c = Runtime::default_strict();
+        assert_eq!(
+            c.execute_plain_zadd_flag_multi_borrowed_with_default_write_gate(
+                b"z", &flags, &pairs, 500, false,
+            ),
+            None
+        );
+        assert_eq!(
+            c.execute_frame(command(&[b"ZCARD", b"z"]), 901),
+            RespFrame::Integer(0)
         );
     }
 

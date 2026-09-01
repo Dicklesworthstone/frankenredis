@@ -8985,10 +8985,13 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zadd2_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zadd_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zadd_borrowed_with_default_write_gate(
                         packet.key,
                         &[packet.s1, packet.m1, packet.s2, packet.m2],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9007,10 +9010,13 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zadd_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zadd_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zadd_borrowed_with_default_write_gate(
                         packet.key,
                         &[packet.start, packet.end],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10307,11 +10313,14 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zadd_incr_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zadd_incr_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zadd_incr_borrowed_with_default_write_gate(
                         packet.key,
                         packet.start,
                         packet.end,
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10330,12 +10339,15 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zadd_flag_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zadd_flag_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zadd_flag_borrowed_with_default_write_gate(
                         packet.key,
                         packet.flag,
                         packet.score,
                         packet.member,
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10466,11 +10478,14 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zadd_flag_multi_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zadd_flag_multi_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zadd_flag_multi_borrowed_with_default_write_gate(
                         packet.key,
                         &packet.flags[..packet.nflags],
                         &packet.pairs[..packet.npairs_bulks],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10489,10 +10504,13 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zadd_multi_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zadd_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zadd_borrowed_with_default_write_gate(
                         packet.key,
                         &packet.pairs[..packet.len],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10511,13 +10529,16 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zadd_flag2_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zadd_flag2_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zadd_flag2_borrowed_with_default_write_gate(
                         packet.key,
                         packet.flag1,
                         packet.flag2,
                         packet.score,
                         packet.member,
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -21967,10 +21988,13 @@ fn try_dispatch_floor_classified_action(
         BorrowedDispatchFloorClass::ZaddTwoPair => {
             match parse_borrowed_plain_zadd_arity6_packet(unparsed, &parser_config) {
                 Some(BorrowedPlainZaddArity6Packet::TwoPair(packet)) => {
-                    if let Some(response) = runtime.execute_plain_zadd_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zadd_borrowed_with_default_write_gate(
                         packet.key,
                         &[packet.s1, packet.m1, packet.s2, packet.m2],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -21988,13 +22012,16 @@ fn try_dispatch_floor_classified_action(
                     }
                 }
                 Some(BorrowedPlainZaddArity6Packet::Flag2(packet)) => {
-                    if let Some(response) = runtime.execute_plain_zadd_flag2_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zadd_flag2_borrowed_with_default_write_gate(
                         packet.key,
                         packet.flag1,
                         packet.flag2,
                         packet.score,
                         packet.member,
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -22137,9 +22164,10 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::ZaddBase => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_zadd_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_zadd_borrowed(packet.key, &[packet.start, packet.end], ts)
+                    runtime.execute_plain_zadd_borrowed_with_default_write_gate(packet.key, &[packet.start, packet.end], ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22164,12 +22192,15 @@ fn try_dispatch_floor_classified_action(
         BorrowedDispatchFloorClass::ZaddFlag => {
             match parse_borrowed_plain_zadd_arity5_packet(unparsed, &parser_config) {
                 Some(BorrowedPlainZaddArity5Packet::Flag(packet)) => {
-                    if let Some(response) = runtime.execute_plain_zadd_flag_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zadd_flag_borrowed_with_default_write_gate(
                         packet.key,
                         packet.flag,
                         packet.score,
                         packet.member,
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -22187,11 +22218,14 @@ fn try_dispatch_floor_classified_action(
                     }
                 }
                 Some(BorrowedPlainZaddArity5Packet::Incr(packet)) => {
-                    if let Some(response) = runtime.execute_plain_zadd_incr_borrowed(
+                    let default_write_allowed =
+                        cached_plain_write_gate(write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime.execute_plain_zadd_incr_borrowed_with_default_write_gate(
                         packet.key,
                         packet.start,
                         packet.end,
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -22219,9 +22253,10 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::ZaddMulti => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_zadd_multi_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_zadd_borrowed(packet.key, &packet.pairs[..packet.len], ts)
+                    runtime.execute_plain_zadd_borrowed_with_default_write_gate(packet.key, &packet.pairs[..packet.len], ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22229,11 +22264,12 @@ fn try_dispatch_floor_classified_action(
                 })
             } else if let Some(packet) =
                 parse_borrowed_plain_zadd_flag_multi_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_zadd_flag_multi_borrowed(
+                && let Some(response) = runtime.execute_plain_zadd_flag_multi_borrowed_with_default_write_gate(
                     packet.key,
                     &packet.flags[..packet.nflags],
                     &packet.pairs[..packet.npairs_bulks],
                     ts,
+                    default_write_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
