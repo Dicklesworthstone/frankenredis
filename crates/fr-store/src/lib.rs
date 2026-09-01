@@ -15840,7 +15840,22 @@ impl Store {
 
         let mut left_entries = Vec::with_capacity(left_count);
         for key in left_keys {
-            let max_deleted_id = self.stream_max_deleted_ids.remove(key.as_slice());
+            // (frankenredis-4f8vx) Four stream sidemaps are probed PER KEY here, and on
+            // any keyspace without streams all four are empty, so every probe is a
+            // foldhash of the key plus a miss. Callgrind attributed 79.2M Ir (6.21 pct)
+            // to ONE instantiation alone: `stream_max_deleted_ids` and `stream_last_ids`
+            // share a `StreamId` value type, so they monomorphise together and the
+            // profile shows 1,200,000 calls for 600,000 key-ops -- 2 per key.
+            //
+            // `remove` on an empty map returns `None`, exactly what skipping yields, so
+            // the guard is behaviour-preserving by construction. Same `is_empty()` shape
+            // `invalidate_write_side_caches` already uses for the three write-side
+            // caches (53w9n-sib); these four were never given it.
+            let max_deleted_id = if self.stream_max_deleted_ids.is_empty() {
+                None
+            } else {
+                self.stream_max_deleted_ids.remove(key.as_slice())
+            };
             let expires_at_ms = self.expiry_ms(key.as_slice());
             let Some(entry) = self.internal_entries_remove(&key) else {
                 continue;
@@ -15848,9 +15863,21 @@ impl Store {
             let logical = decode_db_key(&key)
                 .map(|(_, logical)| logical.to_vec())
                 .unwrap_or(key.clone());
-            let groups = self.stream_groups.remove(key.as_slice());
-            let last_id = self.stream_last_ids.remove(key.as_slice());
-            let entries_added = self.stream_entries_added.remove(key.as_slice());
+            let groups = if self.stream_groups.is_empty() {
+                None
+            } else {
+                self.stream_groups.remove(key.as_slice())
+            };
+            let last_id = if self.stream_last_ids.is_empty() {
+                None
+            } else {
+                self.stream_last_ids.remove(key.as_slice())
+            };
+            let entries_added = if self.stream_entries_added.is_empty() {
+                None
+            } else {
+                self.stream_entries_added.remove(key.as_slice())
+            };
             left_entries.push((
                 logical,
                 entry,
@@ -15864,7 +15891,22 @@ impl Store {
 
         let mut right_entries = Vec::with_capacity(right_count);
         for key in right_keys {
-            let max_deleted_id = self.stream_max_deleted_ids.remove(key.as_slice());
+            // (frankenredis-4f8vx) Four stream sidemaps are probed PER KEY here, and on
+            // any keyspace without streams all four are empty, so every probe is a
+            // foldhash of the key plus a miss. Callgrind attributed 79.2M Ir (6.21 pct)
+            // to ONE instantiation alone: `stream_max_deleted_ids` and `stream_last_ids`
+            // share a `StreamId` value type, so they monomorphise together and the
+            // profile shows 1,200,000 calls for 600,000 key-ops -- 2 per key.
+            //
+            // `remove` on an empty map returns `None`, exactly what skipping yields, so
+            // the guard is behaviour-preserving by construction. Same `is_empty()` shape
+            // `invalidate_write_side_caches` already uses for the three write-side
+            // caches (53w9n-sib); these four were never given it.
+            let max_deleted_id = if self.stream_max_deleted_ids.is_empty() {
+                None
+            } else {
+                self.stream_max_deleted_ids.remove(key.as_slice())
+            };
             let expires_at_ms = self.expiry_ms(key.as_slice());
             let Some(entry) = self.internal_entries_remove(&key) else {
                 continue;
@@ -15872,9 +15914,21 @@ impl Store {
             let logical = decode_db_key(&key)
                 .map(|(_, logical)| logical.to_vec())
                 .unwrap_or(key.clone());
-            let groups = self.stream_groups.remove(key.as_slice());
-            let last_id = self.stream_last_ids.remove(key.as_slice());
-            let entries_added = self.stream_entries_added.remove(key.as_slice());
+            let groups = if self.stream_groups.is_empty() {
+                None
+            } else {
+                self.stream_groups.remove(key.as_slice())
+            };
+            let last_id = if self.stream_last_ids.is_empty() {
+                None
+            } else {
+                self.stream_last_ids.remove(key.as_slice())
+            };
+            let entries_added = if self.stream_entries_added.is_empty() {
+                None
+            } else {
+                self.stream_entries_added.remove(key.as_slice())
+            };
             right_entries.push((
                 logical,
                 entry,
