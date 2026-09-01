@@ -73158,3 +73158,64 @@ width reaching RSS first -- and if that ever changes, the cheap probe is this on
   (`stale_replica_blocks_data_commands_when_replica_serve_stale_data_is_disabled`, filed
   as `frankenredis-nxqmm`; it fails on its FIRST assertion, so the gate it is named for
   is currently uncovered).
+
+- 2026-09-01 SCALING CORRECTION, and it reverses a shipped claim (BlackThrush, board
+  re-measure). `835d05854` shipped the hash retention lever and recorded
+  **reload 2.1386x -> 0.8229x**, ten `--aa` draws, every null passing, at
+  `restore_instr_per_op.py <bin> 40 20 --type=hash --op=reload --keys=200`. That row is
+  CORRECT AND REPRODUCIBLE: I read 0.8396x at the same 40 fields. What does not hold is
+  the sentence beside it -- "fr is now faster than redis 7.2.4 on FOUR of the five reload
+  arms" -- because the hash arm is faster only for SMALL hashes.
+
+  ELF `5ca021e83798166...` (== crates/ at dfd174aeb), redis `e837dbb2...` == vendored
+  HEAD verified in-run, `--keys=200 --aa`, ops=20. EVERY A/A NULL PASSED (band 0.005):
+
+        fields    fr Ir/op        redis Ir/op     fr/redis   A/A null
+            40     5,066,184.8     6,034,096.8     0.8396x   1.000103
+           100    12,771,058.2    12,154,890.7     1.0507x   0.999716
+           128    17,145,062.0    14,923,861.3     1.1488x   1.000121
+           160    23,113,827.9    17,845,413.7     1.2952x   1.000050
+           200    28,391,213.6    21,646,632.0     1.3116x   0.999870
+
+  **Monotone, and it crosses 1.0 at roughly 95 fields.** The shipped win survives only
+  below that. At 200 fields the hash reload arm is a 1.31x LOSS, which makes it the worst
+  remaining cell on the reload board -- the other four measured on the same ELF are
+  list 0.8096x, set 0.1405x, zset 0.3171x, stream 0.9970x, all at 200 elements.
+
+  NOT AN ENCODING-ARM ARTEFACT, which was my first hypothesis and it was wrong. I expected
+  a discontinuity at `hash-max-listpack-entries`, i.e. the lever's listpack arm giving way
+  to a hashtable arm it never touches. There is no discontinuity, and the reason is that
+  the value is **512** in this configuration, not the 128 I assumed: `OBJECT ENCODING`
+  reports `listpack` at 40/100/128/160/200 on BOTH engines. Every point above is the same
+  encoding on both sides, so this is per-field scaling inside one arm, not a switch
+  between two.
+
+  MECHANISM: fr wins on FIXED cost and loses on MARGINAL cost. Between adjacent points the
+  per-field slope is
+
+        fr      128,415 -> 156,214 -> 186,524 -> 131,935 instr/field
+        redis   102,013 ->  98,892 ->  91,299 ->  95,030 instr/field
+
+  redis's marginal cost is flat at ~91-102k and fr's runs 1.4-1.9x higher across the whole
+  range. The 40-field win is a fixed-cost advantage being amortised away; nothing about the
+  per-element path improved.
+
+  REUSABLE, and it is the third time today a board claim did not survive re-measurement:
+  a ratio measured at ONE size is a claim about that size. This one was banked with ten
+  draws and passing nulls -- rigour on the noise axis does not buy you the scaling axis.
+  Vary the dimension the ratio DEPENDS on before generalising, especially before writing
+  "fr is now faster on N of M arms". Filed as `frankenredis-8l29u`.
+
+  THE WHOLE RELOAD BOARD, re-measured on this ELF at 200 elements/fields, `--keys=200`,
+  since three separate titles turned out stale today and the board is what people rank
+  from:
+
+        arm       fr/redis    was
+        hash       1.3116x    "0.8229x" (true at 40 fields only -- see above)
+        list       0.8096x    qj6jn's premise is 3.31x; that is now a WIN
+        set        0.1405x
+        zset       0.3171x
+        stream     0.9970x
+
+  Only the hash arm is a deficit. `frankenredis-qj6jn` is titled around a 3.31x
+  list/zset transcode deficit that no longer exists on this ELF.
