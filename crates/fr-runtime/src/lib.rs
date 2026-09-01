@@ -4585,7 +4585,23 @@ pub struct ServerState {
     /// Path for ACL SAVE/LOAD persistence file.
     acl_file_path: Option<std::path::PathBuf>,
     /// Dynamically overridden CONFIG parameters (set via CONFIG SET, returned by CONFIG GET).
-    config_overrides: HashMap<String, String>,
+    ///
+    /// (frankenredis-e6c9t) foldhash, NOT the std default. `CONFIG GET *` renders ~390
+    /// parameters and probes this map for EVERY one of them, so the std `RandomState`
+    /// put SipHash on the hot path twice over: `sip::Hasher::write` 17,660.0 plus
+    /// `RandomState::hash_one::<&str>` 14,602.0 = 32,262 instr/op of a 233,677.9
+    /// instr/op op, i.e. **13.8 pct of the whole command spent hashing short ASCII
+    /// parameter names**. Callgrind frame profile, ELF 6ba1c7fcdaba2201, 2000 ops.
+    ///
+    /// Unlike the rejected lever A on this bead (hoisting an `is_empty` test), this pays
+    /// whether or not any override has been set: the probe happens per rendered
+    /// parameter regardless, and an empty map still hashes the key before it can miss.
+    ///
+    /// DoS-resistance is unchanged in the way that matters here: `foldhash::quality::RandomState`
+    /// is still randomly seeded per process. The keys are CONFIG parameter names from a
+    /// fixed vocabulary, not attacker-chosen, which is the same argument the other
+    /// foldhash maps in this struct already rest on.
+    config_overrides: HashMap<String, String, foldhash::quality::RandomState>,
     /// (frankenredis-fyi51) True only while a STARTUP directive — a config-file
     /// line or a command-line argument — is being applied.
     ///
@@ -4772,7 +4788,7 @@ impl Default for ServerState {
             rdb_path: None,
             config_file_path: None,
             acl_file_path: None,
-            config_overrides: HashMap::new(),
+            config_overrides: HashMap::default(),
             startup_config_application: false,
             pubsub_channel_subs: HashMap::new(),
             pubsub_pattern_subs: HashMap::new(),

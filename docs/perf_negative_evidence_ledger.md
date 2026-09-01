@@ -73107,3 +73107,54 @@ width reaching RSS first -- and if that ever changes, the cheap probe is this on
   does NOT say "2.1050x is now 1.72x" and no such recovery is claimed. It says only that
   on today's tree, removing the second pass is worth -0.35 pct of the route at worst
   bound, with disjoint null-passing ranges.
+
+- 2026-09-01 WIN with a MEASURED COST ON THE OTHER ARM (BlackThrush, `frankenredis-e6c9t`):
+  `ServerState.config_overrides` moves from the std `HashMap` (SipHash) to
+  `foldhash::quality::RandomState`. Both `fr-server` ELFs built on hz4 through the
+  working-tree route, differing only by `fr-runtime/src/lib.rs`; ORIG
+  `6ba1c7fcdaba2201...`, CAND `5ca021e83798166...`; vendored Redis 7.2.4 live in the same
+  invocation (`redis-server` sha `d2c8a4b9` == vendored HEAD, verified in-run).
+  `scripts/shape_instr_per_op.py <elf> <shape> 2000`.
+
+        shape             ORIG          CAND         delta      pct
+        config_get_star  231,100.7    210,711.5   -20,389.2   -8.82
+        config_get_one     6,196.9      6,217.7       +20.8   +0.34   (medians, 4 draws each)
+
+  **THE TWO ARMS MOVE IN OPPOSITE DIRECTIONS AND BOTH NUMBERS ARE REAL.** This bead's own
+  standing warning says so -- an earlier lever's first version cost the literal arm +216
+  instr/op (+3.0 pct) and was only caught because the literal was carried as the null.
+  So `config_get_one` was drawn four times per arm, and the ranges are DISJOINT:
+  ORIG [6,173.1 .. 6,203.9], CAND [6,215.4 .. 6,220.3]. It is a genuine +20.8 instr/op
+  median regression (+47.2 worst bound, +11.5 best bound), not noise. It is ~10x smaller
+  than the +216 that got the earlier version rejected, and it buys 980x its size on the
+  other arm, which is why this landed rather than being reverted -- but it is a cost, it
+  is recorded as one, and it is the number to revisit if `CONFIG GET <name>` ever
+  matters more than `CONFIG GET *`.
+
+  MECHANISM, attributed frame-for-frame rather than inferred (callgrind, 2000 ops):
+
+        frame                                            ORIG        CAND
+        sip::Hasher::write                            17,660.0         0.0
+        RandomState::hash_one::<&str>                 14,602.0         0.0
+        HashMap<String,String,foldhash>::get::<str>          --    10,113.0
+        foldhash::hash_bytes_long                      3,254.0     5,662.0
+
+  Removed 32,262.0, added 12,521.0, net -19,741.0 against a measured whole-op -20,389.2.
+  `CONFIG GET *` renders ~390 parameters and probes this map for every one of them, so
+  the std hasher was costing 13.8 pct of the entire command to hash short ASCII parameter
+  names. Unlike the REJECTED lever A on this bead (hoist an `is_empty` test, measured as
+  nothing), this pays whether or not any override is set -- an empty map still hashes the
+  key before it can miss.
+
+  **THE BEAD'S HEADLINE IS STALE AND THE ROUTE IS NO LONGER A DEFICIT.** Title says
+  `config_get_one` is 1.2483x worst bound. Measured today on HEAD it is 0.94x-1.00x
+  across draws (fr 6,173.1-6,197.7 vs redis 6,214.5-6,564.2) -- parity, with fr ahead on
+  some draws. `config_get_star` was 0.6361x and now reads 0.3562x -> 0.3290x, i.e. fr is
+  ~3x FASTER than the incumbent. Quote the redis arm with care on this route: its
+  denominator moved 5.6 pct across draws on the literal shape.
+
+  fr-runtime tests: 668 passed / 1 failed / 2 ignored, IDENTICAL on a clean HEAD checkout
+  and with this change. The one failure is pre-existing and unrelated
+  (`stale_replica_blocks_data_commands_when_replica_serve_stale_data_is_disabled`, filed
+  as `frankenredis-nxqmm`; it fails on its FIRST assertion, so the gate it is named for
+  is currently uncovered).
