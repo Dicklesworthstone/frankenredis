@@ -1,5 +1,40 @@
 # Local oracle/build evidence payloads are large and not needed for remote Cargo builds.
-legacy_redis_code/
+# (frankenredis-gvm6z) NOT `legacy_redis_code/` wholesale, and NOT a negation.
+#
+# fr-command's build script READS the vendored 7.2.4 command JSON at
+# legacy_redis_code/redis/src/commands. Excluding the parent made every WORKING-TREE
+# fr-server build die on the worker with "failed to run custom build command for
+# fr-command" -- and the working-tree route is the only one whose remote target dir
+# PERSISTS long enough to scp a linked binary out of (BENCH_METHODOLOGY section 2; the
+# clean-overlay tree under /data/tmp/rch/<hash>/ is reaped before scp can reach it).
+# So this silently gated every perf measurement that needs an fr-server ELF, which is
+# all of them.
+#
+# rch's matcher does NOT honour `!` re-inclusion: `legacy_redis_code/redis/src/*` plus
+# `!legacy_redis_code/redis/src/commands/` was tried and the directory still never
+# arrived on the worker (verified by ls on hz4). The heavy children are therefore listed
+# by name and commands/ is simply never excluded. Out: deps/ 133M, the six built redis
+# binaries and the object files ~87M, tests/ 3.1M, utils/ 244K, the fuzz logs 1.5M.
+# In: the 1.7M of command JSON the build needs, plus the C sources.
+legacy_redis_code/redis/deps/
+legacy_redis_code/redis/tests/
+legacy_redis_code/redis/utils/
+legacy_redis_code/redis/src/*.o
+legacy_redis_code/redis/src/*.d
+legacy_redis_code/redis/src/redis-server
+legacy_redis_code/redis/src/redis-sentinel
+legacy_redis_code/redis/src/redis-check-rdb
+legacy_redis_code/redis/src/redis-check-aof
+legacy_redis_code/redis/src/redis-cli
+legacy_redis_code/redis/src/redis-benchmark
+legacy_redis_code/redis/*.log
+
+# (frankenredis-gvm6z) frbuild/ is 559 MB of LOCALLY-FETCHED fr-server ELFs -- it is an
+# measurement OUTPUT directory, never a build input, and BENCH_METHODOLOGY section 2
+# names it as such. It was being shipped to a worker on every working-tree sync, which
+# is why they were timing out at 474s x3 on this repo. Removing it dwarfs the ~16 MB the
+# block above adds back.
+frbuild/
 artifacts/
 .bench-history/
 .worktrees/
