@@ -5353,6 +5353,9 @@ fn main() -> ExitCode {
     // (frankenredis-pkdgs) Per-master persistent __sentinel__:hello subscriptions
     // (sentinel mode only), drained each iteration to discover peer sentinels.
     let mut sentinel_hello_subs: HashMap<String, SentinelHelloSub> = HashMap::new();
+    // (frankenredis-rc-sentinel-peer-votes) Persistent links to peer sentinels
+    // carrying IS-MASTER-DOWN-BY-ADDR questions; replies drained each iteration.
+    let mut sentinel_peer_links: HashMap<String, SentinelPeerLink> = HashMap::new();
 
     loop {
         // Use fr-eventloop's tick planner to determine poll timeout.
@@ -5682,6 +5685,7 @@ fn main() -> ExitCode {
             ts,
             &mut last_sentinel_probe_ms,
             &mut sentinel_hello_subs,
+            &mut sentinel_peer_links,
         );
 
         // Deliver pending replication writes to connected replicas.
@@ -35873,11 +35877,125 @@ fn handle_sentinel_hello_frame(frame: &RespFrame, runtime: &mut Runtime, now_ms:
     }
 }
 
+/// (frankenredis-rc-sentinel-peer-votes) A persistent connection to a peer
+/// sentinel carrying this sentinel's `SENTINEL IS-MASTER-DOWN-BY-ADDR`
+/// questions. Replies are read non-blocking on every event-loop iteration and
+/// matched to the questions in send order (one RESP reply per question on one
+/// connection). The earlier blocking round trip deadlocked three sentinels
+/// that asked each other in the same tick: each single-threaded loop sat in
+/// its own read timeout instead of answering the others, no answer ever came
+/// back, and a quorum above 1 never reached O_DOWN.
+struct SentinelPeerLink {
+    stream: StdTcpStream,
+    buf: Vec<u8>,
+    /// (master name, sentinel key, sent-at ms) of each question awaiting its
+    /// reply, oldest first.
+    pending: VecDeque<(String, String, u64)>,
+}
+
+/// Questions a peer may leave unanswered on one link before we stop asking.
+const SENTINEL_PEER_LINK_MAX_PENDING: usize = 8;
+/// A reply older than this is not coming: drop the link and reopen next period.
+const SENTINEL_PEER_REPLY_TIMEOUT_MS: u64 = 5_000;
+
+fn open_sentinel_peer_link(ip: &str, port: u16) -> Option<SentinelPeerLink> {
+    let addr: SocketAddr = format!("{ip}:{port}").parse().ok()?;
+    let stream = StdTcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
+    let _ = stream.set_nodelay(true);
+    stream.set_nonblocking(true).ok()?;
+    Some(SentinelPeerLink {
+        stream,
+        buf: Vec::new(),
+        pending: VecDeque::new(),
+    })
+}
+
+/// Put one question to a peer on its link, opening the link when needed. A
+/// write failure drops the link; the next ask period reopens it.
+fn send_sentinel_peer_ask(
+    links: &mut HashMap<String, SentinelPeerLink>,
+    ask: &fr_store::SentinelPeerAsk,
+    now_ms: u64,
+) {
+    let link_key = format!("{}:{}", ask.ip, ask.port);
+    if !links.contains_key(&link_key)
+        && let Some(link) = open_sentinel_peer_link(&ask.ip, ask.port)
+    {
+        links.insert(link_key.clone(), link);
+    }
+    let Some(link) = links.get_mut(&link_key) else {
+        return;
+    };
+    if link.pending.len() >= SENTINEL_PEER_LINK_MAX_PENDING {
+        return;
+    }
+    let epoch = ask.current_epoch.to_string();
+    let master_port = ask.master_port.to_string();
+    let frame = replica_handshake_frame(&[
+        b"SENTINEL",
+        b"IS-MASTER-DOWN-BY-ADDR",
+        ask.master_ip.as_bytes(),
+        master_port.as_bytes(),
+        epoch.as_bytes(),
+        ask.runid_arg.as_bytes(),
+    ]);
+    if link.stream.write_all(&frame.to_bytes()).is_err() {
+        links.remove(&link_key);
+        return;
+    }
+    link.pending
+        .push_back((ask.master_name.clone(), ask.sentinel_key.clone(), now_ms));
+}
+
+/// Non-blocking drain of a peer link: every complete reply answers the oldest
+/// pending question. Err means the link is dead, garbled, or the peer has
+/// left a question unanswered too long, and the caller drops it.
+fn drain_sentinel_peer_link(
+    link: &mut SentinelPeerLink,
+    runtime: &mut Runtime,
+    parser_config: &ParserConfig,
+    now_ms: u64,
+) -> io::Result<()> {
+    let mut tmp = [0u8; 4096];
+    loop {
+        match link.stream.read(&mut tmp) {
+            Ok(0) => return Err(io::Error::new(ErrorKind::UnexpectedEof, "peer link closed")),
+            Ok(n) => link.buf.extend_from_slice(&tmp[..n]),
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
+            Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+        if link.buf.len() > 1 << 16 {
+            return Err(io::Error::new(ErrorKind::InvalidData, "peer link overflow"));
+        }
+    }
+    loop {
+        match fr_protocol::parse_frame_with_config(&link.buf, parser_config) {
+            Ok(parsed) => {
+                if let Some((master_name, sentinel_key, _)) = link.pending.pop_front() {
+                    let reply = parse_is_master_down_reply(&parsed.frame);
+                    runtime.sentinel_apply_peer_reply(&master_name, &sentinel_key, reply, now_ms);
+                }
+                link.buf.drain(..parsed.consumed);
+            }
+            Err(RespParseError::Incomplete) => break,
+            Err(_) => return Err(io::Error::new(ErrorKind::InvalidData, "bad peer reply")),
+        }
+    }
+    if let Some((_, _, sent_at)) = link.pending.front()
+        && now_ms.saturating_sub(*sent_at) > SENTINEL_PEER_REPLY_TIMEOUT_MS
+    {
+        return Err(io::Error::new(ErrorKind::TimedOut, "peer reply overdue"));
+    }
+    Ok(())
+}
+
 fn run_sentinel_monitoring_tick(
     runtime: &mut Runtime,
     now_ms: u64,
     last_probe_ms: &mut u64,
     hello_subs: &mut HashMap<String, SentinelHelloSub>,
+    peer_links: &mut HashMap<String, SentinelPeerLink>,
 ) {
     if !runtime.sentinel_mode() {
         return;
@@ -35924,6 +36042,13 @@ fn run_sentinel_monitoring_tick(
         }
     }
 
+    // Receive half of the peer questions (every iteration): fold each reply
+    // into the sentinel it came from; a dead or silent link is dropped and
+    // reopened by the next ask.
+    peer_links.retain(|_, link| {
+        drain_sentinel_peer_link(link, runtime, &parser_config, now_ms).is_ok()
+    });
+
     // Probe half (network IO) stays throttled.
     if now_ms.saturating_sub(*last_probe_ms) < SENTINEL_PROBE_INTERVAL_MS {
         return;
@@ -35961,31 +36086,6 @@ fn run_sentinel_monitoring_tick(
         );
     }
 
-    // (frankenredis-rc-sentinel-peer-votes) Ask the peer sentinels we know
-    // about whether they also see a down master, and for their vote while a
-    // failover of ours is in flight. Their answers are what let a quorum
-    // above 1 reach O_DOWN and elect exactly one leader.
-    for ask in runtime.sentinel_peer_asks(now_ms) {
-        let epoch = ask.current_epoch.to_string();
-        let master_port = ask.master_port.to_string();
-        let reply = send_sentinel_query(
-            &ask.ip,
-            ask.port,
-            &[
-                b"SENTINEL",
-                b"IS-MASTER-DOWN-BY-ADDR",
-                ask.master_ip.as_bytes(),
-                master_port.as_bytes(),
-                epoch.as_bytes(),
-                ask.runid_arg.as_bytes(),
-            ],
-            &parser_config,
-            query_buffer_limit,
-        )
-        .and_then(|frame| parse_is_master_down_reply(&frame));
-        runtime.sentinel_apply_peer_reply(&ask.master_name, &ask.sentinel_key, reply, now_ms);
-    }
-
     // Drive the failover state machine and perform the `SLAVEOF` writes it asks
     // for. The machine itself lives in fr-sentinel and is pure; this is the only
     // place a sentinel decision reaches a socket.
@@ -36019,38 +36119,17 @@ fn run_sentinel_monitoring_tick(
         };
         runtime.sentinel_apply_failover_io_result(&io, ok, now_ms);
     }
-}
 
-/// (frankenredis-rc-sentinel-peer-votes) Blocking one-shot query to a peer
-/// sentinel; `None` on any connect / IO / protocol failure, which the caller
-/// treats as "no answer this period".
-fn send_sentinel_query(
-    ip: &str,
-    port: u16,
-    args: &[&[u8]],
-    parser_config: &ParserConfig,
-    query_buffer_limit: usize,
-) -> Option<RespFrame> {
-    let addr = format!("{ip}:{port}").parse::<SocketAddr>().ok()?;
-    let mut stream = StdTcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
-    let _ = stream.set_nodelay(true);
-    stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .ok()?;
-    stream
-        .set_write_timeout(Some(Duration::from_millis(500)))
-        .ok()?;
-    stream
-        .write_all(&replica_handshake_frame(args).to_bytes())
-        .ok()?;
-    let mut read_buf = Vec::new();
-    read_frame_from_stream(
-        &mut stream,
-        &mut read_buf,
-        parser_config,
-        query_buffer_limit,
-    )
-    .ok()
+    // (frankenredis-rc-sentinel-peer-votes) Ask the peer sentinels we know
+    // about whether they also see a down master, and for their vote while a
+    // failover of ours is in flight. This runs after the state machine, as
+    // sentinelHandleRedisInstance orders it, so a failover that just started
+    // sends its vote request in this very tick (upstream's SENTINEL_ASK_FORCED)
+    // rather than a full period later, by when the peers may have voted for
+    // themselves. The replies arrive on the links drained above.
+    for ask in runtime.sentinel_peer_asks(now_ms) {
+        send_sentinel_peer_ask(peer_links, &ask, now_ms);
+    }
 }
 
 /// `[is_down, leader_runid | "*", leader_epoch]`, as both redis-sentinel and

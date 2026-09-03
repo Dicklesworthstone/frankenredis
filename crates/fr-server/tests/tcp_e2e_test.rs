@@ -7323,6 +7323,31 @@ fn sentinel_master_field(sentinel_port: u16, name: &[u8], field: &str) -> Option
         .cloned()
 }
 
+/// Every sentinel's `SENTINEL MASTER` view of `name`, for failure messages: a
+/// bare timeout said nothing about which sentinel was stuck in which state.
+fn sentinel_master_snapshot(sentinel_ports: &[u16], name: &[u8]) -> String {
+    sentinel_ports
+        .iter()
+        .map(|port| {
+            let mut client = connect_client(*port);
+            let fields = sentinel_master_fields(&mut client, name);
+            let view: Vec<String> = [
+                "port",
+                "flags",
+                "failover-state",
+                "config-epoch",
+                "num-other-sentinels",
+                "num-slaves",
+            ]
+            .iter()
+            .filter_map(|key| fields.get(*key).map(|value| format!("{key}={value}")))
+            .collect();
+            format!("sentinel {port}: {}", view.join(" "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// (frankenredis-rc-sentinel-peer-votes) Three sentinels with quorum 2 must
 /// agree the primary is down through `is-master-down-by-addr`, elect exactly
 /// one leader, have that leader promote the replica, and converge on the new
@@ -7393,21 +7418,28 @@ fn three_fr_sentinels_with_quorum_two_agree_elect_and_fail_over() {
 
     send_shutdown_nosave(master_port);
 
-    wait_until(
-        Duration::from_secs(90),
-        || fetch_info_replication(replica_port).is_some_and(|info| info.contains("role:master")),
-        "the elected sentinel to promote the replica",
-    );
+    let promoted_by = Instant::now() + Duration::from_secs(90);
+    while !fetch_info_replication(replica_port).is_some_and(|info| info.contains("role:master")) {
+        assert!(
+            Instant::now() < promoted_by,
+            "no sentinel promoted the replica within 90s; {}",
+            sentinel_master_snapshot(&sentinel_ports, b"m1")
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
     let replica_port_str = replica_port.to_string();
     for port in sentinel_ports {
-        wait_until(
-            Duration::from_secs(60),
-            || {
-                sentinel_master_field(port, b"m1", "port").as_deref()
-                    == Some(replica_port_str.as_str())
-            },
-            "every sentinel to converge on the promoted replica as the master",
-        );
+        let converged_by = Instant::now() + Duration::from_secs(60);
+        while sentinel_master_field(port, b"m1", "port").as_deref()
+            != Some(replica_port_str.as_str())
+        {
+            assert!(
+                Instant::now() < converged_by,
+                "sentinel {port} did not converge on the promoted replica as the master within 60s; {}",
+                sentinel_master_snapshot(&sentinel_ports, b"m1")
+            );
+            thread::sleep(Duration::from_millis(200));
+        }
     }
     // One failover, one config epoch: the leader bumped it and the followers
     // adopted it from the hello, so all three agree on a non-zero value.
