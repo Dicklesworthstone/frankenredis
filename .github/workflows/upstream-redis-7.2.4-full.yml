@@ -56,6 +56,14 @@ jobs:
           test -x "${REDIS_724_ROOT}/src/redis-server"
           test -x "${REDIS_724_ROOT}/src/redis-cli"
           test -x "${REDIS_724_ROOT}/src/redis-benchmark"
+          # fr-command's build script reads the command metadata JSON from
+          # legacy_redis_code/redis/src/commands (the vendored oracle path, which is
+          # gitignored), so point that path at the pinned checkout exactly as the
+          # live-conformance workflow does. Without it `cargo build -p fr-server`
+          # fails on the runner with "failed to read Redis commands dir".
+          mkdir -p legacy_redis_code
+          ln -s "../${REDIS_724_ROOT}" legacy_redis_code/redis
+          test -d legacy_redis_code/redis/src/commands
           # runtest resolves tests/test_helper.tcl relative to the current directory,
           # so it must run from inside the Redis checkout, not from the repo root.
           (cd "${REDIS_724_ROOT}" && ./runtest --list-tests) | tee /tmp/redis-724-test-units.txt
