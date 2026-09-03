@@ -7050,6 +7050,16 @@ impl Runtime {
         self.server.set_aof_path(path);
     }
 
+    /// Turn AOF on or off without touching the configured path: the state of a
+    /// server started with `appendonly no` but a configured `appendfilename`,
+    /// which `CONFIG SET appendonly yes` can later enable. `set_aof_path`
+    /// enables AOF as `--aof` does; harnesses that must mirror an oracle
+    /// launched with `--appendonly no` call this afterwards.
+    /// (frankenredis-rc-waitaof-noaof)
+    pub fn set_aof_enabled(&mut self, enabled: bool) {
+        self.server.store.set_aof_enabled(enabled);
+    }
+
     /// Set the RDB persistence file path. When set, SAVE/BGSAVE will write
     /// an RDB snapshot to this path.
     pub fn set_rdb_path(&mut self, path: std::path::PathBuf) {
@@ -7304,6 +7314,25 @@ impl Runtime {
         self.server
             .store
             .apply_sentinel_replica_probe_result(master, replica_key, now_ms, info);
+    }
+
+    /// (frankenredis-rc-sentinel-peer-votes) The peer questions due this tick.
+    #[must_use]
+    pub fn sentinel_peer_asks(&self, now_ms: u64) -> Vec<fr_store::SentinelPeerAsk> {
+        self.server.store.sentinel_peer_asks(now_ms)
+    }
+
+    /// (frankenredis-rc-sentinel-peer-votes) Record a peer's answer.
+    pub fn sentinel_apply_peer_reply(
+        &mut self,
+        master: &str,
+        sentinel_key: &str,
+        reply: Option<fr_store::SentinelPeerReply>,
+        now_ms: u64,
+    ) {
+        self.server
+            .store
+            .sentinel_apply_peer_reply(master, sentinel_key, reply, now_ms);
     }
 
     /// (frankenredis-rc-sentinel-failover) Advance every monitored master's

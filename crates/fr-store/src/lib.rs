@@ -13,6 +13,7 @@ mod keyspace_dict;
 /// failover machine asks fr-server to perform; re-exported so fr-runtime and
 /// fr-server can name the type without depending on fr-sentinel directly.
 pub use fr_sentinel::failover::FailoverIo as SentinelFailoverIo;
+pub use fr_sentinel::consensus::{PeerAsk as SentinelPeerAsk, PeerReply as SentinelPeerReply};
 use keyspace_dict::KeyDict;
 #[cfg(any(test, feature = "bench-reference"))]
 #[doc(hidden)]
@@ -8128,8 +8129,45 @@ impl Store {
         // until peer votes arrive (sentinel-to-sentinel gossip not yet wired, so
         // no external votes here). Matches redis-sentinel's
         // 's_down,o_down,master,disconnected'.
-        let odown = fr_sentinel::consensus::evaluate_o_down(master, &[], now_ms);
+        // (frankenredis-rc-sentinel-peer-votes) The peers' latest
+        // is-master-down-by-addr answers count alongside this sentinel's own
+        // view, so a quorum above 1 can be reached.
+        let votes = fr_sentinel::consensus::peer_o_down_votes(master);
+        let odown = fr_sentinel::consensus::evaluate_o_down(master, &votes, now_ms);
         fr_sentinel::consensus::apply_o_down_result(master, &odown, now_ms);
+    }
+
+    /// (frankenredis-rc-sentinel-peer-votes) The `SENTINEL IS-MASTER-DOWN-BY-ADDR`
+    /// questions due this tick across every monitored master.
+    #[must_use]
+    pub fn sentinel_peer_asks(&self, now_ms: u64) -> Vec<SentinelPeerAsk> {
+        let mut asks = Vec::new();
+        for name in self.sentinel_state.masters.keys() {
+            asks.extend(fr_sentinel::consensus::peer_asks(
+                &self.sentinel_state,
+                name,
+                now_ms,
+            ));
+        }
+        asks
+    }
+
+    /// (frankenredis-rc-sentinel-peer-votes) Fold one peer's answer (or a
+    /// failed ask) into its instance.
+    pub fn sentinel_apply_peer_reply(
+        &mut self,
+        master: &str,
+        sentinel_key: &str,
+        reply: Option<SentinelPeerReply>,
+        now_ms: u64,
+    ) {
+        fr_sentinel::consensus::apply_peer_reply(
+            &mut self.sentinel_state,
+            master,
+            sentinel_key,
+            reply,
+            now_ms,
+        );
     }
 
     /// (frankenredis-rc-sentinel-failover) Every discovered replica of every

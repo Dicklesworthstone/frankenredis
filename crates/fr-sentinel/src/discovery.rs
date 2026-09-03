@@ -395,6 +395,51 @@ fn apply_master_config_from_hello(
     master_config_epoch: u64,
 ) {
     if master_config_epoch > master.config_epoch {
+        // (frankenredis-rc-sentinel-peer-votes) A peer that completed a
+        // failover announces the new master with a higher config epoch. Follow
+        // it the way sentinelResetMasterAndChangeAddress does: the promoted
+        // instance stops being one of our replicas and the old master becomes
+        // one, so this sentinel's own replica probing and demotion logic act
+        // on the right instances instead of telling the new master to follow
+        // itself.
+        if master.addr.port != master_addr.port
+            || !(master.addr.ip.eq_ignore_ascii_case(&master_addr.ip)
+                || master
+                    .addr
+                    .hostname
+                    .eq_ignore_ascii_case(&master_addr.hostname))
+        {
+            let old_addr = master.addr.clone();
+            let quorum = master.quorum;
+            let down_after_period = master.down_after_period;
+            master.slaves.retain(|_, slave| {
+                slave.addr.port != master_addr.port
+                    || !(slave.addr.ip.eq_ignore_ascii_case(&master_addr.ip)
+                        || slave
+                            .addr
+                            .hostname
+                            .eq_ignore_ascii_case(&master_addr.hostname))
+            });
+            let old_key = crate::failover::sentinel_slave_key(&old_addr);
+            if !master.slaves.contains_key(&old_key) {
+                let demoted = crate::failover::reset_slave_instance(
+                    &old_key,
+                    old_addr,
+                    quorum,
+                    down_after_period,
+                    master.role_reported_time,
+                );
+                master.slaves.insert(old_key, demoted);
+            }
+            master.runid = None;
+            master.flags.remove(InstanceFlags::S_DOWN);
+            master.flags.remove(InstanceFlags::O_DOWN);
+            master.flags.remove(InstanceFlags::FAILOVER_IN_PROGRESS);
+            master.failover_state = crate::FailoverState::None;
+            master.promoted_slave = None;
+            master.s_down_since_time = 0;
+            master.o_down_since_time = 0;
+        }
         master.addr = master_addr;
         master.config_epoch = master_config_epoch;
     }

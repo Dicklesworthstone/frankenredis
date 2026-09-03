@@ -124,6 +124,142 @@ pub fn evaluate_leader_election(
     }
 }
 
+/// One `SENTINEL IS-MASTER-DOWN-BY-ADDR` question fr-server must put to a peer
+/// sentinel on this sentinel's behalf.
+///
+/// (frankenredis-rc-sentinel-peer-votes) Until this existed, `evaluate_o_down`
+/// was always fed an empty vote slice and the leader election saw only the
+/// self vote, so a master with a quorum above 1 could be `s_down` forever and
+/// never fail over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerAsk {
+    pub master_name: String,
+    pub sentinel_key: String,
+    pub ip: String,
+    pub port: u16,
+    pub master_ip: String,
+    pub master_port: u16,
+    pub current_epoch: u64,
+    /// `*` when only the peer's down state is wanted; this sentinel's run id
+    /// when it is running a failover and needs the peer's vote.
+    pub runid_arg: String,
+}
+
+/// A peer's reply: `[is_down, leader_runid | "*", leader_epoch]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerReply {
+    pub is_down: bool,
+    pub leader: Option<String>,
+    pub leader_epoch: u64,
+}
+
+/// Mirrors `sentinelAskMasterStateToOtherSentinels`: peers are asked only about
+/// a master this sentinel already sees S_DOWN, once per `ask_period` per peer,
+/// and on every tick (forced) while a failover is in progress so votes arrive
+/// promptly. The run id is sent only when a vote is wanted.
+#[must_use]
+pub fn peer_asks(state: &SentinelState, master_name: &str, now: u64) -> Vec<PeerAsk> {
+    let Some(master) = state.get_master(master_name) else {
+        return Vec::new();
+    };
+    if !master.is_s_down() {
+        return Vec::new();
+    }
+    let in_failover = master
+        .flags
+        .contains(crate::InstanceFlags::FAILOVER_IN_PROGRESS);
+    let ask_period = state.debug_config.ask_period;
+    let myid = state.myid_hex();
+    master
+        .sentinels
+        .iter()
+        .filter(|(_, peer)| {
+            in_failover || now.saturating_sub(peer.last_master_down_reply_time) >= ask_period
+        })
+        .map(|(key, peer)| PeerAsk {
+            master_name: master_name.to_string(),
+            sentinel_key: key.clone(),
+            ip: peer.addr.ip.clone(),
+            port: peer.addr.port,
+            master_ip: master.addr.ip.clone(),
+            master_port: master.addr.port,
+            current_epoch: state.current_epoch,
+            runid_arg: if in_failover {
+                myid.clone()
+            } else {
+                "*".to_string()
+            },
+        })
+        .collect()
+}
+
+/// Fold a peer's reply into its instance, as `sentinelReceiveIsMasterDownReply`
+/// does: the reply time, the `MASTER_DOWN` flag, and the leader it voted for
+/// when it answered a vote request. A failed ask (`None`) changes nothing and
+/// is retried on the next period.
+pub fn apply_peer_reply(
+    state: &mut SentinelState,
+    master_name: &str,
+    sentinel_key: &str,
+    reply: Option<PeerReply>,
+    now: u64,
+) {
+    let Some(reply) = reply else {
+        return;
+    };
+    let Some(master) = state.masters.get_mut(master_name) else {
+        return;
+    };
+    let Some(peer) = master.sentinels.get_mut(sentinel_key) else {
+        return;
+    };
+    peer.last_master_down_reply_time = now;
+    if reply.is_down {
+        peer.flags.insert(crate::InstanceFlags::MASTER_DOWN);
+    } else {
+        peer.flags.remove(crate::InstanceFlags::MASTER_DOWN);
+    }
+    if let Some(leader) = reply.leader.filter(|leader| leader != "*") {
+        peer.leader = Some(leader);
+        peer.leader_epoch = reply.leader_epoch;
+    }
+}
+
+/// The peers' latest down/up answers as votes for `evaluate_o_down`, which
+/// discards any older than five ask periods.
+#[must_use]
+pub fn peer_o_down_votes(master: &SentinelRedisInstance) -> Vec<ODownVote> {
+    master
+        .sentinels
+        .values()
+        .filter_map(|peer| {
+            peer.runid.as_ref().map(|runid| ODownVote {
+                sentinel_runid: runid.clone(),
+                is_down: peer.flags.contains(crate::InstanceFlags::MASTER_DOWN),
+                vote_time: peer.last_master_down_reply_time,
+            })
+        })
+        .collect()
+}
+
+/// The peers' latest leader ballots for `evaluate_leader_election`, which
+/// counts only the ones cast in the epoch being decided.
+#[must_use]
+pub fn peer_leader_votes(master: &SentinelRedisInstance) -> Vec<LeaderVote> {
+    master
+        .sentinels
+        .values()
+        .filter_map(|peer| match (&peer.runid, &peer.leader) {
+            (Some(voter), Some(leader)) => Some(LeaderVote {
+                voter_runid: voter.clone(),
+                leader_runid: leader.clone(),
+                epoch: peer.leader_epoch,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn should_request_vote(master: &SentinelRedisInstance, my_epoch: u64, _now: u64) -> bool {
     if !master.is_o_down() {
         return false;

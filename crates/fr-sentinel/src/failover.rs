@@ -442,11 +442,11 @@ fn push_unique_addr(addrs: &mut Vec<crate::SentinelAddr>, addr: crate::SentinelA
     }
 }
 
-fn sentinel_slave_key(addr: &crate::SentinelAddr) -> String {
+pub(crate) fn sentinel_slave_key(addr: &crate::SentinelAddr) -> String {
     format!("{}:{}", addr.hostname, addr.port)
 }
 
-fn reset_slave_instance(
+pub(crate) fn reset_slave_instance(
     key: &str,
     addr: crate::SentinelAddr,
     quorum: u32,
@@ -527,27 +527,11 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
 
         if master.failover_state == FailoverState::None && should_start_failover(master, true, now)
         {
+            // sentinelStartFailover: claim a new epoch, vote for ourselves in it
+            // (unless this sentinel already voted for a peer that asked first --
+            // cast_vote keeps that ballot), and enter WaitStart. Whether we are
+            // the leader is decided there, once the peers' votes have arrived.
             let new_epoch = epoch.saturating_add(1);
-            let sentinel_count = u32::try_from(master.sentinels.len())
-                .unwrap_or(u32::MAX)
-                .saturating_add(1);
-            let vote = crate::consensus::LeaderVote {
-                voter_runid: my_runid.clone(),
-                leader_runid: my_runid.clone(),
-                epoch: new_epoch,
-            };
-            let election = crate::consensus::evaluate_leader_election(
-                &my_runid,
-                new_epoch,
-                sentinel_count,
-                master.quorum,
-                &[vote],
-            );
-            if !election.is_winner {
-                return ios;
-            }
-            master.leader = Some(my_runid);
-            master.leader_epoch = new_epoch;
             master.failover_epoch = new_epoch;
             master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
             let mut ctx = FailoverContext::new();
@@ -581,9 +565,53 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
                 }
             }
             FailoverState::WaitStart => {
+                // sentinelFailoverWaitStart: a forced failover (SENTINEL
+                // FAILOVER) skips the election; otherwise proceed only once a
+                // majority of the sentinels we know about, and at least
+                // `quorum` of them, voted for us in this failover's epoch.
+                // Past the election timeout with no win, give up; the backoff
+                // in should_start_failover spaces the next attempt.
                 if now >= master.failover_start_time {
-                    master.failover_state = FailoverState::SelectSlave;
-                    master.failover_state_change_time = now;
+                    let forced = master.flags.contains(InstanceFlags::FORCE_FAILOVER);
+                    let won = forced || {
+                        let mut votes = crate::consensus::peer_leader_votes(master);
+                        if let Some(leader) = master.leader.clone()
+                            && master.leader_epoch == master.failover_epoch
+                        {
+                            votes.push(crate::consensus::LeaderVote {
+                                voter_runid: my_runid.clone(),
+                                leader_runid: leader,
+                                epoch: master.leader_epoch,
+                            });
+                        }
+                        let sentinel_count = u32::try_from(master.sentinels.len())
+                            .unwrap_or(u32::MAX)
+                            .saturating_add(1);
+                        crate::consensus::evaluate_leader_election(
+                            &my_runid,
+                            master.failover_epoch,
+                            sentinel_count,
+                            master.quorum,
+                            &votes,
+                        )
+                        .is_winner
+                    };
+                    if won {
+                        master.failover_state = FailoverState::SelectSlave;
+                        master.failover_state_change_time = now;
+                    } else {
+                        let election_timeout =
+                            crate::ELECTION_TIMEOUT_MS.min(master.failover_timeout);
+                        if now.saturating_sub(master.failover_start_time) > election_timeout {
+                            let mut ctx = FailoverContext::new();
+                            advance_failover_state(
+                                master,
+                                FailoverEvent::Abort("election timeout".to_string()),
+                                &mut ctx,
+                                now,
+                            );
+                        }
+                    }
                 }
             }
             FailoverState::SelectSlave => {
@@ -683,6 +711,10 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
     }
     if let Some(new_epoch) = bump_epoch {
         state.current_epoch = new_epoch;
+        // Our own ballot for the epoch we just claimed. If a peer asked for our
+        // vote in this epoch first, cast_vote keeps that ballot and we will
+        // not win -- which is the point of the election.
+        let _ = crate::consensus::cast_vote(state, master_name, &my_runid, new_epoch);
     }
     ios
 }
@@ -1007,8 +1039,11 @@ mod tests {
         assert_eq!(state.get_master("m1").unwrap().addr.ip, "10.0.0.11");
     }
 
+    /// Without peer votes a quorum-2 failover starts, waits in WaitStart for
+    /// an election it cannot win, and is abandoned at the election timeout
+    /// without ever promoting anyone -- sentinelFailoverWaitStart's path.
     #[test]
-    fn a_quorum_that_needs_peer_votes_does_not_start_a_failover_alone() {
+    fn a_quorum_that_needs_peer_votes_waits_and_aborts_without_them() {
         let mut state = SentinelState::new();
         let t0 = 9_000_000;
         monitored_master_with_probed_replicas(&mut state, t0);
@@ -1021,7 +1056,170 @@ mod tests {
         assert!(failover_step(&mut state, "m1", t0 + 500).is_empty());
         assert_eq!(
             state.get_master("m1").unwrap().failover_state,
-            FailoverState::None
+            FailoverState::WaitStart
+        );
+        for tick in 1..20u64 {
+            assert!(
+                failover_step(&mut state, "m1", t0 + 500 + tick * 500).is_empty(),
+                "no I/O may be requested while the election is open"
+            );
+            assert_ne!(
+                state.get_master("m1").unwrap().failover_state,
+                FailoverState::SelectSlave
+            );
+        }
+        // Past ELECTION_TIMEOUT_MS the attempt is abandoned.
+        assert!(
+            failover_step(
+                &mut state,
+                "m1",
+                t0 + 500 + crate::ELECTION_TIMEOUT_MS + 600
+            )
+            .is_empty()
+        );
+        let master = state.get_master("m1").unwrap();
+        assert_eq!(master.failover_state, FailoverState::None);
+        assert!(!master.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS));
+    }
+
+    fn add_peer(master: &mut SentinelRedisInstance, ip: &str, runid: &str, now: u64) {
+        let key = format!("{ip}:26379");
+        let mut peer = SentinelRedisInstance::new_master(&key, SentinelAddr::new(ip, 26379), 0);
+        peer.flags = InstanceFlags::SENTINEL;
+        peer.initialize_created_link_state(now);
+        peer.runid = Some(runid.to_string());
+        master.sentinels.insert(key, peer);
+    }
+
+    /// (frankenredis-rc-sentinel-peer-votes) Three sentinels, quorum 2: this
+    /// one sees the master S_DOWN, asks its two peers, their down answers make
+    /// O_DOWN, the failover starts in a new epoch, the peers' ballots for us
+    /// win the election, and the machine proceeds to promote a replica.
+    #[test]
+    fn peer_votes_reach_o_down_and_elect_this_sentinel_leader() {
+        use crate::consensus::{PeerReply, apply_peer_reply, peer_asks};
+        let mut state = SentinelState::new();
+        let myid = state.myid_hex();
+        let t0 = 11_000_000;
+        monitored_master_with_probed_replicas(&mut state, t0);
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            master.quorum = 2;
+            add_peer(master, "10.0.0.20", &"e".repeat(40), t0);
+            add_peer(master, "10.0.0.21", &"f".repeat(40), t0);
+        }
+        // Nothing is asked while the master looks healthy.
+        assert!(peer_asks(&state, "m1", t0 + 1_000).is_empty());
+
+        state
+            .get_master_mut("m1")
+            .unwrap()
+            .set_s_down(true, t0 + 1_000);
+        let asks = peer_asks(&state, "m1", t0 + 1_500);
+        assert_eq!(asks.len(), 2);
+        assert!(asks.iter().all(|ask| ask.runid_arg == "*"), "{asks:?}");
+        assert!(asks.iter().all(|ask| ask.master_port == 6379));
+        for ask in &asks {
+            apply_peer_reply(
+                &mut state,
+                "m1",
+                &ask.sentinel_key,
+                Some(PeerReply {
+                    is_down: true,
+                    leader: None,
+                    leader_epoch: 0,
+                }),
+                t0 + 1_600,
+            );
+        }
+        // The peers' answers plus our own view reach the quorum.
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            let votes = crate::consensus::peer_o_down_votes(master);
+            let result = crate::consensus::evaluate_o_down(master, &votes, t0 + 1_700);
+            assert!(result.should_mark_o_down, "{result:?}");
+            crate::consensus::apply_o_down_result(master, &result, t0 + 1_700);
+            assert!(master.is_o_down());
+        }
+        // The failover starts in a fresh epoch and asks for votes by run id.
+        let epoch_before = state.current_epoch;
+        assert!(failover_step(&mut state, "m1", t0 + 2_000).is_empty());
+        let failover_epoch = state.get_master("m1").unwrap().failover_epoch;
+        assert_eq!(failover_epoch, epoch_before + 1);
+        assert_eq!(
+            state.get_master("m1").unwrap().failover_state,
+            FailoverState::WaitStart
+        );
+        let asks = peer_asks(&state, "m1", t0 + 2_100);
+        assert_eq!(asks.len(), 2, "forced asks during a failover");
+        assert!(asks.iter().all(|ask| ask.runid_arg == myid));
+        for ask in &asks {
+            apply_peer_reply(
+                &mut state,
+                "m1",
+                &ask.sentinel_key,
+                Some(PeerReply {
+                    is_down: true,
+                    leader: Some(myid.clone()),
+                    leader_epoch: failover_epoch,
+                }),
+                t0 + 2_200,
+            );
+        }
+        // Elected: the machine moves on and eventually asks to promote.
+        let mut promoted = false;
+        for tick in 0..6u64 {
+            for io in failover_step(&mut state, "m1", t0 + 2_500 + tick * 500) {
+                if matches!(io, FailoverIo::PromoteReplica { .. }) {
+                    promoted = true;
+                }
+            }
+        }
+        assert!(promoted, "peer votes must let the failover proceed");
+    }
+
+    /// A losing election: the peers voted for someone else in this epoch, so
+    /// this sentinel never promotes and abandons the attempt at the timeout.
+    #[test]
+    fn peer_votes_for_another_sentinel_stop_this_one_from_promoting() {
+        use crate::consensus::{PeerReply, apply_peer_reply, peer_asks};
+        let mut state = SentinelState::new();
+        let t0 = 13_000_000;
+        monitored_master_with_probed_replicas(&mut state, t0);
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            master.quorum = 2;
+            add_peer(master, "10.0.0.20", &"e".repeat(40), t0);
+            add_peer(master, "10.0.0.21", &"f".repeat(40), t0);
+            master.set_s_down(true, t0);
+            master.set_o_down(true, t0);
+        }
+        assert!(failover_step(&mut state, "m1", t0 + 500).is_empty());
+        let failover_epoch = state.get_master("m1").unwrap().failover_epoch;
+        for ask in peer_asks(&state, "m1", t0 + 600) {
+            apply_peer_reply(
+                &mut state,
+                "m1",
+                &ask.sentinel_key,
+                Some(PeerReply {
+                    is_down: true,
+                    leader: Some("e".repeat(40)),
+                    leader_epoch: failover_epoch,
+                }),
+                t0 + 700,
+            );
+        }
+        for tick in 0..30u64 {
+            let ios = failover_step(&mut state, "m1", t0 + 1_000 + tick * 500);
+            assert!(
+                ios.is_empty(),
+                "a losing candidate must not promote: {ios:?}"
+            );
+        }
+        assert_eq!(
+            state.get_master("m1").unwrap().failover_state,
+            FailoverState::None,
+            "abandoned at the election timeout"
         );
     }
 

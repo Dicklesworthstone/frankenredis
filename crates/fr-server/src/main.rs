@@ -35899,9 +35899,18 @@ fn run_sentinel_monitoring_tick(
     // monitored master and drain it so peer sentinels' hellos are ingested as
     // they arrive. Reconcile against the current master set first.
     {
-        let current: HashSet<&str> = targets.iter().map(|(n, _, _)| n.as_str()).collect();
+        // (frankenredis-rc-sentinel-peer-votes) Subscribe on every discovered
+        // replica as well as the master, as redis-sentinel does: after a peer
+        // completes a failover it announces the new master (with a higher
+        // config epoch) on the promoted replica's channel, and a sentinel that
+        // only listened on the dead master would never learn about it.
+        let mut sub_targets: Vec<(String, String, u16)> = targets.clone();
+        for (master_name, _, ip, port) in runtime.sentinel_replica_targets() {
+            sub_targets.push((format!("{master_name}@{ip}:{port}"), ip, port));
+        }
+        let current: HashSet<&str> = sub_targets.iter().map(|(n, _, _)| n.as_str()).collect();
         hello_subs.retain(|name, _| current.contains(name.as_str()));
-        for (name, ip, port) in &targets {
+        for (name, ip, port) in &sub_targets {
             if !hello_subs.contains_key(name)
                 && let Some(conn) = open_sentinel_hello_sub(ip, *port)
             {
@@ -35952,6 +35961,31 @@ fn run_sentinel_monitoring_tick(
         );
     }
 
+    // (frankenredis-rc-sentinel-peer-votes) Ask the peer sentinels we know
+    // about whether they also see a down master, and for their vote while a
+    // failover of ours is in flight. Their answers are what let a quorum
+    // above 1 reach O_DOWN and elect exactly one leader.
+    for ask in runtime.sentinel_peer_asks(now_ms) {
+        let epoch = ask.current_epoch.to_string();
+        let master_port = ask.master_port.to_string();
+        let reply = send_sentinel_query(
+            &ask.ip,
+            ask.port,
+            &[
+                b"SENTINEL",
+                b"IS-MASTER-DOWN-BY-ADDR",
+                ask.master_ip.as_bytes(),
+                master_port.as_bytes(),
+                epoch.as_bytes(),
+                ask.runid_arg.as_bytes(),
+            ],
+            &parser_config,
+            query_buffer_limit,
+        )
+        .and_then(|frame| parse_is_master_down_reply(&frame));
+        runtime.sentinel_apply_peer_reply(&ask.master_name, &ask.sentinel_key, reply, now_ms);
+    }
+
     // Drive the failover state machine and perform the `SLAVEOF` writes it asks
     // for. The machine itself lives in fr-sentinel and is pure; this is the only
     // place a sentinel decision reaches a socket.
@@ -35985,6 +36019,51 @@ fn run_sentinel_monitoring_tick(
         };
         runtime.sentinel_apply_failover_io_result(&io, ok, now_ms);
     }
+}
+
+/// (frankenredis-rc-sentinel-peer-votes) Blocking one-shot query to a peer
+/// sentinel; `None` on any connect / IO / protocol failure, which the caller
+/// treats as "no answer this period".
+fn send_sentinel_query(
+    ip: &str,
+    port: u16,
+    args: &[&[u8]],
+    parser_config: &ParserConfig,
+    query_buffer_limit: usize,
+) -> Option<RespFrame> {
+    let addr = format!("{ip}:{port}").parse::<SocketAddr>().ok()?;
+    let mut stream = StdTcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
+    let _ = stream.set_nodelay(true);
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+    stream
+        .write_all(&replica_handshake_frame(args).to_bytes())
+        .ok()?;
+    let mut read_buf = Vec::new();
+    read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit).ok()
+}
+
+/// `[is_down, leader_runid | "*", leader_epoch]`, as both redis-sentinel and
+/// fr's SENTINEL IS-MASTER-DOWN-BY-ADDR answer.
+fn parse_is_master_down_reply(frame: &RespFrame) -> Option<fr_store::SentinelPeerReply> {
+    let RespFrame::Array(Some(items)) = frame else {
+        return None;
+    };
+    let [RespFrame::Integer(is_down), RespFrame::BulkString(Some(leader)), RespFrame::Integer(epoch)] =
+        items.as_slice()
+    else {
+        return None;
+    };
+    let leader = String::from_utf8_lossy(leader).into_owned();
+    Some(fr_store::SentinelPeerReply {
+        is_down: *is_down != 0,
+        leader: (leader != "*").then_some(leader),
+        leader_epoch: u64::try_from(*epoch).unwrap_or(0),
+    })
 }
 
 /// (frankenredis-rc-sentinel-failover) Blocking one-shot command to a monitored
