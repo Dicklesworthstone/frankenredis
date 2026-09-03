@@ -15000,7 +15000,9 @@ fn sinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
-    record_source_key_lookups(store, &keys, now_ms);
+    // (frankenredis-rc-keyspace-gates) sinterGenericCommand stops looking up
+    // source keys at the first missing one; SUNION/SDIFF look up all of them.
+    store.record_set_algebra_source_lookups(&keys, now_ms, true);
     let members = store.sinter(&keys, now_ms)?;
     let frames = members
         .into_iter()

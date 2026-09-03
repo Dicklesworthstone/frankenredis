@@ -16645,6 +16645,11 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
+        // (frankenredis-rc-keyspace-gates) lookupKeyRead accounting for every
+        // source key, as sunionDiffGenericCommand does.
+        self.server
+            .store
+            .record_set_algebra_source_lookups(keys, now_ms, false);
         let result = self.server.store.sunion_borrow_scan(keys, now_ms, |ev| {
             if suppress_reply {
                 return;
@@ -16864,6 +16869,11 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
+        // (frankenredis-rc-keyspace-gates) lookupKeyRead accounting for every
+        // source key, as sunionDiffGenericCommand does.
+        self.server
+            .store
+            .record_set_algebra_source_lookups(keys, now_ms, false);
         let result = self.server.store.sdiff_borrow_scan(keys, now_ms, |ev| {
             if suppress_reply {
                 return;
@@ -16953,6 +16963,11 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
+        // (frankenredis-rc-keyspace-gates) lookupKeyRead accounting in
+        // sinterGenericCommand order: stop at the first missing key.
+        self.server
+            .store
+            .record_set_algebra_source_lookups(keys, now_ms, true);
         let result = self.server.store.sinter_borrow_scan(keys, now_ms, |ev| {
             if suppress_reply {
                 return;
@@ -68779,6 +68794,64 @@ mod tests {
         assert_eq!(flags_of(&mut rt), "b");
         rt.mark_client_unblocked(id);
         assert_eq!(flags_of(&mut rt), "N");
+    }
+
+    /// (frankenredis-rc-keyspace-gates) The zero-copy SINTER/SUNION/SDIFF
+    /// routes must count keyspace hits and misses the way lookupKeyRead does:
+    /// SINTER stops at the first missing key, SUNION/SDIFF look up every key.
+    /// Measured 2026-09-03: fr left both counters at 0 where 7.2.4 reported
+    /// (2, 0) for two present keys.
+    #[test]
+    fn set_algebra_fast_paths_count_keyspace_hits_and_misses_like_upstream() {
+        fn hits_misses(rt: &mut Runtime) -> (u64, u64) {
+            let info = match rt.execute_frame(command(&[b"INFO", b"stats"]), 1) {
+                RespFrame::BulkString(Some(b)) => String::from_utf8(b).expect("utf8"),
+                other => unreachable!("unexpected INFO stats: {other:?}"),
+            };
+            let field = |name: &str| -> u64 {
+                info.lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .and_then(|rest| rest.trim_start_matches(':').trim().parse().ok())
+                    .expect(name)
+            };
+            (field("keyspace_hits"), field("keyspace_misses"))
+        }
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SADD", b"sx", b"1", b"2"]), 1),
+            RespFrame::Integer(2)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SADD", b"sy", b"2", b"3"]), 1),
+            RespFrame::Integer(2)
+        );
+        let (h0, m0) = hits_misses(&mut rt);
+
+        let mut out = Vec::new();
+        rt.execute_plain_sinter_borrowed_into(&[b"sx", b"sy"], 2, false, &mut out, None)
+            .expect("fast path");
+        assert_eq!(hits_misses(&mut rt), (h0 + 2, m0), "SINTER of two present keys");
+
+        // SINTER stops at the first missing key: sx is a hit, nope a miss, sy
+        // is never looked up.
+        let mut out = Vec::new();
+        rt.execute_plain_sinter_borrowed_into(&[b"sx", b"nope", b"sy"], 3, false, &mut out, None)
+            .expect("fast path");
+        assert_eq!(hits_misses(&mut rt), (h0 + 3, m0 + 1), "SINTER with a missing key");
+
+        // SUNION and SDIFF look up every key.
+        let mut out = Vec::new();
+        rt.execute_plain_sunion_borrowed_into(&[b"sx", b"nope", b"sy"], 4, false, &mut out, None)
+            .expect("fast path");
+        assert_eq!(hits_misses(&mut rt), (h0 + 5, m0 + 2), "SUNION with a missing key");
+        let mut out = Vec::new();
+        rt.execute_plain_sdiff_borrowed_into(&[b"sx", b"nope"], 5, false, &mut out, None)
+            .expect("fast path");
+        assert_eq!(hits_misses(&mut rt), (h0 + 6, m0 + 3), "SDIFF with a missing key");
+
+        // The generic dispatch path agrees.
+        let _ = rt.execute_frame(command(&[b"SINTER", b"nope", b"sx"]), 6);
+        assert_eq!(hits_misses(&mut rt), (h0 + 6, m0 + 4), "generic SINTER, first key missing");
     }
 
     /// (frankenredis-rc-zrandmember-resp3-double) The zero-copy

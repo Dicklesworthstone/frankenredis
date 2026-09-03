@@ -10617,6 +10617,29 @@ impl Store {
         self.record_keyspace_lookup(key, now_ms)
     }
 
+    /// (frankenredis-rc-keyspace-gates) Keyspace hit/miss accounting for the
+    /// set-algebra readers in upstream order. `sinterGenericCommand`
+    /// (t_set.c:1277) looks the source keys up in argument order and returns at
+    /// the FIRST missing one, so keys after it are never looked up;
+    /// `sunionDiffGenericCommand` (t_set.c:1496) looks up every key. Both go
+    /// through `lookupKeyRead`, so an expired key is reaped and counted as a
+    /// miss. The zero-copy SINTER/SUNION/SDIFF fast paths skipped this entirely
+    /// (keyspace_hits stayed 0), which the keyspace_accounting and
+    /// keyspace_stats parity gates caught against live 7.2.4.
+    pub fn record_set_algebra_source_lookups(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+        stop_at_first_miss: bool,
+    ) {
+        for key in keys {
+            let hit = self.record_keyspace_lookup(key, now_ms);
+            if !hit && stop_at_first_miss {
+                break;
+            }
+        }
+    }
+
     /// Expiry-aware presence check that does NOT record a keyspace hit/miss.
     /// Reaps a stale-expired entry first (so it reads as absent), then reports
     /// presence. Used by write commands that probe existence via lookupKeyWrite
