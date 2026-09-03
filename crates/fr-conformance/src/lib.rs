@@ -12990,6 +12990,36 @@ mod tests {
                         );
                     }
                 }
+                // (frankenredis-rc-rdb-corpus-streamskeleton) Upstream type-21
+                // streams now decode lazily into a skeleton that keeps the
+                // listpack nodes verbatim and materializes entries on demand.
+                // The gate asks the same three questions of it: live entries
+                // come out, the watermark survived, and the seeded key kept its
+                // consumer groups.
+                RdbValue::StreamSkeleton(skeleton) => {
+                    let materialized = skeleton.owned_entries().unwrap_or_else(|err| {
+                        panic!(
+                            "decoded stream corpus entry {:?} failed to materialize: {err:?}",
+                            String::from_utf8_lossy(&entry.key)
+                        )
+                    });
+                    assert!(
+                        !materialized.is_empty(),
+                        "decoded stream corpus entry {:?} had no live entries",
+                        String::from_utf8_lossy(&entry.key)
+                    );
+                    assert!(
+                        skeleton.watermark().is_some(),
+                        "decoded stream corpus entry {:?} lost watermark",
+                        String::from_utf8_lossy(&entry.key)
+                    );
+                    if entry.key.ends_with(b":0") {
+                        assert!(
+                            !skeleton.groups().is_empty(),
+                            "decoded stream corpus entry 0 lost consumer groups"
+                        );
+                    }
+                }
                 other => panic!(
                     "expected stream value for corpus key {:?}, got {other:?}",
                     String::from_utf8_lossy(&entry.key)
