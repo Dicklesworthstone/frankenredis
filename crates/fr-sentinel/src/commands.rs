@@ -216,7 +216,7 @@ fn find_master_name_by_addr(state: &SentinelState, ip: &str, port: i64) -> Optio
         .map(|master| master.name.clone())
 }
 
-fn sentinel_vote_leader(
+pub(crate) fn sentinel_vote_leader(
     state: &mut SentinelState,
     master_name: &str,
     requested_epoch: u64,

@@ -508,8 +508,10 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
     let epoch = state.current_epoch;
     let ping_period = state.debug_config.ping_period;
     let info_period = state.debug_config.info_period;
+    let publish_period = state.debug_config.publish_period;
     let mut ios = Vec::new();
     let mut bump_epoch = None;
+    let mut evaluate_election = false;
     let mut finalize_ctx = None;
     {
         let Some(master) = state.masters.get_mut(master_name) else {
@@ -527,21 +529,19 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
 
         if master.failover_state == FailoverState::None && should_start_failover(master, true, now)
         {
-            // sentinelStartFailover: claim a new epoch, vote for ourselves in it
-            // (unless this sentinel already voted for a peer that asked first --
-            // cast_vote keeps that ballot), and enter WaitStart. Whether we are
-            // the leader is decided there, once the peers' votes have arrived.
+            // sentinelStartFailover: claim a new epoch and enter WaitStart. No
+            // ballot is cast here; sentinelGetLeader casts it when the election
+            // is evaluated below, so a candidate whose peers already back
+            // someone else joins them instead of splitting the vote.
             let new_epoch = epoch.saturating_add(1);
             master.failover_epoch = new_epoch;
             master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
             let mut ctx = FailoverContext::new();
             advance_failover_state(master, FailoverEvent::StartFailover, &mut ctx, now);
-            // Desynchronize the start the way sentinelStartFailover does with
-            // its random delay: sentinels that all saw O_DOWN in the same
-            // second would otherwise each vote for themselves and deadlock
-            // until the election timeout. The first to ask wins the others'
-            // ballots, and a sentinel that voted for a peer has its own start
-            // pushed back by sentinel_vote_leader.
+            // failover_start_time is the base of the election timeout and of
+            // the 2 x failover-timeout backoff before the next attempt;
+            // sentinelStartFailover offsets it by a per-sentinel delay so the
+            // losers of one election do not all retry in the same second.
             master.failover_start_time = crate::commands::sentinel_failover_start_time(
                 now,
                 new_epoch,
@@ -556,13 +556,33 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
                 // No failover in flight: an instance we track as a replica that
                 // reports `role:master` is a former master that came back (or
                 // an operator's manual promotion) and is told to follow the
-                // master we believe in, the way upstream's INFO refresh does.
+                // master we believe in, the way upstream's INFO refresh does --
+                // but only once the picture is stable (sentinelMasterLooksSane
+                // plus the 4 x publish-period grace): our master must itself
+                // answer INFO as a live master, and the instance must have
+                // held the master role, undisturbed by any down flag, for that
+                // long. Without the grace a follower sentinel that probed the
+                // replica the leader had just promoted, before the leader's
+                // hello announced the new master, demoted it straight back
+                // under the dead master and the quorum never converged.
+                let wait_time = publish_period.saturating_mul(4);
+                let master_looks_sane = master.role_reported == crate::Role::Master
+                    && !master.is_s_down()
+                    && !master.is_o_down()
+                    && now.saturating_sub(master.info_refresh) < info_period.saturating_mul(2);
                 let target_ip = master.addr.ip.clone();
                 let target_port = master.addr.port;
                 for (key, slave) in &master.slaves {
-                    if slave.role_reported == crate::Role::Master
+                    let most_recent_down = slave.s_down_since_time.max(slave.o_down_since_time);
+                    let no_down_for_grace =
+                        most_recent_down == 0 || now.saturating_sub(most_recent_down) > wait_time;
+                    if master_looks_sane
+                        && slave.role_reported == crate::Role::Master
+                        && !slave.flags.contains(InstanceFlags::PROMOTED)
                         && !slave.link.disconnected
                         && !slave.is_s_down()
+                        && no_down_for_grace
+                        && now.saturating_sub(slave.role_reported_time) > wait_time
                         && !slave.flags.contains(InstanceFlags::RECONF_SENT)
                     {
                         ios.push(FailoverIo::ReconfigureReplica {
@@ -577,54 +597,9 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
                 }
             }
             FailoverState::WaitStart => {
-                // sentinelFailoverWaitStart: a forced failover (SENTINEL
-                // FAILOVER) skips the election; otherwise proceed only once a
-                // majority of the sentinels we know about, and at least
-                // `quorum` of them, voted for us in this failover's epoch.
-                // Past the election timeout with no win, give up; the backoff
-                // in should_start_failover spaces the next attempt.
-                if now >= master.failover_start_time {
-                    let forced = master.flags.contains(InstanceFlags::FORCE_FAILOVER);
-                    let won = forced || {
-                        let mut votes = crate::consensus::peer_leader_votes(master);
-                        if let Some(leader) = master.leader.clone()
-                            && master.leader_epoch == master.failover_epoch
-                        {
-                            votes.push(crate::consensus::LeaderVote {
-                                voter_runid: my_runid.clone(),
-                                leader_runid: leader,
-                                epoch: master.leader_epoch,
-                            });
-                        }
-                        let sentinel_count = u32::try_from(master.sentinels.len())
-                            .unwrap_or(u32::MAX)
-                            .saturating_add(1);
-                        crate::consensus::evaluate_leader_election(
-                            &my_runid,
-                            master.failover_epoch,
-                            sentinel_count,
-                            master.quorum,
-                            &votes,
-                        )
-                        .is_winner
-                    };
-                    if won {
-                        master.failover_state = FailoverState::SelectSlave;
-                        master.failover_state_change_time = now;
-                    } else {
-                        let election_timeout =
-                            crate::ELECTION_TIMEOUT_MS.min(master.failover_timeout);
-                        if now.saturating_sub(master.failover_start_time) > election_timeout {
-                            let mut ctx = FailoverContext::new();
-                            advance_failover_state(
-                                master,
-                                FailoverEvent::Abort("election timeout".to_string()),
-                                &mut ctx,
-                                now,
-                            );
-                        }
-                    }
-                }
+                // Needs the state, not just this master: the ballot is cast
+                // through sentinel_vote_leader. Evaluated once the borrow ends.
+                evaluate_election = true;
             }
             FailoverState::SelectSlave => {
                 if let Some(key) = select_slave_at(master, now, ping_period, info_period) {
@@ -723,12 +698,91 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
     }
     if let Some(new_epoch) = bump_epoch {
         state.current_epoch = new_epoch;
-        // Our own ballot for the epoch we just claimed. If a peer asked for our
-        // vote in this epoch first, cast_vote keeps that ballot and we will
-        // not win -- which is the point of the election.
-        let _ = crate::consensus::cast_vote(state, master_name, &my_runid, new_epoch);
+    }
+    if evaluate_election {
+        evaluate_wait_start(state, master_name, &my_runid, now);
     }
     ios
+}
+
+/// sentinelFailoverWaitStart: decide whether this sentinel leads the failover
+/// it started. A forced failover (SENTINEL FAILOVER) skips the election.
+/// Otherwise the ballot is cast here, as sentinelGetLeader does: for the
+/// candidate the peers' replies already back in this epoch if there is one,
+/// else for ourselves (a ballot already given to a peer that asked first
+/// stands), and the election is won with a majority of the sentinels we know
+/// about and at least `quorum` votes. A lost election is abandoned past the
+/// election timeout; the backoff in should_start_failover spaces the retry.
+fn evaluate_wait_start(state: &mut SentinelState, master_name: &str, my_runid: &str, now: u64) {
+    let (forced, failover_epoch, quorum, sentinel_count, mut votes) = {
+        let Some(master) = state.get_master(master_name) else {
+            return;
+        };
+        if master.failover_state != FailoverState::WaitStart {
+            return;
+        }
+        (
+            master.flags.contains(InstanceFlags::FORCE_FAILOVER),
+            master.failover_epoch,
+            master.quorum,
+            u32::try_from(master.sentinels.len())
+                .unwrap_or(u32::MAX)
+                .saturating_add(1),
+            crate::consensus::peer_leader_votes(master),
+        )
+    };
+    let won = forced || {
+        let mut counts: std::collections::BTreeMap<&str, u32> = std::collections::BTreeMap::new();
+        for vote in votes.iter().filter(|vote| vote.epoch == failover_epoch) {
+            *counts.entry(vote.leader_runid.as_str()).or_insert(0) += 1;
+        }
+        let candidate = counts
+            .iter()
+            .max_by_key(|(_, count)| **count)
+            .map_or_else(|| my_runid.to_string(), |(runid, _)| (*runid).to_string());
+        let (ballot, ballot_epoch) = crate::commands::sentinel_vote_leader(
+            state,
+            master_name,
+            failover_epoch,
+            &candidate,
+            now,
+        );
+        if let Some(leader) = ballot
+            && ballot_epoch == failover_epoch
+        {
+            votes.push(crate::consensus::LeaderVote {
+                voter_runid: my_runid.to_string(),
+                leader_runid: leader,
+                epoch: failover_epoch,
+            });
+        }
+        crate::consensus::evaluate_leader_election(
+            my_runid,
+            failover_epoch,
+            sentinel_count,
+            quorum,
+            &votes,
+        )
+        .is_winner
+    };
+    let Some(master) = state.masters.get_mut(master_name) else {
+        return;
+    };
+    if won {
+        master.failover_state = FailoverState::SelectSlave;
+        master.failover_state_change_time = now;
+    } else {
+        let election_timeout = crate::ELECTION_TIMEOUT_MS.min(master.failover_timeout);
+        if now.saturating_sub(master.failover_start_time) > election_timeout {
+            let mut ctx = FailoverContext::new();
+            advance_failover_state(
+                master,
+                FailoverEvent::Abort("election timeout".to_string()),
+                &mut ctx,
+                now,
+            );
+        }
+    }
 }
 
 /// Fold the outcome of one [`FailoverIo`] back into the state machine. A
