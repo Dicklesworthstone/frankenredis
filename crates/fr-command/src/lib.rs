@@ -31004,21 +31004,25 @@ fn restore_cmd(
         ));
     }
     let ttl_ms = ttl_signed as u64;
-    // When ABSTTL is set, ttl_ms is an absolute Unix timestamp; convert to relative
-    let effective_ttl = if absttl && ttl_ms > 0 {
-        if ttl_ms <= now_ms {
-            1 // Already expired — set minimal TTL so key expires on next access
+    // (frankenredis-cvaj3) Upstream converts a relative TTL to absolute
+    // (ttl += commandTimeSnapshot) BEFORE the already-expired check; ABSTTL
+    // is already absolute. ttl 0 means "no expiry". The store performs the
+    // already-expired discard AFTER payload verification, matching
+    // cluster.c::restoreCommand's check ordering.
+    let expires_at_ms = if ttl_ms > 0 {
+        Some(if absttl {
+            ttl_ms
         } else {
-            ttl_ms - now_ms
-        }
+            ttl_ms.saturating_add(now_ms)
+        })
     } else {
-        ttl_ms
+        None
     };
     let metadata = RestoreMetadata {
         idletime_secs,
         lfu_freq,
     };
-    match store.restore_key_with_metadata(key, effective_ttl, payload, replace, metadata, now_ms) {
+    match store.restore_key_with_metadata(key, expires_at_ms, payload, replace, metadata, now_ms) {
         Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
         Err(StoreError::BusyKey) => Ok(RespFrame::Error(
             "BUSYKEY Target key name already exists.".to_string(),

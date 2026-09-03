@@ -5534,6 +5534,16 @@ impl ServerState {
             .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
     }
 
+    /// Whether `lazyfree-lazy-server-del` is enabled: a server-side delete
+    /// (the RESTORE already-expired REPLACE discard) then propagates UNLINK
+    /// instead of DEL. Defaults to disabled, matching upstream.
+    /// (frankenredis-cvaj3)
+    fn lazyfree_lazy_server_del_enabled(&self) -> bool {
+        self.config_overrides
+            .get("lazyfree-lazy-server-del")
+            .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
+    }
+
     /// Whether appendonlydir history files are auto-collected after a rewrite.
     /// Mirrors redis's `aof-disable-auto-gc` (default `no` -> gc enabled); set it
     /// to `yes` to retain superseded base/incr files. (frankenredis-5jpn9)
@@ -7510,7 +7520,6 @@ impl Runtime {
         if let Err(reply) = self.persist_snapshot_to_disk(now_ms, false, true) {
             return reply;
         }
-
         if self.server.aof_path.is_some() {
             return match self.load_aof(now_ms.saturating_add(1)) {
                 Ok(_) => RespFrame::SimpleString("OK".to_string()),
@@ -7560,7 +7569,12 @@ impl Runtime {
                     // server identity across the reload — the RDB holds only data.
                     preserve_store_load_context(&mut store, &self.server.store);
                     self.server.store = store;
-                    self.session.selected_db = 0;
+                    // (frankenredis-n01zc) Upstream rdbLoad repopulates the SAME
+                    // server.db structs in place, so the calling client stays on its
+                    // selected db. fr reset the session to db 0 here, silently
+                    // teleporting every later command of this client to db 0 — a
+                    // client on db 9 saw its keys "vanish" after DEBUG RELOAD.
+                    // Keep the selected db.
                     RespFrame::SimpleString("OK".to_string())
                 }
                 Err(_) => RespFrame::Error("ERR failed to reload dataset from RDB".to_string()),
@@ -7633,7 +7647,9 @@ impl Runtime {
         // in-memory reload — the RDB round-trip holds only data.
         preserve_store_load_context(&mut store, &self.server.store);
         self.server.store = store;
-        self.session.selected_db = 0;
+        // (frankenredis-n01zc) Same rule as the rdb-path branch: the client keeps
+        // its selected db across DEBUG RELOAD. The old `selected_db = 0` reset
+        // silently teleported the calling client to db 0.
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -41315,9 +41331,18 @@ impl Runtime {
         // missing or duplicate key argument — matching upstream delGenericCommand
         // which notifies per successful dbDelete). Taken now, before lazy-expiry
         // handling might run its own store.del and overwrite the record.
+        // (frankenredis-cvaj3) RESTORE joins DEL/UNLINK here: an ABSTTL-in-the-past
+        // RESTORE ... REPLACE deletes the old key through the same store path, and
+        // the removed key drives BOTH the "del" keyspace event and the DEL/UNLINK
+        // propagation record that replaces the RESTORE itself.
         let del_removed_keys = if argv
             .first()
-            .is_some_and(|c| c.eq_ignore_ascii_case(b"DEL") || c.eq_ignore_ascii_case(b"UNLINK"))
+            .is_some_and(|c| {
+                c.eq_ignore_ascii_case(b"DEL")
+                    || c.eq_ignore_ascii_case(b"UNLINK")
+                    || c.eq_ignore_ascii_case(b"RESTORE")
+                    || c.eq_ignore_ascii_case(b"RESTORE-ASKING")
+            })
         {
             self.server.store.take_last_del_removed()
         } else {
@@ -41439,8 +41464,54 @@ impl Runtime {
                 let lazy_count = lazy_evicted.len() as u64;
                 self.server.propagate_expired_key_deletions(&lazy_evicted);
                 if dirty_after.saturating_sub(dirty_before) > lazy_count {
-                    // Record AOF only for non-special commands (special ones record themselves)
-                    if special_command.is_none() && !handled_migrate {
+                    // (frankenredis-cvaj3) An ABSTTL-in-the-past RESTORE ... REPLACE
+                    // propagates DEL/UNLINK (per lazyfree-lazy-server-del) INSTEAD of
+                    // the RESTORE itself — upstream rewriteClientCommandVector replaces
+                    // the propagated vector, so replicas and the AOF must never see the
+                    // RESTORE that stored nothing. The removed key's SELECT context is
+                    // emitted first when the stream's last db differs, exactly like the
+                    // lazy-expiry propagation above.
+                    let is_restore_discard = !del_removed_keys.is_empty()
+                        && argv
+                            .first()
+                            .is_some_and(|c| {
+                                c.eq_ignore_ascii_case(b"RESTORE")
+                                    || c.eq_ignore_ascii_case(b"RESTORE-ASKING")
+                            });
+                    if is_restore_discard {
+                        let op: &[u8] = if self.server.lazyfree_lazy_server_del_enabled() {
+                            b"UNLINK"
+                        } else {
+                            b"DEL"
+                        };
+                        for key in &del_removed_keys {
+                            let (db, logical) = decode_db_key(key)
+                                .map(|(d, lk)| (d, lk.to_vec()))
+                                .unwrap_or((0, key.clone()));
+                            if self.server.aof_selected_db != db {
+                                self.capture_aof_record(&[
+                                    b"SELECT".to_vec(),
+                                    db.to_string().into_bytes(),
+                                ]);
+                                self.server.aof_selected_db = db;
+                            }
+                            self.capture_aof_record(&[op.to_vec(), logical]);
+                        }
+                    } else if special_command.is_none() && !handled_migrate {
+                        // (frankenredis-xmix2) Upstream replicationFeedSlaves emits
+                        // `SELECT <db>` whenever the writing client's db differs from
+                        // the db the stream last selected; a fresh stream starts at
+                        // db 0. Without this, a client on a non-zero db propagates
+                        // bare commands and every replica/backlog consumer applies
+                        // them to the wrong db.
+                        let session_db = self.session.selected_db;
+                        if self.server.aof_selected_db != session_db {
+                            self.capture_aof_record(&[
+                                b"SELECT".to_vec(),
+                                session_db.to_string().into_bytes(),
+                            ]);
+                            self.server.aof_selected_db = session_db;
+                        }
                         if let Some(script_commands) =
                             self.take_script_propagation_commands_for_capture(argv)
                         {
@@ -41562,6 +41633,15 @@ impl Runtime {
                             let is_getex = argv
                                 .first()
                                 .is_some_and(|c| c.eq_ignore_ascii_case(b"GETEX"));
+                            // (frankenredis-cvaj3) A RESTORE that discarded an
+                            // already-expired value fired "del" per removed key (see
+                            // the branch below); the generic "restore" event must
+                            // not also fire for the key nothing restored.
+                            let is_restore_discard_notify = !del_removed_keys.is_empty()
+                                && argv.first().is_some_and(|c| {
+                                    c.eq_ignore_ascii_case(b"RESTORE")
+                                        || c.eq_ignore_ascii_case(b"RESTORE-ASKING")
+                                });
                             // (frankenredis-hqj0t) XREADGROUP / XCLAIM /
                             // XAUTOCLAIM fire NO per-command keyspace event
                             // upstream; their only notification is the
@@ -41677,6 +41757,23 @@ impl Runtime {
                                         "move_to",
                                         &cmd_keys[0],
                                         target_db,
+                                    );
+                                }
+                            } else if is_restore_discard_notify {
+                                // (frankenredis-cvaj3) The already-expired RESTORE
+                                // ... REPLACE fires "del" (NOT "restore") per key it
+                                // actually removed, matching upstream's explicit
+                                // notifyKeyspaceEvent(NOTIFY_GENERIC, "del", ...)
+                                // in the discard branch of restoreCommand.
+                                for key in &del_removed_keys {
+                                    let logical = decode_db_key(key)
+                                        .map(|(_, lk)| lk)
+                                        .unwrap_or(key.as_slice());
+                                    self.server.store.notify_keyspace_event(
+                                        fr_store::NOTIFY_GENERIC,
+                                        "del",
+                                        logical,
+                                        db,
                                     );
                                 }
                             } else if argv.first().is_some_and(|c| {
@@ -42307,12 +42404,18 @@ impl Runtime {
     /// the key's live type via a `LOOKUP_NOSTATS` read.
     #[must_use]
     pub fn peek_is_list(&self, key: &[u8], now_ms: u64) -> bool {
-        self.server.store.peek_value_type(key, now_ms) == Some(fr_store::ValueType::List)
+        // The blocked client's session is swapped into `self` before this runs,
+        // so the peek must address the key through THAT session's db namespace.
+        // The raw key only resolves on db 0 (identity encoding), which is why
+        // blocked clients on db >= 1 were never woken by a push. (frankenredis-n01zc)
+        let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
+        self.server.store.peek_value_type(&namespaced, now_ms) == Some(fr_store::ValueType::List)
     }
 
     #[must_use]
     pub fn peek_is_zset(&self, key: &[u8], now_ms: u64) -> bool {
-        self.server.store.peek_value_type(key, now_ms) == Some(fr_store::ValueType::ZSet)
+        let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
+        self.server.store.peek_value_type(&namespaced, now_ms) == Some(fr_store::ValueType::ZSet)
     }
 
     // ── MONITOR support ─────────────────────────────────────────────

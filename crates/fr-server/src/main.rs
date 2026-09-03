@@ -37241,8 +37241,8 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
     }
 
     let ready_keys = runtime.drain_ready_keys();
-    let active_blocked = blocked_wake_index.candidates(&ready_keys, ts);
 
+    let active_blocked = blocked_wake_index.candidates(&ready_keys, ts);
     for token in active_blocked {
         let Some(conn) = clients.get_mut(&token) else {
             blocked_tokens.remove(&token);

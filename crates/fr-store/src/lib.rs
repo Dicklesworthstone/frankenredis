@@ -37221,7 +37221,6 @@ impl Store {
         Some(buf)
     }
 
-    /// Restore a key from a DUMP payload. Returns Ok(()) on success.
     pub fn restore_key(
         &mut self,
         key: &[u8],
@@ -37230,9 +37229,17 @@ impl Store {
         replace: bool,
         now_ms: u64,
     ) -> Result<(), StoreError> {
+        // (frankenredis-cvaj3) The TTL is RELATIVE here; the store owns the
+        // absolute-expiry conversion so the already-expired check sees one
+        // consistent form.
+        let expires_at_ms = if ttl_ms > 0 {
+            Some(now_ms.saturating_add(ttl_ms))
+        } else {
+            None
+        };
         self.restore_key_with_metadata(
             key,
-            ttl_ms,
+            expires_at_ms,
             payload,
             replace,
             RestoreMetadata::default(),
@@ -37241,10 +37248,14 @@ impl Store {
     }
 
     /// Restore a key from a DUMP payload and seed optional access metadata.
+    ///
+    /// `expires_at_ms` is an ABSOLUTE deadline (or `None` for no expiry): the
+    /// already-expired discard semantics only make sense against a deadline,
+    /// not a relative offset. (frankenredis-cvaj3)
     pub fn restore_key_with_metadata(
         &mut self,
         key: &[u8],
-        ttl_ms: u64,
+        expires_at_ms: Option<u64>,
         payload: &[u8],
         replace: bool,
         metadata: RestoreMetadata,
@@ -37774,11 +37785,20 @@ impl Store {
         // `cursor` marks where the object ended; nothing past it is read.
         // (frankenredis-b19ln)
         let _ = cursor;
-        let expires_at_ms = if ttl_ms > 0 {
-            Some(now_ms.saturating_add(ttl_ms))
-        } else {
-            None
-        };
+        // (frankenredis-cvaj3) Upstream cluster.c::restoreCommand checks
+        // already-expired AFTER full payload verification and BEFORE any
+        // mutation: a TTL already in the past NEVER stores the value. With
+        // REPLACE the pre-check dbDelete has removed any existing key -- here
+        // via del_inner, which bumps dirty and records the removal in
+        // `last_del_removed` for the runtime to propagate as DEL/UNLINK (per
+        // lazyfree-lazy-server-del) and fire the "del" keyspace event.
+        // Without REPLACE nothing is deleted. +OK either way.
+        if expires_at_ms.is_some_and(|expiry| expiry <= now_ms) {
+            if replace {
+                self.del_inner(std::slice::from_ref(&key), now_ms);
+            }
+            return Ok(());
+        }
         let mut entry = Entry::new(value, now_ms);
         entry.set_flag(
             ENTRY_FORCE_SET_LISTPACK_ENCODING,
@@ -79228,7 +79248,7 @@ mod tests {
         idle_store
             .restore_key_with_metadata(
                 b"idle",
-                0,
+                None,
                 &payload,
                 false,
                 RestoreMetadata {
@@ -79245,7 +79265,7 @@ mod tests {
         freq_store
             .restore_key_with_metadata(
                 b"freq",
-                0,
+                None,
                 &payload,
                 false,
                 RestoreMetadata {
