@@ -36045,9 +36045,8 @@ fn run_sentinel_monitoring_tick(
     // Receive half of the peer questions (every iteration): fold each reply
     // into the sentinel it came from; a dead or silent link is dropped and
     // reopened by the next ask.
-    peer_links.retain(|_, link| {
-        drain_sentinel_peer_link(link, runtime, &parser_config, now_ms).is_ok()
-    });
+    peer_links
+        .retain(|_, link| drain_sentinel_peer_link(link, runtime, &parser_config, now_ms).is_ok());
 
     // Probe half (network IO) stays throttled.
     if now_ms.saturating_sub(*last_probe_ms) < SENTINEL_PROBE_INTERVAL_MS {
