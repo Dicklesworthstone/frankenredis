@@ -1047,11 +1047,30 @@ mod tests {
         assert!(master.slaves.contains_key("10.0.0.10:6379"));
         assert!(!master.slaves.contains_key("10.0.0.11:6379"));
 
-        // The former master comes back still believing it is a master and is
-        // told to follow the new one.
-        let now = t0 + 60_000;
+        // The former master comes back still believing it is a master. It is
+        // told to follow the new one only once the picture is stable: our
+        // master answers INFO as a live master and the returned instance has
+        // reported role:master for more than four publish periods
+        // (sentinelMasterLooksSane plus the convert-to-slave grace).
+        let returned = t0 + 60_000;
         {
             let master = state.get_master_mut("m1").unwrap();
+            crate::health::record_info_response(master, &master_info(&"b".repeat(40)), returned);
+            apply_replica_probe(
+                master,
+                "10.0.0.1:6379",
+                returned,
+                Some(&master_info(&"d".repeat(40))),
+            );
+        }
+        assert!(
+            failover_step(&mut state, "m1", returned + 1_000).is_empty(),
+            "no demotion inside the grace period"
+        );
+        let now = returned + crate::PUBLISH_PERIOD_MS * 4 + 1_000;
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            crate::health::record_info_response(master, &master_info(&"b".repeat(40)), now);
             apply_replica_probe(
                 master,
                 "10.0.0.1:6379",
@@ -1134,12 +1153,14 @@ mod tests {
                 FailoverState::SelectSlave
             );
         }
-        // Past ELECTION_TIMEOUT_MS the attempt is abandoned.
+        // Past ELECTION_TIMEOUT_MS (measured from the desynchronised start,
+        // which may sit up to a second after the tick that started it) the
+        // attempt is abandoned.
         assert!(
             failover_step(
                 &mut state,
                 "m1",
-                t0 + 500 + crate::ELECTION_TIMEOUT_MS + 600
+                t0 + 500 + crate::ELECTION_TIMEOUT_MS + 1_100
             )
             .is_empty()
         );
@@ -1286,6 +1307,101 @@ mod tests {
             state.get_master("m1").unwrap().failover_state,
             FailoverState::None,
             "abandoned at the election timeout"
+        );
+    }
+
+    /// (frankenredis-rc-sentinel-peer-votes) sentinelGetLeader's tie-break: a
+    /// candidate that starts its own failover after its peers' replies already
+    /// showed a vote for another sentinel in that epoch backs that sentinel
+    /// instead of itself, so two sentinels reaching O_DOWN in the same epoch
+    /// do not split the vote.
+    #[test]
+    fn a_candidate_backs_the_leader_its_peers_already_voted_for() {
+        use crate::consensus::{PeerReply, apply_peer_reply};
+        let mut state = SentinelState::new();
+        let t0 = 15_000_000;
+        monitored_master_with_probed_replicas(&mut state, t0);
+        let claimed = state.current_epoch + 1;
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            master.quorum = 2;
+            add_peer(master, "10.0.0.20", &"e".repeat(40), t0);
+            add_peer(master, "10.0.0.21", &"f".repeat(40), t0);
+            master.set_s_down(true, t0);
+        }
+        // Peer f's answer to our plain down question already carries its vote
+        // for e in the epoch e claimed.
+        apply_peer_reply(
+            &mut state,
+            "m1",
+            "10.0.0.21:26379",
+            Some(PeerReply {
+                is_down: true,
+                leader: Some("e".repeat(40)),
+                leader_epoch: claimed,
+            }),
+            t0 + 100,
+        );
+        state
+            .get_master_mut("m1")
+            .unwrap()
+            .set_o_down(true, t0 + 200);
+        assert!(failover_step(&mut state, "m1", t0 + 300).is_empty());
+        let master = state.get_master("m1").unwrap();
+        assert_eq!(master.failover_epoch, claimed);
+        assert_eq!(master.leader.as_deref(), Some("e".repeat(40).as_str()));
+        assert_eq!(master.leader_epoch, claimed);
+        assert_eq!(
+            master.failover_state,
+            FailoverState::WaitStart,
+            "e has the majority, so this sentinel must not promote"
+        );
+    }
+
+    /// The bug the three-sentinel e2e caught: a follower probing the replica a
+    /// peer had just promoted saw role:master and, with no failover of its own
+    /// in flight, told it to follow the dead master again. The convert-to-slave
+    /// path needs the follower's own master to look sane (alive, fresh INFO)
+    /// and the instance to have reported master for 4 x publish period.
+    #[test]
+    fn a_replica_promoted_by_a_peer_is_not_demoted_while_the_master_is_down() {
+        let mut state = SentinelState::new();
+        let t0 = 17_000_000;
+        monitored_master_with_probed_replicas(&mut state, t0);
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            master.quorum = 2;
+            master.set_s_down(true, t0 + 1_000);
+            // The peer leader promoted 10.0.0.11; our next probe sees it.
+            apply_replica_probe(
+                master,
+                "10.0.0.11:6379",
+                t0 + 2_000,
+                Some(&master_info(&"b".repeat(40))),
+            );
+        }
+        for tick in 0..30u64 {
+            let ios = failover_step(&mut state, "m1", t0 + 2_000 + tick * 500);
+            assert!(
+                ios.is_empty(),
+                "a sentinel whose master is down must not demote the new one: {ios:?}"
+            );
+        }
+        // The old master back and sane, and the instance still claiming to be
+        // a master long past the grace: now it is converted, as upstream does.
+        let back = t0 + 20_000;
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            master.flags.remove(InstanceFlags::S_DOWN);
+            crate::health::record_info_response(master, &master_info(&"a".repeat(40)), back);
+        }
+        let ios = failover_step(&mut state, "m1", back);
+        assert!(
+            matches!(
+                ios.as_slice(),
+                [FailoverIo::ReconfigureReplica { replica_key, .. }] if replica_key == "10.0.0.11:6379"
+            ),
+            "{ios:?}"
         );
     }
 
