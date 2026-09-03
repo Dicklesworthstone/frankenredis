@@ -77,12 +77,12 @@ def main():
 
     for c in (1, 7, 100, 1000, 5000):
         check(f"count{c}", scan_all(s, c), expect)
-    # MATCH filter: complete subset, sorted
+    # MATCH filter: complete subset, no duplicates
     want_1 = {k for k in expect if k.startswith("k0001")}
     check("match", scan_all(s, 11, match="k0001*"), want_1)
     # TYPE filter: all are strings -> full set
     check("type_string", scan_all(s, 13, typ="string"), expect)
-    # mutation: delete a swath, re-scan -> remaining complete/sorted/no-dup
+    # mutation: delete a swath, re-scan -> remaining complete/no-dup
     for i in range(0, N, 3):
         cmd(s, "DEL", f"k{i:05d}")
     remaining = {k for k in expect if int(k[1:]) % 3 != 0}
@@ -113,7 +113,7 @@ def main():
         for x in fails[:15]:
             print(f"  {x}")
         sys.exit(1)
-    print("PASS — keyspace SCAN invariant holds (complete + no-dup + sorted across "
+    print("PASS — keyspace SCAN invariant holds (complete + no-dup across "
           "COUNT 1..5000, MATCH/TYPE filters, post-delete, mixed types, post-DEBUG-RELOAD presized rebuild) [guards uhthd KeyDict]")
 
 

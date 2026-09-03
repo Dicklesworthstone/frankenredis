@@ -1981,15 +1981,35 @@ fn wait_for_live_oracle_aof_rewrite(stream: &mut TcpStream) -> Result<(), String
             // fsync catches up and every later `WAITAOF 0 0 1` answers 1. So
             // block on the oracle's own fsync for this connection's write
             // offset; an error reply (appendonly off) is consumed and ignored.
+            // Under fleet load one blocking WAITAOF was measured to time out
+            // before the fsync landed, so keep asking until the oracle itself
+            // reports numlocal 1; an error reply means appendonly is off and
+            // there is nothing to settle. A bounded loop that fails loudly is
+            // better than a silent mismatch that reads as an fr bug.
             let settle = argv_to_frame(&[
                 "WAITAOF".to_string(),
                 "1".to_string(),
                 "0".to_string(),
-                "3000".to_string(),
+                "2000".to_string(),
             ]);
-            send_frame(stream, &settle)?;
-            let _ = read_resp_frame_from_stream(stream)?;
-            return Ok(());
+            let settle_deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                send_frame(stream, &settle)?;
+                match read_resp_frame_from_stream(stream)? {
+                    RespFrame::Array(Some(items)) if matches!(items.first(), Some(RespFrame::Integer(n)) if *n >= 1) =>
+                    {
+                        return Ok(());
+                    }
+                    RespFrame::Error(_) => return Ok(()),
+                    _ => {}
+                }
+                if std::time::Instant::now() >= settle_deadline {
+                    return Err(
+                        "live oracle AOF fsync did not catch up within 20s of the rewrite"
+                            .to_string(),
+                    );
+                }
+            }
         }
         if std::time::Instant::now() >= deadline {
             return Err("live oracle AOF rewrite did not finish within 5s".to_string());
