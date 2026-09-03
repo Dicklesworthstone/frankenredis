@@ -319,6 +319,23 @@ fn next_port_counter() -> &'static std::sync::atomic::AtomicU16 {
     &NEXT_PORT
 }
 
+/// A port for a CLUSTER-MODE oracle: redis-server also binds `port + 10000` for
+/// the cluster bus and aborts with "Failed listening on port N (cluster)" when
+/// that one is taken, which is exactly how the first GitHub G2 run lost
+/// `cluster_enabled_config_starts_a_cluster_mode_server_matching_legacy_redis`
+/// (run 33785535303: 54862 busy while 44862 was free). Probe both.
+fn reserve_cluster_port() -> u16 {
+    for _ in 0..64 {
+        let port = reserve_port();
+        if let Some(bus) = port.checked_add(10_000)
+            && TcpListener::bind(("127.0.0.1", bus)).is_ok()
+        {
+            return port;
+        }
+    }
+    panic!("no port with a free cluster-bus port (+10000) in 64 attempts");
+}
+
 fn reserve_port() -> u16 {
     use std::sync::atomic::Ordering;
     // A monotonic counter hands every test (across all parallel test
@@ -3928,7 +3945,7 @@ fn parse_field_block(frame: &RespFrame) -> HashMap<String, String> {
 #[test]
 fn cluster_enabled_config_starts_a_cluster_mode_server_matching_legacy_redis() {
     let fr_port = reserve_port();
-    let redis_port = reserve_port();
+    let redis_port = reserve_cluster_port();
 
     let fr_dir = unique_temp_dir("frankenredis-cluster-enabled");
     let config_path = fr_dir.join("frankenredis.conf");
