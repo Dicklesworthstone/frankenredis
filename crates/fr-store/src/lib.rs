@@ -36240,9 +36240,11 @@ impl Store {
     /// argument positions. A name or callback held in a local is invisible to it, so fr FALSELY
     /// REJECTS libraries that Redis 7.2.4 loads -- measured against live 7.2.4:
     ///
-    ///     local n = 'dyn'; register_function(n, fn)          fr: ERR ... must be string
-    ///     local n = 'a'..'b'; register_function(n, fn)       fr: ERR ... must be string
-    ///     local cb = function() end; register_function('f', cb)  fr: ERR ... must be fn
+    /// ```text
+    /// local n = 'dyn'; register_function(n, fn)          fr: ERR ... must be string
+    /// local n = 'a'..'b'; register_function(n, fn)       fr: ERR ... must be string
+    /// local cb = function() end; register_function('f', cb)  fr: ERR ... must be fn
+    /// ```
     ///
     /// all three of which redis accepts. The direction matters: a false REJECTION means a
     /// migration or mixed fleet silently loses libraries rather than gaining them.

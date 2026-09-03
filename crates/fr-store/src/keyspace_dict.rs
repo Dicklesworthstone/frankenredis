@@ -65,13 +65,15 @@ const NIL: u32 = u32::MAX;
 /// the chunk asks for, so the chunk size is worth several bytes per key by itself.
 /// Swept against the live three-server harness at 1M keys, vs Redis 7.2.4:
 ///
-///     shift  cells  chunk    B/key   vs redis   mimalloc committed
-///        8     256   18 KB    95.0    1.1500x       94.8 MiB
-///        9     512   36 KB    95.4    1.1552x       95.6 MiB
-///       10    1024   72 KB    95.2    1.1533x       94.5 MiB   <- here
-///       11    2048  144 KB    99.4    1.2043x       97.9 MiB
-///       12    4096  288 KB   103.7    1.2559x      102.0 MiB   <- was here
-///       13    8192  576 KB   101.0    1.2227x      100.1 MiB
+/// ```text
+/// shift  cells  chunk    B/key   vs redis   mimalloc committed
+///    8     256   18 KB    95.0    1.1500x       94.8 MiB
+///    9     512   36 KB    95.4    1.1552x       95.6 MiB
+///   10    1024   72 KB    95.2    1.1533x       94.5 MiB   <- here
+///   11    2048  144 KB    99.4    1.2043x       97.9 MiB
+///   12    4096  288 KB   103.7    1.2559x      102.0 MiB   <- was here
+///   13    8192  576 KB   101.0    1.2227x      100.1 MiB
+/// ```
 ///
 /// `committed` tracks B/key row for row, which is what identifies the allocator as the
 /// thing being measured rather than anything in this file.
@@ -136,8 +138,10 @@ const ARENA_CHUNK_MASK: usize = ARENA_CHUNK_LEN - 1;
 /// 20k-key populate plus 20,000 GETs, two runs per arm, the same job on both
 /// (`dbsize` 20000 on every run):
 ///
-///     pre-arena  (37daa064f)  107,480,532 / 107,580,605 Ir
-///     chunked    (169d32e68)  108,149,944 / 108,201,231 Ir   +0.60 pct
+/// ```text
+/// pre-arena  (37daa064f)  107,480,532 / 107,580,605 Ir
+/// chunked    (169d32e68)  108,149,944 / 108,201,231 Ir   +0.60 pct
+/// ```
 ///
 /// The two bases differ in exactly one `.rs` file, this one, so that number is this
 /// change and nothing else. 0.60 pct of retired instructions buys -29.2 B/key of

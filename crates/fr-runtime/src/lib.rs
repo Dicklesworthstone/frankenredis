@@ -39585,9 +39585,11 @@ impl Runtime {
     /// Upstream's `rejectCommand` and `rejectCommandSds` (server.c:3700, :3712) both open with
     /// `flagTransaction(c)`, and that function is
     ///
-    ///     void flagTransaction(client *c) {
-    ///         if (c->flags & CLIENT_MULTI) c->flags |= CLIENT_DIRTY_EXEC;
-    ///     }
+    /// ```text
+    /// void flagTransaction(client *c) {
+    ///     if (c->flags & CLIENT_MULTI) c->flags |= CLIENT_DIRTY_EXEC;
+    /// }
+    /// ```
     ///
     /// so EVERY rejection inside `processCommand` taints an open transaction, and the later EXEC
     /// answers `-EXECABORT Transaction discarded because of previous errors.` rather than running.
