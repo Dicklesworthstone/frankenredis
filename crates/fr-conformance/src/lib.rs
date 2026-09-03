@@ -1964,6 +1964,22 @@ fn wait_for_live_oracle_aof_rewrite(stream: &mut TcpStream) -> Result<(), String
             }
         };
         if text.contains("aof_rewrite_in_progress:0") && text.contains("aof_rewrite_scheduled:0") {
+            // The rewrite finishing is not the whole story: with appendfsync
+            // everysec the incr file is fsynced up to a second later, and
+            // numlocal stays 0 until then. Measured on 7.2.4 (2026-09-03):
+            // enable AOF, write, `WAITAOF 0 0 1` -> [0, 0] with the rewrite in
+            // flight; a blocking `WAITAOF 1 0 3000` returns [1, 0] once the
+            // fsync catches up and every later `WAITAOF 0 0 1` answers 1. So
+            // block on the oracle's own fsync for this connection's write
+            // offset; an error reply (appendonly off) is consumed and ignored.
+            let settle = argv_to_frame(&[
+                "WAITAOF".to_string(),
+                "1".to_string(),
+                "0".to_string(),
+                "3000".to_string(),
+            ]);
+            send_frame(stream, &settle)?;
+            let _ = read_resp_frame_from_stream(stream)?;
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
