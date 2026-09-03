@@ -334,7 +334,10 @@ const NODE_KEY_INLINE_CAP: usize = 15;
 /// Those indices were deleted with the KeyDict wiring and this table owns the key ONCE.
 /// The table-entry-size proof the gate asks for is the `==` assertion below.
 enum NodeKey {
-    Inline { len: u8, bytes: [u8; NODE_KEY_INLINE_CAP] },
+    Inline {
+        len: u8,
+        bytes: [u8; NODE_KEY_INLINE_CAP],
+    },
     Heap(Box<[u8]>),
 }
 
@@ -1303,7 +1306,11 @@ mod tests {
             size_of::<Node<EntrySized>>(),
             "arena Option must ride the NodeKey pointer niche, not add a word per key"
         );
-        assert_eq!(size_of::<NodeKey>(), 24, "len 1 + 15 inline, or a 16-byte Box");
+        assert_eq!(
+            size_of::<NodeKey>(),
+            24,
+            "len 1 + 15 inline, or a 16-byte Box"
+        );
         assert_eq!(
             size_of::<Node<EntrySized>>(),
             72,
