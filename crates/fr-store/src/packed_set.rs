@@ -956,7 +956,11 @@ impl VerbatimListpackHash {
         }
         let decoded = std::cell::OnceCell::new();
         let len = entries.len() / 2;
-        let max_entry_len = entries.iter().map(ListpackValueSpan::byte_len).max().unwrap_or(0);
+        let max_entry_len = entries
+            .iter()
+            .map(ListpackValueSpan::byte_len)
+            .max()
+            .unwrap_or(0);
         let _ = decoded.set(VerbatimListpackHashDecoded {
             bytes,
             entries,

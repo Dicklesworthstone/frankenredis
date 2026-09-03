@@ -10599,7 +10599,10 @@ mod tests {
             &oracle,
         )
         .expect("REPLCONF overlong ip-address live oracle transport");
-        assert_eq!(report.total, 1, "live oracle must execute the REPLCONF case");
+        assert_eq!(
+            report.total, 1,
+            "live oracle must execute the REPLCONF case"
+        );
         assert_eq!(
             report.passed, 1,
             "REPLCONF overlong ip-address must match vendored Redis: {:?}",
@@ -10646,7 +10649,10 @@ mod tests {
             &oracle,
         )
         .expect("REPLCONF RDB-FILTER-ONLY live oracle transport");
-        assert_eq!(report.total, 1, "live oracle must execute the REPLCONF case");
+        assert_eq!(
+            report.total, 1,
+            "live oracle must execute the REPLCONF case"
+        );
         assert_eq!(
             report.passed, 1,
             "REPLCONF RDB-FILTER-ONLY unsupported value must match vendored Redis: {:?}",
@@ -10693,7 +10699,10 @@ mod tests {
             &oracle,
         )
         .expect("REPLCONF RDB-FILTER-ONLY live oracle transport");
-        assert_eq!(report.total, 1, "live oracle must execute the REPLCONF case");
+        assert_eq!(
+            report.total, 1,
+            "live oracle must execute the REPLCONF case"
+        );
         assert_eq!(
             report.passed, 1,
             "REPLCONF RDB-FILTER-ONLY NUL-terminated unsupported value must match vendored Redis: {:?}",

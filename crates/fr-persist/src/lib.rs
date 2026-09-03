@@ -3733,7 +3733,11 @@ pub fn bench_lzf_compress_table<const HOIST: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, HOIST, true, true, false, false, false>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, HOIST, true, true, false, false, false>(
+            input,
+            out_budget,
+            &mut scratch.borrow_mut(),
+        )
     })
 }
 
@@ -3752,7 +3756,11 @@ pub fn bench_lzf_compress_literals<const BATCH: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, true, BATCH, true, false, false, false>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, true, BATCH, true, false, false, false>(
+            input,
+            out_budget,
+            &mut scratch.borrow_mut(),
+        )
     })
 }
 
@@ -3834,7 +3842,11 @@ pub fn bench_lzf_compress_guard<const GUARD: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, true, false, GUARD, false, false, false>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, true, false, GUARD, false, false, false>(
+            input,
+            out_budget,
+            &mut scratch.borrow_mut(),
+        )
     })
 }
 
@@ -4967,7 +4979,12 @@ pub fn canonicalise_rdb_value(value: &RdbValue) -> RdbValue {
             let Ok(spans) = listpack::decode_value_spans(&listpack) else {
                 return value.clone();
             };
-            RdbValue::Set(spans.iter().map(|s| s.as_bytes(&listpack).to_vec()).collect())
+            RdbValue::Set(
+                spans
+                    .iter()
+                    .map(|s| s.as_bytes(&listpack).to_vec())
+                    .collect(),
+            )
         }
         // (BlackThrush) A zset handed to the encoder as its listpack blob spells the
         // same pairs; decode it back so a caller comparing CONTENT still compares
@@ -5762,19 +5779,19 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                                 max_member_len: shape.max_member_len,
                             }
                         } else {
-                        // Decode straight to (member, score) pairs. Members
-                        // materialize owned bytes; each score's f64 is read
-                        // allocation-free via the shared raw-entry core —
-                        // integer scores as `n as f64` (CrimsonHawk 788bbfd00's
-                        // -24.7% shortcut: `n as f64` == `parse(decimal(n))`),
-                        // string scores (1.5, inf, ...) by parsing a BORROWED
-                        // slice rather than a decode_listpack-allocated `Vec<u8>`
-                        // that was parsed then dropped. Byte-/bit-identical
-                        // members and scores; structural validation and the odd
-                        // element-count rejection mirror the old path exactly.
-                        let members = listpack::decode_zset_listpack_pairs(&listpack)
-                            .map_err(|_| PersistError::InvalidFrame)?;
-                        RdbValue::SortedSet(members)
+                            // Decode straight to (member, score) pairs. Members
+                            // materialize owned bytes; each score's f64 is read
+                            // allocation-free via the shared raw-entry core —
+                            // integer scores as `n as f64` (CrimsonHawk 788bbfd00's
+                            // -24.7% shortcut: `n as f64` == `parse(decimal(n))`),
+                            // string scores (1.5, inf, ...) by parsing a BORROWED
+                            // slice rather than a decode_listpack-allocated `Vec<u8>`
+                            // that was parsed then dropped. Byte-/bit-identical
+                            // members and scores; structural validation and the odd
+                            // element-count rejection mirror the old path exactly.
+                            let members = listpack::decode_zset_listpack_pairs(&listpack)
+                                .map_err(|_| PersistError::InvalidFrame)?;
+                            RdbValue::SortedSet(members)
                         }
                     }
                     RDB_TYPE_LIST_QUICKLIST_2 => {
@@ -8656,7 +8673,10 @@ mod tests {
         // (gen8 << 24) | pos is indistinguishable from (gen16 << 16) | pos -- so crossing
         // the boundary with a warm table must clear, or the stale entries read as live and
         // the output changes. Alternate across the boundary repeatedly.
-        let small = lzf_equivalence_payloads().into_iter().next().expect("payload");
+        let small = lzf_equivalence_payloads()
+            .into_iter()
+            .next()
+            .expect("payload");
         let mut big = Vec::with_capacity(70_000);
         let mut s: u32 = 0x1234_5678;
         for _ in 0..70_000 {
@@ -8668,7 +8688,8 @@ mod tests {
                 let narrow = super::bench_lzf_compress_widetag::<false>(p, budget);
                 let wide = super::bench_lzf_compress_widetag::<true>(p, budget);
                 assert_eq!(
-                    narrow, wide,
+                    narrow,
+                    wide,
                     "wide epoch tag diverged across the 64 KiB representation switch (len={})",
                     p.len()
                 );
@@ -10117,7 +10138,9 @@ mod tests {
 
         let (entries, _) = decode_rdb(&bytes).expect("decode duplicate-member set");
         match &entries[0].value {
-            RdbValue::Set(members) => assert_eq!(members.len(), 3, "the decode path spells every entry"),
+            RdbValue::Set(members) => {
+                assert_eq!(members.len(), 3, "the decode path spells every entry")
+            }
             other => panic!("a repeated member must NOT be retained, got {other:?}"),
         }
     }
@@ -10199,7 +10222,10 @@ mod tests {
             decoded[0].value
         );
         let second = encode_rdb(&decoded, &[]);
-        assert_eq!(first, second, "re-saving a retained set must be byte-identical");
+        assert_eq!(
+            first, second,
+            "re-saving a retained set must be byte-identical"
+        );
     }
 
     #[test]
@@ -10313,7 +10339,10 @@ mod tests {
             decoded[0].value
         );
         let second = encode_rdb(&decoded, &[]);
-        assert_eq!(first, second, "re-saving a retained hash must be byte-identical");
+        assert_eq!(
+            first, second,
+            "re-saving a retained hash must be byte-identical"
+        );
     }
 
     #[test]
@@ -10439,7 +10468,10 @@ mod tests {
             decoded[0].value
         );
         let second = encode_rdb(&decoded, &[]);
-        assert_eq!(first, second, "re-saving a retained zset must be byte-identical");
+        assert_eq!(
+            first, second,
+            "re-saving a retained zset must be byte-identical"
+        );
     }
 
     #[test]
@@ -10519,12 +10551,7 @@ mod tests {
             RdbValue::List(items) => {
                 assert_eq!(
                     items,
-                    &vec![
-                        b"a".to_vec(),
-                        b"b".to_vec(),
-                        b"BIG".to_vec(),
-                        b"c".to_vec()
-                    ],
+                    &vec![b"a".to_vec(), b"b".to_vec(), b"BIG".to_vec(), b"c".to_vec()],
                     "a mixed payload must keep every element in payload order"
                 );
             }

@@ -656,16 +656,27 @@ fn commandstats_counts_commands_issued_by_a_script() {
     // A successful inner write is counted like a direct one.
     resetstat(&mut rt);
     rt.execute_frame(
-        command(&[b"EVAL", b"redis.call('SET', KEYS[1], 'v') return 1", b"1", b"k"]),
+        command(&[
+            b"EVAL",
+            b"redis.call('SET', KEYS[1], 'v') return 1",
+            b"1",
+            b"k",
+        ]),
         0,
     );
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(),
+        Some("1")
+    );
     assert_eq!(
         cmdstat_field(&mut rt, "cmdstat_set", "failed_calls").as_deref(),
         Some("0")
     );
     // ...and the EVAL itself is still counted once, not replaced by the inner row.
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_eval", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_eval", "calls").as_deref(),
+        Some("1")
+    );
 
     // Every inner call counts, not just the first.
     resetstat(&mut rt);
@@ -678,12 +689,20 @@ fn commandstats_counts_commands_issued_by_a_script() {
         ]),
         0,
     );
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("3"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(),
+        Some("3")
+    );
 
     // A container subcommand is keyed by its `parent|sub` fullname, as upstream does.
     resetstat(&mut rt);
     rt.execute_frame(
-        command(&[b"EVAL", b"return redis.call('OBJECT', 'ENCODING', KEYS[1])", b"1", b"k"]),
+        command(&[
+            b"EVAL",
+            b"return redis.call('OBJECT', 'ENCODING', KEYS[1])",
+            b"1",
+            b"k",
+        ]),
         0,
     );
     assert_eq!(
@@ -698,12 +717,18 @@ fn commandstats_counts_commands_issued_by_a_script() {
     rt.execute_frame(command(&[b"EVAL", b"return 1", b"0"]), 0);
     assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls"), None);
     assert_eq!(cmdstat_field(&mut rt, "cmdstat_get", "calls"), None);
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_eval", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_eval", "calls").as_deref(),
+        Some("1")
+    );
 
     // A direct command is still counted exactly once, not twice.
     resetstat(&mut rt);
     rt.execute_frame(command(&[b"SET", b"direct", b"v"]), 0);
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(),
+        Some("1")
+    );
 }
 
 #[test]
@@ -717,7 +742,10 @@ fn commandstats_separates_failed_and_rejected_inner_calls() {
         command(&[b"EVAL", b"return redis.call('GET', KEYS[1])", b"1", b"l"]),
         0,
     );
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(),
+        Some("1")
+    );
     assert_eq!(
         cmdstat_field(&mut rt, "cmdstat_get", "failed_calls").as_deref(),
         Some("1")
@@ -733,7 +761,10 @@ fn commandstats_separates_failed_and_rejected_inner_calls() {
         command(&[b"EVAL", b"redis.pcall('GET', KEYS[1]) return 1", b"1", b"l"]),
         0,
     );
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(),
+        Some("1")
+    );
     assert_eq!(
         cmdstat_field(&mut rt, "cmdstat_get", "failed_calls").as_deref(),
         Some("1")
@@ -750,7 +781,10 @@ fn commandstats_separates_failed_and_rejected_inner_calls() {
         ]),
         0,
     );
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(), Some("0"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(),
+        Some("0")
+    );
     assert_eq!(
         cmdstat_field(&mut rt, "cmdstat_get", "rejected_calls").as_deref(),
         Some("1")
@@ -802,8 +836,14 @@ fn latency_tracking_toggle_discards_the_percentiles() {
     set_tracking(&mut rt, true);
     resetstat(&mut rt);
     rt.execute_frame(command(&[b"SET", b"a", b"v"]), 0);
-    assert!(latencystats_has(&mut rt, "set"), "percentiles expected while tracking");
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("1"));
+    assert!(
+        latencystats_has(&mut rt, "set"),
+        "percentiles expected while tracking"
+    );
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(),
+        Some("1")
+    );
 
     // Turned OFF: the percentiles go immediately, WITHOUT waiting for another command.
     // fr kept showing them.
@@ -814,7 +854,10 @@ fn latency_tracking_toggle_discards_the_percentiles() {
     );
     // ...and the command counters are untouched by the toggle: this is the half of the
     // flag that must NOT change, so a fix that simply reset everything would fail here.
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(),
+        Some("1")
+    );
 
     // Back ON, before any new command: still absent, because the old buckets were
     // discarded rather than merely hidden. This is what separates clearing from gating.
@@ -823,12 +866,21 @@ fn latency_tracking_toggle_discards_the_percentiles() {
         !latencystats_has(&mut rt, "set"),
         "discarded percentiles must not reappear when tracking is re-enabled"
     );
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(),
+        Some("1")
+    );
 
     // One more command and the section is rebuilt.
     rt.execute_frame(command(&[b"SET", b"b", b"v"]), 0);
-    assert!(latencystats_has(&mut rt, "set"), "percentiles rebuild after a command");
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(), Some("2"));
+    assert!(
+        latencystats_has(&mut rt, "set"),
+        "percentiles rebuild after a command"
+    );
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_set", "calls").as_deref(),
+        Some("2")
+    );
 }
 
 /// (frankenredis-trackgate2) `latency-tracking no` must NOT stop commandstats.
@@ -856,7 +908,10 @@ fn commandstats_keeps_counting_while_latency_tracking_is_off() {
         Some("20"),
         "commandstats must count while latency-tracking is off"
     );
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(),
+        Some("1")
+    );
     // usec is part of the same row and must be real, not a placeholder zero.
     let usec = cmdstat_field(&mut rt, "cmdstat_set", "usec").expect("usec field");
     assert!(
@@ -873,7 +928,10 @@ fn commandstats_keeps_counting_while_latency_tracking_is_off() {
     rt.execute_frame(command(&[b"LPUSH", b"l", b"a"]), 0);
     resetstat(&mut rt);
     rt.execute_frame(command(&[b"GET", b"l"]), 0);
-    assert_eq!(cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(), Some("1"));
+    assert_eq!(
+        cmdstat_field(&mut rt, "cmdstat_get", "calls").as_deref(),
+        Some("1")
+    );
     assert_eq!(
         cmdstat_field(&mut rt, "cmdstat_get", "failed_calls").as_deref(),
         Some("1")

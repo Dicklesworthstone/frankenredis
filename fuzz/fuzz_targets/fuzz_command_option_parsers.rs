@@ -441,12 +441,7 @@ fn fuzz_stream_case(case: StreamCase, now_ms: u64) {
     match case {
         StreamCase::Xread { id } => {
             let raw = render_stream_id_arg(&id);
-            let argv = vec![
-                b"XREAD".to_vec(),
-                b"STREAMS".to_vec(),
-                b"s".to_vec(),
-                raw,
-            ];
+            let argv = vec![b"XREAD".to_vec(), b"STREAMS".to_vec(), b"s".to_vec(), raw];
             // Non-group XREAD parses the id with the STRICT stream-id parser,
             // plus a special case for `$`:
             //   * `$`            -> valid: resolves to the stream's last_id (or

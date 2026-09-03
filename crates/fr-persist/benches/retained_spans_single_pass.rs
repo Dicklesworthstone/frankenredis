@@ -67,7 +67,10 @@ fn consume(spans: &RetainedListpackSpans, payload: &[u8]) -> usize {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
-        eprintln!("usage: {} <two_pass|single_pass|verify> <entries> <iters> <strings|integers|mixed>", args[0]);
+        eprintln!(
+            "usage: {} <two_pass|single_pass|verify> <entries> <iters> <strings|integers|mixed>",
+            args[0]
+        );
         std::process::exit(2);
     }
     let arm = args[1].as_str();
@@ -121,5 +124,8 @@ fn main() {
             std::process::exit(2);
         }
     }
-    println!("{arm} {shape} n={entries} iters={iters} checksum={}", black_box(acc));
+    println!(
+        "{arm} {shape} n={entries} iters={iters} checksum={}",
+        black_box(acc)
+    );
 }

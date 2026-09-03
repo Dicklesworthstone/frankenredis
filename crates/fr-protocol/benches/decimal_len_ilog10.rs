@@ -39,17 +39,19 @@ fn ilog10_len(n: u64) -> usize {
 /// digit count; ilog10 is constant — so the win grows with width).
 fn band(n: usize, digits: u32) -> Vec<u64> {
     let base = 10u64.saturating_pow(digits.saturating_sub(1)).max(1);
-    (0..n as u64).map(|i| base.wrapping_add(i.wrapping_mul(7))).collect()
+    (0..n as u64)
+        .map(|i| base.wrapping_add(i.wrapping_mul(7)))
+        .collect()
 }
 /// Realistic RESP integer/length mix: mostly small (1-4 digit lengths/counts) with a tail of
 /// large values (INCR counters, big cardinalities).
 fn resp_mix(n: usize) -> Vec<u64> {
     (0..n as u64)
         .map(|i| match i % 8 {
-            0..=4 => i % 1000,            // small: 1-3 digits (lengths, small ints)
-            5 => 100_000 + i,             // 6 digits
-            6 => 10_000_000_000 + i,      // 11 digits
-            _ => u64::MAX - i,            // 20 digits
+            0..=4 => i % 1000,       // small: 1-3 digits (lengths, small ints)
+            5 => 100_000 + i,        // 6 digits
+            6 => 10_000_000_000 + i, // 11 digits
+            _ => u64::MAX - i,       // 20 digits
         })
         .collect()
 }
@@ -111,7 +113,8 @@ fn main() {
         loop {
             let e = time(&orig, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 18 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;

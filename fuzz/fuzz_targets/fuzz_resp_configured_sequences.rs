@@ -235,8 +235,7 @@ fn profile_for_frame(frame: &RespFrame) -> FrameProfile {
                     let nested = profile_for_frame(child);
                     profile.max_bulk_len = profile.max_bulk_len.max(nested.max_bulk_len);
                     profile.max_array_len = profile.max_array_len.max(nested.max_array_len);
-                    profile.max_depth =
-                        profile.max_depth.max(nested.max_depth.saturating_add(1));
+                    profile.max_depth = profile.max_depth.max(nested.max_depth.saturating_add(1));
                 }
             }
             profile

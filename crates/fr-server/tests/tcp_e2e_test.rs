@@ -2304,17 +2304,17 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     // that matter are the ones where the route DECLINES and falls through mid-way,
     // because that is the path its own unit test usually never covers.
     cmds.push(c(&[b"SET", b"mv:1", b"v"]));
-    cmds.push(c(&[b"MOVE", b"mv:1", b"1"]));          // succeeds: key leaves db 0
-    cmds.push(c(&[b"EXISTS", b"mv:1"]));              // ...and is gone from db 0
-    cmds.push(c(&[b"MOVE", b"mv:absent", b"1"]));     // absent key: 0, no move
+    cmds.push(c(&[b"MOVE", b"mv:1", b"1"])); // succeeds: key leaves db 0
+    cmds.push(c(&[b"EXISTS", b"mv:1"])); // ...and is gone from db 0
+    cmds.push(c(&[b"MOVE", b"mv:absent", b"1"])); // absent key: 0, no move
     cmds.push(c(&[b"SET", b"mv:2", b"v"]));
-    cmds.push(c(&[b"MOVE", b"mv:2", b"0"]));          // same-db: ERROR, not a move
-    cmds.push(c(&[b"MOVE", b"mv:2", b"notanint"]));   // non-integer db: ERROR
-    cmds.push(c(&[b"MOVE", b"mv:2", b"99"]));         // out-of-range db: ERROR
-    cmds.push(c(&[b"EXISTS", b"mv:2"]));              // ...and mv:2 survived all three
-    cmds.push(c(&[b"SPUBLISH", b"sch:1", b"hello"]));  // no subscribers: 0
-    cmds.push(c(&[b"SPUBLISH", b"sch:1", b""]));       // empty payload
-    cmds.push(c(&[b"SPUBLISH", b"", b"hello"]));       // empty channel name
+    cmds.push(c(&[b"MOVE", b"mv:2", b"0"])); // same-db: ERROR, not a move
+    cmds.push(c(&[b"MOVE", b"mv:2", b"notanint"])); // non-integer db: ERROR
+    cmds.push(c(&[b"MOVE", b"mv:2", b"99"])); // out-of-range db: ERROR
+    cmds.push(c(&[b"EXISTS", b"mv:2"])); // ...and mv:2 survived all three
+    cmds.push(c(&[b"SPUBLISH", b"sch:1", b"hello"])); // no subscribers: 0
+    cmds.push(c(&[b"SPUBLISH", b"sch:1", b""])); // empty payload
+    cmds.push(c(&[b"SPUBLISH", b"", b"hello"])); // empty channel name
 
     // (frankenredis-ozrro) The classifier claims EXPIRE at arity 3 only, so the
     // option form has to stay on the cascade and answer identically. Same idea
@@ -5325,9 +5325,7 @@ fn tcp_sync_and_psync_reject_pending_output_like_legacy_redis_6lzih() {
     }
 }
 
-fn replica_ack_during_client_pause_offset(
-    spawn: impl FnOnce(u16) -> ManagedChild,
-) -> String {
+fn replica_ack_during_client_pause_offset(spawn: impl FnOnce(u16) -> ManagedChild) -> String {
     let port = reserve_port();
     let _server = spawn(port);
     let mut replica = connect_client(port);

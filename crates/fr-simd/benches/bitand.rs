@@ -25,7 +25,9 @@ const NULL_SPREAD_LO_PCT: f64 = 0.05;
 
 fn fill(buf: &mut [u8], mut seed: u64) {
     for b in buf.iter_mut() {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = (seed >> 33) as u8;
     }
 }
@@ -71,7 +73,10 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 }
 
 fn main() {
-    println!("avx2_detected={}", std::arch::is_x86_feature_detected!("avx2"));
+    println!(
+        "avx2_detected={}",
+        std::arch::is_x86_feature_detected!("avx2")
+    );
     println!(
         "\n{:<10} {:>8} {:>9} {:>16} {:>8} {:>9} {:>12}",
         "size", "reps", "NULL med", "null p5..p95", "null cv%", "speedup", "verdict"

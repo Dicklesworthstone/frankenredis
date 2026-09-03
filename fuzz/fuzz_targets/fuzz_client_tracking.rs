@@ -12,7 +12,8 @@ use std::collections::BTreeSet;
 
 const CLIENT_TRACKING_PREFIX_REQUIRES_BCAST: &str =
     "ERR PREFIX option requires BCAST mode to be enabled";
-const CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT: &str = "ERR You can't specify both OPTIN mode and OPTOUT mode";
+const CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT: &str =
+    "ERR You can't specify both OPTIN mode and OPTOUT mode";
 const CLIENT_TRACKING_BCAST_OPT_CONFLICT: &str =
     "ERR OPTIN and OPTOUT are not compatible with BCAST";
 const CLIENT_TRACKING_REDIRECT_MISSING: &str =
@@ -121,8 +122,8 @@ fn fuzz_structured_client_tracking(case: StructuredTrackingCase) {
             let (argv, expected) = render_invalid_case(case);
             let result = parse_client_tracking_state(&argv);
             // Accept InvalidUtf8Argument as valid rejection when arbitrary bytes contain invalid UTF-8
-            let is_expected_error = result == Err(expected.clone())
-                || result == Err(CommandError::InvalidUtf8Argument);
+            let is_expected_error =
+                result == Err(expected.clone()) || result == Err(CommandError::InvalidUtf8Argument);
             assert!(
                 is_expected_error,
                 "invalid CLIENT TRACKING option sets must reject: got {:?}, expected {:?} (or InvalidUtf8Argument)",
@@ -176,9 +177,13 @@ fn assert_success_invariants(state: &ClientTrackingState) {
     // 1. Check enabled first (if disabled, return REQUIRES_TRACKING)
     // 2. Then check mode-specific requirements (OPTIN for YES, OPTOUT for NO)
     let yes_expected = if !state.enabled {
-        Err(CommandError::Custom(CLIENT_CACHING_REQUIRES_TRACKING.to_string()))
+        Err(CommandError::Custom(
+            CLIENT_CACHING_REQUIRES_TRACKING.to_string(),
+        ))
     } else if !state.optin {
-        Err(CommandError::Custom(CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string()))
+        Err(CommandError::Custom(
+            CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string(),
+        ))
     } else {
         Ok(())
     };
@@ -189,9 +194,13 @@ fn assert_success_invariants(state: &ClientTrackingState) {
     );
 
     let no_expected = if !state.enabled {
-        Err(CommandError::Custom(CLIENT_CACHING_REQUIRES_TRACKING.to_string()))
+        Err(CommandError::Custom(
+            CLIENT_CACHING_REQUIRES_TRACKING.to_string(),
+        ))
     } else if !state.optout {
-        Err(CommandError::Custom(CLIENT_CACHING_NO_REQUIRES_OPTOUT.to_string()))
+        Err(CommandError::Custom(
+            CLIENT_CACHING_NO_REQUIRES_OPTOUT.to_string(),
+        ))
     } else {
         Ok(())
     };

@@ -109,7 +109,14 @@ fn main() {
     );
     println!(
         "\n{:<10} {:>7} {:>9} {:>9} {:>9} {:>16} {:>8} {:>10} {:>8}",
-        "size", "reps", "orig ms", "cand ms", "NULL med", "null p5..p95", "null cv%", "speedup",
+        "size",
+        "reps",
+        "orig ms",
+        "cand ms",
+        "NULL med",
+        "null p5..p95",
+        "null cv%",
+        "speedup",
         "spd cv%"
     );
 
@@ -120,8 +127,16 @@ fn main() {
 
         // Correctness gate before any timing: a "faster" arm that disagrees is worthless.
         let expected: usize = buf.iter().map(|b| b.count_ones() as usize).sum();
-        assert_eq!(popcount_scalar(&buf), expected, "ORIG disagrees with the oracle");
-        assert_eq!(popcount_bytes(&buf), expected, "CAND disagrees with the oracle");
+        assert_eq!(
+            popcount_scalar(&buf),
+            expected,
+            "ORIG disagrees with the oracle"
+        );
+        assert_eq!(
+            popcount_bytes(&buf),
+            expected,
+            "CAND disagrees with the oracle"
+        );
 
         let reps = calibrate(&buf);
 

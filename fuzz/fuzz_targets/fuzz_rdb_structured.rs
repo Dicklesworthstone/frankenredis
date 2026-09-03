@@ -5,8 +5,7 @@ use libfuzzer_sys::fuzz_target;
 
 use fr_persist::{
     RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamPendingEntry, StreamEntry, crc64_redis,
-    decode_rdb,
-    encode_upstream_stream_listpacks3_payload,
+    decode_rdb, encode_upstream_stream_listpacks3_payload,
 };
 
 const RDB_MAGIC: &[u8] = b"REDIS";
@@ -231,8 +230,7 @@ impl RdbEntryFuzz {
                     &groups,
                     None, // entries_added
                     None, // max_deleted-entry-id watermark
-                )
-                else {
+                ) else {
                     return;
                 };
                 buf.push(RDB_TYPE_STREAM_LISTPACKS_3);

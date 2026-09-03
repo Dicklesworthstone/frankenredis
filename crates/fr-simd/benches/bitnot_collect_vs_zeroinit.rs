@@ -24,7 +24,9 @@ fn zeroinit_then_not(src: &[u8]) -> Vec<u8> {
 
 fn fill(buf: &mut [u8], mut seed: u64) {
     for b in buf.iter_mut() {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = (seed >> 33) as u8;
     }
 }
@@ -57,9 +59,16 @@ fn main() {
     {
         let mut s = vec![0u8; 1000];
         fill(&mut s, 0xb17);
-        assert_eq!(zeroinit_then_not(&s), bitnot_collect(&s), "variants diverged");
+        assert_eq!(
+            zeroinit_then_not(&s),
+            bitnot_collect(&s),
+            "variants diverged"
+        );
     }
-    println!("avx2_detected={}", cfg!(target_arch = "x86_64") && is_x86_feature_detected!("avx2"));
+    println!(
+        "avx2_detected={}",
+        cfg!(target_arch = "x86_64") && is_x86_feature_detected!("avx2")
+    );
     println!(
         "\n{:>10} {:>7} {:>9} {:>16} {:>8} {:>10} {:>16}",
         "size", "reps", "NULL med", "null p5..p95", "null cv%", "cand/orig", "verdict"
@@ -73,7 +82,8 @@ fn main() {
         loop {
             let e = time(reps, &src, zeroinit_then_not);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 22 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;

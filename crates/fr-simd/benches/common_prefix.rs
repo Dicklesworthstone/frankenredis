@@ -62,7 +62,10 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
 }
 
 fn main() {
-    println!("avx2_detected={}", std::arch::is_x86_feature_detected!("avx2"));
+    println!(
+        "avx2_detected={}",
+        std::arch::is_x86_feature_detected!("avx2")
+    );
     println!(
         "\n{:<10} {:>9} {:>9} {:>16} {:>8} {:>10} {:>12}",
         "prefix", "reps", "NULL med", "null p5..p95", "null cv%", "speedup", "verdict"

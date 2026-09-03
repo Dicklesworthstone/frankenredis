@@ -67,7 +67,12 @@ fn perf_instructions(exe: &Path, arm: Arm, size: usize) -> Result<u64, String> {
         .env("LC_ALL", "C")
         .args(["stat", "--no-big-num", "-x,", "-e", "instructions:u", "--"])
         .arg(exe)
-        .args(["--child", arm.name(), &size.to_string(), &REPEATS.to_string()])
+        .args([
+            "--child",
+            arm.name(),
+            &size.to_string(),
+            &REPEATS.to_string(),
+        ])
         .output()
         .map_err(|error| format!("could not launch perf stat: {error}"))?;
     if !output.status.success() {
@@ -117,10 +122,7 @@ fn main() -> Result<(), String> {
         let r = median(reference) / REPEATS as f64;
         let c = median(candidate) / REPEATS as f64;
         let role = if size <= 8 { "candidate path" } else { "NULL" };
-        println!(
-            "{size:>5}  {r:>14.2}  {c:>14.2}  {:>+10.2}  {role}",
-            c - r
-        );
+        println!("{size:>5}  {r:>14.2}  {c:>14.2}  {:>+10.2}  {role}", c - r);
     }
     Ok(())
 }

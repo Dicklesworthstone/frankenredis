@@ -45,7 +45,9 @@ fn accum_fold(sources: &[Vec<u8>]) -> Vec<u8> {
 
 fn fill(buf: &mut [u8], mut seed: u64) {
     for b in buf.iter_mut() {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = ((seed >> 40) as u8) & 0x3f;
     }
 }
@@ -82,7 +84,11 @@ fn run(label: &str, nsrc: usize) {
             v
         })
         .collect();
-    assert_eq!(accum_zeroed(&sources), accum_fold(&sources), "{label}: variants diverged");
+    assert_eq!(
+        accum_zeroed(&sources),
+        accum_fold(&sources),
+        "{label}: variants diverged"
+    );
 
     let mut reps = 1usize;
     loop {
@@ -140,7 +146,10 @@ fn run(label: &str, nsrc: usize) {
 }
 
 fn main() {
-    println!("\n{:<10} {:>7} {:>9} {:>16} {:>8} {:>11} {:>16}", "sources", "reps", "NULL med", "null p5..p95", "null cv%", "cand/orig", "verdict");
+    println!(
+        "\n{:<10} {:>7} {:>9} {:>16} {:>8} {:>11} {:>16}",
+        "sources", "reps", "NULL med", "null p5..p95", "null cv%", "cand/orig", "verdict"
+    );
     run("2src", 2);
     run("4src", 4);
     run("8src", 8);

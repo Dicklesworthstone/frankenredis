@@ -73,7 +73,10 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 }
 
 fn main() {
-    println!("avx2_detected={}", std::arch::is_x86_feature_detected!("avx2"));
+    println!(
+        "avx2_detected={}",
+        std::arch::is_x86_feature_detected!("avx2")
+    );
     println!(
         "\n{:<10} {:>7} {:>9} {:>16} {:>8} {:>11} {:>11}",
         "size", "reps", "NULL med", "null p5..p95", "null cv%", "SSE2 spd", "AVX2 spd"
@@ -87,7 +90,11 @@ fn main() {
 
         // Correctness gate before timing: every tier must equal the oracle.
         let expected = first_mismatch_byte_scalar(&buf, 0x00);
-        assert_eq!(first_mismatch_byte(&buf, 0x00), expected, "AVX2 dispatch disagrees");
+        assert_eq!(
+            first_mismatch_byte(&buf, 0x00),
+            expected,
+            "AVX2 dispatch disagrees"
+        );
         assert_eq!(fm_sse2(&buf, 0x00), expected, "SSE2 tier disagrees");
         assert_eq!(expected, Some(size - 1));
 
@@ -102,7 +109,8 @@ fn main() {
 
         for round in 0..=ROUNDS {
             let swap = round % 2 == 1;
-            let pair = |base: fn(&[u8], u8) -> Option<usize>, cand: fn(&[u8], u8) -> Option<usize>| {
+            let pair = |base: fn(&[u8], u8) -> Option<usize>,
+                        cand: fn(&[u8], u8) -> Option<usize>| {
                 if swap {
                     let c = time(reps, &buf, cand);
                     time(reps, &buf, base) / c

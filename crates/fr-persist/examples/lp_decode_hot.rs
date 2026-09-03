@@ -58,18 +58,21 @@ fn main() {
     // count so the decoder takes its pre-sized path -- which is what the real
     // RESTORE payload has.
     finish_header(&mut payload, usize::from(u16::MAX));
-    let probe = fr_persist::listpack::decode_raw_values(&payload)
-        .expect("generated listpack must decode");
+    let probe =
+        fr_persist::listpack::decode_raw_values(&payload).expect("generated listpack must decode");
     let elements = probe.len();
     finish_header(&mut payload, elements);
     let probe = fr_persist::listpack::decode_raw_values(&payload)
         .expect("listpack with an exact count must decode");
-    assert_eq!(probe.len(), elements, "element count must survive the stamp");
+    assert_eq!(
+        probe.len(),
+        elements,
+        "element count must survive the stamp"
+    );
 
     let mut acc = 0usize;
     for _ in 0..reps {
-        let values = fr_persist::listpack::decode_raw_values(black_box(&payload))
-            .expect("decodes");
+        let values = fr_persist::listpack::decode_raw_values(black_box(&payload)).expect("decodes");
         acc += black_box(values).len();
     }
     println!(

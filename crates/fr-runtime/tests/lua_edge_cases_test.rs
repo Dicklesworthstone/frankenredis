@@ -457,10 +457,19 @@ fn lua_keys_table_holds_the_logical_key_on_a_selected_db() {
     let mut rt = Runtime::default_strict();
     // db 0 is the identity encoding, so it is the control arm: what the script
     // sees here is what it must also see on db 3.
-    assert_eq!(eval(&mut rt, r#"return #KEYS[1]"#, "1", &[b"mykey"]), RespFrame::Integer(5));
+    assert_eq!(
+        eval(&mut rt, r#"return #KEYS[1]"#, "1", &[b"mykey"]),
+        RespFrame::Integer(5)
+    );
 
-    assert_eq!(select(&mut rt, b"3"), RespFrame::SimpleString("OK".to_string()));
-    assert_eq!(eval(&mut rt, r#"return #KEYS[1]"#, "1", &[b"mykey"]), RespFrame::Integer(5));
+    assert_eq!(
+        select(&mut rt, b"3"),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        eval(&mut rt, r#"return #KEYS[1]"#, "1", &[b"mykey"]),
+        RespFrame::Integer(5)
+    );
     assert_eq!(
         eval(&mut rt, r#"return KEYS[1]"#, "1", &[b"mykey"]),
         RespFrame::BulkString(Some(b"mykey".to_vec()))
@@ -477,7 +486,12 @@ fn lua_keys_table_holds_the_logical_key_on_a_selected_db() {
     );
     // And the leading bytes, which is where the encoding would show up first.
     assert_eq!(
-        eval(&mut rt, r#"return string.sub(KEYS[1], 1, 2)"#, "1", &[b"mykey"]),
+        eval(
+            &mut rt,
+            r#"return string.sub(KEYS[1], 1, 2)"#,
+            "1",
+            &[b"mykey"]
+        ),
         RespFrame::BulkString(Some(b"my".to_vec()))
     );
 }
@@ -485,18 +499,40 @@ fn lua_keys_table_holds_the_logical_key_on_a_selected_db() {
 #[test]
 fn lua_script_named_key_lands_in_the_selected_db() {
     let mut rt = Runtime::default_strict();
-    assert_eq!(select(&mut rt, b"3"), RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(
+        select(&mut rt, b"3"),
+        RespFrame::SimpleString("OK".to_string())
+    );
 
     // A literal the script names itself, with no declared keys at all.
-    eval(&mut rt, r#"redis.call('SET', 'litkey', 'v') return 1"#, "0", &[]);
-    assert_eq!(get(&mut rt, b"litkey"), RespFrame::BulkString(Some(b"v".to_vec())));
+    eval(
+        &mut rt,
+        r#"redis.call('SET', 'litkey', 'v') return 1"#,
+        "0",
+        &[],
+    );
+    assert_eq!(
+        get(&mut rt, b"litkey"),
+        RespFrame::BulkString(Some(b"v".to_vec()))
+    );
 
     // A key the script builds out of ARGV, which is likewise never rewritten.
-    eval(&mut rt, r#"redis.call('SET', ARGV[1], 'v') return 1"#, "0", &[b"argkey"]);
-    assert_eq!(get(&mut rt, b"argkey"), RespFrame::BulkString(Some(b"v".to_vec())));
+    eval(
+        &mut rt,
+        r#"redis.call('SET', ARGV[1], 'v') return 1"#,
+        "0",
+        &[b"argkey"],
+    );
+    assert_eq!(
+        get(&mut rt, b"argkey"),
+        RespFrame::BulkString(Some(b"v".to_vec()))
+    );
 
     // Neither may have leaked into db 0, which is where they used to go.
-    assert_eq!(select(&mut rt, b"0"), RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(
+        select(&mut rt, b"0"),
+        RespFrame::SimpleString("OK".to_string())
+    );
     assert_eq!(get(&mut rt, b"litkey"), RespFrame::BulkString(None));
     assert_eq!(get(&mut rt, b"argkey"), RespFrame::BulkString(None));
 }
@@ -504,7 +540,10 @@ fn lua_script_named_key_lands_in_the_selected_db() {
 #[test]
 fn lua_keys_derived_write_is_namespaced_exactly_once() {
     let mut rt = Runtime::default_strict();
-    assert_eq!(select(&mut rt, b"3"), RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(
+        select(&mut rt, b"3"),
+        RespFrame::SimpleString("OK".to_string())
+    );
 
     // Reading back through the same handle passes even when the key is encoded
     // twice, so the load-bearing assertion is the one OUTSIDE the script: a
@@ -518,9 +557,15 @@ fn lua_keys_derived_write_is_namespaced_exactly_once() {
         ),
         RespFrame::BulkString(Some(b"kv".to_vec()))
     );
-    assert_eq!(get(&mut rt, b"mykey"), RespFrame::BulkString(Some(b"kv".to_vec())));
+    assert_eq!(
+        get(&mut rt, b"mykey"),
+        RespFrame::BulkString(Some(b"kv".to_vec()))
+    );
 
-    assert_eq!(select(&mut rt, b"0"), RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(
+        select(&mut rt, b"0"),
+        RespFrame::SimpleString("OK".to_string())
+    );
     assert_eq!(get(&mut rt, b"mykey"), RespFrame::BulkString(None));
 }
 
@@ -537,8 +582,16 @@ fn lua_db_zero_key_that_looks_encoded_is_left_alone() {
     let len = rt.execute_frame(command(&[b"EVAL", b"return #KEYS[1]", b"1", &odd_key]), 0);
     assert_eq!(len, RespFrame::Integer(odd_key.len() as i64));
 
-    eval(&mut rt, r#"redis.call('SET', KEYS[1], 'v') return 1"#, "1", &[&odd_key]);
-    assert_eq!(get(&mut rt, &odd_key), RespFrame::BulkString(Some(b"v".to_vec())));
+    eval(
+        &mut rt,
+        r#"redis.call('SET', KEYS[1], 'v') return 1"#,
+        "1",
+        &[&odd_key],
+    );
+    assert_eq!(
+        get(&mut rt, &odd_key),
+        RespFrame::BulkString(Some(b"v".to_vec()))
+    );
 }
 
 // ── Cross-database commands named by a script (frankenredis-mvcpy) ──
@@ -559,7 +612,10 @@ fn exists(rt: &mut Runtime, db: &[u8], key: &[u8]) -> RespFrame {
 fn lua_script_move_transfers_out_of_the_selected_db() {
     for src in [&b"0"[..], &b"3"[..]] {
         let mut rt = Runtime::default_strict();
-        assert_eq!(select(&mut rt, src), RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(
+            select(&mut rt, src),
+            RespFrame::SimpleString("OK".to_string())
+        );
         rt.execute_frame(command(&[b"SET", b"mk", b"v"]), 0);
 
         assert_eq!(
@@ -580,11 +636,19 @@ fn lua_script_move_transfers_a_declared_key() {
     // before KEYS was made logical it carried encoded bytes that MOVE re-encoded.
     for src in [&b"0"[..], &b"3"[..]] {
         let mut rt = Runtime::default_strict();
-        assert_eq!(select(&mut rt, src), RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(
+            select(&mut rt, src),
+            RespFrame::SimpleString("OK".to_string())
+        );
         rt.execute_frame(command(&[b"SET", b"mk", b"v"]), 0);
 
         assert_eq!(
-            eval(&mut rt, r#"return redis.call('MOVE',KEYS[1],7)"#, "1", &[b"mk"]),
+            eval(
+                &mut rt,
+                r#"return redis.call('MOVE',KEYS[1],7)"#,
+                "1",
+                &[b"mk"]
+            ),
             RespFrame::Integer(1),
             "script MOVE via KEYS from db {}",
             String::from_utf8_lossy(src)
@@ -598,11 +662,19 @@ fn lua_script_move_transfers_a_declared_key() {
 fn lua_script_copy_reaches_another_db_and_leaves_the_source() {
     for src in [&b"0"[..], &b"3"[..]] {
         let mut rt = Runtime::default_strict();
-        assert_eq!(select(&mut rt, src), RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(
+            select(&mut rt, src),
+            RespFrame::SimpleString("OK".to_string())
+        );
         rt.execute_frame(command(&[b"SET", b"mk", b"v"]), 0);
 
         assert_eq!(
-            eval(&mut rt, r#"return redis.call('COPY','mk','mk2','DB',7)"#, "0", &[]),
+            eval(
+                &mut rt,
+                r#"return redis.call('COPY','mk','mk2','DB',7)"#,
+                "0",
+                &[]
+            ),
             RespFrame::Integer(1),
             "script COPY from db {}",
             String::from_utf8_lossy(src)
@@ -620,10 +692,18 @@ fn debug_is_refused_from_a_script_so_it_needs_no_logical_key_exemption() {
     // no script route can reach it -- upstream refuses DEBUG from a script and so does
     // fr. If this ever starts succeeding, DEBUG needs adding to the exemption.
     let mut rt = Runtime::default_strict();
-    assert_eq!(select(&mut rt, b"3"), RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(
+        select(&mut rt, b"3"),
+        RespFrame::SimpleString("OK".to_string())
+    );
     rt.execute_frame(command(&[b"SET", b"mk", b"v"]), 0);
 
-    let reply = eval(&mut rt, r#"return redis.call('DEBUG','OBJECT','mk')"#, "0", &[]);
+    let reply = eval(
+        &mut rt,
+        r#"return redis.call('DEBUG','OBJECT','mk')"#,
+        "0",
+        &[],
+    );
     let RespFrame::Error(message) = reply else {
         panic!("DEBUG must be refused from a script, got {reply:?}"); // ubs:ignore — AI triage
     };
@@ -761,7 +841,10 @@ fn lua_void_bindings_still_do_their_work() {
     let RespFrame::Error(message) = bad else {
         panic!("redis.setresp(4) must be an error, got {bad:?}"); // ubs:ignore — AI triage
     };
-    assert!(message.contains("RESP version must be 2 or 3"), "got {message}");
+    assert!(
+        message.contains("RESP version must be 2 or 3"),
+        "got {message}"
+    );
 }
 
 // ── table.sort must be Lua 5.1's auxsort (frankenredis-luasort) ──
@@ -919,23 +1002,41 @@ fn lua_table_sort_matches_auxsort_tie_order_and_call_count() {
         "1,1,2,3,3,4,5,5,6,9"
     );
     assert_eq!(
-        lua_str(&mut rt, "local t={3,1,4,1,5,9,2,6,5,3} table.sort(t) \
-             return table.concat(t, ',')"),
+        lua_str(
+            &mut rt,
+            "local t={3,1,4,1,5,9,2,6,5,3} table.sort(t) \
+             return table.concat(t, ',')"
+        ),
         "1,1,2,3,3,4,5,5,6,9"
     );
     assert_eq!(
-        lua_str(&mut rt, "local t={'pear','apple','fig'} table.sort(t) \
-             return table.concat(t, ',')"),
+        lua_str(
+            &mut rt,
+            "local t={'pear','apple','fig'} table.sort(t) \
+             return table.concat(t, ',')"
+        ),
         "apple,fig,pear"
     );
     // Degenerate sizes still work, and a hole still bounds the sort at #t.
-    assert_eq!(lua_str(&mut rt, "local t={7} table.sort(t) return table.concat(t, ',')"), "7");
     assert_eq!(
-        lua_str(&mut rt, "local t={} table.sort(t) return '['..table.concat(t, ',')..']'"),
+        lua_str(
+            &mut rt,
+            "local t={7} table.sort(t) return table.concat(t, ',')"
+        ),
+        "7"
+    );
+    assert_eq!(
+        lua_str(
+            &mut rt,
+            "local t={} table.sort(t) return '['..table.concat(t, ',')..']'"
+        ),
         "[]"
     );
     assert_eq!(
-        lua_str(&mut rt, "local t={3,1,2} t[5]=0 table.sort(t) return table.concat(t, ',')"),
+        lua_str(
+            &mut rt,
+            "local t={3,1,2} t[5]=0 table.sort(t) return table.concat(t, ',')"
+        ),
         "1,2,3"
     );
 }
@@ -959,10 +1060,22 @@ fn lua_table_sort_matches_auxsort_tie_order_and_call_count() {
 fn lua_caught_runtime_errors_report_their_own_line() {
     let mut rt = Runtime::default_strict();
     for (line, script) in [
-        (1, "local ok,e = pcall(function() return {} + 1 end) return tostring(e)"),
-        (2, "local ok,e = pcall(function()\nreturn {} + 1 end) return tostring(e)"),
-        (3, "local ok,e = pcall(function()\n\nreturn {} + 1 end) return tostring(e)"),
-        (5, "local ok,e = pcall(function()\n\n\n\nreturn {} + 1 end) return tostring(e)"),
+        (
+            1,
+            "local ok,e = pcall(function() return {} + 1 end) return tostring(e)",
+        ),
+        (
+            2,
+            "local ok,e = pcall(function()\nreturn {} + 1 end) return tostring(e)",
+        ),
+        (
+            3,
+            "local ok,e = pcall(function()\n\nreturn {} + 1 end) return tostring(e)",
+        ),
+        (
+            5,
+            "local ok,e = pcall(function()\n\n\n\nreturn {} + 1 end) return tostring(e)",
+        ),
     ] {
         assert_eq!(
             lua_str(&mut rt, script),
@@ -998,8 +1111,11 @@ fn lua_caught_runtime_errors_report_their_own_line() {
     );
     // A builtin's bad-argument error carries a position too.
     assert_eq!(
-        lua_str(&mut rt, "local ok,e = pcall(function()\nreturn table.sort(1) end) \
-                          return tostring(e)"),
+        lua_str(
+            &mut rt,
+            "local ok,e = pcall(function()\nreturn table.sort(1) end) \
+                          return tostring(e)"
+        ),
         "user_script:2: bad argument #1 to 'sort' (table expected, got number)"
     );
 }

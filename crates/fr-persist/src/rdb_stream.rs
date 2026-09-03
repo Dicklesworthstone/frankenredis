@@ -803,7 +803,13 @@ impl UpstreamStreamSkeleton {
         let mut out: StreamOut<F> = StreamOut::default();
         for (master_ms, master_seq, blob) in &self.nodes {
             let lp = decode_raw_values(blob)?;
-            decode_stream_listpack::<_, false, false>(&lp, blob, *master_ms, *master_seq, &mut out)?;
+            decode_stream_listpack::<_, false, false>(
+                &lp,
+                blob,
+                *master_ms,
+                *master_seq,
+                &mut out,
+            )?;
         }
         Ok(out.entries)
     }
@@ -1494,14 +1500,21 @@ mod tests {
                 )
             })
             .collect();
-        let payload = encode_upstream_stream_listpacks3(&entries, Some((24, 1)), &[], Some(24), None)
-            .expect("encodes");
+        let payload =
+            encode_upstream_stream_listpacks3(&entries, Some((24, 1)), &[], Some(24), None)
+                .expect("encodes");
 
         let clean = UpstreamStreamSkeleton::decode(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, &payload)
             .expect("clean payload decodes")
             .0;
-        assert!(clean.flat_entries().is_ok(), "clean payload must materialise");
-        assert!(clean.validate_entries().is_ok(), "clean payload must validate");
+        assert!(
+            clean.flat_entries().is_ok(),
+            "clean payload must materialise"
+        );
+        assert!(
+            clean.validate_entries().is_ok(),
+            "clean payload must validate"
+        );
 
         let mut agreed = 0_u32;
         let mut both_rejected = 0_u32;

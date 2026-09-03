@@ -114,7 +114,10 @@ fn run(label: &str, n: usize) {
 }
 
 fn main() {
-    println!("\n{:<8} {:>7} {:>9} {:>16} {:>8} {:>11} {:>16}", "count", "reps", "NULL med", "null p5..p95", "null cv%", "cand/orig", "verdict");
+    println!(
+        "\n{:<8} {:>7} {:>9} {:>16} {:>8} {:>11} {:>16}",
+        "count", "reps", "NULL med", "null p5..p95", "null cv%", "cand/orig", "verdict"
+    );
     run("n8", 8);
     run("n64", 64);
     run("n512", 512);

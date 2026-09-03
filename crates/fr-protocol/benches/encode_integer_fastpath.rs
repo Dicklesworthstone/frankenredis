@@ -45,9 +45,7 @@ impl Arm {
 
 // Realistic counter/length replies: overwhelmingly small non-negative values (INCR / LLEN / SCARD /
 // EXISTS / DEL / SADD counts), with a couple of larger and negative magnitudes mixed in.
-const CORPUS: [i64; 16] = [
-    0, 1, 2, 1, 3, 0, 5, 1, 10, 0, 42, 1, 128, 2, -1, 1000,
-];
+const CORPUS: [i64; 16] = [0, 1, 2, 1, 3, 0, 5, 1, 10, 0, 42, 1, 128, 2, -1, 1000];
 
 fn encode(n: i64, arm: Arm, out: &mut Vec<u8>) {
     match arm {
@@ -337,7 +335,9 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
         "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} speedup_cv_pct={effect_cv_pct:.6}"
     );
     if (null_median - 1.0).abs() >= 0.02 {
-        return Err(format!("null median exposes harness bias: {null_median:.9}"));
+        return Err(format!(
+            "null median exposes harness bias: {null_median:.9}"
+        ));
     }
     if effect_median <= null_p95 || effect_median <= 1.01 {
         return Err(format!(

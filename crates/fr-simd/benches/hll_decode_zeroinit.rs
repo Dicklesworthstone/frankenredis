@@ -48,7 +48,9 @@ fn decode_uninit(payload: &[u8]) -> Vec<u8> {
 
 fn fill(buf: &mut [u8], mut seed: u64) {
     for b in buf.iter_mut() {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = (seed >> 33) as u8;
     }
 }
@@ -80,7 +82,11 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
 fn main() {
     let mut payload = vec![0u8; DENSE_BYTES];
     fill(&mut payload, 0x48_4c_4c_00);
-    assert_eq!(decode_zeroed(&payload), decode_uninit(&payload), "decode variants diverged");
+    assert_eq!(
+        decode_zeroed(&payload),
+        decode_uninit(&payload),
+        "decode variants diverged"
+    );
 
     let mut reps = 1usize;
     loop {
@@ -125,7 +131,10 @@ fn main() {
     } else {
         "indistinguishable"
     };
-    println!("\n{:>10} {:>9} {:>16} {:>8} {:>11} {:>16}", "reps", "NULL med", "null p5..p95", "null cv%", "cand/orig", "verdict");
+    println!(
+        "\n{:>10} {:>9} {:>16} {:>8} {:>11} {:>16}",
+        "reps", "NULL med", "null p5..p95", "null cv%", "cand/orig", "verdict"
+    );
     println!(
         "{:>10} {:>9.4} {:>16} {:>8.2} {:>10.3}x {:>16}",
         reps,

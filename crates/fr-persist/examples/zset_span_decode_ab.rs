@@ -49,21 +49,16 @@ fn zset_listpack(members: u32) -> Vec<u8> {
 fn main() {
     let mut args = std::env::args().skip(1);
     let arm = args.next().unwrap_or_else(|| "pair".into());
-    let members: u32 = args
-        .next()
-        .and_then(|a| a.parse().ok())
-        .unwrap_or(40);
-    let reps: usize = args
-        .next()
-        .and_then(|a| a.parse().ok())
-        .unwrap_or(2000);
+    let members: u32 = args.next().and_then(|a| a.parse().ok()).unwrap_or(40);
+    let reps: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(2000);
 
     let lp = zset_listpack(members);
 
     // EQUIVALENCE BEFORE TIMING. A build where the arms disagree must not be able to
     // report a speedup.
     let a = fr_persist::listpack::decode_zset_spans_and_scores(&lp).expect("pair arm decodes");
-    let b = fr_persist::listpack::decode_zset_spans_and_scores_orig(&lp).expect("option arm decodes");
+    let b =
+        fr_persist::listpack::decode_zset_spans_and_scores_orig(&lp).expect("option arm decodes");
     assert_eq!(a.len(), b.len(), "arms disagree on element count");
     for (index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
         assert_eq!(
@@ -90,9 +85,8 @@ fn main() {
         }
         "option" => {
             for _ in 0..reps {
-                let pairs =
-                    fr_persist::listpack::decode_zset_spans_and_scores_orig(black_box(&lp))
-                        .expect("decode");
+                let pairs = fr_persist::listpack::decode_zset_spans_and_scores_orig(black_box(&lp))
+                    .expect("decode");
                 acc += black_box(pairs).len();
             }
         }

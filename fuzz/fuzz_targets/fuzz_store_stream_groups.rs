@@ -643,12 +643,22 @@ fn assert_dump_restore_round_trip(store: &mut Store, now_ms: u64) {
         assert_eq!(restored.info.2, expected.info.2, "pending count");
         assert_eq!(restored.info.3, expected.info.3, "last_delivered_id");
         // Consumer names and pending counts, but NOT idle/inactive times
-        let restored_consumer_names: Vec<_> = restored.consumers.iter().map(|(n, _, _, _)| n).collect();
-        let expected_consumer_names: Vec<_> = expected.consumers.iter().map(|(n, _, _, _)| n).collect();
-        assert_eq!(restored_consumer_names, expected_consumer_names, "consumer names");
-        let restored_consumer_pending: Vec<_> = restored.consumers.iter().map(|(_, p, _, _)| *p).collect();
-        let expected_consumer_pending: Vec<_> = expected.consumers.iter().map(|(_, p, _, _)| *p).collect();
-        assert_eq!(restored_consumer_pending, expected_consumer_pending, "consumer pending counts");
+        let restored_consumer_names: Vec<_> =
+            restored.consumers.iter().map(|(n, _, _, _)| n).collect();
+        let expected_consumer_names: Vec<_> =
+            expected.consumers.iter().map(|(n, _, _, _)| n).collect();
+        assert_eq!(
+            restored_consumer_names, expected_consumer_names,
+            "consumer names"
+        );
+        let restored_consumer_pending: Vec<_> =
+            restored.consumers.iter().map(|(_, p, _, _)| *p).collect();
+        let expected_consumer_pending: Vec<_> =
+            expected.consumers.iter().map(|(_, p, _, _)| *p).collect();
+        assert_eq!(
+            restored_consumer_pending, expected_consumer_pending,
+            "consumer pending counts"
+        );
         // Summary and pending entries must match
         assert_eq!(restored.summary, expected.summary, "pending summary");
         assert_eq!(restored.pending, expected.pending, "pending entries");

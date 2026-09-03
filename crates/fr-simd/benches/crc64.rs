@@ -80,7 +80,10 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
 
 fn main() {
     let tables = build_tables();
-    println!("pclmulqdq_detected={}", std::arch::is_x86_feature_detected!("pclmulqdq"));
+    println!(
+        "pclmulqdq_detected={}",
+        std::arch::is_x86_feature_detected!("pclmulqdq")
+    );
     println!(
         "\n{:<10} {:>9} {:>9} {:>16} {:>8} {:>10} {:>12}",
         "size", "reps", "NULL med", "null p5..p95", "null cv%", "speedup", "verdict"
@@ -90,12 +93,18 @@ fn main() {
         let mut buf = vec![0u8; size];
         let mut s = 0xa5a5_5a5a_c3c3_3c3cu64;
         for b in buf.iter_mut() {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *b = (s >> 33) as u8;
         }
         let oracle = table_crc(&tables, &buf);
         assert_eq!(crc64(&buf), oracle, "CAND (fold4) != table oracle");
-        assert_eq!(crc64_fold1_reference(&buf), oracle, "ORIG (fold1) != table oracle");
+        assert_eq!(
+            crc64_fold1_reference(&buf),
+            oracle,
+            "ORIG (fold1) != table oracle"
+        );
 
         let base = |d: &[u8]| crc64_fold1_reference(d);
         let cand = |d: &[u8]| crc64(d);
@@ -112,7 +121,8 @@ fn main() {
         loop {
             let e = time(&base, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 24 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;

@@ -929,8 +929,7 @@ fn push_inline_sanitized(out: &mut Vec<u8>, body: &[u8]) {
 #[inline(always)]
 fn push_inline_sanitized_impl<const BULK_RUNS: bool>(out: &mut Vec<u8>, body: &[u8]) {
     if BULK_RUNS {
-        let Some(first_dirty) = body.iter().position(|&byte| byte == b'\r' || byte == b'\n')
-        else {
+        let Some(first_dirty) = body.iter().position(|&byte| byte == b'\r' || byte == b'\n') else {
             out.extend_from_slice(body);
             return;
         };
@@ -2213,8 +2212,8 @@ fn parse_multibulk_count<const FAST: bool>(
             }
         }
     }
-    let (line, cursor) =
-        read_line(input, start).map_err(|e| line_too_long_as(e, RespParseError::TooBigMbulkCount))?;
+    let (line, cursor) = read_line(input, start)
+        .map_err(|e| line_too_long_as(e, RespParseError::TooBigMbulkCount))?;
     let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     Ok((len, cursor))
 }
@@ -2462,10 +2461,16 @@ fn parse_resp3_bool_impl<const FIXED_WIDTH: bool>(
     start: usize,
 ) -> Result<(RespFrame, usize), RespParseError> {
     if FIXED_WIDTH {
-        if input.get(start..).is_some_and(|tail| tail.starts_with(b"t\r\n")) {
+        if input
+            .get(start..)
+            .is_some_and(|tail| tail.starts_with(b"t\r\n"))
+        {
             return Ok((RespFrame::Integer(1), start + 3));
         }
-        if input.get(start..).is_some_and(|tail| tail.starts_with(b"f\r\n")) {
+        if input
+            .get(start..)
+            .is_some_and(|tail| tail.starts_with(b"f\r\n"))
+        {
             return Ok((RespFrame::Integer(0), start + 3));
         }
     }
@@ -3150,13 +3155,13 @@ mod tests {
     use super::{
         AuthedLimits, BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig,
         RespFrame, RespParseError, UNAUTH_MAX_BULK_LEN, UNAUTH_MAX_MULTIBULK_LEN,
-        bench_encode_bulk_string_slice_small, bench_encode_integer,
-        bench_encode_redis_double, bench_parse_bulk_slice, bench_parse_frame_len_line,
-        bench_parse_multibulk_count, bench_push_len_header, decimal_u64_len, decimal_usize_len,
-        encode_aggregate_header, encode_bulk_string_slice, encode_map_header, encode_redis_double,
-        format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
-        parse_command_frame_borrowed, parse_frame, parse_frame_with_config,
-        parse_resp3_big_number_body, push_i64, push_redis_double_ascii, push_usize,
+        bench_encode_bulk_string_slice_small, bench_encode_integer, bench_encode_redis_double,
+        bench_parse_bulk_slice, bench_parse_frame_len_line, bench_parse_multibulk_count,
+        bench_push_len_header, decimal_u64_len, decimal_usize_len, encode_aggregate_header,
+        encode_bulk_string_slice, encode_map_header, encode_redis_double, format_redis_double,
+        parse_command_args_borrowed_into, parse_command_frame, parse_command_frame_borrowed,
+        parse_frame, parse_frame_with_config, parse_resp3_big_number_body, push_i64,
+        push_redis_double_ascii, push_usize,
     };
 
     // The fused owned-frame count/length line fast path (parse_bulk / parse_array / parse_resp3_map)
@@ -3423,7 +3428,10 @@ mod tests {
                 let mut old = Vec::new();
                 bench_push_len_header::<true>(&mut fused, prefix, n);
                 bench_push_len_header::<false>(&mut old, prefix, n);
-                assert_eq!(fused, old, "fused vs three-call differ for {prefix:?} n={n}");
+                assert_eq!(
+                    fused, old,
+                    "fused vs three-call differ for {prefix:?} n={n}"
+                );
                 assert_eq!(fused[0], prefix);
                 assert_eq!(&fused[fused.len() - 2..], b"\r\n");
             }
@@ -4395,15 +4403,20 @@ mod tests {
             }),
             ..ParserConfig::default()
         };
-        assert_eq!(hardened.max_bulk_len, 1024, "the cap must not RAISE 1024 to 16384");
-        assert_eq!(hardened.max_array_len, 10, "the cap must still lower 1024 to 10");
+        assert_eq!(
+            hardened.max_bulk_len, 1024,
+            "the cap must not RAISE 1024 to 16384"
+        );
+        assert_eq!(
+            hardened.max_array_len, 10,
+            "the cap must still lower 1024 to 10"
+        );
 
         // 2000 bytes is inside upstream's 16384 but outside this server's own
         // limit, so it is refused, and refused as an ordinary over-limit rather
         // than as a pre-auth one -- the configured limit is what rejected it.
         assert_eq!(
-            parse_command_args_borrowed_into(b"*1\r\n$2000\r\n", &hardened, &mut args)
-                .unwrap_err(),
+            parse_command_args_borrowed_into(b"*1\r\n$2000\r\n", &hardened, &mut args).unwrap_err(),
             RespParseError::BulkLengthTooLarge
         );
     }
@@ -4621,10 +4634,7 @@ mod tests {
 
         let error = parse_frame("-ERR é\r東京\n🙂\r\n".as_bytes())
             .expect("error with lone CR/LF should parse");
-        assert_eq!(
-            error.frame,
-            RespFrame::Error("ERR é 東京 🙂".to_string())
-        );
+        assert_eq!(error.frame, RespFrame::Error("ERR é 東京 🙂".to_string()));
     }
 
     #[test]
