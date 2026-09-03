@@ -36721,8 +36721,21 @@ impl Runtime {
                                 fr_protocol::encode_aggregate_header(2, false, out);
                             }
                             fr_protocol::encode_bulk_string_slice(Some(member), false, out);
-                            let ss = fr_store::redis_score_to_string(score);
-                            fr_protocol::encode_bulk_string_slice(Some(ss.as_bytes()), false, out);
+                            if resp3 {
+                                // (frankenredis-rc-zrandmember-resp3-double) A RESP3 client
+                                // gets the score as a Double (`,3`), the way ZRANGE WITHSCORES
+                                // and 7.2.4's addReplyDouble do; this path wrote a bulk string
+                                // under both protocols and was the one RESP3 typing divergence
+                                // resp3_reply_type_gate still reported.
+                                RespFrame::double_from_f64(score).encode_into_resp3(out);
+                            } else {
+                                let ss = fr_store::redis_score_to_string(score);
+                                fr_protocol::encode_bulk_string_slice(
+                                    Some(ss.as_bytes()),
+                                    false,
+                                    out,
+                                );
+                            }
                         }
                     }
                 });
@@ -42547,11 +42560,19 @@ impl Runtime {
         } else if self.is_replica(session.client_id) {
             flag_chars.push('S');
         }
+        // (frankenredis-rc-client-list-blocked-flag) Letters in upstream's
+        // catClientInfoString order (networking.c:2777-2797): P before x, then
+        // b for a client parked in a blocking command, then tracking, then
+        // r / e / T. A blocked client showed flags=N here while 7.2.4 shows b,
+        // although INFO blocked_clients already counted it.
+        if channel_subs > 0 || pattern_subs > 0 || shard_subs > 0 {
+            flag_chars.push('P');
+        }
         if session.transaction_state.in_transaction {
             flag_chars.push('x');
         }
-        if channel_subs > 0 || pattern_subs > 0 || shard_subs > 0 {
-            flag_chars.push('P');
+        if self.server.blocked_client_ids.contains(&session.client_id) {
+            flag_chars.push('b');
         }
         if session.client_tracking.enabled {
             flag_chars.push('t');
@@ -42559,14 +42580,14 @@ impl Runtime {
                 flag_chars.push('B');
             }
         }
+        if session.cluster_state.mode == ClusterClientMode::ReadOnly {
+            flag_chars.push('r');
+        }
         if session.client_no_evict {
             flag_chars.push('e');
         }
         if session.client_no_touch {
             flag_chars.push('T');
-        }
-        if session.cluster_state.mode == ClusterClientMode::ReadOnly {
-            flag_chars.push('r');
         }
         if flag_chars.is_empty() {
             flag_chars.push('N');
@@ -68134,6 +68155,66 @@ mod tests {
         // cross-connection — `SET k vvvvv` (9+8*3) + `GET k` (4+8*2) = 53, verified
         // e2e vs redis 7.2.4 (it can't be read by the MULTI client itself, since
         // CLIENT LIST is queued in a transaction).
+    }
+
+    /// (frankenredis-rc-client-list-blocked-flag) A client parked in a
+    /// blocking command reports flags=b (upstream CLIENT_BLOCKED); it showed
+    /// N while INFO blocked_clients counted it. Verified vs redis 7.2.4 with a
+    /// BLPOP client on 2026-09-02.
+    #[test]
+    fn client_info_flags_mark_blocked_clients() {
+        fn flags_of(rt: &mut Runtime) -> String {
+            let info = match rt.execute_frame(command(&[b"CLIENT", b"INFO"]), 1) {
+                RespFrame::BulkString(Some(b)) => String::from_utf8(b).expect("utf8"),
+                other => unreachable!("unexpected CLIENT INFO: {other:?}"),
+            };
+            info.split("flags=")
+                .nth(1)
+                .and_then(|s| s.split(' ').next())
+                .expect("flags field")
+                .to_string()
+        }
+        let mut rt = Runtime::default_strict();
+        let id = rt.session.client_id;
+        assert_eq!(flags_of(&mut rt), "N");
+        rt.mark_client_blocked(id);
+        assert_eq!(flags_of(&mut rt), "b");
+        rt.mark_client_unblocked(id);
+        assert_eq!(flags_of(&mut rt), "N");
+    }
+
+    /// (frankenredis-rc-zrandmember-resp3-double) The zero-copy
+    /// `ZRANDMEMBER key count WITHSCORES` route must type the score like the
+    /// generic ZRANGE path: a RESP3 Double, a RESP2 bulk string. Live 7.2.4 on
+    /// 2026-09-02: `redis-cli -3 ZRANDMEMBER z 1 WITHSCORES` -> `(double) 3`;
+    /// fr answered `"3"`.
+    #[test]
+    fn zrandmember_withscores_fast_path_types_the_score_per_protocol() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"ZADD", b"z", b"3", b"only"]), 1),
+            RespFrame::Integer(1)
+        );
+        let mut resp3_out = Vec::new();
+        rt.execute_plain_zrandmember_count_withscores_borrowed_into(
+            b"z",
+            b"1",
+            2,
+            true,
+            &mut resp3_out,
+        )
+        .expect("fast path serves the request");
+        assert_eq!(resp3_out, b"*1\r\n*2\r\n$4\r\nonly\r\n,3\r\n");
+        let mut resp2_out = Vec::new();
+        rt.execute_plain_zrandmember_count_withscores_borrowed_into(
+            b"z",
+            b"1",
+            3,
+            false,
+            &mut resp2_out,
+        )
+        .expect("fast path serves the request");
+        assert_eq!(resp2_out, b"*2\r\n$4\r\nonly\r\n$1\r\n3\r\n");
     }
 
     /// (frankenredis-clreplflag) A replica connection reports flags=S in
