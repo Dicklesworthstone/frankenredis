@@ -118,11 +118,7 @@ fn is_slave_eligible(
         max_master_down_time =
             max_master_down_time.saturating_add(now_ms.saturating_sub(master.s_down_since_time));
     }
-    if slave.master_link_down_time > max_master_down_time {
-        return false;
-    }
-
-    true
+    slave.master_link_down_time <= max_master_down_time
 }
 
 #[cfg(feature = "bench-reference")]
