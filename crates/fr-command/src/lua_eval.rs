@@ -5516,13 +5516,11 @@ pub(crate) fn function_call_registered(
             // CALLER is on RESP2; without the same step here, a registered function returning
             // `{map={...}}` to a RESP2 client -- the DEFAULT protocol -- emits a RESP3 frame it
             // cannot parse. No `redis.setresp` is needed to reach it.
-            Ok(
-                if store.dispatch_client_ctx.resp_protocol_version == 3 {
-                    frame
-                } else {
-                    downconvert_lua_reply_to_resp2(frame)
-                },
-            )
+            Ok(if store.dispatch_client_ctx.resp_protocol_version == 3 {
+                frame
+            } else {
+                downconvert_lua_reply_to_resp2(frame)
+            })
         }
         Err(err) => {
             let line = state.current_line;
@@ -6539,101 +6537,88 @@ impl<'a> LuaState<'a> {
         env: &mut Env,
         varargs: &mut Vec<LuaValue>,
     ) -> Result<ControlFlow, String> {
-            // (frankenredis-7vqyo) Upstream luaV_execute raises these
-            // via luaG_runerror which prepends the script source
-            // location. The initial-value variant reads "initial
-            // value" (not "start") in Lua 5.1's lvm.c.
-            let s = self
-                .eval_expr(start, env, varargs)?
+        // (frankenredis-7vqyo) Upstream luaV_execute raises these
+        // via luaG_runerror which prepends the script source
+        // location. The initial-value variant reads "initial
+        // value" (not "start") in Lua 5.1's lvm.c.
+        let s = self
+            .eval_expr(start, env, varargs)?
+            .to_number()
+            .ok_or("user_script:1: 'for' initial value must be a number")?;
+        let e = self
+            .eval_expr(stop, env, varargs)?
+            .to_number()
+            .ok_or("user_script:1: 'for' limit must be a number")?;
+        let st = match step {
+            Some(expr) => self
+                .eval_expr(expr, env, varargs)?
                 .to_number()
-                .ok_or("user_script:1: 'for' initial value must be a number")?;
-            let e = self
-                .eval_expr(stop, env, varargs)?
-                .to_number()
-                .ok_or("user_script:1: 'for' limit must be a number")?;
-            let st = match step {
-                Some(expr) => self
-                    .eval_expr(expr, env, varargs)?
-                    .to_number()
-                    .ok_or("user_script:1: 'for' step must be a number")?,
-                None => 1.0,
-            };
-            // (frankenredis-4hhz5) Lua 5.1 allows step=0; the body
-            // either breaks/returns or the loop is infinite (caller's
-            // responsibility, same as `while true do end`). Vendored
-            // does not reject step=0 at the runtime layer.
-            if let Some(result) = self.execute_numeric_for_add_assign_fast_path(
-                name.as_ref(),
-                e,
-                st,
-                body,
-                s,
-                env,
-            ) {
-                return result;
-            }
-            let mut i = s;
-            // (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) ONE
-            // scope for the whole loop, re-armed per iteration, rather than a
-            // push/pop pair per iteration. The old shape cleared the scope and
-            // re-pushed the loop binding every pass, which re-allocated the
-            // binding's `name` String each time; `rearm_loop_scope` truncates
-            // to the loop variable and overwrites its cell instead, reaching
-            // the identical `[loop_var]` state. Cell reuse keeps the same
-            // strong_count == 1 guard as before -- now read off the scope's own
-            // binding, which is the sole owner precisely when nothing captured
-            // it.
-            let mut scope_open = false;
-            loop {
-                self.iterations += 1;
-                if self.iterations > MAX_ITERATIONS {
-                    if scope_open {
-                        env.pop_scope();
-                    }
-                    return Err("script exceeded maximum iteration count".to_string());
-                }
-                if (st > 0.0 && i > e) || (st < 0.0 && i < e) {
-                    break;
-                }
+                .ok_or("user_script:1: 'for' step must be a number")?,
+            None => 1.0,
+        };
+        // (frankenredis-4hhz5) Lua 5.1 allows step=0; the body
+        // either breaks/returns or the loop is infinite (caller's
+        // responsibility, same as `while true do end`). Vendored
+        // does not reject step=0 at the runtime layer.
+        if let Some(result) =
+            self.execute_numeric_for_add_assign_fast_path(name.as_ref(), e, st, body, s, env)
+        {
+            return result;
+        }
+        let mut i = s;
+        // (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) ONE
+        // scope for the whole loop, re-armed per iteration, rather than a
+        // push/pop pair per iteration. The old shape cleared the scope and
+        // re-pushed the loop binding every pass, which re-allocated the
+        // binding's `name` String each time; `rearm_loop_scope` truncates
+        // to the loop variable and overwrites its cell instead, reaching
+        // the identical `[loop_var]` state. Cell reuse keeps the same
+        // strong_count == 1 guard as before -- now read off the scope's own
+        // binding, which is the sole owner precisely when nothing captured
+        // it.
+        let mut scope_open = false;
+        loop {
+            self.iterations += 1;
+            if self.iterations > MAX_ITERATIONS {
                 if scope_open {
-                    env.rearm_loop_scope(LuaValue::Number(i));
-                } else {
-                    env.push_scope();
-                    env.set_local(name.as_ref(), LuaValue::Number(i));
-                    scope_open = true;
+                    env.pop_scope();
                 }
-                // NOTE the `?` deliberately leaves the scope unpopped on the
-                // error path, exactly as the per-iteration shape did: an error
-                // here unwinds the whole script.
-                let cf = self.exec_numeric_for_body_from(
-                    name.as_ref(),
-                    e,
-                    st,
-                    body,
-                    i,
-                    0,
-                    env,
-                    varargs,
-                )?;
-                match cf {
-                    ControlFlow::Break => break,
-                    ControlFlow::Return(v) => {
-                        env.pop_scope();
-                        return Ok(ControlFlow::Return(v));
-                    }
-                    // (frankenredis-lua-tail-calls-ps0le) Same scope discipline as the return arm.
-                    ControlFlow::TailCall(tc) => {
-                        env.pop_scope();
-                        return Ok(ControlFlow::TailCall(tc));
-                    }
-                    ControlFlow::None => {}
-                }
-                i += st;
+                return Err("script exceeded maximum iteration count".to_string());
+            }
+            if (st > 0.0 && i > e) || (st < 0.0 && i < e) {
+                break;
             }
             if scope_open {
-                env.pop_scope();
+                env.rearm_loop_scope(LuaValue::Number(i));
+            } else {
+                env.push_scope();
+                env.set_local(name.as_ref(), LuaValue::Number(i));
+                scope_open = true;
             }
-            Ok(ControlFlow::None)
+            // NOTE the `?` deliberately leaves the scope unpopped on the
+            // error path, exactly as the per-iteration shape did: an error
+            // here unwinds the whole script.
+            let cf =
+                self.exec_numeric_for_body_from(name.as_ref(), e, st, body, i, 0, env, varargs)?;
+            match cf {
+                ControlFlow::Break => break,
+                ControlFlow::Return(v) => {
+                    env.pop_scope();
+                    return Ok(ControlFlow::Return(v));
+                }
+                // (frankenredis-lua-tail-calls-ps0le) Same scope discipline as the return arm.
+                ControlFlow::TailCall(tc) => {
+                    env.pop_scope();
+                    return Ok(ControlFlow::TailCall(tc));
+                }
+                ControlFlow::None => {}
+            }
+            i += st;
+        }
+        if scope_open {
+            env.pop_scope();
+        }
+        Ok(ControlFlow::None)
     }
 
     fn exec_stmt(
@@ -6705,12 +6690,7 @@ impl<'a> LuaState<'a> {
                     && matches!(right.as_ref(), Expr::Call(_, _))
                     && matches!(
                         op,
-                        BinOp::Add
-                            | BinOp::Sub
-                            | BinOp::Mul
-                            | BinOp::Div
-                            | BinOp::Mod
-                            | BinOp::Pow
+                        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow
                     )
                 {
                     let left_value = self.eval_expr(left, env, varargs)?;
@@ -6735,9 +6715,11 @@ impl<'a> LuaState<'a> {
                             .into_iter()
                             .next()
                             .unwrap_or(LuaValue::Nil);
-                        return Ok(ControlFlow::Return(vec![
-                            self.eval_binop(&left_value, op, &right_value)?,
-                        ]));
+                        return Ok(ControlFlow::Return(vec![self.eval_binop(
+                            &left_value,
+                            op,
+                            &right_value,
+                        )?]));
                     }
                 }
                 let vals = self.eval_expr_list(exprs, env, varargs)?;
@@ -6888,7 +6870,7 @@ impl<'a> LuaState<'a> {
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
                     env_table: Rc::new(RefCell::new(env.current_global_env())),
-                        source_label: self.current_source_label.clone(),
+                    source_label: self.current_source_label.clone(),
                     identity: next_function_identity(),
                 });
                 if names.len() == 1 {
@@ -6910,7 +6892,7 @@ impl<'a> LuaState<'a> {
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
                     env_table: Rc::new(RefCell::new(env.current_global_env())),
-                        source_label: self.current_source_label.clone(),
+                    source_label: self.current_source_label.clone(),
                     identity: next_function_identity(),
                 });
                 if !env.set_existing_local(name, func.clone()) {
@@ -8473,10 +8455,7 @@ impl<'a> LuaState<'a> {
     /// scope. Both call sites had to CLONE the callee to produce it, and `LuaValue::Function`
     /// holds a `Box<LuaFunc>`, so that clone was a deep copy of the params, the `Block` body and
     /// the captured environment -- on every Lua function call, for a branch that never ran.
-    fn prepare_lua_function_env(
-        lua_func: &LuaFunc,
-        args: &[LuaValue],
-    ) -> (Env, Vec<LuaValue>) {
+    fn prepare_lua_function_env(lua_func: &LuaFunc, args: &[LuaValue]) -> (Env, Vec<LuaValue>) {
         let mut new_env = match &lua_func.captured_env {
             Some(captured) => Env::from_captured(captured),
             None => Env::new(),
@@ -10516,7 +10495,7 @@ impl<'a> LuaState<'a> {
                         is_variadic: true,
                         captured_env: Some(env.snapshot()),
                         env_table: Rc::new(RefCell::new(env.current_global_env())),
-                                // (frankenredis-ycaog) Tag the chunk so runtime
+                        // (frankenredis-ycaog) Tag the chunk so runtime
                         // errors raised from inside it are reported with
                         // the loadstring chunk-label prefix instead of
                         // the outer script's `user_script:1:` prefix.
@@ -10623,7 +10602,7 @@ impl<'a> LuaState<'a> {
                                 is_variadic: true,
                                 captured_env: Some(env.snapshot()),
                                 env_table: Rc::new(RefCell::new(env.current_global_env())),
-                                                source_label: Some(chunk_label),
+                                source_label: Some(chunk_label),
                                 identity: next_function_identity(),
                             })]),
                             Err((line, msg)) => Ok(vec![
@@ -11262,7 +11241,10 @@ impl<'a> LuaState<'a> {
                     // equal is not the property under test.
                     LuaValue::Str(_) => {
                         let mt = lua_string_metatable();
-                        let masked = mt.inner.borrow().get(&LuaValue::Str(b"__metatable".to_vec()));
+                        let masked = mt
+                            .inner
+                            .borrow()
+                            .get(&LuaValue::Str(b"__metatable".to_vec()));
                         if matches!(masked, LuaValue::Nil) {
                             Ok(vec![LuaValue::Table(mt)])
                         } else {
@@ -11787,11 +11769,13 @@ impl<'a> LuaState<'a> {
             }
             // ── String library ──────────────────────────────────────────
             "string.len" => {
-                let s = lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "len")?;
+                let s =
+                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "len")?;
                 Ok(vec![LuaValue::Number(s.len() as f64)])
             }
             "string.sub" => {
-                let s = lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "sub")?;
+                let s =
+                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "sub")?;
                 let len = s.len() as i64;
                 let mut i =
                     lua_check_number(self.current_invocation_name.as_deref(), args, 1, "sub")?
@@ -11830,7 +11814,8 @@ impl<'a> LuaState<'a> {
                 }
             }
             "string.rep" => {
-                let s = lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "rep")?;
+                let s =
+                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "rep")?;
                 let n_val =
                     lua_check_number(self.current_invocation_name.as_deref(), args, 1, "rep")?;
                 if n_val < 0.0 {
@@ -11860,13 +11845,21 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(result)])
             }
             "string.lower" => {
-                let s =
-                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "lower")?;
+                let s = lua_check_string_ref(
+                    self.current_invocation_name.as_deref(),
+                    args,
+                    0,
+                    "lower",
+                )?;
                 Ok(vec![LuaValue::Str(s.to_ascii_lowercase())])
             }
             "string.upper" => {
-                let s =
-                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "upper")?;
+                let s = lua_check_string_ref(
+                    self.current_invocation_name.as_deref(),
+                    args,
+                    0,
+                    "upper",
+                )?;
                 Ok(vec![LuaValue::Str(s.to_ascii_uppercase())])
             }
             "string.reverse" => {
@@ -11981,7 +11974,8 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(result)])
             }
             "string.find" => {
-                let s = lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "find")?;
+                let s =
+                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "find")?;
                 let pattern =
                     lua_check_string_ref(self.current_invocation_name.as_deref(), args, 1, "find")?;
                 // (frankenredis-izta5) Upstream luaB_str_find_aux uses
@@ -12047,9 +12041,9 @@ impl<'a> LuaState<'a> {
                     }
                 } else {
                     // Lua pattern matching
-                    if let Some(m) = lua_pattern_find(&s, &pattern, init)
-                        .map_err(|e| lua_pattern_raise(self.current_invocation_name.as_deref(), e))?
-                    {
+                    if let Some(m) = lua_pattern_find(&s, &pattern, init).map_err(|e| {
+                        lua_pattern_raise(self.current_invocation_name.as_deref(), e)
+                    })? {
                         let mut result = vec![
                             LuaValue::Number((m.start + 1) as f64), // 1-indexed
                             LuaValue::Number(m.end as f64),         // inclusive end
@@ -12079,10 +12073,18 @@ impl<'a> LuaState<'a> {
                 }
             }
             "string.match" => {
-                let s =
-                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "match")?;
-                let pattern =
-                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 1, "match")?;
+                let s = lua_check_string_ref(
+                    self.current_invocation_name.as_deref(),
+                    args,
+                    0,
+                    "match",
+                )?;
+                let pattern = lua_check_string_ref(
+                    self.current_invocation_name.as_deref(),
+                    args,
+                    1,
+                    "match",
+                )?;
                 // (frankenredis-izta5) Same init-arg validation as
                 // string.find — upstream luaB_str_find_aux raises
                 // 'bad argument #3' for non-number-convertible init.
@@ -12112,10 +12114,18 @@ impl<'a> LuaState<'a> {
             "string.gmatch" => {
                 // Returns an iterator function. Each call returns next match.
                 // We collect all matches and return a closure-like iterator via a table.
-                let s =
-                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 0, "gmatch")?;
-                let pattern =
-                    lua_check_string_ref(self.current_invocation_name.as_deref(), args, 1, "gmatch")?;
+                let s = lua_check_string_ref(
+                    self.current_invocation_name.as_deref(),
+                    args,
+                    0,
+                    "gmatch",
+                )?;
+                let pattern = lua_check_string_ref(
+                    self.current_invocation_name.as_deref(),
+                    args,
+                    1,
+                    "gmatch",
+                )?;
                 // (frankenredis-vfv8s) Validate pattern eagerly so the
                 // iterator constructor surfaces malformed patterns the
                 // same way upstream's gmatch does.
@@ -12130,10 +12140,9 @@ impl<'a> LuaState<'a> {
                     // the empty pattern at every position -- 4 matches on 'a^b' where 7.2.4 yields
                     // the single literal caret.
                     if let Some(m) =
-                        lua_pattern_find_with_caret(&s, &pattern, pos, LuaCaret::Literal)
-                            .map_err(|e| {
-                                lua_pattern_raise(self.current_invocation_name.as_deref(), e)
-                            })?
+                        lua_pattern_find_with_caret(&s, &pattern, pos, LuaCaret::Literal).map_err(
+                            |e| lua_pattern_raise(self.current_invocation_name.as_deref(), e),
+                        )?
                     {
                         matches.push(lua_match_captures(&s, &m).map_err(|e| {
                             lua_pattern_raise(self.current_invocation_name.as_deref(), e)
@@ -13232,19 +13241,18 @@ impl<'a> LuaState<'a> {
         // db 0 borrows and copies NOTHING, matching the runtime's own `Cow::Borrowed`
         // fast path -- the overwhelmingly common case pays only the `db == 0` test.
         let selected_db = self.store.dispatch_client_ctx.db_index;
-        let namespaced: Option<Vec<Vec<u8>>> = if selected_db == 0
-            || crate::command_resolves_keys_against_selected_db(argv)
-        {
-            None
-        } else {
-            let mut rewritten = argv.to_vec();
-            for idx in crate::command_key_indexes(argv) {
-                if let Some(slot) = rewritten.get_mut(idx) {
-                    *slot = fr_store::encode_db_key(selected_db, slot);
+        let namespaced: Option<Vec<Vec<u8>>> =
+            if selected_db == 0 || crate::command_resolves_keys_against_selected_db(argv) {
+                None
+            } else {
+                let mut rewritten = argv.to_vec();
+                for idx in crate::command_key_indexes(argv) {
+                    if let Some(slot) = rewritten.get_mut(idx) {
+                        *slot = fr_store::encode_db_key(selected_db, slot);
+                    }
                 }
-            }
-            Some(rewritten)
-        };
+                Some(rewritten)
+            };
         let dispatch_target: &[Vec<u8>] = namespaced.as_deref().unwrap_or(argv);
 
         // The intercept chain handles MULTI/EXEC/ACL/AUTH/HELLO/SYNC only -- all keyless --
@@ -13309,8 +13317,7 @@ impl<'a> LuaState<'a> {
         //     calls=1,failed_calls=1 against upstream's calls=0,rejected_calls=1.
         //
         // Only a command that was admitted and then returned an error is `Failed`.
-        let (canonical, arity_ok, _parent_arity_ok) =
-            crate::resolve_command_name_and_arity(argv);
+        let (canonical, arity_ok, _parent_arity_ok) = crate::resolve_command_name_and_arity(argv);
         if let Some(canonical) = canonical {
             let kind = if !arity_ok {
                 fr_store::CommandRecordKind::Rejected
@@ -13319,8 +13326,7 @@ impl<'a> LuaState<'a> {
             } else {
                 fr_store::CommandRecordKind::Success
             };
-            let elapsed =
-                u64::try_from(stats_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            let elapsed = u64::try_from(stats_started.elapsed().as_micros()).unwrap_or(u64::MAX);
             self.store
                 .record_command_histogram_canonical_with_kind(canonical, elapsed, kind);
         }
@@ -13784,7 +13790,6 @@ fn hello_script_result(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
     Some(Err(SCRIPT_NOSCRIPT_ERROR.to_string()))
 }
 
-
 fn sync_script_result(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
     let command = argv.first()?;
     if !command.eq_ignore_ascii_case(b"SYNC") {
@@ -13917,8 +13922,10 @@ fn lua_literal_prefix_end(pat: &[u8], start: usize) -> usize {
     let mut end = start;
     while end < pat.len() {
         let byte = pat[end];
-        if matches!(byte, 0 | b'(' | b')' | b'$' | b'%' | b'[' | b'.' | b'*' | b'+' | b'-' | b'?')
-        {
+        if matches!(
+            byte,
+            0 | b'(' | b')' | b'$' | b'%' | b'[' | b'.' | b'*' | b'+' | b'-' | b'?'
+        ) {
             break;
         }
         // A suffix quantifies this byte, so it must remain visible to the
@@ -14259,7 +14266,9 @@ fn lua_pat_match(
         let literal_end = lua_literal_prefix_end(pat, pi);
         if literal_end > pi {
             let literal = &pat[pi..literal_end];
-            if s.get(si..).is_some_and(|remaining| remaining.starts_with(literal)) {
+            if s.get(si..)
+                .is_some_and(|remaining| remaining.starts_with(literal))
+            {
                 si += literal.len();
                 pi = literal_end;
                 continue 'match_pattern;
@@ -18458,14 +18467,20 @@ mod tests {
         // identity, not a copy, which is what `== string` pins.
         assert_eq!(run(&mut store, b"return type(getmetatable(''))"), "table");
         assert_eq!(
-            run(&mut store, b"return tostring(getmetatable('').__index == string)"),
+            run(
+                &mut store,
+                b"return tostring(getmetatable('').__index == string)"
+            ),
             "true"
         );
         // One metatable for every string, so two lookups yield the same table. Before this bead
         // BOTH sides were nil and this comparison was ALREADY true -- it only means something
         // alongside the type assertion above.
         assert_eq!(
-            run(&mut store, b"return tostring(getmetatable('') == getmetatable('abc'))"),
+            run(
+                &mut store,
+                b"return tostring(getmetatable('') == getmetatable('abc'))"
+            ),
             "true"
         );
         // Only strings have one. A catch-all returning the string metatable would pass every
@@ -18476,7 +18491,11 @@ mod tests {
             b"return type(getmetatable(nil))".as_slice(),
             b"return type(getmetatable({}))".as_slice(),
         ] {
-            assert_eq!(run(&mut store, src), "nil", "only strings carry the metatable");
+            assert_eq!(
+                run(&mut store, src),
+                "nil",
+                "only strings carry the metatable"
+            );
         }
 
         // The metatable is MUTABLE while the string table it points at is READ-ONLY. Upstream's
@@ -18562,15 +18581,12 @@ mod tests {
                  local gt = tostring('{a}' > '{b}') return lt .. ',' .. le .. ',' .. gt"
             );
             let got = match eval_script(src.as_bytes(), &[], &[], &mut store, 0) {
-                Ok(RespFrame::BulkString(Some(bytes))) => String::from_utf8_lossy(&bytes).into_owned(),
+                Ok(RespFrame::BulkString(Some(bytes))) => {
+                    String::from_utf8_lossy(&bytes).into_owned()
+                }
                 other => panic!("unexpected reply for {a:?} < {b:?}: {other:?}"),
             };
-            let expected = format!(
-                "{},{},{}",
-                want.is_lt(),
-                want.is_le(),
-                want.is_gt()
-            );
+            let expected = format!("{},{},{}", want.is_lt(), want.is_le(), want.is_gt());
             assert_eq!(got, expected, "comparing {a:?} with {b:?}");
         }
 
@@ -18588,7 +18604,11 @@ mod tests {
         };
         let mut want: Vec<&str> = vec!["B", "a", "__index", "fresh"];
         want.sort_by(|x, y| expect(x, y));
-        assert_eq!(sorted, want.join(","), "table.sort must use the same collation");
+        assert_eq!(
+            sorted,
+            want.join(","),
+            "table.sort must use the same collation"
+        );
     }
 
     #[test]
@@ -18607,11 +18627,17 @@ mod tests {
         // property and it survives a later change to where empty matches land.
         let nul_pat = run(&mut store, b"return (string.gsub('a\0b', '\0', 'X'))");
         let empty_pat = run(&mut store, b"return (string.gsub('a\0b', '', 'X'))");
-        assert_eq!(nul_pat, empty_pat, "a NUL-only pattern must behave as the empty pattern");
+        assert_eq!(
+            nul_pat, empty_pat,
+            "a NUL-only pattern must behave as the empty pattern"
+        );
 
         // The pattern is truncated at the NUL, so only the prefix matches.
         assert_eq!(run(&mut store, b"return string.match('ab', 'a\0b')"), "a");
-        assert_eq!(run(&mut store, b"return tostring(string.match('abc', '^\0'))"), "");
+        assert_eq!(
+            run(&mut store, b"return tostring(string.match('abc', '^\0'))"),
+            ""
+        );
 
         // A MALFORMED tail after the NUL is never seen, so it is not an error. These two would
         // raise if validation walked past the NUL, which is what fr used to do.
@@ -18623,14 +18649,20 @@ mod tests {
         // NUL) and searches the full bytes, so it locates the literal NUL. This agreed BEFORE the
         // fix and must still agree after it.
         assert_eq!(
-            run(&mut store, b"local a,b = string.find('a\0b', '\0') return tostring(a)..','..tostring(b)"),
+            run(
+                &mut store,
+                b"local a,b = string.find('a\0b', '\0') return tostring(a)..','..tostring(b)"
+            ),
             "2,2"
         );
 
         // CONTROL: a NUL in the SUBJECT is ordinary data -- the subject is bounded by length and
         // only the PATTERN is NUL-terminated.
         assert_eq!(
-            run(&mut store, b"return string.match('a\0b', 'a.b') == 'a\0b' and 'yes' or 'no'"),
+            run(
+                &mut store,
+                b"return string.match('a\0b', 'a.b') == 'a\0b' and 'yes' or 'no'"
+            ),
             "yes"
         );
     }
@@ -18647,9 +18679,18 @@ mod tests {
         };
 
         // gsub with a replacement that names no capture COMPLETES.
-        assert_eq!(run(&mut store, b"return (string.gsub('zazbz','(','X'))"), "XzXaXzXbXzX");
-        assert_eq!(run(&mut store, b"return (string.gsub('zazbz','a(','X'))"), "zXzbz");
-        assert_eq!(run(&mut store, b"return (string.gsub('a b','(','X'))"), "XaX XbX");
+        assert_eq!(
+            run(&mut store, b"return (string.gsub('zazbz','(','X'))"),
+            "XzXaXzXbXzX"
+        );
+        assert_eq!(
+            run(&mut store, b"return (string.gsub('zazbz','a(','X'))"),
+            "zXzbz"
+        );
+        assert_eq!(
+            run(&mut store, b"return (string.gsub('a b','(','X'))"),
+            "XaX XbX"
+        );
 
         // The same pattern still raises everywhere a capture IS read.
         for src in [
@@ -18672,7 +18713,10 @@ mod tests {
         );
 
         // A closed capture is unaffected, which is the control for all of the above.
-        assert_eq!(run(&mut store, b"return (string.gsub('zazbz','(a)','[%1]'))"), "z[a]zbz");
+        assert_eq!(
+            run(&mut store, b"return (string.gsub('zazbz','(a)','[%1]'))"),
+            "z[a]zbz"
+        );
     }
 
     #[test]
@@ -18691,19 +18735,37 @@ mod tests {
         // re-anchored at each new position, which is "start of this attempt" rather than "start of
         // the subject". Upstream tries an anchored pattern ONCE.
         assert_eq!(
-            run(&mut store, b"local r,n = string.gsub('aaa','^a','X') return r..'|'..tostring(n)"),
+            run(
+                &mut store,
+                b"local r,n = string.gsub('aaa','^a','X') return r..'|'..tostring(n)"
+            ),
             "Xaa|1"
         );
         // 'aba' agreed even while fr was wrong -- position 2 is not where the previous match ended.
         // Kept as the near-miss it is: on its own it certifies nothing.
-        assert_eq!(run(&mut store, b"return (string.gsub('aba','^a','X'))"), "Xba");
+        assert_eq!(
+            run(&mut store, b"return (string.gsub('aba','^a','X'))"),
+            "Xba"
+        );
         // A bare caret is an EMPTY anchored pattern: one empty match at the front, then stop.
-        assert_eq!(run(&mut store, b"return (string.gsub('a^b','^','X'))"), "Xa^b");
-        assert_eq!(run(&mut store, b"return (string.gsub('abc','^','X'))"), "Xabc");
+        assert_eq!(
+            run(&mut store, b"return (string.gsub('a^b','^','X'))"),
+            "Xa^b"
+        );
+        assert_eq!(
+            run(&mut store, b"return (string.gsub('abc','^','X'))"),
+            "Xabc"
+        );
         // Anchored and not matching must still leave the subject alone rather than consume it.
-        assert_eq!(run(&mut store, b"return (string.gsub('baa','^a','X'))"), "baa");
+        assert_eq!(
+            run(&mut store, b"return (string.gsub('baa','^a','X'))"),
+            "baa"
+        );
         // An UNanchored pattern must still replace everywhere, or the break would have eaten gsub.
-        assert_eq!(run(&mut store, b"return (string.gsub('aaa','a','X'))"), "XXX");
+        assert_eq!(
+            run(&mut store, b"return (string.gsub('aaa','a','X'))"),
+            "XXX"
+        );
 
         // gmatch is the one function upstream does not strip the caret for, so `^` is a plain byte
         // and 'a^b' yields the single caret -- not an empty match at every position.
@@ -18715,8 +18777,14 @@ mod tests {
             "1"
         );
         // find and match keep anchoring, including from a non-default init.
-        assert_eq!(run(&mut store, b"return tostring(string.find('baa','^a',2))"), "2");
-        assert_eq!(run(&mut store, b"return tostring(string.match('baa','^a',2))"), "a");
+        assert_eq!(
+            run(&mut store, b"return tostring(string.find('baa','^a',2))"),
+            "2"
+        );
+        assert_eq!(
+            run(&mut store, b"return tostring(string.match('baa','^a',2))"),
+            "a"
+        );
     }
 
     #[test]
@@ -18732,14 +18800,23 @@ mod tests {
         };
 
         // `)` is absent from SPECIALS, so find takes the plain branch and ANSWERS.
-        assert_eq!(run(&mut store, b"return tostring(string.find('a)b',')'))"), "2");
         assert_eq!(
-            run(&mut store, b"local a,b = string.find('xx)yy',')') return tostring(a)..','..tostring(b)"),
+            run(&mut store, b"return tostring(string.find('a)b',')'))"),
+            "2"
+        );
+        assert_eq!(
+            run(
+                &mut store,
+                b"local a,b = string.find('xx)yy',')') return tostring(a)..','..tostring(b)"
+            ),
             "3,3",
             "the plain branch returns both bounds, not just the start"
         );
         // No match still yields nil rather than the matcher's error.
-        assert_eq!(run(&mut store, b"return tostring(string.find('abc',')',9))"), "nil");
+        assert_eq!(
+            run(&mut store, b"return tostring(string.find('abc',')',9))"),
+            "nil"
+        );
 
         // FIND-ONLY. match, gmatch and gsub have no such branch upstream and all three raise on the
         // same pattern -- on BOTH engines. Without these, moving the fix into the pattern compiler
@@ -18758,8 +18835,14 @@ mod tests {
 
         // A pattern that DOES contain a special still goes to the matcher, or the branch would have
         // swallowed pattern matching whole.
-        assert_eq!(run(&mut store, b"return tostring(string.find('xaaa','a+'))"), "2");
-        assert_eq!(run(&mut store, b"return tostring(string.find('abc','^b'))"), "nil");
+        assert_eq!(
+            run(&mut store, b"return tostring(string.find('xaaa','a+'))"),
+            "2"
+        );
+        assert_eq!(
+            run(&mut store, b"return tostring(string.find('abc','^b'))"),
+            "nil"
+        );
 
         // strpbrk stops at the first NUL while the plain search uses the full length, so this
         // pattern is judged special-free on its first byte and then matched verbatim, `(` included.
@@ -24229,8 +24312,14 @@ end
         // And the gate returns the moment the obeyed source ends -- an exemption that failed to
         // clear would let ordinary clients write past maxmemory forever.
         store.must_obey_client = false;
-        let err = eval_script(b"return redis.call('set','k2','v')", &[], &[], &mut store, 0)
-            .expect_err("an ordinary client is still refused");
+        let err = eval_script(
+            b"return redis.call('set','k2','v')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("an ordinary client is still refused");
         assert!(
             err.contains("OOM command not allowed"),
             "expected the OOM refusal to come back, got {err}"
@@ -24244,14 +24333,8 @@ end
             "local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f({})",
             super::MAX_HEAP_CALL_CONTINUATIONS
         );
-        let ok = eval_script(
-            inside.as_bytes(),
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .expect("a recursion inside the bound must still run");
+        let ok = eval_script(inside.as_bytes(), &[], &[], &mut store, 0)
+            .expect("a recursion inside the bound must still run");
         assert_eq!(
             ok,
             RespFrame::Integer(super::MAX_HEAP_CALL_CONTINUATIONS as i64),
@@ -24262,14 +24345,8 @@ end
             "local function f(n) if n == 0 then return 0 end return 1 + f(n-1) end return f({})",
             super::MAX_HEAP_CALL_CONTINUATIONS + 1
         );
-        let err = eval_script(
-            past.as_bytes(),
-            &[],
-            &[],
-            &mut store,
-            0,
-        )
-        .expect_err("a recursion past the bound must be refused");
+        let err = eval_script(past.as_bytes(), &[], &[], &mut store, 0)
+            .expect_err("a recursion past the bound must be refused");
         assert!(
             err.contains("stack overflow"),
             "expected the incumbent's wording, got {err}"
@@ -24768,75 +24845,82 @@ end
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-        const DEEP: usize = 500; // comfortably past upstream's 200
-        let cases: [(&str, String); 4] = [
-            (
-                "parenthesised subexpressions (parse_expr re-entry)",
-                format!("return {}1{}", "(".repeat(DEEP), ")".repeat(DEEP)),
-            ),
-            (
-                "unary chain (parse_unary self-recursion)",
-                format!("return {}1", "not ".repeat(DEEP)),
-            ),
-            (
-                "right-associative concat (parse_concat self-recursion)",
-                format!("return {}'x'", "'x'..".repeat(DEEP)),
-            ),
-            (
-                "nested blocks (parse_block, upstream guards chunk() too)",
-                format!("{}{}", "do ".repeat(DEEP), "end ".repeat(DEEP)),
-            ),
-        ];
-        for (what, script) in &cases {
-            let err = parse_lua_chunk_located(script.as_bytes())
-                .err()
-                .unwrap_or_else(|| panic!("{what}: nesting {DEEP} deep was accepted, so the \
-                                           parser is still unbounded on this cycle"));
-            assert!(
-                err.1.contains("chunk has too many syntax levels"),
-                "{what}: expected upstream's message, got {:?}",
-                err.1
-            );
-        }
+                const DEEP: usize = 500; // comfortably past upstream's 200
+                let cases: [(&str, String); 4] = [
+                    (
+                        "parenthesised subexpressions (parse_expr re-entry)",
+                        format!("return {}1{}", "(".repeat(DEEP), ")".repeat(DEEP)),
+                    ),
+                    (
+                        "unary chain (parse_unary self-recursion)",
+                        format!("return {}1", "not ".repeat(DEEP)),
+                    ),
+                    (
+                        "right-associative concat (parse_concat self-recursion)",
+                        format!("return {}'x'", "'x'..".repeat(DEEP)),
+                    ),
+                    (
+                        "nested blocks (parse_block, upstream guards chunk() too)",
+                        format!("{}{}", "do ".repeat(DEEP), "end ".repeat(DEEP)),
+                    ),
+                ];
+                for (what, script) in &cases {
+                    let err = parse_lua_chunk_located(script.as_bytes())
+                        .err()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{what}: nesting {DEEP} deep was accepted, so the \
+                                           parser is still unbounded on this cycle"
+                            )
+                        });
+                    assert!(
+                        err.1.contains("chunk has too many syntax levels"),
+                        "{what}: expected upstream's message, got {:?}",
+                        err.1
+                    );
+                }
 
-        // ANTI-OVER-REJECTION. The bound is only correct if it refuses what
-        // upstream refuses and nothing more — a guard that also rejected
-        // ordinary scripts would trade a crash for a parity break, which is the
-        // trade zo5ac's tests exist to prevent. 50 levels is well inside 200.
-        const SHALLOW: usize = 50;
-        for (what, script) in [
-            (
-                "shallow parens",
-                format!("return {}1{}", "(".repeat(SHALLOW), ")".repeat(SHALLOW)),
-            ),
-            ("shallow unary chain", format!("return {}1", "not ".repeat(SHALLOW))),
-            (
-                "shallow concat",
-                format!("return {}'x'", "'x'..".repeat(SHALLOW)),
-            ),
-            (
-                "shallow blocks",
-                format!("{}{}", "do ".repeat(SHALLOW), "end ".repeat(SHALLOW)),
-            ),
-        ] {
-            assert!(
-                parse_lua_chunk_located(script.as_bytes()).is_ok(),
-                "{what}: {SHALLOW} levels is inside upstream's limit and must still parse"
-            );
-        }
+                // ANTI-OVER-REJECTION. The bound is only correct if it refuses what
+                // upstream refuses and nothing more — a guard that also rejected
+                // ordinary scripts would trade a crash for a parity break, which is the
+                // trade zo5ac's tests exist to prevent. 50 levels is well inside 200.
+                const SHALLOW: usize = 50;
+                for (what, script) in [
+                    (
+                        "shallow parens",
+                        format!("return {}1{}", "(".repeat(SHALLOW), ")".repeat(SHALLOW)),
+                    ),
+                    (
+                        "shallow unary chain",
+                        format!("return {}1", "not ".repeat(SHALLOW)),
+                    ),
+                    (
+                        "shallow concat",
+                        format!("return {}'x'", "'x'..".repeat(SHALLOW)),
+                    ),
+                    (
+                        "shallow blocks",
+                        format!("{}{}", "do ".repeat(SHALLOW), "end ".repeat(SHALLOW)),
+                    ),
+                ] {
+                    assert!(
+                        parse_lua_chunk_located(script.as_bytes()).is_ok(),
+                        "{what}: {SHALLOW} levels is inside upstream's limit and must still parse"
+                    );
+                }
 
-        // The counter must UNWIND: many sequential shallow nests in one chunk
-        // are not a deep nest. Without `leave_syntax_level` this accumulates
-        // and trips the bound, which is the obvious way to get this wrong.
-        let sequential = "return ".to_string()
-            + &(0..300)
-                .map(|_| "((1))".to_string())
-                .collect::<Vec<_>>()
-                .join(" + ");
-        assert!(
-            parse_lua_chunk_located(sequential.as_bytes()).is_ok(),
-            "300 sequential shallow nests must parse: depth is nesting, not a running total"
-        );
+                // The counter must UNWIND: many sequential shallow nests in one chunk
+                // are not a deep nest. Without `leave_syntax_level` this accumulates
+                // and trips the bound, which is the obvious way to get this wrong.
+                let sequential = "return ".to_string()
+                    + &(0..300)
+                        .map(|_| "((1))".to_string())
+                        .collect::<Vec<_>>()
+                        .join(" + ");
+                assert!(
+                    parse_lua_chunk_located(sequential.as_bytes()).is_ok(),
+                    "300 sequential shallow nests must parse: depth is nesting, not a running total"
+                );
             })
             .expect("spawn a test thread with headroom")
             .join()
@@ -24936,7 +25020,10 @@ end
             levels += 1;
             cur = &items[0];
         }
-        assert_eq!(levels, 100, "100 nested tables must survive the walk intact");
+        assert_eq!(
+            levels, 100,
+            "100 nested tables must survive the walk intact"
+        );
         assert!(
             matches!(cur, RespFrame::Array(Some(items)) if items.is_empty()),
             "the innermost value is the empty table the loop started from, got {cur:?}"
@@ -24980,7 +25067,11 @@ end
             0,
         )
         .expect("find over a 400-byte literal pattern");
-        assert_eq!(frame, RespFrame::Integer(1), "find must locate it at offset 1");
+        assert_eq!(
+            frame,
+            RespFrame::Integer(1),
+            "find must locate it at offset 1"
+        );
 
         // The guard must still REFUSE rather than recurse without limit: this one backtracks
         // genuinely, and upstream's own matcher has no bound at all, so fr answering at all is

@@ -9,6 +9,10 @@ mod packed_set;
 // (frankenredis-uhthd step 2); it serves SCAN and RANDOMKEY itself, which is what
 // let `ordered_keys` and `random_key_slots` be deleted.
 mod keyspace_dict;
+/// (frankenredis-rc-sentinel-failover) The `SLAVEOF` writes the sentinel
+/// failover machine asks fr-server to perform; re-exported so fr-runtime and
+/// fr-server can name the type without depending on fr-sentinel directly.
+pub use fr_sentinel::failover::FailoverIo as SentinelFailoverIo;
 use keyspace_dict::KeyDict;
 #[cfg(any(test, feature = "bench-reference"))]
 #[doc(hidden)]
@@ -16,10 +20,6 @@ pub use packed_set::PackedStreamLogBTreeReference;
 #[cfg(any(test, feature = "bench-reference"))]
 #[doc(hidden)]
 pub use packed_set::PackedZSet as BenchPackedZSet;
-/// (frankenredis-rc-sentinel-failover) The `SLAVEOF` writes the sentinel
-/// failover machine asks fr-server to perform; re-exported so fr-runtime and
-/// fr-server can name the type without depending on fr-sentinel directly.
-pub use fr_sentinel::failover::FailoverIo as SentinelFailoverIo;
 use packed_set::{
     GenericSet, HashFieldMap, ListValue, PackedStreamLog, PackedZSet, PackedZSetInsertResult,
     PackedZSetIter, RestoredListNode, RetainedListpackChunk,
@@ -393,7 +393,10 @@ impl StreamEntries {
     /// CALLER CONTRACT: validate_entries must already have returned Ok for this
     /// skeleton. See materialize_pending.
     #[must_use]
-    pub fn pending(skeleton: fr_persist::UpstreamStreamSkeleton, last_id: Option<StreamId>) -> Self {
+    pub fn pending(
+        skeleton: fr_persist::UpstreamStreamSkeleton,
+        last_id: Option<StreamId>,
+    ) -> Self {
         Self {
             repr: StreamRepr::Pending {
                 skeleton: Box::new(skeleton),
@@ -637,7 +640,12 @@ pub struct StreamClaimOptions {
 /// may land in the past-of-epoch, which the clamp then rejects.
 #[must_use]
 pub fn stream_claim_delivery_time_from_idle(now_ms: u64, idle_ms: i64) -> u64 {
-    clamp_stream_claim_delivery_time(now_ms, i64::try_from(now_ms).unwrap_or(i64::MAX).saturating_sub(idle_ms))
+    clamp_stream_claim_delivery_time(
+        now_ms,
+        i64::try_from(now_ms)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(idle_ms),
+    )
 }
 
 /// Clamp a resolved XCLAIM delivery time the way `t_stream.c::xclaimCommand` does.
@@ -2043,7 +2051,9 @@ impl SortedSet {
     ) -> Self {
         if max_listpack_entries >= 1 && member.len() <= max_listpack_value {
             Self {
-                repr: SortedSetRepr::Ready(SortedSetInner::Packed(PackedZSet::from_single(member, score))),
+                repr: SortedSetRepr::Ready(SortedSetInner::Packed(PackedZSet::from_single(
+                    member, score,
+                ))),
             }
         } else {
             Self::from_inner(SortedSetInner::Full(FullSortedSet::from_unique_pairs(
@@ -2063,11 +2073,15 @@ impl SortedSet {
                 .all(|(member, _)| member.len() <= max_listpack_value)
         {
             Self {
-                repr: SortedSetRepr::Ready(SortedSetInner::Packed(PackedZSet::from_unique_pairs(pairs))),
+                repr: SortedSetRepr::Ready(SortedSetInner::Packed(PackedZSet::from_unique_pairs(
+                    pairs,
+                ))),
             }
         } else {
             Self {
-                repr: SortedSetRepr::Ready(SortedSetInner::Full(FullSortedSet::from_unique_pairs(pairs))),
+                repr: SortedSetRepr::Ready(SortedSetInner::Full(FullSortedSet::from_unique_pairs(
+                    pairs,
+                ))),
             }
         }
     }
@@ -2099,7 +2113,9 @@ impl SortedSet {
                 .map(|(member, score)| (member.to_vec(), score))
                 .collect();
             Self {
-                repr: SortedSetRepr::Ready(SortedSetInner::Full(FullSortedSet::from_unique_pairs(owned_pairs))),
+                repr: SortedSetRepr::Ready(SortedSetInner::Full(FullSortedSet::from_unique_pairs(
+                    owned_pairs,
+                ))),
             }
         }
     }
@@ -3347,7 +3363,7 @@ impl<'a> Iterator for SortedSetIterAsc<'a> {
     // ELEMENT on the RDB path; the plain hint is declined at this body size
     // (9d7be9b44).
     #[inline(always)]
-fn next(&mut self) -> Option<Self::Item> {
+    fn next(&mut self) -> Option<Self::Item> {
         match &mut self.inner {
             SortedSetIterAscInner::Packed(iter) => iter.next(),
             SortedSetIterAscInner::Full(keys) => {
@@ -5716,7 +5732,10 @@ fn parse_decimal_float(rest: &str) -> Option<SortMagnitude> {
     // Rust's own parser handles the whole consumed slice, so the rounding is correct; the
     // scan above exists to decide the EXTENT and reject leftovers, which is the part that
     // differs from `parse::<f64>()`.
-    let value: f64 = rest[..mantissa_end].parse().ok().and_then(|_: f64| rest.parse().ok())?;
+    let value: f64 = rest[..mantissa_end]
+        .parse()
+        .ok()
+        .and_then(|_: f64| rest.parse().ok())?;
     Some(SortMagnitude {
         value,
         significand_nonzero: nonzero,
@@ -6436,7 +6455,6 @@ impl CommandHistogramTracker {
                 .record_with_kind(latency_us, kind);
         }
     }
-
 
     /// Record a command the caller STATICALLY KNOWS has no direct field, going straight to the
     /// `HashMap` and skipping the direct-field `match` entirely.
@@ -14699,7 +14717,8 @@ impl Store {
     /// so a READ command must use this rather than `drop_if_expired`.
     #[inline]
     fn key_is_logically_expired(&self, key: &[u8], now_ms: u64) -> bool {
-        self.expiry_ms(key).is_some_and(|deadline| deadline <= now_ms)
+        self.expiry_ms(key)
+            .is_some_and(|deadline| deadline <= now_ms)
     }
 
     #[inline]
@@ -22007,11 +22026,7 @@ impl Store {
                 // RESTORE route; its doc states the substituted predicate
                 // (`max_member_len <= max_listpack_value` for the `all`) picks the
                 // same tier, so OBJECT ENCODING is unchanged.
-                let max_member_len = members
-                    .iter()
-                    .map(|m| m.as_ref().len())
-                    .max()
-                    .unwrap_or(0);
+                let max_member_len = members.iter().map(|m| m.as_ref().len()).max().unwrap_or(0);
                 Self::refresh_set_encoding_flags_from_max_len(
                     &mut entry,
                     max_member_len,
@@ -33656,9 +33671,10 @@ impl Store {
             visit(logical);
         };
         match prefix_first_byte {
-            Some(first_byte) => this
-                .entries
-                .scan_first_byte(cursor, batch, first_byte, &mut scan_entry),
+            Some(first_byte) => {
+                this.entries
+                    .scan_first_byte(cursor, batch, first_byte, &mut scan_entry)
+            }
             None => this.entries.scan(cursor, batch, &mut scan_entry),
         }
     }
@@ -36233,7 +36249,6 @@ impl Store {
         code: &[u8],
         functions: Vec<FunctionEntry>,
     ) -> Result<String, StoreError> {
-
         // Upstream functions.c::functionsRegisterEngineLib rejects
         // libraries that don't register at least one function with
         // 'ERR No functions registered'. fr previously accepted
@@ -37454,7 +37469,10 @@ impl Store {
                 // Last-id fallback comes from VALIDATION, not from the log: reading
                 // it off the log dereferences the value and materializes it.
                 restored_stream_last_id = watermark.or(validated_last_id);
-                Value::Stream(Box::new(StreamEntries::pending(skeleton, validated_last_id)))
+                Value::Stream(Box::new(StreamEntries::pending(
+                    skeleton,
+                    validated_last_id,
+                )))
             }
             RDB_TYPE_LIST_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -44109,19 +44127,28 @@ mod tests {
     fn the_sorted_zset_gate_fires_on_real_redis_dump_bytes_i41sx() {
         // ZADD z 0 alpha 1 beta 2 gamma, then DUMP, on vendored redis-server 7.2.4.
         const REDIS_DUMP: &[u8] = &[
-            0x11, 0x21, 0x21, 0x00, 0x00, 0x00, 0x06, 0x00, 0x85, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x06,
-            0x00, 0x01, 0x84, 0x62, 0x65, 0x74, 0x61, 0x05, 0x01, 0x01, 0x85, 0x67, 0x61, 0x6d, 0x6d,
-            0x61, 0x06, 0x02, 0x01, 0xff, 0x0b, 0x00, 0x94, 0x81, 0x8e, 0x09, 0x95, 0xb8, 0x86, 0xc5
+            0x11, 0x21, 0x21, 0x00, 0x00, 0x00, 0x06, 0x00, 0x85, 0x61, 0x6c, 0x70, 0x68, 0x61,
+            0x06, 0x00, 0x01, 0x84, 0x62, 0x65, 0x74, 0x61, 0x05, 0x01, 0x01, 0x85, 0x67, 0x61,
+            0x6d, 0x6d, 0x61, 0x06, 0x02, 0x01, 0xff, 0x0b, 0x00, 0x94, 0x81, 0x8e, 0x09, 0x95,
+            0xb8, 0x86, 0xc5,
         ];
         // RDB_TYPE_ZSET_LISTPACK. If this ever changes, the fixture is stale and the rest of the
         // test would be reading the wrong bytes rather than failing honestly.
         assert_eq!(REDIS_DUMP[0], 17, "fixture must be a zset listpack payload");
         // 6-bit string length (top two bits 00), then that many listpack bytes, then the 2-byte RDB
         // version and 8-byte CRC footer.
-        assert_eq!(REDIS_DUMP[1] & 0xC0, 0, "fixture length prefix must be the 6-bit form");
+        assert_eq!(
+            REDIS_DUMP[1] & 0xC0,
+            0,
+            "fixture length prefix must be the 6-bit form"
+        );
         let len = (REDIS_DUMP[1] & 0x3F) as usize;
         let listpack = &REDIS_DUMP[2..2 + len];
-        assert_eq!(REDIS_DUMP.len(), 2 + len + 10, "fixture must end in the RDB footer");
+        assert_eq!(
+            REDIS_DUMP.len(),
+            2 + len + 10,
+            "fixture must end in the RDB footer"
+        );
 
         let decoded = fr_persist::listpack::decode_zset_spans_and_scores(listpack)
             .expect("real Redis listpack must decode");
@@ -44159,7 +44186,9 @@ mod tests {
             super::SORTED_SET_PACKED_DEFAULT_MAX_VALUE,
         );
         assert_eq!(
-            set.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect::<Vec<_>>(),
+            set.iter_asc()
+                .map(|(m, s)| (m.to_vec(), s))
+                .collect::<Vec<_>>(),
             vec![
                 (b"alpha".to_vec(), 0.0),
                 (b"beta".to_vec(), 1.0),
@@ -44187,10 +44216,8 @@ mod tests {
         ];
 
         // PACKED tier: ordered input and the SAME set shuffled must be indistinguishable.
-        let ordered: Vec<(&[u8], f64)> =
-            vec![(b"alpha", 0.0), (b"beta", 1.0), (b"gamma", 2.0)];
-        let unordered: Vec<(&[u8], f64)> =
-            vec![(b"gamma", 2.0), (b"alpha", 0.0), (b"beta", 1.0)];
+        let ordered: Vec<(&[u8], f64)> = vec![(b"alpha", 0.0), (b"beta", 1.0), (b"gamma", 2.0)];
+        let unordered: Vec<(&[u8], f64)> = vec![(b"gamma", 2.0), (b"alpha", 0.0), (b"beta", 1.0)];
         assert_eq!(build(ordered), want, "ordered payload must round-trip");
         assert_eq!(
             build(unordered),
@@ -44219,8 +44246,7 @@ mod tests {
             .enumerate()
             .map(|(i, m)| (m.as_slice(), i as f64))
             .collect();
-        let want_big: Vec<(Vec<u8>, f64)> =
-            big.iter().map(|(m, s)| (m.to_vec(), *s)).collect();
+        let want_big: Vec<(Vec<u8>, f64)> = big.iter().map(|(m, s)| (m.to_vec(), *s)).collect();
         big.reverse();
         assert_eq!(
             build(big),
@@ -47505,7 +47531,12 @@ mod tests {
             let mut store = Store::new();
             store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
             for idx in 0..2_000 {
-                store.set(format!("evict:{idx:06}").into_bytes(), vec![b'v'; 64], None, 0);
+                store.set(
+                    format!("evict:{idx:06}").into_bytes(),
+                    vec![b'v'; 64],
+                    None,
+                    0,
+                );
             }
             store
         }
@@ -47523,14 +47554,24 @@ mod tests {
 
         // Arm 2: same store, same limit, generous budget.
         let mut big = build();
-        let big_result =
-            big.run_bounded_eviction_loop(0, limit, 0, 5, 100_000, EvictionSafetyGateState::default());
+        let big_result = big.run_bounded_eviction_loop(
+            0,
+            limit,
+            0,
+            5,
+            100_000,
+            EvictionSafetyGateState::default(),
+        );
 
         println!(
             "usage={full} limit={limit}\n  max_cycles=4      {:?} evicted={} bytes_freed={} left={}\n  max_cycles=100k   {:?} evicted={} bytes_freed={} left={}",
-            prod_result.status, prod_result.evicted_keys, prod_result.bytes_freed,
+            prod_result.status,
+            prod_result.evicted_keys,
+            prod_result.bytes_freed,
             prod_result.bytes_to_free_after,
-            big_result.status, big_result.evicted_keys, big_result.bytes_freed,
+            big_result.status,
+            big_result.evicted_keys,
+            big_result.bytes_freed,
             big_result.bytes_to_free_after,
         );
 
@@ -48839,7 +48880,9 @@ mod tests {
 
         store.must_obey_client = true;
         assert_eq!(
-            store.append(b"k", b"6789", 0).expect("an obeyed source must not be refused"),
+            store
+                .append(b"k", b"6789", 0)
+                .expect("an obeyed source must not be refused"),
             9,
             "the grow path must apply the write the master already applied"
         );
@@ -48892,16 +48935,25 @@ mod tests {
             store.bitfield_reserve_for_write(b"k", 64, 8, 0).is_err(),
             "the BITFIELD reserve path is capped"
         );
-        assert!(store.bitfield_set(b"k", 64, 8, 1, 0).is_err(), "BITFIELD SET is capped");
         assert!(
-            store.bitfield_incrby(b"k", 64, 8, true, 0, |v| Some(v + 1)).is_err(),
+            store.bitfield_set(b"k", 64, 8, 1, 0).is_err(),
+            "BITFIELD SET is capped"
+        );
+        assert!(
+            store
+                .bitfield_incrby(b"k", 64, 8, true, 0, |v| Some(v + 1))
+                .is_err(),
             "BITFIELD INCRBY is capped"
         );
         assert!(
             store
                 .bitfield_apply_ops(
                     b"k",
-                    &[BitfieldOp::Set { offset: 64, bits: 8, signed: false }],
+                    &[BitfieldOp::Set {
+                        offset: 64,
+                        bits: 8,
+                        signed: false
+                    }],
                     0,
                     |_, v| Some(v),
                 )
@@ -48912,20 +48964,28 @@ mod tests {
         // Obeyed: the same five writes are applied, because they already happened elsewhere.
         store.must_obey_client = true;
         assert!(
-            !store.setbit(b"k", 64, true, 0).expect("an obeyed SETBIT must not be refused"),
+            !store
+                .setbit(b"k", 64, true, 0)
+                .expect("an obeyed SETBIT must not be refused"),
             "the bit was previously unset"
         );
         store
             .bitfield_reserve_for_write(b"k", 64, 8, 0)
             .expect("an obeyed reserve must not be refused");
-        store.bitfield_set(b"k", 64, 8, 1, 0).expect("an obeyed BITFIELD SET must not be refused");
+        store
+            .bitfield_set(b"k", 64, 8, 1, 0)
+            .expect("an obeyed BITFIELD SET must not be refused");
         store
             .bitfield_incrby(b"k", 64, 8, true, 0, |v| Some(v + 1))
             .expect("an obeyed BITFIELD INCRBY must not be refused");
         store
             .bitfield_apply_ops(
                 b"k",
-                &[BitfieldOp::Set { offset: 64, bits: 8, signed: false }],
+                &[BitfieldOp::Set {
+                    offset: 64,
+                    bits: 8,
+                    signed: false,
+                }],
                 0,
                 |_, v| Some(v),
             )
@@ -48934,8 +48994,14 @@ mod tests {
         // And the cap comes back when the obeyed source ends -- an exemption that failed to clear
         // would lift the limit for ordinary clients, turning a parity fix into unbounded growth.
         store.must_obey_client = false;
-        assert!(store.setbit(b"k", 64, false, 0).is_err(), "the cap must return");
-        assert!(store.bitfield_set(b"k", 64, 8, 1, 0).is_err(), "the cap must return for BITFIELD");
+        assert!(
+            store.setbit(b"k", 64, false, 0).is_err(),
+            "the cap must return"
+        );
+        assert!(
+            store.bitfield_set(b"k", 64, 8, 1, 0).is_err(),
+            "the cap must return for BITFIELD"
+        );
     }
 
     #[test]
@@ -55505,8 +55571,16 @@ mod tests {
             Vec::<Vec<u8>>::new(),
             "KEYS * after flush must be empty"
         );
-        assert_eq!(store.scan(0, None, 100, 0), (0, Vec::new()), "SCAN after flush must be empty");
-        assert_eq!(store.randomkey(0), None, "RANDOMKEY after flush must be None");
+        assert_eq!(
+            store.scan(0, None, 100, 0),
+            (0, Vec::new()),
+            "SCAN after flush must be empty"
+        );
+        assert_eq!(
+            store.randomkey(0),
+            None,
+            "RANDOMKEY after flush must be None"
+        );
     }
 
     /// (frankenredis-uhthd step 2) There is no ordered side index to defer any
@@ -55617,8 +55691,18 @@ mod tests {
         // somewhere to go and would be visible.
         let n = 2_000usize;
         for i in 0..n {
-            store.set(encode_db_key(0, format!("a:{i}").as_bytes()), vec![b'v'], None, 1);
-            store.set(encode_db_key(1, format!("b:{i}").as_bytes()), vec![b'v'], None, 1);
+            store.set(
+                encode_db_key(0, format!("a:{i}").as_bytes()),
+                vec![b'v'],
+                None,
+                1,
+            );
+            store.set(
+                encode_db_key(1, format!("b:{i}").as_bytes()),
+                vec![b'v'],
+                None,
+                1,
+            );
         }
         let buckets_before = store.entries.bucket_count();
         let len_before = store.entries.len();
@@ -55635,7 +55719,11 @@ mod tests {
             buckets_before,
             "SWAPDB resized the bucket table despite a net-zero key count"
         );
-        assert_eq!(store.entries.len(), len_before, "SWAPDB changed the key count");
+        assert_eq!(
+            store.entries.len(),
+            len_before,
+            "SWAPDB changed the key count"
+        );
 
         // The swap itself must still be correct: every key changed database.
         for i in 0..n {
@@ -55949,7 +56037,6 @@ mod tests {
         }
         with_direct_histogram_fields!(assert_reported);
     }
-
 
     #[test]
     fn command_histogram_new_direct_fields_report_consistently_with_hashmap_reference() {
@@ -66841,8 +66928,7 @@ mod tests {
 
         let missing = present_throughout.difference(&seen).count();
         assert_eq!(
-            missing,
-            0,
+            missing, 0,
             "SCAN dropped {missing} keys that were present for the whole scan"
         );
     }
@@ -83955,44 +84041,62 @@ mod tests {
         // (label, sets) — chosen to hit both the int-set fast path and the generic
         // `contains` probe loop, plus the degenerate cases around them.
         let cases: Vec<(&str, Vec<Vec<&[u8]>>)> = vec![
-            ("identical strings", vec![
-                vec![b"m1".as_slice(), b"m2", b"m3"],
-                vec![b"m1".as_slice(), b"m2", b"m3"],
-            ]),
-            ("partial overlap", vec![
-                vec![b"m1".as_slice(), b"m2", b"m3"],
-                vec![b"m2".as_slice(), b"m3", b"m4"],
-            ]),
-            ("disjoint", vec![
-                vec![b"m1".as_slice(), b"m2"],
-                vec![b"n1".as_slice(), b"n2"],
-            ]),
+            (
+                "identical strings",
+                vec![
+                    vec![b"m1".as_slice(), b"m2", b"m3"],
+                    vec![b"m1".as_slice(), b"m2", b"m3"],
+                ],
+            ),
+            (
+                "partial overlap",
+                vec![
+                    vec![b"m1".as_slice(), b"m2", b"m3"],
+                    vec![b"m2".as_slice(), b"m3", b"m4"],
+                ],
+            ),
+            (
+                "disjoint",
+                vec![vec![b"m1".as_slice(), b"m2"], vec![b"n1".as_slice(), b"n2"]],
+            ),
             // Integer members take `as_int_slice()` in sintercard and NOT in sinter, so
             // this is the case where the two bodies diverge most.
-            ("int sets overlapping", vec![
-                vec![b"1".as_slice(), b"2", b"3", b"4"],
-                vec![b"3".as_slice(), b"4", b"5"],
-            ]),
-            ("int sets disjoint", vec![
-                vec![b"1".as_slice(), b"2"],
-                vec![b"7".as_slice(), b"8"],
-            ]),
+            (
+                "int sets overlapping",
+                vec![
+                    vec![b"1".as_slice(), b"2", b"3", b"4"],
+                    vec![b"3".as_slice(), b"4", b"5"],
+                ],
+            ),
+            (
+                "int sets disjoint",
+                vec![vec![b"1".as_slice(), b"2"], vec![b"7".as_slice(), b"8"]],
+            ),
             // Mixed encodings: one int-encoded, one not, so the int fast path must bail.
-            ("mixed encodings", vec![
-                vec![b"1".as_slice(), b"2", b"3"],
-                vec![b"2".as_slice(), b"3", b"x"],
-            ]),
-            ("three keys", vec![
-                vec![b"a".as_slice(), b"b", b"c", b"d"],
-                vec![b"b".as_slice(), b"c", b"d"],
-                vec![b"c".as_slice(), b"d", b"e"],
-            ]),
+            (
+                "mixed encodings",
+                vec![
+                    vec![b"1".as_slice(), b"2", b"3"],
+                    vec![b"2".as_slice(), b"3", b"x"],
+                ],
+            ),
+            (
+                "three keys",
+                vec![
+                    vec![b"a".as_slice(), b"b", b"c", b"d"],
+                    vec![b"b".as_slice(), b"c", b"d"],
+                    vec![b"c".as_slice(), b"d", b"e"],
+                ],
+            ),
             // Large enough to leave the packed encoding and become hash-backed, which is
             // the encoding sintercard_big actually measures.
-            ("large hash-backed", vec![
-                (0..300).map(|_| b"placeholder".as_slice()).collect(),
-                (0..300).map(|_| b"placeholder".as_slice()).collect(),
-            ]),
+            (
+                "large hash-backed",
+                vec![
+                    (0..300).map(|_| b"placeholder".as_slice()).collect(),
+                    (0..300).map(|_| b"placeholder".as_slice()).collect(),
+                ],
+            ),
         ];
 
         for (label, sets) in cases {

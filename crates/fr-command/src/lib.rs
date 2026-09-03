@@ -14444,60 +14444,56 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // Read BEFORE the borrow below so the probe and the library come from the same
     // observation of the library set.
     let store_generation = store.function_generation();
-    let (library, has_no_writes, has_allow_oom, has_allow_stale, has_no_cluster) =
-        match store.function_get(func_name) {
-            Some((lib, func)) => {
-                let no_writes = func
-                    .flags
-                    .iter()
-                    .any(|f| f.eq_ignore_ascii_case("no-writes"));
-                // (frankenredis-oo3aw) A function declares allow-oom in its own registered flags
-                // rather than in a shebang, so it is read here alongside no-writes.
-                let allow_oom = func
-                    .flags
-                    .iter()
-                    .any(|f| f.eq_ignore_ascii_case("allow-oom"));
-                // (frankenredis-eh2ct) And the two the prepare chain gained with it. Same source,
-                // same comparison -- a FUNCTION's flags are registered strings where an EVAL's are
-                // shebang tokens, which is the only reason these are read here rather than through
-                // `script_shebang_has_flag`.
-                //
-                // FOUR is where this tuple stops being readable; `allow-cross-slot-keys` is the only
-                // upstream flag left unread, and it is cluster-routing-only. If it ever needs
-                // reading, bundle all five into a struct rather than widening this again.
-                let allow_stale = func
-                    .flags
-                    .iter()
-                    .any(|f| f.eq_ignore_ascii_case("allow-stale"));
-                let no_cluster = func
-                    .flags
-                    .iter()
-                    .any(|f| f.eq_ignore_ascii_case("no-cluster"));
-                // `Ok` = already executed and retained; `Err` = the source to execute once. A Result
-                // rather than two Options so "cached AND a source" and "neither" are not
-                // representable.
-                match lua_eval::fcall_cached_library_callbacks(
-                    lib.name.as_bytes(),
-                    store_generation,
-                ) {
-                    Some(callbacks) => {
-                        (Ok(callbacks), no_writes, allow_oom, allow_stale, no_cluster)
-                    }
-                    None => (
-                        // The NAME travels with the source: the load re-probes and inserts
-                        // under the name, and it cannot recover the name from the body.
-                        Err((lib.name.clone().into_bytes(), lib.code.clone())),
-                        no_writes,
-                        allow_oom,
-                        allow_stale,
-                        no_cluster,
-                    ),
-                }
+    let (library, has_no_writes, has_allow_oom, has_allow_stale, has_no_cluster) = match store
+        .function_get(func_name)
+    {
+        Some((lib, func)) => {
+            let no_writes = func
+                .flags
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case("no-writes"));
+            // (frankenredis-oo3aw) A function declares allow-oom in its own registered flags
+            // rather than in a shebang, so it is read here alongside no-writes.
+            let allow_oom = func
+                .flags
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case("allow-oom"));
+            // (frankenredis-eh2ct) And the two the prepare chain gained with it. Same source,
+            // same comparison -- a FUNCTION's flags are registered strings where an EVAL's are
+            // shebang tokens, which is the only reason these are read here rather than through
+            // `script_shebang_has_flag`.
+            //
+            // FOUR is where this tuple stops being readable; `allow-cross-slot-keys` is the only
+            // upstream flag left unread, and it is cluster-routing-only. If it ever needs
+            // reading, bundle all five into a struct rather than widening this again.
+            let allow_stale = func
+                .flags
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case("allow-stale"));
+            let no_cluster = func
+                .flags
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case("no-cluster"));
+            // `Ok` = already executed and retained; `Err` = the source to execute once. A Result
+            // rather than two Options so "cached AND a source" and "neither" are not
+            // representable.
+            match lua_eval::fcall_cached_library_callbacks(lib.name.as_bytes(), store_generation) {
+                Some(callbacks) => (Ok(callbacks), no_writes, allow_oom, allow_stale, no_cluster),
+                None => (
+                    // The NAME travels with the source: the load re-probes and inserts
+                    // under the name, and it cannot recover the name from the body.
+                    Err((lib.name.clone().into_bytes(), lib.code.clone())),
+                    no_writes,
+                    allow_oom,
+                    allow_stale,
+                    no_cluster,
+                ),
             }
-            None => {
-                return Ok(RespFrame::Error("ERR Function not found".to_string()));
-            }
-        };
+        }
+        None => {
+            return Ok(RespFrame::Error("ERR Function not found".to_string()));
+        }
+    };
 
     // (frankenredis-ascgr) Upstream functions.c::fcallCommandGeneric
     // line 638-641 uses `getLongLongFromObject` (no _OrReply suffix)
@@ -17203,7 +17199,9 @@ fn lcs(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
     // t_string.c:791, ahead of the transient-memory check at :812. Order is the point: putting
     // it after would answer the memory error for an input the incumbent answers this one for.
     if lcs_string_too_long(a.len(), b.len()) {
-        return Err(CommandError::Custom("ERR String too long for LCS".to_string()));
+        return Err(CommandError::Custom(
+            "ERR String too long for LCS".to_string(),
+        ));
     }
 
     let mut len_only = false;
@@ -19786,8 +19784,12 @@ pub fn command_is_noscript(argv: &[Vec<u8>]) -> bool {
     };
     if command_has_subcommands_bytes(parent) && argv.len() >= 2 {
         let fullname = canonical_command_fullname(argv);
-        return subcommand_table_index(fullname.as_bytes())
-            .is_some_and(|index| SUBCOMMAND_TABLE[index].2.split(' ').any(|f| f == "noscript"));
+        return subcommand_table_index(fullname.as_bytes()).is_some_and(|index| {
+            SUBCOMMAND_TABLE[index]
+                .2
+                .split(' ')
+                .any(|f| f == "noscript")
+        });
     }
     command_table_index(parent)
         .is_some_and(|index| COMMAND_TABLE[index].2.split(' ').any(|f| f == "noscript"))
@@ -19890,7 +19892,11 @@ pub fn script_effective_command_flags(
             .flags
             .iter()
             .any(|f| f.eq_ignore_ascii_case("allow-stale"));
-        return Some(rebuild_script_command_flags(no_writes, allow_oom, allow_stale));
+        return Some(rebuild_script_command_flags(
+            no_writes,
+            allow_oom,
+            allow_stale,
+        ));
     }
 
     let is_evalsha =
@@ -20719,11 +20725,7 @@ pub fn resolve_command_name_and_arity(argv: &[Vec<u8>]) -> (Option<&'static str>
             None => (None, parent_ok, parent_ok),
         };
     }
-    (
-        parent_idx.map(|i| COMMAND_TABLE[i].0),
-        parent_ok,
-        parent_ok,
-    )
+    (parent_idx.map(|i| COMMAND_TABLE[i].0), parent_ok, parent_ok)
 }
 
 #[must_use]
@@ -27244,10 +27246,7 @@ fn eval_cmd(
                 )
             })
             .or_else(|| {
-                script_prepare_disk_error_refusal(
-                    store,
-                    script_shebang_has_no_writes_flag(script),
-                )
+                script_prepare_disk_error_refusal(store, script_shebang_has_no_writes_flag(script))
             })
             .or_else(|| {
                 script_prepare_ro_command_refusal(
@@ -27430,7 +27429,10 @@ fn evalsha_cmd(
         // The body is fetched HERE rather than held across the call: it is needed only to
         // render an error, so the hot path never materialises it.
         Err(e) => {
-            let body = store.script_get_hex(&sha_hex).map(<[u8]>::to_vec).unwrap_or_default();
+            let body = store
+                .script_get_hex(&sha_hex)
+                .map(<[u8]>::to_vec)
+                .unwrap_or_default();
             Ok(eval_script_error_reply(&body, e, store.lua_error_line))
         }
     };
@@ -29891,7 +29893,8 @@ fn bitfield_cmd(
         while i < argv.len() {
             if argv[i].eq_ignore_ascii_case(b"GET") {
                 if let Some((signed, bits)) = bitfield_parse_encoding(&argv[i + 1])
-                    && let Some(bit_offset) = bitfield_parse_offset(&argv[i + 2], bits, offset_limit)
+                    && let Some(bit_offset) =
+                        bitfield_parse_offset(&argv[i + 2], bits, offset_limit)
                 {
                     ops.push((bit_offset, bits, signed));
                 }
@@ -30234,8 +30237,8 @@ fn bitfield_ro_cmd(
             // Args already validated above.
             let (signed, bits) =
                 bitfield_parse_encoding(&argv[i + 1]).expect("GET encoding validated");
-            let bit_offset =
-                bitfield_parse_offset(&argv[i + 2], bits, offset_limit).expect("GET offset validated");
+            let bit_offset = bitfield_parse_offset(&argv[i + 2], bits, offset_limit)
+                .expect("GET offset validated");
             let val = store
                 .bitfield_get_no_stat(key, bit_offset, bits, signed, now_ms)
                 .map_err(CommandError::Store)?;
@@ -31279,7 +31282,11 @@ fn ascii_alnum_fast_path_agrees_with(
     for byte in (b'0'..=b'9').chain(b'a'..=b'z').chain(b'A'..=b'Z') {
         probes.push((byte as char).to_string());
     }
-    probes.extend(ASCII_ALNUM_TAILORING_PROBES.iter().map(|probe| (*probe).to_string()));
+    probes.extend(
+        ASCII_ALNUM_TAILORING_PROBES
+            .iter()
+            .map(|probe| (*probe).to_string()),
+    );
     for (index, left) in probes.iter().enumerate() {
         for right in &probes[index..] {
             let Some(fast_answer) = fast(left.as_bytes(), right.as_bytes()) else {
@@ -31327,9 +31334,8 @@ impl LibcCollationLocale {
         let name = CString::new(name).map_err(|_| ())?;
         // SAFETY: `name` is NUL-terminated; `LC_COLLATE_MASK` requests only collation; null base
         // asks libc to allocate a new locale. A null result becomes an error before it is stored.
-        let raw = unsafe {
-            libc::newlocale(libc::LC_COLLATE_MASK, name.as_ptr(), std::ptr::null_mut())
-        };
+        let raw =
+            unsafe { libc::newlocale(libc::LC_COLLATE_MASK, name.as_ptr(), std::ptr::null_mut()) };
         if raw.is_null() {
             Err(())
         } else {
@@ -31464,9 +31470,9 @@ fn active_sort_alpha_collation() -> &'static SortAlphaCollation {
     static COLLATION: std::sync::OnceLock<SortAlphaCollation> = std::sync::OnceLock::new();
     COLLATION.get_or_init(|| {
         let collator = resolve_sort_alpha_collator();
-        let ascii_fast_path = collator
-            .as_ref()
-            .is_some_and(|collator| ascii_alnum_fast_path_agrees_with(collator, ascii_alnum_collate));
+        let ascii_fast_path = collator.as_ref().is_some_and(|collator| {
+            ascii_alnum_fast_path_agrees_with(collator, ascii_alnum_collate)
+        });
         SortAlphaCollation {
             collator,
             ascii_fast_path,
@@ -31518,9 +31524,7 @@ pub fn sort_alpha_compare_with_ascii_fast_path(
     let Some(collator) = collator else {
         return left.cmp(right);
     };
-    if ascii_fast_path
-        && let Some(ordering) = ascii_alnum_collate(left, right)
-    {
+    if ascii_fast_path && let Some(ordering) = ascii_alnum_collate(left, right) {
         return ordering;
     }
     match (std::str::from_utf8(left), std::str::from_utf8(right)) {
@@ -32356,14 +32360,20 @@ mod tests {
         // And the default still renders key:N.
         let mut s = Store::new();
         populate(&mut s, 0, &[b"2"]);
-        assert!(s.exists_no_touch(&phys(0, "key:0"), 1), "default prefix is key:N");
+        assert!(
+            s.exists_no_touch(&phys(0, "key:0"), 1),
+            "default prefix is key:N"
+        );
 
         // 3. SIZE. `createStringObject(NULL,valsize)` + memcpy of min(valsize,len) bytes
         //    of "value:N" -- the body TRUNCATED or NUL-PADDED, never a fill byte. fr
         //    used vec![b'A'; size].
         let mut s = Store::new();
         populate(&mut s, 0, &[b"1", b"p", b"12"]);
-        let v = s.get(&phys(0, "p:0"), 1).expect("get ok").expect("p:0 exists");
+        let v = s
+            .get(&phys(0, "p:0"), 1)
+            .expect("get ok")
+            .expect("p:0 exists");
         assert_eq!(
             v,
             b"value:0\0\0\0\0\0".to_vec(),
@@ -32372,8 +32382,15 @@ mod tests {
         // Truncation when valsize is shorter than the body.
         let mut s = Store::new();
         populate(&mut s, 0, &[b"1", b"p", b"3"]);
-        let v = s.get(&phys(0, "p:0"), 1).expect("get ok").expect("p:0 exists");
-        assert_eq!(v, b"val".to_vec(), "size shorter than the body truncates it");
+        let v = s
+            .get(&phys(0, "p:0"), 1)
+            .expect("get ok")
+            .expect("p:0 exists");
+        assert_eq!(
+            v,
+            b"val".to_vec(),
+            "size shorter than the body truncates it"
+        );
 
         // 4. EXISTING KEYS ARE LEFT ALONE. `if (lookupKeyWrite(..) != NULL) continue;`
         //    fr overwrote, which silently destroys whatever a test had staged.
@@ -32381,7 +32398,9 @@ mod tests {
         s.set(phys(0, "key:0"), b"ORIGINAL".to_vec(), None, 1);
         populate(&mut s, 0, &[b"2"]);
         assert_eq!(
-            s.get(&phys(0, "key:0"), 1).expect("get ok").expect("key:0 exists"),
+            s.get(&phys(0, "key:0"), 1)
+                .expect("get ok")
+                .expect("key:0 exists"),
             b"ORIGINAL".to_vec(),
             "an existing key must survive DEBUG POPULATE untouched"
         );
@@ -32418,7 +32437,7 @@ mod tests {
             b"E0e1F9fa".to_vec(),                                 // mixed case, short
             b"".to_vec(),                                         // empty
             b"not-a-sha".to_vec(),                                // ascii, non-hex
-            "\u{00e9}\u{4e2d}\u{1f600}".as_bytes().to_vec(),       // valid multi-byte
+            "\u{00e9}\u{4e2d}\u{1f600}".as_bytes().to_vec(),      // valid multi-byte
             vec![0xff, 0xfe, 0xfd],                               // wholly invalid
             vec![b'a', 0xff, b'B'],                               // invalid mid-string
             vec![0xe2, 0x82],                                     // truncated 3-byte seq
@@ -32427,11 +32446,7 @@ mod tests {
             vec![0x00, b'x', 0x7f],                               // NUL and DEL are ascii
         ];
         for c in &cases {
-            assert_eq!(
-                new(c),
-                old(c),
-                "normalisation diverged for {c:?}"
-            );
+            assert_eq!(new(c), old(c), "normalisation diverged for {c:?}");
         }
 
         // ANTI-VACUITY: the invalid cases must actually exercise the fallback, otherwise
@@ -32440,7 +32455,10 @@ mod tests {
             .iter()
             .filter(|c| std::str::from_utf8(c).is_err())
             .count();
-        assert!(invalid >= 4, "only {invalid} invalid-UTF-8 cases reached the fallback");
+        assert!(
+            invalid >= 4,
+            "only {invalid} invalid-UTF-8 cases reached the fallback"
+        );
         // And at least one of them must really contain the replacement character, i.e.
         // the lossy behaviour is preserved rather than bypassed.
         assert!(
@@ -36531,8 +36549,8 @@ mod tests {
         store.notify_keyspace_events = notify_all;
         store.set(b"k".to_vec(), b"42".to_vec(), Some(40), 0);
         let _ = store.drain_keyspace_notifications();
-        let got = dispatch_argv(&[b"GET".to_vec(), b"k".to_vec()], &mut store, 100_000)
-            .expect("get");
+        let got =
+            dispatch_argv(&[b"GET".to_vec(), b"k".to_vec()], &mut store, 100_000).expect("get");
         assert_eq!(got, RespFrame::BulkString(None));
         let events = store.drain_keyspace_notifications();
         assert!(
@@ -36904,18 +36922,12 @@ mod tests {
     fn keys_never_returns_a_logically_expired_key_on_any_pattern() {
         // Every pattern that matches `k`, across both the literal-prefix branch (`k`, `k*`)
         // and the full-scan branch (`*`, `?`, `[k]`, `*k`).
-        for pattern in [
-            &b"k"[..], b"k*", b"*", b"?", b"[k]", b"*k", b"\\k",
-        ] {
+        for pattern in [&b"k"[..], b"k*", b"*", b"?", b"[k]", b"*k", b"\\k"] {
             let mut store = Store::new();
             // The ONLY volatile key in the db, so the reap takes expires_count to zero.
             store.set(b"k".to_vec(), b"42".to_vec(), Some(40), 0);
-            let out = dispatch_argv(
-                &[b"KEYS".to_vec(), pattern.to_vec()],
-                &mut store,
-                100_000,
-            )
-            .expect("keys");
+            let out = dispatch_argv(&[b"KEYS".to_vec(), pattern.to_vec()], &mut store, 100_000)
+                .expect("keys");
             assert_eq!(
                 out,
                 RespFrame::Array(Some(vec![])),
@@ -36929,8 +36941,8 @@ mod tests {
         for pattern in [&b"k"[..], b"k*", b"*", b"?", b"[k]", b"*k"] {
             let mut store = Store::new();
             store.set(b"k".to_vec(), b"42".to_vec(), Some(100_000), 0);
-            let out = dispatch_argv(&[b"KEYS".to_vec(), pattern.to_vec()], &mut store, 1)
-                .expect("keys");
+            let out =
+                dispatch_argv(&[b"KEYS".to_vec(), pattern.to_vec()], &mut store, 1).expect("keys");
             assert_eq!(
                 out,
                 RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"k".to_vec()))])),
@@ -36944,8 +36956,8 @@ mod tests {
         let mut store = Store::new();
         store.set(b"k".to_vec(), b"42".to_vec(), Some(40), 0);
         store.set(b"kalive".to_vec(), b"1".to_vec(), None, 0);
-        let out = dispatch_argv(&[b"KEYS".to_vec(), b"k*".to_vec()], &mut store, 100_000)
-            .expect("keys");
+        let out =
+            dispatch_argv(&[b"KEYS".to_vec(), b"k*".to_vec()], &mut store, 100_000).expect("keys");
         assert_eq!(
             out,
             RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"kalive".to_vec()))])),
@@ -43098,28 +43110,48 @@ mod tests {
         // no flags at all: a write, denyoom, not stale. This is the `fcall` row.
         assert_eq!(
             rebuild(false, false, false),
-            super::ScriptCommandFlags { stale: false, write: true, denyoom: true }
+            super::ScriptCommandFlags {
+                stale: false,
+                write: true,
+                denyoom: true
+            }
         );
         // no-writes: not a write, and NOT denyoom -- no-writes implies allow-oom. This is the
         // `fcall_ro` row, and it is why upstream answers it with the stale gate rather than the
         // read-only-replica gate.
         assert_eq!(
             rebuild(true, false, false),
-            super::ScriptCommandFlags { stale: false, write: false, denyoom: false }
+            super::ScriptCommandFlags {
+                stale: false,
+                write: false,
+                denyoom: false
+            }
         );
         // allow-oom alone clears denyoom but leaves it a write.
         assert_eq!(
             rebuild(false, true, false),
-            super::ScriptCommandFlags { stale: false, write: true, denyoom: false }
+            super::ScriptCommandFlags {
+                stale: false,
+                write: true,
+                denyoom: false
+            }
         );
         // allow-stale is the ONLY way STALE comes back, whatever the command table says.
         assert_eq!(
             rebuild(false, false, true),
-            super::ScriptCommandFlags { stale: true, write: true, denyoom: true }
+            super::ScriptCommandFlags {
+                stale: true,
+                write: true,
+                denyoom: true
+            }
         );
         assert_eq!(
             rebuild(true, false, true),
-            super::ScriptCommandFlags { stale: true, write: false, denyoom: false }
+            super::ScriptCommandFlags {
+                stale: true,
+                write: false,
+                denyoom: false
+            }
         );
     }
 
@@ -43129,9 +43161,7 @@ mod tests {
     fn script_effective_command_flags_resolves_and_declines_like_upstream_3bda1() {
         let mut store = Store::new();
 
-        let argv = |parts: &[&[u8]]| -> Vec<Vec<u8>> {
-            parts.iter().map(|p| p.to_vec()).collect()
-        };
+        let argv = |parts: &[&[u8]]| -> Vec<Vec<u8>> { parts.iter().map(|p| p.to_vec()).collect() };
 
         // NOT a script command -> None (use the table).
         assert_eq!(
@@ -43155,14 +43185,26 @@ mod tests {
                 &argv(&[b"EVAL", b"#!lua\nreturn 1", b"0"]),
                 &store
             ),
-            Some(super::ScriptCommandFlags { stale: false, write: true, denyoom: true })
+            Some(super::ScriptCommandFlags {
+                stale: false,
+                write: true,
+                denyoom: true
+            })
         );
         assert_eq!(
             super::script_effective_command_flags(
-                &argv(&[b"EVAL", b"#!lua flags=allow-stale,no-writes\nreturn 1", b"0"]),
+                &argv(&[
+                    b"EVAL",
+                    b"#!lua flags=allow-stale,no-writes\nreturn 1",
+                    b"0"
+                ]),
                 &store
             ),
-            Some(super::ScriptCommandFlags { stale: true, write: false, denyoom: false })
+            Some(super::ScriptCommandFlags {
+                stale: true,
+                write: false,
+                denyoom: false
+            })
         );
 
         // EVALSHA with a non-40-byte argument -> None (eval.c:386), and an unknown 40-byte sha
@@ -43172,10 +43214,7 @@ mod tests {
             None
         );
         assert_eq!(
-            super::script_effective_command_flags(
-                &argv(&[b"EVALSHA", &[b'0'; 40], b"0"]),
-                &store
-            ),
+            super::script_effective_command_flags(&argv(&[b"EVALSHA", &[b'0'; 40], b"0"]), &store),
             None
         );
 
@@ -43198,7 +43237,11 @@ mod tests {
                 &[b"EVALSHA".to_vec(), sha.clone(), b"0".to_vec()],
                 &store
             ),
-            Some(super::ScriptCommandFlags { stale: false, write: false, denyoom: false }),
+            Some(super::ScriptCommandFlags {
+                stale: false,
+                write: false,
+                denyoom: false
+            }),
             "a cached shebang body must be rebuilt, not read from the table"
         );
 
@@ -43226,13 +43269,21 @@ mod tests {
 
         assert_eq!(
             super::script_effective_command_flags(&argv(&[b"FCALL", b"wfn", b"0"]), &store),
-            Some(super::ScriptCommandFlags { stale: false, write: true, denyoom: true }),
+            Some(super::ScriptCommandFlags {
+                stale: false,
+                write: true,
+                denyoom: true
+            }),
             "a flagless function is a WRITE and not stale-safe, so the read-only-replica gate \
              answers it -- upstream says READONLY here"
         );
         assert_eq!(
             super::script_effective_command_flags(&argv(&[b"FCALL_RO", b"rofn", b"0"]), &store),
-            Some(super::ScriptCommandFlags { stale: false, write: false, denyoom: false }),
+            Some(super::ScriptCommandFlags {
+                stale: false,
+                write: false,
+                denyoom: false
+            }),
             "a no-writes function is NOT a write, so the stale gate answers it instead -- \
              upstream says MASTERDOWN here"
         );
@@ -43296,11 +43347,7 @@ mod tests {
 
         // A SHEBANG body with no flags is refused by the OTHER arm, with the OTHER wording.
         let reply = dispatch_argv(
-            &[
-                b"EVAL".to_vec(),
-                b"#!lua\nreturn 1".to_vec(),
-                b"0".to_vec(),
-            ],
+            &[b"EVAL".to_vec(), b"#!lua\nreturn 1".to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
@@ -43437,7 +43484,6 @@ mod tests {
         }
     }
 
-
     /// The COMPAT-MODE half of the same two gates -- the half fr was missing entirely.
     ///
     /// Upstream wraps every `scriptPrepareForRun` check in
@@ -43483,7 +43529,9 @@ mod tests {
             RespFrame::Error(msg) => {
                 assert!(msg.contains(DENIAL), "expected the disk denial, got {msg}")
             }
-            other => panic!("a compat-mode script must not write through a disk error, got {other:?}"),
+            other => {
+                panic!("a compat-mode script must not write through a disk error, got {other:?}")
+            }
         }
 
         // 3. ORDER. Upstream tests disk at :379 and quorum at :387, so a host failing BOTH
@@ -43527,7 +43575,10 @@ mod tests {
 
         // 6. DEFAULTS PERMISSIVE. A Store built outside a runtime must behave as it did before.
         let mut store = Store::new();
-        assert!(store.script_inner_disk_write_denial.is_none(), "safe default is no denial");
+        assert!(
+            store.script_inner_disk_write_denial.is_none(),
+            "safe default is no denial"
+        );
         assert_eq!(
             run(&mut store, BODY),
             RespFrame::Integer(1),
@@ -43584,7 +43635,10 @@ mod tests {
 
         // Default is None, so nothing changes for a healthy server.
         let mut store = Store::new();
-        assert!(store.script_disk_write_denial.is_none(), "the safe default is no denial");
+        assert!(
+            store.script_disk_write_denial.is_none(),
+            "the safe default is no denial"
+        );
         assert_eq!(
             run_script(&mut store, b"#!lua\nredis.call('set','h_k','v') return 1"),
             RespFrame::Integer(1)
@@ -43602,7 +43656,10 @@ mod tests {
                     msg.contains("Can not run script with write flag on readonly replica"),
                     "the replica check must be answered FIRST, got {msg}"
                 );
-                assert!(!msg.contains("MISCONF"), "MISCONF must not win this race: {msg}");
+                assert!(
+                    !msg.contains("MISCONF"),
+                    "MISCONF must not win this race: {msg}"
+                );
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -43652,7 +43709,10 @@ mod tests {
 
         // The default is permissive: a Store built outside a runtime must behave as before.
         let mut store = Store::new();
-        assert!(store.good_replicas_ok, "the safe default is `no reason to refuse`");
+        assert!(
+            store.good_replicas_ok,
+            "the safe default is `no reason to refuse`"
+        );
         assert_eq!(
             run_script(&mut store, b"#!lua\nredis.call('set','ok_k','v') return 1"),
             RespFrame::Integer(1),
@@ -43665,7 +43725,11 @@ mod tests {
         let mut store = Store::new();
         store.good_replicas_ok = false;
         let out = dispatch_argv(
-            &[b"EVAL_RO".to_vec(), b"#!lua\nreturn 1".to_vec(), b"0".to_vec()],
+            &[
+                b"EVAL_RO".to_vec(),
+                b"#!lua\nreturn 1".to_vec(),
+                b"0".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -43820,11 +43884,12 @@ mod tests {
 
         // `no-writes` exempts: upstream's check sits inside `if (!(script_flags & NO_WRITES))`.
         let mut store = replica();
-        let out = run_script(
-            &mut store,
-            b"#!lua flags=no-writes\nreturn 1",
+        let out = run_script(&mut store, b"#!lua flags=no-writes\nreturn 1");
+        assert_eq!(
+            out,
+            RespFrame::Integer(1),
+            "a no-writes script must still run on a replica"
         );
-        assert_eq!(out, RespFrame::Integer(1), "a no-writes script must still run on a replica");
 
         // The obeyed-source exemption is NOT tested here any more. It moved into the runtime's
         // publish, which folds `!obey_client` into `is_read_only_replica` itself, so a row here
@@ -45364,7 +45429,10 @@ mod tests {
         };
 
         assert_eq!(
-            err(&mut store, &[b"XREAD", b"GROUP", b"g", b"c", b"STREAMS", b"s", b"0"]),
+            err(
+                &mut store,
+                &[b"XREAD", b"GROUP", b"g", b"c", b"STREAMS", b"s", b"0"]
+            ),
             "ERR The GROUP option is only supported by XREADGROUP. You called XREAD instead."
         );
         assert_eq!(
@@ -45382,7 +45450,16 @@ mod tests {
         assert_eq!(
             err(
                 &mut store,
-                &[b"XREADGROUP", b"COUNT", b"1", b"STREAMS", b"a", b"b", b">", b">"]
+                &[
+                    b"XREADGROUP",
+                    b"COUNT",
+                    b"1",
+                    b"STREAMS",
+                    b"a",
+                    b"b",
+                    b">",
+                    b">"
+                ]
             ),
             "ERR Missing GROUP option for XREADGROUP"
         );
@@ -45390,19 +45467,34 @@ mod tests {
         // '$' needs a real stream and group, because upstream answers it only AFTER the key
         // lookup, the type check and the group resolution.
         dispatch_argv(
-            &[b"XADD".to_vec(), b"s".to_vec(), b"*".to_vec(), b"f".to_vec(), b"v".to_vec()],
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
             &mut store,
             0,
         )
         .expect("xadd");
         dispatch_argv(
-            &[b"XGROUP".to_vec(), b"CREATE".to_vec(), b"s".to_vec(), b"g".to_vec(), b"0".to_vec()],
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"0".to_vec(),
+            ],
             &mut store,
             0,
         )
         .expect("xgroup create");
         assert_eq!(
-            err(&mut store, &[b"XREADGROUP", b"GROUP", b"g", b"c", b"STREAMS", b"s", b"$"]),
+            err(
+                &mut store,
+                &[b"XREADGROUP", b"GROUP", b"g", b"c", b"STREAMS", b"s", b"$"]
+            ),
             "ERR The $ ID is meaningless in the context of XREADGROUP: you want to read the \
              history of this consumer by specifying a proper ID, or use the > ID to get new \
              messages. The $ ID would just return an empty result set."
@@ -45410,8 +45502,19 @@ mod tests {
         // ORDER: a missing key still reports NOGROUP, not the '$' wording. This is the row a
         // future refactor is most likely to break, by answering '$' before resolving the group.
         assert!(
-            err(&mut store, &[b"XREADGROUP", b"GROUP", b"g", b"c", b"STREAMS", b"missing", b"$"])
-                .starts_with("NOGROUP"),
+            err(
+                &mut store,
+                &[
+                    b"XREADGROUP",
+                    b"GROUP",
+                    b"g",
+                    b"c",
+                    b"STREAMS",
+                    b"missing",
+                    b"$"
+                ]
+            )
+            .starts_with("NOGROUP"),
             "group resolution must precede the $ diagnostic"
         );
     }
@@ -49502,17 +49605,31 @@ mod tests {
     /// absolute delivery time, and XPENDING reports `now - delivery`.
     #[cfg(test)]
     fn xclaim_resulting_idle_ms(opts: &[&[u8]], now_ms: u64) -> i64 {
-        let argv = |parts: &[&[u8]]| -> Vec<Vec<u8>> {
-            parts.iter().map(|p| p.to_vec()).collect()
-        };
+        let argv = |parts: &[&[u8]]| -> Vec<Vec<u8>> { parts.iter().map(|p| p.to_vec()).collect() };
         let mut store = Store::new();
-        dispatch_argv(&argv(&[b"XADD", b"s", b"1-1", b"f", b"v"]), &mut store, now_ms)
-            .expect("xadd");
-        dispatch_argv(&argv(&[b"XGROUP", b"CREATE", b"s", b"g", b"0"]), &mut store, now_ms)
-            .expect("xgroup create");
+        dispatch_argv(
+            &argv(&[b"XADD", b"s", b"1-1", b"f", b"v"]),
+            &mut store,
+            now_ms,
+        )
+        .expect("xadd");
+        dispatch_argv(
+            &argv(&[b"XGROUP", b"CREATE", b"s", b"g", b"0"]),
+            &mut store,
+            now_ms,
+        )
+        .expect("xgroup create");
         dispatch_argv(
             &argv(&[
-                b"XREADGROUP", b"GROUP", b"g", b"c1", b"COUNT", b"10", b"STREAMS", b"s", b">",
+                b"XREADGROUP",
+                b"GROUP",
+                b"g",
+                b"c1",
+                b"COUNT",
+                b"10",
+                b"STREAMS",
+                b"s",
+                b">",
             ]),
             &mut store,
             now_ms,
@@ -49564,7 +49681,11 @@ mod tests {
         // when only one was given, let TIME win regardless of order.
         const NOW: u64 = 1_000_000;
 
-        assert_eq!(xclaim_resulting_idle_ms(&[], NOW), 0, "no option means idle 0");
+        assert_eq!(
+            xclaim_resulting_idle_ms(&[], NOW),
+            0,
+            "no option means idle 0"
+        );
         assert_eq!(xclaim_resulting_idle_ms(&[b"IDLE", b"5"], NOW), 5);
         assert_eq!(xclaim_resulting_idle_ms(&[b"TIME", b"1000"], NOW), 999_000);
 
@@ -49586,7 +49707,10 @@ mod tests {
             xclaim_resulting_idle_ms(&[b"TIME", b"1000", b"IDLE", b"5"], NOW),
         );
         // A repeated option follows the same rule.
-        assert_eq!(xclaim_resulting_idle_ms(&[b"IDLE", b"5", b"IDLE", b"7"], NOW), 7);
+        assert_eq!(
+            xclaim_resulting_idle_ms(&[b"IDLE", b"5", b"IDLE", b"7"], NOW),
+            7
+        );
     }
 
     #[test]
@@ -49597,7 +49721,10 @@ mod tests {
         const NOW: u64 = 1_000_000;
 
         // IDLE larger than the clock puts the delivery time before the epoch.
-        assert_eq!(xclaim_resulting_idle_ms(&[b"IDLE", b"99999999999999"], NOW), 0);
+        assert_eq!(
+            xclaim_resulting_idle_ms(&[b"IDLE", b"99999999999999"], NOW),
+            0
+        );
         // A negative IDLE pushes it into the future.
         assert_eq!(xclaim_resulting_idle_ms(&[b"IDLE", b"-5"], NOW), 0);
         // TIME is absolute, so negative and future both clamp.
@@ -52251,7 +52378,10 @@ mod tests {
         refused(&mut store, &[b"SETBIT", b"k", b"8192", b"1"]);
         refused(&mut store, &[b"GETBIT", b"k", b"8192"]);
         refused(&mut store, &[b"BITFIELD", b"k", b"GET", b"u8", b"8192"]);
-        refused(&mut store, &[b"BITFIELD", b"k", b"SET", b"u8", b"8192", b"1"]);
+        refused(
+            &mut store,
+            &[b"BITFIELD", b"k", b"SET", b"u8", b"8192", b"1"],
+        );
         refused(&mut store, &[b"BITFIELD_RO", b"k", b"GET", b"u8", b"8192"]);
 
         // Just below the lowered cap still works, so the bound moved rather than the command
@@ -52268,15 +52398,17 @@ mod tests {
             run(&mut store, &[b"SETBIT", b"k", b"8192", b"1"]).expect("obeyed SETBIT"),
             RespFrame::Integer(0)
         );
-        run(&mut store, &[b"BITFIELD", b"k", b"SET", b"u8", b"8192", b"1"])
-            .expect("obeyed BITFIELD SET");
+        run(
+            &mut store,
+            &[b"BITFIELD", b"k", b"SET", b"u8", b"8192", b"1"],
+        )
+        .expect("obeyed BITFIELD SET");
 
         // And the cap returns when the obeyed source ends: an exemption that failed to clear
         // would lift the limit for ordinary clients.
         store.must_obey_client = false;
         refused(&mut store, &[b"SETBIT", b"k", b"8192", b"0"]);
     }
-
 
     #[test]
     fn bitpos_missing_key_short_circuits_before_arg_parse() {
@@ -54288,9 +54420,18 @@ mod tests {
         // matrix. The inputs that trip it are two 4 GiB strings, which no unit test can
         // allocate -- so the predicate is tested on LENGTHS, which is why it takes them.
         const LIMIT: usize = (u32::MAX - 1) as usize;
-        assert!(!super::lcs_string_too_long(LIMIT - 1, LIMIT - 1), "just under is allowed");
-        assert!(super::lcs_string_too_long(LIMIT, 1), "at the limit is refused, either side");
-        assert!(super::lcs_string_too_long(1, LIMIT), "and the other side too");
+        assert!(
+            !super::lcs_string_too_long(LIMIT - 1, LIMIT - 1),
+            "just under is allowed"
+        );
+        assert!(
+            super::lcs_string_too_long(LIMIT, 1),
+            "at the limit is refused, either side"
+        );
+        assert!(
+            super::lcs_string_too_long(1, LIMIT),
+            "and the other side too"
+        );
         assert!(!super::lcs_string_too_long(0, 0), "empty is not too long");
         // `>=`, not `>`: upstream's comparison is inclusive and an off-by-one here would admit
         // exactly the length its overflow guard exists to exclude.
@@ -59067,8 +59208,7 @@ mod tests {
     }
 
     #[test]
-    fn evalsha_after_script_flush_returns_noscript_even_though_the_chunk_is_still_compiled_sf510()
-    {
+    fn evalsha_after_script_flush_returns_noscript_even_though_the_chunk_is_still_compiled_sf510() {
         // (frankenredis-sf510) THE GUARD ON THE FAST PATH. evalsha_cmd now looks a compiled
         // chunk up by SHA, and that index is CONTENT-ADDRESSED, so it deliberately outlives
         // SCRIPT FLUSH -- a SHA always denotes the same bytes, so the entry can never be stale.
@@ -59712,12 +59852,8 @@ mod tests {
             .concat();
             let mut full = script.to_vec();
             full.extend_from_slice(&body);
-            match dispatch_argv(
-                &[b"EVAL".to_vec(), full, b"0".to_vec()],
-                store,
-                0,
-            )
-            .expect("EVAL itself must not be refused -- the gate is per inner call")
+            match dispatch_argv(&[b"EVAL".to_vec(), full, b"0".to_vec()], store, 0)
+                .expect("EVAL itself must not be refused -- the gate is per inner call")
             {
                 // A caught error comes back as the bulk string the script returns. The OOM
                 // refusal does NOT: fr propagates it out of redis.pcall as a script error, so
@@ -64224,14 +64360,43 @@ mod tests {
 
         // Edges and the exact-tie cases, where round-half-to-EVEN is the whole point.
         for v in [
-            0.0, -0.0, 1.0, -1.0, 0.5, 0.00005, 0.00015, 0.00025, 0.00035,
-            -0.00005, -0.00015, 0.12345, 0.123449999, 0.99995, 0.99994999,
-            1e-8, -1e-8, 1e-300, f64::MIN_POSITIVE, 4.9e-324,
-            166274.1516, 3067.4157, 20037508.34, 40075016.68,
-            f64::NAN, f64::INFINITY, f64::NEG_INFINITY,
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            0.00005,
+            0.00015,
+            0.00025,
+            0.00035,
+            -0.00005,
+            -0.00015,
+            0.12345,
+            0.123449999,
+            0.99995,
+            0.99994999,
+            1e-8,
+            -1e-8,
+            1e-300,
+            f64::MIN_POSITIVE,
+            4.9e-324,
+            166274.1516,
+            3067.4157,
+            20037508.34,
+            40075016.68,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
             // outside the geo domain: must defer to std and still agree
-            2f64.powi(40), 2f64.powi(41), 2f64.powi(52), 2f64.powi(53),
-            1e15, 1e16, 1e17, f64::MAX, -f64::MAX,
+            2f64.powi(40),
+            2f64.powi(41),
+            2f64.powi(52),
+            2f64.powi(53),
+            1e15,
+            1e16,
+            1e17,
+            f64::MAX,
+            -f64::MAX,
         ] {
             check(v);
         }
@@ -64251,13 +64416,18 @@ mod tests {
         // several exponents, including subnormals.
         let mut state = 0x2026_08_27_u64;
         for _ in 0..200_000 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let v = f64::from_bits(state);
             if v.is_finite() {
                 check(v);
             }
         }
-        assert!(checked > 1_000_000, "sweep must be large: only {checked} values");
+        assert!(
+            checked > 1_000_000,
+            "sweep must be large: only {checked} values"
+        );
     }
 
     #[test]
@@ -65025,8 +65195,7 @@ mod tests {
         assert_eq!(
             out,
             RespFrame::Error(
-                "ERR exactly one of BYRADIUS and BYBOX can be specified for GEOSEARCH"
-                    .to_string()
+                "ERR exactly one of BYRADIUS and BYBOX can be specified for GEOSEARCH".to_string()
             ),
             "upstream writes this one with `and`, not `or` -- copied verbatim"
         );
@@ -65081,13 +65250,9 @@ mod tests {
         .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             out,
-            RespFrame::Error(
-                "ERR syntax error"
-                    .to_string()
-            ),
+            RespFrame::Error("ERR syntax error".to_string()),
             "a duplicate source is a syntax error, not the exactly-one message"
         );
-
     }
 
     #[test]
@@ -65523,7 +65688,8 @@ mod tests {
         let right = std::ffi::CString::new("a-b").expect("no NUL");
         // SAFETY: both `CString`s are live and NUL-terminated; `locale.raw` is the non-null
         // handle just returned by `newlocale` and remains owned for this entire call.
-        let glibc_order = unsafe { super::strcoll_l(left.as_ptr(), right.as_ptr(), locale.raw) }.cmp(&0);
+        let glibc_order =
+            unsafe { super::strcoll_l(left.as_ptr(), right.as_ptr(), locale.raw) }.cmp(&0);
         assert_eq!(glibc_order, std::cmp::Ordering::Less);
 
         let mut options = CollatorOptions::default();
@@ -65895,13 +66061,13 @@ mod tests {
     #[test]
     fn ascii_alnum_collate_declines_every_input_outside_its_domain() {
         for (left, right) in [
-            (&b"a"[..], &b"a "[..]),                 // trailing space: ignorable
-            (&b"ab"[..], &b"a-b"[..]),               // punctuation, same reason
-            (&b"a"[..], &b"a\xcc\x81"[..]),          // combining acute: SECONDARY difference
-            (&b"caf\xc3\xa9"[..], &b"cafe"[..]),     // multi-byte UTF-8
-            (&b"\xff\xfe"[..], &b"ab"[..]),          // not UTF-8 at all
-            (&b"a\0b"[..], &b"ab"[..]),              // embedded NUL
-            (&b"a_b"[..], &b"ab"[..]),               // underscore is not alphanumeric
+            (&b"a"[..], &b"a "[..]),             // trailing space: ignorable
+            (&b"ab"[..], &b"a-b"[..]),           // punctuation, same reason
+            (&b"a"[..], &b"a\xcc\x81"[..]),      // combining acute: SECONDARY difference
+            (&b"caf\xc3\xa9"[..], &b"cafe"[..]), // multi-byte UTF-8
+            (&b"\xff\xfe"[..], &b"ab"[..]),      // not UTF-8 at all
+            (&b"a\0b"[..], &b"ab"[..]),          // embedded NUL
+            (&b"a_b"[..], &b"ab"[..]),           // underscore is not alphanumeric
         ] {
             assert_eq!(
                 super::ascii_alnum_collate(left, right),
@@ -66507,22 +66673,58 @@ mod tests {
             (false, b"nan", "isnan rejection"),
             (false, b"NaN", "isnan is case-insensitive in strtod"),
             (false, b"-nan", "signed NaN is still NaN"),
-            (false, b" 1 ", "strtod skips LEADING space only; the trailing one is junk"),
+            (
+                false,
+                b" 1 ",
+                "strtod skips LEADING space only; the trailing one is junk",
+            ),
             (false, b"1\n", "same, for a trailing newline"),
-            (false, b"1e400", "ERANGE on overflow, even though the value is a finite literal"),
-            (false, b"1e-320", "ERANGE on underflow: a SUBNORMAL result counts"),
+            (
+                false,
+                b"1e400",
+                "ERANGE on overflow, even though the value is a finite literal",
+            ),
+            (
+                false,
+                b"1e-320",
+                "ERANGE on underflow: a SUBNORMAL result counts",
+            ),
             (false, b"5e-324", "the smallest subnormal is still ERANGE"),
-            (true, b"", "no conversion performed, so endptr == nptr and it is NOT an error"),
-            (true, b"0x10", "strtod parses hex floats; Rust's parser refuses them"),
-            (true, b"0x1.8p1", "hex with a fraction and a binary exponent"),
-            (true, b"inf", "an infinity LITERAL sets no ERANGE, so it stays valid"),
+            (
+                true,
+                b"",
+                "no conversion performed, so endptr == nptr and it is NOT an error",
+            ),
+            (
+                true,
+                b"0x10",
+                "strtod parses hex floats; Rust's parser refuses them",
+            ),
+            (
+                true,
+                b"0x1.8p1",
+                "hex with a fraction and a binary exponent",
+            ),
+            (
+                true,
+                b"inf",
+                "an infinity LITERAL sets no ERANGE, so it stays valid",
+            ),
             (true, b"-inf", "and so does a negative one"),
             (true, b"1.5", "the ordinary case must keep working"),
             (true, b"-0", "negative zero is not underflow"),
             (false, b"abc", "no digits at all"),
             (false, b"1abc", "trailing junk after a good number"),
-            (false, b" ", "whitespace only: endptr rewinds, so the space is left over"),
-            (false, b"0x", "`0x` converts the leading 0 and leaves `x` as junk"),
+            (
+                false,
+                b" ",
+                "whitespace only: endptr rewinds, so the space is left over",
+            ),
+            (
+                false,
+                b"0x",
+                "`0x` converts the leading 0 and leaves `x` as junk",
+            ),
         ];
 
         for &(accepted, value, why) in cases {
@@ -66539,7 +66741,8 @@ mod tests {
             let element_raised = matches!(&element, RespFrame::Error(m)
                 if m.contains("scores can't be converted into double"));
             assert_eq!(
-                element_raised, !accepted,
+                element_raised,
+                !accepted,
                 "element {:?} ({why}): got {element:?}",
                 String::from_utf8_lossy(value)
             );
@@ -66572,7 +66775,8 @@ mod tests {
             let weight_raised = matches!(&weight, RespFrame::Error(m)
                 if m.contains("scores can't be converted into double"));
             assert_eq!(
-                weight_raised, !accepted,
+                weight_raised,
+                !accepted,
                 "weight {:?} ({why}): got {weight:?}",
                 String::from_utf8_lossy(value)
             );
@@ -66586,10 +66790,7 @@ mod tests {
     /// never convert anything at all -- an unparseable weight is fine under both.
     #[test]
     fn sort_skips_conversion_under_alpha_and_nosort() {
-        for extra in [
-            vec![b"ALPHA".to_vec()],
-            vec![],
-        ] {
+        for extra in [vec![b"ALPHA".to_vec()], vec![]] {
             let mut store = Store::new();
             dispatch_argv(
                 &[b"RPUSH".to_vec(), b"l".to_vec(), b"1".to_vec()],
@@ -77752,12 +77953,16 @@ mod tests {
             assert_eq!(out, RespFrame::BulkString(Some(b"hi".to_vec())));
         }
 
-        let after_first =
-            super::lua_eval::fcall_cached_library_callbacks(b"kbyhylib", store.function_generation())
-                .expect("the first FCALL must retain the executed library");
-        let after_second =
-            super::lua_eval::fcall_cached_library_callbacks(b"kbyhylib", store.function_generation())
-                .expect("the retained library must still be there");
+        let after_first = super::lua_eval::fcall_cached_library_callbacks(
+            b"kbyhylib",
+            store.function_generation(),
+        )
+        .expect("the first FCALL must retain the executed library");
+        let after_second = super::lua_eval::fcall_cached_library_callbacks(
+            b"kbyhylib",
+            store.function_generation(),
+        )
+        .expect("the retained library must still be there");
         assert!(
             std::rc::Rc::ptr_eq(&after_first, &after_second),
             "the second FCALL re-executed the library body instead of serving the retained one"
@@ -82156,7 +82361,9 @@ mod tests {
             CommandError::Custom("ERR Missing rdb-filter-only values".to_string())
         );
         assert!(super::replconf_rdb_filter_only_is_malformed(b"\""));
-        assert!(super::replconf_rdb_filter_only_is_malformed(b"'functions'nope"));
+        assert!(super::replconf_rdb_filter_only_is_malformed(
+            b"'functions'nope"
+        ));
         assert!(!super::replconf_rdb_filter_only_is_malformed(b"functions"));
     }
 
@@ -82286,7 +82493,10 @@ mod tests {
         // only because the handler ran before any noscript check existed.
         let short =
             dispatch_argv(&[b"REPLCONF".to_vec(), b"ACK".to_vec()], &mut store, 0).unwrap_err();
-        assert_eq!(short, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        assert_eq!(
+            short,
+            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
+        );
 
         let invalid = dispatch_argv(
             &[b"REPLCONF".to_vec(), b"ACK".to_vec(), b"-1".to_vec()],
@@ -82294,7 +82504,10 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert_eq!(invalid, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        assert_eq!(
+            invalid,
+            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
+        );
 
         let ack = dispatch_argv(
             &[b"REPLCONF".to_vec(), b"ACK".to_vec(), b"100".to_vec()],
@@ -86598,9 +86811,9 @@ mod tests {
             };
             let listed = items
                 .iter()
-                .filter(|f| {
-                    matches!(f, RespFrame::BulkString(Some(b)) if b.starts_with(b"sentinel|"))
-                })
+                .filter(
+                    |f| matches!(f, RespFrame::BulkString(Some(b)) if b.starts_with(b"sentinel|")),
+                )
                 .count();
             assert_eq!(
                 listed,
@@ -86651,8 +86864,15 @@ mod tests {
                 let RespFrame::Array(Some(row)) = &items[0] else {
                     panic!("sentinel mode must return a row, got {:?}", items[0]);
                 };
-                assert_eq!(row[0], RespFrame::BulkString(Some(b"sentinel|masters".to_vec())));
-                assert_eq!(row[1], RespFrame::Integer(2), "arity from sentinel-masters.json");
+                assert_eq!(
+                    row[0],
+                    RespFrame::BulkString(Some(b"sentinel|masters".to_vec()))
+                );
+                assert_eq!(
+                    row[1],
+                    RespFrame::Integer(2),
+                    "arity from sentinel-masters.json"
+                );
             } else {
                 assert_eq!(
                     items[0],

@@ -43,9 +43,8 @@ use fr_repl::{
 use fr_store::{
     AclKeyPattern, ClientReplyState, ClientTrackingState, CommandRecordKind, DispatchAclLogContext,
     DispatchAclPermissionReason, DispatchAclPermissions, EvictionLoopFailure, EvictionLoopResult,
-    EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPolicy, PendingAclLogEvent,
-    HistSlot, SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, StringBytes, decode_db_key,
-    encode_db_key,
+    EvictionLoopStatus, EvictionSafetyGateState, HistSlot, MaxmemoryPolicy, PendingAclLogEvent,
+    SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, StringBytes, decode_db_key, encode_db_key,
     glob_match,
 };
 
@@ -3422,7 +3421,8 @@ impl AuthState {
     /// needs. Every mutator of `requirepass` or `acl_users` ends with the bump above, so this
     /// runs on an ACL/CONFIG command and never on a request.
     fn refresh_default_user_cache(&mut self) {
-        self.default_auth_required = Self::compute_auth_required(&self.requirepass, &self.acl_users);
+        self.default_auth_required =
+            Self::compute_auth_required(&self.requirepass, &self.acl_users);
         self.default_allows_all_key_commands =
             Self::compute_default_allows_all_key_commands(&self.acl_users);
     }
@@ -4376,7 +4376,11 @@ impl EvidenceEvent {
             },
         );
         push_json_str_field(&mut out, "severity", &format!("{:?}", self.severity));
-        push_json_str_field(&mut out, "threat_class", &format!("{:?}", self.threat_class));
+        push_json_str_field(
+            &mut out,
+            "threat_class",
+            &format!("{:?}", self.threat_class),
+        );
         push_json_str_field(
             &mut out,
             "decision_action",
@@ -4462,8 +4466,8 @@ impl EvidenceLedger {
         if self.events.len() > EVIDENCE_LEDGER_MAX_EVENTS {
             // Evict a tenth of the window at a time so the drain is amortized
             // rather than paid on every event once the window is full.
-            let excess = self.events.len() - EVIDENCE_LEDGER_MAX_EVENTS
-                + EVIDENCE_LEDGER_MAX_EVENTS / 10;
+            let excess =
+                self.events.len() - EVIDENCE_LEDGER_MAX_EVENTS + EVIDENCE_LEDGER_MAX_EVENTS / 10;
             let kept = self.events.len() - excess;
             if self.unflushed > kept {
                 self.dropped_unwritten = self
@@ -4539,7 +4543,9 @@ mod threat_ledger_tests {
         assert!(line.contains("\"decision_action\":\"FailClosed\""));
         assert!(line.contains("\"reason\":\"say \\\"hi\\\"\\nnow\\\\\""));
         assert!(line.contains("\"packet_id\":7"));
-        assert!(line.contains("\"artifact_refs\":[\"SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md\"]"));
+        assert!(
+            line.contains("\"artifact_refs\":[\"SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md\"]")
+        );
         assert!(line.contains("\"confidence\":1}"));
         assert!(!line.contains('\n'));
         let mut no_confidence = event("x");
@@ -4558,13 +4564,19 @@ mod threat_ledger_tests {
             ledger.record(event(&i.to_string()));
         }
         assert!(ledger.events().len() <= EVIDENCE_LEDGER_MAX_EVENTS);
-        assert_eq!(ledger.total_recorded(), (EVIDENCE_LEDGER_MAX_EVENTS + 2_500) as u64);
+        assert_eq!(
+            ledger.total_recorded(),
+            (EVIDENCE_LEDGER_MAX_EVENTS + 2_500) as u64
+        );
         assert_eq!(
             ledger.dropped_unwritten() as usize + ledger.unflushed().len(),
             EVIDENCE_LEDGER_MAX_EVENTS + 2_500
         );
         let oldest_kept = ledger.events()[0].reason.parse::<usize>().unwrap();
-        assert_eq!(oldest_kept, EVIDENCE_LEDGER_MAX_EVENTS + 2_500 - ledger.events().len());
+        assert_eq!(
+            oldest_kept,
+            EVIDENCE_LEDGER_MAX_EVENTS + 2_500 - ledger.events().len()
+        );
     }
 
     #[test]
@@ -4587,11 +4599,19 @@ mod threat_ledger_tests {
         assert_eq!(runtime.flush_threat_ledger(), 0, "nothing recorded yet");
         // A frame that cannot be parsed is a recorded ParserAbuse event.
         let reply = runtime.execute_bytes(b"*1\r\n$x\r\n", 1_700_000_000_000);
-        assert!(reply.starts_with(b"-ERR"), "{:?}", String::from_utf8_lossy(&reply));
+        assert!(
+            reply.starts_with(b"-ERR"),
+            "{:?}",
+            String::from_utf8_lossy(&reply)
+        );
         assert_eq!(runtime.evidence().unflushed().len(), 1);
 
         assert_eq!(runtime.flush_threat_ledger(), 1);
-        assert_eq!(runtime.flush_threat_ledger(), 0, "a flushed row is not written twice");
+        assert_eq!(
+            runtime.flush_threat_ledger(),
+            0,
+            "a flushed row is not written twice"
+        );
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 1, "{text}");
@@ -6941,8 +6961,7 @@ impl Runtime {
             // (frankenredis-rc-threat-ledger-persist) Hardened mode writes its
             // threat-event ledger by default, relative to the working directory
             // like dump.rdb; `threat-ledger-file ""` turns it off.
-            server.threat_ledger_path =
-                Some(std::path::PathBuf::from(DEFAULT_THREAT_LEDGER_FILE));
+            server.threat_ledger_path = Some(std::path::PathBuf::from(DEFAULT_THREAT_LEDGER_FILE));
             server.config_overrides.insert(
                 "threat-ledger-file".to_string(),
                 DEFAULT_THREAT_LEDGER_FILE.to_string(),
@@ -10204,22 +10223,22 @@ impl Runtime {
         let result = self.server.store.get_string_bytes(key, now_ms);
         let failed = result.is_err();
         match result {
-            Ok(value) => encode_bulk_string_slice(value.as_ref().map(StringBytes::as_slice), false, out),
+            Ok(value) => {
+                encode_bulk_string_slice(value.as_ref().map(StringBytes::as_slice), false, out)
+            }
             Err(err) => CommandError::Store(err).to_resp().encode_into(out),
         }
         if let Some(started) = started {
             let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::get,
-                    elapsed_us,
-                    if failed {
-                        CommandRecordKind::Failed
-                    } else {
-                        CommandRecordKind::Success
-                    },
-                );
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::get,
+                elapsed_us,
+                if failed {
+                    CommandRecordKind::Failed
+                } else {
+                    CommandRecordKind::Success
+                },
+            );
         }
     }
 
@@ -10780,7 +10799,13 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_set_opt_get_borrowed_inner(key, value, opt, now_ms, default_write_allowed)
+        self.execute_plain_set_opt_get_borrowed_inner(
+            key,
+            value,
+            opt,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_set_opt_get_borrowed(
@@ -10791,7 +10816,13 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_set_opt_get_borrowed_inner(key, value, opt, now_ms, default_write_allowed)
+        self.execute_plain_set_opt_get_borrowed_inner(
+            key,
+            value,
+            opt,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_set_opt_get_borrowed_inner(
@@ -10912,9 +10943,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::set, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::set,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -11091,13 +11124,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::set,
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::set,
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -11241,13 +11272,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::set,
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::set,
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -11302,7 +11331,15 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_set_cond_relexpire_borrowed_inner(is_xx, is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+        self.execute_plain_set_cond_relexpire_borrowed_inner(
+            is_xx,
+            is_seconds,
+            key,
+            value,
+            time_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_set_cond_relexpire_borrowed(
@@ -11315,7 +11352,15 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_set_cond_relexpire_borrowed_inner(is_xx, is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+        self.execute_plain_set_cond_relexpire_borrowed_inner(
+            is_xx,
+            is_seconds,
+            key,
+            value,
+            time_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_set_cond_relexpire_borrowed_inner(
@@ -11438,13 +11483,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::set,
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::set,
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -11515,7 +11558,14 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<()> {
-        self.execute_plain_set_absexpire_borrowed_ok_inner(is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+        self.execute_plain_set_absexpire_borrowed_ok_inner(
+            is_seconds,
+            key,
+            value,
+            time_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_set_absexpire_borrowed_ok(
@@ -11527,7 +11577,14 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<()> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_set_absexpire_borrowed_ok_inner(is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+        self.execute_plain_set_absexpire_borrowed_ok_inner(
+            is_seconds,
+            key,
+            value,
+            time_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_set_absexpire_borrowed_ok_inner(
@@ -11633,7 +11690,14 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<()> {
-        self.execute_plain_set_relexpire_borrowed_ok_inner(is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+        self.execute_plain_set_relexpire_borrowed_ok_inner(
+            is_seconds,
+            key,
+            value,
+            time_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_set_relexpire_borrowed_ok(
@@ -11645,7 +11709,14 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<()> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_set_relexpire_borrowed_ok_inner(is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+        self.execute_plain_set_relexpire_borrowed_ok_inner(
+            is_seconds,
+            key,
+            value,
+            time_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_set_relexpire_borrowed_ok_inner(
@@ -11753,13 +11824,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::set,
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::set,
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -11809,7 +11878,14 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_set_relexpire_get_borrowed_inner(is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+        self.execute_plain_set_relexpire_get_borrowed_inner(
+            is_seconds,
+            key,
+            value,
+            time_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_set_relexpire_get_borrowed(
@@ -11821,7 +11897,14 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_set_relexpire_get_borrowed_inner(is_seconds, key, value, time_arg, now_ms, default_write_allowed)
+        self.execute_plain_set_relexpire_get_borrowed_inner(
+            is_seconds,
+            key,
+            value,
+            time_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_set_relexpire_get_borrowed_inner(
@@ -11951,9 +12034,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::set, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::set,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -12153,13 +12238,11 @@ impl Runtime {
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "mset",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "mset",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
             let argv_ref = argv.get_or_insert_with(|| plain_mset_owned_argv(pairs));
@@ -12368,9 +12451,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::incr, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::incr,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -12996,7 +13081,13 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_setrange_borrowed(key, offset_arg, value, now_ms, default_write_allowed) {
+        if !self.can_execute_plain_setrange_borrowed(
+            key,
+            offset_arg,
+            value,
+            now_ms,
+            default_write_allowed,
+        ) {
             return None;
         }
         let offset = parse_i64_arg(offset_arg).ok()?;
@@ -13165,7 +13256,13 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.plain_keyed_values_write_borrowed_inner(cmd, key, values, now_ms, default_write_allowed)
+        self.plain_keyed_values_write_borrowed_inner(
+            cmd,
+            key,
+            values,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_keyed_values_write_borrowed(
@@ -13352,9 +13449,11 @@ impl Runtime {
             // (frankenredis-par0e) cmd.name_lower() is a static lowercase canonical
             // name — record directly, skipping the per-command re-lowercase +
             // UTF-8 validation, and hitting the lpush/rpush/sadd direct fields.
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(cmd.hist_slot(), elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                cmd.hist_slot(),
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -13535,9 +13634,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::hset, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::hset,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -13900,9 +14001,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::zadd, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::zadd,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -15011,7 +15114,13 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_zadd_incr_borrowed_inner(key, delta_arg, member, now_ms, default_write_allowed)
+        self.execute_plain_zadd_incr_borrowed_inner(
+            key,
+            delta_arg,
+            member,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_zadd_incr_borrowed(
@@ -15022,7 +15131,13 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_zadd_incr_borrowed_inner(key, delta_arg, member, now_ms, default_write_allowed)
+        self.execute_plain_zadd_incr_borrowed_inner(
+            key,
+            delta_arg,
+            member,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_zadd_incr_borrowed_inner(
@@ -15152,9 +15267,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::zadd, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::zadd,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -15203,7 +15320,15 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_zadd_flag2_borrowed_inner(key, flag1, flag2, score_arg, member, now_ms, default_write_allowed)
+        self.execute_plain_zadd_flag2_borrowed_inner(
+            key,
+            flag1,
+            flag2,
+            score_arg,
+            member,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_zadd_flag2_borrowed(
@@ -15216,7 +15341,15 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_zadd_flag2_borrowed_inner(key, flag1, flag2, score_arg, member, now_ms, default_write_allowed)
+        self.execute_plain_zadd_flag2_borrowed_inner(
+            key,
+            flag1,
+            flag2,
+            score_arg,
+            member,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_zadd_flag2_borrowed_inner(
@@ -15374,9 +15507,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::zadd, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::zadd,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -15428,7 +15563,14 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_zadd_flag_borrowed_inner(key, flag_arg, score_arg, member, now_ms, default_write_allowed)
+        self.execute_plain_zadd_flag_borrowed_inner(
+            key,
+            flag_arg,
+            score_arg,
+            member,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_zadd_flag_borrowed(
@@ -15440,7 +15582,14 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_zadd_flag_borrowed_inner(key, flag_arg, score_arg, member, now_ms, default_write_allowed)
+        self.execute_plain_zadd_flag_borrowed_inner(
+            key,
+            flag_arg,
+            score_arg,
+            member,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_zadd_flag_borrowed_inner(
@@ -15606,9 +15755,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::zadd, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::zadd,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -15666,7 +15817,13 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_zadd_flag_multi_borrowed_inner(key, flags, pairs, now_ms, default_write_allowed)
+        self.execute_plain_zadd_flag_multi_borrowed_inner(
+            key,
+            flags,
+            pairs,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_zadd_flag_multi_borrowed(
@@ -15677,7 +15834,13 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_zadd_flag_multi_borrowed_inner(key, flags, pairs, now_ms, default_write_allowed)
+        self.execute_plain_zadd_flag_multi_borrowed_inner(
+            key,
+            flags,
+            pairs,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_zadd_flag_multi_borrowed_inner(
@@ -15835,9 +15998,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::zadd, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::zadd,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -16021,9 +16186,11 @@ impl Runtime {
             // (frankenredis-par0e) cmd.name_lower() is a static lowercase canonical
             // name — record directly, skipping the per-command re-lowercase +
             // UTF-8 validation, and hitting the lpush/rpush/sadd direct fields.
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(cmd.hist_slot(), elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                cmd.hist_slot(),
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -16223,13 +16390,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "ping",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "ping",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -16316,13 +16481,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "echo",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "echo",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -17376,9 +17539,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::hget, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::hget,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -17515,7 +17680,12 @@ impl Runtime {
         Some(())
     }
 
-    fn can_execute_plain_mget_borrowed(&mut self, keys: &[&[u8]], now_ms: u64, default_read_allowed: Option<bool>) -> bool {
+    fn can_execute_plain_mget_borrowed(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         // argv is [MGET, key, key, ...]; the gate bounds the whole multibulk.
         if keys.is_empty()
             || self.policy.gate.max_array_len < keys.len().saturating_add(1)
@@ -17524,8 +17694,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `MGET key [key ...]`: mirrors
@@ -17578,7 +17747,9 @@ impl Runtime {
             let value = self.server.store.get_string_bytes(key, now_ms);
             if !suppress_reply {
                 match value {
-                    Ok(v) => encode_bulk_string_slice(v.as_ref().map(StringBytes::as_slice), resp3, out),
+                    Ok(v) => {
+                        encode_bulk_string_slice(v.as_ref().map(StringBytes::as_slice), resp3, out)
+                    }
                     // MGET yields nil for a non-string (wrong-type) key, not an error.
                     Err(_) => encode_bulk_string_slice(None, resp3, out),
                 }
@@ -17619,13 +17790,11 @@ impl Runtime {
 
         if self.server.latency_tracking {
             // MGET never returns an error reply.
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "mget",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "mget",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -17662,8 +17831,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `EXISTS key [key ...]`:
@@ -17785,13 +17953,11 @@ impl Runtime {
 
         if self.server.latency_tracking {
             // EXISTS never returns an error reply.
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::exists,
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::exists,
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -17848,7 +18014,11 @@ impl Runtime {
     /// WRONGTYPE error reply for a non-string key, exactly like the generic
     /// handler. Returns None (fall back) on any disabling state.
     /// (frankenredis-uz39v)
-    pub fn execute_plain_pexpiretime_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_pexpiretime_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
         if !self.can_execute_plain_pexpiretime_borrowed(key, now_ms) {
             return None;
         }
@@ -17935,9 +18105,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_map_with_kind("pexpiretime", elapsed_us, kind);
+            self.server.store.record_command_histogram_map_with_kind(
+                "pexpiretime",
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -17975,8 +18147,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `STRLEN key`: mirrors
@@ -18071,9 +18242,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::strlen, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::strlen,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -18169,13 +18342,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "dump",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "dump",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -18378,13 +18549,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "randomkey",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "randomkey",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -18423,8 +18592,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `GETRANGE key start end`:
@@ -18444,7 +18612,13 @@ impl Runtime {
         now_ms: u64,
         default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_getrange_borrowed(key, start_arg, end_arg, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_getrange_borrowed(
+            key,
+            start_arg,
+            end_arg,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         // Only fast-path well-formed integer ranges; defer the
@@ -18518,7 +18692,13 @@ impl Runtime {
         out: &mut Vec<u8>,
         default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_getrange_borrowed(key, start_arg, end_arg, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_getrange_borrowed(
+            key,
+            start_arg,
+            end_arg,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         // Only fast-path well-formed integer ranges; defer the
@@ -18624,9 +18804,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::getrange, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::getrange,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -18657,7 +18839,13 @@ impl Runtime {
         now_ms: u64,
         default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_getrange_borrowed(key, start_arg, end_arg, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_getrange_borrowed(
+            key,
+            start_arg,
+            end_arg,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         let start = parse_i64_arg(start_arg).ok()?;
@@ -19106,7 +19294,10 @@ impl Runtime {
         for &key in keys {
             let _ = self.server.store.exists_no_touch(key, now_ms);
         }
-        let result = self.server.store.zintercard_count_cached(keys, limit, now_ms);
+        let result = self
+            .server
+            .store
+            .zintercard_count_cached(keys, limit, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
@@ -19221,7 +19412,9 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command '{}' took {}us, exceeding budget {}ms",
-                    String::from_utf8_lossy(upper), elapsed_us, self.server.command_time_budget_ms
+                    String::from_utf8_lossy(upper),
+                    elapsed_us,
+                    self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
                 output: &RespFrame::Integer(0),
@@ -19247,8 +19440,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed fast path for `ZMSCORE key member [member ...]`: mirrors the
@@ -19502,8 +19694,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed fast path for `SMISMEMBER key member [member ...]`: members are
@@ -19697,9 +19888,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_map_with_kind("smismember", elapsed_us, kind);
+            self.server.store.record_command_histogram_map_with_kind(
+                "smismember",
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -19741,8 +19934,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `HMGET key field [field ...]`:
@@ -19991,8 +20183,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `SISMEMBER key member`:
@@ -20090,9 +20281,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::sismember, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::sismember,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -20115,15 +20308,19 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_getbit_borrowed(&mut self, key: &[u8], now_ms: u64, default_read_allowed: Option<bool>) -> bool {
+    fn can_execute_plain_getbit_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"GETBIT".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for `GETBIT key offset`. Mirrors the
@@ -20230,9 +20427,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::getbit, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::getbit,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -20267,8 +20466,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     fn can_execute_plain_object_refcount_borrowed(
@@ -20283,8 +20481,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     fn can_execute_plain_memory_usage_borrowed(
@@ -20299,8 +20496,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for `MEMORY USAGE key` (the common, no-
@@ -20373,13 +20569,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "memory|usage",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "memory|usage",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -20524,13 +20718,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "object|encoding",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "object|encoding",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -20620,13 +20812,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "object|refcount",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "object|refcount",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -20663,8 +20853,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for `OBJECT IDLETIME key` / `OBJECT FREQ
@@ -20787,9 +20976,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(cmd.hist_slot(), elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                cmd.hist_slot(),
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -20828,8 +21019,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for the no-option `LPOS key element` form
@@ -21298,8 +21488,7 @@ impl Runtime {
         if self.policy.gate.max_array_len < 2 || self.policy.gate.max_bulk_len < b"COMMAND".len() {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for keyless `COMMAND COUNT`. Pure
@@ -21360,13 +21549,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "command|count",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "command|count",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -21389,14 +21576,17 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_dbsize_borrowed(&mut self, now_ms: u64, default_read_allowed: Option<bool>) -> bool {
+    fn can_execute_plain_dbsize_borrowed(
+        &mut self,
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 1 || self.policy.gate.max_bulk_len < b"DBSIZE".len() {
             return false;
         }
         // The read gate requires selected_db == 0, so the fast path only serves
         // db-0 DBSIZE; a non-zero SELECT defers to generic (correct per-db count).
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for keyless `DBSIZE`. The read gate pins
@@ -21404,7 +21594,11 @@ impl Runtime {
     /// generic db-scoped path in that gated state. Runs the same fast active-
     /// expire cycle as the other read fast paths so the count reflects the same
     /// reaped state. Never errors. (cold-cmd audit)
-    pub fn execute_plain_dbsize_borrowed(&mut self, now_ms: u64, default_read_allowed: Option<bool>) -> Option<RespFrame> {
+    pub fn execute_plain_dbsize_borrowed(
+        &mut self,
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
         if !self.can_execute_plain_dbsize_borrowed(now_ms, default_read_allowed) {
             return None;
         }
@@ -21457,13 +21651,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "dbsize",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "dbsize",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -21559,13 +21751,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "watch",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "watch",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -21597,9 +21787,7 @@ impl Runtime {
         out: &mut Vec<u8>,
         default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if self.policy.gate.max_array_len < 1
-            || self.policy.gate.max_bulk_len < b"UNWATCH".len()
-        {
+        if self.policy.gate.max_array_len < 1 || self.policy.gate.max_bulk_len < b"UNWATCH".len() {
             return None;
         }
         if !default_read_allowed
@@ -21657,13 +21845,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_map_with_kind(
-                    "unwatch",
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_map_with_kind(
+                "unwatch",
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -21699,8 +21885,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for `BITPOS key bit [start [end [BYTE|BIT]]]`
@@ -21889,8 +22074,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for `BITCOUNT key [start end [BYTE|BIT]]`
@@ -22243,7 +22427,9 @@ impl Runtime {
         {
             return None;
         }
-        if !default_write_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms)) {
+        if !default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
+        {
             return None;
         }
         // A single NX|XX|GT|LT condition token (matching parse_expire_options for one
@@ -22426,7 +22612,8 @@ impl Runtime {
         {
             return false;
         }
-        default_write_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-6s9dx) Conservative borrowed WRITE fast path for the
@@ -22495,13 +22682,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::persist,
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::persist,
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -22611,13 +22796,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::setnx,
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::setnx,
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -23815,7 +23998,12 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_incrbyfloat_borrowed(key, increment_arg, now_ms, default_write_allowed) {
+        if !self.can_execute_plain_incrbyfloat_borrowed(
+            key,
+            increment_arg,
+            now_ms,
+            default_write_allowed,
+        ) {
             return None;
         }
         // (1) wrong-type peek first (non-counting), matching generic ordering.
@@ -23921,9 +24109,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_map_with_kind("incrbyfloat", elapsed_us, kind);
+            self.server.store.record_command_histogram_map_with_kind(
+                "incrbyfloat",
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -24513,10 +24703,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::getset, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::getset,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -24994,10 +25185,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::lrem, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::lrem,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -25036,8 +25228,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// (frankenredis-zbylexfast) Conservative borrowed READ fast path for the
@@ -25057,7 +25248,8 @@ impl Runtime {
         now_ms: u64,
         default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms, default_read_allowed)
+        {
             return None;
         }
         // Defer malformed-bound errors to the generic path for byte-exact wording
@@ -25135,7 +25327,8 @@ impl Runtime {
         out: &mut Vec<u8>,
         default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms, default_read_allowed)
+        {
             return None;
         }
         if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
@@ -25208,7 +25401,13 @@ impl Runtime {
         out: &mut Vec<u8>,
         default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zrevrangebylex_borrowed(key, max, min, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_zrevrangebylex_borrowed(
+            key,
+            max,
+            min,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         if !plain_lex_bound_well_formed(max) || !plain_lex_bound_well_formed(min) {
@@ -25306,9 +25505,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_map_with_kind("zrangebylex", elapsed_us, kind);
+            self.server.store.record_command_histogram_map_with_kind(
+                "zrangebylex",
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -25347,8 +25548,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// (BlackThrush) Borrowed READ fast path for `ZRANGEBYLEX key min max LIMIT
@@ -25368,7 +25568,8 @@ impl Runtime {
         now_ms: u64,
         default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms, default_read_allowed)
+        {
             return None;
         }
         if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
@@ -25459,7 +25660,8 @@ impl Runtime {
         out: &mut Vec<u8>,
         default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_zrangebylex_borrowed(key, min, max, now_ms, default_read_allowed)
+        {
             return None;
         }
         if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
@@ -25596,7 +25798,13 @@ impl Runtime {
         now_ms: u64,
         default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zrevrangebylex_borrowed(key, max, min, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_zrevrangebylex_borrowed(
+            key,
+            max,
+            min,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         if !plain_lex_bound_well_formed(max) || !plain_lex_bound_well_formed(min) {
@@ -25695,9 +25903,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_map_with_kind("zrevrangebylex", elapsed_us, kind);
+            self.server.store.record_command_histogram_map_with_kind(
+                "zrevrangebylex",
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -26054,8 +26264,14 @@ impl Runtime {
         now_ms: u64,
         default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min_arg, max_arg, now_ms, default_read_allowed)
-        {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZRANGE".len(),
+            key,
+            min_arg,
+            max_arg,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         let (min, max) = match (
@@ -26111,8 +26327,14 @@ impl Runtime {
         out: &mut Vec<u8>,
         default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min_arg, max_arg, now_ms, default_read_allowed)
-        {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZRANGE".len(),
+            key,
+            min_arg,
+            max_arg,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         let (min, max) = match (
@@ -26177,7 +26399,14 @@ impl Runtime {
         now_ms: u64,
         default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min, max, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZRANGE".len(),
+            key,
+            min,
+            max,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
@@ -26237,7 +26466,14 @@ impl Runtime {
         out: &mut Vec<u8>,
         default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min, max, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZRANGE".len(),
+            key,
+            min,
+            max,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
@@ -26521,8 +26757,14 @@ impl Runtime {
         now_ms: u64,
         default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGEBYLEX".len(), key, max, min, now_ms, default_read_allowed)
-        {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZREVRANGEBYLEX".len(),
+            key,
+            max,
+            min,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         if !plain_lex_bound_well_formed(max) || !plain_lex_bound_well_formed(min) {
@@ -26612,8 +26854,14 @@ impl Runtime {
         out: &mut Vec<u8>,
         default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGEBYLEX".len(), key, max, min, now_ms, default_read_allowed)
-        {
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZREVRANGEBYLEX".len(),
+            key,
+            max,
+            min,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         if !plain_lex_bound_well_formed(max) || !plain_lex_bound_well_formed(min) {
@@ -27127,8 +27375,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// (frankenredis-zbyscorefast) Borrowed READ fast path for `ZRANGEBYSCORE key
@@ -28095,7 +28342,12 @@ impl Runtime {
     /// cannot apply to a command whose status quo is already generic.
     ///
     /// Returns None (=> generic) for a non-canonical cursor or a disallowed session.
-    pub fn execute_plain_scan_borrowed(&mut self, cursor_arg: &[u8], now_ms: u64, default_read_allowed: Option<bool>) -> Option<RespFrame> {
+    pub fn execute_plain_scan_borrowed(
+        &mut self,
+        cursor_arg: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"SCAN".len()
             || cursor_arg.len() > self.policy.gate.max_bulk_len
@@ -28115,14 +28367,10 @@ impl Runtime {
         let st = self.chained_command_start();
         // selected_db is pinned to 0 by the admission guard above; read it rather than
         // hardcoding, so this stays correct if that guard is ever relaxed.
-        let (next_cursor, keys) = self.server.store.scan_in_db(
-            self.session.selected_db,
-            cursor,
-            None,
-            None,
-            10,
-            now_ms,
-        );
+        let (next_cursor, keys) =
+            self.server
+                .store
+                .scan_in_db(self.session.selected_db, cursor, None, None, 10, now_ms);
         let reply = Self::scan0_reply_from_items(
             next_cursor,
             keys.into_iter()
@@ -28157,7 +28405,11 @@ impl Runtime {
     /// here would invent an error reply the generic path never produces.
     ///
     /// Returns None (=> generic) only for a disallowed session or an oversized argument.
-    pub fn execute_plain_keys_borrowed(&mut self, pattern: &[u8], now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_keys_borrowed(
+        &mut self,
+        pattern: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"KEYS".len()
             || pattern.len() > self.policy.gate.max_bulk_len
@@ -28539,13 +28791,11 @@ impl Runtime {
     ) -> Option<RespFrame> {
         self.execute_plain_scan_opts_borrowed(
             cursor_arg,
-            &[
-                (keyword1, value1),
-                (keyword2, value2),
-                (keyword3, value3),
-            ],
+            &[(keyword1, value1), (keyword2, value2), (keyword3, value3)],
             8,
-            now_ms, default_read_allowed)
+            now_ms,
+            default_read_allowed,
+        )
     }
 
     /// (frankenredis-ozrro) Borrowed READ fast path for the TWO-option SCAN forms at
@@ -28569,7 +28819,9 @@ impl Runtime {
             cursor_arg,
             &[(keyword1, value1), (keyword2, value2)],
             6,
-            now_ms, default_read_allowed)
+            now_ms,
+            default_read_allowed,
+        )
     }
 
     /// (frankenredis-ozrro) Borrowed READ fast path for the arity-4 SCAN option forms:
@@ -28592,7 +28844,13 @@ impl Runtime {
         now_ms: u64,
         default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        self.execute_plain_scan_opts_borrowed(cursor_arg, &[(keyword, value)], 4, now_ms, default_read_allowed)
+        self.execute_plain_scan_opts_borrowed(
+            cursor_arg,
+            &[(keyword, value)],
+            4,
+            now_ms,
+            default_read_allowed,
+        )
     }
 
     /// (frankenredis-ozrro) Borrowed WRITE fast path for the base `SPOP key` form.
@@ -28619,7 +28877,12 @@ impl Runtime {
     /// The gate reads session and server CONFIG state only, and it plus all four helpers it calls
     /// are pure, so evaluating it in this position cannot move anything. The uncached entry point is
     /// KEPT for any caller that is not the borrowed batch (`parse_borrowed_multibulk_action`).
-    pub fn execute_plain_spop_borrowed_with_default_write_gate(&mut self, key: &[u8], now_ms: u64, default_write_allowed: bool) -> Option<RespFrame> {
+    pub fn execute_plain_spop_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         self.execute_plain_spop_borrowed_inner(key, now_ms, default_write_allowed)
     }
 
@@ -28628,7 +28891,12 @@ impl Runtime {
         self.execute_plain_spop_borrowed_inner(key, now_ms, default_write_allowed)
     }
 
-    fn execute_plain_spop_borrowed_inner(&mut self, key: &[u8], now_ms: u64, default_write_allowed: bool) -> Option<RespFrame> {
+    fn execute_plain_spop_borrowed_inner(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"SPOP".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -28665,8 +28933,6 @@ impl Runtime {
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
     }
-
-
 
     /// (CrimsonHawk) Zero-copy `_into` fast path for `SSCAN key 0` — streams the batch members
     /// BORROWED straight into `out` as the `[cursor, [members]]` reply via `sscan0_borrow_scan`,
@@ -28738,25 +29004,22 @@ impl Runtime {
         let db = self.session.selected_db;
         let keys_start = out.len();
         let mut count = 0usize;
-        let next_cursor =
-            self.server
-                .store
-                .scan_in_db_visit(
-                    fr_store::ScanQuery {
-                        db,
-                        cursor,
-                        pattern: None,
-                        type_filter: None,
-                        count: 10,
-                        now_ms,
-                    },
-                    |logical| {
-                        count += 1;
-                        if !suppress_reply {
-                            fr_protocol::encode_bulk_string_slice(Some(logical), resp3, out);
-                        }
-                    },
-                );
+        let next_cursor = self.server.store.scan_in_db_visit(
+            fr_store::ScanQuery {
+                db,
+                cursor,
+                pattern: None,
+                type_filter: None,
+                count: 10,
+                now_ms,
+            },
+            |logical| {
+                count += 1;
+                if !suppress_reply {
+                    fr_protocol::encode_bulk_string_slice(Some(logical), resp3, out);
+                }
+            },
+        );
         if !suppress_reply {
             let keys_len = out.len() - keys_start;
             out.extend_from_slice(b"*2\r\n");
@@ -29161,7 +29424,13 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_lmpop1_borrowed_inner(numkeys_arg, key, dir_arg, now_ms, default_write_allowed)
+        self.execute_plain_lmpop1_borrowed_inner(
+            numkeys_arg,
+            key,
+            dir_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_lmpop1_borrowed(
@@ -29172,7 +29441,13 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_lmpop1_borrowed_inner(numkeys_arg, key, dir_arg, now_ms, default_write_allowed)
+        self.execute_plain_lmpop1_borrowed_inner(
+            numkeys_arg,
+            key,
+            dir_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_lmpop1_borrowed_inner(
@@ -29280,7 +29555,15 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_lmpop1_count_borrowed_inner(numkeys_arg, key, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+        self.execute_plain_lmpop1_count_borrowed_inner(
+            numkeys_arg,
+            key,
+            dir_arg,
+            count_kw,
+            count_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_lmpop1_count_borrowed(
@@ -29293,7 +29576,15 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_lmpop1_count_borrowed_inner(numkeys_arg, key, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+        self.execute_plain_lmpop1_count_borrowed_inner(
+            numkeys_arg,
+            key,
+            dir_arg,
+            count_kw,
+            count_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_lmpop1_count_borrowed_inner(
@@ -29416,7 +29707,14 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_lmpop2_borrowed_inner(numkeys_arg, k1, k2, dir_arg, now_ms, default_write_allowed)
+        self.execute_plain_lmpop2_borrowed_inner(
+            numkeys_arg,
+            k1,
+            k2,
+            dir_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_lmpop2_borrowed(
@@ -29428,7 +29726,14 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_lmpop2_borrowed_inner(numkeys_arg, k1, k2, dir_arg, now_ms, default_write_allowed)
+        self.execute_plain_lmpop2_borrowed_inner(
+            numkeys_arg,
+            k1,
+            k2,
+            dir_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_lmpop2_borrowed_inner(
@@ -29553,7 +29858,16 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_lmpop2_count_borrowed_inner(numkeys_arg, k1, k2, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+        self.execute_plain_lmpop2_count_borrowed_inner(
+            numkeys_arg,
+            k1,
+            k2,
+            dir_arg,
+            count_kw,
+            count_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_lmpop2_count_borrowed(
@@ -29567,7 +29881,16 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_lmpop2_count_borrowed_inner(numkeys_arg, k1, k2, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+        self.execute_plain_lmpop2_count_borrowed_inner(
+            numkeys_arg,
+            k1,
+            k2,
+            dir_arg,
+            count_kw,
+            count_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_lmpop2_count_borrowed_inner(
@@ -29713,7 +30036,13 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_zpop_count_borrowed_inner(use_min, key, count_arg, now_ms, default_write_allowed)
+        self.execute_plain_zpop_count_borrowed_inner(
+            use_min,
+            key,
+            count_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_zpop_count_borrowed(
@@ -29724,7 +30053,13 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_zpop_count_borrowed_inner(use_min, key, count_arg, now_ms, default_write_allowed)
+        self.execute_plain_zpop_count_borrowed_inner(
+            use_min,
+            key,
+            count_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_zpop_count_borrowed_inner(
@@ -29824,7 +30159,13 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_zmpop1_borrowed_inner(numkeys_arg, key, dir_arg, now_ms, default_write_allowed)
+        self.execute_plain_zmpop1_borrowed_inner(
+            numkeys_arg,
+            key,
+            dir_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_zmpop1_borrowed(
@@ -29835,7 +30176,13 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_zmpop1_borrowed_inner(numkeys_arg, key, dir_arg, now_ms, default_write_allowed)
+        self.execute_plain_zmpop1_borrowed_inner(
+            numkeys_arg,
+            key,
+            dir_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_zmpop1_borrowed_inner(
@@ -29951,7 +30298,14 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_zmpop2_borrowed_inner(numkeys_arg, z1, z2, dir_arg, now_ms, default_write_allowed)
+        self.execute_plain_zmpop2_borrowed_inner(
+            numkeys_arg,
+            z1,
+            z2,
+            dir_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_zmpop2_borrowed(
@@ -29963,7 +30317,14 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_zmpop2_borrowed_inner(numkeys_arg, z1, z2, dir_arg, now_ms, default_write_allowed)
+        self.execute_plain_zmpop2_borrowed_inner(
+            numkeys_arg,
+            z1,
+            z2,
+            dir_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_zmpop2_borrowed_inner(
@@ -30095,7 +30456,15 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_zmpop1_count_borrowed_inner(numkeys_arg, key, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+        self.execute_plain_zmpop1_count_borrowed_inner(
+            numkeys_arg,
+            key,
+            dir_arg,
+            count_kw,
+            count_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_zmpop1_count_borrowed(
@@ -30108,7 +30477,15 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_zmpop1_count_borrowed_inner(numkeys_arg, key, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+        self.execute_plain_zmpop1_count_borrowed_inner(
+            numkeys_arg,
+            key,
+            dir_arg,
+            count_kw,
+            count_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_zmpop1_count_borrowed_inner(
@@ -30250,7 +30627,16 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: bool,
     ) -> Option<RespFrame> {
-        self.execute_plain_zmpop2_count_borrowed_inner(numkeys_arg, z1, z2, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+        self.execute_plain_zmpop2_count_borrowed_inner(
+            numkeys_arg,
+            z1,
+            z2,
+            dir_arg,
+            count_kw,
+            count_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     pub fn execute_plain_zmpop2_count_borrowed(
@@ -30264,7 +30650,16 @@ impl Runtime {
         now_ms: u64,
     ) -> Option<RespFrame> {
         let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
-        self.execute_plain_zmpop2_count_borrowed_inner(numkeys_arg, z1, z2, dir_arg, count_kw, count_arg, now_ms, default_write_allowed)
+        self.execute_plain_zmpop2_count_borrowed_inner(
+            numkeys_arg,
+            z1,
+            z2,
+            dir_arg,
+            count_kw,
+            count_arg,
+            now_ms,
+            default_write_allowed,
+        )
     }
 
     fn execute_plain_zmpop2_count_borrowed_inner(
@@ -30736,45 +31131,52 @@ impl Runtime {
         let st = self.chained_command_start();
         fr_command::record_source_key_lookups(&mut self.server.store, &[src], now_ms);
         let reply = 'reply: {
-            let pairs =
-                if let Some((lo, hi)) = bounds {
-                    match fr_command::zscore_inverted_wrongtype_guard(
-                        &mut self.server.store,
-                        src,
-                        lo,
-                        hi,
-                        now_ms,
-                    ) {
-                        // Fully-inverted range on a zset or missing key: generic DELETES dst and
-                        // replies 0 before any walk.
-                        Ok(true) => {
-                            let dst_key = dst.to_vec();
-                            self.server
-                                .store
-                                .del(std::slice::from_ref(&dst_key), now_ms);
-                            break 'reply RespFrame::Integer(0);
-                        }
-                        Ok(false) => {}
-                        Err(err) => break 'reply err.to_resp(),
+            let pairs = if let Some((lo, hi)) = bounds {
+                match fr_command::zscore_inverted_wrongtype_guard(
+                    &mut self.server.store,
+                    src,
+                    lo,
+                    hi,
+                    now_ms,
+                ) {
+                    // Fully-inverted range on a zset or missing key: generic DELETES dst and
+                    // replies 0 before any walk.
+                    Ok(true) => {
+                        let dst_key = dst.to_vec();
+                        self.server
+                            .store
+                            .del(std::slice::from_ref(&dst_key), now_ms);
+                        break 'reply RespFrame::Integer(0);
                     }
-                    match self
-                        .server
-                        .store
-                        .zrangebyscore_withscores_limited(
-                            src, lo, hi, false, limit_offset, limit_count, now_ms,
-                        )
-                    {
-                        Ok(pairs) => pairs,
-                        Err(err) => break 'reply CommandError::Store(err).to_resp(),
-                    }
-                } else {
-                    match self.server.store.zrangebylex_withscores_limited(
-                        src, min_arg, max_arg, false, limit_offset, limit_count, now_ms,
-                    ) {
-                        Ok(pairs) => pairs,
-                        Err(err) => break 'reply CommandError::Store(err).to_resp(),
-                    }
-                };
+                    Ok(false) => {}
+                    Err(err) => break 'reply err.to_resp(),
+                }
+                match self.server.store.zrangebyscore_withscores_limited(
+                    src,
+                    lo,
+                    hi,
+                    false,
+                    limit_offset,
+                    limit_count,
+                    now_ms,
+                ) {
+                    Ok(pairs) => pairs,
+                    Err(err) => break 'reply CommandError::Store(err).to_resp(),
+                }
+            } else {
+                match self.server.store.zrangebylex_withscores_limited(
+                    src,
+                    min_arg,
+                    max_arg,
+                    false,
+                    limit_offset,
+                    limit_count,
+                    now_ms,
+                ) {
+                    Ok(pairs) => pairs,
+                    Err(err) => break 'reply CommandError::Store(err).to_resp(),
+                }
+            };
             let count = i64::try_from(pairs.len()).unwrap_or(i64::MAX);
             let dst_key = dst.to_vec();
             if pairs.is_empty() {
@@ -30873,7 +31275,9 @@ impl Runtime {
                 .store
                 .zrevrange_withscores(src, start, stop, now_ms)
         } else {
-            self.server.store.zrange_withscores(src, start, stop, now_ms)
+            self.server
+                .store
+                .zrange_withscores(src, start, stop, now_ms)
         };
         let reply = match ranged {
             Ok(pairs) => {
@@ -30881,7 +31285,9 @@ impl Runtime {
                 let dst_key = dst.to_vec();
                 if pairs.is_empty() {
                     // Empty result DELETES dst — it does not leave a stale zset behind.
-                    self.server.store.del(std::slice::from_ref(&dst_key), now_ms);
+                    self.server
+                        .store
+                        .del(std::slice::from_ref(&dst_key), now_ms);
                 } else {
                     self.server
                         .store
@@ -31291,7 +31697,12 @@ impl Runtime {
     /// Integer(count). Callers pass the 2- or 3-key slice; 1-key and 4+ forms fall
     /// through to generic. (DEL does not record keyspace_hits/misses — matches the
     /// generic.)
-    pub fn execute_plain_del_borrowed(&mut self, keys: &[&[u8]], now_ms: u64, default_write_allowed: Option<bool>) -> Option<RespFrame> {
+    pub fn execute_plain_del_borrowed(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < keys.len() + 1
             || self.policy.gate.max_bulk_len < b"DEL".len()
             || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
@@ -31712,7 +32123,13 @@ impl Runtime {
         now_ms: u64,
         default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_setbit_borrowed(key, offset_arg, value_arg, now_ms, default_write_allowed) {
+        if !self.can_execute_plain_setbit_borrowed(
+            key,
+            offset_arg,
+            value_arg,
+            now_ms,
+            default_write_allowed,
+        ) {
             return None;
         }
         // Same validation as generic setbit; defer on any failure for exact errors.
@@ -31816,10 +32233,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::setbit, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::setbit,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -31990,9 +32408,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_map_with_kind("hincrbyfloat", elapsed_us, kind);
+            self.server.store.record_command_histogram_map_with_kind(
+                "hincrbyfloat",
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -32073,7 +32493,8 @@ impl Runtime {
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name = Some("ltrim");
-        self.session.last_argv_len_sum = b"LTRIM".len() + key.len() + start_arg.len() + stop_arg.len();
+        self.session.last_argv_len_sum =
+            b"LTRIM".len() + key.len() + start_arg.len() + stop_arg.len();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -32130,14 +32551,16 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_ltrim_owned_argv(key, start_arg, stop_arg));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_ltrim_owned_argv(key, start_arg, stop_arg));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_ltrim_owned_argv(key, start_arg, stop_arg));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_ltrim_owned_argv(key, start_arg, stop_arg));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -32154,7 +32577,8 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_ltrim_owned_argv(key, start_arg, stop_arg));
+            let argv_ref =
+                argv.get_or_insert_with(|| plain_ltrim_owned_argv(key, start_arg, stop_arg));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -32344,8 +32768,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed fast path for `HSTRLEN key field`: calls the SAME store.hstrlen
@@ -32442,9 +32865,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::hstrlen, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::hstrlen,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -32484,8 +32909,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `HEXISTS key field`: mirrors
@@ -32583,9 +33007,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::hexists, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::hexists,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -32623,8 +33049,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `LLEN key`: mirrors
@@ -32719,9 +33144,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::llen, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::llen,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -33201,8 +33628,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed runtime fast path for `GEODIST key m1 m2 [unit]` — mirrors
@@ -33378,8 +33804,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed runtime fast path for `ZCOUNT key min max` — mirrors the generic
@@ -33399,7 +33824,13 @@ impl Runtime {
         now_ms: u64,
         default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zcount_borrowed(key, min_arg, max_arg, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_zcount_borrowed(
+            key,
+            min_arg,
+            max_arg,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         // Parse BEFORE any side effect; a bad bound falls back to generic for the
@@ -33554,8 +33985,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed runtime fast path for `ZLEXCOUNT key min max` — mirrors the
@@ -33572,7 +34002,13 @@ impl Runtime {
         now_ms: u64,
         default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zlexcount_borrowed(key, min_arg, max_arg, now_ms, default_read_allowed) {
+        if !self.can_execute_plain_zlexcount_borrowed(
+            key,
+            min_arg,
+            max_arg,
+            now_ms,
+            default_read_allowed,
+        ) {
             return None;
         }
         // Validate BEFORE any side effect; a bad bound falls back to generic for
@@ -33717,8 +34153,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed runtime fast path for `GEOPOS key member [member ...]` — mirrors
@@ -35376,19 +35811,22 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
-    fn can_execute_plain_bitfield_ro_two_get_borrowed(&mut self, key: &[u8], now_ms: u64, default_read_allowed: Option<bool>) -> bool {
+    fn can_execute_plain_bitfield_ro_two_get_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 8
             || self.policy.gate.max_bulk_len < b"BITFIELD_RO".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     fn can_execute_plain_bitfield_set_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
@@ -35872,9 +36310,11 @@ impl Runtime {
             // (frankenredis-par0e) cmd.name_lower() is a static lowercase canonical
             // name — record directly, skipping the per-command re-lowercase +
             // UTF-8 validation, and hitting the lpush/rpush/sadd direct fields.
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(cmd.hist_slot(), elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                cmd.hist_slot(),
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -35912,8 +36352,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed fast path for the no-count `SRANDMEMBER key` /
@@ -36930,9 +37369,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(cmd.hist_slot(), elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                cmd.hist_slot(),
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -36973,8 +37414,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `ZRANK key member` /
@@ -37082,9 +37522,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(cmd.hist_slot(), elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                cmd.hist_slot(),
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -37124,8 +37566,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `SCARD key`: mirrors
@@ -37221,9 +37662,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::scard, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::scard,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -37264,8 +37707,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `LINDEX key index`: mirrors
@@ -37477,9 +37919,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::lindex, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::lindex,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -37516,8 +37960,7 @@ impl Runtime {
         {
             return false;
         }
-        default_read_allowed
-            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        default_read_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `ZSCORE key member`: mirrors
@@ -38538,8 +38981,14 @@ impl Runtime {
         out: &mut Vec<u8>,
         default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min_arg, max_arg, now_ms, default_read_allowed)
-            || self.policy.gate.max_array_len < 6
+        if !self.can_execute_plain_zbyscore_borrowed(
+            b"ZRANGE".len(),
+            key,
+            min_arg,
+            max_arg,
+            now_ms,
+            default_read_allowed,
+        ) || self.policy.gate.max_array_len < 6
             || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
         {
             return None;
@@ -38810,9 +39259,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::zscore, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::zscore,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -39048,17 +39499,15 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::set,
-                    elapsed_us,
-                    if failed {
-                        CommandRecordKind::Failed
-                    } else {
-                        CommandRecordKind::Success
-                    },
-                );
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::set,
+                elapsed_us,
+                if failed {
+                    CommandRecordKind::Failed
+                } else {
+                    CommandRecordKind::Success
+                },
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -39105,13 +39554,11 @@ impl Runtime {
         }
 
         if self.server.latency_tracking {
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(
-                    HistSlot::set,
-                    elapsed_us,
-                    CommandRecordKind::Success,
-                );
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::set,
+                elapsed_us,
+                CommandRecordKind::Success,
+            );
         }
     }
 
@@ -39145,9 +39592,11 @@ impl Runtime {
             } else {
                 CommandRecordKind::Success
             };
-            self.server
-                .store
-                .record_command_histogram_slot_with_kind(HistSlot::get, elapsed_us, kind);
+            self.server.store.record_command_histogram_slot_with_kind(
+                HistSlot::get,
+                elapsed_us,
+                kind,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -39742,8 +40191,7 @@ impl Runtime {
             // keeps `c->lastcmd` as a POINTER and prints `lastcmd->fullname`, so this is
             // the same representation, and `None` reproduces upstream's NULL for a command
             // the table does not have (frankenredis-zbiy3).
-            let (canonical, arity_ok, parent_ok) =
-                fr_command::resolve_command_name_and_arity(argv);
+            let (canonical, arity_ok, parent_ok) = fr_command::resolve_command_name_and_arity(argv);
             self.session.last_command_name = canonical;
             resolved_arity_ok = Some(arity_ok);
             resolved_parent_arity_ok = Some(parent_ok);
@@ -40097,7 +40545,10 @@ impl Runtime {
         // function is not one here; conversely a flagless function must be rejected here before
         // the stale-data gate gets a chance to answer it. (script.c::scriptFlagsToCmdFlags)
         let command_writes = fr_command::script_effective_command_flags(argv, &self.server.store)
-            .map_or_else(|| fr_command::is_write_command(command), |flags| flags.write);
+            .map_or_else(
+                || fr_command::is_write_command(command),
+                |flags| flags.write,
+            );
         if !command_writes {
             return None;
         }
@@ -40755,8 +41206,12 @@ impl Runtime {
                 } else {
                     self.record_slowlog(argv, elapsed_us, now_ms);
                     self.server.record_latency_sample(argv, elapsed_us, now_ms);
-                    self.server
-                        .record_command_histogram(argv, resolved_canonical, elapsed_us, &reply);
+                    self.server.record_command_histogram(
+                        argv,
+                        resolved_canonical,
+                        elapsed_us,
+                        &reply,
+                    );
                     // Upstream call() feeds MONITOR at the end of every executed
                     // command except CMD_ADMIN / CMD_SKIP_MONITOR ones. This
                     // special-command early-return path used to feed only under
@@ -40794,7 +41249,6 @@ impl Runtime {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
-
 
         // Command paths run a fast active-expire cycle to keep short-lived keys
         // from lingering between server ticks.
@@ -40856,8 +41310,12 @@ impl Runtime {
                 Ok(RespFrame::Error(_)) | Err(_) => true,
                 Ok(_) => false,
             };
-            self.server
-                .record_command_histogram_outcome(argv, resolved_canonical, elapsed_us, failed);
+            self.server.record_command_histogram_outcome(
+                argv,
+                resolved_canonical,
+                elapsed_us,
+                failed,
+            );
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
@@ -42152,9 +42610,10 @@ impl Runtime {
         let script_command_flags =
             fr_command::script_effective_command_flags(argv, &self.server.store);
         let command_denyoom = script_command_flags.map_or_else(
-            || argv
-                .first()
-                .is_some_and(|cmd| fr_command::command_is_denyoom(cmd)),
+            || {
+                argv.first()
+                    .is_some_and(|cmd| fr_command::command_is_denyoom(cmd))
+            },
             |flags| flags.denyoom,
         );
         if script_entrypoint && (script_command_flags.is_none() || !command_denyoom) {
@@ -42723,7 +43182,11 @@ impl Runtime {
             // with an output backlog previously reported `events=r` -- i.e. it looked idle
             // and healthy at the moment upstream would show it backing up, which is the one
             // state an operator reads this field to find.
-            if session.output_buffer_bytes > 0 { "rw" } else { "r" },
+            if session.output_buffer_bytes > 0 {
+                "rw"
+            } else {
+                "r"
+            },
             session.last_command_name.unwrap_or("NULL"),
             String::from_utf8_lossy(session.current_user_name()),
             redir,
@@ -44618,7 +45081,8 @@ impl Runtime {
                     .into_bytes(),
             )));
         }
-        if Self::config_pattern_matches_known(pattern, is_literal, "cluster-allow-reads-when-down") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "cluster-allow-reads-when-down")
+        {
             entries.push(RespFrame::BulkString(Some(
                 b"cluster-allow-reads-when-down".to_vec(),
             )));
@@ -44630,7 +45094,11 @@ impl Runtime {
                 },
             )));
         }
-        if Self::config_pattern_matches_known(pattern, is_literal, "cluster-allow-pubsubshard-when-down") {
+        if Self::config_pattern_matches_known(
+            pattern,
+            is_literal,
+            "cluster-allow-pubsubshard-when-down",
+        ) {
             entries.push(RespFrame::BulkString(Some(
                 b"cluster-allow-pubsubshard-when-down".to_vec(),
             )));
@@ -45312,15 +45780,12 @@ impl Runtime {
                 // parse_int_config_value already renders the exact upstream wording, and the
                 // neighbouring slowlog-max-len arm already bounds itself at [0, i64::MAX];
                 // this arm was the one that skipped it.
-                let parsed = match parse_int_config_value(
-                    "slowlog-log-slower-than",
-                    &pair[1],
-                    -1,
-                    i64::MAX,
-                ) {
-                    Ok(value) => value,
-                    Err(resp) => return resp,
-                };
+                let parsed =
+                    match parse_int_config_value("slowlog-log-slower-than", &pair[1], -1, i64::MAX)
+                    {
+                        Ok(value) => value,
+                        Err(resp) => return resp,
+                    };
                 next_slowlog_slower_than = Some(parsed);
                 continue;
             }
@@ -47329,7 +47794,11 @@ impl Runtime {
         // `glob_match` on it degenerates to exact byte equality. `\` is excluded because it
         // ESCAPES the next character, and `[` because it opens a class; either makes the
         // pattern non-literal even with no `*` or `?` present.
-        Self::config_pattern_matches_known(pattern, Self::config_pattern_is_literal(pattern), parameter)
+        Self::config_pattern_matches_known(
+            pattern,
+            Self::config_pattern_is_literal(pattern),
+            parameter,
+        )
     }
 
     /// Does this pattern have any glob semantics left?
@@ -49558,8 +50027,7 @@ impl Runtime {
             dispatch_command_section(self, "stats", &mut info)?;
         }
         if is_replication
-            && let RespFrame::BulkString(Some(bytes)) =
-                self.handle_info_replication_section(now_ms)
+            && let RespFrame::BulkString(Some(bytes)) = self.handle_info_replication_section(now_ms)
         {
             info.extend_from_slice(&bytes);
         }
@@ -51825,9 +52293,7 @@ fn store_to_rdb_entries_with_thresholds(
                         // value rather than encoding it re-derives them from `raw`.
                         nodes: Vec::new(),
                     }
-                } else if let Some(nodes) =
-                    l.quicklist_packed_node_blobs(list_max_listpack_size)
-                {
+                } else if let Some(nodes) = l.quicklist_packed_node_blobs(list_max_listpack_size) {
                     RdbValue::ListQuicklist2Packed(nodes)
                 } else {
                     RdbValue::List(l.iter().map(<[u8]>::to_vec).collect())
@@ -51873,35 +52339,35 @@ fn store_to_rdb_entries_with_thresholds(
                         max_member_len,
                     }
                 } else {
-                let borrowed_blob = if store.set_is_hashtable_encoded(&key) {
-                    None
-                } else {
-                    compact.and_then(|thresholds| {
-                        s.borrowed_generic_members().and_then(|borrowed| {
-                            fr_persist::encode_set_listpack_blob_borrowed(&borrowed, thresholds)
+                    let borrowed_blob = if store.set_is_hashtable_encoded(&key) {
+                        None
+                    } else {
+                        compact.and_then(|thresholds| {
+                            s.borrowed_generic_members().and_then(|borrowed| {
+                                fr_persist::encode_set_listpack_blob_borrowed(&borrowed, thresholds)
+                            })
                         })
-                    })
-                };
-                if let Some(blob) = borrowed_blob {
-                    RdbValue::SetListpack(blob)
-                } else {
-                let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
-                // (frankenredis-39is8) Save by ACTUAL encoding: a hashtable set
-                // emits the plain RDB_TYPE_SET so the encoding survives a
-                // save/load even when its content would otherwise re-derive to a
-                // smaller encoding. intset/listpack sets keep `Set` (re-derived).
-                if store.set_is_hashtable_encoded(&key) {
-                    // (frankenredis-2j9wz) Only a hashtable set needs an imposed
-                    // order — its iteration is non-deterministic. intset/listpack
-                    // sets are saved in native iteration order (ascending for
-                    // intset, insertion for listpack), matching redis, so the
-                    // DUMP stays byte-stable across DEBUG RELOAD.
-                    members.sort();
-                    RdbValue::SetHashtable(members)
-                } else {
-                    RdbValue::Set(members)
-                }
-                }
+                    };
+                    if let Some(blob) = borrowed_blob {
+                        RdbValue::SetListpack(blob)
+                    } else {
+                        let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+                        // (frankenredis-39is8) Save by ACTUAL encoding: a hashtable set
+                        // emits the plain RDB_TYPE_SET so the encoding survives a
+                        // save/load even when its content would otherwise re-derive to a
+                        // smaller encoding. intset/listpack sets keep `Set` (re-derived).
+                        if store.set_is_hashtable_encoded(&key) {
+                            // (frankenredis-2j9wz) Only a hashtable set needs an imposed
+                            // order — its iteration is non-deterministic. intset/listpack
+                            // sets are saved in native iteration order (ascending for
+                            // intset, insertion for listpack), matching redis, so the
+                            // DUMP stays byte-stable across DEBUG RELOAD.
+                            members.sort();
+                            RdbValue::SetHashtable(members)
+                        } else {
+                            RdbValue::Set(members)
+                        }
+                    }
                 }
             }
             Value::Hash(h) => {
@@ -51929,8 +52395,8 @@ fn store_to_rdb_entries_with_thresholds(
                         .collect();
                     fields.sort_by(|a, b| a.0.cmp(&b.0));
                     RdbValue::HashWithTtls(fields)
-                } else if let Some(thresholds) = compact
-                    .filter(|_| !cfg!(feature = "perf-ab-rdb-hash-owned"))
+                } else if let Some(thresholds) =
+                    compact.filter(|_| !cfg!(feature = "perf-ab-rdb-hash-owned"))
                     && let Some((raw, pair_count, max_entry_len)) = h.retained_rdb_string()
                     && pair_count <= thresholds.hash_max_listpack_entries
                     && max_entry_len <= thresholds.hash_max_listpack_value
@@ -52048,17 +52514,17 @@ fn store_to_rdb_entries_with_thresholds(
                         max_member_len,
                     }
                 } else {
-                let borrowed_blob = compact.and_then(|thresholds| {
-                    let borrowed: Vec<(&[u8], f64)> = zs.iter_asc().collect();
-                    fr_persist::encode_zset_listpack_blob_borrowed(&borrowed, thresholds)
-                });
-                if let Some(blob) = borrowed_blob {
-                    RdbValue::ZsetListpack(blob)
-                } else {
-                    let members: Vec<(Vec<u8>, f64)> =
-                        zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
-                    RdbValue::SortedSet(members)
-                }
+                    let borrowed_blob = compact.and_then(|thresholds| {
+                        let borrowed: Vec<(&[u8], f64)> = zs.iter_asc().collect();
+                        fr_persist::encode_zset_listpack_blob_borrowed(&borrowed, thresholds)
+                    });
+                    if let Some(blob) = borrowed_blob {
+                        RdbValue::ZsetListpack(blob)
+                    } else {
+                        let members: Vec<(Vec<u8>, f64)> =
+                            zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
+                        RdbValue::SortedSet(members)
+                    }
                 }
             }
             Value::Stream(entries_map) => {
@@ -52141,41 +52607,41 @@ fn store_to_rdb_entries_with_thresholds(
                 {
                     RdbValue::StreamListpacks3(skeleton.upstream_payload().to_vec())
                 } else {
-                let borrowed_entries: Vec<(u64, u64, Vec<(&[u8], &[u8])>)> = entries_map
-                    .iter()
-                    .map(|((ms, seq), fields)| (*ms, *seq, fields.iter().collect()))
-                    .collect();
-                if let Some(blob) = fr_persist::encode_stream_listpacks3_blob_borrowed(
-                    &borrowed_entries,
-                    watermark,
-                    &groups,
-                    entries_added,
-                    max_deleted,
-                ) {
-                    RdbValue::StreamListpacks3(blob)
-                } else {
-                    let stream_entries: Vec<fr_persist::StreamEntry> = borrowed_entries
-                        .into_iter()
-                        .map(|(ms, seq, fields)| {
-                            (
-                                ms,
-                                seq,
-                                fields
-                                    .into_iter()
-                                    .map(|(f, v)| (f.to_vec(), v.to_vec()))
-                                    .collect(),
-                            )
-                        })
+                    let borrowed_entries: Vec<(u64, u64, Vec<(&[u8], &[u8])>)> = entries_map
+                        .iter()
+                        .map(|((ms, seq), fields)| (*ms, *seq, fields.iter().collect()))
                         .collect();
-                    RdbValue::Stream(
-                        stream_entries,
+                    if let Some(blob) = fr_persist::encode_stream_listpacks3_blob_borrowed(
+                        &borrowed_entries,
                         watermark,
-                        groups,
-                        None,
+                        &groups,
                         entries_added,
                         max_deleted,
-                    )
-                }
+                    ) {
+                        RdbValue::StreamListpacks3(blob)
+                    } else {
+                        let stream_entries: Vec<fr_persist::StreamEntry> = borrowed_entries
+                            .into_iter()
+                            .map(|(ms, seq, fields)| {
+                                (
+                                    ms,
+                                    seq,
+                                    fields
+                                        .into_iter()
+                                        .map(|(f, v)| (f.to_vec(), v.to_vec()))
+                                        .collect(),
+                                )
+                            })
+                            .collect();
+                        RdbValue::Stream(
+                            stream_entries,
+                            watermark,
+                            groups,
+                            None,
+                            entries_added,
+                            max_deleted,
+                        )
+                    }
                 }
             }
         };
@@ -52362,8 +52828,7 @@ fn apply_rdb_entries_to_store(
                         .ok_or(PersistError::InvalidFrame)?;
                     let spans = fr_persist::listpack::decode_value_spans(&listpack)
                         .map_err(|_| PersistError::InvalidFrame)?;
-                    let members: Vec<&[u8]> =
-                        spans.iter().map(|s| s.as_bytes(&listpack)).collect();
+                    let members: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(&listpack)).collect();
                     store
                         .sadd_loading(&key, &members, now_ms)
                         .map_err(|_| PersistError::InvalidFrame)?;
@@ -52907,8 +53372,7 @@ mod tests {
                 for c in [0u8, 10] {
                     for d in octet_cases {
                         for port in port_cases {
-                            let addr =
-                                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(a, b, c, d)), port);
+                            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(a, b, c, d)), port);
                             let mut mine = String::new();
                             match addr {
                                 SocketAddr::V4(v4) => {
@@ -53039,7 +53503,8 @@ mod tests {
                 .filter(|k| k.as_slice() == pattern.as_bytes())
                 .count();
             assert_eq!(
-                hits, 1,
+                hits,
+                1,
                 "literal CONFIG GET {pattern:?} emitted the key {hits} times, expected exactly 1; \
                  keys were {:?}",
                 keys.iter()
@@ -53727,9 +54192,9 @@ mod tests {
         ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
         OutputBufferClassLimit, PlainBitfieldGetCmd, PlainCardinalityCmd, PlainKeyMetaCmd,
         PlainObjectStatCmd, PlainRandMemberCmd, RDB_DISK_ERROR_WRITE_DENIED, Runtime,
-        SCRIPT_RDB_DISK_ERROR_WRITE_DENIED, ServerState,
-        acl_list_entries_from_rules, build_hello_response, canonical_static_config_param,
-        canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
+        SCRIPT_RDB_DISK_ERROR_WRITE_DENIED, ServerState, acl_list_entries_from_rules,
+        build_hello_response, canonical_static_config_param, canonicalize_acl_rules,
+        classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
         client_wrong_subcommand_arity, config_set_failed, digest_bytes, parse_acl_key_selector,
         parse_aof_history_seq, sha256_hex_bytes, store_to_rdb_entries_with_thresholds,
@@ -53773,8 +54238,17 @@ mod tests {
             rt.execute_frame(command(&[b"XGROUP", b"CREATE", b"xp", b"gp", b"0"]), 0);
             // Read the entry into the PEL so the populated case really is populated.
             rt.execute_frame(
-                command(&[b"XREADGROUP", b"GROUP", b"gp", b"c1", b"COUNT", b"10",
-                          b"STREAMS", b"xp", b">"]),
+                command(&[
+                    b"XREADGROUP",
+                    b"GROUP",
+                    b"gp",
+                    b"c1",
+                    b"COUNT",
+                    b"10",
+                    b"STREAMS",
+                    b"xp",
+                    b">",
+                ]),
                 0,
             );
             rt.execute_frame(command(&[b"SET", b"str", b"v"]), 0);
@@ -53796,7 +54270,10 @@ mod tests {
 
             if let Some(reply) = got {
                 served += 1;
-                assert_eq!(reply, want, "borrowed XPENDING diverged from the generic on {label:?}");
+                assert_eq!(
+                    reply, want,
+                    "borrowed XPENDING diverged from the generic on {label:?}"
+                );
                 assert_eq!(
                     fast.server.store.stat_keyspace_hits, generic.server.store.stat_keyspace_hits,
                     "keyspace hits diverged on {label:?}"
@@ -54698,10 +55175,23 @@ mod tests {
                 )
                 .expect("limit fast path should engage");
             let g = generic.execute_frame(
-                command(&[b"ZRANGESTORE", b"dst", b"zs", min, max, kw, b"LIMIT", off, cnt]),
+                command(&[
+                    b"ZRANGESTORE",
+                    b"dst",
+                    b"zs",
+                    min,
+                    max,
+                    kw,
+                    b"LIMIT",
+                    off,
+                    cnt,
+                ]),
                 ts,
             );
-            assert_eq!(f, g, "reply differs: {kw:?} {min:?}..{max:?} LIMIT {off:?} {cnt:?}");
+            assert_eq!(
+                f, g,
+                "reply differs: {kw:?} {min:?}..{max:?} LIMIT {off:?} {cnt:?}"
+            );
             for probe in [
                 &[b"ZRANGE".as_slice(), b"dst", b"0", b"-1", b"WITHSCORES"][..],
                 &[b"OBJECT".as_slice(), b"ENCODING", b"dst"][..],
@@ -56029,7 +56519,10 @@ mod tests {
         // case-insensitive subcommand still recognized + canonical name
         let mut lc = Runtime::default_strict();
         lc.execute_frame(command(&[b"SET", b"i", b"1"]), 1);
-        assert!(lc.execute_plain_object_encoding_borrowed(b"i", 2, None).is_some());
+        assert!(
+            lc.execute_plain_object_encoding_borrowed(b"i", 2, None)
+                .is_some()
+        );
         assert_eq!(lc.session.last_command_name, Some("object|encoding"));
     }
 
@@ -56195,7 +56688,11 @@ mod tests {
         assert!(matches!(f, RespFrame::Integer(n) if n > 0));
         assert_eq!(direct.session.last_command_name, Some("command|count"));
         // case-insensitive
-        assert!(direct.execute_plain_command_count_borrowed(3, None).is_some());
+        assert!(
+            direct
+                .execute_plain_command_count_borrowed(3, None)
+                .is_some()
+        );
     }
 
     #[test]
@@ -56214,7 +56711,9 @@ mod tests {
             rt.execute_frame(command(&[b"SET", b"b", b"2"]), 3);
             rt.execute_frame(command(&[b"RPUSH", b"l", b"x"]), 3);
         }
-        let f = direct.execute_plain_dbsize_borrowed(4, None).expect("fast path");
+        let f = direct
+            .execute_plain_dbsize_borrowed(4, None)
+            .expect("fast path");
         let g = generic.execute_frame(command(&[b"DBSIZE"]), 4);
         assert_eq!(f, g);
         assert_eq!(f, RespFrame::Integer(3));
@@ -57126,8 +57625,15 @@ mod tests {
             for (ts, key) in (2u64..).zip([b"z".as_slice(), b"nokey".as_slice(), b"str".as_slice()])
             {
                 let mut fast_bytes = Vec::new();
-                fast.execute_plain_zscan0_borrowed_into(key, b"0", ts, resp3, &mut fast_bytes, None)
-                    .expect("well-formed ZSCAN key 0 should take fast path");
+                fast.execute_plain_zscan0_borrowed_into(
+                    key,
+                    b"0",
+                    ts,
+                    resp3,
+                    &mut fast_bytes,
+                    None,
+                )
+                .expect("well-formed ZSCAN key 0 should take fast path");
                 let generic_reply = generic.execute_frame(command(&[b"ZSCAN", key, b"0"]), ts);
                 assert_eq!(
                     fast_bytes,
@@ -57137,8 +57643,15 @@ mod tests {
             }
 
             assert!(
-                fast.execute_plain_zscan0_borrowed_into(b"z", b"1", 10, resp3, &mut Vec::new(), None)
-                    .is_none()
+                fast.execute_plain_zscan0_borrowed_into(
+                    b"z",
+                    b"1",
+                    10,
+                    resp3,
+                    &mut Vec::new(),
+                    None
+                )
+                .is_none()
             );
 
             assert_eq!(
@@ -57212,7 +57725,10 @@ mod tests {
         assert!(matches!(wt, RespFrame::Error(_)));
 
         // non-integer index -> fast path defers (None), generic emits the error
-        assert!(fast.execute_plain_lindex_borrowed(b"l", b"x", 5, None).is_none());
+        assert!(
+            fast.execute_plain_lindex_borrowed(b"l", b"x", 5, None)
+                .is_none()
+        );
 
         assert_eq!(
             fast.server.store.stat_total_commands_processed,
@@ -57240,9 +57756,15 @@ mod tests {
     fn plain_lindex_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"RPUSH", b"l", b"a"]), 1);
-        assert!(rt.execute_plain_lindex_borrowed(b"l", b"0", 2, None).is_some());
+        assert!(
+            rt.execute_plain_lindex_borrowed(b"l", b"0", 2, None)
+                .is_some()
+        );
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
-        assert!(rt.execute_plain_lindex_borrowed(b"l", b"0", 4, None).is_none());
+        assert!(
+            rt.execute_plain_lindex_borrowed(b"l", b"0", 4, None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -57698,8 +58220,7 @@ mod tests {
                 let mut out = Vec::new();
                 direct
                     .execute_plain_zrange_withscores_borrowed_into(
-                        key, start, stop, ts, resp3, &mut out,
-                        None,
+                        key, start, stop, ts, resp3, &mut out, None,
                     )
                     .expect("rank ZRANGE WITHSCORES should take borrowed fast path");
                 let generic_reply = generic.execute_frame(
@@ -57782,8 +58303,7 @@ mod tests {
                 let mut out = Vec::new();
                 direct
                     .execute_plain_zrevrange_withscores_borrowed_into(
-                        key, start, stop, ts, resp3, &mut out,
-                        None,
+                        key, start, stop, ts, resp3, &mut out, None,
                     )
                     .expect("ZREVRANGE WITHSCORES should take borrowed fast path");
                 let generic_reply = generic.execute_frame(
@@ -57867,8 +58387,7 @@ mod tests {
                 let mut out = Vec::new();
                 direct
                     .execute_plain_zrangebyscore_withscores_borrowed_into(
-                        key, min, max, ts, resp3, &mut out,
-                        None,
+                        key, min, max, ts, resp3, &mut out, None,
                     )
                     .expect("ZRANGEBYSCORE WITHSCORES should take borrowed fast path");
                 let generic_reply = generic.execute_frame(
@@ -57945,8 +58464,7 @@ mod tests {
                 let mut out = Vec::new();
                 direct
                     .execute_plain_zrevrangebyscore_withscores_borrowed_into(
-                        key, max, min, ts, resp3, &mut out,
-                        None,
+                        key, max, min, ts, resp3, &mut out, None,
                     )
                     .expect("ZREVRANGEBYSCORE WITHSCORES should take borrowed fast path");
                 let generic_reply = generic.execute_frame(
@@ -58210,7 +58728,14 @@ mod tests {
         // Malformed lex bound (no [/(/-/+ prefix) defers to generic.
         assert!(
             direct
-                .execute_plain_zrangebylex_borrowed_into(b"z", b"bad", b"+", 90, &mut Vec::new(), None)
+                .execute_plain_zrangebylex_borrowed_into(
+                    b"z",
+                    b"bad",
+                    b"+",
+                    90,
+                    &mut Vec::new(),
+                    None
+                )
                 .is_none()
         );
         assert_eq!(
@@ -58259,7 +58784,14 @@ mod tests {
         }
         assert!(
             direct
-                .execute_plain_zrange_bylex_borrowed_into(b"z", b"bad", b"+", 90, &mut Vec::new(), None)
+                .execute_plain_zrange_bylex_borrowed_into(
+                    b"z",
+                    b"bad",
+                    b"+",
+                    90,
+                    &mut Vec::new(),
+                    None
+                )
                 .is_none()
         );
         assert_eq!(
@@ -58346,8 +58878,7 @@ mod tests {
             let mut out = Vec::new();
             direct
                 .execute_plain_zrangebyscore_limit_borrowed_into(
-                    key, min, max, off, cnt, ts, &mut out,
-                    None,
+                    key, min, max, off, cnt, ts, &mut out, None,
                 )
                 .expect("ZRANGEBYSCORE LIMIT _into");
             assert_eq!(
@@ -58402,8 +58933,7 @@ mod tests {
             let mut out = Vec::new();
             direct
                 .execute_plain_zrevrangebyscore_limit_borrowed_into(
-                    key, max, min, off, cnt, ts, &mut out,
-                    None,
+                    key, max, min, off, cnt, ts, &mut out, None,
                 )
                 .expect("ZREVRANGEBYSCORE LIMIT _into");
             assert_eq!(
@@ -58564,8 +59094,7 @@ mod tests {
             let mut out = Vec::new();
             direct
                 .execute_plain_zrevrangebylex_limit_borrowed_into(
-                    key, max, min, off, cnt, ts, &mut out,
-                    None,
+                    key, max, min, off, cnt, ts, &mut out, None,
                 )
                 .expect("ZREVRANGEBYLEX LIMIT _into");
             assert_eq!(
@@ -58618,9 +59147,15 @@ mod tests {
     fn plain_zscore_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"ZADD", b"z", b"1", b"a"]), 1);
-        assert!(rt.execute_plain_zscore_borrowed(b"z", b"a", 2, None).is_some());
+        assert!(
+            rt.execute_plain_zscore_borrowed(b"z", b"a", 2, None)
+                .is_some()
+        );
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
-        assert!(rt.execute_plain_zscore_borrowed(b"z", b"a", 4, None).is_none());
+        assert!(
+            rt.execute_plain_zscore_borrowed(b"z", b"a", 4, None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -59475,19 +60010,25 @@ mod tests {
         }
 
         // overflow / wrong-type / not-an-integer value -> same errors
-        let ov = fast.execute_plain_incrby_borrowed(b"big", b"1", 3, None).unwrap();
+        let ov = fast
+            .execute_plain_incrby_borrowed(b"big", b"1", 3, None)
+            .unwrap();
         assert_eq!(
             ov,
             generic.execute_frame(command(&[b"INCRBY", b"big", b"1"]), 3)
         );
         assert!(matches!(ov, RespFrame::Error(_)));
-        let wt = fast.execute_plain_incrby_borrowed(b"l", b"1", 4, None).unwrap();
+        let wt = fast
+            .execute_plain_incrby_borrowed(b"l", b"1", 4, None)
+            .unwrap();
         assert_eq!(
             wt,
             generic.execute_frame(command(&[b"INCRBY", b"l", b"1"]), 4)
         );
         assert!(matches!(wt, RespFrame::Error(_)));
-        let nanv = fast.execute_plain_incrby_borrowed(b"nan", b"1", 5, None).unwrap();
+        let nanv = fast
+            .execute_plain_incrby_borrowed(b"nan", b"1", 5, None)
+            .unwrap();
         assert_eq!(
             nanv,
             generic.execute_frame(command(&[b"INCRBY", b"nan", b"1"]), 5)
@@ -59495,7 +60036,10 @@ mod tests {
         assert!(matches!(nanv, RespFrame::Error(_)));
 
         // non-integer DELTA -> fast path defers (None), generic emits the error
-        assert!(fast.execute_plain_incrby_borrowed(b"n", b"x", 6, None).is_none());
+        assert!(
+            fast.execute_plain_incrby_borrowed(b"n", b"x", 6, None)
+                .is_none()
+        );
 
         assert_eq!(
             fast.execute_frame(command(&[b"GET", b"n"]), 7),
@@ -59519,9 +60063,15 @@ mod tests {
     fn plain_incrby_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"n", b"1"]), 1);
-        assert!(rt.execute_plain_incrby_borrowed(b"n", b"2", 2, None).is_some());
+        assert!(
+            rt.execute_plain_incrby_borrowed(b"n", b"2", 2, None)
+                .is_some()
+        );
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
-        assert!(rt.execute_plain_incrby_borrowed(b"n", b"2", 4, None).is_none());
+        assert!(
+            rt.execute_plain_incrby_borrowed(b"n", b"2", 4, None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -59598,14 +60148,19 @@ mod tests {
             );
         }
         // wrong-type -> same WRONGTYPE
-        let wt = fast.execute_plain_decrby_borrowed(b"l", b"1", 3, None).unwrap();
+        let wt = fast
+            .execute_plain_decrby_borrowed(b"l", b"1", 3, None)
+            .unwrap();
         assert_eq!(
             wt,
             generic.execute_frame(command(&[b"DECRBY", b"l", b"1"]), 3)
         );
         assert!(matches!(wt, RespFrame::Error(_)));
         // non-integer delta -> deferred (None)
-        assert!(fast.execute_plain_decrby_borrowed(b"n", b"x", 4, None).is_none());
+        assert!(
+            fast.execute_plain_decrby_borrowed(b"n", b"x", 4, None)
+                .is_none()
+        );
         // LLONG_MIN delta -> deferred (None); generic emits "decrement would overflow"
         assert!(
             fast.execute_plain_decrby_borrowed(b"n", b"-9223372036854775808", 5, None)
@@ -59626,10 +60181,16 @@ mod tests {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"n", b"1"]), 1);
         assert!(rt.execute_plain_decr_borrowed(b"n", 2, None).is_some());
-        assert!(rt.execute_plain_decrby_borrowed(b"n", b"2", 2, None).is_some());
+        assert!(
+            rt.execute_plain_decrby_borrowed(b"n", b"2", 2, None)
+                .is_some()
+        );
         rt.execute_frame(command(&[b"MULTI"]), 3);
         assert!(rt.execute_plain_decr_borrowed(b"n", 4, None).is_none());
-        assert!(rt.execute_plain_decrby_borrowed(b"n", b"2", 4, None).is_none());
+        assert!(
+            rt.execute_plain_decrby_borrowed(b"n", b"2", 4, None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -59662,13 +60223,17 @@ mod tests {
         );
         assert_eq!(created, RespFrame::Integer(3));
         // append empty value to existing -> unchanged length
-        let noop = fast.execute_plain_append_borrowed(b"s", b"", 4, None).unwrap();
+        let noop = fast
+            .execute_plain_append_borrowed(b"s", b"", 4, None)
+            .unwrap();
         assert_eq!(
             noop,
             generic.execute_frame(command(&[b"APPEND", b"s", b""]), 4)
         );
         // wrong type -> WRONGTYPE
-        let wt = fast.execute_plain_append_borrowed(b"l", b"x", 5, None).unwrap();
+        let wt = fast
+            .execute_plain_append_borrowed(b"l", b"x", 5, None)
+            .unwrap();
         assert_eq!(
             wt,
             generic.execute_frame(command(&[b"APPEND", b"l", b"x"]), 5)
@@ -59702,10 +60267,16 @@ mod tests {
     fn plain_append_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
-        assert!(rt.execute_plain_append_borrowed(b"s", b"x", 2, None).is_some());
+        assert!(
+            rt.execute_plain_append_borrowed(b"s", b"x", 2, None)
+                .is_some()
+        );
         // a configured replica link / subscribe disables the write fast path
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
-        assert!(rt.execute_plain_append_borrowed(b"s", b"x", 4, None).is_none());
+        assert!(
+            rt.execute_plain_append_borrowed(b"s", b"x", 4, None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -59902,7 +60473,9 @@ mod tests {
             for resp3 in [false, true] {
                 let mut out = Vec::new();
                 assert_eq!(
-                    fast.execute_plain_getrange_borrowed_into(b"s", start, end, 2, resp3, &mut out, None),
+                    fast.execute_plain_getrange_borrowed_into(
+                        b"s", start, end, 2, resp3, &mut out, None
+                    ),
                     Some(()),
                     "well-formed GETRANGE should take _into fast path (start={start:?} end={end:?})"
                 );
@@ -59919,7 +60492,9 @@ mod tests {
         // missing key -> empty bulk string (NOT nil)
         let mut miss = Vec::new();
         assert_eq!(
-            fast.execute_plain_getrange_borrowed_into(b"nope", b"0", b"-1", 2, false, &mut miss, None),
+            fast.execute_plain_getrange_borrowed_into(
+                b"nope", b"0", b"-1", 2, false, &mut miss, None
+            ),
             Some(())
         );
         assert_eq!(
@@ -60057,16 +60632,25 @@ mod tests {
     fn plain_hmget_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"HSET", b"h", b"f", b"v"]), 1);
-        assert!(rt.execute_plain_hmget_borrowed(b"h", &[b"f"], 2, None).is_some());
+        assert!(
+            rt.execute_plain_hmget_borrowed(b"h", &[b"f"], 2, None)
+                .is_some()
+        );
         rt.execute_frame(command(&[b"MULTI"]), 3);
-        assert!(rt.execute_plain_hmget_borrowed(b"h", &[b"f"], 4, None).is_none());
+        assert!(
+            rt.execute_plain_hmget_borrowed(b"h", &[b"f"], 4, None)
+                .is_none()
+        );
     }
 
     #[test]
     fn plain_hmget_borrowed_fast_path_defers_over_max_command_arity() {
         let mut rt = Runtime::default_strict();
         let fields = vec![b"f".as_slice(); super::MAX_COMMAND_ARITY - 1];
-        assert!(rt.execute_plain_hmget_borrowed(b"h", &fields, 1, None).is_none());
+        assert!(
+            rt.execute_plain_hmget_borrowed(b"h", &fields, 1, None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -60151,9 +60735,15 @@ mod tests {
     fn plain_sismember_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SADD", b"s", b"a"]), 1);
-        assert!(rt.execute_plain_sismember_borrowed(b"s", b"a", 2, None).is_some());
+        assert!(
+            rt.execute_plain_sismember_borrowed(b"s", b"a", 2, None)
+                .is_some()
+        );
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
-        assert!(rt.execute_plain_sismember_borrowed(b"s", b"a", 4, None).is_none());
+        assert!(
+            rt.execute_plain_sismember_borrowed(b"s", b"a", 4, None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -60349,7 +60939,9 @@ mod tests {
             for (ts, (key, member)) in (3..).zip(cases) {
                 let mut out = Vec::new();
                 direct
-                    .execute_plain_geohash_single_borrowed_into(key, member, ts, resp3, &mut out, None)
+                    .execute_plain_geohash_single_borrowed_into(
+                        key, member, ts, resp3, &mut out, None,
+                    )
                     .expect("single-member GEOHASH direct encoder should take borrowed fast path");
                 let generic_reply =
                     generic.execute_frame(command(&[b"GEOHASH".as_slice(), key, member]), ts);
@@ -60547,9 +61139,15 @@ mod tests {
     fn plain_hexists_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"HSET", b"h", b"f", b"v"]), 1);
-        assert!(rt.execute_plain_hexists_borrowed(b"h", b"f", 2, None).is_some());
+        assert!(
+            rt.execute_plain_hexists_borrowed(b"h", b"f", 2, None)
+                .is_some()
+        );
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
-        assert!(rt.execute_plain_hexists_borrowed(b"h", b"f", 4, None).is_none());
+        assert!(
+            rt.execute_plain_hexists_borrowed(b"h", b"f", 4, None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -60635,8 +61233,7 @@ mod tests {
 
             let fast_reply = fast
                 .execute_plain_bitfield_ro_two_get_borrowed(
-                    b"bf", b"GET", b"u8", b"0", b"get", b"i8", b"8", 2,
-                    None,
+                    b"bf", b"GET", b"u8", b"0", b"get", b"i8", b"8", 2, None,
                 )
                 .expect("valid exact two-GET shape should take the packed floor");
             let generic_reply = generic.execute_frame(
@@ -60661,8 +61258,7 @@ mod tests {
         assert!(
             runtime
                 .execute_plain_bitfield_ro_two_get_borrowed(
-                    b"bf", b"SET", b"u8", b"0", b"GET", b"u8", b"8", 1,
-                    None,
+                    b"bf", b"SET", b"u8", b"0", b"GET", b"u8", b"8", 1, None,
                 )
                 .is_none(),
             "write subcommands must fall through to generic BITFIELD_RO validation"
@@ -60670,8 +61266,7 @@ mod tests {
         assert!(
             runtime
                 .execute_plain_bitfield_ro_two_get_borrowed(
-                    b"bf", b"GET", b"u64", b"0", b"GET", b"u8", b"8", 1,
-                    None,
+                    b"bf", b"GET", b"u64", b"0", b"GET", b"u8", b"8", 1, None,
                 )
                 .is_none(),
             "invalid encodings must fall through for exact Redis diagnostics"
@@ -61543,8 +62138,14 @@ mod tests {
 
         rt.record_eventloop_breakdown(5, 7, 3);
         rt.record_eventloop_breakdown(6, 8, 2);
-        assert_eq!(rt.server.eventloop_duration_aof_sum_usec, 11, "AOF is a SUM");
-        assert_eq!(rt.server.eventloop_duration_cron_sum_usec, 15, "cron is a SUM");
+        assert_eq!(
+            rt.server.eventloop_duration_aof_sum_usec, 11,
+            "AOF is a SUM"
+        );
+        assert_eq!(
+            rt.server.eventloop_duration_cron_sum_usec, 15,
+            "cron is a SUM"
+        );
         assert_eq!(
             rt.server.eventloop_cmd_per_cycle_max, 3,
             "commands-per-cycle is a MAXIMUM: a quieter second cycle must not lower it"
@@ -64720,13 +65321,7 @@ mod tests {
         let mut got = Vec::new();
         assert!(
             rt.execute_plain_scan_opt_borrowed_into(
-                b"0",
-                b"MATCH",
-                b"scopt:*",
-                3,
-                false,
-                &mut got,
-                None,
+                b"0", b"MATCH", b"scopt:*", 3, false, &mut got, None,
             )
             .is_some(),
             "the _into path must serve what the owning twin serves"
@@ -64847,7 +65442,10 @@ mod tests {
                 "SCAN {cursor:?} must terminate on this keyspace"
             );
             let RespFrame::Array(Some(keys)) = &parts[1] else {
-                panic!("SCAN {cursor:?} must reply with a key array, got {:?}", parts[1])
+                panic!(
+                    "SCAN {cursor:?} must reply with a key array, got {:?}",
+                    parts[1]
+                )
             };
             for key in keys {
                 assert_eq!(
@@ -64947,9 +65545,9 @@ mod tests {
                     .2;
                 assert_eq!(ttl, Some(1_000), "the field deadline must reach the RDB");
             }
-            other => panic!(
-                "a hash with a per-field TTL must NOT be spliced verbatim, got {other:?}"
-            ),
+            other => {
+                panic!("a hash with a per-field TTL must NOT be spliced verbatim, got {other:?}")
+            }
         }
     }
 
@@ -69215,7 +69813,6 @@ mod tests {
         );
     }
 
-
     /// `FORCE` was PARSED and never read, so `FAILOVER FORCE` alone was accepted.
     ///
     /// Upstream refuses it at replication.c:4129 -- `force_flag && (!timeout_in_ms || !host)` --
@@ -69302,7 +69899,6 @@ mod tests {
             );
         }
     }
-
 
     #[test]
     fn failover_parse_errors_fire_before_replica_check_w1v61() {
@@ -70437,9 +71033,7 @@ mod tests {
             );
             assert_eq!(
                 out,
-                RespFrame::Error(
-                    "ERR SYNC and PSYNC are invalid with pending output".to_string()
-                ),
+                RespFrame::Error("ERR SYNC and PSYNC are invalid with pending output".to_string()),
                 "argv={argv:?}"
             );
         }
@@ -72458,7 +73052,10 @@ mod tests {
                 rt.execute_frame(command(&[b"LRANGE", b"l2", b"0", b"-1"]), 901),
                 rt.execute_frame(command(&[b"SCARD", b"s"]), 902),
                 rt.execute_frame(command(&[b"ZRANGE", b"z", b"0", b"-1", b"WITHSCORES"]), 903),
-                rt.execute_frame(command(&[b"ZRANGE", b"z2", b"0", b"-1", b"WITHSCORES"]), 904),
+                rt.execute_frame(
+                    command(&[b"ZRANGE", b"z2", b"0", b"-1", b"WITHSCORES"]),
+                    904,
+                ),
             ]
         }
         assert!(
@@ -72471,16 +73068,32 @@ mod tests {
                 let label: &str = $label;
                 #[allow(unused_mut)]
                 let (mut a, mut b, mut c) = (seeded(), seeded(), seeded());
-                let ra = { let rt = &mut a; $uncached(rt) };
-                let rb = { let rt = &mut b; $twin(rt, true) };
-                assert!(ra.is_some(), "{label}: uncached path must take the fast path");
+                let ra = {
+                    let rt = &mut a;
+                    $uncached(rt)
+                };
+                let rb = {
+                    let rt = &mut b;
+                    $twin(rt, true)
+                };
+                assert!(
+                    ra.is_some(),
+                    "{label}: uncached path must take the fast path"
+                );
                 assert_eq!(ra, rb, "{label}: reply");
                 assert_eq!(snapshot(&mut a), snapshot(&mut b), "{label}: state");
 
                 let before = snapshot(&mut c);
-                let rc = { let rt = &mut c; $twin(rt, false) };
+                let rc = {
+                    let rt = &mut c;
+                    $twin(rt, false)
+                };
                 assert_eq!(rc, None, "{label}: closed gate must fall through");
-                assert_eq!(snapshot(&mut c), before, "{label}: closed gate must not write");
+                assert_eq!(
+                    snapshot(&mut c),
+                    before,
+                    "{label}: closed gate must not write"
+                );
             }};
         }
 
@@ -72536,10 +73149,9 @@ mod tests {
         check!(
             "lmpop2",
             |rt: &mut Runtime| rt.execute_plain_lmpop2_borrowed(b"2", b"l", b"l2", b"LEFT", 500),
-            |rt: &mut Runtime, g: bool| rt
-                .execute_plain_lmpop2_borrowed_with_default_write_gate(
-                    b"2", b"l", b"l2", b"LEFT", 500, g
-                )
+            |rt: &mut Runtime, g: bool| rt.execute_plain_lmpop2_borrowed_with_default_write_gate(
+                b"2", b"l", b"l2", b"LEFT", 500, g
+            )
         );
         check!(
             "lmpop2_count",
@@ -72569,10 +73181,9 @@ mod tests {
         check!(
             "zmpop2",
             |rt: &mut Runtime| rt.execute_plain_zmpop2_borrowed(b"2", b"z", b"z2", b"MIN", 500),
-            |rt: &mut Runtime, g: bool| rt
-                .execute_plain_zmpop2_borrowed_with_default_write_gate(
-                    b"2", b"z", b"z2", b"MIN", 500, g
-                )
+            |rt: &mut Runtime, g: bool| rt.execute_plain_zmpop2_borrowed_with_default_write_gate(
+                b"2", b"z", b"z2", b"MIN", 500, g
+            )
         );
         check!(
             "zmpop2_count",
@@ -72606,11 +73217,15 @@ mod tests {
         // --- Option<()> forms: SET k v EX|PX n  and  SET k v EXAT|PXAT ts ---
         for (label, is_seconds, time_arg) in [("relexpire_s", true, b"100".as_slice())] {
             let (mut a, mut b, mut c) = (fresh(), fresh(), fresh());
-            let ra = a.execute_plain_set_relexpire_borrowed_ok(is_seconds, b"k", b"v", time_arg, 500);
+            let ra =
+                a.execute_plain_set_relexpire_borrowed_ok(is_seconds, b"k", b"v", time_arg, 500);
             let rb = b.execute_plain_set_relexpire_borrowed_ok_with_default_write_gate(
                 is_seconds, b"k", b"v", time_arg, 500, true,
             );
-            assert!(ra.is_some(), "{label}: uncached path must take the fast path");
+            assert!(
+                ra.is_some(),
+                "{label}: uncached path must take the fast path"
+            );
             assert_eq!(ra, rb, "{label}: return");
             assert_eq!(state(&mut a), state(&mut b), "{label}: state");
             assert_eq!(
@@ -72629,16 +73244,30 @@ mod tests {
         {
             // EXAT takes an absolute unix time in seconds; 500 ms of runtime clock is well before it.
             let (mut a, mut b, mut c) = (fresh(), fresh(), fresh());
-            let ra = a.execute_plain_set_absexpire_borrowed_ok(true, b"k", b"v", b"99999999999", 500);
+            let ra =
+                a.execute_plain_set_absexpire_borrowed_ok(true, b"k", b"v", b"99999999999", 500);
             let rb = b.execute_plain_set_absexpire_borrowed_ok_with_default_write_gate(
-                true, b"k", b"v", b"99999999999", 500, true,
+                true,
+                b"k",
+                b"v",
+                b"99999999999",
+                500,
+                true,
             );
-            assert!(ra.is_some(), "absexpire: uncached path must take the fast path");
+            assert!(
+                ra.is_some(),
+                "absexpire: uncached path must take the fast path"
+            );
             assert_eq!(ra, rb, "absexpire: return");
             assert_eq!(state(&mut a), state(&mut b), "absexpire: state");
             assert_eq!(
                 c.execute_plain_set_absexpire_borrowed_ok_with_default_write_gate(
-                    true, b"k", b"v", b"99999999999", 500, false,
+                    true,
+                    b"k",
+                    b"v",
+                    b"99999999999",
+                    500,
+                    false,
                 ),
                 None
             );
@@ -72670,7 +73299,10 @@ mod tests {
                 } else {
                     b.execute_plain_set_xx_borrowed_with_default_write_gate(b"k", b"v", 500, true)
                 };
-                assert!(ra.is_some(), "{label}: uncached path must take the fast path");
+                assert!(
+                    ra.is_some(),
+                    "{label}: uncached path must take the fast path"
+                );
                 assert_eq!(ra, rb, "{label}: return");
                 assert_eq!(state(&mut a), state(&mut b), "{label}: state");
 
@@ -72695,11 +73327,15 @@ mod tests {
         // --- Option<RespFrame> forms ---
         {
             let (mut a, mut b, mut c) = (fresh(), fresh(), fresh());
-            let ra = a.execute_plain_set_cond_relexpire_borrowed(false, true, b"k", b"v", b"100", 500);
+            let ra =
+                a.execute_plain_set_cond_relexpire_borrowed(false, true, b"k", b"v", b"100", 500);
             let rb = b.execute_plain_set_cond_relexpire_borrowed_with_default_write_gate(
                 false, true, b"k", b"v", b"100", 500, true,
             );
-            assert!(ra.is_some(), "cond_relexpire: uncached path must take the fast path");
+            assert!(
+                ra.is_some(),
+                "cond_relexpire: uncached path must take the fast path"
+            );
             assert_eq!(ra, rb, "cond_relexpire: return");
             assert_eq!(state(&mut a), state(&mut b), "cond_relexpire: state");
             assert_eq!(
@@ -72719,7 +73355,10 @@ mod tests {
             let rb = b.execute_plain_set_relexpire_get_borrowed_with_default_write_gate(
                 true, b"k", b"v", b"100", 500, true,
             );
-            assert!(ra.is_some(), "relexpire_get: uncached path must take the fast path");
+            assert!(
+                ra.is_some(),
+                "relexpire_get: uncached path must take the fast path"
+            );
             assert_eq!(ra, rb, "relexpire_get: return");
             assert_eq!(state(&mut a), state(&mut b), "relexpire_get: state");
             assert_eq!(
@@ -72745,9 +73384,13 @@ mod tests {
                 rt.execute_frame(command(&[b"SET", b"k", b"old"]), 400);
             }
             let ra = a.execute_plain_set_opt_get_borrowed(b"k", b"v", opt, 500);
-            let rb =
-                b.execute_plain_set_opt_get_borrowed_with_default_write_gate(b"k", b"v", opt, 500, true);
-            assert!(ra.is_some(), "opt_get {label}: uncached path must take the fast path");
+            let rb = b.execute_plain_set_opt_get_borrowed_with_default_write_gate(
+                b"k", b"v", opt, 500, true,
+            );
+            assert!(
+                ra.is_some(),
+                "opt_get {label}: uncached path must take the fast path"
+            );
             assert_eq!(ra, rb, "opt_get {label}: return");
             assert_eq!(state(&mut a), state(&mut b), "opt_get {label}: state");
             assert_eq!(
@@ -72813,7 +73456,9 @@ mod tests {
                 "zadd_incr",
                 |rt, _| rt.execute_plain_zadd_incr_borrowed(b"z", b"3", b"m", 500),
                 |rt, g| {
-                    rt.execute_plain_zadd_incr_borrowed_with_default_write_gate(b"z", b"3", b"m", 500, g)
+                    rt.execute_plain_zadd_incr_borrowed_with_default_write_gate(
+                        b"z", b"3", b"m", 500, g,
+                    )
                 },
             ),
             (
@@ -72842,7 +73487,10 @@ mod tests {
             let mut b = Runtime::default_strict();
             let reply_a = uncached(&mut a, true);
             let reply_b = twin(&mut b, true);
-            assert!(reply_a.is_some(), "{label}: uncached path must take the fast path");
+            assert!(
+                reply_a.is_some(),
+                "{label}: uncached path must take the fast path"
+            );
             assert_eq!(reply_a, reply_b, "{label}: reply");
             assert_eq!(zcard(&mut a, b"z"), zcard(&mut b, b"z"), "{label}: zcard");
             for member in [b"m".as_slice(), b"a".as_slice(), b"b".as_slice()] {
@@ -72856,7 +73504,11 @@ mod tests {
 
             // 2. The parameter is actually READ: a closed gate refuses and writes nothing.
             let mut c = Runtime::default_strict();
-            assert_eq!(twin(&mut c, false), None, "{label}: closed gate must fall through");
+            assert_eq!(
+                twin(&mut c, false),
+                None,
+                "{label}: closed gate must fall through"
+            );
             assert_eq!(
                 zcard(&mut c, b"z"),
                 RespFrame::Integer(0),
@@ -72924,9 +73576,8 @@ mod tests {
             "MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'."
                 .to_string(),
         );
-        let readonly = RespFrame::Error(
-            "READONLY You can't write against a read only replica.".to_string(),
-        );
+        let readonly =
+            RespFrame::Error("READONLY You can't write against a read only replica.".to_string());
         let ok = RespFrame::SimpleString("OK".to_string());
         let pong = RespFrame::SimpleString("PONG".to_string());
 
@@ -72961,7 +73612,8 @@ mod tests {
             ),
         ] {
             let mut rt = Runtime::default_strict();
-            let label = format!("replica-read-only={read_only} replica-serve-stale-data={serve_stale}");
+            let label =
+                format!("replica-read-only={read_only} replica-serve-stale-data={serve_stale}");
 
             // REPLICAOF with nothing listening leaves the link in a non-"connected" state,
             // which is exactly the stale precondition the gate tests.
@@ -73375,9 +74027,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             let names: Vec<String> = entries
                 .chunks(2)
                 .filter_map(|pair| match &pair[0] {
-                    RespFrame::BulkString(Some(n)) => {
-                        Some(String::from_utf8_lossy(n).into_owned())
-                    }
+                    RespFrame::BulkString(Some(n)) => Some(String::from_utf8_lossy(n).into_owned()),
                     _ => None,
                 })
                 .collect();
@@ -73409,7 +74059,11 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         let RespFrame::Array(Some(entries)) = reply else {
             panic!("CONFIG GET * did not return an array");
         };
-        assert_eq!(entries.len() % 2, 0, "CONFIG GET * returned an odd frame count");
+        assert_eq!(
+            entries.len() % 2,
+            0,
+            "CONFIG GET * returned an odd frame count"
+        );
         let names: Vec<String> = entries
             .chunks(2)
             .filter_map(|pair| match &pair[0] {
@@ -73420,15 +74074,22 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
         // The drop branch actually fired, and dropped exactly the duplicate.
         let hz = names.iter().filter(|n| *n == "dynamic-hz").count();
-        assert_eq!(hz, 1, "dynamic-hz appears {hz} times; it is listed twice in the table, \
-                   so exactly one copy must survive the dedup");
+        assert_eq!(
+            hz, 1,
+            "dynamic-hz appears {hz} times; it is listed twice in the table, \
+                   so exactly one copy must survive the dedup"
+        );
 
         // No key survives twice: the whole point of the pass.
         let mut sorted = names.clone();
         sorted.sort();
         let before_dedup = sorted.len();
         sorted.dedup();
-        assert_eq!(before_dedup, sorted.len(), "CONFIG GET * returned duplicate keys");
+        assert_eq!(
+            before_dedup,
+            sorted.len(),
+            "CONFIG GET * returned duplicate keys"
+        );
 
         // ORDER IS PRESERVED across the drop. `requirepass` is emitted by the chain ABOVE the
         // literal early-exit checkpoint and `tcp-backlog` only by the CONFIG_STATIC_PARAMS
@@ -73436,8 +74097,14 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         // moved a survivor backwards past a dropped pair would invert it.
         let ri = names.iter().position(|n| n == "requirepass");
         let ti = names.iter().position(|n| n == "tcp-backlog");
-        let (ri, ti) = (ri.expect("requirepass missing"), ti.expect("tcp-backlog missing"));
-        assert!(ri < ti, "CONFIG GET * reordered: requirepass at {ri}, tcp-backlog at {ti}");
+        let (ri, ti) = (
+            ri.expect("requirepass missing"),
+            ti.expect("tcp-backlog missing"),
+        );
+        assert!(
+            ri < ti,
+            "CONFIG GET * reordered: requirepass at {ri}, tcp-backlog at {ti}"
+        );
 
         // KEYS AND VALUES DID NOT GET OUT OF STEP, checked where it can actually go wrong.
         //
@@ -73469,7 +74136,12 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 let RespFrame::Array(Some(pair)) = reply else {
                     panic!("CONFIG GET {probe} did not return an array");
                 };
-                assert_eq!(pair.len(), 2, "CONFIG GET {probe} returned {} frames", pair.len());
+                assert_eq!(
+                    pair.len(),
+                    2,
+                    "CONFIG GET {probe} returned {} frames",
+                    pair.len()
+                );
                 match &pair[1] {
                     RespFrame::BulkString(Some(v)) => v.clone(),
                     other => panic!("CONFIG GET {probe} value frame was {other:?}"),
@@ -73477,8 +74149,10 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             };
             let got = entries
                 .chunks(2)
-                .find(|c| matches!(&c[0], RespFrame::BulkString(Some(n))
-                                   if n.as_slice() == probe.as_bytes()))
+                .find(|c| {
+                    matches!(&c[0], RespFrame::BulkString(Some(n))
+                                   if n.as_slice() == probe.as_bytes())
+                })
                 .map(|c| match &c[1] {
                     RespFrame::BulkString(Some(v)) => v.clone(),
                     other => panic!("CONFIG GET * value frame for {probe} was {other:?}"),
@@ -73753,8 +74427,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             };
 
             let mut rt = Runtime::new(RuntimePolicy::default());
-            let startup =
-                rt.execute_startup_config_directive(parameter.as_bytes(), value, 0);
+            let startup = rt.execute_startup_config_directive(parameter.as_bytes(), value, 0);
             assert!(
                 !matches!(&startup, RespFrame::Error(_)),
                 "{parameter} must be accepted as a STARTUP directive, got {startup:?}"
@@ -73765,7 +74438,9 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 0,
             );
             let RespFrame::Error(err) = &runtime_set else {
-                panic!("{parameter} must still be refused by a RUNTIME CONFIG SET, got {runtime_set:?}");
+                panic!(
+                    "{parameter} must still be refused by a RUNTIME CONFIG SET, got {runtime_set:?}"
+                );
             };
             assert!(
                 err.contains("can't set immutable config"),
@@ -76138,7 +76813,10 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                     command(&[b"CONFIG", b"SET", NODENAME.as_bytes(), &value]),
                     0
                 ),
-                err(NODENAME, "Announced human node name contained invalid character"),
+                err(
+                    NODENAME,
+                    "Announced human node name contained invalid character"
+                ),
                 "byte {:?} is in isValidAuxChar's denylist and must be refused",
                 *c as char
             );
@@ -77870,7 +78548,6 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         assert!(info.contains("rdb_last_bgsave_status:err\r\n"), "{info}");
     }
 
-
     /// BGSAVE and BGREWRITEAOF must admit each other the way upstream does.
     ///
     /// (frankenredis-eh2ct) Three defects in one family, all found through error literals the
@@ -77941,11 +78618,12 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         rt.server.rdb_bgsave_pid = Some(424242);
         assert_eq!(
             rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1),
-            RespFrame::SimpleString(
-                "Background append only file rewriting scheduled".to_string()
-            )
+            RespFrame::SimpleString("Background append only file rewriting scheduled".to_string())
         );
-        assert!(rt.server.aof_rewrite_scheduled, "the schedule flag must be set");
+        assert!(
+            rt.server.aof_rewrite_scheduled,
+            "the schedule flag must be set"
+        );
 
         // NOT A BLANKET REFUSAL: with no child at all, both commands still run. This is the row
         // an over-eager admission fails.
@@ -77959,7 +78637,6 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         );
         rt.wait_for_child_processes();
     }
-
 
     #[test]
     fn save_failure_updates_aof_last_write_status() {
@@ -78074,10 +78751,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         // `redis.call` with the COMMAND wording instead. Testing this arm with a bare script
         // therefore tests the wrong gate -- it did, first time, and answered OK.
         let script = b"#!lua\nreturn redis.call('SET', KEYS[1], 'v')";
-        let refusal = rt.execute_frame(
-            command(&[b"EVAL", script.as_slice(), b"1", b"blocked"]),
-            3,
-        );
+        let refusal = rt.execute_frame(command(&[b"EVAL", script.as_slice(), b"1", b"blocked"]), 3);
         assert_eq!(
             refusal,
             RespFrame::Error(SCRIPT_RDB_DISK_ERROR_WRITE_DENIED.to_string()),
@@ -78159,7 +78833,12 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         // command without CMD_WRITE, so the gate must not become a blanket script refusal.
         assert_eq!(
             rt.execute_frame(
-                command(&[b"EVAL", b"return redis.call('GET', KEYS[1])".as_slice(), b"1", b"compat_blocked"]),
+                command(&[
+                    b"EVAL",
+                    b"return redis.call('GET', KEYS[1])".as_slice(),
+                    b"1",
+                    b"compat_blocked"
+                ]),
                 4
             ),
             RespFrame::BulkString(None),
@@ -80564,7 +81243,9 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             );
 
             assert_eq!(
-                fast.execute_plain_getex_absexpire_borrowed(is_seconds, b"missing", time_arg, 6, None),
+                fast.execute_plain_getex_absexpire_borrowed(
+                    is_seconds, b"missing", time_arg, 6, None
+                ),
                 Some(generic.execute_frame(command(&[b"GETEX", b"missing", unit, time_arg]), 6))
             );
             assert_eq!(
@@ -83888,7 +84569,10 @@ user bob reset off nopass +@all
                 generic.execute_frame(command(&[b"EXISTS", b"lk"]), 22),
                 "{label}: an emptied list must be DELETED, not left empty"
             );
-            assert_eq!(fast.server.store.dirty, generic.server.store.dirty, "{label}: dirty");
+            assert_eq!(
+                fast.server.store.dirty, generic.server.store.dirty,
+                "{label}: dirty"
+            );
             assert_eq!(
                 fast.server.store.state_digest(),
                 generic.server.store.state_digest(),
@@ -83908,9 +84592,18 @@ user bob reset off nopass +@all
         rt.execute_frame(command(&[b"SET", b"str", b"x"]), 10);
 
         // Non-integer bounds: defer, so the generic emits "value is not an integer".
-        assert!(rt.execute_plain_ltrim_borrowed(b"lk", b"abc", b"-1", 20).is_none());
-        assert!(rt.execute_plain_ltrim_borrowed(b"lk", b"0", b"xyz", 20).is_none());
-        assert!(rt.execute_plain_ltrim_borrowed(b"lk", b"", b"-1", 20).is_none());
+        assert!(
+            rt.execute_plain_ltrim_borrowed(b"lk", b"abc", b"-1", 20)
+                .is_none()
+        );
+        assert!(
+            rt.execute_plain_ltrim_borrowed(b"lk", b"0", b"xyz", 20)
+                .is_none()
+        );
+        assert!(
+            rt.execute_plain_ltrim_borrowed(b"lk", b"", b"-1", 20)
+                .is_none()
+        );
 
         // A missing key is a legitimate +OK no-op, and must NOT create anything.
         let mut fast = Runtime::default_strict();
@@ -84148,8 +84841,7 @@ user bob reset off nopass +@all
             let generic_reply = rt.execute_frame(command(&[b"SCAN", cursor]), 20);
 
             assert_eq!(
-                fast_reply,
-                generic_reply,
+                fast_reply, generic_reply,
                 "cursor {cursor:?}: fast path must reproduce the generic reply exactly"
             );
             assert_eq!(
@@ -84165,13 +84857,13 @@ user bob reset off nopass +@all
         let mut rt = Runtime::default_strict();
         seed(&mut rt);
         for declined in [
-            b"".as_slice(), // empty
-            b"007",         // leading zeros: generic reads 7, canonical refuses
-            b"+5",          // explicit sign
-            b"-1",          // negative wrap to u64::MAX
-            b"1x",          // trailing garbage
-            b"x",           // not a number
-            b" 1",          // leading space
+            b"".as_slice(),          // empty
+            b"007",                  // leading zeros: generic reads 7, canonical refuses
+            b"+5",                   // explicit sign
+            b"-1",                   // negative wrap to u64::MAX
+            b"1x",                   // trailing garbage
+            b"x",                    // not a number
+            b" 1",                   // leading space
             b"18446744073709551616", // u64 overflow
         ] {
             assert!(
@@ -84186,7 +84878,9 @@ user bob reset off nopass +@all
         seed(&mut other_db);
         other_db.execute_frame(command(&[b"SELECT", b"1"]), 20);
         assert!(
-            other_db.execute_plain_scan_borrowed(b"0", 20, None).is_none(),
+            other_db
+                .execute_plain_scan_borrowed(b"0", 20, None)
+                .is_none(),
             "SCAN on a non-zero db must fall through to the generic path"
         );
     }
@@ -84310,8 +85004,7 @@ user bob reset off nopass +@all
                 let fast_reply = rt
                     .execute_plain_scan_opt_borrowed(cursor, kw, val, 20, None)
                     .unwrap_or_else(|| panic!("SCAN {cursor:?} {kw:?} {val:?} must be served"));
-                let generic_reply =
-                    rt.execute_frame(command(&[b"SCAN", cursor, kw, val]), 20);
+                let generic_reply = rt.execute_frame(command(&[b"SCAN", cursor, kw, val]), 20);
 
                 assert_eq!(
                     fast_reply, generic_reply,
@@ -84328,7 +85021,11 @@ user bob reset off nopass +@all
         let mut rt = Runtime::default_strict();
         seed(&mut rt);
         for (kw, val, why) in [
-            (b"COUNT".as_slice(), b"0".as_slice(), "COUNT 0 is a syntax error upstream"),
+            (
+                b"COUNT".as_slice(),
+                b"0".as_slice(),
+                "COUNT 0 is a syntax error upstream",
+            ),
             (b"COUNT", b"-1", "negative COUNT is a syntax error upstream"),
             (b"COUNT", b"007", "non-canonical integer"),
             (b"COUNT", b"abc", "not an integer"),
@@ -84338,12 +85035,17 @@ user bob reset off nopass +@all
                 "one past i64::MAX: parse_i64_arg fails upstream, canonical parse would not",
             ),
             (b"COUNT", b"18446744073709551615", "u64::MAX likewise"),
-            (b"NOVALUES", b"x", "SCAN does not recognise NOVALUES, only HSCAN does"),
+            (
+                b"NOVALUES",
+                b"x",
+                "SCAN does not recognise NOVALUES, only HSCAN does",
+            ),
             (b"BOGUS", b"x", "unknown keyword is a syntax error upstream"),
             (b"", b"x", "empty keyword"),
         ] {
             assert!(
-                rt.execute_plain_scan_opt_borrowed(b"0", kw, val, 20, None).is_none(),
+                rt.execute_plain_scan_opt_borrowed(b"0", kw, val, 20, None)
+                    .is_none(),
                 "SCAN 0 {kw:?} {val:?} must fall through: {why}"
             );
         }
@@ -84402,7 +85104,11 @@ user bob reset off nopass +@all
                 "the popped member must be gone from the set"
             );
             seen.push(member);
-            assert_eq!(card(&mut rt, b"s"), before - 1, "cardinality must drop by one");
+            assert_eq!(
+                card(&mut rt, b"s"),
+                before - 1,
+                "cardinality must drop by one"
+            );
             assert_eq!(card(&mut rt, b"s"), expected_remaining);
         }
         assert_eq!(seen.len(), 4, "every member must come back exactly once");
@@ -84439,7 +85145,10 @@ user bob reset off nopass +@all
         let fast_err = wrong
             .execute_plain_spop_borrowed(b"str", 20)
             .expect("WRONGTYPE is served, not declined");
-        assert!(matches!(fast_err, RespFrame::Error(_)), "expected WRONGTYPE");
+        assert!(
+            matches!(fast_err, RespFrame::Error(_)),
+            "expected WRONGTYPE"
+        );
         assert_eq!(
             wrong.server.store.state_digest(),
             digest_before,
@@ -84481,7 +85190,12 @@ user bob reset off nopass +@all
         };
 
         for (k1, v1, k2, v2) in [
-            (b"MATCH".as_slice(), b"k*".as_slice(), b"COUNT".as_slice(), b"100".as_slice()),
+            (
+                b"MATCH".as_slice(),
+                b"k*".as_slice(),
+                b"COUNT".as_slice(),
+                b"100".as_slice(),
+            ),
             (b"COUNT", b"100", b"MATCH", b"k*"),
             (b"MATCH", b"k1*", b"COUNT", b"5"),
             (b"MATCH", b"*", b"TYPE", b"string"),
@@ -84533,7 +85247,12 @@ user bob reset off nopass +@all
         let mut rt = Runtime::default_strict();
         seed(&mut rt);
         for (k1, v1, k2, v2) in [
-            (b"MATCH".as_slice(), b"k*".as_slice(), b"BOGUS".as_slice(), b"x".as_slice()),
+            (
+                b"MATCH".as_slice(),
+                b"k*".as_slice(),
+                b"BOGUS".as_slice(),
+                b"x".as_slice(),
+            ),
             (b"BOGUS", b"x", b"MATCH", b"k*"),
             (b"MATCH", b"k*", b"COUNT", b"0"),
             (b"COUNT", b"0", b"MATCH", b"k*"),
@@ -84576,8 +85295,14 @@ user bob reset off nopass +@all
         };
 
         for (k1, v1, k2, v2, k3, v3) in [
-            (b"MATCH".as_slice(), b"k*".as_slice(), b"COUNT".as_slice(), b"100".as_slice(),
-             b"TYPE".as_slice(), b"string".as_slice()),
+            (
+                b"MATCH".as_slice(),
+                b"k*".as_slice(),
+                b"COUNT".as_slice(),
+                b"100".as_slice(),
+                b"TYPE".as_slice(),
+                b"string".as_slice(),
+            ),
             (b"COUNT", b"100", b"MATCH", b"k*", b"TYPE", b"string"),
             (b"TYPE", b"string", b"COUNT", b"5", b"MATCH", b"k1*"),
             (b"MATCH", b"*", b"TYPE", b"list", b"COUNT", b"50"),
@@ -84621,12 +85346,25 @@ user bob reset off nopass +@all
         let mut rt = Runtime::default_strict();
         seed(&mut rt);
         for (k1, v1, k2, v2, k3, v3) in [
-            (b"BOGUS".as_slice(), b"x".as_slice(), b"MATCH".as_slice(), b"k*".as_slice(),
-             b"COUNT".as_slice(), b"10".as_slice()),
+            (
+                b"BOGUS".as_slice(),
+                b"x".as_slice(),
+                b"MATCH".as_slice(),
+                b"k*".as_slice(),
+                b"COUNT".as_slice(),
+                b"10".as_slice(),
+            ),
             (b"MATCH", b"k*", b"BOGUS", b"x", b"COUNT", b"10"),
             (b"MATCH", b"k*", b"COUNT", b"10", b"BOGUS", b"x"),
             (b"MATCH", b"k*", b"COUNT", b"0", b"TYPE", b"string"),
-            (b"MATCH", b"k*", b"COUNT", b"9223372036854775808", b"TYPE", b"string"),
+            (
+                b"MATCH",
+                b"k*",
+                b"COUNT",
+                b"9223372036854775808",
+                b"TYPE",
+                b"string",
+            ),
         ] {
             assert!(
                 rt.execute_plain_scan_opt3_borrowed(b"0", k1, v1, k2, v2, k3, v3, 20, None)
