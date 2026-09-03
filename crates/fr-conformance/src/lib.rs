@@ -542,6 +542,17 @@ fn run_live_redis_diff_with_fixture(
         }
 
         let frame = case_to_frame(&case);
+        // (frankenredis-rc-waitaof-noaof) WAITAOF reads the oracle's fsync
+        // offset, which is undefined until a runtime-enabled AOF has finished
+        // its background rewrite; fr is already past that point.
+        if case
+            .argv
+            .first()
+            .is_some_and(|cmd| cmd.eq_ignore_ascii_case("WAITAOF"))
+        {
+            wait_for_live_oracle_aof_rewrite(&mut stream)
+                .map_err(|err| format!("{}: {err}", case.name))?;
+        }
         // Commands that mutate connection-local state need isolated
         // sessions on both the runtime and live Redis sides so later
         // cases do not inherit their mode. Upstream achieves this by
@@ -1928,6 +1939,37 @@ fn flushall(stream: &mut TcpStream) -> Result<(), String> {
     match reply {
         RespFrame::SimpleString(ref s) if s == "OK" => Ok(()),
         other => Err(format!("unexpected FLUSHALL reply: {other:?}")),
+    }
+}
+
+/// (frankenredis-rc-waitaof-noaof) Block until the live oracle has no AOF
+/// rewrite in progress or scheduled (bounded). Redis 7.2.4 answers WAITAOF's
+/// numlocal with `fsynced_reploff >= woff`, and `fsynced_reploff` stays -1 from
+/// `CONFIG SET appendonly yes` until the background rewrite completes, while
+/// FrankenRedis rewrites synchronously and is in the post-rewrite state at
+/// once. Without this the differential compared the oracle's fork latency,
+/// not WAITAOF: `[1, 0]` from fr against `[0, 0]` from an oracle still
+/// rewriting.
+fn wait_for_live_oracle_aof_rewrite(stream: &mut TcpStream) -> Result<(), String> {
+    let info = argv_to_frame(&["INFO".to_string(), "persistence".to_string()]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        send_frame(stream, &info)?;
+        let text = match read_resp_frame_from_stream(stream)? {
+            RespFrame::BulkString(Some(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+            other => {
+                return Err(format!(
+                    "live oracle INFO persistence was not a bulk: {other:?}"
+                ));
+            }
+        };
+        if text.contains("aof_rewrite_in_progress:0") && text.contains("aof_rewrite_scheduled:0") {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("live oracle AOF rewrite did not finish within 5s".to_string());
+        }
+        sleep(Duration::from_millis(50));
     }
 }
 
