@@ -182,7 +182,7 @@ FR_BENCH_THROUGHPUT_DROP_PCT=10 FR_BENCH_P99_REGRESSION_PCT=20 \
 
 ### 1. Deterministic Latency Replication Core (DLRC)
 
-Strict command semantics, tail-aware scheduling, and recoverable persistence pipelines are treated as core identity constraints, not best-effort niceties. The event loop in `fr-eventloop` is planned in explicit phases (`BeforeSleep` → `Poll` → `FileDispatch` → `TimeDispatch` → `AfterSleep`) with per-phase tick budgets (`max_accepts`, `max_commands`) so that one client cannot starve another and so that replay/audit can reconstruct exactly what the loop did each tick.
+Strict command semantics, tail-aware scheduling, and recoverable persistence pipelines are treated as core identity constraints, not best-effort niceties. What is enforced today is the single-threaded, arrival-order execution model and the admission validators that `fr-eventloop` supplies to the server loop on every read and accept (query-buffer limit, `maxclients`). `fr-eventloop` also models the loop as five named phases (`BeforeSleep` → `Poll` → `FileDispatch` → `TimeDispatch` → `AfterSleep`) with per-phase tick budgets; that model is a design and a validator library, and the shipping mio loop does not execute it (see "Event loop discipline" below for exactly what is live).
 
 ### 2. Strict vs Hardened mode split
 
@@ -479,7 +479,9 @@ The evaluator is exercised by:
 
 ### Event loop discipline: DLRC in practice (`fr-eventloop`)
 
-The "Deterministic Latency" half of DLRC is realized by an event loop that is *planned* rather than just *run*. Each tick goes through five named phases in fixed order:
+**What is live and what is a model.** Being precise here matters because an earlier version of this section described the model as if it ran. The `frankenredis` binary's event loop (`crates/fr-server/src/main.rs`) is a hand-written mio poll/dispatch loop. From `fr-eventloop` it executes three things on the hot path: `validate_read_path` on every client read (query-buffer limit), `validate_accept_path` on every accept (`maxclients`), and the active-expire cycle planner (`plan_active_expire_cycle`, through `fr-runtime`). The phase model below, `TickBudget`, `run_tick`, the bootstrap validators, the barrier-order and pending-write validators and the TLS accept rate limiter are a planning and validator library with their own tests; the loop calls `plan_tick(0, 0, …)` only to obtain a poll timeout, because feeding it the real accept and command counts was measured to add a per-iteration cost the server could not afford (bead `zw36c`). Whether to make the loop execute the budgeted plan or to retire the model is an open decision (bead `rc-eventloop-dlrc-claim`).
+
+The model reads as follows. Each tick goes through five named phases in fixed order:
 
 ```rust
 pub enum EventLoopPhase {
@@ -493,7 +495,7 @@ pub enum EventLoopPhase {
 pub const EVENT_LOOP_PHASE_ORDER: [EventLoopPhase; 5] = [/* the five above */];
 ```
 
-A `TickBudget` carries `max_accepts` and `max_commands` per tick so neither a thundering-herd accept storm nor a single hyperactive client can starve the rest of the loop. Each phase has *planning* code and *execution* code; the planning side emits validators that any agent or test can run against the recorded phase trace to confirm the loop did exactly what it said it would. The "replay/audit can reconstruct what the loop did each tick" property is what those validators actually enforce.
+A `TickBudget` carries `max_accepts` and `max_commands` per tick so that, in the model, neither a thundering-herd accept storm nor a single hyperactive client can starve the rest of the loop; the phase-trace replay validators check a recorded trace against that model. In the shipping server those budgets are not enforced and no phase trace is recorded; fairness comes from mio's readiness batching and the per-connection read/write buffer limits instead.
 
 Blocking commands (BLPOP/BRPOP/BLMOVE/BLMPOP/BZPOPMIN/BZPOPMAX/BZMPOP/XREAD BLOCK/XREADGROUP BLOCK/WAIT/WAITAOF/CLIENT PAUSE) plug into this discipline via the `BlockedState { op, deadline_ms }` field on each `ClientConnection`. When the source key gets data (or the deadline arrives in `TimeDispatch`), the command is re-dispatched with the fresh state. Nothing actually blocks an OS thread; the whole server stays inside its single mio loop.
 
