@@ -731,7 +731,11 @@ fn evaluate_wait_start(state: &mut SentinelState, master_name: &str, my_runid: &
             crate::consensus::peer_leader_votes(master),
         )
     };
-    let won = forced || {
+    // The ballot is cast even for a forced failover, as sentinelGetLeader runs
+    // before upstream's forced check: a peer that asks for our vote while we
+    // are promoting by operator request must not be handed it and start a
+    // second failover of its own.
+    let elected = {
         let mut counts: std::collections::BTreeMap<&str, u32> = std::collections::BTreeMap::new();
         for vote in votes.iter().filter(|vote| vote.epoch == failover_epoch) {
             *counts.entry(vote.leader_runid.as_str()).or_insert(0) += 1;
@@ -765,6 +769,7 @@ fn evaluate_wait_start(state: &mut SentinelState, master_name: &str, my_runid: &
         )
         .is_winner
     };
+    let won = forced || elected;
     let Some(master) = state.masters.get_mut(master_name) else {
         return;
     };
