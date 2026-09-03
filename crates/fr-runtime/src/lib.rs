@@ -1491,8 +1491,8 @@ fn wrong_arity_error(command: &'static str) -> RespFrame {
 /// (frankenredis-hackk)
 fn push_ascii_lowercase_lossy(out: &mut String, bytes: &[u8]) {
     // (frankenredis-loweasc) Command names are ASCII in the overwhelming common
-    // case, and this runs on EVERY command (write_client_info_command_name sets
-    // last_command_name for CLIENT INFO/LIST). For all-ASCII input, lowercase
+    // case, and this runs on EVERY command (the dispatch path lowercases the
+    // command name for CLIENT INFO/LIST). For all-ASCII input, lowercase
     // with a direct byte loop — skipping the UTF-8 validation + char-iteration
     // (from_utf8 + Utf8Chunks) the general path pays. Byte-identical: every byte
     // is <= 0x7F so ascii-lowercasing keeps it valid 1-byte UTF-8, exactly what
@@ -1528,10 +1528,11 @@ fn push_ascii_lowercase_lossy(out: &mut String, bytes: &[u8]) {
 }
 
 /// Write the canonical lowercase command name (with `parent|sub` for container
-/// commands) into `out`, reusing its buffer instead of allocating a fresh String
-/// each command — this runs on every command via `execute_dispatch`. Byte-
-/// identical to the prior `client_info_command_name` return value.
-/// (frankenredis-hackk)
+/// commands) into `out`, reusing its buffer. (frankenredis-hackk)
+///
+/// Test-only: no production path calls it any more; the buffer-reuse A/B test keeps it
+/// as the reference for the ratio it reports.
+#[cfg(test)]
 fn write_client_info_command_name(out: &mut String, argv: &[Vec<u8>]) {
     out.clear();
     let Some(command) = argv.first() else {
@@ -5554,7 +5555,7 @@ impl ServerState {
         self.config_overrides
             .get("replica-ignore-maxmemory")
             .or_else(|| self.config_overrides.get("slave-ignore-maxmemory"))
-            .map_or(true, |value| value.eq_ignore_ascii_case("yes"))
+            .is_none_or(|value| value.eq_ignore_ascii_case("yes"))
     }
 
     /// (frankenredis-w1djx) `repl-disable-tcp-nodelay`; upstream's default is `no`.
@@ -5577,7 +5578,7 @@ impl ServerState {
     pub fn protected_mode_enabled(&self) -> bool {
         self.config_overrides
             .get("protected-mode")
-            .map_or(true, |value| value.eq_ignore_ascii_case("yes"))
+            .is_none_or(|value| value.eq_ignore_ascii_case("yes"))
     }
 
     /// (frankenredis-w1djx) Upstream's `DefaultUser->flags & USER_FLAG_NOPASS`.
@@ -9801,7 +9802,6 @@ impl Runtime {
         self.session.cluster_state.mode == ClusterClientMode::ReadOnly
     }
 
-    #[must_use]
     /// Parser limits for a SERVER-TO-SERVER link, which is never subject to the pre-AUTH caps.
     ///
     /// (frankenredis-2ubu0) `parser_config()` applies the pre-AUTH caps whenever this runtime's
@@ -11392,6 +11392,7 @@ impl Runtime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_plain_set_cond_relexpire_borrowed_inner(
         &mut self,
         is_xx: bool,
@@ -15339,6 +15340,7 @@ impl Runtime {
     /// generic execution. If this cached gate were unsound, SET would be unsound today.
     ///
     /// The uncached entry point is KEPT for any caller that is not the borrowed batch.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zadd_flag2_borrowed_with_default_write_gate(
         &mut self,
         key: &[u8],
@@ -15381,6 +15383,7 @@ impl Runtime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_plain_zadd_flag2_borrowed_inner(
         &mut self,
         key: &[u8],
@@ -16740,6 +16743,7 @@ impl Runtime {
     /// `zrank_generic`'s: `Array([Integer(rank), <score>])` (score = RESP3 Double / RESP2 bulk via
     /// `encode_redis_double`) when the member ranks, else a nil array (`*-1` / `_`). Same conservative gate
     /// as the other plain read fast paths.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrank_withscore_borrowed_into(
         &mut self,
         key: &[u8],
@@ -18726,6 +18730,7 @@ impl Runtime {
     /// built `RespFrame::BulkString(Some(store.getrange(...)))`, a full 1 MB
     /// malloc + memcpy on `GETRANGE bigstr 0 -1`). Mirrors the borrow path's
     /// bookkeeping exactly. Returns `None` to fall back to generic dispatch.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_getrange_borrowed_into(
         &mut self,
         key: &[u8],
@@ -25602,6 +25607,7 @@ impl Runtime {
     /// semantics), so only offset>=0 & count>=0 is fast-pathed. Records the one
     /// keyspace lookup (record_source_key_lookups, as the store walk does not), then
     /// store.zrangebylex_limited; member-only array.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrangebylex_limit_borrowed(
         &mut self,
         key: &[u8],
@@ -26587,6 +26593,7 @@ impl Runtime {
     /// wire order is max then min, the inverted/wrongtype guard still takes
     /// (min, max), and the store walk runs rev=true. Defers on negative offset/count
     /// or a non-float bound. Member-only array.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrevrangebyscore_limit_borrowed(
         &mut self,
         key: &[u8],
@@ -26791,6 +26798,7 @@ impl Runtime {
     /// bounds in (min, max) order (verified byte-exact vs redis). Well-formed lex
     /// bounds only; defers on negative offset/count. Records the one keyspace lookup
     /// (the store walk does not). Member-only array.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrevrangebylex_limit_borrowed(
         &mut self,
         key: &[u8],
@@ -27487,6 +27495,7 @@ impl Runtime {
     /// pagination: defers to the generic on a negative offset/count (the generic's
     /// usize::MAX-offset / unlimited-count edge semantics) and on a non-float bound,
     /// so only the common offset>=0 & count>=0 case is fast-pathed. Member-only array.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrangebyscore_limit_borrowed(
         &mut self,
         key: &[u8],
@@ -28821,6 +28830,7 @@ impl Runtime {
     /// (frankenredis-ozrro) `SCAN cursor <opt> <val> <opt> <val> <opt> <val>` at arity 8 —
     /// the three-option form, previously left on the generic route and pinned there by a
     /// test. Thin wrapper over the shared impl.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_scan_opt3_borrowed(
         &mut self,
         cursor_arg: &[u8],
@@ -28849,6 +28859,7 @@ impl Runtime {
     /// Options are applied IN ORDER through the shared helper, which reproduces the
     /// generic's last-wins behaviour on a repeated keyword (`MATCH a MATCH b` => b).
     /// Rejecting duplicates here would invent a syntax error the generic never emits.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_scan_opt2_borrowed(
         &mut self,
         cursor_arg: &[u8],
@@ -29631,6 +29642,7 @@ impl Runtime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_plain_lmpop1_count_borrowed_inner(
         &mut self,
         numkeys_arg: &[u8],
@@ -29914,6 +29926,7 @@ impl Runtime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_lmpop2_count_borrowed(
         &mut self,
         numkeys_arg: &[u8],
@@ -29937,6 +29950,7 @@ impl Runtime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_plain_lmpop2_count_borrowed_inner(
         &mut self,
         numkeys_arg: &[u8],
@@ -30532,6 +30546,7 @@ impl Runtime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_plain_zmpop1_count_borrowed_inner(
         &mut self,
         numkeys_arg: &[u8],
@@ -30683,6 +30698,7 @@ impl Runtime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zmpop2_count_borrowed(
         &mut self,
         numkeys_arg: &[u8],
@@ -30706,6 +30722,7 @@ impl Runtime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_plain_zmpop2_count_borrowed_inner(
         &mut self,
         numkeys_arg: &[u8],
@@ -31109,6 +31126,7 @@ impl Runtime {
     ///
     /// The arity-9 form always carries BYSCORE or BYLEX, so generic's "LIMIT without
     /// BYSCORE/BYLEX is a syntax error" post-loop check can never fire here.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrangestore_bound_limit_borrowed(
         &mut self,
         dst: &[u8],
@@ -32581,6 +32599,7 @@ impl Runtime {
         Some(reply)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_plain_ltrim_borrowed_metrics(
         &mut self,
         key: &[u8],
@@ -33215,20 +33234,6 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_keymeta_borrowed(
-        &mut self,
-        cmd: PlainKeyMetaCmd,
-        key: &[u8],
-        now_ms: u64,
-    ) -> bool {
-        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
-        self.can_execute_plain_keymeta_borrowed_with_default_read_gate(
-            cmd,
-            key,
-            default_read_allowed,
-        )
-    }
-
     /// (frankenredis-ozrro) Shape checks WITHOUT the read-gate evaluation, so a caller holding
     /// the gate for this buffered pass supplies it instead of recomputing per packet. Measured
     /// on HGET: the gate is ~207 instr/op and a cached lookup ~15, so ~190 net per arm.
@@ -33686,6 +33691,7 @@ impl Runtime {
     /// reaches here — it falls back to generic). WRONGTYPE surfaces via the same
     /// `zmscore` error; a missing key/member yields the same nil. Read-only: no
     /// dirty/propagation. Returns None (fall back) on any disabling state. (cc)
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_geodist_borrowed(
         &mut self,
         key: &[u8],
@@ -36052,6 +36058,7 @@ impl Runtime {
     /// (fall back) unless the op is a literal GET with a valid encoding+offset, so
     /// every SET/INCRBY/OVERFLOW/multi-op/invalid form reaches the generic handler
     /// (writes + propagation + multi-op replies unaffected).
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_bitfield_get_borrowed(
         &mut self,
         cmd: PlainBitfieldGetCmd,
@@ -38170,22 +38177,6 @@ impl Runtime {
         Some(())
     }
 
-    fn can_execute_plain_zrange_borrowed(
-        &mut self,
-        key: &[u8],
-        start: &[u8],
-        stop: &[u8],
-        now_ms: u64,
-    ) -> bool {
-        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
-        self.can_execute_plain_zrange_borrowed_with_default_read_gate(
-            key,
-            start,
-            stop,
-            default_read_allowed,
-        )
-    }
-
     /// (frankenredis-ozrro) Shape checks without the read-gate evaluation, so a caller holding a
     /// per-pass cached gate supplies it. Same split as HGET and keymeta; ZRANGE's floor arm is the
     /// CLOSURE form (`.and_then(|packet| { .. })`), which is the placement that measured a WIN
@@ -38439,6 +38430,7 @@ impl Runtime {
     /// `ZRANGE key start stop WITHSCORES`. It preserves rank-only validation and
     /// store semantics while avoiding one score `String` / score `RespFrame` per
     /// returned member-score pair on the network fast path.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrange_withscores_borrowed_into(
         &mut self,
         key: &[u8],
@@ -38562,6 +38554,7 @@ impl Runtime {
     /// [`Self::execute_plain_zrange_withscores_borrowed_into`]; byte-identical
     /// framing (RESP3 `*N` array of `[member,double]` pairs / RESP2 flat `*(N*2)`).
     /// Defers (None) on a bad integer arg for the generic's canonical error text.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrevrange_withscores_borrowed_into(
         &mut self,
         key: &[u8],
@@ -38690,6 +38683,7 @@ impl Runtime {
     /// RESP2 flat array (member,score-bulk) vs RESP3 array of [member,double] pairs.
     /// Same inverted/wrongtype guard as the no-WITHSCORES form, then
     /// store.zrangebyscore_withscores_limited; defers non-float bounds to the generic.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrangebyscore_withscores_borrowed_into(
         &mut self,
         key: &[u8],
@@ -38854,6 +38848,7 @@ impl Runtime {
     /// WITHSCORES`. Reverse mirror of execute_plain_zrangebyscore_withscores_borrowed_
     /// into: wire order max then min, the guard still takes (min, max), and the store
     /// walk runs rev=true. RESP2 flat / RESP3 [member,Double] pairs.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrevrangebyscore_withscores_borrowed_into(
         &mut self,
         key: &[u8],
@@ -39015,6 +39010,7 @@ impl Runtime {
     /// `ZRANGE key min max BYSCORE WITHSCORES` — same ascending score-range +
     /// interleaved member/score as ZRANGEBYSCORE WITHSCORES but recorded under the
     /// `zrange` command name. RESP2 flat / RESP3 [member,Double] pairs.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_zrange_byscore_withscores_borrowed_into(
         &mut self,
         key: &[u8],
@@ -40653,6 +40649,7 @@ impl Runtime {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_frame_internal(
         &mut self,
         frame: Option<&RespFrame>,
@@ -47825,19 +47822,11 @@ impl Runtime {
         RespFrame::SimpleString("OK".to_string())
     }
 
+    /// The uncached form of the predicate, kept for the equivalence test against
+    /// `glob_match`; every production caller classifies the pattern once and calls
+    /// `config_pattern_matches_known` directly.
+    #[cfg(test)]
     fn config_pattern_matches(pattern: &str, parameter: &str) -> bool {
-        // (frankenredis-e6c9t) LITERAL FAST PATH. `CONFIG GET <name>` is overwhelmingly a
-        // literal parameter name, and this predicate is evaluated once per known config
-        // parameter -- 43 call sites -- so a literal request runs the full glob engine 43
-        // times to answer a question a byte compare settles. MEASURED: `CONFIG GET maxmemory`
-        // spent 21,326 instr/op inside `glob_match`, 54.5 pct of the whole command, which is
-        // why the route was 5.9x behind Redis 7.2.4.
-        //
-        // Equivalence is by construction, not by testing alone: a pattern containing none of
-        // `*`, `?`, `[` or `\` has no glob semantics left -- every byte is a literal -- so
-        // `glob_match` on it degenerates to exact byte equality. `\` is excluded because it
-        // ESCAPES the next character, and `[` because it opens a class; either makes the
-        // pattern non-literal even with no `*` or `?` present.
         Self::config_pattern_matches_known(
             pattern,
             Self::config_pattern_is_literal(pattern),
@@ -52651,7 +52640,8 @@ fn store_to_rdb_entries_with_thresholds(
                 {
                     RdbValue::StreamListpacks3(skeleton.upstream_payload().to_vec())
                 } else {
-                    let borrowed_entries: Vec<(u64, u64, Vec<(&[u8], &[u8])>)> = entries_map
+                    type BorrowedStreamEntry<'a> = (u64, u64, Vec<(&'a [u8], &'a [u8])>);
+                    let borrowed_entries: Vec<BorrowedStreamEntry<'_>> = entries_map
                         .iter()
                         .map(|((ms, seq), fields)| (*ms, *seq, fields.iter().collect()))
                         .collect();
@@ -52857,16 +52847,9 @@ fn apply_rdb_entries_to_store(
                 //
                 // A shape the guard declines is handed straight back and takes the
                 // ordinary decode path below -- byte-identical to what this did before.
-                let raw = match store.set_load_retained_listpack(
-                    &key,
-                    raw,
-                    member_count,
-                    max_member_len,
-                    now_ms,
-                ) {
-                    Ok(_) => None,
-                    Err(raw) => Some(raw),
-                };
+                let raw = store
+                    .set_load_retained_listpack(&key, raw, member_count, max_member_len, now_ms)
+                    .err();
                 if let Some(raw) = raw {
                     let (listpack, _) = fr_persist::rdb_decode_string_payload(&raw)
                         .ok_or(PersistError::InvalidFrame)?;
@@ -53096,16 +53079,9 @@ fn apply_rdb_entries_to_store(
                 // A shape the thresholds send to a skiplist (or a key already
                 // present) is handed straight back, and takes the ordinary decode
                 // path below -- byte-identical to what this arm did before.
-                let raw = match store.zset_load_retained_listpack(
-                    &key,
-                    raw,
-                    pair_count,
-                    max_member_len,
-                    now_ms,
-                ) {
-                    Ok(_) => None,
-                    Err(raw) => Some(raw),
-                };
+                let raw = store
+                    .zset_load_retained_listpack(&key, raw, pair_count, max_member_len, now_ms)
+                    .err();
                 if let Some(raw) = raw {
                     let (listpack, _) = fr_persist::rdb_decode_string_payload(&raw)
                         .ok_or(PersistError::InvalidFrame)?;
@@ -55194,7 +55170,9 @@ mod tests {
             );
             rt.execute_frame(command(&[b"ZADD", b"dst", b"9", b"stale"]), 1);
         }
-        let cases: [(&[u8], &[u8], &[u8], &[u8], bool); 8] = [
+        // (min, max, offset, count, lex)
+        type LimitCase<'a> = (&'a [u8], &'a [u8], &'a [u8], &'a [u8], bool);
+        let cases: [LimitCase<'_>; 8] = [
             (b"-inf", b"+inf", b"0", b"2", false),  // ordinary window
             (b"-inf", b"+inf", b"1", b"1", false),  // offset skips the first
             (b"-inf", b"+inf", b"0", b"0", false),  // count 0 -> empty -> dst deleted
@@ -55305,7 +55283,8 @@ mod tests {
             rt.execute_frame(command(&[b"ZADD", b"dst", b"9", b"stale"]), 1);
         }
         // (src, min, max, lex) with the generic keyword that must match it.
-        let cases: [(&[u8], &[u8], &[u8], bool); 9] = [
+        type RangeCase<'a> = (&'a [u8], &'a [u8], &'a [u8], bool);
+        let cases: [RangeCase<'_>; 9] = [
             (b"zs", b"-inf", b"+inf", false), // whole score band
             (b"zs", b"2", b"3", false),       // partial
             (b"zs", b"(1", b"3", false),      // exclusive low bound
@@ -61528,7 +61507,6 @@ mod tests {
         assert_ne!(writer.client_id, reader.client_id);
     }
 
-    #[test]
     /// (frankenredis-2ubu0) A SERVER-TO-SERVER link must never inherit the pre-AUTH caps.
     ///
     /// `parser_config()` keys them on `!is_authenticated()`, which reads the runtime's CURRENT
@@ -64237,7 +64215,6 @@ mod tests {
         );
     }
 
-    #[test]
     // (frankenredis-ozrro) UNWATCH inside MULTI is QUEUED and replayed by EXEC, matching
     // vendored Redis 7.2.4. fr previously executed it immediately, answering +OK and returning a
     // ONE-element EXEC array -- the UNWATCH silently vanished from the transaction. Two separate
@@ -64272,6 +64249,9 @@ mod tests {
         );
     }
 
+    // Never had its #[test] attribute; clippy's dead-code pass (2026-09-03) noticed it had
+    // never run.
+    #[test]
     fn transaction_activity_invariant_tracks_all_control_transitions() {
         let mut rt = Runtime::default_strict();
         assert!(rt.session.transaction_state.is_pristine());
@@ -73337,7 +73317,8 @@ mod tests {
         );
 
         // --- Option<()> forms: SET k v EX|PX n  and  SET k v EXAT|PXAT ts ---
-        for (label, is_seconds, time_arg) in [("relexpire_s", true, b"100".as_slice())] {
+        {
+            let (label, is_seconds, time_arg) = ("relexpire_s", true, b"100".as_slice());
             let (mut a, mut b, mut c) = (fresh(), fresh(), fresh());
             let ra =
                 a.execute_plain_set_relexpire_borrowed_ok(is_seconds, b"k", b"v", time_arg, 500);
@@ -84773,7 +84754,8 @@ user bob reset off nopass +@all
     #[test]
     fn plain_pexpiretime_borrowed_matches_generic_across_all_three_outcomes() {
         // (label, setup, key)
-        let cases: &[(&str, &[&[&[u8]]], &[u8])] = &[
+        type TtlCase<'a> = (&'a str, &'a [&'a [&'a [u8]]], &'a [u8]);
+        let cases: &[TtlCase<'_>] = &[
             ("missing key -> -2", &[], b"nosuchkey"),
             ("key with no TTL -> -1", &[&[b"SET", b"k", b"v"]], b"k"),
             (
@@ -84873,7 +84855,8 @@ user bob reset off nopass +@all
     /// remove it safely and, until then, guards against the pair silently diverging.
     #[test]
     fn plain_pexpiretime_borrowed_is_redundant_with_the_shared_keymeta_executor() {
-        let cases: &[(&str, &[&[&[u8]]], &[u8])] = &[
+        type TtlCase<'a> = (&'a str, &'a [&'a [&'a [u8]]], &'a [u8]);
+        let cases: &[TtlCase<'_>] = &[
             ("missing key", &[], b"nosuchkey"),
             ("no TTL", &[&[b"SET", b"k", b"v"]], b"k"),
             (

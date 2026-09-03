@@ -588,6 +588,12 @@ impl<V> KeyDict<V> {
     }
 
     /// Apply the shrink policy once, now. No-op while suspended.
+    // Unwired lever (frankenredis-d4fux): `expect`, not `allow`, so wiring it makes this
+    // attribute an error and it leaves with the debt instead of outliving it.
+    #[expect(
+        dead_code,
+        reason = "frankenredis-d4fux: unwired lever, wire or delete"
+    )]
     #[inline]
     pub fn shrink_if_sparse(&mut self) {
         self.maybe_shrink();
@@ -1146,8 +1152,11 @@ mod tests {
         // a const assert next to its definition). This read `[u64; 6]` -- 48 -- for a
         // long time, and an 8-byte-wide stand-in overstates the node arena by 8 B/key,
         // which is one whole lever's worth on the line this instrument exists to rank.
+        // The payload is never read: it exists for its width.
         #[derive(Clone)]
-        struct EntrySized([u64; 5]);
+        struct EntrySized {
+            _payload: [u64; 5],
+        }
 
         let n = 1_000_000usize;
         let r0 = rss_bytes();
@@ -1156,7 +1165,7 @@ mod tests {
             // Same shape DEBUG POPULATE uses: key:N
             kd.insert(
                 format!("key:{i}").into_bytes().into_boxed_slice(),
-                EntrySized([0; 5]),
+                EntrySized { _payload: [0; 5] },
             );
         }
         let r1 = rss_bytes();
@@ -1693,7 +1702,7 @@ mod tests {
 
         // Keep one key in every 7. The survivors are spread over every chunk, so
         // compaction has to pull them down across boundaries rather than within one.
-        let survives = |i: u32| i % 7 == 0;
+        let survives = |i: u32| i.is_multiple_of(7);
         for i in 0..N {
             if !survives(i) {
                 assert_eq!(d.remove(format!("key:{i:07}").as_bytes()), Some(i));

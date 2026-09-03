@@ -18240,9 +18240,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (3, BorrowedDispatchFloorCommand::Spop) => Some(BorrowedDispatchFloorClass::SpopCount),
         (2, BorrowedDispatchFloorCommand::Pubsub) => Some(BorrowedDispatchFloorClass::PubsubNumpat),
         (3, BorrowedDispatchFloorCommand::Pubsub) => Some(BorrowedDispatchFloorClass::PubsubNumsub),
-        (array_len, BorrowedDispatchFloorCommand::Mset)
-            if matches!(array_len, 5 | 7 | 9 | 11 | 13 | 15 | 17) =>
-        {
+        (5 | 7 | 9 | 11 | 13 | 15 | 17, BorrowedDispatchFloorCommand::Mset) => {
             Some(BorrowedDispatchFloorClass::Mset)
         }
         (4, BorrowedDispatchFloorCommand::Hset) => Some(BorrowedDispatchFloorClass::HsetSingle),
@@ -18417,16 +18415,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // is a REGRESSION, not a missed optimisation, and it is exactly the defect
         // this bead was opened for on MGET. The classifier must promise no more
         // than the arm can serve.
-        (3, cmd)
-            if matches!(
-                cmd,
-                BorrowedDispatchFloorCommand::Pfadd
-                    | BorrowedDispatchFloorCommand::Lpushx
-                    | BorrowedDispatchFloorCommand::Rpushx
-            ) =>
-        {
-            Some(BorrowedDispatchFloorClass::KeyedValuesWrite(1))
-        }
+        (
+            3,
+            BorrowedDispatchFloorCommand::Pfadd
+            | BorrowedDispatchFloorCommand::Lpushx
+            | BorrowedDispatchFloorCommand::Rpushx,
+        ) => Some(BorrowedDispatchFloorClass::KeyedValuesWrite(1)),
         _ => None,
     }
 }
@@ -19668,6 +19662,7 @@ fn dispatch_floor_keyed_values_write(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_dispatch_floor_classified_action(
     unparsed: &[u8],
     parser_config: ParserConfig,
@@ -36429,6 +36424,7 @@ fn replica_handshake_read_timeout(runtime: &Runtime) -> Duration {
     Duration::from_secs(runtime.server.repl_timeout_sec.max(1))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sync_replica_with_primary(
     runtime: &mut Runtime,
     host: &str,
@@ -38649,7 +38645,7 @@ mod tests {
         // 4. EXHAUSTIVE over short strings from the alphabet that can reach either arm.
         //    Catches the shapes hand-written cases miss, e.g. "$1" with nothing after it,
         //    "$\r\n", "$01\r\n", "$1a\r\n".
-        let alphabet = [b'$', b'0', b'1', b'9', b'\r', b'\n', b'a'];
+        let alphabet = *b"$019\r\na";
         let mut buf = [0u8; 5];
         for len in 0..=5usize {
             let mut counter = vec![0usize; len];
@@ -50574,6 +50570,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     ///   1. classifier vs ORACLE — catches classifier and parser drifting TOGETHER
     ///   2. classifier vs PARSER — catches the classifier drifting ALONE, which is
     ///      what happened all four times
+    ///
     /// A test with only (1) proves the classifier matches a table a human wrote.
     #[test]
     fn keyed_values_classifier_claims_exactly_what_its_parsers_accept() {
@@ -51120,7 +51117,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
 
                 assert_eq!(
                     super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
-                    Some(class.clone()),
+                    Some(class),
                     "{shown} with {keys} key(s) must classify"
                 );
                 // The claim must be one the arm's parser honours. Before 9hnxt this

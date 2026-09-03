@@ -1003,8 +1003,10 @@ mod tests {
                 }
             }
             let master = state.get_master("m1").unwrap();
-            if promoted.is_some() && master.failover_state == FailoverState::None {
-                return promoted.unwrap();
+            if master.failover_state == FailoverState::None
+                && let Some(key) = promoted.as_deref()
+            {
+                return key.to_string();
             }
         }
         panic!(
@@ -1056,7 +1058,7 @@ mod tests {
         let returned = t0 + 60_000;
         {
             let master = state.get_master_mut("m1").unwrap();
-            crate::health::record_info_response(master, &master_info(&"b".repeat(40)), returned);
+            crate::health::record_info_response(master, master_info(&"b".repeat(40)), returned);
             apply_replica_probe(
                 master,
                 "10.0.0.1:6379",
@@ -1071,7 +1073,7 @@ mod tests {
         let now = returned + crate::PUBLISH_PERIOD_MS * 4 + 1_000;
         {
             let master = state.get_master_mut("m1").unwrap();
-            crate::health::record_info_response(master, &master_info(&"b".repeat(40)), now);
+            crate::health::record_info_response(master, master_info(&"b".repeat(40)), now);
             apply_replica_probe(
                 master,
                 "10.0.0.1:6379",
@@ -1394,7 +1396,7 @@ mod tests {
         {
             let master = state.get_master_mut("m1").unwrap();
             master.flags.remove(InstanceFlags::S_DOWN);
-            crate::health::record_info_response(master, &master_info(&"a".repeat(40)), back);
+            crate::health::record_info_response(master, master_info(&"a".repeat(40)), back);
         }
         let ios = failover_step(&mut state, "m1", back);
         assert!(

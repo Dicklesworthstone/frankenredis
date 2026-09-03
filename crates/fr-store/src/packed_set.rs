@@ -50,11 +50,6 @@ impl PackedStrSet {
         self.len
     }
 
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
     /// Size of the packed payload in bytes (varint headers + member bytes).
     #[must_use]
     pub fn byte_len(&self) -> usize {
@@ -116,11 +111,6 @@ impl PackedStrSet {
             pos = data_end;
         }
         false
-    }
-
-    pub fn clear(&mut self) {
-        self.buf.clear();
-        self.len = 0;
     }
 }
 
@@ -2619,11 +2609,6 @@ impl FieldDict {
         self.arena.extend_from_slice(name);
         self.spans.push((off, len));
         self.spans.len() - 1
-    }
-
-    #[must_use]
-    fn len(&self) -> usize {
-        self.spans.len()
     }
 }
 
@@ -5940,6 +5925,12 @@ impl ListValue {
     /// totals are the one implementation's answer and not a second derivation
     /// (`frankenredis-c92f6`). `raw` must be the record body those nodes were decoded
     /// from.
+    // Unwired lever (frankenredis-d4fux): `expect`, not `allow`, so wiring it makes this
+    // attribute an error and it leaves with the debt instead of outliving it.
+    #[expect(
+        dead_code,
+        reason = "frankenredis-d4fux: unwired lever, wire or delete"
+    )]
     #[must_use]
     pub(crate) fn retained_quicklist2(derived: Self, raw: Vec<u8>) -> Self {
         let len = derived.len();
@@ -8165,11 +8156,9 @@ mod tests {
         ])
         .expect("duplicate fixture encodes");
         assert!(
-            matches!(
-                super::HashFieldMap::try_from_rdb_listpack(duplicate, 512, 64)
-                    .expect("duplicate is structurally valid"),
-                Err(_)
-            ),
+            super::HashFieldMap::try_from_rdb_listpack(duplicate, 512, 64)
+                .expect("duplicate is structurally valid")
+                .is_err(),
             "RDB-load duplicates must retain the established last-wins fallback"
         );
     }
@@ -8466,7 +8455,8 @@ mod tests {
             ]
         };
         let entries: Vec<((u64, u64), Pairs)> = (0..400u64).map(|i| ((i + 1, 1), mk(i))).collect();
-        let borrowed: Vec<((u64, u64), &[(Vec<u8>, Vec<u8>)])> =
+        type BorrowedEntry<'a> = ((u64, u64), &'a [(Vec<u8>, Vec<u8>)]);
+        let borrowed: Vec<BorrowedEntry<'_>> =
             entries.iter().map(|(id, p)| (*id, p.as_slice())).collect();
 
         // Both hint shapes: an accurate hint (fires the reserve) and no hint at all
@@ -10689,6 +10679,9 @@ mod tests {
         );
     }
 
+    // Never had its #[test] attribute: clippy's dead-code pass (2026-09-03) was the first
+    // thing to notice it had not run since 76b07f291.
+    #[test]
     fn restored_quicklist2_fused_growth_totals_match_rebuild_walk_c92f6() {
         // canonical: mixed strings + integer-encoded entries
         let canonical: Vec<&[u8]> = vec![b"member:0001", b"42", b"-9999", b"x"];

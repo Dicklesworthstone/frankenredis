@@ -14327,23 +14327,6 @@ impl Store {
         }
     }
 
-    fn push_logical_key_if_match(
-        result: &mut Vec<Vec<u8>>,
-        physical_key: &[u8],
-        glob: &PreparedGlob<'_>,
-        is_star: bool,
-    ) {
-        let logical = decode_db_key(physical_key)
-            .map(|(_, logical)| logical)
-            .unwrap_or(physical_key);
-        // (cc_fr) `glob.matches(l)` is byte-identical to `glob_match(pattern, l)`; the
-        // pattern is classified ONCE by the caller instead of per key (KEYS over a
-        // large keyspace globbed every key: same `glob_match` self-frame as SCAN).
-        if is_star || glob.matches(logical) {
-            result.push(logical.to_vec());
-        }
-    }
-
     #[must_use]
     pub fn keys_matching_in_db(&mut self, db: usize, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
         // (frankenredis-2wgom) Range-prune by the pattern's literal prefix. The
@@ -27005,7 +26988,6 @@ impl Store {
     /// and membership/order via [`SortedSet::score_bound_range_limited_refs`] (which
     /// preserves the deep-offset treap jump + lazy skip/take), streaming borrowed
     /// members with no `Vec<(Vec<u8>, f64)>` clone.
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn zrangebyscore_members_limit_borrow_scan(
         &mut self,
@@ -41352,8 +41334,8 @@ impl BigNat {
         debug_assert!(left.cmp_abs(right) != std::cmp::Ordering::Less);
         let mut limbs = Vec::with_capacity(left.limbs.len());
         let mut borrow = 0_i64;
-        for idx in 0..left.limbs.len() {
-            let a = i64::from(left.limbs[idx]) - borrow;
+        for (idx, &left_limb) in left.limbs.iter().enumerate() {
+            let a = i64::from(left_limb) - borrow;
             let b = i64::from(right.limbs.get(idx).copied().unwrap_or(0));
             if a >= b {
                 limbs.push((a - b) as u32);

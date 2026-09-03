@@ -14,10 +14,7 @@ use fr_store::{
     StreamPendingRecord, Value, ValueType, decode_db_key, glob_match, read_rss_bytes,
     read_total_system_memory_bytes, redis_score_to_string, sha1_hex_public,
 };
-use icu_collator::{
-    Collator, CollatorBorrowed, options::AlternateHandling, options::CollatorOptions,
-};
-use icu_locale_core::Locale;
+use icu_collator::CollatorBorrowed;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::CString;
@@ -20076,6 +20073,7 @@ fn write_container_key<'b>(buf: &'b mut [u8; 64], parent: &[u8], sub: &[u8]) -> 
 ///   * "what costs is ITERATING 129 entries, and a binary search removes only ~7/8 of the
 ///     iterations" — that arithmetic is the argument FOR a hash, which removes all of
 ///     them. The row bounded the wrong mechanism, and says so itself.
+///
 /// That row's retry predicate asked for the duplicate SCAN to be collapsed. Half of that
 /// duplication is already gone (`830af9fcc` took the flags scan off the no-MONITOR path);
 /// this removes the walk itself from the half that remains.
@@ -31079,59 +31077,6 @@ fn partial_sort_window<T>(
     v[start..end].sort_unstable_by(&mut cmp);
 }
 
-fn is_c_collation_locale(locale: &str) -> bool {
-    let locale = locale.trim();
-    locale.is_empty()
-        || locale.eq_ignore_ascii_case("C")
-        || locale.eq_ignore_ascii_case("POSIX")
-        || locale.eq_ignore_ascii_case("C.UTF-8")
-        || locale.eq_ignore_ascii_case("C.UTF8")
-}
-
-fn posix_locale_to_bcp47(locale: &str) -> Option<String> {
-    if is_c_collation_locale(locale) {
-        return None;
-    }
-    let without_encoding = locale
-        .split_once('.')
-        .map_or(locale, |(before_encoding, _)| before_encoding);
-    let without_modifier = without_encoding
-        .split_once('@')
-        .map_or(without_encoding, |(before_modifier, _)| before_modifier)
-        .trim();
-    if is_c_collation_locale(without_modifier) {
-        None
-    } else {
-        Some(without_modifier.replace('_', "-"))
-    }
-}
-
-/// Resolve the `SORT ... ALPHA` collator from the process environment.
-///
-/// Callers want [`active_sort_alpha_collator`], which memoises this. Kept as its own
-/// function so the resolution is still directly testable (the tests below drive it
-/// through `posix_locale_to_bcp47`, which is where every interesting case lives).
-fn resolve_sort_alpha_collator() -> Option<CollatorBorrowed<'static>> {
-    let locale = std::env::var("LC_ALL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            std::env::var("LC_COLLATE")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .or_else(|| {
-            std::env::var("LANG")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })?;
-    let locale = posix_locale_to_bcp47(&locale)?;
-    let locale = locale.parse::<Locale>().ok()?;
-    let mut options = CollatorOptions::default();
-    options.alternate_handling = Some(AlternateHandling::Shifted);
-    Collator::try_new(locale.into(), options).ok()
-}
-
 /// Primary collation rank of one byte, `0` meaning "outside the ASCII fast path's
 /// domain". Root (and `en`) collation orders ASCII alphanumerics digits-then-letters with
 /// `a/A < b/B < ... < z/Z`, and case is a TERTIARY difference — so the two halves of a
@@ -31235,9 +31180,13 @@ fn ascii_alnum_collate(left: &[u8], right: &[u8]) -> Option<Ordering> {
 /// Danish/Norwegian `aa` sorting as `å` (after `z`), Czech/Slovak `ch` after `h`, the
 /// Hungarian digraphs, Spanish traditional `ch`/`ll`, Estonian `z` after `s`, Lithuanian
 /// `y` after `i`, Swedish/Finnish `w` folded onto `v`. Each of those makes a tailored
-/// locale disagree with the table above on a pair drawn from this list, which is what
-/// turns the fast path off there. The case forms pin the tertiary rule and
-/// `0a`/`a0`/`9z`/`z9` pin digits-before-letters.
+/// locale disagree with the table above on a pair drawn from this list. The case forms pin
+/// the tertiary rule and `0a`/`a0`/`9z`/`z9` pin digits-before-letters.
+///
+/// Test-only since the process-wide icu resolution retired (SORT compares with glibc
+/// `strcoll_l`); the tests still pin `ascii_alnum_collate`, which the bench A/Bs, against a
+/// real collator on this corpus.
+#[cfg(test)]
 const ASCII_ALNUM_TAILORING_PROBES: &[&str] = &[
     "aa", "ab", "az", "aaa", "b", "ba", "ch", "ci", "cd", "cz", "cs", "d", "dz", "dzs", "gy", "h",
     "hi", "i", "ij", "j", "ll", "lz", "ly", "ny", "nz", "rr", "sz", "ss", "t", "ty", "v", "vv",
@@ -31247,35 +31196,14 @@ const ASCII_ALNUM_TAILORING_PROBES: &[&str] = &[
 
 /// Does `fast` reproduce `collator` exactly on the probe corpus?
 ///
-/// This is the gate that makes the fast path safe against a collator this code did not
-/// choose. It is checked against the collator that will actually be used, so a locale
-/// tailoring the Latin letters — where the table above is simply WRONG — turns the fast
-/// path OFF rather than returning a wrong order. **A wrong table can therefore only cost
-/// the speedup, never an answer.** A probe that leaves the fast path's own domain is a
+/// A locale tailoring the Latin letters -- where the table above is simply WRONG -- must
+/// turn the fast path OFF rather than return a wrong order, so a wrong table can only cost
+/// the speedup, never an answer. A probe that leaves the fast path's own domain is a
 /// failure too: the corpus exists to exercise the table, and one that declines proves
-/// nothing about it.
-///
-/// The comparator arrives as a function pointer rather than being called directly so that
-/// a test can hand in a deliberately WRONG one and watch this refuse — a gate nothing can
-/// fail is not a gate.
-///
-/// COST: 6,441 collator comparisons, ~6.8M instructions, paid ONCE per process on the first
-/// `SORT ... ALPHA` that has a collator at all — against ~1,000 instructions bought back on
-/// every in-domain comparison afterwards. AUDITED RATHER THAN WAVED THROUGH, because it sits
-/// on a request path:
-///
-/// * **Amortisation.** It pays for itself after ~6,400 in-domain comparisons: one
-///   1,000-element `SORT ALPHA` (~10,000 comparisons), or ~2,000 three-element ones. Every
-///   comparison after that is pure profit.
-/// * **Latency of the ONE request that pays it.** ~6.8M instructions is roughly 1.7-3.4 ms
-///   natively. `slowlog-log-slower-than` defaults to 10,000 µs, so this stays under the
-///   slowlog bar — but it is the same ORDER as that bar, not orders below it. If the probe
-///   corpus ever grows, re-check that margin rather than assuming it.
-/// * **No lock contention, and the reason is structural rather than lucky.** `OnceLock`
-///   would block other threads behind the initialising one, but `SORT` is excluded from the
-///   per-core reactor path — `reactor_single_key_command` lists it among the commands that
-///   would reach outside a locked partition — so SORT executes serially and no second thread
-///   can be waiting on this init.
+/// nothing about it. The comparator arrives as a function pointer so that a test can hand
+/// in a deliberately WRONG one and watch this refuse -- a gate nothing can fail is not a
+/// gate.
+#[cfg(test)]
 fn ascii_alnum_fast_path_agrees_with(
     collator: &CollatorBorrowed<'_>,
     fast: fn(&[u8], &[u8]) -> Option<Ordering>,
@@ -31371,9 +31299,13 @@ pub fn sort_alpha_locale_is_valid(locale: &str) -> bool {
     LibcCollationLocale::new(locale).is_ok()
 }
 
+/// The `locale-collate` value names no locale this libc can build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidCollationLocale;
+
 /// Commit a previously validated `locale-collate` value.
-pub fn set_sort_alpha_locale(locale: &str) -> Result<(), ()> {
-    let next = LibcCollationLocale::new(locale)?;
+pub fn set_sort_alpha_locale(locale: &str) -> Result<(), InvalidCollationLocale> {
+    let next = LibcCollationLocale::new(locale).map_err(|()| InvalidCollationLocale)?;
     let mut active = match active_libc_collation_locale().write() {
         Ok(active) => active,
         Err(poisoned) => poisoned.into_inner(),
@@ -31382,11 +31314,11 @@ pub fn set_sort_alpha_locale(locale: &str) -> Result<(), ()> {
     Ok(())
 }
 
-/// Redis-compatible `strcoll` over arbitrary RESP byte strings.
-///
-/// Redis stores C-terminated SDS values, while a Rust `&[u8]` has no spare terminator. Embedded
-/// NUL cannot be represented to libc and retains the established byte-order fallback rather than
-/// truncating either input.
+// Redis-compatible `strcoll` over arbitrary RESP byte strings.
+//
+// Redis stores C-terminated SDS values, while a Rust `&[u8]` has no spare terminator. Embedded
+// NUL cannot be represented to libc and retains the established byte-order fallback rather than
+// truncating either input. (A plain comment: a doc comment on a macro invocation is unused.)
 std::thread_local! {
     /// Reused NUL-terminated scratch for [`sort_alpha_compare_glibc`], one pair per thread.
     ///
@@ -31438,50 +31370,6 @@ pub fn sort_alpha_compare_glibc(left: &[u8], right: &[u8]) -> Ordering {
     })
 }
 
-/// The `SORT ... ALPHA` collator, plus whether the ASCII fast path was VALIDATED against
-/// that exact collator. The two travel together because either alone is unusable: the
-/// flag means nothing without the collator it was checked against.
-struct SortAlphaCollation {
-    collator: Option<CollatorBorrowed<'static>>,
-    ascii_fast_path: bool,
-}
-
-/// The collator every `SORT ... ALPHA` (without `STORE`) compares with, resolved once,
-/// together with the fast-path verdict for that collator.
-///
-/// (frankenredis-7nfc0 named this cost; this is the lever.) The resolution behind it is
-/// not cheap and it was being paid ONCE PER COMMAND: three `getenv`s, a POSIX→BCP47
-/// rewrite, a `Locale` parse, and `Collator::try_new`, whose ICU data lookup is a
-/// zerotrie walk plus locale fallback. Censused on `SORT_RO sl ALPHA` over a
-/// three-element list, that resolution is roughly 12,500 instr/op against ~2,300 spent
-/// actually comparing — the lookup cost several times the work it enables, on a route
-/// where the list is short enough that it cannot amortise.
-///
-/// Memoising is sound because the inputs cannot change while the process runs:
-/// the answer is a pure function of `LC_ALL`/`LC_COLLATE`/`LANG`, and nothing in this
-/// workspace mutates the environment — there is no `std::env::set_var` call in any
-/// crate. `locale-collate` exists in the config table but is stored, not wired to
-/// collation, so `CONFIG SET locale-collate` does not reach here either. If either of
-/// those ever stops being true, this cache is the thing that has to change with it.
-///
-/// Returning a borrow rather than a fresh `CollatorBorrowed` is what makes it a cache:
-/// `CollatorBorrowed<'static>` is a view over ICU's compiled data, so cloning it per
-/// call would re-run the lookup this exists to avoid. The same argument extends to
-/// `ascii_fast_path`: it is a pure function of the collator, so it is decided with it.
-fn active_sort_alpha_collation() -> &'static SortAlphaCollation {
-    static COLLATION: std::sync::OnceLock<SortAlphaCollation> = std::sync::OnceLock::new();
-    COLLATION.get_or_init(|| {
-        let collator = resolve_sort_alpha_collator();
-        let ascii_fast_path = collator.as_ref().is_some_and(|collator| {
-            ascii_alnum_fast_path_agrees_with(collator, ascii_alnum_collate)
-        });
-        SortAlphaCollation {
-            collator,
-            ascii_fast_path,
-        }
-    })
-}
-
 /// Compare two `SORT ... ALPHA` elements.
 ///
 /// Short-circuits on `collator` BEFORE validating UTF-8. The previous form matched on the
@@ -31507,8 +31395,9 @@ pub fn sort_alpha_compare(
 
 /// [`sort_alpha_compare`] with the ASCII-alnum fast path available.
 ///
-/// `ascii_fast_path` MUST come from [`active_sort_alpha_collation`], i.e. it must have
-/// been validated against the very `collator` passed here — which is why this is a
+/// `ascii_fast_path` must have been validated against the very `collator` passed here
+/// (the process-wide icu resolution that once did so was retired when SORT moved to
+/// glibc `strcoll_l`; the bench and the tests build their own) — which is why this is a
 /// separate entry point rather than a global flag consulted inside the comparator. The
 /// comparator is also handed collators the process did not resolve (the bench's A/B arms,
 /// and tests that build their own `en-US`), and a flag validated against a DIFFERENT
@@ -32477,7 +32366,7 @@ mod tests {
 
     use super::{
         cluster_invalid_setslot_action_error, encode_pubsub_message_for_protocol_into,
-        posix_locale_to_bcp47, sort_alpha_compare,
+        sort_alpha_compare,
     };
     use fr_protocol::RespFrame;
     use icu_collator::{Collator, options::AlternateHandling, options::CollatorOptions};
@@ -64416,7 +64305,7 @@ mod tests {
 
         // A deterministic bit-pattern sweep: mantissas that stress the tie logic at
         // several exponents, including subnormals.
-        let mut state = 0x2026_08_27_u64;
+        let mut state = 0x2026_0827_u64;
         for _ in 0..200_000 {
             state = state
                 .wrapping_mul(6364136223846793005)
@@ -65665,27 +65554,18 @@ mod tests {
     }
 
     #[test]
-    fn sort_alpha_posix_locale_mapping_keeps_c_locale_binary() {
-        assert_eq!(posix_locale_to_bcp47("C"), None);
-        assert_eq!(posix_locale_to_bcp47("POSIX"), None);
-        assert_eq!(posix_locale_to_bcp47("C.UTF-8"), None);
-        assert_eq!(
-            posix_locale_to_bcp47("en_US.UTF-8"),
-            Some("en-US".to_string())
-        );
-        assert_eq!(
-            posix_locale_to_bcp47("de_DE.UTF-8@euro"),
-            Some("de-DE".to_string())
-        );
-    }
-
-    #[test]
     #[allow(unsafe_code)]
     fn glibc_collation_rejects_the_icu_punctuation_tie_break() {
         // Redis 7.2.4 calls glibc strcoll after selecting locale-collate. ICU's shifted
         // comparator treats punctuation as ignorable here, so the old implementation preserved
         // insertion order (`a-b`, `ab`, `a b`) rather than glibc's `a b`, `a-b`, `ab` order.
-        let locale = super::LibcCollationLocale::new("en_US.utf8").expect("test locale installed");
+        // The tie-break needs a real en_US locale. A host without one (the rch workers
+        // have only C/POSIX) cannot run this assertion, and inventing a pass would prove
+        // nothing, so it declines loudly instead.
+        let Ok(locale) = super::LibcCollationLocale::new("en_US.utf8") else {
+            eprintln!("skipping: en_US.utf8 is not installed on this host");
+            return;
+        };
         let left = std::ffi::CString::new("a b").expect("no NUL");
         let right = std::ffi::CString::new("a-b").expect("no NUL");
         // SAFETY: both `CString`s are live and NUL-terminated; `locale.raw` is the non-null
@@ -65706,32 +65586,6 @@ mod tests {
         assert!(!super::sort_alpha_locale_is_valid("bad\0locale"));
     }
 
-    /// The `SORT ... ALPHA` collator is memoised (frankenredis-r9mqp), so assert BOTH
-    /// halves of that claim, because either alone can pass while the change is wrong:
-    ///
-    /// 1. It is really a cache. Two calls must hand back the SAME collator — compared by
-    ///    ADDRESS, not by value, since a re-resolution would be equal-but-distinct and a
-    ///    value comparison could not tell the two apart. This is what fails if a later
-    ///    edit turns the accessor back into a per-call `resolve`.
-    /// 2. Memoising did not change WHICH collator SORT gets. The cached answer must
-    ///    agree with a fresh `resolve_sort_alpha_collator()` — same Some/None, and where
-    ///    both are `Some`, the same ordering on a corpus that separates collation from
-    ///    byte order (`Banana` before `apple` collated, after it byte-wise; and the
-    ///    punctuation-vs-digit pairs that `AlternateHandling::Shifted` decides).
-    ///
-    /// Deliberately locale-agnostic: this runs under whatever locale the test host has,
-    /// so it asserts cached-equals-fresh rather than a fixed order. The fixed-order
-    /// assertion lives in `sort_alpha_en_us_collation_matches_non_store_probe`, which
-    /// builds its own en-US collator and does not depend on the environment.
-    ///
-    /// KNOWN LIMIT, stated so this is not read as stronger than it is: on a host whose
-    /// environment names no collating locale, both halves reduce to `None == None` and
-    /// the test cannot fail. It is regression protection, not the proof the cache
-    /// works. That proof is the callgrind census on `7nfc0`/`r9mqp`, taken with both
-    /// engines pinned to `en_US.UTF-8`, where the resolution frames (`getenv`,
-    /// the zerotrie walk, `DataLocale::write`, locale fallback) disappear from
-    /// `SORT_RO ALPHA` entirely — they cannot vanish unless the accessor stopped
-    /// resolving.
     /// (frankenredis-aujcf) `check_full_command_arity` now asks
     /// `command_has_subcommands_bytes(name)` instead of allocating
     /// `from_utf8_lossy(name).to_ascii_lowercase()` and asking the `&str` wrapper.
@@ -65874,45 +65728,6 @@ mod tests {
             vec![-6, -5, -5],
             "preserved 7.4 arities have rotted"
         );
-    }
-
-    #[test]
-    fn sort_alpha_collator_is_memoised_and_agrees_with_a_fresh_resolution() {
-        // Through the production accessor, which now hands out the whole
-        // `SortAlphaCollation` (collator + validated-fast-path flag) from ONE `OnceLock`.
-        let first = super::active_sort_alpha_collation().collator.as_ref();
-        let second = super::active_sort_alpha_collation().collator.as_ref();
-        match (first, second) {
-            (Some(first), Some(second)) => assert!(
-                std::ptr::eq(first, second),
-                "collator was re-resolved: the accessor is not memoising"
-            ),
-            (None, None) => {}
-            _ => panic!("memoised collator disagreed with itself across two calls"),
-        }
-
-        let fresh = super::resolve_sort_alpha_collator();
-        assert_eq!(
-            first.is_some(),
-            fresh.is_some(),
-            "cached collator presence disagrees with a fresh resolution"
-        );
-        if let (Some(cached), Some(fresh)) = (first, fresh.as_ref()) {
-            let corpus: [&[u8]; 8] = [
-                b"Banana", b"apple", b"-2", b"18", b"3.5", b"9x", b"", b"co-op",
-            ];
-            for left in corpus {
-                for right in corpus {
-                    assert_eq!(
-                        sort_alpha_compare(Some(cached), left, right),
-                        sort_alpha_compare(Some(fresh), left, right),
-                        "cached and freshly resolved collators disagree on {:?} vs {:?}",
-                        String::from_utf8_lossy(left),
-                        String::from_utf8_lossy(right),
-                    );
-                }
-            }
-        }
     }
 
     #[test]

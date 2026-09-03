@@ -1262,16 +1262,12 @@ fn lua_plain_find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     let last_start = hay.len() - needle.len();
     let mut at = 0usize;
     while at <= last_start {
-        match hay[at..=last_start].iter().position(|&b| b == first) {
-            Some(off) => {
-                let cand = at + off;
-                if &hay[cand..cand + needle.len()] == needle {
-                    return Some(cand);
-                }
-                at = cand + 1;
-            }
-            None => return None,
+        let off = hay[at..=last_start].iter().position(|&b| b == first)?;
+        let cand = at + off;
+        if &hay[cand..cand + needle.len()] == needle {
+            return Some(cand);
         }
+        at = cand + 1;
     }
     None
 }
@@ -5222,10 +5218,7 @@ thread_local! {
     /// FUNCTION LOAD / DELETE / FLUSH, and a probe whose stored generation differs CLEARS the
     /// map before answering. So a stale entry is unreachable, as before -- just paid for at
     /// mutation time rather than on every call.
-    static FCALL_LIBRARY_CALLBACKS: std::cell::RefCell<(
-        u64,
-        std::collections::HashMap<Vec<u8>, Rc<RegisteredCallbacks>, LibraryKeyHasherBuilder>,
-    )> = const {
+    static FCALL_LIBRARY_CALLBACKS: std::cell::RefCell<FcallLibraryCallbacks> = const {
         std::cell::RefCell::new((
             0,
             std::collections::HashMap::with_hasher(LibraryKeyHasherBuilder),
@@ -5310,22 +5303,27 @@ impl LibraryKeyHasher {
     }
 
     fn fold_bytes(&mut self, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
-        for chunk in &mut chunks {
-            // `chunks_exact` yields exactly 8, so this cannot fail.
-            let word = u64::from_le_bytes(chunk.try_into().unwrap_or([0; 8]));
-            self.mix(word);
+        let (chunks, remainder) = bytes.as_chunks::<8>();
+        for chunk in chunks {
+            self.mix(u64::from_le_bytes(*chunk));
         }
         // The tail is folded BYTE-WISE rather than copied into a zero-padded buffer on
         // purpose: `buf[..n].copy_from_slice(..)` with a RUNTIME `n` is a `memcpy` CALL, and
         // that is exactly what made the KEYS prefix-digest comparator measure 25 pct WORSE
         // (`0c1b567bf`). At most seven bytes reach here, and the measured path -- a long
         // library, whose windows are exactly 16 bytes -- has no tail at all.
-        for &byte in chunks.remainder() {
+        for &byte in remainder {
             self.fold_byte(byte);
         }
     }
 }
+
+/// The FCALL callback cache: the function generation it was built under, and the
+/// per-library callbacks keyed by library name (see `FCALL_LIBRARY_CALLBACKS`).
+type FcallLibraryCallbacks = (
+    u64,
+    std::collections::HashMap<Vec<u8>, Rc<RegisteredCallbacks>, LibraryKeyHasherBuilder>,
+);
 
 impl std::hash::Hasher for LibraryKeyHasher {
     fn write(&mut self, bytes: &[u8]) {
@@ -6526,6 +6524,9 @@ impl<'a> LuaState<'a> {
     ///
     /// Body moved VERBATIM; the only edits are the signature and the de-indent, so a reader
     /// comparing against the previous revision sees no behaviour to re-derive.
+    // An extracted statement body: its parameters are the enclosing frame's locals, and
+    // bundling them into a struct would add a move per loop for no reader's benefit.
+    #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn exec_numeric_for_stmt(
         &mut self,
@@ -9607,6 +9608,10 @@ impl<'a> LuaState<'a> {
         self.call_function_with_continuations(func, args, env, varargs, Vec::new())
     }
 
+    // `varargs` is threaded through the tail-call trampoline but never read here: the
+    // callee's `...` comes from its own frame. Dropping the parameter touches every
+    // `call_function` caller in the interpreter (22 sites) and is a change of its own.
+    #[allow(clippy::only_used_in_recursion)]
     fn call_function_with_continuations(
         &mut self,
         func: &LuaValue,
