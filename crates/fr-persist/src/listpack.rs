@@ -2050,14 +2050,13 @@ fn hash_field_spans_probe<const SLOTS: usize>(
 ///
 /// (frankenredis-8l29u) THREE BANDS, not two, and the split point is chosen so the
 /// common case cannot regress:
-///   * `<= 64` fields  -- the 256-slot table, kept at or under a quarter load, which is
-///                        where it was MEASURED to beat the wide one (see
-///                        [`HASH_NARROW_PROBE_MAX`]).
-///   * `65..=512`      -- a 1024-slot table. The upper half of this band previously fell
-///                        through to a `std::collections::HashSet` on the claim that it
-///                        was never retained, which is false at
-///                        `hash-max-listpack-entries`' default of 512.
-///   * `> 512`         -- the allocating set, which is now genuinely cold.
+/// * `<= 64` fields -- the 256-slot table, kept at or under a quarter load, which is
+///   where it was MEASURED to beat the wide one (see [`HASH_NARROW_PROBE_MAX`]).
+/// * `65..=512` -- a 1024-slot table. The upper half of this band previously fell
+///   through to a `std::collections::HashSet` on the claim that it was never
+///   retained, which is false at `hash-max-listpack-entries`' default of 512.
+/// * `> 512` -- the allocating set, which is now genuinely cold.
+///
 /// Every boundary here is a measured crossover, not a guess; both of them were found by
 /// building the alternative and reading both arms.
 fn hash_field_spans_have_duplicate(data: &[u8], spans: &[ListpackValueSpan]) -> bool {
@@ -3347,11 +3346,12 @@ mod tests {
             HASH_NARROW_PROBE_MAX, 64,
             "the narrow/wide probe crossover is measured, not derived -- see its doc"
         );
-        assert!(
+        // Constant relations are pinned at compile time, not asserted at run time.
+        const _: () = assert!(
             HASH_NARROW_PROBE_MAX * 4 <= ZSET_STACK_DUP_MAX * 2,
             "the narrow band must stay at or under a quarter load, which is where it wins"
         );
-        assert!(
+        const _: () = assert!(
             HASH_STACK_DUP_MAX > ZSET_STACK_DUP_MAX,
             "the hash ceiling is deliberately its own constant"
         );

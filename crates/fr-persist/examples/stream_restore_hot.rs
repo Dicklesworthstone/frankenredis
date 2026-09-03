@@ -25,7 +25,9 @@ fn main() {
     // Same shape the harness seeds: explicit ids, `f0/f1` names repeated across
     // every entry (so upstream's SAMEFIELDS flag is set, as on any real stream)
     // and short distinct values.
-    let owned: Vec<(u64, u64, Vec<(Vec<u8>, Vec<u8>)>)> = (0..entries)
+    // (ms, seq, field/value pairs) -- one owned entry as the harness seeds it.
+    type OwnedEntry = (u64, u64, Vec<(Vec<u8>, Vec<u8>)>);
+    let owned: Vec<OwnedEntry> = (0..entries)
         .map(|i| {
             let pairs = (0..fields)
                 .map(|f| {

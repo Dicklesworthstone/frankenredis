@@ -1175,6 +1175,11 @@ impl<F> StreamOut<F> {
         self.index.len()
     }
 
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
     /// Bytes to reserve for a consumer that appends, per field, a varint field
     /// index, a varint value length and the value itself.
     ///

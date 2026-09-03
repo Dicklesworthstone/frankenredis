@@ -108,8 +108,8 @@ fn main() -> Result<(), String> {
     println!("encode_bulk_string_slice small-PAYLOAD store, same binary, instructions:u");
     println!("{REPEATS} encodes per sample, {ROUNDS} rounds, median reported\n");
     println!(
-        "{:>5}  {:>14}  {:>14}  {:>10}  {}",
-        "size", "reference", "candidate", "delta/enc", "role"
+        "{:>5}  {:>14}  {:>14}  {:>10}  role",
+        "size", "reference", "candidate", "delta/enc"
     );
     for &size in SIZES {
         let mut reference = Vec::new();

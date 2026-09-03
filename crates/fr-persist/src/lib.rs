@@ -3015,13 +3015,13 @@ where
         if !can_encode_upstream_stream_losslessly(entries, watermark, groups) {
             return None;
         }
-        return rdb_stream::encode_upstream_stream_listpacks3(
+        rdb_stream::encode_upstream_stream_listpacks3(
             entries,
             watermark,
             groups,
             entries_added,
             max_deleted,
-        );
+        )
     }
     #[cfg(not(feature = "upstream-stream-rdb"))]
     {
@@ -3450,7 +3450,6 @@ fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
 }
 
 /// `encode_listpack_entry` for bytes already known not to be a canonical i64 decimal.
-#[inline]
 // (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: called once per
 // ELEMENT on the RDB save/load path, and the plain hint is DECLINED by LLVM for
 // bodies this size -- 9d7be9b44 measured it moving the ratio 0.1 pct with the call
@@ -10111,7 +10110,7 @@ mod tests {
         assert!(
             matches!(&entries[0].value, RdbValue::SetListpackRetained { .. }),
             "a valid duplicate-free non-integer set listpack must be retained undecoded, got {:?}",
-            &entries[0].value
+            entries[0].value
         );
         match &canonicalise_rdb_value(&entries[0].value) {
             RdbValue::Set(members) => {
@@ -10162,7 +10161,7 @@ mod tests {
             assert!(
                 matches!(&entries[0].value, RdbValue::Set(_)),
                 "member {member:?} could be read as an integer and must NOT be retained, got {:?}",
-                &entries[0].value
+                entries[0].value
             );
         }
     }
@@ -10380,7 +10379,7 @@ mod tests {
         assert!(
             matches!(&entries[0].value, RdbValue::ZsetListpackRetained { .. }),
             "a valid duplicate-free zset listpack must be retained undecoded, got {:?}",
-            &entries[0].value
+            entries[0].value
         );
         match &canonicalise_rdb_value(&entries[0].value) {
             RdbValue::SortedSet(members) => {

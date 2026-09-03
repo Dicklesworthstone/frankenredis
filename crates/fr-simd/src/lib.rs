@@ -1143,11 +1143,11 @@ mod tests {
         for &skip in &[0x00u8, 0xffu8, 0x55u8] {
             let other = !skip;
             for len in 0..=200usize {
+                // Hoisted out of the assert macro: clippy cannot see a SAFETY
+                // comment through a macro argument.
                 // SAFETY: sse2 confirmed present above.
-                assert_eq!(
-                    unsafe { super::first_mismatch_byte_sse2(&vec![skip; len], skip) },
-                    None
-                );
+                let uniform = unsafe { super::first_mismatch_byte_sse2(&vec![skip; len], skip) };
+                assert_eq!(uniform, None);
                 for pos in 0..len {
                     let mut buf = vec![skip; len];
                     buf[pos] = other;
