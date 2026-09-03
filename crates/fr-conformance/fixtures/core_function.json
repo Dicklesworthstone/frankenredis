@@ -970,7 +970,7 @@
                 "value": "functions"
               },
               {
-                "kind": "array",
+                "kind": "array_any_order",
                 "value": [
                   {
                     "kind": "array",

@@ -241,6 +241,15 @@ pub enum ExpectedFrame {
     Array {
         value: Vec<ExpectedFrame>,
     },
+    /// (frankenredis-rc-function-list-libraryname) An array whose element
+    /// order Redis itself does not guarantee: a reply assembled by iterating a
+    /// dict, such as the functions of one library in FUNCTION LIST, comes out
+    /// in hash-seed order and was measured to flip between 7.2.4 processes.
+    /// Matches an array of the same length in which every expected element
+    /// pairs with a distinct actual element, in any order.
+    ArrayAnyOrder {
+        value: Vec<ExpectedFrame>,
+    },
     NullArray,
     AnyInteger,
     AnyBulk,
@@ -3375,12 +3384,39 @@ fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
         ExpectedFrame::AnyInteger => RespFrame::Integer(0),
         ExpectedFrame::AnyBulk => RespFrame::BulkString(Some(Vec::new())),
         ExpectedFrame::AnySimple => RespFrame::SimpleString(String::new()),
+        ExpectedFrame::ArrayAnyOrder { value } => {
+            RespFrame::Array(Some(value.iter().map(expected_to_frame).collect()))
+        }
         ExpectedFrame::AnyArray => RespFrame::Array(Some(Vec::new())),
         ExpectedFrame::SimplePattern { value } => RespFrame::SimpleString(value.clone()),
     }
 }
 
 #[cfg_attr(feature = "bench-reference", inline(never))]
+/// Every expected element must match a distinct actual element; order is
+/// free. Greedy first-fit is exact here because expectations are concrete
+/// frames, not overlapping patterns.
+fn frames_match_in_any_order(items: &[RespFrame], expected: &[ExpectedFrame]) -> bool {
+    if items.len() != expected.len() {
+        return false;
+    }
+    let mut used = vec![false; items.len()];
+    for want in expected {
+        let mut found = false;
+        for (index, actual) in items.iter().enumerate() {
+            if !used[index] && frame_matches_expected(actual, want) {
+                used[index] = true;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
 fn frame_matches_expected(actual: &RespFrame, expected: &ExpectedFrame) -> bool {
     match expected {
         ExpectedFrame::AnyInteger => matches!(actual, RespFrame::Integer(_)),
@@ -3412,6 +3448,11 @@ fn frame_matches_expected(actual: &RespFrame, expected: &ExpectedFrame) -> bool 
         },
         ExpectedFrame::SimplePattern { value } => match actual {
             RespFrame::SimpleString(text) => simple_pattern_matches(value, text),
+            _ => false,
+        },
+        ExpectedFrame::ArrayAnyOrder { value } => match actual {
+            RespFrame::Array(Some(items)) => frames_match_in_any_order(items, value),
+            RespFrame::Push(items) => frames_match_in_any_order(items, value),
             _ => false,
         },
         ExpectedFrame::Array { value } => match actual {
@@ -3930,6 +3971,59 @@ fn decision_action_label(decision_action: DecisionAction) -> &'static str {
         DecisionAction::FailClosed => "fail_closed",
         DecisionAction::BoundedDefense => "bounded_defense",
         DecisionAction::RejectNonAllowlisted => "reject_non_allowlisted",
+    }
+}
+
+#[cfg(test)]
+mod any_order_expectation_tests {
+    use super::{ExpectedFrame, frame_matches_expected};
+    use fr_protocol::RespFrame;
+
+    fn bulk(s: &str) -> RespFrame {
+        RespFrame::BulkString(Some(s.as_bytes().to_vec()))
+    }
+
+    fn expect_bulk(s: &str) -> ExpectedFrame {
+        ExpectedFrame::Bulk {
+            value: Some(s.to_string()),
+        }
+    }
+
+    /// (frankenredis-rc-function-list-libraryname) The same two elements in
+    /// either order match; a missing, duplicated or extra element does not.
+    #[test]
+    fn array_any_order_matches_permutations_and_nothing_else() {
+        let expected = ExpectedFrame::ArrayAnyOrder {
+            value: vec![expect_bulk("func_b"), expect_bulk("func_a")],
+        };
+        let ab = RespFrame::Array(Some(vec![bulk("func_a"), bulk("func_b")]));
+        let ba = RespFrame::Array(Some(vec![bulk("func_b"), bulk("func_a")]));
+        assert!(frame_matches_expected(&ab, &expected));
+        assert!(frame_matches_expected(&ba, &expected));
+
+        let duplicated = RespFrame::Array(Some(vec![bulk("func_a"), bulk("func_a")]));
+        let short = RespFrame::Array(Some(vec![bulk("func_a")]));
+        let long = RespFrame::Array(Some(vec![bulk("func_a"), bulk("func_b"), bulk("x")]));
+        assert!(!frame_matches_expected(&duplicated, &expected));
+        assert!(!frame_matches_expected(&short, &expected));
+        assert!(!frame_matches_expected(&long, &expected));
+        assert!(!frame_matches_expected(&bulk("func_a"), &expected));
+
+        // The ordered kind still demands the order.
+        let ordered = ExpectedFrame::Array {
+            value: vec![expect_bulk("func_b"), expect_bulk("func_a")],
+        };
+        assert!(frame_matches_expected(&ba, &ordered));
+        assert!(!frame_matches_expected(&ab, &ordered));
+    }
+
+    #[test]
+    fn array_any_order_deserializes_from_its_kind_tag() {
+        let parsed: ExpectedFrame = serde_json::from_str(
+            r#"{"kind":"array_any_order","value":[{"kind":"bulk","value":"a"}]}"#,
+        )
+        .expect("kind tag");
+        assert!(matches!(parsed, ExpectedFrame::ArrayAnyOrder { ref value } if value.len() == 1));
     }
 }
 
