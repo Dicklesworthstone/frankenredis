@@ -2152,6 +2152,9 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
 /// upstream config.c lines 3091, 3096, 3177, 3178, 3183, 3203, 3232.
 const CONFIG_STATIC_HIDDEN_PARAMS: &[(&str, &str)] = &[
     ("use-exit-on-panic", "no"),
+    // (frankenredis-rc-threat-ledger-persist) fr-only: the hardened-mode
+    // threat-event ledger file; hidden so `CONFIG GET *` stays 7.2.4-exact.
+    ("threat-ledger-file", ""),
     ("aof-disable-auto-gc", "no"),
     ("rdb-key-save-delay", "0"),
     ("key-load-delay", "0"),
@@ -4335,19 +4338,284 @@ pub struct EvidenceEvent {
     pub confidence: Option<f64>,
 }
 
+/// Schema tag on every row the threat-event ledger file carries.
+pub const THREAT_LEDGER_SCHEMA_VERSION: &str = "fr_threat_ledger_v1";
+
+/// Default ledger file for a hardened-mode server, relative to the working
+/// directory like `dump.rdb`; `CONFIG SET threat-ledger-file ""` disables it.
+pub const DEFAULT_THREAT_LEDGER_FILE: &str = "threat-ledger.jsonl";
+
+/// Upper bound on evidence events kept in memory.
+///
+/// (frankenredis-rc-threat-ledger-persist) The ledger was an unbounded `Vec`
+/// that nothing ever drained, so a hardened server under sustained hostile
+/// traffic -- the exact deployment hardened mode exists for -- grew without
+/// limit, each event carrying two state digests and a replay command. The file
+/// is the durable record; memory holds a window for tests and for the events
+/// not yet written.
+pub const EVIDENCE_LEDGER_MAX_EVENTS: usize = 10_000;
+
+impl EvidenceEvent {
+    /// One JSON object, no trailing newline: every field of the event, digests
+    /// in place of payload bytes (the redaction policy of TEST_LOG_SCHEMA_V1).
+    /// Hand-encoded because fr-runtime carries no serializer dependency.
+    #[must_use]
+    pub fn to_json_line(&self) -> String {
+        let mut out = String::with_capacity(512);
+        out.push_str("{\"schema_version\":");
+        push_json_string(&mut out, THREAT_LEDGER_SCHEMA_VERSION);
+        push_json_str_field(&mut out, "ts_utc", &self.ts_utc);
+        push_json_raw_field(&mut out, "ts_ms", &self.ts_ms.to_string());
+        push_json_raw_field(&mut out, "packet_id", &self.packet_id.to_string());
+        push_json_str_field(
+            &mut out,
+            "mode",
+            match self.mode {
+                Mode::Strict => "strict",
+                Mode::Hardened => "hardened",
+            },
+        );
+        push_json_str_field(&mut out, "severity", &format!("{:?}", self.severity));
+        push_json_str_field(&mut out, "threat_class", &format!("{:?}", self.threat_class));
+        push_json_str_field(
+            &mut out,
+            "decision_action",
+            &format!("{:?}", self.decision_action),
+        );
+        push_json_str_field(&mut out, "subsystem", self.subsystem);
+        push_json_str_field(&mut out, "action", self.action);
+        push_json_str_field(&mut out, "reason_code", self.reason_code);
+        push_json_str_field(&mut out, "reason", &self.reason);
+        push_json_str_field(&mut out, "input_digest", &self.input_digest);
+        push_json_str_field(&mut out, "output_digest", &self.output_digest);
+        push_json_str_field(&mut out, "state_digest_before", &self.state_digest_before);
+        push_json_str_field(&mut out, "state_digest_after", &self.state_digest_after);
+        push_json_str_field(&mut out, "replay_cmd", &self.replay_cmd);
+        out.push_str(",\"artifact_refs\":[");
+        for (index, artifact) in self.artifact_refs.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            push_json_string(&mut out, artifact);
+        }
+        out.push(']');
+        out.push_str(",\"confidence\":");
+        match self.confidence {
+            Some(confidence) if confidence.is_finite() => out.push_str(&format!("{confidence}")),
+            _ => out.push_str("null"),
+        }
+        out.push('}');
+        out
+    }
+}
+
+fn push_json_str_field(out: &mut String, key: &str, value: &str) {
+    out.push_str(",\"");
+    out.push_str(key);
+    out.push_str("\":");
+    push_json_string(out, value);
+}
+
+fn push_json_raw_field(out: &mut String, key: &str, raw: &str) {
+    out.push_str(",\"");
+    out.push_str(key);
+    out.push_str("\":");
+    out.push_str(raw);
+}
+
+fn push_json_string(out: &mut String, value: &str) {
+    use std::fmt::Write as _;
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if (control as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", control as u32);
+            }
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+}
+
 #[derive(Debug, Default)]
 pub struct EvidenceLedger {
     events: Vec<EvidenceEvent>,
+    /// How many events at the tail of `events` have not been written to the
+    /// ledger file yet.
+    unflushed: usize,
+    /// Events evicted from memory before they reached the file (no file
+    /// configured, or writes failing).
+    dropped_unwritten: u64,
+    total_recorded: u64,
 }
 
 impl EvidenceLedger {
     pub fn record(&mut self, event: EvidenceEvent) {
         self.events.push(event);
+        self.unflushed = self.unflushed.saturating_add(1);
+        self.total_recorded = self.total_recorded.saturating_add(1);
+        if self.events.len() > EVIDENCE_LEDGER_MAX_EVENTS {
+            // Evict a tenth of the window at a time so the drain is amortized
+            // rather than paid on every event once the window is full.
+            let excess = self.events.len() - EVIDENCE_LEDGER_MAX_EVENTS
+                + EVIDENCE_LEDGER_MAX_EVENTS / 10;
+            let kept = self.events.len() - excess;
+            if self.unflushed > kept {
+                self.dropped_unwritten = self
+                    .dropped_unwritten
+                    .saturating_add((self.unflushed - kept) as u64);
+                self.unflushed = kept;
+            }
+            self.events.drain(..excess);
+        }
     }
 
     #[must_use]
     pub fn events(&self) -> &[EvidenceEvent] {
         &self.events
+    }
+
+    /// The events recorded since the last successful write to the file.
+    #[must_use]
+    pub fn unflushed(&self) -> &[EvidenceEvent] {
+        &self.events[self.events.len() - self.unflushed..]
+    }
+
+    pub fn mark_flushed(&mut self, count: usize) {
+        self.unflushed = self.unflushed.saturating_sub(count);
+    }
+
+    #[must_use]
+    pub fn dropped_unwritten(&self) -> u64 {
+        self.dropped_unwritten
+    }
+
+    #[must_use]
+    pub fn total_recorded(&self) -> u64 {
+        self.total_recorded
+    }
+}
+
+#[cfg(test)]
+mod threat_ledger_tests {
+    use super::*;
+
+    fn event(reason: &str) -> EvidenceEvent {
+        EvidenceEvent {
+            ts_utc: "2026-09-03T00:00:00Z".to_string(),
+            ts_ms: 1_700_000_000_000,
+            packet_id: 7,
+            mode: Mode::Hardened,
+            severity: DriftSeverity::S1,
+            threat_class: ThreatClass::ParserAbuse,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "protocol",
+            action: "parse_failure",
+            reason_code: "protocol_parse_failure",
+            reason: reason.to_string(),
+            input_digest: "aa".repeat(32),
+            output_digest: "bb".repeat(32),
+            state_digest_before: "cc".repeat(32),
+            state_digest_after: "cc".repeat(32),
+            replay_cmd: "cargo test -p fr-runtime -- --nocapture packet_7".to_string(),
+            artifact_refs: vec!["SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md".to_string()],
+            confidence: Some(1.0),
+        }
+    }
+
+    #[test]
+    fn json_line_names_every_field_and_escapes_the_reason() {
+        let line = event("say \"hi\"\nnow\\").to_json_line();
+        assert!(line.starts_with("{\"schema_version\":\"fr_threat_ledger_v1\",\"ts_utc\":"));
+        assert!(line.ends_with('}'));
+        assert!(line.contains("\"mode\":\"hardened\""));
+        assert!(line.contains("\"severity\":\"S1\""));
+        assert!(line.contains("\"threat_class\":\"ParserAbuse\""));
+        assert!(line.contains("\"decision_action\":\"FailClosed\""));
+        assert!(line.contains("\"reason\":\"say \\\"hi\\\"\\nnow\\\\\""));
+        assert!(line.contains("\"packet_id\":7"));
+        assert!(line.contains("\"artifact_refs\":[\"SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md\"]"));
+        assert!(line.contains("\"confidence\":1}"));
+        assert!(!line.contains('\n'));
+        let mut no_confidence = event("x");
+        no_confidence.confidence = None;
+        assert!(
+            no_confidence
+                .to_json_line()
+                .ends_with("\"confidence\":null}")
+        );
+    }
+
+    #[test]
+    fn ledger_memory_stays_bounded_and_counts_unwritten_drops() {
+        let mut ledger = EvidenceLedger::default();
+        for i in 0..(EVIDENCE_LEDGER_MAX_EVENTS + 2_500) {
+            ledger.record(event(&i.to_string()));
+        }
+        assert!(ledger.events().len() <= EVIDENCE_LEDGER_MAX_EVENTS);
+        assert_eq!(ledger.total_recorded(), (EVIDENCE_LEDGER_MAX_EVENTS + 2_500) as u64);
+        assert_eq!(
+            ledger.dropped_unwritten() as usize + ledger.unflushed().len(),
+            EVIDENCE_LEDGER_MAX_EVENTS + 2_500
+        );
+        let oldest_kept = ledger.events()[0].reason.parse::<usize>().unwrap();
+        assert_eq!(oldest_kept, EVIDENCE_LEDGER_MAX_EVENTS + 2_500 - ledger.events().len());
+    }
+
+    #[test]
+    fn hardened_runtime_flushes_recorded_events_as_json_lines() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "fr-threat-ledger-{}-{nanos}.jsonl",
+            std::process::id()
+        ));
+        let mut runtime = Runtime::new(RuntimePolicy::hardened());
+        assert_eq!(
+            runtime.threat_ledger_path().map(|p| p.to_path_buf()),
+            Some(std::path::PathBuf::from(DEFAULT_THREAT_LEDGER_FILE)),
+            "hardened mode writes a ledger by default"
+        );
+        runtime.set_threat_ledger_path(Some(path.clone()));
+
+        assert_eq!(runtime.flush_threat_ledger(), 0, "nothing recorded yet");
+        // A frame that cannot be parsed is a recorded ParserAbuse event.
+        let reply = runtime.execute_bytes(b"*1\r\n$x\r\n", 1_700_000_000_000);
+        assert!(reply.starts_with(b"-ERR"), "{:?}", String::from_utf8_lossy(&reply));
+        assert_eq!(runtime.evidence().unflushed().len(), 1);
+
+        assert_eq!(runtime.flush_threat_ledger(), 1);
+        assert_eq!(runtime.flush_threat_ledger(), 0, "a flushed row is not written twice");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].starts_with("{\"schema_version\":\"fr_threat_ledger_v1\""));
+        assert!(lines[0].contains("\"reason_code\":\"protocol_parse_failure\""));
+        assert!(lines[0].contains("\"threat_class\":\"ParserAbuse\""));
+
+        // The file is append-only across flushes.
+        let _ = runtime.execute_bytes(b"*1\r\n$x\r\n", 1_700_000_000_001);
+        assert_eq!(runtime.flush_threat_ledger(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+
+        // Disabling the file stops the writes; memory keeps its bounded window.
+        runtime.set_threat_ledger_path(None);
+        let _ = runtime.execute_bytes(b"*1\r\n$x\r\n", 1_700_000_000_002);
+        assert_eq!(runtime.flush_threat_ledger(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn strict_runtime_has_no_ledger_file_by_default() {
+        let runtime = Runtime::new(RuntimePolicy::default());
+        assert!(runtime.threat_ledger_path().is_none());
     }
 }
 
@@ -4388,6 +4656,10 @@ pub struct ServerState {
     aof_selected_db: usize,
     replication_runtime_state: ReplicationRuntimeState,
     evidence: EvidenceLedger,
+    /// (frankenredis-rc-threat-ledger-persist) Where `flush_threat_ledger`
+    /// appends evidence rows; `None` keeps the ledger in memory only.
+    threat_ledger_path: Option<std::path::PathBuf>,
+    threat_ledger_write_failures: u64,
     auth_state: AuthState,
     tls_state: TlsRuntimeState,
     acllog_max_len: i64,
@@ -4700,6 +4972,8 @@ impl Default for ServerState {
             aof_current_seq: 0,
             aof_selected_db: 0,
             evidence: EvidenceLedger::default(),
+            threat_ledger_path: None,
+            threat_ledger_write_failures: 0,
             auth_state: AuthState::default(),
             tls_state: TlsRuntimeState::default(),
             acllog_max_len: DEFAULT_ACLLOG_MAX_LEN,
@@ -6664,6 +6938,15 @@ impl Runtime {
         // Doctrine's mode-split (same pattern as the CompatibilityGate caps).
         if policy.mode == Mode::Hardened {
             server.client_output_buffer_limits.normal.hard = 256 * 1024 * 1024;
+            // (frankenredis-rc-threat-ledger-persist) Hardened mode writes its
+            // threat-event ledger by default, relative to the working directory
+            // like dump.rdb; `threat-ledger-file ""` turns it off.
+            server.threat_ledger_path =
+                Some(std::path::PathBuf::from(DEFAULT_THREAT_LEDGER_FILE));
+            server.config_overrides.insert(
+                "threat-ledger-file".to_string(),
+                DEFAULT_THREAT_LEDGER_FILE.to_string(),
+            );
         }
         let session = ClientSession::new_for_server(&server);
         Self {
@@ -6980,6 +7263,47 @@ impl Runtime {
         self.server
             .store
             .apply_sentinel_probe_result(name, now_ms, info);
+    }
+
+    /// (frankenredis-rc-sentinel-failover) Every discovered replica of every
+    /// monitored master as (master name, replica key, ip, port), for the
+    /// fr-server tick to PING/INFO alongside the masters.
+    #[must_use]
+    pub fn sentinel_replica_targets(&self) -> Vec<(String, String, String, u16)> {
+        self.server.store.sentinel_replica_targets()
+    }
+
+    /// (frankenredis-rc-sentinel-failover) Fold one replica's probe outcome into
+    /// the sentinel state (`None` = probe failed -> link disconnected).
+    pub fn apply_sentinel_replica_probe_result(
+        &mut self,
+        master: &str,
+        replica_key: &str,
+        now_ms: u64,
+        info: Option<&str>,
+    ) {
+        self.server
+            .store
+            .apply_sentinel_replica_probe_result(master, replica_key, now_ms, info);
+    }
+
+    /// (frankenredis-rc-sentinel-failover) Advance every monitored master's
+    /// failover state machine and return the `SLAVEOF` writes to perform.
+    pub fn sentinel_failover_step(&mut self, now_ms: u64) -> Vec<fr_store::SentinelFailoverIo> {
+        self.server.store.sentinel_failover_step(now_ms)
+    }
+
+    /// (frankenredis-rc-sentinel-failover) Report whether a `SLAVEOF` write was
+    /// acknowledged so the state machine can move on (or retry next tick).
+    pub fn sentinel_apply_failover_io_result(
+        &mut self,
+        io: &fr_store::SentinelFailoverIo,
+        ok: bool,
+        now_ms: u64,
+    ) {
+        self.server
+            .store
+            .sentinel_apply_failover_io_result(io, ok, now_ms);
     }
 
     /// Load and replay AOF records from the configured path, restoring store state.
@@ -7412,6 +7736,68 @@ impl Runtime {
     #[must_use]
     pub fn evidence(&self) -> &EvidenceLedger {
         &self.server.evidence
+    }
+
+    /// (frankenredis-rc-threat-ledger-persist) The file `flush_threat_ledger`
+    /// appends to, if any.
+    #[must_use]
+    pub fn threat_ledger_path(&self) -> Option<&std::path::Path> {
+        self.server.threat_ledger_path.as_deref()
+    }
+
+    pub fn set_threat_ledger_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.server.threat_ledger_path = path;
+    }
+
+    /// Append every evidence event recorded since the last successful write
+    /// to the ledger file, one JSON object per line. Returns the number of rows
+    /// written. A write failure leaves the rows pending for the next call and
+    /// is counted, so a broken disk neither loses the in-memory window nor
+    /// stalls the event loop. fr-server calls this once per loop iteration,
+    /// next to the AOF flush.
+    pub fn flush_threat_ledger(&mut self) -> usize {
+        let Some(path) = self.server.threat_ledger_path.clone() else {
+            return 0;
+        };
+        let (payload, count) = {
+            let pending = self.server.evidence.unflushed();
+            if pending.is_empty() {
+                return 0;
+            }
+            let mut payload = String::with_capacity(pending.len() * 512);
+            for event in pending {
+                payload.push_str(&event.to_json_line());
+                payload.push('\n');
+            }
+            (payload, pending.len())
+        };
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                file.write_all(payload.as_bytes())?;
+                file.flush()
+            });
+        match written {
+            Ok(()) => {
+                self.server.evidence.mark_flushed(count);
+                count
+            }
+            Err(_) => {
+                self.server.threat_ledger_write_failures =
+                    self.server.threat_ledger_write_failures.saturating_add(1);
+                0
+            }
+        }
+    }
+
+    /// Writes to the ledger file that failed (each failure is retried on the
+    /// next flush).
+    #[must_use]
+    pub fn threat_ledger_write_failures(&self) -> u64 {
+        self.server.threat_ledger_write_failures
     }
 
     #[must_use]
@@ -44703,6 +45089,7 @@ impl Runtime {
             .unwrap_or_else(|| std::path::PathBuf::from(".").join("dump.rdb"));
         let mut next_acl_file_path = self.server.acl_file_path.clone();
         let mut next_locale_collate: Option<String> = None;
+        let mut next_threat_ledger_path: Option<Option<std::path::PathBuf>> = None;
         let mut rdb_path_changed = false;
         let mut encoding_threshold_updates: Vec<(&str, usize)> = Vec::new();
         let mut static_override_updates: Vec<(String, String)> = Vec::new();
@@ -44844,6 +45231,27 @@ impl Runtime {
                 };
                 next_lfu_decay_time = Some(parsed as u64);
                 static_override_updates.push(("lfu-decay-time".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("threat-ledger-file") {
+                // (frankenredis-rc-threat-ledger-persist) fr-only, hidden from
+                // `CONFIG GET *` so the visible key set stays byte-exact with
+                // 7.2.4; exact-name GET and SET work. Empty disables the file.
+                let value = match std::str::from_utf8(&pair[1]) {
+                    Ok(value) => value.trim().to_string(),
+                    Err(_) => {
+                        return config_set_failed(
+                            "threat-ledger-file",
+                            "argument must be valid UTF-8",
+                        );
+                    }
+                };
+                next_threat_ledger_path = Some(if value.is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(&value))
+                });
+                static_override_updates.push(("threat-ledger-file".to_string(), value));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("stream-node-max-entries") {
@@ -46880,6 +47288,9 @@ impl Runtime {
         }
         for (param, value) in static_override_updates {
             self.server.config_overrides.insert(param, value);
+        }
+        if let Some(path) = next_threat_ledger_path {
+            self.server.threat_ledger_path = path;
         }
         RespFrame::SimpleString("OK".to_string())
     }

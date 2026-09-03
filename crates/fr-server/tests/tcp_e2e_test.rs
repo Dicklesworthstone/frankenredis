@@ -919,6 +919,131 @@ fn spawn_frankenredis_sharded_set_get(port: u16, workers: usize) -> ManagedChild
     ManagedChild::spawn_ready(command, Some(log_path), port)
 }
 
+/// (frankenredis-rc-sentinel-failover) A `frankenredis --sentinel` process in
+/// its own working directory, so no data snapshot in the cwd can leak into it.
+fn spawn_frankenredis_sentinel(port: u16) -> ManagedChild {
+    let log_dir = unique_temp_dir("frankenredis-sentinel-log");
+    let log_path = log_dir.join("stderr.log");
+    let log_file = std::fs::File::create(&log_path).expect("create sentinel log file");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_frankenredis"));
+    command
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--mode")
+        .arg("strict")
+        .arg("--sentinel")
+        .current_dir(&log_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log_file));
+    ManagedChild::spawn_ready(command, Some(log_path), port)
+}
+
+/// `SENTINEL MASTER <name>` as a field map.
+fn sentinel_master_fields(
+    client: &mut TcpStream,
+    name: &[u8],
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if let RespFrame::Array(Some(items)) = send_command(client, &[b"SENTINEL", b"MASTER", name]) {
+        let mut iter = items.into_iter();
+        while let (
+            Some(RespFrame::BulkString(Some(key))),
+            Some(RespFrame::BulkString(Some(value))),
+        ) = (iter.next(), iter.next())
+        {
+            out.insert(
+                String::from_utf8_lossy(&key).into_owned(),
+                String::from_utf8_lossy(&value).into_owned(),
+            );
+        }
+    }
+    out
+}
+
+/// `SENTINEL GET-MASTER-ADDR-BY-NAME <name>` as (ip, port).
+fn sentinel_master_addr(client: &mut TcpStream, name: &[u8]) -> Option<(String, u16)> {
+    if let RespFrame::Array(Some(items)) =
+        send_command(client, &[b"SENTINEL", b"GET-MASTER-ADDR-BY-NAME", name])
+        && let [
+            RespFrame::BulkString(Some(ip)),
+            RespFrame::BulkString(Some(port)),
+        ] = items.as_slice()
+    {
+        return Some((
+            String::from_utf8_lossy(ip).into_owned(),
+            String::from_utf8_lossy(port).parse().ok()?,
+        ));
+    }
+    None
+}
+
+/// Wait until the sentinel has both discovered the replica from the master's
+/// INFO and probed it itself (its flags no longer carry `disconnected`), which
+/// is the precondition for the replica to be eligible for promotion.
+fn wait_for_sentinel_replica_probed(sentinel_port: u16, name: &[u8], replica_port: u16) {
+    let expected_port = replica_port.to_string();
+    wait_until(
+        Duration::from_secs(20),
+        || {
+            let mut client = connect_client(sentinel_port);
+            let RespFrame::Array(Some(replicas)) =
+                send_command(&mut client, &[b"SENTINEL", b"REPLICAS", name])
+            else {
+                return false;
+            };
+            replicas.iter().any(|replica| {
+                let RespFrame::Array(Some(items)) = replica else {
+                    return false;
+                };
+                let mut port_matches = false;
+                let mut connected = false;
+                let mut iter = items.iter();
+                while let (
+                    Some(RespFrame::BulkString(Some(key))),
+                    Some(RespFrame::BulkString(Some(value))),
+                ) = (iter.next(), iter.next())
+                {
+                    if key == b"port" && value == expected_port.as_bytes() {
+                        port_matches = true;
+                    }
+                    if key == b"flags" && !String::from_utf8_lossy(value).contains("disconnected") {
+                        connected = true;
+                    }
+                }
+                port_matches && connected
+            })
+        },
+        "the sentinel to discover and probe the replica",
+    );
+}
+
+/// (frankenredis-rc-threat-ledger-persist) A hardened-mode server writing its
+/// threat-event ledger to `ledger_path`, with DEBUG enabled so a slow command
+/// can be forced.
+fn spawn_frankenredis_hardened_with_ledger(port: u16, ledger_path: &str) -> ManagedChild {
+    let log_dir = unique_temp_dir("frankenredis-hardened-ledger-log");
+    let log_path = log_dir.join("stderr.log");
+    let log_file = std::fs::File::create(&log_path).expect("create hardened server log file");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_frankenredis"));
+    command
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--mode")
+        .arg("hardened")
+        .arg("--enable-debug-command")
+        .arg("yes")
+        .arg("--threat-ledger-file")
+        .arg(ledger_path)
+        .current_dir(&log_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log_file));
+    ManagedChild::spawn_ready(command, Some(log_path), port)
+}
+
 fn spawn_frankenredis_with_aof(port: u16) -> ManagedChild {
     let temp_dir = unique_temp_dir("frankenredis-aof-server");
     let aof_path = temp_dir.join("appendonly.aof");
@@ -6881,6 +7006,313 @@ fn tcp_sentinel_failover_integration() {
     send_shutdown_nosave(original_master_port);
     send_shutdown_nosave(replica1_port);
     send_shutdown_nosave(replica2_port);
+}
+
+/// (frankenredis-rc-sentinel-failover) The sentinel itself performs the
+/// failover: the primary is shut down and nothing but `frankenredis --sentinel`
+/// touches the replica afterwards. Before the wiring landed, the sentinel
+/// reached s_down,o_down and the replica stayed a replica forever.
+#[test]
+fn fr_sentinel_promotes_a_replica_when_the_primary_dies_without_client_help() {
+    let master_port = reserve_port();
+    let replica_port = reserve_port();
+    let sentinel_port = reserve_port();
+    let _master = spawn_frankenredis(master_port, None);
+    let _replica = spawn_frankenredis(replica_port, Some(master_port));
+    let _sentinel = spawn_frankenredis_sentinel(sentinel_port);
+    wait_for_replica_sync(replica_port, Duration::from_secs(10));
+    {
+        let mut client = connect_client(master_port);
+        assert_eq!(
+            send_command(&mut client, &[b"SET", b"before", b"failover"]),
+            RespFrame::SimpleString("OK".to_string())
+        );
+    }
+
+    let master_port_str = master_port.to_string();
+    let mut sentinel = connect_client(sentinel_port);
+    assert_eq!(
+        send_command(
+            &mut sentinel,
+            &[
+                b"SENTINEL",
+                b"MONITOR",
+                b"m1",
+                b"127.0.0.1",
+                master_port_str.as_bytes(),
+                b"1",
+            ],
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        send_command(
+            &mut sentinel,
+            &[
+                b"SENTINEL",
+                b"SET",
+                b"m1",
+                b"down-after-milliseconds",
+                b"1000"
+            ],
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        send_command(
+            &mut sentinel,
+            &[b"SENTINEL", b"SET", b"m1", b"failover-timeout", b"15000"],
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    wait_for_sentinel_replica_probed(sentinel_port, b"m1", replica_port);
+
+    // Kill the primary. From here on only the sentinel acts.
+    send_shutdown_nosave(master_port);
+
+    wait_until(
+        Duration::from_secs(45),
+        || fetch_info_replication(replica_port).is_some_and(|info| info.contains("role:master")),
+        "the sentinel to promote the replica",
+    );
+    // GET-MASTER-ADDR-BY-NAME names the promoted replica as soon as it is
+    // selected; the master record switches only when the failover finalizes
+    // (ReconfSlaves -> UpdateConfig), two probe ticks later.
+    let replica_port_str = replica_port.to_string();
+    wait_until(
+        Duration::from_secs(20),
+        || {
+            sentinel_master_fields(&mut sentinel, b"m1")
+                .get("port")
+                .map(String::as_str)
+                == Some(replica_port_str.as_str())
+        },
+        "SENTINEL MASTER to record the promoted replica as the master",
+    );
+    assert_eq!(
+        sentinel_master_addr(&mut sentinel, b"m1"),
+        Some(("127.0.0.1".to_string(), replica_port))
+    );
+    let fields = sentinel_master_fields(&mut sentinel, b"m1");
+    assert!(
+        !fields
+            .get("flags")
+            .is_some_and(|flags| flags.contains("o_down")),
+        "promoted master must not carry o_down: {fields:?}"
+    );
+
+    // The promoted node kept the data and now takes writes.
+    let mut client = connect_client(replica_port);
+    assert_eq!(
+        send_command(&mut client, &[b"GET", b"before"]),
+        RespFrame::BulkString(Some(b"failover".to_vec()))
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"SET", b"after", b"failover"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+
+    send_shutdown_nosave(replica_port);
+    send_shutdown_nosave(sentinel_port);
+}
+
+/// (frankenredis-rc-sentinel-failover) `SENTINEL FAILOVER` with the primary
+/// alive: the replica is promoted, the old primary is demoted to follow it,
+/// and writes to the new primary reach the old one. Before the wiring, this
+/// command answered NOGOODSLAVE against a healthy replica because replicas
+/// were never probed.
+#[test]
+fn fr_sentinel_manual_failover_promotes_the_replica_and_demotes_the_old_primary() {
+    let master_port = reserve_port();
+    let replica_port = reserve_port();
+    let sentinel_port = reserve_port();
+    let _master = spawn_frankenredis(master_port, None);
+    let _replica = spawn_frankenredis(replica_port, Some(master_port));
+    let _sentinel = spawn_frankenredis_sentinel(sentinel_port);
+    wait_for_replica_sync(replica_port, Duration::from_secs(10));
+
+    let master_port_str = master_port.to_string();
+    let mut sentinel = connect_client(sentinel_port);
+    assert_eq!(
+        send_command(
+            &mut sentinel,
+            &[
+                b"SENTINEL",
+                b"MONITOR",
+                b"m1",
+                b"127.0.0.1",
+                master_port_str.as_bytes(),
+                b"1",
+            ],
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        send_command(
+            &mut sentinel,
+            &[b"SENTINEL", b"SET", b"m1", b"failover-timeout", b"15000"],
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    wait_for_sentinel_replica_probed(sentinel_port, b"m1", replica_port);
+
+    assert_eq!(
+        send_command(&mut sentinel, &[b"SENTINEL", b"FAILOVER", b"m1"]),
+        RespFrame::SimpleString("OK".to_string()),
+        "SENTINEL FAILOVER against a probed, healthy replica"
+    );
+
+    wait_until(
+        Duration::from_secs(45),
+        || fetch_info_replication(replica_port).is_some_and(|info| info.contains("role:master")),
+        "the sentinel to promote the replica",
+    );
+    let expected_master_port = format!("master_port:{replica_port}");
+    wait_until(
+        Duration::from_secs(45),
+        || {
+            fetch_info_replication(master_port).is_some_and(|info| {
+                info.contains("role:slave") && info.contains(&expected_master_port)
+            })
+        },
+        "the sentinel to demote the old primary",
+    );
+    wait_until(
+        Duration::from_secs(20),
+        || {
+            sentinel_master_addr(&mut sentinel, b"m1")
+                == Some(("127.0.0.1".to_string(), replica_port))
+        },
+        "SENTINEL GET-MASTER-ADDR-BY-NAME to name the promoted replica",
+    );
+
+    // Replication now flows from the promoted node to the demoted one.
+    let mut client = connect_client(replica_port);
+    assert_eq!(
+        send_command(&mut client, &[b"SET", b"post-failover", b"yes"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    wait_until(
+        Duration::from_secs(20),
+        || fetch_string_value(master_port, b"post-failover").as_deref() == Some(b"yes".as_slice()),
+        "the demoted primary to receive the write",
+    );
+
+    send_shutdown_nosave(master_port);
+    send_shutdown_nosave(replica_port);
+    send_shutdown_nosave(sentinel_port);
+}
+
+/// (frankenredis-rc-threat-ledger-persist) A hardened server appends every
+/// recorded threat event to its JSON-lines ledger file. Before this landed the
+/// ledger was an in-memory Vec that fr-server never wrote anywhere, so an
+/// operator running `--mode hardened` had nothing to read after an incident.
+#[test]
+fn hardened_mode_appends_threat_events_to_the_jsonl_ledger_file() {
+    let port = reserve_port();
+    let ledger_dir = unique_temp_dir("frankenredis-threat-ledger");
+    let ledger_path = ledger_dir.join("threat-ledger.jsonl");
+    let ledger_path_str = ledger_path.to_str().expect("ledger path").to_string();
+    let _server = spawn_frankenredis_hardened_with_ledger(port, &ledger_path_str);
+    let mut client = connect_client(port);
+
+    assert_eq!(
+        send_command(&mut client, &[b"CONFIG", b"GET", b"threat-ledger-file"]),
+        RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"threat-ledger-file".to_vec())),
+            RespFrame::BulkString(Some(ledger_path_str.clone().into_bytes())),
+        ]))
+    );
+    // The fr-only key stays out of the wildcard sweep so CONFIG GET * remains
+    // byte-exact with 7.2.4.
+    if let RespFrame::Array(Some(all)) = send_command(&mut client, &[b"CONFIG", b"GET", b"*"]) {
+        assert!(
+            !all.contains(&RespFrame::BulkString(Some(b"threat-ledger-file".to_vec()))),
+            "threat-ledger-file must not appear in CONFIG GET *"
+        );
+    } else {
+        panic!("CONFIG GET * did not return an array");
+    }
+
+    // A command that overruns the busy threshold is a recorded
+    // ResourceExhaustion event (reason_code command_time_budget_exceeded).
+    assert_eq!(
+        send_command(
+            &mut client,
+            &[b"CONFIG", b"SET", b"busy-reply-threshold", b"1"]
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    let reply = send_command(&mut client, &[b"DEBUG", b"SLEEP", b"0.05"]);
+    assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+
+    wait_until(
+        Duration::from_secs(10),
+        || {
+            std::fs::read_to_string(&ledger_path)
+                .is_ok_and(|text| text.contains("\"reason_code\":\"command_time_budget_exceeded\""))
+        },
+        "the threat event to reach the ledger file",
+    );
+    let text = std::fs::read_to_string(&ledger_path).expect("read ledger");
+    let line = text
+        .lines()
+        .find(|line| line.contains("command_time_budget_exceeded"))
+        .expect("ledger row");
+    assert!(
+        line.starts_with("{\"schema_version\":\"fr_threat_ledger_v1\","),
+        "{line}"
+    );
+    assert!(line.ends_with('}'), "{line}");
+    assert!(line.contains("\"mode\":\"hardened\""), "{line}");
+    assert!(
+        line.contains("\"threat_class\":\"ResourceExhaustion\""),
+        "{line}"
+    );
+    assert!(line.contains("\"decision_action\":\""), "{line}");
+    assert!(line.contains("\"input_digest\":\""), "{line}");
+    let rows_before = text.lines().count();
+
+    // Append-only: the next event adds a row, the earlier rows stay.
+    assert_eq!(
+        send_command(&mut client, &[b"DEBUG", b"SLEEP", b"0.05"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    wait_until(
+        Duration::from_secs(10),
+        || {
+            std::fs::read_to_string(&ledger_path)
+                .is_ok_and(|text| text.lines().count() > rows_before)
+        },
+        "a second ledger row",
+    );
+
+    // An empty value turns the file off at runtime; nothing more is written.
+    assert_eq!(
+        send_command(
+            &mut client,
+            &[b"CONFIG", b"SET", b"threat-ledger-file", b""]
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    let rows_at_disable = std::fs::read_to_string(&ledger_path)
+        .expect("read ledger")
+        .lines()
+        .count();
+    assert_eq!(
+        send_command(&mut client, &[b"DEBUG", b"SLEEP", b"0.05"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        std::fs::read_to_string(&ledger_path)
+            .expect("read ledger")
+            .lines()
+            .count(),
+        rows_at_disable
+    );
+
+    send_shutdown_nosave(port);
 }
 
 #[test]

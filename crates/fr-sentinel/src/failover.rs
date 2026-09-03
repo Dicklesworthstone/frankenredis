@@ -460,6 +460,337 @@ fn reset_slave_instance(
     slave
 }
 
+/// One socket operation fr-server performs on the sentinel's behalf: the
+/// state machine above is pure, so every `SLAVEOF` it wants written to a real
+/// instance comes out of [`failover_step`] as one of these, and the outcome is
+/// folded back in through [`apply_failover_io_result`].
+///
+/// (frankenredis-rc-sentinel-failover) Before this existed the whole failover
+/// module had no caller outside its own tests: a sentinel reached
+/// `s_down,o_down` and then did nothing, and `SENTINEL FAILOVER` answered
+/// NOGOODSLAVE against a healthy replica because replicas were discovered from
+/// the master's INFO but never contacted, so `link.disconnected` never cleared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailoverIo {
+    /// `SLAVEOF NO ONE` to the replica selected for promotion.
+    PromoteReplica {
+        master_name: String,
+        replica_key: String,
+        ip: String,
+        port: u16,
+    },
+    /// `SLAVEOF <new_ip> <new_port>` to a replica that must follow the new
+    /// master -- the remaining replicas during `ReconfSlaves`, and a former
+    /// master that comes back reporting `role:master` after the failover.
+    ReconfigureReplica {
+        master_name: String,
+        replica_key: String,
+        ip: String,
+        port: u16,
+        new_ip: String,
+        new_port: u16,
+    },
+}
+
+/// Advance one master's failover by at most one state per call and return the
+/// socket writes the server must perform. Mirrors `sentinelFailoverStateMachine`
+/// plus `sentinelStartFailoverIfNeeded` in upstream sentinel.c, for the
+/// single-sentinel case: the leader election is evaluated over the sentinels
+/// this instance knows about with only its own vote, so a quorum that needs
+/// peer votes does not start a failover here (that exchange is a separate
+/// piece of work); `SENTINEL FAILOVER` (`FORCE_FAILOVER`) skips the election
+/// exactly as upstream does.
+///
+/// Called once per probe tick, after the master and its replicas have been
+/// probed, so `select_slave_at` sees fresh link and INFO state.
+pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> Vec<FailoverIo> {
+    let my_runid = state.myid_hex();
+    let epoch = state.current_epoch;
+    let ping_period = state.debug_config.ping_period;
+    let info_period = state.debug_config.info_period;
+    let mut ios = Vec::new();
+    let mut bump_epoch = None;
+    let mut finalize_ctx = None;
+    {
+        let Some(master) = state.masters.get_mut(master_name) else {
+            return ios;
+        };
+
+        // A failover that outlived failover-timeout is abandoned; the backoff
+        // in `should_start_failover` keeps the next attempt from starting at
+        // once, as upstream's `failover_start_time` check does.
+        if check_failover_timeout(master, now) {
+            let mut ctx = FailoverContext::new();
+            advance_failover_state(master, FailoverEvent::Timeout, &mut ctx, now);
+            return ios;
+        }
+
+        if master.failover_state == FailoverState::None && should_start_failover(master, true, now)
+        {
+            let new_epoch = epoch.saturating_add(1);
+            let sentinel_count = u32::try_from(master.sentinels.len())
+                .unwrap_or(u32::MAX)
+                .saturating_add(1);
+            let vote = crate::consensus::LeaderVote {
+                voter_runid: my_runid.clone(),
+                leader_runid: my_runid.clone(),
+                epoch: new_epoch,
+            };
+            let election = crate::consensus::evaluate_leader_election(
+                &my_runid,
+                new_epoch,
+                sentinel_count,
+                master.quorum,
+                &[vote],
+            );
+            if !election.is_winner {
+                return ios;
+            }
+            master.leader = Some(my_runid);
+            master.leader_epoch = new_epoch;
+            master.failover_epoch = new_epoch;
+            master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+            let mut ctx = FailoverContext::new();
+            advance_failover_state(master, FailoverEvent::StartFailover, &mut ctx, now);
+            bump_epoch = Some(new_epoch);
+        }
+
+        match master.failover_state {
+            FailoverState::None => {
+                // No failover in flight: an instance we track as a replica that
+                // reports `role:master` is a former master that came back (or
+                // an operator's manual promotion) and is told to follow the
+                // master we believe in, the way upstream's INFO refresh does.
+                let target_ip = master.addr.ip.clone();
+                let target_port = master.addr.port;
+                for (key, slave) in &master.slaves {
+                    if slave.role_reported == crate::Role::Master
+                        && !slave.link.disconnected
+                        && !slave.is_s_down()
+                        && !slave.flags.contains(InstanceFlags::RECONF_SENT)
+                    {
+                        ios.push(FailoverIo::ReconfigureReplica {
+                            master_name: master_name.to_string(),
+                            replica_key: key.clone(),
+                            ip: slave.addr.ip.clone(),
+                            port: slave.addr.port,
+                            new_ip: target_ip.clone(),
+                            new_port: target_port,
+                        });
+                    }
+                }
+            }
+            FailoverState::WaitStart => {
+                if now >= master.failover_start_time {
+                    master.failover_state = FailoverState::SelectSlave;
+                    master.failover_state_change_time = now;
+                }
+            }
+            FailoverState::SelectSlave => {
+                if let Some(key) = select_slave_at(master, now, ping_period, info_period) {
+                    let mut ctx = FailoverContext::new();
+                    advance_failover_state(
+                        master,
+                        FailoverEvent::SlaveSelected(key),
+                        &mut ctx,
+                        now,
+                    );
+                }
+            }
+            FailoverState::SendSlaveofNoone => {
+                if let Some((replica_key, ip, port)) = master
+                    .promoted_slave
+                    .as_ref()
+                    .map(|p| (p.name.clone(), p.addr.ip.clone(), p.addr.port))
+                {
+                    ios.push(FailoverIo::PromoteReplica {
+                        master_name: master_name.to_string(),
+                        replica_key,
+                        ip,
+                        port,
+                    });
+                }
+            }
+            FailoverState::WaitPromotion => {
+                // Confirmed by `apply_replica_probe` when the promoted replica's
+                // INFO reports role:master.
+            }
+            FailoverState::ReconfSlaves => {
+                if let Some((promoted_key, new_ip, new_port)) = master
+                    .promoted_slave
+                    .as_ref()
+                    .map(|p| (p.name.clone(), p.addr.ip.clone(), p.addr.port))
+                {
+                    let parallel = usize::try_from(master.parallel_syncs.max(1)).unwrap_or(1);
+                    let in_flight = master
+                        .slaves
+                        .values()
+                        .filter(|s| {
+                            s.flags.contains(InstanceFlags::RECONF_SENT)
+                                && !s.flags.contains(InstanceFlags::RECONF_DONE)
+                        })
+                        .count();
+                    let mut budget = parallel.saturating_sub(in_flight);
+                    let mut pending = false;
+                    for (key, slave) in &master.slaves {
+                        if *key == promoted_key
+                            || slave.flags.contains(InstanceFlags::PROMOTED)
+                            || slave.flags.contains(InstanceFlags::RECONF_DONE)
+                        {
+                            continue;
+                        }
+                        // Unreachable replicas do not hold the failover open;
+                        // they are reconfigured by the `None` arm when they
+                        // return, which is what upstream does after the
+                        // failover-timeout grace as well.
+                        if slave.is_s_down() || slave.link.disconnected {
+                            continue;
+                        }
+                        pending = true;
+                        if slave.flags.contains(InstanceFlags::RECONF_SENT) || budget == 0 {
+                            continue;
+                        }
+                        budget -= 1;
+                        ios.push(FailoverIo::ReconfigureReplica {
+                            master_name: master_name.to_string(),
+                            replica_key: key.clone(),
+                            ip: slave.addr.ip.clone(),
+                            port: slave.addr.port,
+                            new_ip: new_ip.clone(),
+                            new_port,
+                        });
+                    }
+                    if !pending {
+                        let mut ctx = FailoverContext::new();
+                        advance_failover_state(
+                            master,
+                            FailoverEvent::ReconfigurationComplete,
+                            &mut ctx,
+                            now,
+                        );
+                    }
+                }
+            }
+            FailoverState::UpdateConfig => {
+                let mut ctx = FailoverContext::new();
+                ctx.promoted_slave_key = master.promoted_slave.as_ref().map(|p| p.name.clone());
+                finalize_ctx = Some(ctx);
+            }
+        }
+    }
+    if let Some(ctx) = finalize_ctx {
+        finalize_failover(state, master_name, &ctx, now);
+    }
+    if let Some(new_epoch) = bump_epoch {
+        state.current_epoch = new_epoch;
+    }
+    ios
+}
+
+/// Fold the outcome of one [`FailoverIo`] back into the state machine. A
+/// failed write changes nothing: the next tick re-issues it, which is the
+/// retry loop upstream gets from `sentinelSendSlaveOf` being called again on
+/// every `sentinelFailoverStateMachine` pass.
+pub fn apply_failover_io_result(state: &mut SentinelState, io: &FailoverIo, ok: bool, now: u64) {
+    if !ok {
+        return;
+    }
+    match io {
+        FailoverIo::PromoteReplica { master_name, .. } => {
+            if let Some(master) = state.masters.get_mut(master_name)
+                && master.failover_state == FailoverState::SendSlaveofNoone
+            {
+                let mut ctx = FailoverContext::new();
+                advance_failover_state(master, FailoverEvent::SlaveofNoOneSent, &mut ctx, now);
+            }
+        }
+        FailoverIo::ReconfigureReplica {
+            master_name,
+            replica_key,
+            ..
+        } => {
+            if let Some(master) = state.masters.get_mut(master_name)
+                && let Some(slave) = master.slaves.get_mut(replica_key)
+            {
+                slave.flags.insert(InstanceFlags::RECONF_SENT);
+                slave.flags.remove(InstanceFlags::RECONF_INPROG);
+            }
+        }
+    }
+}
+
+/// Fold one replica's PING + INFO probe into its instance: link liveness, the
+/// INFO-derived role/offset/priority/master fields, subjective-down, and the
+/// two confirmations the failover machine waits for -- the promoted replica
+/// reporting `role:master` (WaitPromotion -> ReconfSlaves) and a reconfigured
+/// replica reporting the expected `master_host`/`master_port` (`RECONF_DONE`,
+/// or the end of a post-failover demotion when no failover is in flight).
+/// `info == None` is a failed probe and marks the link disconnected.
+pub fn apply_replica_probe(
+    master: &mut SentinelRedisInstance,
+    replica_key: &str,
+    now: u64,
+    info: Option<&str>,
+) {
+    let failover_state = master.failover_state;
+    let master_addr = master.addr.clone();
+    let promoted_addr = master.promoted_slave.as_ref().map(|p| p.addr.clone());
+    let mut promotion_confirmed = false;
+    {
+        let Some(slave) = master.slaves.get_mut(replica_key) else {
+            return;
+        };
+        crate::health::record_ping_sent(&mut slave.link, now);
+        match info {
+            Some(info) => {
+                crate::health::record_pong(&mut slave.link, now);
+                crate::health::record_reconnect(&mut slave.link, now);
+                crate::health::record_info_response(slave, info, now);
+            }
+            None => crate::health::record_disconnect(&mut slave.link),
+        }
+        let health = crate::health::evaluate_instance_health(slave, now);
+        crate::health::apply_health_result(slave, &health, now);
+
+        if failover_state == FailoverState::WaitPromotion
+            && slave.flags.contains(InstanceFlags::PROMOTED)
+            && slave.role_reported == crate::Role::Master
+        {
+            promotion_confirmed = true;
+        }
+
+        if slave.flags.contains(InstanceFlags::RECONF_SENT)
+            && slave.role_reported == crate::Role::Slave
+        {
+            let target = if failover_state == FailoverState::ReconfSlaves {
+                promoted_addr.as_ref()
+            } else {
+                Some(&master_addr)
+            };
+            if let Some(target) = target
+                && slave.slave_master_port == Some(target.port)
+                && slave.slave_master_host.as_deref().is_some_and(|host| {
+                    host.eq_ignore_ascii_case(&target.ip)
+                        || host.eq_ignore_ascii_case(&target.hostname)
+                })
+            {
+                slave.flags.remove(InstanceFlags::RECONF_SENT);
+                slave.flags.remove(InstanceFlags::RECONF_INPROG);
+                if failover_state == FailoverState::ReconfSlaves {
+                    slave.flags.insert(InstanceFlags::RECONF_DONE);
+                }
+            }
+        }
+    }
+    if promotion_confirmed {
+        if let Some(snapshot) = master.slaves.get(replica_key).cloned() {
+            master.promoted_slave = Some(Box::new(snapshot));
+        }
+        let mut ctx = FailoverContext::new();
+        advance_failover_state(master, FailoverEvent::PromotionConfirmed, &mut ctx, now);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,6 +818,240 @@ mod tests {
         master.slaves.insert("10.0.0.11:6379".to_string(), slave2);
 
         master
+    }
+
+    fn replica_info(master_ip: &str, master_port: u16, offset: u64, runid: &str) -> String {
+        format!(
+            "# Replication\r\nrole:slave\r\nmaster_host:{master_ip}\r\nmaster_port:{master_port}\r\nmaster_link_status:up\r\nmaster_link_down_since_seconds:-1\r\nslave_repl_offset:{offset}\r\nslave_priority:100\r\nrun_id:{runid}\r\n"
+        )
+    }
+
+    fn master_info(runid: &str) -> String {
+        format!("# Replication\r\nrole:master\r\nconnected_slaves:0\r\nrun_id:{runid}\r\n")
+    }
+
+    /// A monitored master with two discovered replicas that have been probed
+    /// (connected, fresh INFO), the shape fr-server builds before a failover.
+    fn monitored_master_with_probed_replicas(state: &mut SentinelState, now: u64) {
+        state.monitor("m1", "10.0.0.1", 6379, 1).unwrap();
+        let master = state.get_master_mut("m1").unwrap();
+        master.down_after_period = 1_000;
+        master.failover_timeout = 10_000;
+        for (ip, offset, runid) in [
+            ("10.0.0.10", 100u64, "a".repeat(40)),
+            ("10.0.0.11", 200u64, "b".repeat(40)),
+        ] {
+            let key = format!("{ip}:6379");
+            let mut slave = SentinelRedisInstance::new_master(&key, SentinelAddr::new(ip, 6379), 0);
+            slave.flags = InstanceFlags::SLAVE;
+            slave.down_after_period = 1_000;
+            slave.initialize_created_link_state(now);
+            master.slaves.insert(key.clone(), slave);
+            apply_replica_probe(
+                master,
+                &key,
+                now,
+                Some(&replica_info("10.0.0.1", 6379, offset, &runid)),
+            );
+        }
+    }
+
+    /// Run `failover_step` the way fr-server's tick does, answering each I/O
+    /// request as a live instance would: `SLAVEOF NO ONE` makes the promoted
+    /// replica report role:master, `SLAVEOF ip port` makes a replica report
+    /// that master. Returns the promoted key once the machine finalizes.
+    fn drive_to_finalize(state: &mut SentinelState, start: u64) -> String {
+        let mut promoted = None;
+        for tick in 0..40u64 {
+            let now = start + tick * 500;
+            for io in failover_step(state, "m1", now) {
+                match &io {
+                    FailoverIo::PromoteReplica {
+                        replica_key, ip, ..
+                    } => {
+                        promoted = Some(replica_key.clone());
+                        apply_failover_io_result(state, &io, true, now);
+                        let master = state.get_master_mut("m1").unwrap();
+                        assert_eq!(master.failover_state, FailoverState::WaitPromotion);
+                        apply_replica_probe(
+                            master,
+                            replica_key,
+                            now,
+                            Some(&master_info(&format!("{:0>40}", ip.replace('.', "")))),
+                        );
+                        assert_eq!(master.failover_state, FailoverState::ReconfSlaves);
+                    }
+                    FailoverIo::ReconfigureReplica {
+                        replica_key,
+                        new_ip,
+                        new_port,
+                        ..
+                    } => {
+                        apply_failover_io_result(state, &io, true, now);
+                        let master = state.get_master_mut("m1").unwrap();
+                        assert!(
+                            master.slaves[replica_key]
+                                .flags
+                                .contains(InstanceFlags::RECONF_SENT)
+                        );
+                        apply_replica_probe(
+                            master,
+                            replica_key,
+                            now,
+                            Some(&replica_info(new_ip, *new_port, 300, &"c".repeat(40))),
+                        );
+                    }
+                }
+            }
+            let master = state.get_master("m1").unwrap();
+            if promoted.is_some() && master.failover_state == FailoverState::None {
+                return promoted.unwrap();
+            }
+        }
+        panic!(
+            "failover did not finalize; state={:?}",
+            state.get_master("m1").unwrap().failover_state
+        );
+    }
+
+    #[test]
+    fn single_sentinel_failover_step_promotes_reconfigures_and_finalizes_after_o_down() {
+        let mut state = SentinelState::new();
+        let t0 = 1_000_000;
+        monitored_master_with_probed_replicas(&mut state, t0);
+        // Nothing happens while the master is healthy.
+        assert!(failover_step(&mut state, "m1", t0 + 500).is_empty());
+        assert_eq!(
+            state.get_master("m1").unwrap().failover_state,
+            FailoverState::None
+        );
+
+        // The detector marks the master down (quorum 1: the self vote suffices).
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            master.set_s_down(true, t0 + 1_000);
+            master.set_o_down(true, t0 + 1_000);
+        }
+        let epoch_before = state.current_epoch;
+        let promoted = drive_to_finalize(&mut state, t0 + 1_500);
+
+        // The higher replication offset wins, exactly as select_slave_at ranks.
+        assert_eq!(promoted, "10.0.0.11:6379");
+        assert_eq!(state.current_epoch, epoch_before + 1);
+        let master = state.get_master("m1").unwrap();
+        assert_eq!(master.addr.ip, "10.0.0.11");
+        assert_eq!(master.addr.port, 6379);
+        assert_eq!(master.failover_state, FailoverState::None);
+        assert!(!master.is_o_down() && !master.is_s_down());
+        assert!(!master.flags.contains(InstanceFlags::FAILOVER_IN_PROGRESS));
+        // The old master and the other replica are now this master's replicas.
+        assert!(master.slaves.contains_key("10.0.0.1:6379"));
+        assert!(master.slaves.contains_key("10.0.0.10:6379"));
+        assert!(!master.slaves.contains_key("10.0.0.11:6379"));
+
+        // The former master comes back still believing it is a master and is
+        // told to follow the new one.
+        let now = t0 + 60_000;
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            apply_replica_probe(
+                master,
+                "10.0.0.1:6379",
+                now,
+                Some(&master_info(&"d".repeat(40))),
+            );
+        }
+        let ios = failover_step(&mut state, "m1", now);
+        assert_eq!(
+            ios,
+            vec![FailoverIo::ReconfigureReplica {
+                master_name: "m1".into(),
+                replica_key: "10.0.0.1:6379".into(),
+                ip: "10.0.0.1".into(),
+                port: 6379,
+                new_ip: "10.0.0.11".into(),
+                new_port: 6379,
+            }]
+        );
+        apply_failover_io_result(&mut state, &ios[0], true, now);
+        // Once it reports following the new master the demotion is over and it
+        // is not told again.
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            apply_replica_probe(
+                master,
+                "10.0.0.1:6379",
+                now + 500,
+                Some(&replica_info("10.0.0.11", 6379, 400, &"d".repeat(40))),
+            );
+        }
+        assert!(failover_step(&mut state, "m1", now + 1_000).is_empty());
+    }
+
+    #[test]
+    fn manual_failover_request_is_driven_to_finalize_without_o_down() {
+        let mut state = SentinelState::new();
+        let t0 = 5_000_000;
+        monitored_master_with_probed_replicas(&mut state, t0);
+        // What cmd_failover leaves behind for a forced failover.
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            master.flags.insert(InstanceFlags::FORCE_FAILOVER);
+            master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
+            master.failover_state = FailoverState::WaitStart;
+            master.failover_start_time = t0 + 400;
+            master.failover_state_change_time = t0;
+        }
+        let promoted = drive_to_finalize(&mut state, t0);
+        assert_eq!(promoted, "10.0.0.11:6379");
+        assert_eq!(state.get_master("m1").unwrap().addr.ip, "10.0.0.11");
+    }
+
+    #[test]
+    fn a_quorum_that_needs_peer_votes_does_not_start_a_failover_alone() {
+        let mut state = SentinelState::new();
+        let t0 = 9_000_000;
+        monitored_master_with_probed_replicas(&mut state, t0);
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            master.quorum = 2;
+            master.set_s_down(true, t0);
+            master.set_o_down(true, t0);
+        }
+        assert!(failover_step(&mut state, "m1", t0 + 500).is_empty());
+        assert_eq!(
+            state.get_master("m1").unwrap().failover_state,
+            FailoverState::None
+        );
+    }
+
+    #[test]
+    fn failed_promotion_write_is_retried_on_the_next_tick() {
+        let mut state = SentinelState::new();
+        let t0 = 3_000_000;
+        monitored_master_with_probed_replicas(&mut state, t0);
+        {
+            let master = state.get_master_mut("m1").unwrap();
+            master.set_s_down(true, t0);
+            master.set_o_down(true, t0);
+        }
+        let mut first = None;
+        for tick in 0..6u64 {
+            let ios = failover_step(&mut state, "m1", t0 + 500 + tick * 500);
+            if let Some(io) = ios.into_iter().next() {
+                first = Some(io);
+                break;
+            }
+        }
+        let io = first.expect("a promotion request");
+        assert!(matches!(io, FailoverIo::PromoteReplica { .. }));
+        apply_failover_io_result(&mut state, &io, false, t0 + 4_000);
+        assert_eq!(
+            state.get_master("m1").unwrap().failover_state,
+            FailoverState::SendSlaveofNoone
+        );
+        let again = failover_step(&mut state, "m1", t0 + 4_500);
+        assert_eq!(again, vec![io]);
     }
 
     #[test]

@@ -16,6 +16,10 @@ pub use packed_set::PackedStreamLogBTreeReference;
 #[cfg(any(test, feature = "bench-reference"))]
 #[doc(hidden)]
 pub use packed_set::PackedZSet as BenchPackedZSet;
+/// (frankenredis-rc-sentinel-failover) The `SLAVEOF` writes the sentinel
+/// failover machine asks fr-server to perform; re-exported so fr-runtime and
+/// fr-server can name the type without depending on fr-sentinel directly.
+pub use fr_sentinel::failover::FailoverIo as SentinelFailoverIo;
 use packed_set::{
     GenericSet, HashFieldMap, ListValue, PackedStreamLog, PackedZSet, PackedZSetInsertResult,
     PackedZSetIter, RestoredListNode, RetainedListpackChunk,
@@ -8108,6 +8112,69 @@ impl Store {
         // 's_down,o_down,master,disconnected'.
         let odown = fr_sentinel::consensus::evaluate_o_down(master, &[], now_ms);
         fr_sentinel::consensus::apply_o_down_result(master, &odown, now_ms);
+    }
+
+    /// (frankenredis-rc-sentinel-failover) Every discovered replica of every
+    /// monitored master as (master name, replica key, ip, port), snapshotted so
+    /// the blocking probes hold no borrow of the sentinel state.
+    #[must_use]
+    pub fn sentinel_replica_targets(&self) -> Vec<(String, String, String, u16)> {
+        self.sentinel_state
+            .masters
+            .iter()
+            .flat_map(|(name, master)| {
+                master.slaves.iter().map(move |(key, slave)| {
+                    (
+                        name.clone(),
+                        key.clone(),
+                        slave.addr.ip.clone(),
+                        slave.addr.port,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// (frankenredis-rc-sentinel-failover) Fold one replica's PING/INFO probe
+    /// outcome into its instance, including the promotion and reconfiguration
+    /// confirmations the failover machine waits for.
+    pub fn apply_sentinel_replica_probe_result(
+        &mut self,
+        master: &str,
+        replica_key: &str,
+        now_ms: u64,
+        info: Option<&str>,
+    ) {
+        if let Some(master) = self.sentinel_state.masters.get_mut(master) {
+            fr_sentinel::failover::apply_replica_probe(master, replica_key, now_ms, info);
+        }
+    }
+
+    /// (frankenredis-rc-sentinel-failover) Advance every monitored master's
+    /// failover state machine by one step; the returned requests are the
+    /// `SLAVEOF` writes fr-server must perform.
+    pub fn sentinel_failover_step(&mut self, now_ms: u64) -> Vec<SentinelFailoverIo> {
+        let names: Vec<String> = self.sentinel_state.masters.keys().cloned().collect();
+        let mut ios = Vec::new();
+        for name in names {
+            ios.extend(fr_sentinel::failover::failover_step(
+                &mut self.sentinel_state,
+                &name,
+                now_ms,
+            ));
+        }
+        ios
+    }
+
+    /// (frankenredis-rc-sentinel-failover) Record whether a requested `SLAVEOF`
+    /// write was acknowledged.
+    pub fn sentinel_apply_failover_io_result(
+        &mut self,
+        io: &SentinelFailoverIo,
+        ok: bool,
+        now_ms: u64,
+    ) {
+        fr_sentinel::failover::apply_failover_io_result(&mut self.sentinel_state, io, ok, now_ms);
     }
 
     /// Physical keys of one db, in sorted order, built ON DEMAND.

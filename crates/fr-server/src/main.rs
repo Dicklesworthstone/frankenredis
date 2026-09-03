@@ -5088,7 +5088,11 @@ fn main() -> ExitCode {
     {
         rdb_path = Some(effective.to_string_lossy().into_owned());
     }
+    // (frankenredis-rc-sentinel-failover) A sentinel has no keyspace to persist
+    // or restore: redis-sentinel never touches dump.rdb, and a sentinel that
+    // happened to start in a directory holding a data snapshot loaded it.
     if rdb_path.is_none()
+        && !sentinel_mode
         && sharded_set_get_workers.is_none()
         && key_sharded_set_get_workers.is_none()
     {
@@ -5697,6 +5701,10 @@ fn main() -> ExitCode {
         // for fr is exactly this flush.
         let aof_started_us = now_unix_time().us;
         runtime.flush_aof_to_disk(ts);
+        // (frankenredis-rc-threat-ledger-persist) The hardened-mode threat
+        // ledger reaches disk here; before this call the events lived only in
+        // memory and no operator could read them.
+        runtime.flush_threat_ledger();
         let aof_duration_us = now_unix_time().us.saturating_sub(aof_started_us);
 
         // Deliver pending Pub/Sub messages to subscribed clients.
@@ -35342,6 +35350,92 @@ fn run_sentinel_monitoring_tick(
         .ok();
         runtime.apply_sentinel_probe_result(name, now_ms, info.as_deref());
     }
+
+    // (frankenredis-rc-sentinel-failover) Probe every discovered replica too.
+    // Until this ran, replicas were discovered from the master's INFO and never
+    // contacted, so `link.disconnected` stayed true and every one of them was
+    // ineligible for promotion: `SENTINEL FAILOVER` answered NOGOODSLAVE against
+    // a healthy replica, and an O_DOWN master was never replaced.
+    for (master_name, replica_key, ip, port) in runtime.sentinel_replica_targets() {
+        let info = probe_sentinel_master(&ip, port, &parser_config, query_buffer_limit, None).ok();
+        runtime.apply_sentinel_replica_probe_result(
+            &master_name,
+            &replica_key,
+            now_ms,
+            info.as_deref(),
+        );
+    }
+
+    // Drive the failover state machine and perform the `SLAVEOF` writes it asks
+    // for. The machine itself lives in fr-sentinel and is pure; this is the only
+    // place a sentinel decision reaches a socket.
+    for io in runtime.sentinel_failover_step(now_ms) {
+        let ok = match &io {
+            fr_store::SentinelFailoverIo::PromoteReplica { ip, port, .. } => {
+                send_sentinel_command_ok(
+                    ip,
+                    *port,
+                    &[b"SLAVEOF", b"NO", b"ONE"],
+                    &parser_config,
+                    query_buffer_limit,
+                )
+            }
+            fr_store::SentinelFailoverIo::ReconfigureReplica {
+                ip,
+                port,
+                new_ip,
+                new_port,
+                ..
+            } => {
+                let new_port = new_port.to_string();
+                send_sentinel_command_ok(
+                    ip,
+                    *port,
+                    &[b"SLAVEOF", new_ip.as_bytes(), new_port.as_bytes()],
+                    &parser_config,
+                    query_buffer_limit,
+                )
+            }
+        };
+        runtime.sentinel_apply_failover_io_result(&io, ok, now_ms);
+    }
+}
+
+/// (frankenredis-rc-sentinel-failover) Blocking one-shot command to a monitored
+/// instance, true when it answered `+OK`. Short timeouts keep a wedged instance
+/// from stalling the sentinel's event loop; a false is simply retried by the
+/// state machine on the next tick.
+fn send_sentinel_command_ok(
+    ip: &str,
+    port: u16,
+    args: &[&[u8]],
+    parser_config: &ParserConfig,
+    query_buffer_limit: usize,
+) -> bool {
+    let Ok(addr) = format!("{ip}:{port}").parse::<SocketAddr>() else {
+        return false;
+    };
+    let Ok(mut stream) = StdTcpStream::connect_timeout(&addr, Duration::from_millis(200)) else {
+        return false;
+    };
+    let _ = stream.set_nodelay(true);
+    if stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .is_err()
+        || stream
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .is_err()
+        || stream
+            .write_all(&replica_handshake_frame(args).to_bytes())
+            .is_err()
+    {
+        return false;
+    }
+    let mut read_buf = Vec::new();
+    matches!(
+        read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit),
+        Ok(RespFrame::SimpleString(reply)) if reply.eq_ignore_ascii_case("OK")
+    )
 }
 
 fn replica_handshake_frame(args: &[&[u8]]) -> RespFrame {
