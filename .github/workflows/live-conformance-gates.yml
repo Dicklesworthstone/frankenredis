@@ -75,7 +75,10 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: G2 - Run Unit and Property Baseline
-        run: cargo test --workspace -- --nocapture
+        # --no-fail-fast: the step still fails on any red test, but every crate's binary
+        # runs, so one known failure (e.g. the INFO persistence aof fields, 2qwr3) does not
+        # hide the verdict of the crates that sort after it.
+        run: cargo test --workspace --no-fail-fast -- --nocapture
 
       - name: G3+G5 - Run Live Oracle Differential Parity Matrix
         run: |
