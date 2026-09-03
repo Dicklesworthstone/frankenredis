@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
-"""Property gate: keyspace SCAN completeness/order/no-dup invariant (frankenredis-uhthd).
+"""Property gate: keyspace SCAN completeness/no-dup invariant (frankenredis-uhthd).
 
-fr's SCAN is DELIBERATELY deterministic (sorted-order + index cursor), distinct from redis's
-hash-bucket reverse-binary cursor, so SCAN canNOT be checked against the redis oracle — a
+fr's SCAN cursor is a position into its own keyspace dict, distinct from redis's hash-bucket
+reverse-binary cursor, so SCAN canNOT be checked against the redis oracle — a
 redis-differential would false-positive on every run. Instead this is a SINGLE-SERVER
 PROPERTY gate asserting the contract that fr's SCAN must uphold no matter how the underlying
 keyspace dict is represented (it guards the uhthd arena-backed KeyDict rewrite + any future
-KeyDict change): a full cursor chain returns EVERY key EXACTLY ONCE, in sorted order, and the
-set is stable under COUNT variation, MATCH/TYPE filters, and mid-life mutation.
+KeyDict change): a full cursor chain returns EVERY key EXACTLY ONCE, and the set is stable
+under COUNT variation, MATCH/TYPE filters, and mid-life mutation.
+
+Order is NOT part of the contract. The first version of this gate also required sorted
+output, which was a property of the BTreeSet side index the keyspace kept at the time; that
+index was dropped in uhthd step 2 (`ordered_physical_keys_in_db` now sorts on demand for the
+few callers that need order) because keeping a second owned copy of every key cost more RSS
+than the whole rewrite saved. SCAN now walks the dict in arena order, which is what Redis
+does too — Redis guarantees completeness and no duplicates for a stable keyspace and nothing
+about order. (frankenredis-rc-keyspace-gates-l1h3w, 2026-09-03: every check reported
+"NOT SORTED" and nothing else.)
 
 A regression here (a key skipped or duplicated by SCAN) is a silent data-visibility bug that
 a per-step oracle diff would miss.
@@ -65,8 +74,6 @@ def main():
             miss = list(want - set(keys))[:5]
             extra = list(set(keys) - want)[:5]
             fails.append(f"{label}: INCOMPLETE missing={miss} extra={extra}")
-        if keys != sorted(keys):
-            fails.append(f"{label}: NOT SORTED")
 
     for c in (1, 7, 100, 1000, 5000):
         check(f"count{c}", scan_all(s, c), expect)
