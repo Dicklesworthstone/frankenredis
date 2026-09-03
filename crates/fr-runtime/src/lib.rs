@@ -68859,28 +68859,48 @@ mod tests {
         let mut out = Vec::new();
         rt.execute_plain_sinter_borrowed_into(&[b"sx", b"sy"], 2, false, &mut out, None)
             .expect("fast path");
-        assert_eq!(hits_misses(&mut rt), (h0 + 2, m0), "SINTER of two present keys");
+        assert_eq!(
+            hits_misses(&mut rt),
+            (h0 + 2, m0),
+            "SINTER of two present keys"
+        );
 
         // SINTER stops at the first missing key: sx is a hit, nope a miss, sy
         // is never looked up.
         let mut out = Vec::new();
         rt.execute_plain_sinter_borrowed_into(&[b"sx", b"nope", b"sy"], 3, false, &mut out, None)
             .expect("fast path");
-        assert_eq!(hits_misses(&mut rt), (h0 + 3, m0 + 1), "SINTER with a missing key");
+        assert_eq!(
+            hits_misses(&mut rt),
+            (h0 + 3, m0 + 1),
+            "SINTER with a missing key"
+        );
 
         // SUNION and SDIFF look up every key.
         let mut out = Vec::new();
         rt.execute_plain_sunion_borrowed_into(&[b"sx", b"nope", b"sy"], 4, false, &mut out, None)
             .expect("fast path");
-        assert_eq!(hits_misses(&mut rt), (h0 + 5, m0 + 2), "SUNION with a missing key");
+        assert_eq!(
+            hits_misses(&mut rt),
+            (h0 + 5, m0 + 2),
+            "SUNION with a missing key"
+        );
         let mut out = Vec::new();
         rt.execute_plain_sdiff_borrowed_into(&[b"sx", b"nope"], 5, false, &mut out, None)
             .expect("fast path");
-        assert_eq!(hits_misses(&mut rt), (h0 + 6, m0 + 3), "SDIFF with a missing key");
+        assert_eq!(
+            hits_misses(&mut rt),
+            (h0 + 6, m0 + 3),
+            "SDIFF with a missing key"
+        );
 
         // The generic dispatch path agrees.
         let _ = rt.execute_frame(command(&[b"SINTER", b"nope", b"sx"]), 6);
-        assert_eq!(hits_misses(&mut rt), (h0 + 6, m0 + 4), "generic SINTER, first key missing");
+        assert_eq!(
+            hits_misses(&mut rt),
+            (h0 + 6, m0 + 4),
+            "generic SINTER, first key missing"
+        );
     }
 
     /// (frankenredis-rc-zrandmember-resp3-double) The zero-copy

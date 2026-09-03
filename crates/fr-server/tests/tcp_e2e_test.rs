@@ -7315,6 +7315,123 @@ fn hardened_mode_appends_threat_events_to_the_jsonl_ledger_file() {
     send_shutdown_nosave(port);
 }
 
+/// `SENTINEL MASTER <name>` field on a given sentinel.
+fn sentinel_master_field(sentinel_port: u16, name: &[u8], field: &str) -> Option<String> {
+    let mut client = connect_client(sentinel_port);
+    sentinel_master_fields(&mut client, name)
+        .get(field)
+        .cloned()
+}
+
+/// (frankenredis-rc-sentinel-peer-votes) Three sentinels with quorum 2 must
+/// agree the primary is down through `is-master-down-by-addr`, elect exactly
+/// one leader, have that leader promote the replica, and converge on the new
+/// master through the leader's hello. Before the wiring, quorum 2 meant
+/// `s_down` forever: O_DOWN was evaluated with no peer votes.
+#[test]
+fn three_fr_sentinels_with_quorum_two_agree_elect_and_fail_over() {
+    let master_port = reserve_port();
+    let replica_port = reserve_port();
+    let sentinel_ports = [reserve_port(), reserve_port(), reserve_port()];
+    let _master = spawn_frankenredis(master_port, None);
+    let _replica = spawn_frankenredis(replica_port, Some(master_port));
+    let _sentinels: Vec<ManagedChild> = sentinel_ports
+        .iter()
+        .map(|port| spawn_frankenredis_sentinel(*port))
+        .collect();
+    wait_for_replica_sync(replica_port, Duration::from_secs(10));
+
+    let master_port_str = master_port.to_string();
+    for port in sentinel_ports {
+        let mut sentinel = connect_client(port);
+        assert_eq!(
+            send_command(
+                &mut sentinel,
+                &[
+                    b"SENTINEL",
+                    b"MONITOR",
+                    b"m1",
+                    b"127.0.0.1",
+                    master_port_str.as_bytes(),
+                    b"2",
+                ],
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            send_command(
+                &mut sentinel,
+                &[
+                    b"SENTINEL",
+                    b"SET",
+                    b"m1",
+                    b"down-after-milliseconds",
+                    b"1500"
+                ],
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            send_command(
+                &mut sentinel,
+                &[b"SENTINEL", b"SET", b"m1", b"failover-timeout", b"20000"],
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+    }
+
+    // Gossip on the master's hello channel lets every sentinel discover the
+    // other two, and each must have probed the replica for it to be eligible.
+    for port in sentinel_ports {
+        wait_until(
+            Duration::from_secs(40),
+            || sentinel_master_field(port, b"m1", "num-other-sentinels").as_deref() == Some("2"),
+            "each sentinel to discover its two peers",
+        );
+        wait_for_sentinel_replica_probed(port, b"m1", replica_port);
+    }
+
+    send_shutdown_nosave(master_port);
+
+    wait_until(
+        Duration::from_secs(90),
+        || fetch_info_replication(replica_port).is_some_and(|info| info.contains("role:master")),
+        "the elected sentinel to promote the replica",
+    );
+    let replica_port_str = replica_port.to_string();
+    for port in sentinel_ports {
+        wait_until(
+            Duration::from_secs(60),
+            || {
+                sentinel_master_field(port, b"m1", "port").as_deref()
+                    == Some(replica_port_str.as_str())
+            },
+            "every sentinel to converge on the promoted replica as the master",
+        );
+    }
+    // One failover, one config epoch: the leader bumped it and the followers
+    // adopted it from the hello, so all three agree on a non-zero value.
+    let epochs: Vec<String> = sentinel_ports
+        .iter()
+        .map(|port| sentinel_master_field(*port, b"m1", "config-epoch").unwrap_or_default())
+        .collect();
+    assert!(
+        epochs.iter().all(|e| e == &epochs[0]) && epochs[0] != "0",
+        "config epochs must agree after one failover: {epochs:?}"
+    );
+
+    let mut client = connect_client(replica_port);
+    assert_eq!(
+        send_command(&mut client, &[b"SET", b"after", b"quorum-failover"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+
+    send_shutdown_nosave(replica_port);
+    for port in sentinel_ports {
+        send_shutdown_nosave(port);
+    }
+}
+
 #[test]
 fn idle_client_disconnected_after_timeout() {
     let port = reserve_port();

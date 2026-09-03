@@ -36044,7 +36044,13 @@ fn send_sentinel_query(
         .write_all(&replica_handshake_frame(args).to_bytes())
         .ok()?;
     let mut read_buf = Vec::new();
-    read_frame_from_stream(&mut stream, &mut read_buf, parser_config, query_buffer_limit).ok()
+    read_frame_from_stream(
+        &mut stream,
+        &mut read_buf,
+        parser_config,
+        query_buffer_limit,
+    )
+    .ok()
 }
 
 /// `[is_down, leader_runid | "*", leader_epoch]`, as both redis-sentinel and
@@ -36053,8 +36059,11 @@ fn parse_is_master_down_reply(frame: &RespFrame) -> Option<fr_store::SentinelPee
     let RespFrame::Array(Some(items)) = frame else {
         return None;
     };
-    let [RespFrame::Integer(is_down), RespFrame::BulkString(Some(leader)), RespFrame::Integer(epoch)] =
-        items.as_slice()
+    let [
+        RespFrame::Integer(is_down),
+        RespFrame::BulkString(Some(leader)),
+        RespFrame::Integer(epoch),
+    ] = items.as_slice()
     else {
         return None;
     };

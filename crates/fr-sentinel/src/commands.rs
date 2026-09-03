@@ -244,7 +244,7 @@ fn sentinel_vote_leader(
     (master.leader.clone(), master.leader_epoch)
 }
 
-fn sentinel_failover_start_time(
+pub(crate) fn sentinel_failover_start_time(
     now: u64,
     epoch: u64,
     master_name: &str,

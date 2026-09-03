@@ -536,6 +536,18 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
             master.flags.insert(InstanceFlags::FAILOVER_IN_PROGRESS);
             let mut ctx = FailoverContext::new();
             advance_failover_state(master, FailoverEvent::StartFailover, &mut ctx, now);
+            // Desynchronize the start the way sentinelStartFailover does with
+            // its random delay: sentinels that all saw O_DOWN in the same
+            // second would otherwise each vote for themselves and deadlock
+            // until the election timeout. The first to ask wins the others'
+            // ballots, and a sentinel that voted for a peer has its own start
+            // pushed back by sentinel_vote_leader.
+            master.failover_start_time = crate::commands::sentinel_failover_start_time(
+                now,
+                new_epoch,
+                master_name,
+                &my_runid,
+            );
             bump_epoch = Some(new_epoch);
         }
 

@@ -9,11 +9,11 @@ mod packed_set;
 // (frankenredis-uhthd step 2); it serves SCAN and RANDOMKEY itself, which is what
 // let `ordered_keys` and `random_key_slots` be deleted.
 mod keyspace_dict;
+pub use fr_sentinel::consensus::{PeerAsk as SentinelPeerAsk, PeerReply as SentinelPeerReply};
 /// (frankenredis-rc-sentinel-failover) The `SLAVEOF` writes the sentinel
 /// failover machine asks fr-server to perform; re-exported so fr-runtime and
 /// fr-server can name the type without depending on fr-sentinel directly.
 pub use fr_sentinel::failover::FailoverIo as SentinelFailoverIo;
-pub use fr_sentinel::consensus::{PeerAsk as SentinelPeerAsk, PeerReply as SentinelPeerReply};
 use keyspace_dict::KeyDict;
 #[cfg(any(test, feature = "bench-reference"))]
 #[doc(hidden)]

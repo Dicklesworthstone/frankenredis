@@ -133,6 +133,14 @@ fn configure_runtime_for_fixture(runtime: &mut Runtime, fixture_name: &str) {
         // moving the targets is invisible to every case in it.
         runtime.set_rdb_path(runtime_fixture_artifact_path(fixture_name, "rdb"));
         runtime.set_aof_path(runtime_fixture_artifact_path(fixture_name, "aof"));
+        // (frankenredis-rc-waitaof-noaof) `set_aof_path` enables AOF the way
+        // `--aof` does, but the vendored oracle this fixture is diffed against
+        // starts with `--appendonly no`; the fixture's own
+        // `config_set_appendonly_yes_before_bgrewriteaof` case turns it on for
+        // both sides. With AOF pre-enabled here, the live subset (which does
+        // not include that case) had fr answering WAITAOF numlocal 1 against
+        // the oracle's 0 since April: a harness asymmetry, not a server bug.
+        runtime.set_aof_enabled(false);
     }
     // Conformance fixtures that exercise DEBUG must opt in. The
     // runtime defaults to enable-debug-command=no (matches upstream
