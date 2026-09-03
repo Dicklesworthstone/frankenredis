@@ -62,7 +62,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Start Pinned Redis 7.2.4 Server
-        run: "${REDIS_724_SERVER}" --save "" --appendonly no --daemonize yes
+        run: |
+          "${REDIS_724_SERVER}" --save "" --appendonly no --daemonize yes
 
       - name: Prepare Failure Forensics Directories
         run: mkdir -p "${FORENSICS_ROOT}/${LIVE_RUN_ID}"

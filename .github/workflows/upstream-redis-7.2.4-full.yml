@@ -56,7 +56,9 @@ jobs:
           test -x "${REDIS_724_ROOT}/src/redis-server"
           test -x "${REDIS_724_ROOT}/src/redis-cli"
           test -x "${REDIS_724_ROOT}/src/redis-benchmark"
-          "${REDIS_724_ROOT}/runtest" --list-tests | tee /tmp/redis-724-test-units.txt
+          # runtest resolves tests/test_helper.tcl relative to the current directory,
+          # so it must run from inside the Redis checkout, not from the repo root.
+          (cd "${REDIS_724_ROOT}" && ./runtest --list-tests) | tee /tmp/redis-724-test-units.txt
           test -s /tmp/redis-724-test-units.txt
 
       - name: Install Rust Nightly
