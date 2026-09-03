@@ -12,7 +12,7 @@
   <img alt="Unsafe forbidden" src="https://img.shields.io/badge/unsafe-forbidden-success">
 </p>
 
-> **FrankenRedis is a memory-safe, clean-room Rust reimplementation of Redis 7.2.4 with strict drop-in protocol parity, a first-class strict/hardened compatibility split, a Sentinel state machine, a 4,975-case bespoke differential conformance corpus, pinned live Redis 7.2.4 oracle gates, and direct execution of Redis 7.2.4's own unmodified Tcl test suite against FrankenRedis.**
+> **FrankenRedis is a memory-safe, clean-room Rust reimplementation of Redis 7.2.4 with strict drop-in protocol parity, a first-class strict/hardened compatibility split, a Sentinel state machine, a 5,076-case bespoke differential conformance corpus, pinned live Redis 7.2.4 oracle gates, and direct execution of Redis 7.2.4's own unmodified Tcl test suite against FrankenRedis.**
 
 ---
 
@@ -35,14 +35,14 @@ FrankenRedis ships a Rust workspace whose crates each own one job (`fr-protocol`
 
 | You want… | FrankenRedis gives you |
 |---|---|
-| **A memory-safe Redis** | `#![forbid(unsafe_code)]` across 12 of 13 crates (parser, data engine, command dispatch, persistence, replication, sentinel, etc.); `fr-runtime` uses `#![deny(unsafe_code)]` with three audited `unsafe` blocks for `libc::waitpid` in BGSAVE/BGREWRITEAOF child-process supervision |
-| **Drop-in protocol parity with Redis 7.2.4** | 241 Redis 7.2.4 commands plus three Redis 7.4 hash-field TTL commands implemented (zero stubs), a 4,975-case bespoke differential corpus, pinned Redis 7.2.4 live-oracle gates, and Redis 7.2.4's own unmodified Tcl tests executed against FrankenRedis |
+| **A memory-safe Redis** | `#![forbid(unsafe_code)]` in 11 of 15 crates (parser, data engine, persistence, replication, sentinel, event loop, config, expire, server, conformance, bench). The `unsafe` that remains is fenced into four places with audited reasons: `fr-simd` (CPU-feature-gated SIMD kernels for BITCOUNT/BITOP/HyperLogLog/CRC64), `fr-uring` (the io_uring submission boundary, compiled only with the `io-uring-writes` feature), `fr-command` (a `libc` locale handle for `SORT ALPHA` collation), and `fr-runtime` (`libc::waitpid` for BGSAVE/BGREWRITEAOF children) |
+| **Drop-in protocol parity with Redis 7.2.4** | Every one of Redis 7.2.4's 242 top-level commands (241 visible outside sentinel mode) and 150 subcommands is recognized and implemented, a 5,076-case bespoke differential corpus, pinned Redis 7.2.4 live-oracle gates, and Redis 7.2.4's own unmodified Tcl tests executed against FrankenRedis. The Redis 7.4 hash-field TTL commands (`HEXPIRE`/`HTTL`/`HPERSIST`) exist in the tree but are deliberately not exposed, for 7.2.4 parity |
 | **Upstream fidelity evidence, not just home-grown tests** | A fast hard gate runs 72 selected upstream Redis 7.2.4 Tcl assertions; a dedicated full-suite workflow runs every default unit returned by Redis 7.2.4 `runtest --list-tests` in external-server mode, preserving upstream's own `external:skip` annotations and emitting machine-readable evidence |
 | **A compatibility/security policy split** | `Mode::Strict` (byte-exact replies, no defensive repairs) vs `Mode::Hardened` (preserves contract, adds fail-closed guards for malformed/adversarial input) |
 | **A Sentinel state machine** | The `fr-sentinel` crate implements `__sentinel__:hello` discovery, quorum-based S_DOWN/O_DOWN, epoch leader election, and a 7-state failover machine, matching the conceptual model of Redis Sentinel. Currently exposed as a library and via `SENTINEL` command dispatch. |
 | **Live differential parity testing** | The `fr-conformance` harness runs fixtures against FrankenRedis and a pinned Redis 7.2.4 oracle and diffs replies byte-for-byte across 43 fixture families covering every command domain |
 | **Reproducible benchmarks and a regression gate** | `fr-bench` + checked-in baseline JSON under `baselines/` + `scripts/benchmark_gate.sh` with tunable p99/throughput thresholds |
-| **A clean architectural model to read or embed** | 13 small focused crates with explicit boundaries; the data engine, RESP codec, RDB codec, replication FSM, and Lua evaluator are each usable independently |
+| **A clean architectural model to read or embed** | 15 small focused crates with explicit boundaries; the data engine, RESP codec, RDB codec, replication FSM, and Lua evaluator are each usable independently |
 
 ---
 
@@ -90,16 +90,16 @@ The replica issues `PSYNC` / `FULLRESYNC` against the primary, streams the RDB s
 
 | Area | State | Detail |
 |---|---|---|
-| **Commands** | **241 Redis 7.2 base commands plus three Redis 7.4 hash-field TTL commands, zero stubs.** | All command families: strings, hashes, lists, sets, sorted sets, streams, geo, hyperloglog, bitmap, pub/sub, scripting (EVAL/FCALL), server, cluster (single-node), connection, ACL, transactions, debug, function, memory, slowlog, latency, monitor. |
+| **Commands** | **All 242 Redis 7.2.4 top-level commands and 150 subcommands recognized and implemented.** A handful of admin arms accept-and-OK where a single node has nothing to do (`CLUSTER MEET`/`SAVECONFIG`/`SETSLOT`, `SCRIPT DEBUG`, ten `DEBUG` subcommands); each is documented in code. The Redis 7.4 hash-field TTL commands are compiled but not exposed. | All command families: strings, hashes, lists, sets, sorted sets, streams, geo, hyperloglog, bitmap, pub/sub, scripting (EVAL/FCALL), server, cluster (single-node), connection, ACL, transactions, debug, function, memory, slowlog, latency, monitor. |
 | **Wire protocol** | RESP2 native; RESP3 inbound parsing with downconversion. | `fr-protocol` enforces upstream `max_bulk_len = 512 MiB`, `max_array_len = 1M`, `max_recursion_depth = 128`, CRLF-injection sanitization on error/string bodies. RESP3 `Map`/`Set` emitted on the reply side when the client negotiates `protocol_version=3` (`HELLO 3`) for `CONFIG GET`, `HGETALL`, `XINFO STREAM/GROUPS/CONSUMERS`. |
 | **Persistence** | AOF + RDB v11, both round-trip-tested. | Manifest-based multi-part AOF with `everysec`/`always`/`no` fsync; AOF replay with bounded tail-repair policies. RDB v11 with LZF compression on strings >20 B, CRC64 footer, standalone listpack decoder for upstream macro-node entries, and decoder coverage for upstream compact type tags `RDB_TYPE_SET_INTSET` (11), `RDB_TYPE_HASH_LISTPACK` (16), `RDB_TYPE_ZSET_LISTPACK` (17), `RDB_TYPE_LIST_QUICKLIST_2` (18), `RDB_TYPE_STREAM_LISTPACKS_2` (19), `RDB_TYPE_SET_LISTPACK` (20), and `RDB_TYPE_STREAM_LISTPACKS_3` (21). `FUNCTION DUMP`/`RESTORE` wrapped in an upstream version + CRC64 envelope so functions round-trip through vendored servers. |
 | **Replication** | TCP end-to-end, both directions. | `--replicaof` and `REPLICAOF`/`SLAVEOF` from clients; `AUTH`/`REPLCONF`/`PSYNC` handshake; `FULLRESYNC` snapshot stream; `CONTINUE` backlog replay; `REPLCONF ACK` offset accounting; replica-of-replica chaining; `min-replicas-to-write` / `min-replicas-max-lag` write admission; reconnect with backoff. Integration tests prove legacy → FrankenRedis, password-protected legacy → FrankenRedis, and FrankenRedis → replica → downstream replica. |
-| **Sentinel** | Library + `SENTINEL` command dispatcher. | `__sentinel__:hello` pub/sub discovery, periodic PING/INFO, subjective-down → quorum-voted objective-down with vote staleness filtering, epoch-based leader election, 7-state failover state machine (`SelectSlave` → `SendSlaveofNoone` → `WaitPromotion` → `ReconfSlaves` → `UpdateConfig`), and the full `SENTINEL` command surface. A dedicated launcher binary that puts the server into sentinel mode at startup (mirroring `redis-sentinel`) is still to come. |
+| **Sentinel** | `--sentinel` mode with monitoring and single-sentinel failover. | `__sentinel__:hello` pub/sub discovery, PING/INFO probing of the master and every discovered replica, subjective-down → objective-down, and the 7-state failover machine (`SelectSlave` → `SendSlaveofNoone` → `WaitPromotion` → `ReconfSlaves` → `UpdateConfig`) driven from the server loop: `SENTINEL FAILOVER` and automatic failover after O_DOWN promote the best replica with `SLAVEOF NO ONE`, point the other replicas at it, and demote a former master when it returns. Full `SENTINEL` command surface. Not yet wired: the `is-master-down-by-addr` vote exchange between sentinels, so a quorum above 1 cannot reach O_DOWN or elect a leader. |
 | **Lua scripting** | Custom Lua 5.1 evaluator (no FFI, no embedded VM). | EVAL/EVALSHA/EVAL_RO/EVALSHA_RO + FCALL/FCALL_RO + FUNCTION LOAD/DUMP/RESTORE/STATS/DELETE; `redis.call`/`pcall`/`status_reply`/`error_reply`/`sha1hex`/`log`/`replicate_commands`/`set_repl`/`setresp`/`acl_check_cmd`/`breakpoint`/`debug` plus `redis.REPL_*` and `redis.LOG_*` constants; full pattern matcher (`%b` balanced, `%f[set]` frontier, `%1`–`%9` back-references); script-relevant metamethods (`__index`/`__newindex`/`__call`/`__concat`/`__add` family/`__eq`/`__lt`/`__le`/`__tostring`/`__unm`/`__metatable`; `__mode`/`__len`/`__gc` not exposed); LuaJIT-compatible `bit` library; `cjson.encode`/`decode` with upstream `%.14g` formatting; KEYS/ARGV; closures with lexical-scope upvalue capture; coroutines. |
 | **ACL** | Full lifecycle. | `SETUSER`/`GETUSER`/`DELUSER`/`LIST`/`USERS`/`WHOAMI`/`CAT`/`GENPASS`/`LOG`/`SAVE`/`LOAD`/`DRYRUN`/`HELP`; per-command `+cmd`/`-cmd`, per-category `+@cat`/`-@cat`, `allcommands`/`nocommands`/`allkeys`/`allchannels`/`reset`, key pattern `~pattern`, channel pattern `&pattern`; deny-first precedence enforced at dispatch. |
 | **Pub/Sub** | Cross-client delivery. | SUBSCRIBE/UNSUBSCRIBE/PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH/PUBSUB plus shard variants SSUBSCRIBE/SUNSUBSCRIBE/SPUBLISH; subscription-mode command restriction; deterministic unsubscribe-all ordering. Keyspace notifications via `CONFIG SET notify-keyspace-events`. |
 | **Blocking ops** | Real socket-level blocking. | BLPOP/BRPOP/BLMOVE/BLMPOP/BRPOPLPUSH/BZPOPMIN/BZPOPMAX/BZMPOP/XREAD BLOCK/XREADGROUP BLOCK/WAIT/WAITAOF/CLIENT PAUSE with deadline tracking and session swap-out in the mio loop. |
-| **Conformance** | Bespoke differential + upstream Redis tests. | 4,975 fixture cases across 43 bespoke families; a pinned Redis 7.2.4 live-oracle parity matrix; a 72-assertion upstream Tcl hard gate; and a dedicated workflow that runs every default Redis 7.2.4 `runtest` unit against FrankenRedis in external-server mode and records pass/skip/ignore/error counts plus exact unit completion. |
+| **Conformance** | Bespoke differential + upstream Redis tests. | 5,076 fixture cases across 46 fixture files (36 `core_*` families plus packet-journey, replay and protocol corpora); a pinned Redis 7.2.4 live-oracle parity matrix; a 72-assertion upstream Tcl hard gate; and a dedicated workflow that runs every default Redis 7.2.4 `runtest` unit against FrankenRedis in external-server mode and records pass/skip/ignore/error counts plus exact unit completion. |
 | **Fuzzing** | 33 `cargo-fuzz` targets. | Parser (RESP, inline), command parse, RDB encode/decode/structured, AOF decoder/manifest, store bitops/HLL/scan/stream-groups, runtime execute_bytes/sequence/eventloop validators, Lua eval, function restore, PSYNC reply, MIGRATE/DUMP, client tracking, keyspace events, glob match, config file, TLS config, ACL rules, sentinel parsers. |
 | **Benchmarks** | Checked-in baselines + regression gate. | `crates/fr-bench` issues 8 standard workloads (SET/GET/INCR/LPUSH/LPOP/HSET/HGET/MIXED), records HdrHistogram p50/p95/p99/p999, normalizes to `frankenredis_baseline/v1` JSON, and `scripts/benchmark_gate.sh` compares candidate runs against the checked-in baselines with tunable thresholds. |
 
@@ -149,6 +149,22 @@ The checked-in `baselines/*.json` are a separate, older capture used by `scripts
 as a regression reference; they are not the numbers above. Build with `--profile release-perf` for
 benchmarking.
 
+**Where FrankenRedis is behind Redis 7.2.4.** The table above is the pipelined command path; it is not
+the whole story, and the repository's own evidence documents (`docs/RELEASE_READINESS_SCORECARD.md`,
+`docs/perf_domination_scorecard.md`, `docs/NEGATIVE_EVIDENCE.md`) record these measured losses:
+
+| Surface | FrankenRedis ÷ Redis 7.2.4 | Source |
+|---|---:|---|
+| Resident memory, 1M short string keys (fresh process, kernel VmRSS delta) | 1.17x | 2026-09-02 probe on this host |
+| Resident memory, 100k ten-field hashes / 20k fifty-member zsets / 20k fifty-member sets / small streams | 2.3x–2.9x | 2026-09-02 probe; keyspace-dict work is bead `uhthd`, small-collection layout has no bead yet |
+| `SET` with 64 KB–256 KB values | 0.12x–0.42x | RELEASE_READINESS_SCORECARD (safe-Rust zero-fill framing tax) |
+| Collection `RESTORE` decode | 0.61x | NEGATIVE_EVIDENCE 2026-08-16, with CI and A/A null |
+| `FCALL` dispatch (instructions per op) | ~1.33x more | perf_negative_evidence_ledger, closed as dispatch layering |
+
+The scorecards' ratcheted matrix reads 7 wins / 6 losses / 2 neutral on its stable cells with a
+0.952x geometric mean and a ratchet status of FAIL, and a controlled quiet-host re-baseline (bead
+`vibu6`) is still owed before the pipelined table is quoted as a release number.
+
 To reproduce locally:
 
 ```bash
@@ -189,7 +205,7 @@ A repeating "probe sweep" workflow uses adversarial command sequences to find ne
 
 ### 4. Memory safety as a structural property, not a slogan
 
-`#![forbid(unsafe_code)]` is set in 12 of 13 crates (the parser, data engine, command dispatch, Lua evaluator, persistence, replication, sentinel, event loop, config, expire, server, conformance, bench). The thirteenth, `fr-runtime`, uses `#![deny(unsafe_code)]` and contains exactly three audited `unsafe` blocks; all of them wrap `libc::waitpid` calls used to reap `BGSAVE` and `BGREWRITEAOF` child processes. The fork-and-wait pattern is unavoidable for those subsystems on Unix; everything else stays in safe Rust. Common dangerous helpers (`libc::getrusage`, `libc::clock_gettime`, raw FFI) are explicitly avoided. The custom Lua evaluator is written in safe Rust against a `LuaValue` enum, with no embedded C VM.
+`#![forbid(unsafe_code)]` is set in 11 of 15 crates (the parser, data engine, persistence, replication, sentinel, event loop, config, expire, server, conformance, bench). The other four hold every `unsafe` site in the workspace, each fenced with a stated reason: `fr-simd` (46 sites) is the SIMD kernel crate, where every `unsafe fn` is a `#[target_feature]` kernel for BITCOUNT, BITPOS, BITOP, HyperLogLog merging and the RDB CRC64, called only after `is_x86_feature_detected!` and shadowed by a scalar reference implementation; `fr-uring` (5 sites) is the io_uring submission boundary, compiled only with the `io-uring-writes` feature and off by default; `fr-command` (7 sites, `#![deny(unsafe_code)]`) holds a `libc` locale handle so `SORT ALPHA` collates the way glibc does; and `fr-runtime` (3 sites, `#![deny(unsafe_code)]`) wraps `libc::waitpid` to reap `BGSAVE` and `BGREWRITEAOF` child processes. The fork-and-wait pattern is unavoidable for those subsystems on Unix; everything else stays in safe Rust. Common dangerous helpers (`libc::getrusage`, `libc::clock_gettime`, raw FFI) are explicitly avoided. The custom Lua evaluator is written in safe Rust against a `LuaValue` enum, with no embedded C VM.
 
 ### 5. Audit-first, repair-second
 
@@ -264,6 +280,8 @@ Performance work is gated on showing that observable behavior didn't change. Eac
 | [`fr-bench`](crates/fr-bench) | TCP benchmark harness for 8 workloads with HdrHistogram percentile reporting. |
 | [`fr-conformance`](crates/fr-conformance) | Differential conformance harness + 13 binaries (live oracle diff, budget orchestrator, adversarial triage, schema gate, …). |
 | [`fr-sentinel`](crates/fr-sentinel) | Sentinel reimplementation: discovery, health, consensus, failover, full `SENTINEL` command set. |
+| [`fr-simd`](crates/fr-simd) | Runtime-dispatched SIMD kernels (popcount, bitwise ops, HyperLogLog register max, CRC64) with scalar reference implementations; the workspace's SIMD `unsafe` lives here. |
+| [`fr-uring`](crates/fr-uring) | io_uring batched-write and multishot-receive boundary; optional, behind the `io-uring-writes` feature and the `--io-uring-output` flag. |
 
 ---
 
@@ -411,7 +429,7 @@ pub struct SortedSet {
 
 **SCAN cursors are positional, not bit-reversed.** Real Redis uses a clever reverse-binary cursor that survives hash-table rehashing without missing or duplicating keys. FrankenRedis's `HashMap` doesn't have Redis's two-table rehash, so it can get away with a simpler positional cursor: `next_cursor = pos`, returning `0` on completion. Redis explicitly documents SCAN cursors as opaque to clients, so this is allowed; `HSCAN`/`SSCAN`/`ZSCAN` short-circuit small-encoding values (return everything with cursor = 0) just like upstream does.
 
-**Hash field TTL** uses `hash_field_expires: BTreeMap<(key, field), expires_at_ms>` plus per-key reap counters, with RDB round-trips through `RDB_TYPE_HASH_WITH_TTLS` (tag 100). The Redis 7.4 `HEXPIRE`, `HTTL`, and `HPERSIST` command family is dispatched through `fr-command`; elapsed fields are reaped before TTL or persist results are reported.
+**Hash field TTL** uses `hash_field_expires: BTreeMap<(key, field), expires_at_ms>` plus per-key reap counters, with RDB round-trips through `RDB_TYPE_HASH_WITH_TTLS` (tag 100). The Redis 7.4 `HEXPIRE`, `HTTL`, and `HPERSIST` executors exist in `fr-command` but are not registered on the wire (`FORWARD_HASH_FIELD_TTL_REGISTERED = false`, pinned by tests): against Redis 7.2.4 they are unknown commands, and FrankenRedis answers the same way. The storage keeps per-field TTLs so that a 7.4-produced RDB round-trips, and elapsed fields are reaped on read.
 
 **LFU is the logarithmic counter from upstream** with `LFU_INIT_VAL = 5` (newly-created objects start at 5 so they aren't immediate eviction candidates) and `lfu-log-factor = 10` controlling counter growth speed; decay is applied via `lfu_last_touch_min` so the counter doesn't grow without bound during long-running cache sessions.
 
@@ -827,7 +845,7 @@ Operators ask about this choice often. Three reasons:
 
 1. **Determinism.** Redis's behavior model is "one logical thread, commands execute atomically in arrival order." Multi-threading the data path means giving up that model; Dragonfly and KeyDB both had to invent per-shard sharding or per-connection serialization to recover something like it. FrankenRedis preserves the original semantics by inheriting the original design.
 2. **Latency predictability.** A single-threaded mio loop has no lock contention, no context-switch jitter, no false-sharing across cores. The sub-millisecond p50 latency numbers in the Performance section fall out of that directly.
-3. **Cognitive load.** The whole runtime fits in one synchronous mental model: read bytes, parse, dispatch, mutate, encode, write. There is no `tokio::spawn` to reason about, no `Arc<Mutex<...>>` over the store, no `async` color anywhere in the data path. The 4,975 conformance fixtures and 33 fuzz targets are all easier to write because of this.
+3. **Cognitive load.** The whole runtime fits in one synchronous mental model: read bytes, parse, dispatch, mutate, encode, write. There is no `tokio::spawn` to reason about, no `Arc<Mutex<...>>` over the store, no `async` color anywhere in the data path. The 5,076 conformance fixtures and 33 fuzz targets are all easier to write because of this. (An experimental per-core reactor mode, `--experimental-sharded-set-get-workers`, exists for single-key workloads; the default server is the single-threaded loop described here.)
 
 The trade-off is that a single-threaded server doesn't scale across cores for raw throughput. Neither does vendored Redis, and the established operational pattern (one Redis process per core, partitioned by application sharding or by cluster) applies unchanged to FrankenRedis.
 
@@ -930,9 +948,10 @@ If you have `rch` (remote compilation helper) installed, all of the above can be
 ./target/release/frankenredis --port 6380 --aof r.aof --rdb r.rdb \
   --replicaof 127.0.0.1 6379 &
 
-# (The fr-sentinel state machine and command surface are available; the
-#  dedicated launcher binary that puts the server into sentinel mode at
-#  startup is still to come. See the Sentinel section.)
+# Sentinel (no keyspace; monitors the primary, promotes the replica on failure)
+./target/release/frankenredis --port 26379 --sentinel &
+redis-cli -p 26379 SENTINEL MONITOR mymaster 127.0.0.1 6379 1
+redis-cli -p 26379 SENTINEL SET mymaster down-after-milliseconds 5000
 ```
 
 ### With auth
@@ -1053,6 +1072,21 @@ frankenredis [options]
   --enable-debug-command {no|local|yes}
                                       Allow DEBUG command surface (default: no;
                                       `local` permits DEBUG only over loopback)
+  --sentinel                          Run in Sentinel mode (monitoring, SENTINEL
+                                      command dispatch, failover; no keyspace)
+  --io-uring-output                   Multishot receive + batched io_uring writes
+                                      (needs a build with the `io-uring-writes`
+                                      feature; fails closed otherwise)
+  --experimental-sharded-set-get-workers <N>
+                                      Per-core reactors over a partitioned
+                                      keyspace for single-key commands (1-256);
+                                      cross-key commands are refused
+  --experimental-key-sharded-set-get-workers <N>
+                                      Key-affinity variant of the above (mutually
+                                      exclusive with it)
+  --<config-key> <value>              Any redis.conf key, applied through CONFIG
+                                      SET at startup (e.g. --maxmemory-policy
+                                      allkeys-lru); an unknown key aborts startup
   --help, -h                          Show help
 ```
 
@@ -1078,7 +1112,7 @@ All 241 Redis 7.2 base commands are implemented and exposed, together with Redis
 | Transactions | 5 | MULTI, EXEC, DISCARD, WATCH, UNWATCH |
 | Server | 30+ | INFO, CONFIG (GET/SET/RESETSTAT/REWRITE/HELP), DBSIZE, FLUSHDB, FLUSHALL, SAVE, BGSAVE, BGREWRITEAOF, LASTSAVE, SWAPDB, SHUTDOWN, LATENCY, SLOWLOG, MONITOR, ROLE, COMMAND (COUNT/LIST/INFO/DOCS/GETKEYS/GETKEYSANDFLAGS), MEMORY (USAGE/STATS/DOCTOR), MODULE (LIST/LOAD/LOADEX/UNLOAD failure surfaces), LOLWUT, DEBUG, RESET, FAILOVER, WAIT, WAITAOF, TIME, REPLICAOF, SLAVEOF, READONLY, READWRITE, SYNC, PSYNC, REPLCONF, ASKING |
 | Client | 19 | CLIENT SETNAME / GETNAME / ID / LIST / INFO / KILL / PAUSE / UNPAUSE / UNBLOCK / TRACKING / TRACKINGINFO / CACHING / GETREDIR / NO-EVICT / NO-TOUCH / SETINFO / REPLY / GET / HELP |
-| Cluster | 20+ | CLUSTER INFO / MYID / SLOTS / SHARDS / NODES / KEYSLOT / RESET / ADDSLOTS / DELSLOTS / FLUSHSLOTS / FAILOVER / REPLICATE / REPLICAS / MEET / FORGET / SET-CONFIG-EPOCH / BUMPEPOCH / SAVECONFIG / LINKS / MYSHARDID / SLOTSTATE / COUNTKEYSINSLOT / GETKEYSINSLOT / COUNT-FAILURE-REPORTS / ADDSLOTSRANGE / DELSLOTSRANGE / SETSLOT (single-node mode; full multi-node sharding is not yet implemented) |
+| Cluster | 20+ | CLUSTER INFO / MYID / SLOTS / SHARDS / NODES / KEYSLOT / RESET / ADDSLOTS / DELSLOTS / FLUSHSLOTS / FAILOVER / REPLICATE / REPLICAS / MEET / FORGET / SET-CONFIG-EPOCH / BUMPEPOCH / SAVECONFIG / LINKS / MYSHARDID / COUNTKEYSINSLOT / GETKEYSINSLOT / COUNT-FAILURE-REPORTS / ADDSLOTSRANGE / DELSLOTSRANGE / SETSLOT (single-node mode; full multi-node sharding is not yet implemented) |
 | Connection | 8 | AUTH, HELLO, PING, ECHO, SELECT, QUIT, CLIENT, RESET |
 | ACL | 13 | All `ACL` subcommands listed above |
 | Keys | 24 | DEL, EXISTS, TYPE, EXPIRE, EXPIREAT, PEXPIRE, PEXPIREAT, TTL, PTTL, EXPIRETIME, PEXPIRETIME, PERSIST, KEYS, RANDOMKEY, RENAME, RENAMENX, MOVE, COPY, TOUCH, UNLINK, DUMP, RESTORE, OBJECT (`ENCODING`/`REFCOUNT`/`IDLETIME`/`FREQ`/`HELP`), SCAN (`MATCH`/`COUNT`/`TYPE`) |
@@ -1137,7 +1171,7 @@ Both directions are exercised end-to-end in integration tests: vendored `redis-s
 
 ## Sentinel
 
-The `fr-sentinel` crate is a clean-room reimplementation of Redis Sentinel, modeled on the same conceptual layers as `redis/src/sentinel.c`. Today it ships as a **library plus the `SENTINEL` command dispatcher**: the full state machine, discovery, health, consensus, and failover modules are present and unit/fuzz-tested, and the `SENTINEL` command surface is wired into the main runtime when `Store::sentinel_mode` is enabled. The remaining piece is a dedicated launcher binary that mirrors `redis-sentinel` and brings up a server in sentinel mode at startup.
+The `fr-sentinel` crate is a clean-room reimplementation of Redis Sentinel, modeled on the same conceptual layers as `redis/src/sentinel.c`. `frankenredis --sentinel` brings a process up in sentinel mode: no keyspace, the `SENTINEL` command surface, and a monitoring tick that PINGs, INFOs and gossips on every monitored master and every replica it discovers. The failover state machine in `fr-sentinel::failover` is pure; the server loop drives it once a second and performs the `SLAVEOF` writes it asks for (`fr_sentinel::failover::failover_step`), so both `SENTINEL FAILOVER` and automatic failover after O_DOWN promote the best replica, reconfigure the rest, and demote a former master that comes back. What is not wired yet is the sentinel-to-sentinel vote exchange (`SENTINEL is-master-down-by-addr`): O_DOWN and leader election are evaluated with this sentinel's own vote only, so a master configured with a quorum above 1 will be reported `s_down` but never failed over. That is tracked as bead `rc-sentinel-peer-votes`. Sentinel config files (`sentinel monitor ...` directives) and notification scripts are also still open; masters are registered at runtime with `SENTINEL MONITOR`.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -1231,7 +1265,7 @@ Now trace each request:
 
 ## Conformance harness
 
-FrankenRedis deliberately uses multiple independent fidelity layers. The 4,975-case corpus is strong bespoke differential coverage; it is **not** presented as a substitute for upstream Redis's own tests.
+FrankenRedis deliberately uses multiple independent fidelity layers. The 5,076-case corpus is strong bespoke differential coverage; it is **not** presented as a substitute for upstream Redis's own tests.
 
 ```bash
 # Run the in-process conformance suite (FrankenRedis runtime vs declared expectations)
@@ -1286,7 +1320,7 @@ crates/fr-conformance/fixtures/
                                 TLS — 8 fixture files)
 ```
 
-Total: **4,975 cases across 43 fixtures**. Each case carries an `argv`, a `now_ms`, and an `ExpectedFrame` (`Simple` / `Error` / `Integer` / `Bulk` / `Array` / `SimplePattern` with `{hex40}` and `{int}` placeholders). Some carry threat-event expectations and structured-log contracts.
+Total: **5,076 cases across 46 fixture files** (counted from the JSON on disk at 2026-09-02; the tree above lists the families by size at the time it was drawn). Each case carries an `argv`, a `now_ms`, and an `ExpectedFrame` (`Simple` / `Error` / `Integer` / `Bulk` / `Array` / `SimplePattern` with `{hex40}` and `{int}` placeholders). Some carry threat-event expectations and structured-log contracts.
 
 ### Differential testing
 
@@ -1360,7 +1394,7 @@ FrankenRedis emits the same observability surface Redis operators are used to, p
 
 ### Threat-event ledger
 
-In hardened mode, every `ThreatEvent` (see Implementation deep-dives → Threat-event ledger format) is appended to a deterministic JSON-lines ledger. The schema is defined in `docs/planning/TEST_LOG_SCHEMA_V1.md` (`STRUCTURED_LOG_SCHEMA_VERSION = fr_testlog_v1`). Each line carries the timestamp, the threat class, a SHA256 digest of the offending input, the decision action, and a one-line reason; enough to reconstruct what hardened mode did without rerunning the workload.
+In hardened mode, every `ThreatEvent` (see Implementation deep-dives → Threat-event ledger format) is appended to a JSON-lines file, `threat-ledger.jsonl` in the working directory by default (next to `dump.rdb`). The path is the fr-only config key `threat-ledger-file`, settable at startup (`--threat-ledger-file /var/log/frankenredis/threats.jsonl`) or at runtime with `CONFIG SET`; an empty value turns the file off. The key answers an exact-name `CONFIG GET` but stays out of `CONFIG GET *` so the visible key set remains byte-exact with Redis 7.2.4. Each row is a `fr_threat_ledger_v1` object carrying the timestamp, packet id, mode, severity, threat class, decision action, subsystem, action, reason code and reason, the SHA-256 digests of input, output and store state, the replay command and artifact references; payload bytes are never written, only digests (the redaction rule of `docs/planning/TEST_LOG_SCHEMA_V1.md`). The server appends once per event-loop iteration, keeps at most 10,000 events in memory, and counts (rather than silently drops) rows it could not write. Strict mode records the same events in memory and writes a file only when `threat-ledger-file` is set.
 
 ---
 
@@ -1612,9 +1646,11 @@ Honest list of what FrankenRedis does *not* do today. The roadmap below tracks c
 
 1. **Multi-node cluster sharding**: CRC16 slot allocation, slot migration, MOVED/ASK redirects, gossip.
 2. **A benchmark client that is not the bottleneck.** A single-core `redis-benchmark` saturates at ~75k ops/s while the server still has headroom, so `pipeline=1` `ops/s` cannot currently show a server-side win. This is a prerequisite for any further unpipelined claim.
-3. **Wire-level `rustls` termination** in `fr-server`, to fully realize the TLS configuration framework that already exists in `fr-config`/`fr-runtime`.
-4. **RaptorQ-everywhere sidecar** for self-healing durability of long-lived state snapshots, fixture bundles, and reproducibility ledgers.
-5. **Asupersync-backed runtime adapter** and **FrankenTUI operator dashboard adapter** for the deployment story.
+3. **Multi-sentinel consensus**: `is-master-down-by-addr` vote exchange and leader election across peer sentinels, so a quorum above one can fail over (single-sentinel failover works today; bead `rc-sentinel-peer-votes`).
+4. **RaptorQ-everywhere sidecar** for self-healing durability of long-lived state snapshots, fixture bundles, and reproducibility ledgers. Named as a contract in `AGENTS.md`; no implementation or bead exists yet.
+5. **Operator dashboard adapter** for the deployment story. (An Asupersync runtime adapter was evaluated and rejected in `docs/planning/UPGRADE_LOG.md`; the trait stubs in `fr-runtime` are empty.)
+
+Wire-level TLS is not on this list on purpose: it was decided as a scope exclusion (bead `xzdbc`, closed WONTFIX on 2026-05-25) and stays delegated to the operational layer, as the Limitations section says.
 
 ---
 
@@ -1701,6 +1737,8 @@ The CHANGELOG's Phase 11 section is largely the output of this workflow. The met
 ### What runs in CI
 
 `.github/workflows/live-conformance-gates.yml` is the main fast conformance workflow. It pins the behavioral oracle to the exact Redis 7.2.4 release SHA, builds that source, and drives formatting/lints/workspace tests, the broad live-oracle `parity` matrix, the 72-assertion upstream Tcl hard gate, protocol/Lua/bead parity probes, coverage/flake budgets, adversarial triage, schema gates, benchmark gating when requested, and failure-forensics artifacts.
+
+An honest note on history: until 2026-09-03 neither workflow had ever completed a run. The conformance workflow failed at `cargo fmt --check` from March 2026 and then at YAML parse time from 2026-08-19; the full upstream Tcl workflow invoked `runtest` from the wrong directory on every run since it was created. Both defects were fixed in commit `780b5aa09`; the Actions tab shows the state since then, and the local equivalents (`parity_suite.py`, `upstream_redis_tcl_fidelity.py`, `cargo test --workspace`) remain the evidence to run before trusting a badge.
 
 `.github/workflows/upstream-redis-7.2.4-full.yml` is the complete upstream-test workflow. It checks out and verifies the exact Redis 7.2.4 source, builds Redis's test-support binaries, builds FrankenRedis, and then runs every default unit from Redis's own `runtest --list-tests` against FrankenRedis in external-server mode. It publishes the raw Tcl log and structured report on relevant pushes, nightly, and on manual dispatch. **Release candidates must run this workflow with `enforce=true`; see `AGENTS.md`.**
 
@@ -1790,7 +1828,7 @@ The combination of AOF (`appendfsync everysec`) and periodic RDB (`save 3600 1`)
 
 ### Is FrankenRedis production-ready?
 
-No. The workspace is `0.1.0` and there are no tagged releases. The implemented surface is exercised by a 4,975-case bespoke differential corpus, pinned live Redis 7.2.4 oracle gates, Redis 7.2.4's own upstream Tcl tests, and 33 fuzz targets, but the complete upstream external-mode report must still be read as evidence rather than a blanket compatibility certificate. In particular, multi-node sharding does not exist yet, wire TLS is delegated to the operational layer, and separate upstream cluster/Sentinel/module-API test runners require their own topology/ABI-specific treatment.
+No. The workspace is `0.1.0` and there are no tagged releases. The implemented surface is exercised by a 5,076-case bespoke differential corpus, pinned live Redis 7.2.4 oracle gates, Redis 7.2.4's own upstream Tcl tests, and 33 fuzz targets, but the complete upstream external-mode report must still be read as evidence rather than a blanket compatibility certificate. In particular, multi-node sharding does not exist yet, wire TLS is delegated to the operational layer, and separate upstream cluster/Sentinel/module-API test runners require their own topology/ABI-specific treatment.
 
 ### Does it speak the regular Redis protocol?
 
@@ -1818,7 +1856,7 @@ A workspace decision in `crates/fr-server/Cargo.toml`: the crate is `fr-server`,
 
 ### Is there a Sentinel binary?
 
-Not yet. The `fr-sentinel` crate currently exposes the state machine, command surface, and parsers, all unit/fuzz-tested, and the `SENTINEL` command set is wired through the main runtime via the `Store::sentinel_mode` flag. The missing piece is a dedicated `fr-sentinel` launcher binary mirroring `redis-sentinel`, which would take a sentinel config file and enter sentinel mode at startup.
+Yes: `frankenredis --sentinel --port 26379`. It monitors what you register with `SENTINEL MONITOR`, probes masters and replicas, and performs failovers on its own (an end-to-end test kills a primary and watches the sentinel promote the replica with no help from the test client). It does not yet read a `sentinel.conf`, and it cannot yet exchange votes with other sentinels, so run it with quorum 1 until bead `rc-sentinel-peer-votes` lands.
 
 ### How is performance trending?
 
@@ -1956,20 +1994,20 @@ Numbers behind the "clean-room reimplementation" claim:
 
 | What | Count |
 |---|---|
-| Crates in the workspace | 13 |
-| Rust source files (excluding tests) | 40 |
-| Rust source lines (excluding tests, fuzz harnesses, conformance fixtures) | ~186,000 |
-| Lines in `fr-command/src/lib.rs` (largest single file — dispatch + 231 command arms) | ~67,600 |
-| Lines in `fr-command/src/lua_eval.rs` (custom Lua 5.1 evaluator) | ~19,300 |
-| Lines in `fr-runtime/src/lib.rs` (Runtime orchestrator) | ~28,500 |
-| Lines in `fr-store/src/lib.rs` (data engine) | ~24,600 |
-| Lines in `fr-conformance/src/lib.rs` (test harness) | ~13,300 |
-| Lines in `fr-persist/src/lib.rs` (AOF + RDB) | ~6,600 |
-| Lines in `fr-server/src/main.rs` (mio TCP server) | ~6,100 |
-| Lines in `fr-protocol/src/lib.rs` (RESP codec) | ~2,100 |
-| Commits on `main` | 2,389 |
-| Active development days | 79 |
-| Conformance fixture cases | 4,975 |
+| Crates in the workspace | 15 |
+| Rust source files under `crates/*/src` | 43 |
+| Rust source lines under `crates/*/src` (inline unit tests included) | ~423,000 |
+| Lines in `fr-command/src/lib.rs` (largest single file — dispatch + 231 command arms; tests start near line 32,300) | ~87,500 |
+| Lines in `fr-command/src/lua_eval.rs` (custom Lua 5.1 evaluator) | ~31,600 |
+| Lines in `fr-runtime/src/lib.rs` (Runtime orchestrator; tests start near line 52,400) | ~84,200 |
+| Lines in `fr-store/src/lib.rs` (data engine) | ~84,000 |
+| Lines in `fr-server/src/main.rs` (mio TCP server) | ~57,700 |
+| Lines in `fr-conformance/src/lib.rs` (test harness) | ~13,800 |
+| Lines in `fr-persist/src/lib.rs` (AOF + RDB) | ~12,700 |
+| Lines in `fr-protocol/src/lib.rs` (RESP codec) | ~6,300 |
+| Commits on `main` (2026-09-03) | ~8,400 |
+| Active development days | 171 |
+| Conformance fixture cases | 5,076 |
 | Conformance fixture families | 43 |
 | Upstream Redis Tcl fast hard gate | 72 selected assertions |
 | Complete upstream Redis Tcl lane | every default Redis 7.2.4 `runtest --list-tests` unit, external mode |
@@ -1977,8 +2015,8 @@ Numbers behind the "clean-room reimplementation" claim:
 | Redis 7.2.4 base commands implemented | 241 |
 | Distinct command-name dispatch arms in `fr-command` | 231 |
 | RDB version emitted | 11 |
-| Open parity beads as of 2026-05-18 | 10 (1 P2, 2 P3, 7 P4) |
-| `unsafe` blocks across all 13 crates | 3 (all `libc::waitpid` in `fr-runtime`) |
+| Live beads as of 2026-09-02 | 44 (19 perf, 17 bugs, 7 tasks, 1 feature) plus the gap-closure beads filed by the 2026-09-02 reality check |
+| `unsafe` sites across all 15 crates | 61: `fr-simd` 46 (SIMD kernels), `fr-command` 7 (libc locale for `SORT ALPHA`), `fr-uring` 5 (io_uring, feature-gated), `fr-runtime` 3 (`libc::waitpid`) |
 | Tagged releases | 0 (pre-1.0; `main` is the version spine) |
 
 ---

@@ -50,7 +50,8 @@ Planned crate families:
 - fr-config
 - fr-runtime
 - fr-conformance
-- frankenredis (integration binary; pending)
+- frankenredis (integration binary; shipped as `crates/fr-server`, binary name `frankenredis`)
+- fr-sentinel, fr-bench, fr-simd, fr-uring (added after this list was written; see the README crate map)
 
 ## 4. Compatibility Model (frankenlibc/frankenfs-inspired)
 
@@ -240,6 +241,11 @@ Mitigations:
 5. Add RaptorQ sidecar pipeline for conformance and benchmark artifacts.
 
 ## 14. Detailed Crate Contracts (Full-Parity Program)
+
+> Naming note (2026-09-03): these are the February 2026 design names. The shipped workspace
+> folds them as follows: `fr-types` + `fr-resp` → `fr-protocol`; `fr-aof` + `fr-rdb` →
+> `fr-persist`; `fr-net` → `fr-eventloop` (planning/validators) + `fr-server` (the mio loop);
+> `frankenredis` → `crates/fr-server`. The contracts below still describe the responsibilities.
 
 | Crate | Primary Responsibility | Explicit Non-Goal | Invariants | Mandatory Tests |
 |---|---|---|---|---|

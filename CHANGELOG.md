@@ -17,6 +17,56 @@ Representative commits in each phase are live-linked to GitHub.
 
 ---
 
+## [Unreleased] -- 2026-08-20 through 2026-09-03
+
+About 275 commits. Two threads: the write-gate and dispatch-shape performance campaign continued
+(ZADD/SET/pop/counter families stop re-deriving a gate the server already caches; hash reload drops
+SipHash; keyspace-dict arena and inline small keys; listpack single-pass span decode; the `.rchignore`
+fix that had been silently gating every fr-server perf measurement), and a reality check on
+2026-09-02 measured the README against the code and started closing the gaps it found.
+
+### What the reality check found (2026-09-02, HEAD 70aeb457d)
+
+- Both GitHub workflows had failed on every run in their visible history: the conformance workflow
+  at `cargo fmt --check` since March and at YAML parse time since 2026-08-19, the full upstream Tcl
+  lane at `runtest --list-tests` on all 105 runs because it ran from the wrong directory. No
+  `report.json` had ever been produced.
+- Flagship claims contradicted by the code: the hardened-mode "JSON-lines threat ledger" was an
+  in-memory `Vec` nothing wrote; the five-phase event loop was `plan_tick(0, 0, …)`; Sentinel could
+  detect O_DOWN but never fail over (`SENTINEL FAILOVER` answered NOGOODSLAVE against a healthy
+  replica); the Redis 7.4 hash-field TTL commands were compiled out; the README counted 13 crates
+  and 3 `unsafe` blocks (15 and 61 sites).
+- `cargo test --workspace` failed 12 of 5,145 tests at HEAD; `parity_suite.py` was 175/179;
+  fresh-process RSS on small collections was 2–3x Redis.
+
+### Delivered since
+
+- **CI can run.** `780b5aa09` fixes the workflow YAML and the runtest working directory and tags
+  four doc fences rustdoc tried to compile; `84e37dd3c` applies rustfmt to the 36 workspace files
+  that failed the check. (frankenredis-rc-ci-repair-wvle1)
+- **Sentinel failover is wired.** `fr_sentinel::failover::failover_step` drives the existing
+  state machine from the server's monitoring tick; replicas are probed every tick (they were
+  discovered but never contacted, which made every one ineligible); `SLAVEOF NO ONE` and
+  `SLAVEOF ip port` are written over real sockets; a returning former master is demoted; the
+  sentinel process no longer loads `./dump.rdb`. End-to-end tests kill a primary and watch the
+  sentinel promote the replica unaided, and run a manual `SENTINEL FAILOVER` that demotes the old
+  primary. Peer vote exchange (quorum > 1) remains open as frankenredis-rc-sentinel-peer-votes.
+  (frankenredis-rc-sentinel-failover-dlev0)
+- **The threat ledger reaches disk.** `EvidenceLedger` is a bounded window (10,000 events) with a
+  flush cursor; `Runtime::flush_threat_ledger` appends `fr_threat_ledger_v1` JSON lines, called
+  from the server loop next to the AOF flush; hardened mode writes `threat-ledger.jsonl` by default
+  and the hidden config key `threat-ledger-file` moves or disables it.
+  (frankenredis-rc-threat-ledger-persist-d3lyv)
+- **Documents match the tree again.** README (crates, unsafe census, command truth, corpus counts,
+  statistics, CLI flags, Sentinel and ledger status, CI history, measured losses), AGENTS.md
+  (release profile), SENTINEL_SPEC.md (phase checklist), COMPREHENSIVE_SPEC (crate names).
+  (frankenredis-rc-readme-truth-pbit9)
+
+Beads filed for what remains: WAITAOF without appendonly, the RDB corpus StreamSkeleton test, the
+FUNCTION LIST LIBRARYNAME fixture, INFO persistence AOF fields, the CLIENT LIST blocked flag,
+ZRANDMEMBER RESP3 doubles, the three keyspace parity gates, the hash-field TTL contract decision,
+and the DLRC event-loop claim.
+
 ## [Unreleased] -- development on `main` (as of 2026-08-19)
 
 8,115 non-merge commits on `main` from 2026-02-13 through 2026-08-19; **5,729** of those landed after

@@ -140,15 +140,22 @@ We only use **Cargo** in this project, NEVER any other package manager.
 
 ### Release Profile
 
-The release build optimizes for performance (this is a server):
+The workspace does NOT override `[profile.release]`; a plain `--release` build uses cargo's
+defaults (`opt-level = 3`, `lto = false`, `codegen-units = 16`, `strip = "none"`). Performance
+claims are measured on the dedicated profile the root `Cargo.toml` defines for that purpose:
 
 ```toml
-[profile.release]
-opt-level = 3       # Maximum performance optimization
-lto = true          # Link-time optimization
-codegen-units = 1   # Single codegen unit for better optimization
-strip = true        # Remove debug symbols
+[profile.release-perf]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"   # keeps frames resolvable for flamegraph/perf
+strip = false
 ```
+
+Build it with `--profile release-perf`. (Until 2026-09-03 this section described a tuned
+`[profile.release]` that had never been added to the workspace.)
 
 ---
 

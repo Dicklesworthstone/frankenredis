@@ -255,3 +255,5 @@ rust_out
 # Test-output RDB dumps (real .rdb fixtures stay tracked; dump.rdb already ignored).
 noexist_*.rdb
 .rch-targets/
+# Hardened-mode threat-event ledger written next to dump.rdb by default.
+**/threat-ledger.jsonl
