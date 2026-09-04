@@ -6845,7 +6845,19 @@ impl ListValue {
                     // (build only) at fill 128 / 300 elements: `encode_listpack_string_entry`
                     // 7,800 + `encode_listpack_backlen` 4,500 + `encode_listpack_strings_blob`
                     // 5,727 instr/key in fr_persist, on a 139,595 instr/key DUMP.
-                    if list_node_exceeds_limit(fill, *lp_bytes, elems.len() as u64) {
+                    // Mutation paths (LPOP/pop_front/make_mut) ZERO lp_bytes on
+                    // front-biased chunks to mark the total dirty; every other
+                    // consumer re-derives it via owned_listpack_bytes — this arm
+                    // must too, or a DEBUG SAVE after an LPOP trips the
+                    // exactness assertion on the freshly encoded blob.
+                    // (frankenredis-rc-blocking-wake-family: found by
+                    // unit/type/list — DEBUG RELOAD + LPOP + SAVE)
+                    let lp_bytes = if *lp_bytes == 0 {
+                        owned_listpack_bytes(elems)
+                    } else {
+                        *lp_bytes
+                    };
+                    if list_node_exceeds_limit(fill, lp_bytes, elems.len() as u64) {
                         return None;
                     }
                     let slices: Vec<&[u8]> = if *front_biased {
@@ -6853,10 +6865,10 @@ impl ListValue {
                     } else {
                         elems.iter().map(Vec::as_slice).collect()
                     };
-                    let blob = Self::encode_node_blob(&slices, *lp_bytes)?;
+                    let blob = Self::encode_node_blob(&slices, lp_bytes)?;
                     debug_assert_eq!(
                         blob.len() as u64,
-                        *lp_bytes,
+                        lp_bytes,
                         "lp_bytes must be the EXACT blob length; the early reject above relies on it"
                     );
                     (Cow::Owned(blob), elems.len())
