@@ -51466,17 +51466,15 @@ replica_announced:1\r\n",
                 replica.fsync_offset = offset;
             }
         }
-        // (frankenredis-xmix2) A freshly-attached replica has no db context.
-        // Upstream replicationFeedSlaves tracks repldb PER replica and emits
-        // `SELECT <db>` the first time the writing client's db differs; fr's
-        // backlog is one shared byte stream, so the equivalent is to enqueue
-        // the stream's current db ONCE here — it is the first record the new
-        // consumer reads after the RDB payload, and an idempotent no-op for
-        // already-attached replicas.
-        self.capture_aof_record(&[
-            b"SELECT".to_vec(),
-            self.server.aof_selected_db.to_string().into_bytes(),
-        ]);
+        // (frankenredis-xmix2, reopened) NOTE: an earlier attempt enqueued a
+        // `SELECT <aof_selected_db>` record here so freshly-attached replicas
+        // would learn the stream db. It is deliberately ABSENT: the capture
+        // advances primary_offset, so a bare PSYNC on a fresh runtime answered
+        // `FULLRESYNC <replid> 23/46` instead of `... 0`, breaking
+        // conformance_core_replication (fixtures pin the upstream observable).
+        // The lazy per-write SELECT in the generic capture path covers the
+        // upstream tcl scenarios; the mid-stream-attach case needs the
+        // per-replica repldb design documented in the bead.
         self.server.refresh_replica_ack_snapshots();
         response
     }
