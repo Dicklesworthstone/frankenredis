@@ -7354,6 +7354,13 @@ pub struct Store {
     /// layer fires a "del"/"unlink" keyspace event per real removal only.
     last_del_removed: Vec<Vec<u8>>,
 
+    /// (frankenredis-cvaj3) Keys deleted by the RESTORE already-expired discard
+    /// branch, recorded UNCONDITIONALLY: the runtime consumes them to propagate
+    /// DEL/UNLINK (per lazyfree-lazy-server-del) instead of the RESTORE itself,
+    /// whether or not keyspace notifications are enabled (which is what gates
+    /// `last_del_removed`).
+    restore_discard_deletions: Vec<Vec<u8>>,
+
     /// Pending keyspace notification messages (channel, message) to deliver
     /// via the pub/sub system after command execution.
     pub keyspace_notifications: Vec<(Vec<u8>, Vec<u8>)>,
@@ -7776,6 +7783,7 @@ impl Default for Store {
             avg_ttl_deadline_sum_cache: std::cell::RefCell::new(Vec::new()),
             notify_keyspace_events: 0,
             last_del_removed: Vec::new(),
+            restore_discard_deletions: Vec::new(),
             keyspace_notifications: Vec::new(),
             lazy_expired_propagation: Vec::new(),
             last_xadd_trimmed: false,
@@ -37789,13 +37797,14 @@ impl Store {
         // already-expired AFTER full payload verification and BEFORE any
         // mutation: a TTL already in the past NEVER stores the value. With
         // REPLACE the pre-check dbDelete has removed any existing key -- here
-        // via del_inner, which bumps dirty and records the removal in
-        // `last_del_removed` for the runtime to propagate as DEL/UNLINK (per
-        // lazyfree-lazy-server-del) and fire the "del" keyspace event.
+        // via del_inner (bumps dirty); the removal is recorded UNCONDITIONALLY
+        // in `restore_discard_deletions` because the runtime's DEL/UNLINK
+        // propagation replaces the RESTORE itself, while `last_del_removed`
+        // is populated only when keyspace notifications are enabled.
         // Without REPLACE nothing is deleted. +OK either way.
         if expires_at_ms.is_some_and(|expiry| expiry <= now_ms) {
-            if replace {
-                self.del_inner(std::slice::from_ref(&key), now_ms);
+            if replace && self.del_inner(std::slice::from_ref(&key), now_ms) > 0 {
+                self.restore_discard_deletions.push(key.to_vec());
             }
             return Ok(());
         }
@@ -37930,6 +37939,13 @@ impl Store {
         }
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
+    }
+
+    /// Drain the keys removed by the RESTORE already-expired discard branch
+    /// (frankenredis-cvaj3). Unconditional recording; see the field doc.
+    #[must_use]
+    pub fn take_restore_discard_deletions(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.restore_discard_deletions)
     }
 
     /// Generate AOF-compatible command sequences that reconstruct the entire store.

@@ -41326,25 +41326,24 @@ impl Runtime {
         };
         let elapsed_us = self.finish_chained_command(start);
         let dirty_after = self.server.store.dirty;
-        // Capture the keys DEL/UNLINK actually removed, so the keyspace
-        // dispatcher fires "del"/"unlink" only for real removals (never for a
-        // missing or duplicate key argument — matching upstream delGenericCommand
-        // which notifies per successful dbDelete). Taken now, before lazy-expiry
-        // handling might run its own store.del and overwrite the record.
-        // (frankenredis-cvaj3) RESTORE joins DEL/UNLINK here: an ABSTTL-in-the-past
-        // RESTORE ... REPLACE deletes the old key through the same store path, and
-        // the removed key drives BOTH the "del" keyspace event and the DEL/UNLINK
-        // propagation record that replaces the RESTORE itself.
+        // (frankenredis-cvaj3) RESTORE drains its OWN channel: an ABSTTL-in-the-past
+        // RESTORE ... REPLACE deletes the old key through a dedicated record so the
+        // removed key drives BOTH the "del" keyspace event and the DEL/UNLINK
+        // propagation record that replaces the RESTORE itself. (RESTORE is NOT added
+        // to the DEL/UNLINK `last_del_removed` gate: that buffer is populated only
+        // when keyspace notifications are enabled, and the propagation must not be.)
         let del_removed_keys = if argv
             .first()
-            .is_some_and(|c| {
-                c.eq_ignore_ascii_case(b"DEL")
-                    || c.eq_ignore_ascii_case(b"UNLINK")
-                    || c.eq_ignore_ascii_case(b"RESTORE")
-                    || c.eq_ignore_ascii_case(b"RESTORE-ASKING")
-            })
+            .is_some_and(|c| c.eq_ignore_ascii_case(b"DEL") || c.eq_ignore_ascii_case(b"UNLINK"))
         {
             self.server.store.take_last_del_removed()
+        } else {
+            Vec::new()
+        };
+        let restore_discard_deletions = if argv.first().is_some_and(|c| {
+            c.eq_ignore_ascii_case(b"RESTORE") || c.eq_ignore_ascii_case(b"RESTORE-ASKING")
+        }) {
+            self.server.store.take_restore_discard_deletions()
         } else {
             Vec::new()
         };
@@ -41471,20 +41470,18 @@ impl Runtime {
                     // RESTORE that stored nothing. The removed key's SELECT context is
                     // emitted first when the stream's last db differs, exactly like the
                     // lazy-expiry propagation above.
-                    let is_restore_discard = !del_removed_keys.is_empty()
-                        && argv
-                            .first()
-                            .is_some_and(|c| {
-                                c.eq_ignore_ascii_case(b"RESTORE")
-                                    || c.eq_ignore_ascii_case(b"RESTORE-ASKING")
-                            });
+                    let is_restore_discard = !restore_discard_deletions.is_empty()
+                        && argv.first().is_some_and(|c| {
+                            c.eq_ignore_ascii_case(b"RESTORE")
+                                || c.eq_ignore_ascii_case(b"RESTORE-ASKING")
+                        });
                     if is_restore_discard {
                         let op: &[u8] = if self.server.lazyfree_lazy_server_del_enabled() {
                             b"UNLINK"
                         } else {
                             b"DEL"
                         };
-                        for key in &del_removed_keys {
+                        for key in &restore_discard_deletions {
                             let (db, logical) = decode_db_key(key)
                                 .map(|(d, lk)| (d, lk.to_vec()))
                                 .unwrap_or((0, key.clone()));
@@ -41637,7 +41634,7 @@ impl Runtime {
                             // already-expired value fired "del" per removed key (see
                             // the branch below); the generic "restore" event must
                             // not also fire for the key nothing restored.
-                            let is_restore_discard_notify = !del_removed_keys.is_empty()
+                            let is_restore_discard_notify = !restore_discard_deletions.is_empty()
                                 && argv.first().is_some_and(|c| {
                                     c.eq_ignore_ascii_case(b"RESTORE")
                                         || c.eq_ignore_ascii_case(b"RESTORE-ASKING")
@@ -41765,7 +41762,7 @@ impl Runtime {
                                 // actually removed, matching upstream's explicit
                                 // notifyKeyspaceEvent(NOTIFY_GENERIC, "del", ...)
                                 // in the discard branch of restoreCommand.
-                                for key in &del_removed_keys {
+                                for key in &restore_discard_deletions {
                                     let logical = decode_db_key(key)
                                         .map(|(_, lk)| lk)
                                         .unwrap_or(key.as_slice());
@@ -51450,6 +51447,17 @@ replica_announced:1\r\n",
                 replica.fsync_offset = offset;
             }
         }
+        // (frankenredis-xmix2) A freshly-attached replica has no db context.
+        // Upstream replicationFeedSlaves tracks repldb PER replica and emits
+        // `SELECT <db>` the first time the writing client's db differs; fr's
+        // backlog is one shared byte stream, so the equivalent is to enqueue
+        // the stream's current db ONCE here — it is the first record the new
+        // consumer reads after the RDB payload, and an idempotent no-op for
+        // already-attached replicas.
+        self.capture_aof_record(&[
+            b"SELECT".to_vec(),
+            self.server.aof_selected_db.to_string().into_bytes(),
+        ]);
         self.server.refresh_replica_ack_snapshots();
         response
     }
