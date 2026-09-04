@@ -37259,6 +37259,18 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
     let ready_keys = runtime.drain_ready_keys();
 
     let active_blocked = blocked_wake_index.candidates(&ready_keys, ts);
+    // (frankenredis-rc-blocking-wake-family) `ts` was sampled at the head of
+    // this pass; a long-running command inside the pass (DEBUG SLEEP inside
+    // EXEC, a slow SCAN) can outrun it by whole expiry windows. Serving a
+    // blocked client with a stale clock pops values from keys whose deadline
+    // passed mid-command — upstream reads mstime() fresh at serve time. The
+    // re-sample happens ONLY when a candidate exists, so the no-candidate fast
+    // path keeps its zero-extra-clock-sample shape (zw36c).
+    let ts = if active_blocked.is_empty() {
+        ts
+    } else {
+        now_unix_time().ms
+    };
     for token in active_blocked {
         let Some(conn) = clients.get_mut(&token) else {
             blocked_tokens.remove(&token);
