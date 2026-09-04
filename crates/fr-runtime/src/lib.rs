@@ -51447,17 +51447,6 @@ replica_announced:1\r\n",
                 replica.fsync_offset = offset;
             }
         }
-        // (frankenredis-xmix2) A freshly-attached replica has no db context.
-        // Upstream replicationFeedSlaves tracks repldb PER replica and emits
-        // `SELECT <db>` the first time the writing client's db differs; fr's
-        // backlog is one shared byte stream, so the equivalent is to enqueue
-        // the stream's current db ONCE here — it is the first record the new
-        // consumer reads after the RDB payload, and an idempotent no-op for
-        // already-attached replicas.
-        self.capture_aof_record(&[
-            b"SELECT".to_vec(),
-            self.server.aof_selected_db.to_string().into_bytes(),
-        ]);
         self.server.refresh_replica_ack_snapshots();
         response
     }
