@@ -4483,7 +4483,13 @@ impl ListChunk {
                 .collect();
             *self = Self::Owned {
                 elems: Arc::new(elems),
-                lp_bytes: 0,
+                // The reversal permutes entries without changing their encoded
+                // sizes, so the source listpack blob's length IS the exact
+                // encoded length of the Owned chunk. A zero here made any later
+                // DUMP trip the lp_bytes exactness assertion (and, in release,
+                // bypass the node-size limit check). (frankenredis-rc-blocking-
+                // wake-family: found by unit/type/list on the retained path)
+                lp_bytes: bytes.len() as u64,
                 front_biased: true,
             };
         }
