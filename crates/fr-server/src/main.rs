@@ -35573,9 +35573,10 @@ fn process_argv_frame(
     // Arm its pending SELECT so the feed path prepends the stream's current db
     // before the next backlog tail — upstream emits this per replica inside
     // replicationFeedSlaves.
-    if argv.first().is_some_and(|c| {
-        c.eq_ignore_ascii_case(b"SYNC") || c.eq_ignore_ascii_case(b"PSYNC")
-    }) && matches!(&response, RespFrame::SimpleString(s) if s.starts_with("FULLRESYNC"))
+    if argv
+        .first()
+        .is_some_and(|c| c.eq_ignore_ascii_case(b"SYNC") || c.eq_ignore_ascii_case(b"PSYNC"))
+        && matches!(&response, RespFrame::SimpleString(s) if s.starts_with("FULLRESYNC"))
     {
         conn.replica_pending_select = Some(runtime.replication_stream_selected_db());
     }
@@ -37275,80 +37276,152 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
         return;
     }
 
-    let ready_keys = runtime.drain_ready_keys();
-
-    let active_blocked = blocked_wake_index.candidates(&ready_keys, ts);
-    // (frankenredis-rc-blocking-wake-family) `ts` was sampled at the head of
-    // this pass; a long-running command inside the pass (DEBUG SLEEP inside
-    // EXEC, a slow SCAN) can outrun it by whole expiry windows. Serving a
-    // blocked client with a stale clock pops values from keys whose deadline
-    // passed mid-command — upstream reads mstime() fresh at serve time. The
-    // re-sample happens ONLY when a candidate exists, so the no-candidate fast
-    // path keeps its zero-extra-clock-sample shape (zw36c).
-    let ts = if active_blocked.is_empty() {
-        ts
-    } else {
-        now_unix_time().ms
-    };
-    for token in active_blocked {
-        let Some(conn) = clients.get_mut(&token) else {
-            blocked_tokens.remove(&token);
-            blocked_wake_index.remove(token);
-            continue;
-        };
-        let Some(blocked) = &conn.blocked else {
-            blocked_tokens.remove(&token);
-            blocked_wake_index.remove(token);
-            continue;
-        };
-
-        let mut should_check = ts >= blocked.deadline_ms
-            || matches!(
-                &blocked.op,
-                BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. }
-            );
-        if !should_check && blocked.op.any_key_ready(&ready_keys) {
-            should_check = true;
+    // (frankenredis-rc-blocking-wake-family) Serve the wake cascade bounded-
+    // synchronously: upstream runs handleClientsBlockedOnKeys at beforeSleep,
+    // so a fulfillment's own writes (a BRPOPLPUSH serving into the next
+    // waiter's key) re-serve BEFORE the next client command executes — the
+    // Circular BRPOPLPUSH test asserts that settled state. fr previously
+    // deferred each cascade step to the next event-loop pass, losing that
+    // ordering. Bounded at 16 rounds; a deeper chain defers the remainder to
+    // the next pass exactly as before.
+    let mut serve_rounds = 0u32;
+    loop {
+        let ready_keys = runtime.drain_ready_keys();
+        let active_blocked = blocked_wake_index.candidates(&ready_keys, ts);
+        if active_blocked.is_empty() && ready_keys.is_empty() {
+            break;
         }
-
-        if !should_check {
-            continue;
+        serve_rounds += 1;
+        if serve_rounds > 16 {
+            break;
         }
+        // (frankenredis-rc-blocking-wake-family) `ts` was sampled at the head of
+        // this pass; a long-running command inside the pass (DEBUG SLEEP inside
+        // EXEC, a slow SCAN) can outrun it by whole expiry windows. Serving a
+        // blocked client with a stale clock pops values from keys whose deadline
+        // passed mid-command — upstream reads mstime() fresh at serve time. The
+        // re-sample happens ONLY when a candidate exists, so the no-candidate fast
+        // path keeps its zero-extra-clock-sample shape (zw36c).
+        let ts = if active_blocked.is_empty() {
+            ts
+        } else {
+            now_unix_time().ms
+        };
+        for token in active_blocked {
+            let Some(conn) = clients.get_mut(&token) else {
+                blocked_tokens.remove(&token);
+                blocked_wake_index.remove(token);
+                continue;
+            };
+            let Some(blocked) = &conn.blocked else {
+                blocked_tokens.remove(&token);
+                blocked_wake_index.remove(token);
+                continue;
+            };
 
-        // Check timeout first.
-        if ts >= blocked.deadline_ms {
-            let resp3 = conn.session.resp_protocol_version() == 3;
-            encode_client_reply(
-                &blocked_timeout_response(&blocked.op, runtime, ts),
-                resp3,
-                &mut conn.write_buf,
-            );
-            conn.blocked = None;
-            blocked_tokens.remove(&token);
-            blocked_wake_index.remove(token);
-            runtime.mark_client_unblocked(conn.session.client_id);
-
-            // Process any commands the client pipelined while blocked.
-            if !conn.read_buf.is_empty() {
-                let session = std::mem::take(&mut conn.session);
-                let prev = runtime.swap_session(session);
-                let budget_exhausted = process_buffered_frames(
-                    token,
-                    conn,
-                    runtime,
-                    blocked_tokens,
-                    blocked_wake_index,
-                    closing_tokens,
-                    write_tokens,
-                    paused_tokens,
-                    ts,
-                    ts.saturating_mul(1000),
+            let mut should_check = ts >= blocked.deadline_ms
+                || matches!(
+                    &blocked.op,
+                    BlockingOp::Waitaof { .. } | BlockingOp::Wait { .. }
                 );
-                record_deferred_buffered_token(token, conn, deferred_tokens, budget_exhausted);
-                let updated_session = runtime.swap_session(prev);
-                conn.session = updated_session;
+            if !should_check && blocked.op.any_key_ready(&ready_keys) {
+                should_check = true;
             }
 
+            if !should_check {
+                continue;
+            }
+
+            // Check timeout first.
+            if ts >= blocked.deadline_ms {
+                let resp3 = conn.session.resp_protocol_version() == 3;
+                encode_client_reply(
+                    &blocked_timeout_response(&blocked.op, runtime, ts),
+                    resp3,
+                    &mut conn.write_buf,
+                );
+                conn.blocked = None;
+                blocked_tokens.remove(&token);
+                blocked_wake_index.remove(token);
+                runtime.mark_client_unblocked(conn.session.client_id);
+
+                // Process any commands the client pipelined while blocked.
+                if !conn.read_buf.is_empty() {
+                    let session = std::mem::take(&mut conn.session);
+                    let prev = runtime.swap_session(session);
+                    let budget_exhausted = process_buffered_frames(
+                        token,
+                        conn,
+                        runtime,
+                        blocked_tokens,
+                        blocked_wake_index,
+                        closing_tokens,
+                        write_tokens,
+                        paused_tokens,
+                        ts,
+                        ts.saturating_mul(1000),
+                    );
+                    record_deferred_buffered_token(token, conn, deferred_tokens, budget_exhausted);
+                    let updated_session = runtime.swap_session(prev);
+                    conn.session = updated_session;
+                }
+
+                drive_client_output(
+                    token,
+                    conn,
+                    OutputDriveContext {
+                        runtime,
+                        poll,
+                        write_tokens,
+                        closing_tokens,
+                        writer_pool,
+                    },
+                    false,
+                );
+                continue;
+            }
+
+            // Try to fulfill the blocking operation.
+            let session = std::mem::take(&mut conn.session);
+            let prev = runtime.swap_session(session);
+
+            let result = try_fulfill_blocked(&blocked.op, runtime, ts);
+
+            if let Some(response) = result {
+                // (frankenredis-pgplm) Session is swapped into `runtime` here, so
+                // its negotiated protocol drives the RESP3 null encoding.
+                let resp3 = runtime.client_session().resp_protocol_version() == 3;
+                encode_client_reply(&response, resp3, &mut conn.write_buf);
+                conn.blocked = None;
+                blocked_tokens.remove(&token);
+                blocked_wake_index.remove(token);
+                runtime.mark_client_unblocked(runtime.client_id());
+
+                // Process any commands the client pipelined while blocked.
+                if !conn.read_buf.is_empty() {
+                    // The session is already swapped in here.
+                    let budget_exhausted = process_buffered_frames(
+                        token,
+                        conn,
+                        runtime,
+                        blocked_tokens,
+                        blocked_wake_index,
+                        closing_tokens,
+                        write_tokens,
+                        paused_tokens,
+                        ts,
+                        ts.saturating_mul(1000),
+                    );
+                    record_deferred_buffered_token(token, conn, deferred_tokens, budget_exhausted);
+                }
+            }
+
+            let updated_session = runtime.swap_session(prev);
+            conn.session = updated_session;
+
+            // Always arm write interest if there's pending output, even if the
+            // client re-blocked during pipelined command processing — the response
+            // from the first unblock still needs to reach the client.
             drive_client_output(
                 token,
                 conn,
@@ -37361,62 +37434,7 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
                 },
                 false,
             );
-            continue;
         }
-
-        // Try to fulfill the blocking operation.
-        let session = std::mem::take(&mut conn.session);
-        let prev = runtime.swap_session(session);
-
-        let result = try_fulfill_blocked(&blocked.op, runtime, ts);
-
-        if let Some(response) = result {
-            // (frankenredis-pgplm) Session is swapped into `runtime` here, so
-            // its negotiated protocol drives the RESP3 null encoding.
-            let resp3 = runtime.client_session().resp_protocol_version() == 3;
-            encode_client_reply(&response, resp3, &mut conn.write_buf);
-            conn.blocked = None;
-            blocked_tokens.remove(&token);
-            blocked_wake_index.remove(token);
-            runtime.mark_client_unblocked(runtime.client_id());
-
-            // Process any commands the client pipelined while blocked.
-            if !conn.read_buf.is_empty() {
-                // The session is already swapped in here.
-                let budget_exhausted = process_buffered_frames(
-                    token,
-                    conn,
-                    runtime,
-                    blocked_tokens,
-                    blocked_wake_index,
-                    closing_tokens,
-                    write_tokens,
-                    paused_tokens,
-                    ts,
-                    ts.saturating_mul(1000),
-                );
-                record_deferred_buffered_token(token, conn, deferred_tokens, budget_exhausted);
-            }
-        }
-
-        let updated_session = runtime.swap_session(prev);
-        conn.session = updated_session;
-
-        // Always arm write interest if there's pending output, even if the
-        // client re-blocked during pipelined command processing — the response
-        // from the first unblock still needs to reach the client.
-        drive_client_output(
-            token,
-            conn,
-            OutputDriveContext {
-                runtime,
-                poll,
-                write_tokens,
-                closing_tokens,
-                writer_pool,
-            },
-            false,
-        );
     }
 }
 
@@ -37849,12 +37867,9 @@ fn propagate_writes_to_replicas(
                 // shared backlog and offset accounting; fr prepends the frame to
                 // THIS replica's payload only.
                 let db_str = db.to_string();
-                let mut select_frame = format!(
-                    "*2\r\n$6\r\nSELECT\r\n${}\r\n{}\r\n",
-                    db_str.len(),
-                    db_str
-                )
-                .into_bytes();
+                let mut select_frame =
+                    format!("*2\r\n$6\r\nSELECT\r\n${}\r\n{}\r\n", db_str.len(), db_str)
+                        .into_bytes();
                 select_frame.extend_from_slice(&bytes);
                 bytes = select_frame;
             }
