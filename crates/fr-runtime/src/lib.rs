@@ -42408,6 +42408,14 @@ impl Runtime {
         std::mem::take(&mut self.server.ready_keys)
     }
 
+    /// The db the shared replication/AOF stream is currently selected on —
+    /// the value a freshly-attached replica needs in its leading SELECT
+    /// frame. (frankenredis-xmix2)
+    #[must_use]
+    pub fn replication_stream_selected_db(&self) -> usize {
+        self.server.aof_selected_db
+    }
+
     /// Read-only, no-stat type peeks for the blocked-client serve path: only a
     /// key whose *current* type matches what a blocked client is waiting for may
     /// be served (a non-list write like SET must NOT wake a BLPOP waiter).

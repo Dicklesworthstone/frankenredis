@@ -547,6 +547,13 @@ struct ClientConnection {
     blocked: Option<BlockedState>,
     /// If set, this client is a replica and this is the last offset sent to it.
     replication_sent_offset: Option<ReplOffset>,
+    /// (frankenredis-xmix2) Set on FULLRESYNC: the stream db the replica must
+    /// be told about before the next backlog tail. Upstream tracks `repldb`
+    /// per replica inside replicationFeedSlaves and emits the SELECT straight
+    /// to that slave's socket; fr mirrors that by prepending the frame at feed
+    /// time WITHOUT counting it in primary_offset (upstream's per-slave SELECT
+    /// is likewise outside the shared backlog).
+    replica_pending_select: Option<usize>,
     /// Reply sequencing for the opt-in key-sharded command execution bus.
     ///
     /// Shards execute independently, so completions may arrive out of order.
@@ -878,6 +885,7 @@ impl ClientConnection {
             closing: false,
             blocked: None,
             replication_sent_offset: None,
+            replica_pending_select: None,
             sharded_replies: ShardedReplyOrder::default(),
             shared_nothing_route_tag: Vec::new(),
             shared_nothing_partition: None,
@@ -35560,6 +35568,17 @@ fn process_argv_frame(
         // them all; the type-checked serve path decides which actually unblock.
         runtime.signal_ready_keys(blocked_wake_index.by_key.keys().cloned());
     }
+
+    // (frankenredis-xmix2) A FULLRESYNC-ing replica starts with no db context.
+    // Arm its pending SELECT so the feed path prepends the stream's current db
+    // before the next backlog tail — upstream emits this per replica inside
+    // replicationFeedSlaves.
+    if argv.first().is_some_and(|c| {
+        c.eq_ignore_ascii_case(b"SYNC") || c.eq_ignore_ascii_case(b"PSYNC")
+    }) && matches!(&response, RespFrame::SimpleString(s) if s.starts_with("FULLRESYNC"))
+    {
+        conn.replica_pending_select = Some(runtime.replication_stream_selected_db());
+    }
     // Check for QUIT command.
     if is_quit_frame(argv) {
         encode_client_reply(&response, client_resp3, &mut conn.write_buf);
@@ -37823,7 +37842,22 @@ fn propagate_writes_to_replicas(
             // form was O(backlog) per iteration (O(n²) over a replicated write
             // stream) to ship one record to a caught-up replica; this is byte-
             // identical and O(records in the tail). (frankenredis-cc aoftail)
-            let bytes = runtime.encoded_aof_stream_from_offset(sent_offset.0);
+            let mut bytes = runtime.encoded_aof_stream_from_offset(sent_offset.0);
+            if let Some(db) = conn.replica_pending_select.take() {
+                // (frankenredis-xmix2) Per-replica leading SELECT: upstream writes
+                // the per-slave SELECT straight to that slave's socket, outside the
+                // shared backlog and offset accounting; fr prepends the frame to
+                // THIS replica's payload only.
+                let db_str = db.to_string();
+                let mut select_frame = format!(
+                    "*2\r\n$6\r\nSELECT\r\n${}\r\n{}\r\n",
+                    db_str.len(),
+                    db_str
+                )
+                .into_bytes();
+                select_frame.extend_from_slice(&bytes);
+                bytes = select_frame;
+            }
             if !bytes.is_empty() {
                 conn.write_buf.extend_from_slice(&bytes);
                 drive_client_output(
