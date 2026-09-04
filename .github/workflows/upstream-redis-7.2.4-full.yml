@@ -131,6 +131,47 @@ jobs:
           path: artifacts/upstream_redis_tcl_full
           if-no-files-found: warn
 
+      # (frankenredis-rc-upstream-verdict-integrity) The run step carries
+      # `continue-on-error` so the summary/evidence steps always execute; this
+      # step converts the SUITE'S OWN machine-readable verdict into the job
+      # conclusion, so a failing gate can never show a green check on
+      # push/schedule runs. This STRENGTHENS the gate (AGENTS.md release
+      # criteria, verbatim): correct pinned commit, anti_vacuity_ok, every
+      # expected unit completed exactly once, and suite_passed.
+      - name: Verify complete upstream suite verdict
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report_path = Path(os.environ["REPORT_DIR"]) / "report.json"
+          if not report_path.is_file():
+              raise SystemExit(
+                  "FAIL: the upstream runner produced no report.json — harness failure, "
+                  "and a release gate cannot be green without its evidence."
+              )
+          r = json.loads(report_path.read_text())
+          pinned_commit = "d2c8a4b91e8c0e6aefd1f5bc0bf582cddbe046b7"
+          checks = {
+              "pinned Redis 7.2.4 commit": r.get("redis_commit") == pinned_commit,
+              "anti_vacuity_ok": r.get("anti_vacuity_ok") is True,
+              "all expected units completed": r.get("completed_unit_count")
+              == r.get("expected_unit_count"),
+              "suite_passed": r.get("suite_passed") is True,
+          }
+          for name, ok in checks.items():
+              print(f"{'PASS' if ok else 'FAIL'}: {name}")
+          if not all(checks.values()):
+              raise SystemExit(
+                  "FAIL: complete upstream Redis 7.2.4 Tcl suite verdict is not green "
+                  "(see the checks above). Do not weaken the harness to get green — "
+                  "fix the divergences (AGENTS.md release doctrine)."
+              )
+          PY
+
       - name: Enforce complete upstream suite when requested
         if: always() && github.event_name == 'workflow_dispatch' && inputs.enforce
         env:
