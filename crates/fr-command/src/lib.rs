@@ -30683,12 +30683,17 @@ fn parse_blocking_deadline_seconds(arg: &[u8], now_ms: u64) -> Result<u64, Comma
     }
 
     let timeout_ms = timeout * 1000.0;
-    if !timeout_ms.is_finite() {
+    // Upstream timeout.c::getTimeoutFromObjectOrReply checks the *1000 product
+    // against LLONG_MAX (9.223e18) — NOT u64::MAX — and then 'tval + now'
+    // against LLONG_MAX - now. 0x7FFFFFFFFFFFFF seconds lands between the two
+    // and must answer 'timeout is out of range'. (frankenredis-rc-blocking-
+    // wake-family — unit/type/list 'BLPOP: timeout value out of range')
+    if !timeout_ms.is_finite() || timeout_ms > i64::MAX as f64 {
         return Err(blocking_timeout_out_of_range_error());
     }
 
     let delta_ms = timeout_ms.ceil();
-    if delta_ms > u64::MAX as f64 {
+    if delta_ms > (i64::MAX as f64 - now_ms as f64) {
         return Err(blocking_timeout_out_of_range_error());
     }
 
@@ -30722,13 +30727,74 @@ fn parse_blocking_deadline_milliseconds(arg: &[u8], now_ms: u64) -> Result<u64, 
 /// the deadline yields `ERR timeout is out of range`. Collapsing any two of
 /// these produces user-visible wording divergence on BLPOP/BRPOP/BZPOPMIN/etc.
 /// (frankenredis-82gyd)
+///
+/// C99 `strtold` semantics for the hexadecimal floating form (`0x` mantissa,
+/// optional `.` and `p`-exponent) that Rust's f64 parser rejects — BLPOP
+/// blist1 0x7FFFFFFFFFFFFF must PARSE and then overflow into 'timeout is out
+/// of range', exactly as it does on vendored Redis. (frankenredis-rc-blocking-
+/// wake-family — unit/type/list 'BLPOP: timeout value out of range')
+fn parse_c99_hex_float(text: &str) -> Option<f64> {
+    let (sign, body) = match text.as_bytes().first()? {
+        b'-' => (-1.0f64, &text[1..]),
+        b'+' => (1.0f64, &text[1..]),
+        _ => (1.0f64, text),
+    };
+    let body = body
+        .strip_prefix("0x")
+        .or_else(|| body.strip_prefix("0X"))?;
+    let (mantissa_str, exponent) = match body.find(['p', 'P']) {
+        Some(pos) => (&body[..pos], body[pos + 1..].parse::<i32>().ok()?),
+        None => (body, 0),
+    };
+    let (int_part, frac_part) = match mantissa_str.find('.') {
+        Some(pos) => (&mantissa_str[..pos], &mantissa_str[pos + 1..]),
+        None => (mantissa_str, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    let mut value = 0f64;
+    let mut any_digit = false;
+    for ch in int_part.bytes() {
+        value = value * 16.0 + (ch as char).to_digit(16)? as f64;
+        any_digit = true;
+    }
+    let mut scale = 1.0 / 16.0;
+    for ch in frac_part.bytes() {
+        value += (ch as char).to_digit(16)? as f64 * scale;
+        scale /= 16.0;
+        any_digit = true;
+    }
+    if !any_digit {
+        return None;
+    }
+    Some(sign * value * 2f64.powi(exponent))
+}
+
+/// Parse and validate a blocking command timeout. Returns an error for negative values.
+///
+/// Wording / ordering must match upstream Redis 7.2 util.c::string2ld plus the
+/// call sites in t_list.c / t_zset.c / blocked.c. Parse failure or NaN yields
+/// `ERR timeout is not a float or out of range`; any finite negative or `-inf`
+/// yields `ERR timeout is negative`; `+inf` or a finite positive that overflows
+/// the deadline yields `ERR timeout is out of range`. Collapsing any two of
+/// these produces user-visible wording divergence on BLPOP/BRPOP/BZPOPMIN/etc.
+/// (frankenredis-82gyd)
 fn parse_blocking_timeout(arg: &[u8]) -> Result<f64, CommandError> {
-    let text = std::str::from_utf8(arg).map_err(|_| {
-        CommandError::Custom("ERR timeout is not a float or out of range".to_string())
-    })?;
-    let timeout: f64 = text.parse().map_err(|_| {
-        CommandError::Custom("ERR timeout is not a float or out of range".to_string())
-    })?;
+    let not_a_float =
+        || CommandError::Custom("ERR timeout is not a float or out of range".to_string());
+    let text = std::str::from_utf8(arg).map_err(|_| not_a_float())?;
+    // C's strtold (util.c::string2ld) accepts C99 hexadecimal floating
+    // literals; Rust's f64 parser does not. BLPOP blist1 0x7FFFFFFFFFFFFF
+    // must parse and then trip the *1000 overflow to 'timeout is out of
+    // range', not fail as an unparseable float. (frankenredis-rc-blocking-
+    // wake-family — unit/type/list 'BLPOP: timeout value out of range')
+    let timeout: f64 =
+        if text.len() > 2 && text.as_bytes()[0] == b'0' && (text.as_bytes()[1] | 0x20) == b'x' {
+            parse_c99_hex_float(text).ok_or_else(not_a_float)?
+        } else {
+            text.parse().map_err(|_| not_a_float())?
+        };
     if timeout.is_nan() {
         return Err(CommandError::Custom(
             "ERR timeout is not a float or out of range".to_string(),
