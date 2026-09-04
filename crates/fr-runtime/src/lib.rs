@@ -42427,19 +42427,21 @@ impl Runtime {
         // so the peek must address the key through THAT session's db namespace.
         // The raw key only resolves on db 0 (identity encoding), which is why
         // blocked clients on db >= 1 were never woken by a push. (frankenredis-n01zc)
+        //
+        // The gate is EXPIRY-AWARE (peek_value_type skips expired-but-present
+        // entries): an intermediate expiry-unchecked variant made the serve
+        // attempt run for expired keys and served dead values / reaped early —
+        // upstream's expected streams show the client stays blocked and the
+        // test's own later DEL propagates instead. (frankenredis-n01zc,
+        // rc-blocking-wake-family)
         let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
-        // The WAKE gate uses the expiry-UNchecked type signal (upstream
-        // scanDatabaseForReadyKeys dictFind semantics): an expired entry still
-        // signals, so the serve attempt runs, reaps the key, propagates the
-        // DEL, and leaves the client blocked — instead of silently skipping the
-        // serve and losing the propagation. (frankenredis-rc-blocking-wake-family)
-        self.server.store.wake_value_type(&namespaced) == Some(fr_store::ValueType::List)
+        self.server.store.peek_value_type(&namespaced, now_ms) == Some(fr_store::ValueType::List)
     }
 
     #[must_use]
     pub fn peek_is_zset(&self, key: &[u8], now_ms: u64) -> bool {
         let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
-        self.server.store.wake_value_type(&namespaced) == Some(fr_store::ValueType::ZSet)
+        self.server.store.peek_value_type(&namespaced, now_ms) == Some(fr_store::ValueType::ZSet)
     }
 
     // ── MONITOR support ─────────────────────────────────────────────

@@ -13693,26 +13693,6 @@ impl Store {
         })
     }
 
-    /// Type signal for the blocked-client WAKE path (`signalKeyAsReady`
-    /// equivalent): like upstream `scanDatabaseForReadyKeys`, which does a
-    /// plain `dictFind` WITHOUT an expiry check, an entry whose deadline has
-    /// passed still signals — the serve attempt then reaps it, propagates the
-    /// DEL, and leaves the client blocked. The expiry-aware
-    /// [`Store::peek_value_type`] would skip the serve entirely and lose the
-    /// propagation. (frankenredis-rc-blocking-wake-family)
-    #[must_use]
-    pub fn wake_value_type(&self, key: &[u8]) -> Option<ValueType> {
-        let entry = self.entries.get(key)?;
-        Some(match &entry.value {
-            Value::String(_) | Value::Integer(_) => ValueType::String,
-            Value::Hash(_) => ValueType::Hash,
-            Value::List(_) => ValueType::List,
-            Value::Set(_) => ValueType::Set,
-            Value::SortedSet(_) => ValueType::ZSet,
-            Value::Stream(_) => ValueType::Stream,
-        })
-    }
-
     /// Read-only, no-stat string length: `Ok(0)` for a missing/expired key,
     /// `Ok(len)` for a string/int, `Err(WrongType)` otherwise — WITHOUT bumping
     /// keyspace_hits/misses or touching LRU. For write-command size/type
