@@ -274,7 +274,7 @@ FrankenRedis has two first-class upstream-Tcl lanes in addition to its bespoke d
 
 **Every release candidate MUST run the complete upstream suite, not merely the curated fast lane or the bespoke 4,975-case corpus.** The canonical CI workflow is `.github/workflows/upstream-redis-7.2.4-full.yml`. For a release candidate, dispatch that workflow with **`enforce=true`** so the upstream verdict is blocking.
 
-A release is not allowed to ship merely because the workflow produced artifacts. Before tagging or publishing a release, the release agent MUST verify all of the following from `artifacts/upstream_redis_tcl_full/report.json` and the raw log:
+A release is not allowed to ship merely because the workflow produced artifacts. Before tagging or publishing a release, the release agent MUST verify all of the following from `artifacts/upstream_redis_tcl_full/report.json` and the raw log (the workflow publishes them as the artifact `upstream-redis-7.2.4-full-<run_id>`; for a release candidate, download and commit them under `artifacts/upstream_redis_tcl_full/` in the release commit so the gate evidence is durable in the tree, not just a per-run CI artifact):
 
 1. The Redis source revision is exactly `d2c8a4b91e8c0e6aefd1f5bc0bf582cddbe046b7` (Redis 7.2.4).
 2. `anti_vacuity_ok` is true.

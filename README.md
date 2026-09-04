@@ -162,8 +162,10 @@ the whole story, and the repository's own evidence documents (`docs/RELEASE_READ
 | `FCALL` dispatch (instructions per op) | ~1.33x more | perf_negative_evidence_ledger, closed as dispatch layering |
 
 The scorecards' ratcheted matrix reads 7 wins / 6 losses / 2 neutral on its stable cells with a
-0.952x geometric mean and a ratchet status of FAIL, and a controlled quiet-host re-baseline (bead
-`vibu6`) is still owed before the pipelined table is quoted as a release number.
+0.952x geometric mean and a ratchet status of FAIL. A controlled quiet-host re-baseline (bead
+`vibu6`) would be required before the pipelined table is quoted as a release number; that bead
+is currently **deferred**, so until it is un-defered the pipelined table should be read as a
+contention-sandbox measurement, not a release claim.
 
 To reproduce locally:
 
@@ -892,13 +894,18 @@ Every fixture in `fr-conformance` is some variation of this: argv in, expected r
 git clone https://github.com/Dicklesworthstone/frankenredis
 cd frankenredis
 
-# Single binary, release profile (LTO + codegen-units=1)
+# Single binary, default release profile (plain cargo defaults; see below)
 cargo build --release -p fr-server
 
 ./target/release/frankenredis --help
 ```
 
-The workspace `Cargo.toml` does not currently override `[profile.release]`, so the release build uses cargo's defaults (`opt-level = 3`, `lto = false`, `codegen-units = 16`, `strip = "none"`). The doctrine in `AGENTS.md` describes a tuned profile (`lto = true`, `codegen-units = 1`, `strip = true`) that has not yet been added to the workspace root; opt in locally via `RUSTFLAGS` or a Cargo profile override if you need it.
+The workspace `Cargo.toml` does not override `[profile.release]`, so a plain
+`--release` build uses cargo's defaults (`opt-level = 3`, `lto = false`,
+`codegen-units = 16`, `strip = "none"`). Performance claims are measured on the
+dedicated `[profile.release-perf]` profile the workspace root defines
+(`inherits = "release"`, `lto = "thin"`, `codegen-units = 1`,
+`debug = "line-tables-only"`); build it with `--profile release-perf`.
 
 ### Build the bench harness
 
@@ -1096,12 +1103,12 @@ frankenredis [options]
 
 ## Command surface
 
-All 241 Redis 7.2 base commands are implemented and exposed, together with Redis 7.4 `HEXPIRE`, `HTTL`, and `HPERSIST`. Counts below are approximate command-name groupings.
+All 241 Redis 7.2 base commands are implemented and exposed. The Redis 7.4 `HEXPIRE`/`HTTL`/`HPERSIST` executors exist in the tree but are deliberately NOT exposed (`FORWARD_HASH_FIELD_TTL_REGISTERED = false`, pinned by a test): against 7.2.4 they are unknown commands, and FrankenRedis answers the same way. Counts below are approximate command-name groupings.
 
 | Family | Count | Highlights |
 |---|---|---|
 | Strings | 22 | GET, SET (`EX`/`PX`/`EXAT`/`PXAT`/`KEEPTTL`/`NX`/`XX`/`GET`), SETEX, PSETEX, SETNX, APPEND, GETRANGE, SETRANGE, INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT, GETEX, GETDEL, GETSET, MSET, MSETNX, MGET, LCS, SUBSTR, STRLEN |
-| Hashes | 19 | HSET, HGET, HMGET, HDEL, HINCRBY, HINCRBYFLOAT, HSCAN, HRANDFIELD (`COUNT`/`WITHVALUES`), HSETNX, HVALS, HKEYS, HLEN, HEXISTS, HEXPIRE, HTTL, HPERSIST |
+| Hashes | 16 | HSET, HGET, HGETALL, HMGET, HDEL, HINCRBY, HINCRBYFLOAT, HSCAN, HRANDFIELD (`COUNT`/`WITHVALUES`), HSETNX, HVALS, HKEYS, HLEN, HEXISTS, HSTRLEN |
 | Lists | 22 | LPUSH, RPUSH, LPOP/RPOP (`COUNT`), LRANGE, LTRIM, LINSERT, LPOS (`RANK`/`COUNT`/`MAXLEN`), LMOVE, RPOPLPUSH, LMPOP, BLPOP, BRPOP, BLMOVE, BLMPOP, BRPOPLPUSH |
 | Sets | 17 | SADD, SREM, SISMEMBER, SMISMEMBER, SCARD, SMEMBERS, SINTER, SUNION, SDIFF, SINTERSTORE, SUNIONSTORE, SDIFFSTORE, SINTERCARD, SRANDMEMBER (`COUNT`), SPOP (`COUNT`), SSCAN, SMOVE |
 | Sorted sets | 35 | ZADD (`NX`/`XX`/`GT`/`LT`/`CH`/`INCR`), ZRANGE (`BYSCORE`/`BYLEX`/`REV`/`LIMIT`/`WITHSCORES`), ZREVRANGE, ZRANGESTORE, ZRANGEBYSCORE/ZREVRANGEBYSCORE, ZRANGEBYLEX/ZREVRANGEBYLEX, ZPOPMIN/ZPOPMAX (`COUNT`), BZPOPMIN, BZPOPMAX, ZMPOP, BZMPOP, ZDIFF/ZUNION/ZINTER + STORE forms, ZINTERCARD, ZRANDMEMBER, ZINCRBY, ZRANK/ZREVRANK (`WITHSCORE`), ZSCORE, ZMSCORE, ZCOUNT, ZLEXCOUNT, ZCARD, ZREM, ZREMRANGEBYRANK/SCORE/LEX, ZSCAN |
@@ -1636,7 +1643,7 @@ Honest list of what FrankenRedis does *not* do today. The roadmap below tracks c
 
 - **No multi-node cluster sharding.** The `CLUSTER` command surface is implemented for single-node mode (slot map, NODES, INFO, KEYSLOT, etc.), but FrankenRedis does not yet do CRC16 slot rebalancing or live shard migration across multiple FrankenRedis processes.
 - **Wire-level TLS delegated to operational layer.** TLS configuration parsing and validation are wired through `fr-config` / `fr-runtime`, but the listener accepts plaintext only. **This is a deliberate scope decision:** TLS termination is a transport concern, not Redis protocol parity. All implemented commands behave identically over TLS or plaintext. Use `stunnel`, `spiped`, or your load balancer/reverse-proxy for TLS termination — this is the standard production pattern anyway.
-- **Hash-field TTL coverage is partial.** `HEXPIRE`, `HTTL`, and `HPERSIST` are exposed as Redis 7.4 forward-compatibility commands; the millisecond and absolute-time variants remain outside the current command surface.
+- **Hash-field TTL commands (Redis 7.4) are compiled but not exposed.** The `HEXPIRE`, `HTTL`, and `HPERSIST` executors exist in `fr-command` behind `FORWARD_HASH_FIELD_TTL_REGISTERED = false` (pinned by a test): against Redis 7.2.4 they are unknown commands, and FrankenRedis answers unknown-command the same way. Per-field TTL storage still round-trips through RDB so a 7.4-produced file loads. Whether to someday ship them behind a forward-compat key is tracked as bead `rc-hash-ttl-contract-lhgr6`.
 - **Maxmemory eviction samples randomly, not into a sorted pool.** `sampled_eviction_candidate_keys` randomly samples up to `sample_limit` keys (default 5, matching upstream's `maxmemory-samples`), then picks the best LRU/LFU/TTL candidate from that sample. Upstream merges samples into a sorted `EVPOOL_SIZE = 16` pool across eviction rounds; FrankenRedis samples fresh each round.
 - **RaptorQ-everywhere durability sidecar is not started.** The doctrine is named in `AGENTS.md`; no crate dependency or implementation exists yet.
 - **The complete upstream Redis Tcl lane is evidence, not a blanket claim that every Redis test category is green.** The full external-mode workflow publishes its actual pass/skip/ignore/error counts. Separate upstream cluster, Sentinel, and module-API runners require topology/ABI-specific treatment and are not folded into the external-server count.
@@ -1648,7 +1655,7 @@ Honest list of what FrankenRedis does *not* do today. The roadmap below tracks c
 
 1. **Multi-node cluster sharding**: CRC16 slot allocation, slot migration, MOVED/ASK redirects, gossip.
 2. **A benchmark client that is not the bottleneck.** A single-core `redis-benchmark` saturates at ~75k ops/s while the server still has headroom, so `pipeline=1` `ops/s` cannot currently show a server-side win. This is a prerequisite for any further unpipelined claim.
-3. **Multi-sentinel consensus**: `is-master-down-by-addr` vote exchange and leader election across peer sentinels, so a quorum above one can fail over (single-sentinel failover works today; bead `rc-sentinel-peer-votes`).
+3. ~~Multi-sentinel consensus~~ **Shipped 2026-09-03**: `is-master-down-by-addr` vote exchange and epoch leader election across peer sentinels work, quorum above one can fail over, and a three-sentinel quorum-2 automatic failover is covered by an end-to-end TCP test (bead `rc-sentinel-peer-votes`, closed).
 4. **RaptorQ-everywhere sidecar** for self-healing durability of long-lived state snapshots, fixture bundles, and reproducibility ledgers. Named as a contract in `AGENTS.md`; no implementation or bead exists yet.
 5. **Operator dashboard adapter** for the deployment story. (An Asupersync runtime adapter was evaluated and rejected in `docs/planning/UPGRADE_LOG.md`; the trait stubs in `fr-runtime` are empty.)
 
@@ -1858,7 +1865,7 @@ A workspace decision in `crates/fr-server/Cargo.toml`: the crate is `fr-server`,
 
 ### Is there a Sentinel binary?
 
-Yes: `frankenredis --sentinel --port 26379`. It monitors what you register with `SENTINEL MONITOR`, probes masters and replicas, and performs failovers on its own (an end-to-end test kills a primary and watches the sentinel promote the replica with no help from the test client). It does not yet read a `sentinel.conf`, and it cannot yet exchange votes with other sentinels, so run it with quorum 1 until bead `rc-sentinel-peer-votes` lands.
+Yes: `frankenredis --sentinel --port 26379`. It monitors what you register with `SENTINEL MONITOR`, probes masters and replicas, and performs failovers on its own (an end-to-end test kills a primary and watches the sentinel promote the replica with no help from the test client). It exchanges `is-master-down-by-addr` votes and elects epoch leaders with peer sentinels, so quorum above 1 works, including a three-sentinel quorum-2 automatic failover covered by a TCP integration test (bead `rc-sentinel-peer-votes`). It does not yet read a `sentinel.conf` — configure it over the `SENTINEL` command surface.
 
 ### How is performance trending?
 
@@ -1899,7 +1906,9 @@ frankenredis/
 │   ├── fr-server/                               # `frankenredis` binary
 │   ├── fr-bench/                                # TCP benchmark harness
 │   ├── fr-conformance/                          # differential conformance + orchestrators
-│   └── fr-sentinel/                             # Sentinel reimplementation
+│   ├── fr-sentinel/                             # Sentinel reimplementation
+│   ├── fr-simd/                                 # runtime-dispatched SIMD kernels (the workspace's `unsafe`)
+│   └── fr-uring/                                # optional io_uring write path (`io-uring-writes` feature)
 │
 ├── legacy_redis_code/redis/                     # local/pinned Redis 7.2.4 oracle checkout
 ├── baselines/                                   # checked-in baseline JSON
@@ -2017,7 +2026,7 @@ Numbers behind the "clean-room reimplementation" claim:
 | Redis 7.2.4 base commands implemented | 241 |
 | Distinct command-name dispatch arms in `fr-command` | 231 |
 | RDB version emitted | 11 |
-| Live beads as of 2026-09-02 | 44 (19 perf, 17 bugs, 7 tasks, 1 feature) plus the gap-closure beads filed by the 2026-09-02 reality check |
+| Live beads | 59 as of 2026-09-03 (8 open, 42 in_progress, 1 blocked, 6 deferred, 1 frozen, plus new reality-check beads). This row goes stale by design — the live count is `jq -r '.status' .beads/issues.jsonl \| sort \| uniq -c` |
 | `unsafe` sites across all 15 crates | 61: `fr-simd` 46 (SIMD kernels), `fr-command` 7 (libc locale for `SORT ALPHA`), `fr-uring` 5 (io_uring, feature-gated), `fr-runtime` 3 (`libc::waitpid`) |
 | Tagged releases | 0 (pre-1.0; `main` is the version spine) |
 
