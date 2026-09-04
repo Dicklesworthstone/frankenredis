@@ -35544,6 +35544,22 @@ fn process_argv_frame(
     // unmutated `response`.
     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
 
+    // (frankenredis-rc-blocking-wake-family) SWAPDB moves whole databases
+    // under blocked clients' keys; no single captured record expresses that.
+    // Upstream db.c::scanDatabaseForReadyKeys re-signals every key with
+    // blocked clients after the swap; fr re-signals ALL blocked keys and lets
+    // the type-checked serve path decide (try_fulfill re-validates the live
+    // type, so over-signaling is behaviorally inert).
+    if argv
+        .first()
+        .is_some_and(|c| c.eq_ignore_ascii_case(b"SWAPDB"))
+        && matches!(&response, RespFrame::SimpleString(s) if s == "OK")
+        && !blocked_tokens.is_empty()
+    {
+        // The wake index already holds EVERY blocked key (by_key), so re-signal
+        // them all; the type-checked serve path decides which actually unblock.
+        runtime.signal_ready_keys(blocked_wake_index.by_key.keys().cloned());
+    }
     // Check for QUIT command.
     if is_quit_frame(argv) {
         encode_client_reply(&response, client_resp3, &mut conn.write_buf);

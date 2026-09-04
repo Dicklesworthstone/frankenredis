@@ -42389,6 +42389,20 @@ impl Runtime {
         self.server.ready_keys.clear();
     }
 
+    /// (frankenredis-rc-blocking-wake-family) Server-initiated ready signal:
+    /// SWAPDB moves whole databases under blocked clients' keys, which no
+    /// single captured record expresses. The server re-signals every blocked
+    /// key after the swap; the type-checked serve path decides, exactly like
+    /// upstream `db.c::scanDatabaseForReadyKeys`.
+    pub fn signal_ready_keys(&mut self, keys: impl IntoIterator<Item = Vec<u8>>) {
+        if self.server.blocked_client_ids.is_empty() {
+            return;
+        }
+        for key in keys {
+            self.server.ready_keys.insert(key);
+        }
+    }
+
     /// Return and clear the set of keys that were modified in the current tick.
     pub fn drain_ready_keys(&mut self) -> HashSet<Vec<u8>> {
         std::mem::take(&mut self.server.ready_keys)
@@ -42406,13 +42420,18 @@ impl Runtime {
         // The raw key only resolves on db 0 (identity encoding), which is why
         // blocked clients on db >= 1 were never woken by a push. (frankenredis-n01zc)
         let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
-        self.server.store.peek_value_type(&namespaced, now_ms) == Some(fr_store::ValueType::List)
+        // The WAKE gate uses the expiry-UNchecked type signal (upstream
+        // scanDatabaseForReadyKeys dictFind semantics): an expired entry still
+        // signals, so the serve attempt runs, reaps the key, propagates the
+        // DEL, and leaves the client blocked — instead of silently skipping the
+        // serve and losing the propagation. (frankenredis-rc-blocking-wake-family)
+        self.server.store.wake_value_type(&namespaced) == Some(fr_store::ValueType::List)
     }
 
     #[must_use]
     pub fn peek_is_zset(&self, key: &[u8], now_ms: u64) -> bool {
         let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
-        self.server.store.peek_value_type(&namespaced, now_ms) == Some(fr_store::ValueType::ZSet)
+        self.server.store.wake_value_type(&namespaced) == Some(fr_store::ValueType::ZSet)
     }
 
     // ── MONITOR support ─────────────────────────────────────────────
