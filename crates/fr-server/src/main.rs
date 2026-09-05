@@ -7609,6 +7609,21 @@ fn process_buffered_frames(
                         ts_us,
                     ) {
                         ProcessArgvAction::Continue => {
+                            // (frankenredis-rc-blocking-wake-family) Upstream
+                            // serves blocked clients after EVERY command that
+                            // touched a waited key (afterCommand), so a pipelined
+                            // [LPUSH, BLPOP] cannot steal the value from an
+                            // earlier-blocked client. Defer this connection's
+                            // remainder; the cascade runs at pass end before the
+                            // deferred frames re-process.
+                            if !blocked_tokens.is_empty()
+                                && !runtime.server.ready_keys.is_empty()
+                                && !conn.read_buf.is_empty()
+                                && !conn.closing
+                            {
+                                budget_exhausted = true;
+                                break;
+                            }
                             if disconnect_if_output_limit_exceeded(
                                 conn,
                                 &mut output_hard_limit_cache,
@@ -7695,6 +7710,18 @@ fn process_buffered_frames(
                     ) {
                         ProcessArgvAction::Continue => {
                             consumed_total += consumed;
+                            // (frankenredis-rc-blocking-wake-family) See the
+                            // first Continue arm: after a command that signaled a
+                            // waited key, run the wake cascade before the next
+                            // pipelined command.
+                            if !blocked_tokens.is_empty()
+                                && !runtime.server.ready_keys.is_empty()
+                                && !conn.read_buf.is_empty()
+                                && !conn.closing
+                            {
+                                budget_exhausted = true;
+                                break;
+                            }
                             if disconnect_if_output_limit_exceeded(
                                 conn,
                                 &mut output_hard_limit_cache,
@@ -14974,6 +15001,18 @@ fn process_buffered_frames(
                     ) {
                         ProcessArgvAction::Continue => {
                             consumed_total += consumed;
+                            // (frankenredis-rc-blocking-wake-family) See the
+                            // first Continue arm: after a command that signaled a
+                            // waited key, run the wake cascade before the next
+                            // pipelined command.
+                            if !blocked_tokens.is_empty()
+                                && !runtime.server.ready_keys.is_empty()
+                                && !conn.read_buf.is_empty()
+                                && !conn.closing
+                            {
+                                budget_exhausted = true;
+                                break;
+                            }
                             if disconnect_if_output_limit_exceeded(
                                 conn,
                                 &mut output_hard_limit_cache,
@@ -15052,6 +15091,18 @@ fn process_buffered_frames(
                 ) {
                     ProcessArgvAction::Continue => {
                         consumed_total += consumed;
+                        // (frankenredis-rc-blocking-wake-family) See the other
+                        // Continue arms: after a command that signaled a waited
+                        // key, run the wake cascade before the next pipelined
+                        // command.
+                        if !blocked_tokens.is_empty()
+                            && !runtime.server.ready_keys.is_empty()
+                            && !conn.read_buf.is_empty()
+                            && !conn.closing
+                        {
+                            budget_exhausted = true;
+                            break;
+                        }
                     }
                     ProcessArgvAction::BreakAfterConsume => {
                         consumed_total += consumed;
