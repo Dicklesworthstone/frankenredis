@@ -41495,20 +41495,15 @@ impl Runtime {
                             self.capture_aof_record(&[op.to_vec(), logical]);
                         }
                     } else if special_command.is_none() && !handled_migrate {
-                        // (frankenredis-xmix2) Upstream replicationFeedSlaves emits
-                        // `SELECT <db>` whenever the writing client's db differs from
-                        // the db the stream last selected; a fresh stream starts at
-                        // db 0. Without this, a client on a non-zero db propagates
-                        // bare commands and every replica/backlog consumer applies
-                        // them to the wrong db.
-                        let session_db = self.session.selected_db;
-                        if self.server.aof_selected_db != session_db {
-                            self.capture_aof_record(&[
-                                b"SELECT".to_vec(),
-                                session_db.to_string().into_bytes(),
-                            ]);
-                            self.server.aof_selected_db = session_db;
-                        }
+                        // (frankenredis-xmix2) The stream's selected-db context for
+                        // replicas is emitted PER REPLICA by the feed path
+                        // (replica_fed_db prepend in fr-server), mirroring upstream
+                        // replicationFeedSlaves' per-slave repldb SELECT. The shared
+                        // aof_selected_db here only TRACKS the writing session's db
+                        // so the feed prepends and the restore/replay paths know the
+                        // context; emitting a shared SELECT record here would
+                        // duplicate the per-replica frame on every fresh attach.
+                        self.server.aof_selected_db = self.session.selected_db;
                         if let Some(script_commands) =
                             self.take_script_propagation_commands_for_capture(argv)
                         {
