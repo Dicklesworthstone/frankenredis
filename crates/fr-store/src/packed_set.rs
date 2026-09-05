@@ -5493,7 +5493,13 @@ const fn list_node_exceeds_limit(fill: i64, new_sz: u64, new_count: u64) -> bool
     } else if new_sz > LIST_SIZE_SAFETY_LIMIT {
         true
     } else {
-        new_count > fill as u64
+        // Upstream treats fill 0 as "one entry per node" (quicklistNodeLimit:
+        // a count budget of 0 degrades to 1) — the tcl test
+        // 'List invalid list-max-listpack-size config' asserts a single entry
+        // stays listpack under fill 0. quicklist_packed_node_accepts_local
+        // already applied this clamp; the limit check must agree.
+        // (frankenredis-rc-blocking-wake-family)
+        new_count > (if fill < 1 { 1 } else { fill }) as u64
     }
 }
 
@@ -6064,6 +6070,16 @@ impl ListValue {
         {
             self.forced_quicklist = true;
         }
+    }
+
+    /// LSET shrink accounting: the replaced value can SHRINK the node below
+    /// the conversion boundary (an oversized/plain-sized entry replaced by a
+    /// small one), which upstream lsetCommand converts back to listpack via
+    /// listTypeTryConversion. Apply the same AUTO shrink hysteresis the pop
+    /// paths apply. (frankenredis-rc-blocking-wake-family — unit/type/list
+    /// 'List quicklist -> listpack encoding conversion' LSET arm)
+    pub fn note_lset_shrink(&mut self) {
+        self.shrink_hysteresis();
     }
 
     /// OBJECT ENCODING hint for a NON-default budget: `true` when the sticky

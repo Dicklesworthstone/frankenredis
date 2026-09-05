@@ -20532,6 +20532,12 @@ impl Store {
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
                         );
+                        // (frankenredis-rc-blocking-wake-family) The replaced
+                        // value can shrink the node below the conversion
+                        // boundary — upstream lsetCommand converts back to
+                        // listpack via listTypeTryConversion (the tcl
+                        // 'quicklist -> listpack encoding conversion' LSET arm).
+                        l.note_lset_shrink();
                         entry.touch_write(now_ms, lfu_tracking_enabled);
                         self.dirty = self.dirty.saturating_add(1);
                         Ok(())
