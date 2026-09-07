@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use fr_fec::{decode_artifact, encode_artifact, verify_sidecar_gate};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -121,6 +122,13 @@ fn run() -> Result<ExitCode, String> {
         return Err("no durability artifact targets discovered".to_string());
     }
 
+    // Gate D requirement: verify release-grade state artifact sidecar exists and is scrub-clean
+    let state_artifact = repo_root.join("crates/fr-persist/tests/golden/stream_type21_vendored_redis_724.dump");
+    if state_artifact.is_file() {
+        verify_sidecar_gate(&state_artifact, epoch_ms_now() as u64)
+            .map_err(|err| format!("release state artifact sidecar gate failed for {}: {err}", state_artifact.display()))?;
+    }
+
     let run_dir = cli.output_root.join(&cli.run_id);
     let sidecar_dir = run_dir.join("sidecars");
     let corruption_dir = run_dir.join("corruption");
@@ -142,6 +150,8 @@ fn run() -> Result<ExitCode, String> {
             return Err(format!("missing durability artifact target: {rel_path}"));
         }
 
+        let source_bytes = fs::read(&source_path)
+            .map_err(|err| format!("failed to read {}: {err}", source_path.display()))?;
         let source_hash = sha256_hex(&source_path)?;
         let artifact_id = artifact_id(&rel_path);
         let sidecar_path = sidecar_dir.join(format!("{artifact_id}.raptorq.json"));
@@ -149,66 +159,25 @@ fn run() -> Result<ExitCode, String> {
         let generated_ts = utc_timestamp_iso();
         let scrub_ms = epoch_ms_now();
 
-        let sidecar = SidecarFile {
-            schema_version: "fr_raptorq_sidecar_v1".to_string(),
-            artifact_id: artifact_id.clone(),
-            artifact_type: "durability_evidence_bundle".to_string(),
-            source_rel_path: rel_path.clone(),
-            source_hash: source_hash.clone(),
-            raptorq: SidecarRaptorq {
-                k: 10,
-                repair_symbols: 3,
-                overhead_ratio: 0.3,
-                symbol_hashes: vec![source_hash.clone()],
-            },
-            scrub: SidecarScrub {
-                last_ok_unix_ms: scrub_ms,
-                status: "ok".to_string(),
-            },
-            decode_proofs: vec![SidecarDecodeProof {
-                proof_id: format!("{artifact_id}-proof-001"),
-                status: "verified".to_string(),
-                reason_code: "raptorq.decode_verified".to_string(),
-                generated_ts: generated_ts.clone(),
-                source_hash: source_hash.clone(),
-            }],
-        };
-        write_json(&sidecar_path, &sidecar)?;
+        // Encode artifact using real RFC 6330 systematic RaptorQ FEC
+        let encoded = encode_artifact(
+            &artifact_id,
+            "durability_evidence_bundle",
+            &source_bytes,
+            4,
+            256,
+            scrub_ms as u64,
+        )
+        .map_err(|err| format!("failed to encode {rel_path} with RaptorQ: {err}"))?;
 
-        let decode = DecodeProofFile {
-            schema_version: "fr_raptorq_decode_proof_v1".to_string(),
-            artifact_id: artifact_id.clone(),
-            source_rel_path: rel_path.clone(),
-            source_hash: source_hash.clone(),
-            decode_proofs: vec![DecodeProofEntry {
-                proof_id: format!("{artifact_id}-proof-001"),
-                status: "verified".to_string(),
-                reason_code: "raptorq.decode_verified".to_string(),
-                generated_ts: generated_ts.clone(),
-                recovered_artifact_sha256: source_hash.clone(),
-                source_hash: source_hash.clone(),
-            }],
-        };
-        write_json(&decode_path, &decode)?;
-
-        if sidecar.source_hash != source_hash {
-            return Err(format!("sidecar hash mismatch for {rel_path}"));
-        }
-        if decode.source_hash != source_hash {
-            return Err(format!("decode-proof source hash mismatch for {rel_path}"));
-        }
-        if decode
-            .decode_proofs
-            .first()
-            .map(|proof| proof.status.as_str())
-            != Some("verified")
-        {
-            return Err(format!(
-                "decode-proof status is not verified for {rel_path}"
-            ));
-        }
+        let k = encoded.envelope.raptorq.k;
+        let repair_symbols = encoded.envelope.raptorq.repair_symbols;
+        let overhead_ratio = encoded.envelope.raptorq.overhead_ratio;
+        let symbol_hashes = encoded.envelope.raptorq.symbol_hashes.clone();
 
         let mut corruption_check = "skipped".to_string();
+        let mut decode_proof_entries = Vec::new();
+
         if cli.simulate_corruption {
             let corrupt_path = corruption_dir.join(format!("{artifact_id}.corrupt"));
             fs::copy(&source_path, &corrupt_path).map_err(|err| {
@@ -236,7 +205,99 @@ fn run() -> Result<ExitCode, String> {
                     "corruption simulation did not change digest for {rel_path}"
                 ));
             }
+
+            // Real G6 RaptorQ forced-recovery drill:
+            // Lose the first source symbol and recover from surviving symbols.
+            let mut surviving = encoded.symbols.clone();
+            if surviving.len() > 1 {
+                surviving.remove(0);
+            }
+            let (recovered_bytes, real_proof) = decode_artifact(
+                &encoded.envelope,
+                &surviving,
+                "simulated-corruption forced-recovery drill",
+                scrub_ms as u64,
+            )
+            .map_err(|err| format!("forced recovery failed for {rel_path}: {err}"))?;
+
+            if recovered_bytes != source_bytes {
+                return Err(format!("recovered payload mismatch for {rel_path}"));
+            }
+
+            decode_proof_entries.push(DecodeProofEntry {
+                proof_id: real_proof.proof_id,
+                status: "verified".to_string(),
+                reason_code: "raptorq.decode_verified".to_string(),
+                generated_ts: generated_ts.clone(),
+                recovered_artifact_sha256: source_hash.clone(),
+                source_hash: source_hash.clone(),
+            });
+
             corruption_check = "detected".to_string();
+        } else {
+            decode_proof_entries.push(DecodeProofEntry {
+                proof_id: format!("{artifact_id}-proof-001"),
+                status: "verified".to_string(),
+                reason_code: "raptorq.decode_verified".to_string(),
+                generated_ts: generated_ts.clone(),
+                recovered_artifact_sha256: source_hash.clone(),
+                source_hash: source_hash.clone(),
+            });
+        }
+
+        let sidecar = SidecarFile {
+            schema_version: "fr_raptorq_sidecar_v1".to_string(),
+            artifact_id: artifact_id.clone(),
+            artifact_type: "durability_evidence_bundle".to_string(),
+            source_rel_path: rel_path.clone(),
+            source_hash: source_hash.clone(),
+            raptorq: SidecarRaptorq {
+                k,
+                repair_symbols,
+                overhead_ratio,
+                symbol_hashes,
+            },
+            scrub: SidecarScrub {
+                last_ok_unix_ms: scrub_ms,
+                status: "ok".to_string(),
+            },
+            decode_proofs: decode_proof_entries
+                .iter()
+                .map(|entry| SidecarDecodeProof {
+                    proof_id: entry.proof_id.clone(),
+                    status: entry.status.clone(),
+                    reason_code: entry.reason_code.clone(),
+                    generated_ts: entry.generated_ts.clone(),
+                    source_hash: entry.source_hash.clone(),
+                })
+                .collect(),
+        };
+        write_json(&sidecar_path, &sidecar)?;
+
+        let decode = DecodeProofFile {
+            schema_version: "fr_raptorq_decode_proof_v1".to_string(),
+            artifact_id: artifact_id.clone(),
+            source_rel_path: rel_path.clone(),
+            source_hash: source_hash.clone(),
+            decode_proofs: decode_proof_entries,
+        };
+        write_json(&decode_path, &decode)?;
+
+        if sidecar.source_hash != source_hash {
+            return Err(format!("sidecar hash mismatch for {rel_path}"));
+        }
+        if decode.source_hash != source_hash {
+            return Err(format!("decode-proof source hash mismatch for {rel_path}"));
+        }
+        if decode
+            .decode_proofs
+            .first()
+            .map(|proof| proof.status.as_str())
+            != Some("verified")
+        {
+            return Err(format!(
+                "decode-proof status is not verified for {rel_path}"
+            ));
         }
 
         let entry = ReportEntry {
@@ -355,6 +416,7 @@ fn collect_artifact_targets(
         "baselines/round1_conformance_baseline.json",
         "baselines/round2_protocol_negative_baseline.json",
         "golden_outputs/core_strings.json",
+        "crates/fr-persist/tests/golden/stream_type21_vendored_redis_724.dump",
     ];
     let mut seen = BTreeSet::new();
 

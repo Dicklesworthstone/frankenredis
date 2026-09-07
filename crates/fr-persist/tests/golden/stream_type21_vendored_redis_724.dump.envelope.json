@@ -1,0 +1,54 @@
+{
+  "schema_version": "frankenredis_fec_envelope/v1",
+  "artifact_id": "crates/fr-persist/tests/golden/stream_type21_vendored_redis_724.dump",
+  "artifact_type": "state",
+  "source_hash": "sha256:8ce20bdc242fb9fb44867cf855785ffed8e0d6a881a2c5511e2893187a21e3a2",
+  "padding": 148,
+  "symbol_size": 512,
+  "oti": [
+    0,
+    0,
+    0,
+    24,
+    0,
+    0,
+    2,
+    0,
+    1,
+    0,
+    1,
+    8
+  ],
+  "raptorq": {
+    "k": 12,
+    "repair_symbols": 8,
+    "overhead_ratio": 0.6666666666666666,
+    "symbol_hashes": [
+      "sha256:2f566a38d242083cbf8cd8b76be6d28bfb1e61f47cacf3b533c4c1c809450e74",
+      "sha256:c0a8243bcb5289fd1b171a935b25306f6ef4a7f1180510f71ff83b0d989255d9",
+      "sha256:5ef740fdfb4c56753f19f8d606e0d4eb86c27ffe82898c46cf80094ef624858d",
+      "sha256:371ddf8c7991344bbeb9cff20b590e5cff4327e691e1aedcd8fc073758a5d6b7",
+      "sha256:6817e12745a96e5e3d4800bcead51b6ceb11254150b6b607aa25112177d867bd",
+      "sha256:068b4ca1800339b46f81116386436788fcb095a30fd1bc585bacec0a7b881330",
+      "sha256:47aaece51578463399f81d7ddc5f9860214c000e2c117fe1fcdc818e8f6b7f32",
+      "sha256:1ec91fd1a8b5bd3a1080f5a93c02f4ae2a2b32d02ceeb29f6874c83ad894ae5c",
+      "sha256:18c4b65ab088d258a6fd49ed9c85addba432c6b783cdb0ce9ab3d82c106b6661",
+      "sha256:122d35d1fa0eaa05358ee0215607d1be9a4350d1e905d20397b75941805b65c8",
+      "sha256:64aaee281d452d3c2ff466aeaf43407afceb4018e72291ef4e24e4366e6c7c97",
+      "sha256:528152417edf44e437c3574dc29e15b6b4d6fc07f26e66a928cd8cec07bebd9a",
+      "sha256:0f9ddf542123d607f3c45e4f6bc15c61b7d404d599bdb84b5fea14a5bc1099a9",
+      "sha256:a074e2f5533221c210c690ea9e395bdc7d7f501e1a75490569c32719266444ac",
+      "sha256:a11d2e4b76e1acbf153d752123e903135b5f704c22addacfd7d520a9be9aed98",
+      "sha256:78b8bf98f1cfaaf06a493b3bafbecd9f5ccd73c4dc0b6ba0e4dc41fb1a56d36f",
+      "sha256:8cdceca550cf342ec2db1d2895e30bdb20f6f9087d0470d2438e3b6e5ebff9f9",
+      "sha256:cc6a17b81df5c8cff5c04e18a5d2bcb7b8fa6e49735940a934dd2b493bc506c4",
+      "sha256:cb1e490c24f170878c6cebdc1e7abf21de1284e57bb79c1036b8a80b1d3e36d5",
+      "sha256:e112703ec96cc938aff7c5f43a2dab7fa14d76a60ec61fc8c07233a9e57767e7"
+    ]
+  },
+  "scrub": {
+    "last_ok_unix_ms": 1788744702739,
+    "status": "ok"
+  },
+  "decode_proofs": []
+}

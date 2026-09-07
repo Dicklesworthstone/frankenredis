@@ -390,6 +390,7 @@ name = "fr-conformance"
 version = "0.1.0"
 dependencies = [
  "fr-config",
+ "fr-fec",
  "fr-persist",
  "fr-protocol",
  "fr-repl",
@@ -409,10 +410,22 @@ name = "fr-expire"
 version = "0.1.0"
 
 [[package]]
+name = "fr-fec"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "raptorq",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "fr-persist"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "fr-fec",
  "fr-protocol",
  "fr-simd",
  "proptest",
@@ -1035,6 +1048,12 @@ checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core",
 ]
+
+[[package]]
+name = "raptorq"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cc8cd0bcb2d520fff368264b5a6295e064c60955349517d09b14473afae4856"
 
 [[package]]
 name = "rayon"

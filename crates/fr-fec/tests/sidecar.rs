@@ -112,3 +112,40 @@ fn reproducibility_ledgers_raptorq_sidecars_scrub_clean() {
     }
 }
 
+#[test]
+fn release_grade_state_artifacts_raptorq_sidecars_scrub_clean() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let state_artifacts = [
+        "crates/fr-persist/tests/golden/stream_type21_vendored_redis_724.dump",
+        "artifacts/optimization/codex-fv18u-rdb-capacity-20260605T1620Z/baseline-golden.rdb",
+        "artifacts/optimization/codex-fv18u-rdb-capacity-20260605T1620Z/candidate-golden.rdb",
+        "artifacts/optimization/codex-pass15-rdb-inline-writer-20260605T1645Z/baseline-golden.rdb",
+        "artifacts/optimization/codex-pass15-rdb-inline-writer-20260605T1645Z/candidate-golden.rdb",
+        "artifacts/optimization/codex-pass15-rdb-inline-writer-20260605T1645Z/candidate2-golden.rdb",
+        "artifacts/optimization/codex-pass17-rdb-short-record-20260605T2050Z/baseline-golden.rdb",
+        "artifacts/optimization/codex-pass17-rdb-short-record-20260605T2050Z/candidate-golden.rdb",
+        "artifacts/optimization/codex-pass18-rdb-sorted-input-20260605T2100Z/baseline-sorted-golden.rdb",
+        "artifacts/optimization/codex-pass18-rdb-sorted-input-20260605T2100Z/baseline-unsorted-multidb-golden.rdb",
+        "artifacts/optimization/codex-pass18-rdb-sorted-input-20260605T2100Z/candidate-sorted-golden.rdb",
+        "artifacts/optimization/codex-pass18-rdb-sorted-input-20260605T2100Z/candidate-unsorted-multidb-golden.rdb",
+        "artifacts/optimization/coralox-47bzu/pass204/baseline-golden-restored.dump",
+        "artifacts/optimization/coralox-47bzu/pass204/baseline-golden-source.dump",
+        "artifacts/optimization/coralox-47bzu/pass204/candidate-golden-restored.dump",
+        "artifacts/optimization/coralox-47bzu/pass204/candidate-golden-source.dump",
+        "artifacts/optimization/coralox-qbs5q/pass202/baseline-golden-restored.dump",
+        "artifacts/optimization/coralox-qbs5q/pass202/baseline-golden-source.dump",
+        "artifacts/optimization/coralox-qbs5q/pass202/candidate-golden-restored.dump",
+        "artifacts/optimization/coralox-qbs5q/pass202/candidate-golden-source.dump",
+        "artifacts/optimization/icywolf-perf-20260605-pass49-rdb-streaming-crc/baseline-golden.rdb",
+        "artifacts/optimization/icywolf-perf-20260605-pass49-rdb-streaming-crc/candidate-golden.rdb",
+    ];
+
+    for rel in state_artifacts {
+        let path = repo_root.join(rel);
+        assert!(path.exists(), "artifact missing: {}", path.display());
+        let gate_res = verify_sidecar_gate(&path, NOW);
+        assert!(gate_res.is_ok(), "gate check for {}", path.display());
+    }
+}
+
+

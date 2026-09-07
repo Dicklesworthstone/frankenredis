@@ -190,7 +190,7 @@ jobs:
           cargo run -p fr-conformance --bin phase2c_schema_gate -- "${packet_dirs[@]}" \
             | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/phase2c_schema_gate_stdout.log"
 
-      - name: G8 - Run RaptorQ Artifact Gate
+      - name: G6 - Run RaptorQ Scrub and Recovery Drill Gate
         run: |
           ./scripts/run_raptorq_artifact_gate.sh \
             --output-root artifacts/durability/raptorq_runs \

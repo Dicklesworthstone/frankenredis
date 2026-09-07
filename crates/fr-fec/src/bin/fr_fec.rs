@@ -29,7 +29,7 @@ fn is_sidecar_file(path: &Path) -> bool {
 fn print_usage() {
     eprintln!(
         "Usage:
-  fr-fec sidecar [--type <benchmark|conformance|manifest|ledger>] [--repair-symbols <N>] [--symbol-size <S>] <paths...>
+  fr-fec sidecar [--type <benchmark|conformance|manifest|ledger|state>] [--repair-symbols <N>] [--symbol-size <S>] <paths...>
   fr-fec scrub <paths...>
   fr-fec verify-gate <paths...>
   fr-fec recover <paths...>
