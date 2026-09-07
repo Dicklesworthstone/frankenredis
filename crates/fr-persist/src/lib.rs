@@ -1997,6 +1997,39 @@ pub fn encode_rdb_with_functions_and_thresholds(
 /// This mirrors `encode_rdb_with_functions` for `RdbValue::String` entries but
 /// avoids materializing `RdbEntry`/`RdbValue` vectors when the runtime can borrow
 /// store keys and values directly. Callers must pass entries sorted by `(db,
+/// (frankenredis-rc-info-persistence-aof-fields-2qwr3) Encode an RDB AUX field.
+///
+/// Upstream Redis 7.2.4 (`rdbSaveInfoAuxFields` / `rdbSaveAuxFieldStrInt`) writes the
+/// standard metadata fields (`redis-bits`, `aof-base`, `ctime`, `used-mem`) with
+/// integer encodings rather than raw length-prefixed strings:
+/// - `redis-bits` and `aof-base` are written as 8-bit integers (`0xC0` opcode + 1 byte value).
+/// - `ctime` and `used-mem` are written as 32-bit little-endian integers (`0xC2` opcode + 4 bytes).
+///
+/// All other fields (e.g. `redis-ver`, `repl-id`, arbitrary custom keys) and values that
+/// do not parse as integers are emitted as standard length-prefixed strings via `rdb_encode_string`.
+fn encode_rdb_aux_field(buf: &mut Vec<u8>, key: &str, value: &str) {
+    buf.push(RDB_OPCODE_AUX);
+    rdb_encode_string(buf, key.as_bytes());
+    match key {
+        "redis-bits" | "aof-base" => {
+            if let Ok(num) = value.parse::<i8>() {
+                buf.push(0xC0);
+                buf.push(num as u8);
+                return;
+            }
+        }
+        "ctime" | "used-mem" => {
+            if let Ok(num) = value.parse::<i64>() {
+                buf.push(0xC2);
+                buf.extend_from_slice(&(num as i32).to_le_bytes());
+                return;
+            }
+        }
+        _ => {}
+    }
+    rdb_encode_string(buf, value.as_bytes());
+}
+
 /// key)`; debug builds assert that contract.
 #[must_use]
 pub fn encode_rdb_string_entries_with_functions(
@@ -2015,9 +2048,7 @@ pub fn encode_rdb_string_entries_with_functions(
     buf.extend_from_slice(version_str.as_bytes());
 
     for (key, value) in aux {
-        buf.push(RDB_OPCODE_AUX);
-        rdb_encode_string(&mut buf, key.as_bytes());
-        rdb_encode_string(&mut buf, value.as_bytes());
+        encode_rdb_aux_field(&mut buf, key, value);
     }
 
     for code in functions {
@@ -2098,9 +2129,7 @@ fn encode_rdb_internal(
 
     // Auxiliary fields (metadata like redis-ver, ctime, etc.)
     for (key, value) in aux {
-        buf.push(RDB_OPCODE_AUX);
-        rdb_encode_string(&mut buf, key.as_bytes());
-        rdb_encode_string(&mut buf, value.as_bytes());
+        encode_rdb_aux_field(&mut buf, key, value);
     }
 
     // FUNCTION libraries are written after aux and before the keyspace, one
@@ -8962,6 +8991,70 @@ mod tests {
             let (decoded, _) = decode_rdb(&encoded).expect("decode incompressible-ish");
             assert_eq!(decoded, entries, "round-trip drift for seed {seed}");
         }
+    }
+
+    #[test]
+    fn rdb_encode_aux_fields_integer_encoding_parity() {
+        // (frankenredis-rc-info-persistence-aof-fields-2qwr3) Upstream Redis 7.2.4
+        // rdbSaveInfoAuxFields writes:
+        // - redis-ver: raw string (1 opcode + 10 key + 6 val = 17 bytes)
+        // - redis-bits: 0xC0 u8 (1 opcode + 11 key + 2 val = 14 bytes)
+        // - ctime: 0xC2 u32 LE (1 opcode + 6 key + 5 val = 12 bytes)
+        // - used-mem: 0xC2 u32 LE (1 opcode + 9 key + 5 val = 15 bytes)
+        // - aof-base: 0xC0 u8 (1 opcode + 9 key + 2 val = 12 bytes)
+        // Together with REDIS0011 (9 bytes), EOF (1 byte), and CRC64 (8 bytes),
+        // an empty dataset base RDB is exactly 9 + 17 + 14 + 12 + 15 + 12 + 1 + 8 = 88 bytes.
+        let aux = [
+            ("redis-ver", "7.2.4"),
+            ("redis-bits", "64"),
+            ("ctime", "1725732123"),
+            ("used-mem", "1048576"),
+            ("aof-base", "1"),
+        ];
+        let encoded = encode_rdb(&[], &aux);
+        assert_eq!(
+            encoded.len(),
+            88,
+            "empty RDB with standard aux should be 88 bytes"
+        );
+
+        // Small ctime and used-mem (e.g. simulated clock or zero store memory) must also
+        // produce 88 bytes due to fixed-width integer encoding parity.
+        let aux_small = [
+            ("redis-ver", "7.2.4"),
+            ("redis-bits", "64"),
+            ("ctime", "10"),
+            ("used-mem", "0"),
+            ("aof-base", "1"),
+        ];
+        let encoded_small = encode_rdb(&[], &aux_small);
+        assert_eq!(
+            encoded_small.len(),
+            88,
+            "small ctime/used-mem must maintain 88-byte parity"
+        );
+
+        // String-only fast path encoder must match identically
+        let encoded_string_fast =
+            crate::encode_rdb_string_entries_with_functions(&[], &aux_small, &[]);
+        assert_eq!(encoded_string_fast.len(), 88);
+        assert_eq!(encoded_string_fast, encoded_small);
+
+        // Roundtrip decoding must reproduce the original string values
+        let (decoded_entries, decoded_aux) =
+            decode_rdb(&encoded_small).expect("decode_rdb should succeed");
+        assert!(decoded_entries.is_empty());
+        assert_eq!(
+            decoded_aux.get("redis-ver").map(String::as_str),
+            Some("7.2.4")
+        );
+        assert_eq!(
+            decoded_aux.get("redis-bits").map(String::as_str),
+            Some("64")
+        );
+        assert_eq!(decoded_aux.get("ctime").map(String::as_str), Some("10"));
+        assert_eq!(decoded_aux.get("used-mem").map(String::as_str), Some("0"));
+        assert_eq!(decoded_aux.get("aof-base").map(String::as_str), Some("1"));
     }
 
     // ── Compact-encoding RDB decoder tests (br-frankenredis-aqgx) ──────
