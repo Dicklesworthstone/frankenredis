@@ -15794,25 +15794,46 @@ impl Store {
         let left_count = left_keys.len();
         let right_count = right_keys.len();
 
+        self.entries.set_shrink_suspended(true);
+
         let mut left_entries = Vec::with_capacity(left_count);
         for key in left_keys {
-            let max_deleted_id = self.stream_max_deleted_ids.remove(key.as_slice());
+            let max_deleted_id = if self.stream_max_deleted_ids.is_empty() {
+                None
+            } else {
+                self.stream_max_deleted_ids.remove(key.as_slice())
+            };
             let expires_at_ms = self.expiry_ms(key.as_slice());
             // Harvest per-field hash TTLs before removing the entry —
             // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
             // (frankenredis-sdmwz)
-            let field_ttls: Vec<(Vec<u8>, u64)> = self
-                .hash_field_expires
-                .range((key.clone(), Vec::new())..)
-                .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
-                .map(|((_, f), v)| (f.clone(), *v))
-                .collect();
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
+                Vec::new()
+            } else {
+                self.hash_field_expires
+                    .range((key.clone(), Vec::new())..)
+                    .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
+                    .map(|((_, f), v)| (f.clone(), *v))
+                    .collect()
+            };
             let Some(entry) = self.internal_entries_remove(&key) else {
                 continue;
             };
-            let groups = self.stream_groups.remove(key.as_slice());
-            let last_id = self.stream_last_ids.remove(key.as_slice());
-            let entries_added = self.stream_entries_added.remove(key.as_slice());
+            let groups = if self.stream_groups.is_empty() {
+                None
+            } else {
+                self.stream_groups.remove(key.as_slice())
+            };
+            let last_id = if self.stream_last_ids.is_empty() {
+                None
+            } else {
+                self.stream_last_ids.remove(key.as_slice())
+            };
+            let entries_added = if self.stream_entries_added.is_empty() {
+                None
+            } else {
+                self.stream_entries_added.remove(key.as_slice())
+            };
             left_entries.push((
                 key,
                 entry,
@@ -15827,20 +15848,39 @@ impl Store {
 
         let mut right_entries = Vec::with_capacity(right_count);
         for key in right_keys {
-            let max_deleted_id = self.stream_max_deleted_ids.remove(key.as_slice());
+            let max_deleted_id = if self.stream_max_deleted_ids.is_empty() {
+                None
+            } else {
+                self.stream_max_deleted_ids.remove(key.as_slice())
+            };
             let expires_at_ms = self.expiry_ms(key.as_slice());
-            let field_ttls: Vec<(Vec<u8>, u64)> = self
-                .hash_field_expires
-                .range((key.clone(), Vec::new())..)
-                .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
-                .map(|((_, f), v)| (f.clone(), *v))
-                .collect();
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
+                Vec::new()
+            } else {
+                self.hash_field_expires
+                    .range((key.clone(), Vec::new())..)
+                    .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
+                    .map(|((_, f), v)| (f.clone(), *v))
+                    .collect()
+            };
             let Some(entry) = self.internal_entries_remove(&key) else {
                 continue;
             };
-            let groups = self.stream_groups.remove(key.as_slice());
-            let last_id = self.stream_last_ids.remove(key.as_slice());
-            let entries_added = self.stream_entries_added.remove(key.as_slice());
+            let groups = if self.stream_groups.is_empty() {
+                None
+            } else {
+                self.stream_groups.remove(key.as_slice())
+            };
+            let last_id = if self.stream_last_ids.is_empty() {
+                None
+            } else {
+                self.stream_last_ids.remove(key.as_slice())
+            };
+            let entries_added = if self.stream_entries_added.is_empty() {
+                None
+            } else {
+                self.stream_entries_added.remove(key.as_slice())
+            };
             right_entries.push((
                 key,
                 entry,
@@ -15929,6 +15969,8 @@ impl Store {
             }
         }
 
+        self.entries.set_shrink_suspended(false);
+
         let touched = (left_count + right_count) as u64;
         self.dirty = self.dirty.saturating_add(touched.max(1));
         touched
@@ -16011,6 +16053,17 @@ impl Store {
                 self.stream_max_deleted_ids.remove(key.as_slice())
             };
             let expires_at_ms = self.expiry_ms(key.as_slice());
+            // (frankenredis-bmyx5) Harvest per-field hash TTLs before removing the entry —
+            // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
+                Vec::new()
+            } else {
+                self.hash_field_expires
+                    .range((key.clone(), Vec::new())..)
+                    .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
+                    .map(|((_, f), v)| (f.clone(), *v))
+                    .collect()
+            };
             let Some(entry) = self.internal_entries_remove(&key) else {
                 continue;
             };
@@ -16040,6 +16093,7 @@ impl Store {
                 entries_added,
                 max_deleted_id,
                 expires_at_ms,
+                field_ttls,
             ));
         }
 
@@ -16062,6 +16116,17 @@ impl Store {
                 self.stream_max_deleted_ids.remove(key.as_slice())
             };
             let expires_at_ms = self.expiry_ms(key.as_slice());
+            // (frankenredis-bmyx5) Harvest per-field hash TTLs before removing the entry —
+            // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
+                Vec::new()
+            } else {
+                self.hash_field_expires
+                    .range((key.clone(), Vec::new())..)
+                    .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
+                    .map(|((_, f), v)| (f.clone(), *v))
+                    .collect()
+            };
             let Some(entry) = self.internal_entries_remove(&key) else {
                 continue;
             };
@@ -16091,11 +16156,20 @@ impl Store {
                 entries_added,
                 max_deleted_id,
                 expires_at_ms,
+                field_ttls,
             ));
         }
 
-        for (logical, entry, groups, last_id, entries_added, max_deleted_id, expires_at_ms) in
-            left_entries
+        for (
+            logical,
+            entry,
+            groups,
+            last_id,
+            entries_added,
+            max_deleted_id,
+            expires_at_ms,
+            field_ttls,
+        ) in left_entries
         {
             let swapped = encode_db_key(right_db, &logical);
             self.internal_entries_insert_with_expiry(swapped.clone(), entry, expires_at_ms);
@@ -16110,12 +16184,24 @@ impl Store {
                     .insert(swapped.clone(), entries_added);
             }
             if let Some(max_deleted_id) = max_deleted_id {
-                self.stream_max_deleted_ids.insert(swapped, max_deleted_id);
+                self.stream_max_deleted_ids.insert(swapped.clone(), max_deleted_id);
+            }
+            for (field, expires_at_ms) in field_ttls {
+                self.hash_field_expires
+                    .insert((swapped.clone(), field), expires_at_ms);
             }
         }
 
-        for (logical, entry, groups, last_id, entries_added, max_deleted_id, expires_at_ms) in
-            right_entries
+        for (
+            logical,
+            entry,
+            groups,
+            last_id,
+            entries_added,
+            max_deleted_id,
+            expires_at_ms,
+            field_ttls,
+        ) in right_entries
         {
             let swapped = encode_db_key(left_db, &logical);
             self.internal_entries_insert_with_expiry(swapped.clone(), entry, expires_at_ms);
@@ -16130,7 +16216,11 @@ impl Store {
                     .insert(swapped.clone(), entries_added);
             }
             if let Some(max_deleted_id) = max_deleted_id {
-                self.stream_max_deleted_ids.insert(swapped, max_deleted_id);
+                self.stream_max_deleted_ids.insert(swapped.clone(), max_deleted_id);
+            }
+            for (field, expires_at_ms) in field_ttls {
+                self.hash_field_expires
+                    .insert((swapped.clone(), field), expires_at_ms);
             }
         }
 
@@ -55766,6 +55856,58 @@ mod tests {
                 .hash_field_expires
                 .contains_key(&(b"db0:h".to_vec(), b"f".to_vec())),
             "old (db0:h, f) row must be gone"
+        );
+    }
+
+    #[test]
+    fn swap_databases_preserves_hash_field_ttls() {
+        // (frankenredis-bmyx5) SWAPDB (via store.swap_databases) silently dropped
+        // per-field hash TTLs because internal_entries_remove cleared hash_field_expires
+        // for the source key and swap_databases never harvested or re-inserted field_ttls.
+        // Assert that per-field hash TTLs correctly migrate across swap_databases.
+        let mut store = Store::new();
+        let k0 = encode_db_key(0, b"h");
+        let k1 = encode_db_key(1, b"h");
+        store
+            .hset(&k0, b"f".to_vec(), b"v".to_vec(), 0)
+            .expect("hset");
+        store
+            .hash_field_expires
+            .insert((k0.clone(), b"f".to_vec()), 99_999);
+
+        // Also seed an unrelated hash in db1
+        let other1 = encode_db_key(1, b"other");
+        let other0 = encode_db_key(0, b"other");
+        store
+            .hset(&other1, b"x".to_vec(), b"y".to_vec(), 0)
+            .expect("hset other");
+        store
+            .hash_field_expires
+            .insert((other1.clone(), b"x".to_vec()), 88_888);
+
+        let touched = store.swap_databases(0, 1);
+        assert!(touched >= 2, "swap should touch both db0 + db1 keys");
+
+        // Field TTL for db0:h must now be at db1:h
+        assert_eq!(
+            store.hash_field_expires.get(&(k1.clone(), b"f".to_vec())),
+            Some(&99_999),
+            "field TTL must follow hash to db1"
+        );
+        assert!(
+            !store.hash_field_expires.contains_key(&(k0, b"f".to_vec())),
+            "old db0:h field TTL must be gone"
+        );
+
+        // Field TTL for db1:other must now be at db0:other
+        assert_eq!(
+            store.hash_field_expires.get(&(other0.clone(), b"x".to_vec())),
+            Some(&88_888),
+            "field TTL must follow other to db0"
+        );
+        assert!(
+            !store.hash_field_expires.contains_key(&(other1, b"x".to_vec())),
+            "old db1:other field TTL must be gone"
         );
     }
 
