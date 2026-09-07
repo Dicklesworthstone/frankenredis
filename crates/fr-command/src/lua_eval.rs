@@ -31765,4 +31765,36 @@ end
         let frame = eval_script(b"return tonumber('0x10')", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::Integer(16));
     }
+
+    #[test]
+    fn lua_method_call_argerror_index_decrements_self_q0hl5() {
+        // (frankenredis-argerr-method-index-q0hl5) Method-call argument errors
+        // must decrement synthetic self so ('x'):rep('a') reports #1, while
+        // plain call string.rep('x', 'a') reports #2.
+        let mut store = Store::new();
+
+        let err_method_rep =
+            eval_script(b"return ('x'):rep('a')", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err_method_rep.contains("bad argument #1 to 'rep'"),
+            "got {err_method_rep:?}"
+        );
+
+        let err_method_sub =
+            eval_script(b"return ('x'):sub('a')", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err_method_sub.contains("bad argument #1 to 'sub'"),
+            "got {err_method_sub:?}"
+        );
+
+        let err_plain =
+            eval_script(b"return string.rep('x', 'a')", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err_plain.contains("bad argument #2 to 'rep'"),
+            "got {err_plain:?}"
+        );
+
+        let ok_method = eval_script(b"return ('x'):rep(2)", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(ok_method, RespFrame::BulkString(Some(b"xx".to_vec())));
+    }
 }

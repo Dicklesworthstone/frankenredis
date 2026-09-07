@@ -50433,11 +50433,8 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
             "rdb_last_load_keys_loaded:{}\r\n",
             self.server.store.stat_rdb_last_load_keys_loaded
         );
-        let _ = write!(
-            info,
-            "aof_enabled:{}\r\n",
-            usize::from(self.server.aof_path.is_some())
-        );
+        let aof_enabled = self.server.aof_path.is_some() && self.server.store.aof_enabled;
+        let _ = write!(info, "aof_enabled:{}\r\n", usize::from(aof_enabled));
         let _ = write!(
             info,
             "aof_rewrite_in_progress:{}\r\n",
@@ -50499,7 +50496,7 @@ eventloop_cmd_per_cycle_max:{}\r\n\r\n",
         //
         // The guard is upstream's, so the fields appear and disappear with appendonly
         // exactly as they do there.
-        if self.server.aof_path.is_some() {
+        if aof_enabled {
             // Sizes come from the appendonlydir on disk. Upstream keeps running counters
             // (`server.aof_current_size`) updated on every write; fr does not track bytes,
             // so it stats the files it wrote. INFO is a rare, human-driven command, so a
@@ -79497,6 +79494,45 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
     }
 
     #[test]
+    fn eval_redis_call_runtime_special_noscript_commands_rejected_asoup() {
+        // (frankenredis-noscriptcentral-asoup) RuntimeSpecialCommands (MULTI, EXEC, DISCARD, WATCH,
+        // UNWATCH, etc.) are noscript commands. A script calling redis.call('MULTI') must return the
+        // canonical noscript error rather than "unknown command". Furthermore, arity is checked
+        // before noscript, so redis.call('MULTI', 'x') returns the arity error.
+        let mut rt = Runtime::default_strict();
+
+        // 1. redis.call('MULTI') -> noscript error
+        let multi_script = b"return redis.call('MULTI')";
+        assert_eq!(
+            rt.execute_frame(command(&[b"EVAL", multi_script, b"0"]), 1),
+            RespFrame::Error(format!(
+                "ERR This Redis command is not allowed from script script: {}, on @user_script:1.",
+                sha1_hex_public(multi_script)
+            ))
+        );
+
+        // 2. redis.call('MULTI', 'x') -> wrong number of args
+        let multi_arity_script = b"return redis.call('MULTI', 'x')";
+        assert_eq!(
+            rt.execute_frame(command(&[b"EVAL", multi_arity_script, b"0"]), 2),
+            RespFrame::Error(format!(
+                "ERR Wrong number of args calling Redis command from script script: {}, on @user_script:1.",
+                sha1_hex_public(multi_arity_script)
+            ))
+        );
+
+        // 3. redis.call('WATCH', 'k') -> noscript error
+        let watch_script = b"return redis.call('WATCH', 'k')";
+        assert_eq!(
+            rt.execute_frame(command(&[b"EVAL", watch_script, b"0"]), 3),
+            RespFrame::Error(format!(
+                "ERR This Redis command is not allowed from script script: {}, on @user_script:1.",
+                sha1_hex_public(watch_script)
+            ))
+        );
+    }
+
+    #[test]
     fn debug_reload_reloads_from_aof_snapshot() {
         let dir = std::env::temp_dir().join("fr_runtime_debug_reload_aof_test");
         let _ = std::fs::create_dir_all(&dir);
@@ -79638,6 +79674,28 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         }
         // Sanity: the section really was rendered, so the absence above means something.
         assert!(info_off.contains("aof_enabled:0\r\n"), "{info_off}");
+
+        // (frankenredis-rc-info-persistence-aof-fields-2qwr3) Verify that having an AOF path
+        // configured while aof_enabled is explicitly false still reports aof_enabled:0 and
+        // omits the sizing group.
+        let mut rt_disabled_with_path = Runtime::default_strict();
+        rt_disabled_with_path.set_aof_path(std::path::PathBuf::from("/dev/null"));
+        rt_disabled_with_path.set_aof_enabled(false);
+        let info_disabled =
+            match rt_disabled_with_path.execute_frame(command(&[b"INFO", b"persistence"]), 1) {
+                RespFrame::BulkString(Some(b)) => String::from_utf8_lossy(&b).into_owned(),
+                other => panic!("expected bulk INFO, got {other:?}"),
+            };
+        assert!(
+            info_disabled.contains("aof_enabled:0\r\n"),
+            "{info_disabled}"
+        );
+        for field in SIZING {
+            assert!(
+                !info_disabled.contains(&format!("{field}:")),
+                "{field} must be ABSENT when aof_enabled is false even with aof_path set"
+            );
+        }
 
         assert_eq!(
             rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"yes"]), 2),

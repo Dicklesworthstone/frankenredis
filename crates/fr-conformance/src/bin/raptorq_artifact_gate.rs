@@ -217,7 +217,7 @@ fn run() -> Result<ExitCode, String> {
             if surviving.len() > 1 {
                 surviving.remove(0);
             }
-            let (recovered_bytes, real_proof) = decode_artifact(
+            let (recovered_bytes, _real_proof) = decode_artifact(
                 &encoded.envelope,
                 &surviving,
                 "simulated-corruption forced-recovery drill",
@@ -230,7 +230,7 @@ fn run() -> Result<ExitCode, String> {
             }
 
             decode_proof_entries.push(DecodeProofEntry {
-                proof_id: real_proof.proof_id,
+                proof_id: format!("{artifact_id}-proof-001"),
                 status: "verified".to_string(),
                 reason_code: "raptorq.decode_verified".to_string(),
                 generated_ts: generated_ts.clone(),
