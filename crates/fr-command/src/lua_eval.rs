@@ -25533,7 +25533,7 @@ end
             (b"return string.format('%s', 0.0*-1)", "-0"),
             (b"return string.format('%g', -0.0)", "-0"),
             (b"return string.format('%.14g', -0.0)", "-0"),
-            (b"return string.format('%q', -0.0)", "-0"),
+            (b"return string.format('%q', -0.0)", "\"-0\""),
             (b"return string.format('%e', -0.0)", "-0.000000e+00"),
             (b"return string.format('%f', -0.0)", "-0.000000"),
             (b"return string.format('%.2f', -0.0)", "-0.00"),
@@ -25548,7 +25548,7 @@ end
             };
             assert_eq!(
                 std::str::from_utf8(&bytes).unwrap(),
-                *expected,
+                expected,
                 "script {:?}",
                 std::str::from_utf8(script).unwrap()
             );
