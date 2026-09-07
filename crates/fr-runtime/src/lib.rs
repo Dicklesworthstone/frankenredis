@@ -6211,6 +6211,13 @@ pub struct ClientSession {
     /// `argv-mem` for the currently-executing client only (idle clients report
     /// 0, since upstream frees argv after each command). (frankenredis-clargvmem)
     last_argv_len_sum: usize,
+    /// (frankenredis-evalshafmt-ex06m) Cached formatted peer address string for
+    /// CLIENT INFO / CLIENT LIST / slowlog. Stored per-session so interleaved
+    /// connection dispatches preserve the memo across `swap_session`.
+    dispatch_peer_addr_cache: String,
+    dispatch_peer_addr_cache_source: Option<std::net::SocketAddr>,
+    /// (frankenredis-w1djx) Second memo key for unix domain socket clients.
+    dispatch_peer_addr_cache_unix: Option<std::sync::Arc<str>>,
 }
 
 impl Clone for ClientSession {
@@ -6243,6 +6250,9 @@ impl Clone for ClientSession {
             last_interaction_ms: self.last_interaction_ms,
             last_command_name: self.last_command_name,
             last_argv_len_sum: self.last_argv_len_sum,
+            dispatch_peer_addr_cache: self.dispatch_peer_addr_cache.clone(),
+            dispatch_peer_addr_cache_source: self.dispatch_peer_addr_cache_source,
+            dispatch_peer_addr_cache_unix: self.dispatch_peer_addr_cache_unix.clone(),
         }
     }
 
@@ -6346,6 +6356,11 @@ impl ClientSession {
         self.unix_path.clone_from(&source.unix_path);
         self.socket_fd = source.socket_fd;
         self.connected_at_ms = source.connected_at_ms;
+        self.dispatch_peer_addr_cache
+            .clone_from(&source.dispatch_peer_addr_cache);
+        self.dispatch_peer_addr_cache_source = source.dispatch_peer_addr_cache_source;
+        self.dispatch_peer_addr_cache_unix
+            .clone_from(&source.dispatch_peer_addr_cache_unix);
     }
 
     fn clone_volatile_metadata_from(&mut self, source: &Self) {
@@ -6453,6 +6468,9 @@ impl ClientSession {
             && self.unix_path == source.unix_path
             && self.socket_fd == source.socket_fd
             && self.connected_at_ms == source.connected_at_ms
+            && self.dispatch_peer_addr_cache == source.dispatch_peer_addr_cache
+            && self.dispatch_peer_addr_cache_source == source.dispatch_peer_addr_cache_source
+            && self.dispatch_peer_addr_cache_unix == source.dispatch_peer_addr_cache_unix
     }
 
     #[cfg(any(test, feature = "bench-reference"))]
@@ -6562,6 +6580,9 @@ impl Default for ClientSession {
             last_interaction_ms: 0,
             last_command_name: None,
             last_argv_len_sum: 0,
+            dispatch_peer_addr_cache: "127.0.0.1:0".to_string(),
+            dispatch_peer_addr_cache_source: None,
+            dispatch_peer_addr_cache_unix: None,
         }
     }
 }
@@ -6571,6 +6592,68 @@ impl ClientSession {
         let mut session = Self::default();
         session.refresh_authentication_for_server(&server.auth_state, false);
         session
+    }
+
+    pub(crate) fn refresh_dispatch_peer_addr_cache(
+        &mut self,
+        peer_addr: Option<std::net::SocketAddr>,
+    ) {
+        // (frankenredis-w1djx) A unix client carries no sockaddr, so the path is part of the memo
+        // key: keying on `peer_addr` alone would treat every unix client as the same address-less
+        // session and hand a stale `127.0.0.1:0` to the next one.
+        if self.dispatch_peer_addr_cache_source == peer_addr
+            && self.dispatch_peer_addr_cache_unix == self.unix_path
+        {
+            return;
+        }
+        let unix_path = self.unix_path.clone();
+        self.dispatch_peer_addr_cache.clear();
+        if let Some(path) = unix_path.as_deref() {
+            // Upstream's `<path>:0`, the same form CLIENT INFO's `addr` reports.
+            write!(&mut self.dispatch_peer_addr_cache, "{path}:0")
+                .expect("writing to String cannot fail");
+        } else if let Some(addr) = peer_addr {
+            // (frankenredis-evalshafmt-ex06m) Render IPv4 WITHOUT `core::fmt`.
+            //
+            // `write!(.., "{addr}")` was 8.94 pct of fr's retired instructions on an
+            // EVALSHA profile -- 75.66M Ir, ~1,261 instr/op -- and callgrind puts the
+            // cost in the FORMATTING MACHINERY, not in the address: the frames are
+            // `core::fmt::write`, `Formatter::pad_integral` and
+            // `String as fmt::Write::write_str`, reached through
+            // `SocketAddr::fmt -> SocketAddrV4::fmt -> Ipv4Addr::fmt`. `pad_integral`
+            // is generic over sign, radix, width and alignment; four octets and a port
+            // need none of that.
+            //
+            // Storing the memo on `ClientSession` ensures that with interleaved
+            // client sockets across `swap_session`, each connection preserves its
+            // cached peer address rendering across commands.
+            //
+            // Byte-identical to `Display`: `SocketAddrV4` renders `a.b.c.d:port` with no
+            // padding. IPv6 keeps the generic path -- its `[addr]:port` form has zone
+            // ids and `::` compression that are not worth reimplementing for a shape
+            // this profile never takes.
+            match addr {
+                std::net::SocketAddr::V4(v4) => {
+                    let octets = v4.ip().octets();
+                    for (i, octet) in octets.iter().enumerate() {
+                        if i > 0 {
+                            self.dispatch_peer_addr_cache.push('.');
+                        }
+                        push_u16_decimal(&mut self.dispatch_peer_addr_cache, u16::from(*octet));
+                    }
+                    self.dispatch_peer_addr_cache.push(':');
+                    push_u16_decimal(&mut self.dispatch_peer_addr_cache, v4.port());
+                }
+                std::net::SocketAddr::V6(_) => {
+                    write!(&mut self.dispatch_peer_addr_cache, "{addr}")
+                        .expect("writing to String cannot fail");
+                }
+            }
+        } else {
+            self.dispatch_peer_addr_cache.push_str("127.0.0.1:0");
+        }
+        self.dispatch_peer_addr_cache_source = peer_addr;
+        self.dispatch_peer_addr_cache_unix = unix_path;
     }
 
     fn is_authenticated(&self) -> bool {
@@ -6657,12 +6740,6 @@ pub struct Runtime {
     suppress_propagation_capture: bool,
     dispatch_acl_snapshot_user: Option<Vec<u8>>,
     dispatch_acl_snapshot_generation: u64,
-    dispatch_peer_addr_cache: String,
-    dispatch_peer_addr_cache_source: Option<std::net::SocketAddr>,
-    /// (frankenredis-w1djx) Second memo key. Every unix client has `peer_addr == None`,
-    /// so the sockaddr alone cannot distinguish one socket path from another -- nor from a
-    /// genuinely address-less session, which renders the `127.0.0.1:0` default.
-    dispatch_peer_addr_cache_unix: Option<std::sync::Arc<str>>,
     /// (frankenredis-7grsy) Chained command-timing clock. Holds the monotonic
     /// `Instant` at which the previous timed fast-path command finished, paired
     /// with the `stat_total_commands_processed` value at that moment. A timed
@@ -6992,9 +7069,6 @@ impl Runtime {
             suppress_propagation_capture: false,
             dispatch_acl_snapshot_user: None,
             dispatch_acl_snapshot_generation: 0,
-            dispatch_peer_addr_cache: "127.0.0.1:0".to_string(),
-            dispatch_peer_addr_cache_source: None,
-            dispatch_peer_addr_cache_unix: None,
             last_command_end: None,
         }
     }
@@ -43104,7 +43178,8 @@ impl Runtime {
             } else {
                 "N"
             });
-        ctx.peer_addr.clone_from(&self.dispatch_peer_addr_cache);
+        ctx.peer_addr
+            .clone_from(&self.session.dispatch_peer_addr_cache);
         // (frankenredis-lxccd) Mirror the real socket fd into the
         // dispatch context so CLIENT INFO / CLIENT LIST emit it
         // through fr-command's client_info_line wrapper too.
@@ -43560,68 +43635,9 @@ impl Runtime {
         result
     }
 
+    #[inline]
     fn refresh_dispatch_peer_addr_cache(&mut self, peer_addr: Option<std::net::SocketAddr>) {
-        // (frankenredis-w1djx) A unix client carries no sockaddr, so the path is part of the memo
-        // key: keying on `peer_addr` alone would treat every unix client as the same address-less
-        // session and hand a stale `127.0.0.1:0` to the next one.
-        let unix_path = self.session.unix_path.clone();
-        if self.dispatch_peer_addr_cache_source == peer_addr
-            && self.dispatch_peer_addr_cache_unix == unix_path
-        {
-            return;
-        }
-        self.dispatch_peer_addr_cache.clear();
-        if let Some(path) = unix_path.as_deref() {
-            // Upstream's `<path>:0`, the same form CLIENT INFO's `addr` reports.
-            write!(&mut self.dispatch_peer_addr_cache, "{path}:0")
-                .expect("writing to String cannot fail");
-        } else if let Some(addr) = peer_addr {
-            // (frankenredis-evalshafmt-ex06m) Render IPv4 WITHOUT `core::fmt`.
-            //
-            // `write!(.., "{addr}")` was 8.94 pct of fr's retired instructions on an
-            // EVALSHA profile -- 75.66M Ir, ~1,261 instr/op -- and callgrind puts the
-            // cost in the FORMATTING MACHINERY, not in the address: the frames are
-            // `core::fmt::write`, `Formatter::pad_integral` and
-            // `String as fmt::Write::write_str`, reached through
-            // `SocketAddr::fmt -> SocketAddrV4::fmt -> Ipv4Addr::fmt`. `pad_integral`
-            // is generic over sign, radix, width and alignment; four octets and a port
-            // need none of that.
-            //
-            // The memo above SHOULD have made this rare, but it is a single slot on the
-            // shared `Runtime` holding a PER-CONNECTION value, so with 32 interleaved
-            // client sockets it misses essentially every command: the profile shows
-            // 60,002 `SocketAddr::fmt` calls for 60,000 operations. Fixing the memo
-            // properly means moving it onto `ClientSession` (9 construction sites, and
-            // the session already round-trips per connection via `swap_session`); this
-            // change instead makes the miss CHEAP, which is local to one function and
-            // carries no lifecycle risk. The memo wart is recorded on the bead.
-            //
-            // Byte-identical to `Display`: `SocketAddrV4` renders `a.b.c.d:port` with no
-            // padding. IPv6 keeps the generic path -- its `[addr]:port` form has zone
-            // ids and `::` compression that are not worth reimplementing for a shape
-            // this profile never takes.
-            match addr {
-                std::net::SocketAddr::V4(v4) => {
-                    let octets = v4.ip().octets();
-                    for (i, octet) in octets.iter().enumerate() {
-                        if i > 0 {
-                            self.dispatch_peer_addr_cache.push('.');
-                        }
-                        push_u16_decimal(&mut self.dispatch_peer_addr_cache, u16::from(*octet));
-                    }
-                    self.dispatch_peer_addr_cache.push(':');
-                    push_u16_decimal(&mut self.dispatch_peer_addr_cache, v4.port());
-                }
-                std::net::SocketAddr::V6(_) => {
-                    write!(&mut self.dispatch_peer_addr_cache, "{addr}")
-                        .expect("writing to String cannot fail");
-                }
-            }
-        } else {
-            self.dispatch_peer_addr_cache.push_str("127.0.0.1:0");
-        }
-        self.dispatch_peer_addr_cache_source = peer_addr;
-        self.dispatch_peer_addr_cache_unix = unix_path;
+        self.session.refresh_dispatch_peer_addr_cache(peer_addr);
     }
 
     fn handle_deferred_store_runtime_action(&mut self, now_ms: u64) -> Option<RespFrame> {
@@ -48847,7 +48863,7 @@ impl Runtime {
         }
         let client_address = if self.session.peer_addr.is_some() {
             self.refresh_dispatch_peer_addr_cache(self.session.peer_addr);
-            self.dispatch_peer_addr_cache.as_bytes().to_vec()
+            self.session.dispatch_peer_addr_cache.as_bytes().to_vec()
         } else {
             Vec::new()
         };
@@ -48869,7 +48885,7 @@ impl Runtime {
         }
         let client_address = if self.session.peer_addr.is_some() {
             self.refresh_dispatch_peer_addr_cache(self.session.peer_addr);
-            self.dispatch_peer_addr_cache.as_bytes().to_vec()
+            self.session.dispatch_peer_addr_cache.as_bytes().to_vec()
         } else {
             Vec::new()
         };
@@ -69209,6 +69225,79 @@ mod tests {
         rt.session.peer_addr = None;
         rt.refresh_current_dispatch_client_context(3_000);
         assert_eq!(rt.server.store.dispatch_client_ctx.peer_addr, "127.0.0.1:0");
+    }
+
+    #[test]
+    fn dispatch_peer_addr_cache_preserved_across_swap_session() {
+        let mut rt = Runtime::default_strict();
+
+        let mut session_a = rt.new_session();
+        session_a.peer_addr = Some("10.0.0.1:1111".parse().expect("socket addr"));
+
+        let mut session_b = rt.new_session();
+        session_b.peer_addr = Some("10.0.0.2:2222".parse().expect("socket addr"));
+
+        let mut session_unix = rt.new_session();
+        session_unix.unix_path = Some(std::sync::Arc::from("/tmp/frankenredis.sock"));
+
+        // Swap in session A and refresh context
+        let prev = rt.swap_session(session_a);
+        rt.refresh_current_dispatch_client_context(1_000);
+        assert_eq!(
+            rt.server.store.dispatch_client_ctx.peer_addr,
+            "10.0.0.1:1111"
+        );
+        let session_a = rt.swap_session(prev);
+
+        // Swap in session B and refresh context
+        let prev = rt.swap_session(session_b);
+        rt.refresh_current_dispatch_client_context(2_000);
+        assert_eq!(
+            rt.server.store.dispatch_client_ctx.peer_addr,
+            "10.0.0.2:2222"
+        );
+        let session_b = rt.swap_session(prev);
+
+        // Swap in session unix and refresh context
+        let prev = rt.swap_session(session_unix);
+        rt.refresh_current_dispatch_client_context(3_000);
+        assert_eq!(
+            rt.server.store.dispatch_client_ctx.peer_addr,
+            "/tmp/frankenredis.sock:0"
+        );
+        let session_unix = rt.swap_session(prev);
+
+        // Verify session A kept its cache
+        assert_eq!(session_a.dispatch_peer_addr_cache, "10.0.0.1:1111");
+        assert_eq!(
+            session_a.dispatch_peer_addr_cache_source,
+            Some("10.0.0.1:1111".parse().expect("socket addr"))
+        );
+
+        // Verify session B kept its cache
+        assert_eq!(session_b.dispatch_peer_addr_cache, "10.0.0.2:2222");
+        assert_eq!(
+            session_b.dispatch_peer_addr_cache_source,
+            Some("10.0.0.2:2222".parse().expect("socket addr"))
+        );
+
+        // Verify session unix kept its cache
+        assert_eq!(
+            session_unix.dispatch_peer_addr_cache,
+            "/tmp/frankenredis.sock:0"
+        );
+        assert_eq!(
+            session_unix.dispatch_peer_addr_cache_unix.as_deref(),
+            Some("/tmp/frankenredis.sock")
+        );
+
+        // Swap session A back in and ensure dispatch context reflects session A
+        let _ = rt.swap_session(session_a);
+        rt.refresh_current_dispatch_client_context(4_000);
+        assert_eq!(
+            rt.server.store.dispatch_client_ctx.peer_addr,
+            "10.0.0.1:1111"
+        );
     }
 
     #[test]
