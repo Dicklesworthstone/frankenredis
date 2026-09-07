@@ -25524,6 +25524,38 @@ end
     }
 
     #[test]
+    fn string_format_preserves_negative_zero_sign_fcoxw() {
+        // (frankenredis-fcoxw) IEEE754 -0.0 == 0.0 is true, so string.format shortcuts
+        // must explicitly check sign to avoid losing the negative sign on -0.0.
+        let mut store = Store::new();
+        for (script, expected) in [
+            (b"return string.format('%s', -0.0)".as_slice(), "-0"),
+            (b"return string.format('%s', 0.0*-1)", "-0"),
+            (b"return string.format('%g', -0.0)", "-0"),
+            (b"return string.format('%.14g', -0.0)", "-0"),
+            (b"return string.format('%q', -0.0)", "-0"),
+            (b"return string.format('%e', -0.0)", "-0.000000e+00"),
+            (b"return string.format('%f', -0.0)", "-0.000000"),
+            (b"return string.format('%.2f', -0.0)", "-0.00"),
+            (b"return string.format('%d', -0.0)", "0"),
+        ] {
+            let r = eval_script(script, &[], &[], &mut store, 0).expect("eval negative zero");
+            let RespFrame::BulkString(Some(bytes)) = r else {
+                panic!(
+                    "expected bulk string for {:?}",
+                    std::str::from_utf8(script).unwrap()
+                );
+            };
+            assert_eq!(
+                std::str::from_utf8(&bytes).unwrap(),
+                *expected,
+                "script {:?}",
+                std::str::from_utf8(script).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn string_format_c_specifier_ascii_path() {
         // (frankenredis-be7o1) Pin the common ASCII case for %c. The
         // high-byte modulo-256 wrap path (and vendored's quirk of emitting
