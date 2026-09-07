@@ -76409,6 +76409,122 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
     }
 
     #[test]
+    fn redis_7_4_hash_field_ttl_commands_dispatch_when_opted_in() {
+        let mut rt = Runtime::default_strict();
+        rt.set_forward_hash_field_ttl_enabled(true);
+
+        // Seed hash:
+        assert_eq!(
+            rt.execute_frame(command(&[b"HSET", b"h", b"f1", b"v1"]), 1000),
+            RespFrame::Integer(1)
+        );
+
+        // HEXPIRE dispatches and sets TTL:
+        assert_eq!(
+            rt.execute_frame(command(&[b"HEXPIRE", b"h", b"60", b"FIELDS", b"1", b"f1"]), 1000),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1)]))
+        );
+
+        // HTTL dispatches and reads remaining TTL:
+        assert_eq!(
+            rt.execute_frame(command(&[b"HTTL", b"h", b"FIELDS", b"1", b"f1"]), 1000),
+            RespFrame::Array(Some(vec![RespFrame::Integer(60)]))
+        );
+
+        // HPERSIST dispatches and clears TTL:
+        assert_eq!(
+            rt.execute_frame(command(&[b"HPERSIST", b"h", b"FIELDS", b"1", b"f1"]), 1000),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1)]))
+        );
+
+        // HTTL reports persistent (-1):
+        assert_eq!(
+            rt.execute_frame(command(&[b"HTTL", b"h", b"FIELDS", b"1", b"f1"]), 1000),
+            RespFrame::Array(Some(vec![RespFrame::Integer(-1)]))
+        );
+
+        // Immediate reap with 0 TTL:
+        assert_eq!(
+            rt.execute_frame(command(&[b"HEXPIRE", b"h", b"0", b"FIELDS", b"1", b"f1"]), 1000),
+            RespFrame::Array(Some(vec![RespFrame::Integer(2)]))
+        );
+
+        // f1 is reaped, hash is deleted:
+        assert_eq!(
+            rt.execute_frame(command(&[b"HEXISTS", b"h", b"f1"]), 1000),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXISTS", b"h"]), 1000),
+            RespFrame::Integer(0)
+        );
+
+        // Write command classifications:
+        assert!(fr_command::is_write_command(b"HEXPIRE"));
+        assert!(fr_command::is_write_command(b"hexpire"));
+        assert!(fr_command::is_write_command(b"HPERSIST"));
+        assert!(fr_command::is_write_command(b"hpersist"));
+        assert!(!fr_command::is_write_command(b"HTTL"));
+        assert!(!fr_command::is_write_command(b"httl"));
+
+        // Key indexes:
+        assert_eq!(
+            fr_command::command_key_indexes(&[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"60".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec()
+            ]),
+            vec![1]
+        );
+        assert_eq!(
+            fr_command::command_key_indexes(&[
+                b"HTTL".to_vec(),
+                b"h".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec()
+            ]),
+            vec![1]
+        );
+        assert_eq!(
+            fr_command::command_key_indexes(&[
+                b"HPERSIST".to_vec(),
+                b"h".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec()
+            ]),
+            vec![1]
+        );
+
+        // Unsupported 7.4 forms remain unknown even when opted in:
+        let unsupported: &[&[&[u8]]] = &[
+            &[b"HPEXPIRE", b"h", b"60000", b"FIELDS", b"1", b"f1"],
+            &[b"HEXPIREAT", b"h", b"9999999999", b"FIELDS", b"1", b"f1"],
+            &[b"HPEXPIREAT", b"h", b"9999999999000", b"FIELDS", b"1", b"f1"],
+            &[b"HEXPIRETIME", b"h", b"FIELDS", b"1", b"f1"],
+            &[b"HPEXPIRETIME", b"h", b"FIELDS", b"1", b"f1"],
+            &[b"HPTTL", b"h", b"FIELDS", b"1", b"f1"],
+            &[b"HGETEX", b"h", b"FIELDS", b"1", b"f1"],
+            &[b"HGETDEL", b"h", b"FIELDS", b"1", b"f1"],
+        ];
+        for argv in unsupported {
+            let frame = rt.execute_frame(command(argv), 0);
+            let RespFrame::Error(msg) = &frame else {
+                panic!("expected Error reply for {:?}, got {:?}", argv, frame);
+            };
+            assert!(
+                msg.starts_with("ERR unknown command"),
+                "expected 'ERR unknown command' prefix for {:?}, got: {msg}",
+                argv,
+            );
+        }
+    }
+
+    #[test]
     fn config_get_prefix_patterns_match_redis_ordering() {
         let mut rt = Runtime::default_strict();
 

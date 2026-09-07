@@ -38678,6 +38678,563 @@ mod tests {
     }
 
     #[test]
+    fn hash_field_ttl_wire_posture_pair_and_unsupported_rejection() {
+        let cmd = |parts: &[&[u8]]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.to_vec()).collect()
+        };
+
+        // 1. Off posture (default 7.2.4 parity):
+        let mut store = Store::new();
+        assert!(!store.forward_hash_field_ttl_enabled);
+
+        let off_cases: &[&[&[u8]]] = &[
+            // Valid shapes when enabled, but must be unknown with opt-in off:
+            &[b"HEXPIRE", b"h", b"60", b"FIELDS", b"1", b"f"],
+            &[b"hexpire", b"h", b"60", b"FIELDS", b"1", b"f"],
+            &[b"Hexpire", b"h", b"60", b"FIELDS", b"1", b"f"],
+            &[b"HTTL", b"h", b"FIELDS", b"1", b"f"],
+            &[b"httl", b"h", b"FIELDS", b"1", b"f"],
+            &[b"Httl", b"h", b"FIELDS", b"1", b"f"],
+            &[b"HPERSIST", b"h", b"FIELDS", b"1", b"f"],
+            &[b"hpersist", b"h", b"FIELDS", b"1", b"f"],
+            &[b"Hpersist", b"h", b"FIELDS", b"1", b"f"],
+            // Malformed/short shapes: gate sits BEFORE arity, so even short forms answer unknown-command:
+            &[b"HEXPIRE"],
+            &[b"hexpire", b"h"],
+            &[b"HTTL"],
+            &[b"httl", b"h"],
+            &[b"HPERSIST"],
+            &[b"hpersist", b"h"],
+            // Forward-compat 7.4 commands that remain unsupported:
+            &[b"HPEXPIRE", b"h", b"60000", b"FIELDS", b"1", b"f"],
+            &[b"HEXPIREAT", b"h", b"9999999999", b"FIELDS", b"1", b"f"],
+            &[b"HPEXPIREAT", b"h", b"9999999999000", b"FIELDS", b"1", b"f"],
+            &[b"HEXPIRETIME", b"h", b"FIELDS", b"1", b"f"],
+            &[b"HPEXPIRETIME", b"h", b"FIELDS", b"1", b"f"],
+            &[b"HPTTL", b"h", b"FIELDS", b"1", b"f"],
+            &[b"HGETEX", b"h", b"FIELDS", b"1", b"f"],
+            &[b"HGETDEL", b"h", b"FIELDS", b"1", b"f"],
+        ];
+
+        for argv in off_cases {
+            let res = dispatch_argv(&cmd(argv), &mut store, 0);
+            assert!(
+                matches!(res, Err(CommandError::UnknownCommand { .. })),
+                "off posture must return unknown command for {:?}, got {:?}",
+                String::from_utf8_lossy(argv[0]),
+                res
+            );
+        }
+
+        // Introspection off:
+        for name in ["hexpire", "httl", "hpersist"] {
+            assert!(!super::command_table_row_is_visible(name, &store));
+        }
+
+        // 2. On posture:
+        store.set_forward_hash_field_ttl_enabled(true);
+        assert!(store.forward_hash_field_ttl_enabled);
+
+        // Introspection on:
+        for name in ["hexpire", "httl", "hpersist"] {
+            assert!(super::command_table_row_is_visible(name, &store));
+        }
+
+        // Seed hash:
+        dispatch_argv(&cmd(&[b"HSET", b"h", b"f", b"v"]), &mut store, 0).expect("hset");
+
+        // Dispatched through wire dispatch_argv:
+        let exp = dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"60", b"FIELDS", b"1", b"f"]), &mut store, 1000)
+            .expect("hexpire wire");
+        assert_eq!(exp, RespFrame::Array(Some(vec![RespFrame::Integer(1)])));
+
+        let ttl = dispatch_argv(&cmd(&[b"HTTL", b"h", b"FIELDS", b"1", b"f"]), &mut store, 1000)
+            .expect("httl wire");
+        assert_eq!(ttl, RespFrame::Array(Some(vec![RespFrame::Integer(60)])));
+
+        let per = dispatch_argv(&cmd(&[b"HPERSIST", b"h", b"FIELDS", b"1", b"f"]), &mut store, 1000)
+            .expect("hpersist wire");
+        assert_eq!(per, RespFrame::Array(Some(vec![RespFrame::Integer(1)])));
+
+        // Arity errors come from executor, not unknown-command:
+        let short_exp = dispatch_argv(&cmd(&[b"HEXPIRE", b"h"]), &mut store, 0);
+        assert_eq!(short_exp, Err(CommandError::WrongArity("HEXPIRE")));
+
+        let short_ttl = dispatch_argv(&cmd(&[b"HTTL", b"h"]), &mut store, 0);
+        assert_eq!(short_ttl, Err(CommandError::WrongArity("HTTL")));
+
+        let short_per = dispatch_argv(&cmd(&[b"HPERSIST", b"h"]), &mut store, 0);
+        assert_eq!(short_per, Err(CommandError::WrongArity("HPERSIST")));
+
+        // Unsupported 7.4 forms STILL answer unknown-command even with opt-in on:
+        let unsupported: &[&[&[u8]]] = &[
+            &[b"HPEXPIRE", b"h", b"60000", b"FIELDS", b"1", b"f"],
+            &[b"HEXPIREAT", b"h", b"9999999999", b"FIELDS", b"1", b"f"],
+            &[b"HPEXPIREAT", b"h", b"9999999999000", b"FIELDS", b"1", b"f"],
+            &[b"HEXPIRETIME", b"h", b"FIELDS", b"1", b"f"],
+            &[b"HPEXPIRETIME", b"h", b"FIELDS", b"1", b"f"],
+            &[b"HPTTL", b"h", b"FIELDS", b"1", b"f"],
+            &[b"HGETEX", b"h", b"FIELDS", b"1", b"f"],
+            &[b"HGETDEL", b"h", b"FIELDS", b"1", b"f"],
+        ];
+        for argv in unsupported {
+            let res = dispatch_argv(&cmd(argv), &mut store, 0);
+            assert!(
+                matches!(res, Err(CommandError::UnknownCommand { .. })),
+                "unsupported forward form must still return unknown command even with opt-in on: {:?}",
+                String::from_utf8_lossy(argv[0])
+            );
+        }
+    }
+
+    #[test]
+    fn hash_field_ttl_arity_and_syntax_options_matrix() {
+        let cmd = |parts: &[&[u8]]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.to_vec()).collect()
+        };
+        let mut store = Store::new();
+        store.set_forward_hash_field_ttl_enabled(true);
+
+        // HEXPIRE arities:
+        for len in 1..6 {
+            let argv: Vec<&[u8]> = [b"HEXPIRE".as_slice(), b"h", b"10", b"FIELDS", b"1", b"f"][..len].to_vec();
+            assert_eq!(
+                dispatch_argv(&cmd(&argv), &mut store, 0),
+                Err(CommandError::WrongArity("HEXPIRE")),
+                "hexpire arity {len}"
+            );
+        }
+
+        // HTTL arities:
+        for len in 1..5 {
+            let argv: Vec<&[u8]> = [b"HTTL".as_slice(), b"h", b"FIELDS", b"1", b"f"][..len].to_vec();
+            assert_eq!(
+                dispatch_argv(&cmd(&argv), &mut store, 0),
+                Err(CommandError::WrongArity("HTTL")),
+                "httl arity {len}"
+            );
+        }
+
+        // HPERSIST arities:
+        for len in 1..5 {
+            let argv: Vec<&[u8]> = [b"HPERSIST".as_slice(), b"h", b"FIELDS", b"1", b"f"][..len].to_vec();
+            assert_eq!(
+                dispatch_argv(&cmd(&argv), &mut store, 0),
+                Err(CommandError::WrongArity("HPERSIST")),
+                "hpersist arity {len}"
+            );
+        }
+
+        // Invalid expire times:
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"-5", b"FIELDS", b"1", b"f"]), &mut store, 0),
+            Err(CommandError::Custom("ERR invalid expire time, must be >= 0".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"notanint", b"FIELDS", b"1", b"f"]), &mut store, 0),
+            Err(CommandError::InvalidInteger)
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"9223372036854775807", b"FIELDS", b"1", b"f"]), &mut store, 10_000),
+            Err(CommandError::Custom("ERR invalid expire time in 'hexpire' command".to_string()))
+        );
+
+        // FIELDS token checks:
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"10", b"NOFIELDS", b"1", b"f"]), &mut store, 0),
+            Err(CommandError::Custom("ERR Mandatory argument FIELDS is missing or not at the right position".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"10", b"NX", b"NOFIELDS", b"1", b"f"]), &mut store, 0),
+            Err(CommandError::Custom("ERR Mandatory argument FIELDS is missing or not at the right position".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HTTL", b"h", b"NOFIELDS", b"1", b"f"]), &mut store, 0),
+            Err(CommandError::Custom("ERR Mandatory argument FIELDS is missing or not at the right position".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HPERSIST", b"h", b"NOFIELDS", b"1", b"f"]), &mut store, 0),
+            Err(CommandError::Custom("ERR Mandatory argument FIELDS is missing or not at the right position".to_string()))
+        );
+
+        // numfields validation:
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"10", b"FIELDS", b"0", b"f"]), &mut store, 0),
+            Err(CommandError::Custom("ERR Parameter `numFields` should be greater than 0".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"10", b"FIELDS", b"-2", b"f"]), &mut store, 0),
+            Err(CommandError::Custom("ERR Parameter `numFields` should be greater than 0".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HTTL", b"h", b"FIELDS", b"0", b"f"]), &mut store, 0),
+            Err(CommandError::Custom("ERR Number of fields must be a positive integer".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HTTL", b"h", b"FIELDS", b"-1", b"f"]), &mut store, 0),
+            Err(CommandError::Custom("ERR Number of fields must be a positive integer".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HPERSIST", b"h", b"FIELDS", b"0", b"f"]), &mut store, 0),
+            Err(CommandError::Custom("ERR Number of fields must be a positive integer".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HPERSIST", b"h", b"FIELDS", b"-4", b"f"]), &mut store, 0),
+            Err(CommandError::Custom("ERR Number of fields must be a positive integer".to_string()))
+        );
+
+        // numfields count mismatch:
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"10", b"FIELDS", b"2", b"f1"]), &mut store, 0),
+            Err(CommandError::Custom("ERR The `numfields` parameter must match the number of arguments".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"10", b"FIELDS", b"1", b"f1", b"f2"]), &mut store, 0),
+            Err(CommandError::Custom("ERR The `numfields` parameter must match the number of arguments".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HTTL", b"h", b"FIELDS", b"3", b"f1", b"f2"]), &mut store, 0),
+            Err(CommandError::Custom("ERR The `numfields` parameter must match the number of arguments".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HPERSIST", b"h", b"FIELDS", b"2", b"f1"]), &mut store, 0),
+            Err(CommandError::Custom("ERR The `numfields` parameter must match the number of arguments".to_string()))
+        );
+
+        // Condition options matrix (NX, XX, GT, LT) + casing:
+        dispatch_argv(&cmd(&[b"HSET", b"h", b"f1", b"v1", b"f2", b"v2"]), &mut store, 1000).expect("seed");
+
+        // f1 has no TTL. f2 set to 100s TTL (expires at 101_000 ms).
+        dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"100", b"FIELDS", b"1", b"f2"]), &mut store, 1000).expect("f2 ttl");
+
+        // NX on f1 (no TTL) -> 1; NX on f2 (has TTL) -> 0:
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"50", b"nx", b"FIELDS", b"2", b"f1", b"f2"]), &mut store, 1000).expect("nx"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
+        );
+
+        // XX on f1 (now has TTL 50s) -> 1; XX on non-existent f_none -> -2:
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"60", b"XX", b"FIELDS", b"2", b"f1", b"f_none"]), &mut store, 1000).expect("xx"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(-2)]))
+        );
+
+        // GT: f1 has 60s (expires at 61_000 ms). Proposing 40s (expires 41_000) -> 0; Proposing 80s (expires 81_000) -> 1:
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"40", b"GT", b"FIELDS", b"1", b"f1"]), &mut store, 1000).expect("gt smaller"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0)]))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"80", b"gt", b"FIELDS", b"1", b"f1"]), &mut store, 1000).expect("gt larger"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1)]))
+        );
+
+        // LT: f1 has 80s (expires at 81_000 ms). Proposing 90s -> 0; Proposing 30s -> 1:
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"90", b"LT", b"FIELDS", b"1", b"f1"]), &mut store, 1000).expect("lt larger"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0)]))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"30", b"lt", b"FIELDS", b"1", b"f1"]), &mut store, 1000).expect("lt smaller"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1)]))
+        );
+    }
+
+    #[test]
+    fn hash_field_ttl_missing_key_and_field_matrix() {
+        let cmd = |parts: &[&[u8]]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.to_vec()).collect()
+        };
+        let mut store = Store::new();
+        store.set_forward_hash_field_ttl_enabled(true);
+
+        // Missing key:
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"nosuchkey", b"10", b"FIELDS", b"3", b"a", b"b", b"c"]), &mut store, 1000).expect("hexpire missing key"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(-2), RespFrame::Integer(-2), RespFrame::Integer(-2)]))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HTTL", b"nosuchkey", b"FIELDS", b"3", b"a", b"b", b"c"]), &mut store, 1000).expect("httl missing key"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(-2), RespFrame::Integer(-2), RespFrame::Integer(-2)]))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HPERSIST", b"nosuchkey", b"FIELDS", b"3", b"a", b"b", b"c"]), &mut store, 1000).expect("hpersist missing key"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(-2), RespFrame::Integer(-2), RespFrame::Integer(-2)]))
+        );
+        assert!(!store.exists(b"nosuchkey", 1000));
+
+        // Existing hash with mixed fields:
+        dispatch_argv(&cmd(&[b"HSET", b"h", b"exists1", b"v1", b"exists2", b"v2"]), &mut store, 1000).expect("seed");
+
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"50", b"FIELDS", b"4", b"exists1", b"ghost1", b"exists2", b"ghost2"]), &mut store, 1000).expect("hexpire mixed"),
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::Integer(-2),
+                RespFrame::Integer(1),
+                RespFrame::Integer(-2),
+            ]))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HTTL", b"h", b"FIELDS", b"4", b"exists1", b"ghost1", b"exists2", b"ghost2"]), &mut store, 1000).expect("httl mixed"),
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(50),
+                RespFrame::Integer(-2),
+                RespFrame::Integer(50),
+                RespFrame::Integer(-2),
+            ]))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HPERSIST", b"h", b"FIELDS", b"4", b"exists1", b"ghost1", b"exists2", b"ghost2"]), &mut store, 1000).expect("hpersist mixed"),
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::Integer(-2),
+                RespFrame::Integer(1),
+                RespFrame::Integer(-2),
+            ]))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HTTL", b"h", b"FIELDS", b"4", b"exists1", b"ghost1", b"exists2", b"ghost2"]), &mut store, 1000).expect("httl after persist"),
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(-1),
+                RespFrame::Integer(-2),
+                RespFrame::Integer(-1),
+                RespFrame::Integer(-2),
+            ]))
+        );
+        // Ghosts never created:
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXISTS", b"h", b"ghost1"]), &mut store, 1000).expect("hexists ghost"),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HLEN", b"h"]), &mut store, 1000).expect("hlen"),
+            RespFrame::Integer(2)
+        );
+    }
+
+    #[test]
+    fn hash_field_ttl_wrongtype_matrix() {
+        let cmd = |parts: &[&[u8]]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.to_vec()).collect()
+        };
+        let mut store = Store::new();
+        store.set_forward_hash_field_ttl_enabled(true);
+
+        dispatch_argv(&cmd(&[b"SET", b"str", b"val"]), &mut store, 0).expect("set str");
+        dispatch_argv(&cmd(&[b"LPUSH", b"list", b"elem"]), &mut store, 0).expect("lpush");
+        dispatch_argv(&cmd(&[b"SADD", b"set", b"mem"]), &mut store, 0).expect("sadd");
+        dispatch_argv(&cmd(&[b"ZADD", b"zset", b"1", b"mem"]), &mut store, 0).expect("zadd");
+
+        for key in [b"str".as_slice(), b"list", b"set", b"zset"] {
+            assert_eq!(
+                dispatch_argv(&cmd(&[b"HEXPIRE", key, b"10", b"FIELDS", b"1", b"f"]), &mut store, 0),
+                Err(CommandError::Store(StoreError::WrongType)),
+                "hexpire on {:?}", String::from_utf8_lossy(key)
+            );
+            assert_eq!(
+                dispatch_argv(&cmd(&[b"HTTL", key, b"FIELDS", b"1", b"f"]), &mut store, 0),
+                Err(CommandError::Store(StoreError::WrongType)),
+                "httl on {:?}", String::from_utf8_lossy(key)
+            );
+            assert_eq!(
+                dispatch_argv(&cmd(&[b"HPERSIST", key, b"FIELDS", b"1", b"f"]), &mut store, 0),
+                Err(CommandError::Store(StoreError::WrongType)),
+                "hpersist on {:?}", String::from_utf8_lossy(key)
+            );
+        }
+    }
+
+    #[test]
+    fn hash_field_ttl_persistence_and_keyspace_events_lifecycle() {
+        let cmd = |parts: &[&[u8]]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.to_vec()).collect()
+        };
+        let mut store = Store::new();
+        store.set_forward_hash_field_ttl_enabled(true);
+        store.notify_keyspace_events =
+            fr_store::NOTIFY_KEYEVENT | fr_store::NOTIFY_KEYSPACE | fr_store::NOTIFY_HASH | fr_store::NOTIFY_GENERIC;
+
+        dispatch_argv(&cmd(&[b"HSET", b"myhash", b"f1", b"v1", b"f2", b"v2"]), &mut store, 1000).expect("hset");
+        let _ = store.drain_keyspace_notifications();
+
+        // 1. HEXPIRE sets TTL -> emits hexpire event
+        let exp = dispatch_argv(&cmd(&[b"HEXPIRE", b"myhash", b"100", b"FIELDS", b"1", b"f1"]), &mut store, 1000).expect("hexpire");
+        assert_eq!(exp, RespFrame::Array(Some(vec![RespFrame::Integer(1)])));
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![
+                (b"__keyspace@0__:myhash".to_vec(), b"hexpire".to_vec()),
+                (b"__keyevent@0__:hexpire".to_vec(), b"myhash".to_vec()),
+            ]
+        );
+
+        // 2. HPERSIST removes TTL -> emits hpersist event
+        let per = dispatch_argv(&cmd(&[b"HPERSIST", b"myhash", b"FIELDS", b"1", b"f1"]), &mut store, 1000).expect("hpersist");
+        assert_eq!(per, RespFrame::Array(Some(vec![RespFrame::Integer(1)])));
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![
+                (b"__keyspace@0__:myhash".to_vec(), b"hpersist".to_vec()),
+                (b"__keyevent@0__:hpersist".to_vec(), b"myhash".to_vec()),
+            ]
+        );
+
+        // 3. Second HPERSIST on already persistent field -> returns -1, emits NO event
+        let per2 = dispatch_argv(&cmd(&[b"HPERSIST", b"myhash", b"FIELDS", b"1", b"f1"]), &mut store, 1000).expect("hpersist 2");
+        assert_eq!(per2, RespFrame::Array(Some(vec![RespFrame::Integer(-1)])));
+        assert!(store.drain_keyspace_notifications().is_empty());
+
+        // 4. HEXPIRE with 0 TTL reaps f1 immediately -> returns 2, emits hdel (not del because f2 remains)
+        let zero1 = dispatch_argv(&cmd(&[b"HEXPIRE", b"myhash", b"0", b"FIELDS", b"1", b"f1"]), &mut store, 1000).expect("hexpire 0 f1");
+        assert_eq!(zero1, RespFrame::Array(Some(vec![RespFrame::Integer(2)])));
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![
+                (b"__keyspace@0__:myhash".to_vec(), b"hdel".to_vec()),
+                (b"__keyevent@0__:hdel".to_vec(), b"myhash".to_vec()),
+            ]
+        );
+
+        // 5. HEXPIRE with 0 TTL reaps last field f2 -> returns 2, emits hdel AND del because hash is now empty!
+        let zero2 = dispatch_argv(&cmd(&[b"HEXPIRE", b"myhash", b"0", b"FIELDS", b"1", b"f2"]), &mut store, 1000).expect("hexpire 0 f2");
+        assert_eq!(zero2, RespFrame::Array(Some(vec![RespFrame::Integer(2)])));
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![
+                (b"__keyspace@0__:myhash".to_vec(), b"hdel".to_vec()),
+                (b"__keyevent@0__:hdel".to_vec(), b"myhash".to_vec()),
+                (b"__keyspace@0__:myhash".to_vec(), b"del".to_vec()),
+                (b"__keyevent@0__:del".to_vec(), b"myhash".to_vec()),
+            ]
+        );
+        assert!(!store.exists(b"myhash", 1000));
+    }
+
+    #[test]
+    fn hash_field_ttl_lazy_reaping_and_expiration_visibility_under_opt_in() {
+        let cmd = |parts: &[&[u8]]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.to_vec()).collect()
+        };
+        let mut store = Store::new();
+        store.set_forward_hash_field_ttl_enabled(true);
+        store.notify_keyspace_events =
+            fr_store::NOTIFY_KEYEVENT | fr_store::NOTIFY_KEYSPACE | fr_store::NOTIFY_EXPIRED;
+
+        // Seed hash at now_ms = 1_000_000
+        let t0 = 1_000_000;
+        dispatch_argv(&cmd(&[b"HSET", b"h", b"f1", b"v1", b"f2", b"v2", b"f3", b"v3"]), &mut store, t0).expect("hset");
+
+        // f1: 10s TTL (expires at 1_010_000)
+        // f2: 20s TTL (expires at 1_020_000)
+        // f3: persistent
+        dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"10", b"FIELDS", b"1", b"f1"]), &mut store, t0).expect("hexpire f1");
+        dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"20", b"FIELDS", b"1", b"f2"]), &mut store, t0).expect("hexpire f2");
+        let _ = store.drain_keyspace_notifications();
+
+        // Check before expiration (t0 + 5s = 1_005_000):
+        let t1 = 1_005_000;
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HGET", b"h", b"f1"]), &mut store, t1).expect("hget f1"),
+            RespFrame::BulkString(Some(b"v1".to_vec()))
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXISTS", b"h", b"f1"]), &mut store, t1).expect("hexists f1"),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HLEN", b"h"]), &mut store, t1).expect("hlen"),
+            RespFrame::Integer(3)
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HSTRLEN", b"h", b"f1"]), &mut store, t1).expect("hstrlen"),
+            RespFrame::Integer(2)
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HTTL", b"h", b"FIELDS", b"3", b"f1", b"f2", b"f3"]), &mut store, t1).expect("httl"),
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(5),
+                RespFrame::Integer(15),
+                RespFrame::Integer(-1),
+            ]))
+        );
+
+        // Advance past f1 expiration (t0 + 15s = 1_015_000):
+        let t2 = 1_015_000;
+        // HGET reaps f1 lazily:
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HGET", b"h", b"f1"]), &mut store, t2).expect("hget expired f1"),
+            RespFrame::BulkString(None)
+        );
+        // Keyspace notification hexpired is emitted:
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![
+                (b"__keyspace@0__:h".to_vec(), b"hexpired".to_vec()),
+                (b"__keyevent@0__:hexpired".to_vec(), b"h".to_vec()),
+            ]
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HEXISTS", b"h", b"f1"]), &mut store, t2).expect("hexists reaped f1"),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HLEN", b"h"]), &mut store, t2).expect("hlen after reap"),
+            RespFrame::Integer(2)
+        );
+        // HTTL reports -2 for reaped f1, 5 for f2, -1 for f3:
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HTTL", b"h", b"FIELDS", b"3", b"f1", b"f2", b"f3"]), &mut store, t2).expect("httl at t2"),
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(-2),
+                RespFrame::Integer(5),
+                RespFrame::Integer(-1),
+            ]))
+        );
+
+        // Persist f2 at t2 (before it expires!):
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HPERSIST", b"h", b"FIELDS", b"3", b"f1", b"f2", b"f3"]), &mut store, t2).expect("hpersist at t2"),
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(-2),
+                RespFrame::Integer(1),
+                RespFrame::Integer(-1),
+            ]))
+        );
+
+        // Advance to t0 + 25s = 1_025_000: f2 was persisted so it did NOT expire!
+        let t3 = 1_025_000;
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HGET", b"h", b"f2"]), &mut store, t3).expect("hget persisted f2"),
+            RespFrame::BulkString(Some(b"v2".to_vec()))
+        );
+
+        // Now set 5s TTL on both f2 and f3 (expires at 1_030_000):
+        dispatch_argv(&cmd(&[b"HEXPIRE", b"h", b"5", b"FIELDS", b"2", b"f2", b"f3"]), &mut store, t3).expect("hexpire f2 f3");
+
+        // Advance to t0 + 35s = 1_035_000: both f2 and f3 are expired!
+        let t4 = 1_035_000;
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HGET", b"h", b"f2"]), &mut store, t4).expect("hget expired f2"),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HGET", b"h", b"f3"]), &mut store, t4).expect("hget expired f3"),
+            RespFrame::BulkString(None)
+        );
+        // Entire hash is now empty and deleted from keyspace:
+        assert!(!store.exists(b"h", t4));
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HLEN", b"h"]), &mut store, t4).expect("hlen empty"),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
+            dispatch_argv(&cmd(&[b"HGETALL", b"h"]), &mut store, t4).expect("hgetall empty"),
+            RespFrame::Array(Some(vec![]))
+        );
+    }
+
+    #[test]
     fn hset_multiple_fields() {
         let mut store = Store::new();
         let argv = vec![
