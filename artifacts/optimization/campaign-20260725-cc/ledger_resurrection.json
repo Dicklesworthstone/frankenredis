@@ -1,0 +1,5065 @@
+[
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 7,
+  "title": "2026-07-25 AzureMouse (cc/STRUCTURAL): REJECT (premise) \u2014 the campaign's io_uring submission-batching lever has nothing to amortize; fr is 1.25x FASTER than redis 7.2.4 at P16 SET and at parity unpipelined (`frankenredis-e947v`)",
+  "date": "2026-07-25",
+  "bead": "frankenredis-e947v",
+  "claimed": 1.004,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": true,
+  "sha": true,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V3n"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "io_uring"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 177,
+  "title": "2026-07-24: BLOCKER \u2014 session-snapshot micro profile saturated (`frankenredis-6oavn`)",
+  "date": "2026-07-24",
+  "bead": "frankenredis-6oavn",
+  "claimed": 0.929,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": true,
+  "sha": true,
+  "st_row": 5.0,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V4"
+  ],
+  "verdict": "VOID",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 526,
+  "title": "2026-07-23 FoggyOrchid: REJECT (premise) \u2014 the RESTORE listpack-re-walk \"gap\" is a measurement artifact; fr's eager span decode WINS the realistic RESTORE+read workload 0.89x. Closes c92f6/hm95r lazy-span lever.",
+  "date": "2026-07-23",
+  "bead": null,
+  "claimed": 0.89,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 556,
+  "title": "2026-07-23 FoggyOrchid: SURFACE \u2014 fresh probe sweep: streams/LPUSH/set-algebra-STORE all fr-DOMINANT; SCAN \"5.4x loss\" is a fixed-cursor harness artifact, real-sweep residual 2.14x instructions at admin-op EV (no lever)",
+  "date": "2026-07-23",
+  "bead": null,
+  "claimed": 1.13,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 671,
+  "title": "2026-07-22 FoggyOrchid: REJECT \u2014 writer-pool Drained completion returning write_buf capacity is UNDECIDABLE below the P16 noise floor; hunk reverted, no source kept (frankenredis-3cp5v)",
+  "date": "2026-07-22",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": true,
+  "sha": true,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V3n"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 868,
+  "title": "2026-07-22: REJECT \u2014 inspect both CLIENT TRACKING states for pristine no-op; 4.194352% more instructions (frankenredis-7eruh)",
+  "date": "2026-07-22",
+  "bead": "frankenredis-cyrt3",
+  "claimed": 0.959744922,
+  "floor": 1e-05,
+  "floor_src": "row: 3x null CV 0.000139%",
+  "has_null": true,
+  "sha": true,
+  "st_row": 12.87,
+  "st_live": 0.04,
+  "st_sym": "<fr_store::ClientTrackingState as core::clone::Clone>::clone_from",
+  "reasons": [],
+  "verdict": "SOUND",
+  "syms": [
+   "ClientTrackingState::clone_from",
+   "clone_from"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 1339,
+  "title": "2026-07-16: REJECTED \u2014 repeated REPLCONF handshake fast path (frankenredis-bf1ow)",
+  "date": "2026-07-16",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 1815,
+  "title": "2026-07-13: REJECTED (REGRESSION) \u2014 classify_command match dispatch on the len-3 bucket regresses ~2.2%; the linear chain is optimal for tiny front-loaded buckets",
+  "date": "2026-07-13",
+  "bead": null,
+  "claimed": 0.978456,
+  "floor": 1e-05,
+  "floor_src": "row: 3x null CV 0.000029%",
+  "has_null": true,
+  "sha": true,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V3n"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "bench_classify3_linear",
+   "bench_classify3_match",
+   "classify_command",
+   "classify_command_matches_linear_reference",
+   "eq_ascii_command",
+   "pack_cmd_u64"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 2051,
+  "title": "2026-07-13: REJECTED (SUB-GATE) \u2014 direct-write `write_i64_to_slice` (no tmp+copy) is only +0.51%, below the 1% keep gate",
+  "date": "2026-07-13",
+  "bead": null,
+  "claimed": 1.005097,
+  "floor": 1e-05,
+  "floor_src": "row: 2x |null median 1.000000055 - 1|",
+  "has_null": true,
+  "sha": true,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V3n",
+   "V6"
+  ],
+  "verdict": "GATE-VOID",
+  "syms": [
+   "copy_from_slice",
+   "decimal_u64_len",
+   "write_i64_to_slice",
+   "write_u64_digits"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 2094,
+  "title": "2026-07-13: REJECTED/REVERTED \u2014 propagating the fused length header to the OWNED RespFrame encode arms regresses array replies ~1.15%",
+  "date": "2026-07-13",
+  "bead": null,
+  "claimed": 0.988676,
+  "floor": 1e-05,
+  "floor_src": "row: 3x null CV 0.000011%",
+  "has_null": true,
+  "sha": true,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V3n"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "RespFrame::encode_into",
+   "bench_encode_array_reply",
+   "encode_into_resp3",
+   "push_len_header",
+   "push_usize"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 2554,
+  "title": "2026-07-12: NEGATIVE (small-clean drive-by frontier exhausted) \u2014 even the HOTTEST Vec-build is already presized; next lever is medium/structural",
+  "date": "2026-07-12",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "contains_key",
+   "digest_mutations",
+   "get_mut",
+   "mark_digest_stale_fields",
+   "parse_command_args_borrowed_into"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 2577,
+  "title": "2026-07-12: NEGATIVE (presize vein fully characterized + mined) \u2014 presize wins ONLY when per-element work \u2248 a pointer-move",
+  "date": "2026-07-12",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "collect_drained",
+   "drain_first_n",
+   "get_mut",
+   "lpop_count",
+   "pop_min",
+   "rpop_count",
+   "spop_count",
+   "zpopmin_count"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 2619,
+  "title": "2026-07-12: NEGATIVE (presize vein clean candidates mined) \u2014 remaining Vec::new()-grows are upper-bound or delicate; SPOP-count O(count)-lookup lever SURFACED",
+  "date": "2026-07-12",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Store::spop_count",
+   "decode_string_ranges_if_all_strings",
+   "decode_value_spans",
+   "get_mut",
+   "usize::MAX",
+   "with_capacity"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 2662,
+  "title": "2026-07-12: NEGATIVE (memset-elision vein now fully mined) \u2014 no clean drive-by remains; next byte-level lever is deferred/complex",
+  "date": "2026-07-12",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Vec::with_capacity",
+   "duplicate_for_copy",
+   "listpack_blob_with_header",
+   "popcount_bytes"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 2728,
+  "title": "2026-07-12: NEGATIVE (measured neutral, reverted) \u2014 the memset-elision does NOT generalize to HLL dense ENCODE",
+  "date": "2026-07-12",
+  "bead": null,
+  "claimed": 0.993,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": true,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "alloc_zeroed",
+   "flat_map",
+   "hll_encode_dense_registers"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 2768,
+  "title": "2026-07-12: NEGATIVE (vein complete) \u2014 byte-streaming AVX2 routing EXHAUSTED for clean drive-bys; remaining pieces are complex/low-value or peer-contended",
+  "date": "2026-07-12",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "common_prefix",
+   "getrange_with",
+   "hll_decode_dense_registers",
+   "hll_estimate"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 2898,
+  "title": "2026-07-12: NEGATIVE (sub-gate, reverted) \u2014 zset-listpack score ENCODE per-entry render Vec hoist",
+  "date": "2026-07-12",
+  "bead": null,
+  "claimed": 0.953,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": true,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V3n",
+   "V4",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "encode_zset_score_listpack_entry",
+   "frac_128",
+   "frac_512",
+   "int_128",
+   "int_96",
+   "mixed_128"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 3204,
+  "title": "2026-07-10 cod_fr: INVALID A/B \u2014 first SORT comparator ORIG was still dead code; no ratio trusted",
+  "date": "2026-07-10",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "String::write_char",
+   "core::str::converts::from_utf8",
+   "from_utf8",
+   "sort_alpha_compare"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 3257,
+  "title": "WHY NO RATIO (blocker, not an omission)",
+  "date": null,
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V4",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "from_utf8"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 3377,
+  "title": "Integrity erratum: short-key compare executes, but its claimed `<0.5%` `memcmp` bound is invalid",
+  "date": null,
+  "bead": null,
+  "claimed": 0.82,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.1,
+  "st_sym": "__memcmp_avx2_movbe",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "CompactFieldMap::lookup_slot_prehashed",
+   "__memcmp_avx2_movbe"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 3389,
+  "title": "2026-07-10 cc_fr: LEDGER-INTEGRITY AUDIT #2 \u2014 the four sweeping do-not-retry families, profile-verified. **SORT REOPENED**: its REJECT row had NO profile, and 35.43% of SORT ALPHA's self-time is a discarded `from_utf8`",
+  "date": "2026-07-10",
+  "bead": null,
+  "claimed": 0.82,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "from_utf8"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 3479,
+  "title": "BLOCKER (unchanged)",
+  "date": null,
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "sort_alpha_compare"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 3488,
+  "title": "2026-07-10 cc_fr: LEDGER-INTEGRITY AUDIT \u2014 manifest levers #2 and #3 were ranked on an input where their function NEVER EXECUTES; rows INVALID, reopened, re-measured on the real bulk-save path",
+  "date": "2026-07-10",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.42,
+  "st_sym": "__memmove_avx_unaligned_erms",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Store::dump_key",
+   "__memmove_avx_unaligned_erms",
+   "alloc::fmt::format::format_inner",
+   "crc64_redis",
+   "encode_intset",
+   "encode_listpack_integer_entry",
+   "encode_listpack_string_entry",
+   "fr_persist",
+   "fr_persist::encode_compact_list_quicklist2",
+   "fr_persist::encode_intset_blob",
+   "fr_persist::encode_listpack_entry",
+   "fr_persist::encode_listpack_strings_blob",
+   "fr_persist::encode_rdb_internal",
+   "fr_persist::encode_zset_score_listpack_entry"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 3979,
+  "title": "DECLINED (recorded rejection, not retried): GETSET / GETDEL zero-copy `_into`",
+  "date": null,
+  "bead": null,
+  "claimed": 1.077,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Runtime::execute_plain_getset_borrowed_into",
+   "Store::getset_with",
+   "internal_entries_remove",
+   "write_buf"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 4166,
+  "title": "2026-07-10 cod_fr: REJECT (premise) \u2014 current P16 small-reply path is NOT writev-starved; do not retry wrappers over `write_buf`",
+  "date": "2026-07-10",
+  "bead": "frankenredis-ohsk5",
+  "claimed": 1.007,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": true,
+  "st_row": null,
+  "st_live": 2.55,
+  "st_sym": "frankenredis::process_buffered_frames",
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "CommandHistogramTracker::record_canonical_with_kind",
+   "LPUSH_16v",
+   "RPUSH_16v",
+   "Runtime::execute_plain_get_borrowed_into_with_default_read_gate",
+   "Runtime::execute_plain_set_borrowed_with_default_write_gate",
+   "Runtime::is_pubsub_client",
+   "SADD_16v",
+   "ServerState::run_active_expire_cycle",
+   "Store::set_plain_borrowed",
+   "__send",
+   "drain_pending_pubsub_to_connection",
+   "estimate_value_memory_usage_bytes",
+   "fr_store::canonical_string_value_from_slice",
+   "fr_store::parse_i64"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 4246,
+  "title": "2026-07-09 cc_fr: REJECT (premise) \u2014 the RESTORE gap is NOT \"solely the owned-argv large-payload copy\"; it is a listpack RE-WALK that redis does not do",
+  "date": "2026-07-09",
+  "bead": null,
+  "claimed": 0.425,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 2.55,
+  "st_sym": "frankenredis::process_buffered_frames",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "ChunkedList::from_restored_nodes",
+   "ListValue::rebuild_growth_state",
+   "Runtime::execute_frame_internal",
+   "__memcmp_avx2_movbe",
+   "__memmove_avx_unaligned_erms",
+   "copy_borrowed_argv_into_scratch",
+   "decode_rdb_string",
+   "decode_value_spans",
+   "entry_len_with_backlen",
+   "extend_from_slice",
+   "forced_quicklist",
+   "fr_persist::crc64_redis",
+   "fr_persist::listpack::decode_value_spans",
+   "fr_persist::listpack::entry_len_with_backlen"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 4495,
+  "title": "2026-07-09 CodexRedisDig: REJECT \u2014 GEOHASH multi-member direct wire/streaming encoder \u2014 no stable gain vs ORIG",
+  "date": "2026-07-09",
+  "bead": null,
+  "claimed": 0.997,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 2.55,
+  "st_sym": "frankenredis::process_buffered_frames",
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "RespFrame::encode_into",
+   "execute_plain_geohash_borrowed",
+   "geo_vs_redis",
+   "process_buffered_frames",
+   "write_buf",
+   "zmscore_each"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 4614,
+  "title": "2026-07-09 CrimsonHawk: CLOSE \u2014 SORT loss DECOMPOSED: it's dominated by the STRUCTURAL ChunkedList `store_as_list` (99fwc, already-rejected), NOT the sort/clones. Stop chasing SORT.",
+  "date": "2026-07-09",
+  "bead": null,
+  "claimed": 0.734,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "mem::take",
+   "store_as_list"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 4627,
+  "title": "2026-07-09 CrimsonHawk: REJECT (0-gain) + SURFACE \u2014 SORT is a real EXECUTOR loss (ALPHA 0.58x vs redis) but the reply-clone (into_iter) lever is 0-gain; cost is the sort comparison / collect+reorder clones",
+  "date": "2026-07-09",
+  "bead": null,
+  "claimed": 1.02,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.1,
+  "st_sym": "__memcmp_avx2_movbe",
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "__memcmp",
+   "core::str::converts::from_utf8",
+   "mem::take",
+   "sort_alpha_compare",
+   "then_with"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 4737,
+  "title": "2026-07-09 CrimsonHawk: SURFACE + REJECT \u2014 variadic-write dispatch cliff (keyed_values5-8) is REAL (+25-30% on 5-8v) but the cascade REORDER fix is net-negative; the clean fix is a front-gate preclassifier (peer's vein)",
+  "date": "2026-07-09",
+  "bead": null,
+  "claimed": 1.094,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "classify_borrowed_dispatch_floor_packet",
+   "keyed_values2"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 4783,
+  "title": "2026-07-09 CrimsonHawk: KEEP SINTERCARD drop-loop guard (+3.5\u20135.9%); REJECT the same guard on full-scan SINTER/SUNION/SDIFF (0-gain)",
+  "date": "2026-07-09",
+  "bead": null,
+  "claimed": 0.997,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "drop_if_expired"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 5016,
+  "title": "2026-07-09 CrimsonHawk: REJECT (negligible) \u2014 CompactFieldMap short-key final-compare micro-lever; the set/hash membership hot path is optimal",
+  "date": "2026-07-09",
+  "bead": null,
+  "claimed": 1.18,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "CompactFieldMap::lookup_slot_prehashed"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 5129,
+  "title": "2026-07-08 CrimsonHawk: REVERT (0-gain) + SURFACE \u2014 SMISMEMBER 100-member 0.82x is NOT the parser cliff; store-membership/encode-bound",
+  "date": "2026-07-08",
+  "bead": null,
+  "claimed": 0.85,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "CompactStrSet::contains",
+   "RespFrame::Array",
+   "execute_plain_smismember_borrowed_into"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 5237,
+  "title": "2026-07-08 CrimsonHawk: SURFACE (blocker + roadmap) \u2014 non-store SUNION/SDIFF do TWO copies per member; both elision routes need a dedicated multi-piece effort",
+  "date": "2026-07-08",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "GenericSet::into_iter",
+   "each_member_bytes",
+   "execute_plain_smembers_borrowed_into",
+   "execute_plain_sunionstore_borrowed",
+   "into_iter",
+   "sdiff_value",
+   "smembers_borrow_scan",
+   "sort_unstable",
+   "sunion_value"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 5355,
+  "title": "2026-07-08 CrimsonHawk: NO-SHIP (profiling sweep) \u2014 each_member_bytes can't extend to SINTER/SUNION/SDIFF (byte-sort blocks borrow-scan); benched read ops + packed contains verified optimal",
+  "date": "2026-07-08",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "PackedStrSet::contains",
+   "bitfield_get",
+   "bitfield_read",
+   "each_member_bytes",
+   "into_owned",
+   "to_vec"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 5417,
+  "title": "2026-07-09 CodexRedis: NO-SHIP \u2014 listpack span exact-capacity prealloc regresses restore decode \u2014 0.93x release; code reverted",
+  "date": "2026-07-09",
+  "bead": null,
+  "claimed": 0.93,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "decode_listpack",
+   "decode_value_spans"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 5500,
+  "title": "2026-07-07 CrimsonHawk: REVERT (0-gain) \u2014 existing-key SADD into a packed generic set: rebuild bulk is MARGINAL/loses for the bounded packed range. Code reverted; byte-exact but not worth it.",
+  "date": "2026-07-07",
+  "bead": null,
+  "claimed": 0.99,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "from_unique_str_members",
+   "insert_borrowed",
+   "sadd_generic_str_batch_matches_individual",
+   "try_sadd_generic_str_batch"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 5520,
+  "title": "2026-07-07 CrimsonHawk: NO-SHIP (audit, negative) \u2014 fresh-key HSET bulk is ALREADY optimal + UNGATED; no small-k regression (bulk wins from k=1). Measured; sweep tool kept.",
+  "date": "2026-07-07",
+  "bead": null,
+  "claimed": 1.42,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "HashFieldMap::from_unique_pairs_borrowed",
+   "hset_borrowed",
+   "hset_borrowed_many"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 5638,
+  "title": "2026-07-05 CrimsonHawk: SURFACE (BLOCKER) \u2014 bounded per-crate levers landed/rejected; next target needs a FRESH sweep, not stale (pre-arc) data",
+  "date": "2026-07-05",
+  "bead": null,
+  "claimed": 0.87,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "common_prefix_len",
+   "hashbrown::HashMap"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 5874,
+  "title": "2026-07-05 CrimsonHawk: NO-SHIP \u2014 SRANDMEMBER intset index visitor was noise/regression; removed",
+  "date": "2026-07-05",
+  "bead": null,
+  "claimed": 0.95,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "each_member_bytes",
+   "srandmember_borrow",
+   "srandmember_count_borrow_scan"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 6058,
+  "title": "2026-07-04 CrimsonHawk: NO-SHIP \u2014 OBJECT IDLETIME single-lookup collapse is ~1.02x vs ORIG, too small/noisy; reverted",
+  "date": "2026-07-04",
+  "bead": null,
+  "claimed": 1.02,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Store::object_idletime_live",
+   "exists_no_touch",
+   "lookup_live_for_read_mut",
+   "object_freq",
+   "object_idletime"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 6178,
+  "title": "2026-07-04 CrimsonHawk: NEGATIVE (verified) \u2014 SMISMEMBER set-lookup path is already h2-optimized; residual is fundamental packed-layout cost, not a bounded lever",
+  "date": "2026-07-04",
+  "bead": null,
+  "claimed": 0.84,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 6193,
+  "title": "2026-07-04 CrimsonHawk: NEGATIVE (measured, don't re-chase) \u2014 data-driven head-to-head sweep confirms only losses are STRUCTURAL; SMISMEMBER large-N argv-alloc = ~0-gain (reverted)",
+  "date": "2026-07-04",
+  "bead": null,
+  "claimed": 0.85,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "foldhash::quality::RandomState"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 6339,
+  "title": "2026-07-04 CrimsonHawk: SURFACE (scoped blocker) \u2014 collection-read borrow-`_into` vein EXHAUSTED; remaining stream/read targets are write-entangled or structural",
+  "date": "2026-07-04",
+  "bead": null,
+  "claimed": 1.44,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 2.55,
+  "st_sym": "frankenredis::process_buffered_frames",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "advance_stream_entries_read_counter",
+   "entries_read",
+   "into_owned",
+   "last_delivered_id",
+   "process_buffered_frames",
+   "rebuild_ordered_keys",
+   "scan_cache",
+   "to_pairs",
+   "to_vec"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 6649,
+  "title": "2026-07-04 CrimsonHawk: SURFACE (scoped blocker) \u2014 remaining random-sample member-clone targets need dedicated efforts",
+  "date": "2026-07-04",
+  "bead": null,
+  "claimed": 1.49,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "execute_plain_scan0_borrowed",
+   "index_slice_asc_adaptive"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 6833,
+  "title": "2026-07-04 CrimsonHawk: SURFACE (blocker) \u2014 clean single-turn per-crate keyspace-probe/bare-drop vein EXHAUSTED; next levers are multi-part/structural",
+  "date": "2026-07-04",
+  "bead": null,
+  "claimed": 1.03,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 2.55,
+  "st_sym": "frankenredis::process_buffered_frames",
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "expires_count",
+   "process_buffered_frames",
+   "raw_entry_mut",
+   "record_keyspace_lookup"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 7761,
+  "title": "2026-07-04 CrimsonHawk: DROP \u2014 BITCOUNT popcount 4-accumulator unroll measured 0.578x vs current single-accumulator swar (WORSE) \u2014 reverted",
+  "date": "2026-07-04",
+  "bead": null,
+  "claimed": 0.578,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Store::popcount_bytes",
+   "popcount_bytes_swar_matches_naive_and_reports_ab_ratio",
+   "u64::count_ones"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 8131,
+  "title": "2026-07-04 CrimsonHawk: MEASURED/REJECT \u2014 zset DUMP listpack in-place finish is ~0-gain; final candidate `0.692x` vs Redis 7.2.4, dropped",
+  "date": "2026-07-04",
+  "bead": "frankenredis-amsm9",
+  "claimed": 0.978,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "finish_listpack_entries"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 8170,
+  "title": "2026-07-04 CrimsonHawk: REJECT \u2014 small CompactFieldMap linear `contains_key` did not clear the SMISMEMBER gate",
+  "date": "2026-07-04",
+  "bead": "frankenredis-f7iv3",
+  "claimed": 0.982,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "CompactFieldMap::contains_key",
+   "contains_key"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 8284,
+  "title": "2026-07-02 CrimsonHawk: REJECT \u2014 PUBLISH/SUBSCRIBE ~0.77x is SYSCALL-BOUND (delivery __send), NOT the channel-map SipHash; foldhash swap showed NO measurable win (reverted).",
+  "date": "2026-07-02",
+  "bead": null,
+  "claimed": 0.93,
+  "floor": 0.105,
+  "floor_src": "assumed: P16 multi-conn shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "pubsub_channel_subs"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 8422,
+  "title": "2026-07-02 CrimsonHawk: MEASURED/REJECT \u2014 RDB SAVE is only ~1.4x vs redis 7.2.4 (NOT 3x \u2014 first read was cold/stale-process confounded), byte-size parity; expiry-map fast-exit = byte-identical but NO measurable win (reverted).",
+  "date": "2026-07-02",
+  "bead": null,
+  "claimed": 1.01,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 8752,
+  "title": "2026-07-02 CrimsonHawk: REJECT \u2014 LocalBinding.name String\u2192Rc<str> loop-var name reuse measured 0.2% (noise); tree-walker CONTAINED-win vein is EXHAUSTED \u2014 remaining EVAL lever is the bytecode VM",
+  "date": "2026-07-02",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Scope::set_local_cell",
+   "set_local_cell",
+   "set_local_cell_rc"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 8986,
+  "title": "2026-07-02 CrimsonHawk: REJECT \u2014 redis score String\u2192bytes round-trip elision measured 0% (from_utf8 on fresh ASCII is not a real cost); post-XRANGE-fix sweep finds NO new below-parity outlier; ZPOPMIN \"gap\" was a destructive-exhaustion artifact",
+  "date": "2026-07-02",
+  "bead": null,
+  "claimed": 1.02,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "format_redis_double_bytes",
+   "redis_score_to_bytes"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 9271,
+  "title": "2026-07-01 CrimsonHawk: REJECT \u2014 ChunkedList arena tail REGRESSES 0.63-0.87x end-to-end (CORRECTS the fe62b26ed micro-bench; move-vs-copy, not clone-vs-copy)",
+  "date": "2026-07-01",
+  "bead": null,
+  "claimed": 0.959,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Owned::push_back_owned",
+   "to_vec"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 9585,
+  "title": "2026-06-28 BlackThrush: REJECTED PFMERGE missing-source no-reencode path \u2014 1.007x vs ORIG / no stable Redis-ratio win",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": 1.007,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Store::pfmerge"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 9715,
+  "title": "2026-06-28 BlackThrush: REJECTED PFADD short-element Murmur64 path \u2014 0.790x vs ORIG",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": 0.918,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "PFADD_16v",
+   "hll_hash",
+   "hll_hash_short_path_matches_generic_tail_flow"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 9762,
+  "title": "2026-06-27 BlueFalcon: REJECTED medium-ZCOUNT count-only rank-tree warm gate \u2014 0.963x vs ORIG",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 0.963,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 9808,
+  "title": "2026-06-27 BlueFalcon: REJECTED fresh SADD direct CompactStrSet de-dup \u2014 1.032x vs ORIG, ~0 Redis-ratio movement",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 1.032,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "SADD_200v_fresh",
+   "SetValue::try_bulk_unique_strings",
+   "legacy_redis_code"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 9857,
+  "title": "2026-06-27 BlackThrush: REJECTED retain QUICKLIST_2 nodes through whole-RDB decode/load \u2014 0.915x vs ORIG",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 1.047,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Store::load_quicklist2_packed_nodes"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 10157,
+  "title": "2026-06-27 BlueFalcon PFADD one-byte HLL hash table rejected",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 0.877,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "PFADD_16v"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 10204,
+  "title": "2026-06-27 BlackThrush PFADD HLL hash-tail matcher rejected",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 0.409,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "PFADD_16v",
+   "hll_hash"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 10288,
+  "title": "2026-06-27 AmberRiver BITFIELD SET u8 aligned store fast-path rejected",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 0.975,
+  "floor": 0.105,
+  "floor_src": "assumed: -c50 multi-conn shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Store::bitfield_set_aligned_u8",
+   "bitfield_read",
+   "bitfield_set",
+   "bitfield_set_aligned_u8_matches_generic_for_existing_and_missing_strings",
+   "bitfield_write",
+   "can_execute_plain_bitfield_set_borrowed"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 10330,
+  "title": "2026-06-27 BlackThrush PFADD register-cache encoding skip rejected",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 0.843,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "PFADD_16v",
+   "hll_parse_encoding"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 10370,
+  "title": "2026-06-27 BlueFalcon BITFIELD_SET_u8 aligned store primitive rejected",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 0.769,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "BITFIELD_SET_u8_0_1",
+   "Store::bitfield_set",
+   "bitfield_read",
+   "bitfield_write"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 10422,
+  "title": "2026-06-27 BlueFalcon PFADD_16v parser admission rejected",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 0.935,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "PFADD_16v",
+   "PFADD_1v",
+   "Store::pfadd_borrowed",
+   "legacy_redis_code"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 10509,
+  "title": "2026-06-27 BlackThrush PFADD exact no-op batch cache rejected",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 0.836,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "PFADD_16v",
+   "modification_count"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 10547,
+  "title": "2026-06-27 BlueFalcon PFADD dense in-place mutation rejected",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 0.302,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "PFADD_1v"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 10680,
+  "title": "2026-06-25 BlackThrush 1-value keyed-write direct integer reply rejected",
+  "date": "2026-06-25",
+  "bead": null,
+  "claimed": 1.006,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "HDEL_1v",
+   "LPUSH_1v",
+   "PFADD_1v",
+   "RPUSH_1v",
+   "SADD_1v",
+   "SREM_1v",
+   "execute_plain_keyed_values_write_borrowed",
+   "legacy_redis_code",
+   "parse_borrowed_plain_keyed_values1_packet"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 10728,
+  "title": "2026-06-24 cod-b `frankenredis-uhthd` PFADD decoded-register cache rejected",
+  "date": "2026-06-24",
+  "bead": "frankenredis-uhthd",
+  "claimed": 1.015,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Store::pfadd"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 10816,
+  "title": "2026-06-21 cod-b `frankenredis-uhthd` quicklist2 RESTORE listpack-span fast path rejected",
+  "date": "2026-06-21",
+  "bead": "frankenredis-uhthd",
+  "claimed": 0.635,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "decode_value_spans",
+   "decode_value_spans_borrows_strings_and_formats_ints",
+   "fr_persist::listpack::decode_value_spans"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 10965,
+  "title": "2026-06-21 cod-b `frankenredis-uhthd` batch list push helper rejected",
+  "date": "2026-06-21",
+  "bead": "frankenredis-uhthd",
+  "claimed": 1.002,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Arc::make_mut",
+   "LPUSH_4v",
+   "RPUSH_4v",
+   "SADD_4v",
+   "Store::lpush",
+   "Store::rpush",
+   "keyed_write_vs_redis",
+   "list_multi_push_preserves_order_across_packed_promotion"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 11295,
+  "title": "2026-06-21 cod-b `frankenredis-uhthd` packed bulk exact-capacity rejected and reverted",
+  "date": "2026-06-21",
+  "bead": "frankenredis-uhthd",
+  "claimed": 1.202,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "PackedZSet::from_unique_pairs"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 11390,
+  "title": "2026-06-21 cod-a `frankenredis-quicklist2-direct-emit-g7ag5` quicklist2 direct emit rejected and reverted",
+  "date": "2026-06-21",
+  "bead": "frankenredis-1z4ba",
+  "claimed": 1.0659,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 11427,
+  "title": "2026-06-21 cod-b arity-one keyed-write cached default write gate rejected",
+  "date": "2026-06-21",
+  "bead": null,
+  "claimed": 0.935,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "LPUSH_1v",
+   "RPUSH_1v",
+   "Runtime::execute_plain_keyed_values_write_borrowed",
+   "SADD_1v",
+   "keyed_write_vs_redis",
+   "plain_borrowed_default_key_write_allows"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 11460,
+  "title": "2026-06-21 cod-a `frankenredis-ohsk5` keyed-write packet-id deferral rejected",
+  "date": "2026-06-21",
+  "bead": "frankenredis-ohsk5",
+  "claimed": 0.8,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": 0.1,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "LPUSH_1v",
+   "RPUSH_1v",
+   "Runtime::execute_plain_keyed_values_write_borrowed",
+   "SADD_1v",
+   "next_packet_id"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 11514,
+  "title": "2026-06-21 cod-b `frankenredis-uhthd` EXISTS no-expiry fast path rejected",
+  "date": "2026-06-21",
+  "bead": "frankenredis-uhthd",
+  "claimed": 0.948,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Store::exists_no_touch",
+   "drop_if_expired",
+   "exists8_all_hit",
+   "exists8_duplicates",
+   "exists8_half_hit",
+   "record_keyspace_lookup"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 11545,
+  "title": "2026-06-21 cod-a `frankenredis-ohsk5` SADD single-member runtime path rejected",
+  "date": "2026-06-21",
+  "bead": "frankenredis-ohsk5",
+  "claimed": 1.16,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Runtime::execute_plain_sadd_one_borrowed",
+   "execute_plain_sadd_one_borrowed",
+   "keyed_write_vs_redis"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 11613,
+  "title": "2026-06-21 cod-b `frankenredis-uhthd` compact PackedZSet score tags rejected",
+  "date": "2026-06-21",
+  "bead": "frankenredis-uhthd",
+  "claimed": 1.57,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 12238,
+  "title": "2026-06-20 cod-a bold-verify current refresh + rejected borrowed ZADD no-op shortcut",
+  "date": "2026-06-20",
+  "bead": null,
+  "claimed": 1.0,
+  "floor": 0.105,
+  "floor_src": "assumed: -c50 multi-conn shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 12288,
+  "title": "2026-06-20 cod-a rejected list LP-byte reuse plumbing",
+  "date": "2026-06-20",
+  "bead": null,
+  "claimed": 1.0,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "ListValue::add_entry_bytes"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 12328,
+  "title": "2026-06-20 cod-b rejected SMISMEMBER direct reply encoding",
+  "date": "2026-06-20",
+  "bead": null,
+  "claimed": 0.99,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": true,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "execute_plain_smismember_borrowed_into"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 12423,
+  "title": "2026-06-20 cod-a kept ZADD plain-owned store fast path; runtime-only shortcut rejected",
+  "date": "2026-06-20",
+  "bead": null,
+  "claimed": 1.0,
+  "floor": 0.105,
+  "floor_src": "assumed: -c50 multi-conn shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Store::zadd_plain_owned",
+   "core_zset"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 12482,
+  "title": "2026-06-20 CobaltCove (cc) \u2014 `modification_count` sidecar (shrink hot `Entry`) \u2014 MEASURED LOSS, reverted",
+  "date": "2026-06-20",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "modification_count",
+   "used_memory"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 13061,
+  "title": "cross-verify peer b89361c13 (fr-persist \"reject quicklist2 direct emit\") \u2014 PARITY-SAFE (cc)",
+  "date": null,
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 13089,
+  "title": "2026-06-21 cod-b `frankenredis-uhthd` RANDOMKEY cache-capacity shrink hypothesis rejected",
+  "date": "2026-06-21",
+  "bead": "frankenredis-uhthd",
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "shrink_to_fit",
+   "used_memory"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 13115,
+  "title": "2026-06-21 cod-b `frankenredis-uhthd` quicklist2 RESTORE state-rebuild bypass rejected",
+  "date": "2026-06-21",
+  "bead": "frankenredis-uhthd",
+  "claimed": 0.745,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "ChunkedList::from_restored_nodes",
+   "ListValue::rebuild_growth_state",
+   "lp_bytes",
+   "restore_quicklist_vs_redis"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 13140,
+  "title": "2026-06-21 cod-a `frankenredis-ohsk5` borrowed ListValue push helper rejected",
+  "date": "2026-06-21",
+  "bead": "frankenredis-ohsk5",
+  "claimed": 1.023,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "LPUSH_12v",
+   "LPUSH_16v",
+   "LPUSH_1v",
+   "LPUSH_5v",
+   "LPUSH_8v",
+   "ListValue::push_front_bytes",
+   "RPUSH_12v",
+   "RPUSH_16v",
+   "RPUSH_1v",
+   "RPUSH_5v",
+   "RPUSH_8v",
+   "Store::lpush",
+   "Store::rpush",
+   "push_back_bytes"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 13176,
+  "title": "2026-06-21 cod-b `frankenredis-uhthd` list-push byte-slice helper recheck rejected",
+  "date": "2026-06-21",
+  "bead": "frankenredis-uhthd",
+  "claimed": 0.796,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "LPUSH_1v",
+   "RPUSH_1v",
+   "SADD_1v"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 13670,
+  "title": "SMISMEMBER small-set linear-contains lever: IMPLEMENTED + reverted (infra-blocked from bench) (cc)",
+  "date": null,
+  "bead": null,
+  "claimed": 0.66,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 14349,
+  "title": "2026-06-22 (part 28) tcknm XADD side-map alloc fix \u2014 BYTE-EXACT but ~1.00x (mimalloc absorbs) \u2014 REVERTED (cc/BlackThrush)",
+  "date": "2026-06-22",
+  "bead": null,
+  "claimed": 1.0,
+  "floor": 0.105,
+  "floor_src": "assumed: -c50 multi-conn shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "fr_smove",
+   "stream_entries_added"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 15047,
+  "title": "2026-06-25 (part 74) ZADD 3-member (*8) dispatch fast-path \u2014 ~0-GAIN, REVERTED (cc/BlackThrush)",
+  "date": "2026-06-25",
+  "bead": null,
+  "claimed": 0.994,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 15060,
+  "title": "2026-06-25 (part 75) DEL/TOUCH 4-key fast-path SHIPPED (DEL4 1.57x, TOUCH4 1.39x); EXISTS4 ~0-gain REVERTED (cc/BlackThrush)",
+  "date": "2026-06-25",
+  "bead": null,
+  "claimed": 0.994,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 15138,
+  "title": "2026-06-25 (part 81) 2-key SINTER fresh-build (drop clone+retain) \u2014 ~0-GAIN, REVERTED; gap is STRUCTURAL dest-build (cc/BlackThrush)",
+  "date": "2026-06-25",
+  "bead": null,
+  "claimed": 0.73,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 15461,
+  "title": "2026-06-25 (part 101) LEDGER REJECT: clean dispatch/option/arity vein CONFIRMED EXHAUSTED (cc/BlackThrush)",
+  "date": "2026-06-25",
+  "bead": null,
+  "claimed": 0.89,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 15477,
+  "title": "2026-06-25 (part 102) LEDGER REJECT + PRECISE STORE-SIDE LEVER: SINTERSTORE dest GenericSet->SetValue DOUBLE-BUILD (cc/BlackThrush)",
+  "date": "2026-06-25",
+  "bead": null,
+  "claimed": 0.755,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 15666,
+  "title": "2026-06-25 (part 112) PUBSUB NUMSUB fast-path ~1.71x (byte-exact) + CHANNELS REJECT (sort divergence) (cc/BlackThrush)",
+  "date": "2026-06-25",
+  "bead": null,
+  "claimed": 0.674,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 15701,
+  "title": "2026-06-26 (part 115) LEDGER REJECT: key_type+op double-lookup does NOT generalize (intentional no-stat design) (cc/BlackThrush)",
+  "date": "2026-06-26",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 15812,
+  "title": "2026-06-26 (part 122) ZADD-borrowed lever assessed + DECLINED (last concrete candidate) (cc/BlackThrush)",
+  "date": "2026-06-26",
+  "bead": null,
+  "claimed": 0.539,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 15822,
+  "title": "2026-06-26 (part 123) BLOCKER: CoralOx has LIVE fr-store WIP on the zset/set structures (structural work IN PROGRESS) (cc/BlackThrush)",
+  "date": "2026-06-26",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 15835,
+  "title": "2026-06-26 (part 124) LPUSH/RPUSH list-batch push rejected: no reliable win, RPUSH regression (codex/BlackThrush)",
+  "date": "2026-06-26",
+  "bead": null,
+  "claimed": 0.854,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Arc::make_mut"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 15919,
+  "title": "2026-06-26 (part 125) MEASURED REJECT: ZADD-flags fast-path byte-exact but ZERO-GAIN (store-bound) \u2014 REVERTED (cc/BlackThrush)",
+  "date": "2026-06-26",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 16042,
+  "title": "2026-06-26 (part 131) MEASURED REJECT: insert_consumer fast-return \u2014 no demonstrable win on benchable path, REVERTED (cc/BlackThrush)",
+  "date": "2026-06-26",
+  "bead": null,
+  "claimed": 1.03,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 16227,
+  "title": "2026-06-26 (part 142) REJECT: early SMISMEMBER fixed-arity dispatch hoist was ~0-gain (codex/BlackThrush)",
+  "date": "2026-06-26",
+  "bead": null,
+  "claimed": 0.956,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "SMISMEMBER_2v",
+   "SMISMEMBER_3v",
+   "parse_borrowed_plain_smismember2_packet",
+   "parse_borrowed_plain_smismember3_packet"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 16521,
+  "title": "2026-06-27 (part 165) NO-SHIP/REVERTED: LPOP/RPOP COUNT dispatch fast-path = DUPLICATE + ~0-gain (cc/BlackThrush)",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 0.68,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 16621,
+  "title": "2026-06-27 (part 172) NO-SHIP/SURFACE: length-audit CLEAN + remaining dispatch \"gaps\" are degenerate/noise (cc/BlackThrush)",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 1.04,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 16674,
+  "title": "2026-06-28 (part 176) NO-SHIP: PFADD existing-key lookup consolidation regresses normalized ratio (cod/BlackThrush)",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": 0.902,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Store::pfadd_impl"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 16702,
+  "title": "2026-06-28 NO-SHIP: PFMERGE borrowed fast path regressed the measured gap; keep bench row only (codex/BlueFalcon)",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": 0.234,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "PFMERGE_1v",
+   "Store::pfmerge",
+   "keyed_write_vs_redis"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 16734,
+  "title": "2026-06-29 NO-SHIP (unverifiable under load): ZRANK/ZREVRANK WITHSCORE combined rank+score one-pass (CrimsonHawk)",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": 0.99,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "FullSortedSet::rank",
+   "rank_with_score",
+   "rev_rank_with_score",
+   "zrank_generic"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 16895,
+  "title": "2026-06-29 NO-SHIP (~0-gain): central drop_if_expired expires_count fast-exit (CrimsonHawk)",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 16925,
+  "title": "2026-07-02 NEGATIVE (saturation re-confirm after 3 wins): command-throughput surface exhausted; residuals are dispatch-chain / peer-owned structural (CrimsonHawk)",
+  "date": "2026-07-02",
+  "bead": null,
+  "claimed": 1.01,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 16951,
+  "title": "2026-07-02 BLOCKER (large-value SET zero-fill): 4MB SET 0.79x root-caused to a value-size memset, locked by #![forbid(unsafe_code)] + no-feature-gate policy (CrimsonHawk)",
+  "date": "2026-07-02",
+  "bead": null,
+  "claimed": 1.06,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 16972,
+  "title": "2026-07-02 REJECT (geo distance {:.4} i128 fixed-point): no measurable gain \u2014 low-precision uses fast grisu, not dragon (CrimsonHawk)",
+  "date": "2026-07-02",
+  "bead": null,
+  "claimed": 0.895,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "format_dist_4dp"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 16985,
+  "title": "2026-07-02 REJECT (ZPOPMIN/ZPOPMAX base *2 fast path) + BLOCKER (dispatch-chain ohsk5 is the dominant sub-ms lever) \u2014 CrimsonHawk",
+  "date": "2026-07-02",
+  "bead": null,
+  "claimed": 0.8,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 18078,
+  "title": "2026-07-03 SHIPPED (FIX: OOM recovery trap \u2014 non-denyoom commands wrongly rejected over maxmemory) + SURFACE (pre-existing script-OOM bypass) \u2014 CrimsonHawk",
+  "date": "2026-07-03",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 18489,
+  "title": "2026-07-03 SURFACE (drop_if_expired internal expires_count fast-exit = MEASURED 0.00%, reverted; safe per-crate perf frontier definitively closed) \u2014 CrimsonHawk",
+  "date": "2026-07-03",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "drop_if_expired"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 18648,
+  "title": "2026-07-03 SURFACE (CONFIG SET accept/reject validation 194/195 byte-exact; sole diff = locale-collate, WONTFIX host-dependent+unsafe) \u2014 CrimsonHawk",
+  "date": "2026-07-03",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 19063,
+  "title": "2026-07-11 MEASURED-SUBGATE (list DUMP-encode single-parse fusion \u2014 byte-identical but no measurable win; REVERTED) \u2014 CreamPeak",
+  "date": "2026-07-11",
+  "bead": null,
+  "claimed": 1.0,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "encode_compact_list_quicklist2",
+   "encode_dump_quicklist2",
+   "encode_listpack_entry",
+   "listpack_entry_encoded_len",
+   "parse_listpack_integer"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 19285,
+  "title": "2026-07-12 NEGATIVE (drive-by frontier saturated) + SURFACED: single-item-write get_mut-first common-path vein",
+  "date": "2026-07-12",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "get_mut",
+   "internal_entry"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 19409,
+  "title": "2026-07-12 NEGATIVE (validatable frontier saturated across all crates \u2014 structural RdbValue is the only real lever)",
+  "date": "2026-07-12",
+  "bead": null,
+  "claimed": 1.08,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.29,
+  "st_sym": "fr_protocol::encode_bulk_string_slice",
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "decimal_usize_len",
+   "encode_aggregate_header",
+   "encode_bulk_string_slice",
+   "encode_map_header",
+   "push_usize"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 19486,
+  "title": "2026-07-12 NEGATIVE (get_mut-first vein 100% COMPLETE + mutate-existing commands verified optimal \u2014 one-turn frontier exhausted)",
+  "date": "2026-07-12",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: P16 multi-conn shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "get_mut",
+   "with_mutated_entry"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 19503,
+  "title": "2026-07-12 NEGATIVE (XADD/stream verified optimal \u2014 one-turn frontier DEFINITIVELY closed, 3rd confirmation)",
+  "date": "2026-07-12",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "drop_if_expired",
+   "get_mut",
+   "stream_entries_added",
+   "stream_last_ids"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 19651,
+  "title": "2026-07-13 NEGATIVE (fr-store command hot-path saturation sweep \u2014 read path CLOSED; INCR mark_dirty BLOCKED)",
+  "date": "2026-07-13",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.41,
+  "st_sym": "<fr_store::Store>::get_string_bytes",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "forget_volatile_key",
+   "get_string_bytes",
+   "getrange_with",
+   "hget_with",
+   "i64_text_len",
+   "incrby_existing_key_matches_whole_entry_replacement_side_effects",
+   "internal_entries_insert_with_expiry",
+   "lookup_live_for_read_mut",
+   "mark_volatile_keys_dirty",
+   "string_len",
+   "volatile_keys_dirty",
+   "with_mutated_entry"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 19678,
+  "title": "2026-07-13 NEGATIVE (narrowing sweep \u2014 fr-simd + random-sampling + list/set reads all saturated too)",
+  "date": "2026-07-13",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "bitfield_get",
+   "bitfield_get_batch",
+   "common_prefix_len",
+   "count_expiring_keys",
+   "first_mismatch_byte",
+   "iter_from",
+   "mark_volatile_keys_dirty",
+   "max_bytes_inplace",
+   "popcount_bytes",
+   "srandmember_count"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 19697,
+  "title": "2026-07-13 NEGATIVE (final closure \u2014 set-algebra + MSET + GETDEL saturated; drive-by frontier DEFINITIVELY exhausted)",
+  "date": "2026-07-13",
+  "bead": null,
+  "claimed": 0.47,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "HashFieldMap::Listpack",
+   "drop_stream_side_metadata",
+   "integer_decimal_bytes",
+   "into_vec",
+   "mark_volatile_keys_dirty",
+   "set_plain_borrowed"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 19716,
+  "title": "2026-07-13 NEGATIVE (persistence subsystem also saturated \u2014 DUMP + RDB-load)",
+  "date": "2026-07-13",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "HashFieldMap::from_unique_pairs",
+   "RdbValue::Hash",
+   "cache_dump_payload",
+   "encode_hash_listpack_dump",
+   "encode_set_listpack_dump",
+   "hset_many",
+   "zset_score_listpack_entry"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 19733,
+  "title": "2026-07-13 NEGATIVE (last flagged-open crate lever verified server-blocked \u2014 exhaustion map COMPLETE)",
+  "date": "2026-07-13",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "copy_no_stat",
+   "push_front_borrowed"
+  ]
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 19813,
+  "title": "2026-07-13 NEGATIVE (gate-no-op-cleanup pattern fully SWEPT \u2014 remaining candidate is marginal)",
+  "date": "2026-07-13",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "NEGATIVE_EVIDENCE.md",
+  "line": 19924,
+  "title": "2026-07-16 REJECTED AND REVERTED (`parse_redis_config_bytes` outer directive pre-size \u2014 frankenredis-e5r3k)",
+  "date": "2026-07-16",
+  "bead": null,
+  "claimed": 0.666668465,
+  "floor": 1e-05,
+  "floor_src": "row: 3x null CV 0.000016%",
+  "has_null": true,
+  "sha": true,
+  "st_row": 19.31,
+  "st_live": 0.42,
+  "st_sym": "__memmove_avx_unaligned_erms",
+  "reasons": [],
+  "verdict": "SOUND",
+  "syms": [
+   "__memmove_avx_unaligned_erms",
+   "fr_config::parse_redis_config_bytes",
+   "parse_redis_config_bytes"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 46,
+  "title": "2026-07-24 CreamPeak: BLOCKER \u2014 session-snapshot micro-lever profile is saturated (`frankenredis-6oavn`)",
+  "date": "2026-07-24",
+  "bead": "frankenredis-6oavn",
+  "claimed": 0.929,
+  "floor": 0.105,
+  "floor_src": "assumed: P16 multi-conn shape",
+  "has_null": true,
+  "sha": true,
+  "st_row": 5.0,
+  "st_live": 0.15,
+  "st_sym": "<fr_runtime::Runtime>::record_client_session",
+  "reasons": [
+   "V1"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "ClientSession::allocation_metadata_matches",
+   "ClientTrackingState::clone_from",
+   "Runtime::record_client_session",
+   "TransactionState::clone_from",
+   "has_activity"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 166,
+  "title": "2026-07-24 cc(Opus): BLOCKER (re-verified 4th time) \u2014 pipeline writev architecturally inapplicable; large-value framing gap CLOSED",
+  "date": "2026-07-24",
+  "bead": null,
+  "claimed": 1.13,
+  "floor": 0.105,
+  "floor_src": "assumed: P16 multi-conn shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "write_buf"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 383,
+  "title": "2026-07-22 CreamPeak: REJECT \u2014 scan both tracking states for a pristine bypass (`frankenredis-7eruh`)",
+  "date": "2026-07-22",
+  "bead": "frankenredis-7eruh",
+  "claimed": 0.959744922,
+  "floor": 1e-05,
+  "floor_src": "row: 3x null CV 0.000139%",
+  "has_null": true,
+  "sha": true,
+  "st_row": 12.87,
+  "st_live": 0.04,
+  "st_sym": "<fr_store::ClientTrackingState as core::clone::Clone>::clone_from",
+  "reasons": [],
+  "verdict": "SOUND",
+  "syms": [
+   "ClientTrackingState::clone_from",
+   "clone_from"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 1163,
+  "title": "2026-07-15 CalmHeron: REJECT \u2014 fixed-shape canonical PSYNC2 CONTINUE reply parsing (`frankenredis-ac0uq`)",
+  "date": "2026-07-15",
+  "bead": "frankenredis-ac0uq",
+  "claimed": 1.00000051,
+  "floor": 1e-05,
+  "floor_src": "row: 3x null CV 0.000188%",
+  "has_null": true,
+  "sha": true,
+  "st_row": 58.7,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "bench_parse_psync_reply_reference"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 1719,
+  "title": "2026-07-14 CalmHeron: INVALID PROFILE \u2014 cached WAIT snapshot accessor was below the exact-frame sampling floor (`frankenredis-j8sa4`)",
+  "date": "2026-07-14",
+  "bead": "frankenredis-j8sa4",
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": true,
+  "sha": true,
+  "st_row": 2.98,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [],
+  "verdict": "SOUND",
+  "syms": [
+   "needless_range_loop",
+   "refresh_replica_ack_snapshots_reusing_capacity"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 1826,
+  "title": "2026-07-14 CalmHeron: NEGATIVE \u2014 NO-SHIP. active-expire live-key clone elision is null-drowned (`frankenredis-auer7`)",
+  "date": "2026-07-14",
+  "bead": "frankenredis-auer7",
+  "claimed": 1.0368,
+  "floor": 1.6398,
+  "floor_src": "row: 3x null CV 54.66%",
+  "has_null": true,
+  "sha": true,
+  "st_row": null,
+  "st_live": 0.52,
+  "st_sym": "<fr_runtime::ServerState>::run_active_expire_cycle",
+  "reasons": [
+   "V1",
+   "V3n"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Store::run_active_expire_cycle",
+   "volatile_keys"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 1897,
+  "title": "2026-07-14 CalmHeron: NEGATIVE \u2014 NO-SHIP. cold compact-ZSET DUMP bitwise score classifier is null-drowned (`frankenredis-hdyw0`)",
+  "date": "2026-07-14",
+  "bead": "frankenredis-hdyw0",
+  "claimed": 1.0027,
+  "floor": 0.05899999999999994,
+  "floor_src": "row: 2x |null median 0.9705 - 1|",
+  "has_null": true,
+  "sha": true,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V3n"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "PackedZSetIter::next",
+   "Store::dump_key",
+   "format_redis_double",
+   "push_redis_double_ascii"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 2184,
+  "title": "Rejected levers \u2014 measured REGRESSION or no-win (do NOT retry)",
+  "date": null,
+  "bead": "frankenredis-uhthd",
+  "claimed": 1.01,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Store::dump_key",
+   "drop_if_expired",
+   "key_has_expiry"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 2757,
+  "title": "MEASURED cod-a quicklist2 PACKED RESTORE decode gauntlet (2026-06-19) \u2014 REJECTED",
+  "date": "2026-06-19",
+  "bead": "frankenredis-ta8s1",
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 2921,
+  "title": "MEASURED cod-b qk0nm residual EXISTS runtime-accounting pass (2026-06-19) \u2014 REJECTED",
+  "date": "2026-06-19",
+  "bead": "frankenredis-qk0nm",
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Store::exists_many_no_touch",
+   "drop_if_expired",
+   "exists_many_no_touch",
+   "exists_no_touch"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 2969,
+  "title": "MEASURED cod-a k263a quicklist2 RESTORE fused-stats pass (2026-06-19) \u2014 REJECTED",
+  "date": "2026-06-19",
+  "bead": "frankenredis-k263a",
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3000,
+  "title": "MEASURED cod-a h6ppr RESP CRLF memchr scanner pass (2026-06-19) \u2014 REJECTED",
+  "date": "2026-06-19",
+  "bead": "frankenredis-h6ppr",
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: P16 multi-conn shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "memchr::memchr"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3059,
+  "title": "MEASURED cod-b uhthd inline-small StoreKey pass (2026-06-20) \u2014 REJECTED",
+  "date": "2026-06-20",
+  "bead": "frankenredis-uhthd",
+  "claimed": 1.21,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3164,
+  "title": "MEASURED cod-b ohsk5 HSET direct histogram candidate (2026-06-20) -- REJECTED",
+  "date": "2026-06-20",
+  "bead": "frankenredis-ohsk5",
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: P16 multi-conn shape",
+  "has_null": false,
+  "sha": true,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V4"
+  ],
+  "verdict": "VOID",
+  "syms": []
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3225,
+  "title": "MEASURED cod-b 15lug residual CV confirmation + missing-key expiry candidate (2026-06-20) -- CANDIDATE REJECTED",
+  "date": "2026-06-20",
+  "bead": "frankenredis-15lug",
+  "claimed": 0.959,
+  "floor": 0.105,
+  "floor_src": "assumed: -c50 multi-conn shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Store::drop_if_expired",
+   "expiry_deadlines",
+   "lrange_500",
+   "ping_mbulk"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3460,
+  "title": "ZLEXCOUNT store-side micro-opt \u2014 DECLINED on measurement (BlackThrush 2026-06-20)",
+  "date": "2026-06-20",
+  "bead": null,
+  "claimed": 1.07,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "SortedSet::lex_count",
+   "get_score",
+   "lex_count",
+   "rank_of"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3492,
+  "title": "GEODIST float formatting \u2014 DECLINED on byte-exactness risk (BlackThrush 2026-06-20)",
+  "date": "2026-06-20",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "execute_frame_internal",
+   "f64::round",
+   "flt2dec::strategy::dragon::format_exact",
+   "geo_distance_reply"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3515,
+  "title": "`modification_count` sidecar (shrink hot `Entry` 48\u219240B) \u2014 MEASURED LOSS, reverted (CobaltCove 2026-06-20)",
+  "date": "2026-06-20",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "key_modification_count",
+   "modification_count",
+   "used_memory"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3552,
+  "title": "2026-06-21 cod-b `frankenredis-uhthd` RANDOMKEY cache-capacity shrink hypothesis - NO-SHIP",
+  "date": "2026-06-21",
+  "bead": "frankenredis-uhthd",
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "RandomKeySlotIndex::mark_dirty",
+   "used_memory",
+   "used_memory_rss"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3580,
+  "title": "2026-06-21 cod-b quicklist2 RESTORE single-listpack rebuild bypass - REVERTED",
+  "date": "2026-06-21",
+  "bead": null,
+  "claimed": 0.745,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "rebuild_growth_state"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3597,
+  "title": "2026-06-21 cod-a ohsk5 borrowed list-push helper - REVERTED",
+  "date": "2026-06-21",
+  "bead": "frankenredis-ohsk5",
+  "claimed": 1.023,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "LPUSH_12v",
+   "LPUSH_16v",
+   "LPUSH_1v",
+   "LPUSH_5v",
+   "LPUSH_8v",
+   "ListValue::push_front_bytes",
+   "RPUSH_12v",
+   "RPUSH_16v",
+   "RPUSH_1v",
+   "RPUSH_5v",
+   "RPUSH_8v",
+   "Store::lpush",
+   "Store::rpush",
+   "keyed_write_vs_redis"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3627,
+  "title": "2026-06-21 cod-b uhthd list-push byte-slice helper recheck - REVERTED",
+  "date": "2026-06-21",
+  "bead": null,
+  "claimed": 0.796,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "LPUSH_1v",
+   "RPUSH_1v",
+   "SADD_1v",
+   "keyed_write_vs_redis"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3691,
+  "title": "2026-06-27 AmberRiver land-or-dig: clean-crate lever surface exhausted + agent-mail blocker surfaced",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 1.017,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.41,
+  "st_sym": "<fr_store::Store>::get_string_bytes",
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Store::get_string_bytes"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3765,
+  "title": "2026-06-27 AmberRiver: SET drop_if_expired guard \u2014 profile-driven, MEASURED ~0-gain, REVERTED",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 1.008,
+  "floor": 0.105,
+  "floor_src": "assumed: -c50 multi-conn shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 2.55,
+  "st_sym": "frankenredis::process_buffered_frames",
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "Store::set",
+   "__send",
+   "canonical_string_value_from_slice",
+   "drop_if_expired",
+   "evaluate_expiry",
+   "parse_i64",
+   "process_buffered_frames",
+   "set_plain_borrowed",
+   "set_plain_owned"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3856,
+  "title": "2026-06-27 AmberRiver: zset RDB-load profiled \u2014 structural (BTreeMap sort), dedup-skip not worth it",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.25,
+  "st_sym": "_copy_from_iter",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "BTreeMap::from_iter",
+   "IndexMap::insert_full",
+   "SortedSet::from_unique_pairs_with_limits",
+   "from_sorted_iter",
+   "hash_one",
+   "sort_unstable"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 3888,
+  "title": "2026-06-27 AmberRiver: list RDB-load `rpush_owned` (avoid redundant clone) \u2014 MEASURED ~0-gain, REVERTED",
+  "date": "2026-06-27",
+  "bead": null,
+  "claimed": 1.073,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.06,
+  "st_sym": "mi_free",
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "RdbValue::List",
+   "drop_if_expired",
+   "feedback_mimalloc",
+   "lzf_compress_with_scratch",
+   "mi_free",
+   "push_back",
+   "push_back_with_fill",
+   "rpush_owned",
+   "to_vec"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 4031,
+  "title": "2026-06-28 AmberRiver: XADD drop_if_expired guard MEASURED ~0-gain (1.015x), REVERTED \u2014 gap confirmed structural",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": 1.01,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "drop_if_expired",
+   "get_mut",
+   "stream_entries_added",
+   "stream_last_ids"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 4234,
+  "title": "2026-06-28 AmberRiver: Lua-map foldhash swap MEASURED ~0-gain (1.00-1.02x), REVERTED \u2014 hashing isn't the EVAL bottleneck",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": 0.996,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "RandomState::hash_one"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 4414,
+  "title": "2026-06-28 CrimsonHawk: REJECT both rewrites of `encode_bulk_string_slice` \u2014 the hottest reply encoder is already optimal (+8.6\u201310.5% slower)",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.29,
+  "st_sym": "fr_protocol::encode_bulk_string_slice",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "encode_bulk_string_slice",
+   "extend_from_slice",
+   "push_usize"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 4474,
+  "title": "2026-06-28 CrimsonHawk: REVERT zset listpack decode integer-score direct-convert \u2014 real but sub-noise, unprovable on this session's box",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "decode_rdb",
+   "encode_listpack_entry",
+   "from_utf8",
+   "into_bytes"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 4495,
+  "title": "2026-06-28 CrimsonHawk: REJECT streaming listpack decode (eliminate intermediate `Vec<ListpackEntry>`) \u2014 +79% SLOWER, the intermediate's presize is a feature not a cost",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "decode_listpack",
+   "num_elements",
+   "size_hint"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 4521,
+  "title": "2026-06-28 CrimsonHawk: REJECT vectorized `read_line` (position-scan for CRLF) \u2014 scalar byte loop is optimal on tiny RESP header lines (+6.8%)",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "parse_bulk_slice",
+   "read_line"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 4636,
+  "title": "2026-06-28 CrimsonHawk: REJECT LZF-decompress pre-reserve (vs 8 KiB-cap + grow) \u2014 mimalloc makes the reallocs free (~0%)",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "expected_len",
+   "lzf_decompress"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 4683,
+  "title": "2026-06-28 CrimsonHawk: LANDED glob_match exact + suffix fast paths (-54% / -49%); contains REJECTED (+66%)",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "glob_match",
+   "literal_glob_shape",
+   "memchr::memmem"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 4754,
+  "title": "2026-06-28 CrimsonHawk: pure-primitive survey \u2014 6 more primitives verified at their optimum (no lever); the easy algorithmic vein is mined out",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": 0.477,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "binary_search",
+   "count_ones",
+   "get_index",
+   "hll_estimate",
+   "hll_hash",
+   "leading_zeros",
+   "listpack_int_bytes_are_canonical"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 4831,
+  "title": "2026-06-28 CrimsonHawk: REJECT listpack-blob encode presize (+5.1%) \u2014 confirms AOF win was MATERIALIZATION, not alloc-avoidance",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "encode_listpack_strings_blob",
+   "to_bytes",
+   "with_capacity"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 5042,
+  "title": "2026-06-29 CrimsonHawk: XADD residual estimate_stream O(n) assessed MARGINAL \u2014 invasive + MEMORY-USAGE-parity-constrained, not worth it; dispatch-lever vein closed",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": 0.74,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "cached_entry_memory_usage_bytes",
+   "estimate_stream",
+   "modification_count"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 5403,
+  "title": "2026-06-28 CrimsonHawk: SET (write) hot-path profile ALSO at the syscall floor \u2014 fr CPU ~7%, spread across already-optimized inherent ops; no lever",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: -c50 multi-conn shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 5463,
+  "title": "2026-06-28 CrimsonHawk: REVERTED the BulkArray reply variant \u2014 build-unblock REVEALED the vein is mostly pre-harvested (`_into` fast paths) + the variant's blast radius isn't worth the long-tail-only EV",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "execute_plain_lrange_borrowed_into",
+   "resp_to_lua"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 5919,
+  "title": "2026-06-28 CrimsonHawk: REJECT uppercase-match command dispatch (+19.7%) \u2014 eq_ignore_ascii_case chain already optimal; dispatch is ~3.5 ns, not a cheap lever",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "eq_ignore_ascii_case"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 5998,
+  "title": "2026-06-28 CrimsonHawk: REJECT BITCOUNT popcount multi-accumulator (+6-8%) \u2014 register add-chain \u2260 the HLL memory chain; multi-bank only wins for MEMORY-RAW loops",
+  "date": "2026-06-28",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "popcount_bytes"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 6260,
+  "title": "2026-06-29 cc: REJECTED quicklist-encode output presize (\u22125%, measured LOSS) \u2014 realloc-cap vein is DECODE-only; encode buffers are write-only and mimalloc-growth-optimal",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "encode_compact_list_quicklist2",
+   "encode_rdb"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 6501,
+  "title": "2026-06-29 cc: PRECISE BLOCKER DIAGNOSIS \u2014 `am` needs a SUPERVISOR restart of pid 2093388 (not `am migrate`); this-turn verifications mark more surface covered",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "get_mut",
+   "keys_matching",
+   "keys_matching_in_db",
+   "parse_i64_strict",
+   "push_logical_key_if_match",
+   "read_line"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 6658,
+  "title": "2026-06-29 cc: REJECTED hget single-lookup collapse \u2014 byte-exact + monotonic but NOT a distinguishable win (field-lookup-dominated); reverted per REVERT-~0-gain",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "drop_hash_field_if_expired",
+   "get_mut",
+   "lookup_live_for_read_mut",
+   "to_vec"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 6696,
+  "title": "2026-06-29 cc: REJECTED append lazy-drop collapse (~0-gain) \u2014 write-path lazy-drop only pays on LOOKUP-dominated writes, not MUTATION-dominated ones",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "drop_if_expired",
+   "drop_if_expired_lazy",
+   "key_has_expiry",
+   "materialize_string",
+   "replace_with_integer_write",
+   "set_flag",
+   "touch_write",
+   "with_mutated_entry"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 6838,
+  "title": "2026-06-29 cc: VEIN STATUS after 4 wins \u2014 alloc-elision exhausted on hot paths; expiry_ms guard DECLINED (foldhash); next = collection RESTORE-decode",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": 0.46,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "expiry_deadlines",
+   "expiry_ms",
+   "hash_field_expires"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 6864,
+  "title": "2026-06-29 cc: BUILD-BLOCKER ROOT CAUSE \u2014 full binary not remote-buildable BY POLICY (.rchignore excludes legacy_redis_code); per-crate fr-store is the only supported measure path",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 7148,
+  "title": "2026-06-29 cc: REVERT single-decode keep-path opt \u2014 ~0-gain; the set-RESTORE residual is NOT the decode",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": 0.446,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 7194,
+  "title": "2026-06-29 cc: zset keep-listpack = mechanically ~0-GAIN (int-scores rejected) \u2014 keep-listpack lever now COMPLETE (Set+Hash shipped, zset declined on evidence)",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 7250,
+  "title": "2026-06-29 cc: REVERT landed keep-listpack (Set+Hash) \u2014 clean A/B shows ~0-gain/negative; original \"wins\" were CONFOUNDED. Integrity revert.",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": 0.44,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 7269,
+  "title": "2026-06-29 cc: RESTORE-command residual has NO clean bounded lever (post keep-listpack revert) \u2014 components analyzed",
+  "date": "2026-06-29",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": []
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 7954,
+  "title": "2026-07-10 cc_fr: NOT WIRED (revert-on-loss) \u2014 AVX2 `common_prefix_len` kernel wins 1.5\u20131.8x on \u2265128 B in isolation, but routing LZF's hot path through it adds cross-crate call overhead on the frequent SHORT-match case; end-to-end LZF net unproven",
+  "date": "2026-07-10",
+  "bead": null,
+  "claimed": 0.89,
+  "floor": 0.19999999999999996,
+  "floor_src": "row: 2x |null median 0.9 - 1|",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "common_prefix_len",
+   "common_prefix_len_scalar",
+   "first_mismatch",
+   "fr_simd::common_prefix_len",
+   "lzf_compress"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 8382,
+  "title": "2026-07-10 cc_fr: ROW #1 UPGRADED \u2014 BITCOUNT's 97.94%-self frame is an **SSE2 software popcount**; the build emits ZERO `popcnt` instructions. REJECT's conclusion CONFIRMED, its mechanism REFUTED, the real lever named for the first time",
+  "date": "2026-07-10",
+  "bead": null,
+  "claimed": 1.95,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": true,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Store::bitcount"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 8446,
+  "title": "2026-07-10 cc_fr: SELF-CORRECTION + RANKED WORKLIST \u2014 the EXISTS lever needs no landing: the bad REJECT hid it for two weeks, then it was re-derived independently and measured at **11.4% SET@1** (`bd358b400`). Next target by gated-frame size is **`Store::bitcount` at 97.94% self**",
+  "date": "2026-07-10",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Store::bitcount",
+   "Store::drop_if_expired",
+   "drop_if_expired",
+   "drop_if_expired_fastexit_matches_full_body",
+   "exists_no_touch",
+   "record_keyspace_lookup"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 8477,
+  "title": "RANKED WORKLIST \u2014 the ~67 unprovenanced REJECT rows, by the size of the frame each one gates",
+  "date": null,
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 2.55,
+  "st_sym": "frankenredis::process_buffered_frames",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "CompactFieldMap::lookup_slot_prehashed",
+   "RespFrame::encode_into",
+   "Store::bitcount",
+   "__memcmp_avx2_movbe",
+   "cod_fr",
+   "contains_key",
+   "core::str::converts::from_utf8",
+   "drop_if_expired",
+   "encode_bulk_string_slice",
+   "encode_listpack_strings_blob",
+   "plain_borrowed_default_key_read_allows",
+   "process_buffered_frames"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 8503,
+  "title": "2026-07-10 cc_fr: RE-VERIFIED two REJECT rows against the rule \u2014 `EXISTS` no-expiry fast path measurement is INVALID (superseded above); SMISMEMBER linear `contains_key` is INVALID-but-live (6.70% self on its true trigger)",
+  "date": "2026-07-10",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "contains_key"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 8510,
+  "title": "`2026-06-21 cod-b frankenredis-uhthd: EXISTS no-expiry fast path rejected` \u2192 **INVALID, REOPENED**",
+  "date": "2026-06-21",
+  "bead": "frankenredis-uhthd",
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.16,
+  "st_sym": "<fr_runtime::Runtime>::plain_borrowed_default_key_read_allows",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "Store::drop_if_expired",
+   "Store::exists_no_touch",
+   "contains_key",
+   "drop_if_expired",
+   "execute_plain_exists_borrowed_into",
+   "geo_vs_redis",
+   "hash_field_ttl_clear_for_key",
+   "plain_borrowed_default_key_read_allows",
+   "record_keyspace_lookup"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 8537,
+  "title": "`2026-07-04 CrimsonHawk: small CompactFieldMap linear contains_key` \u2192 **measurement INVALID, code LIVE (not dead)**",
+  "date": "2026-07-04",
+  "bead": null,
+  "claimed": 1.236,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 2.55,
+  "st_sym": "frankenredis::process_buffered_frames",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "CompactFieldMap::lookup_slot_prehashed",
+   "GenericSet::contains",
+   "SMISMEMBER_2v",
+   "SMISMEMBER_3v",
+   "__memcmp",
+   "__memmove",
+   "process_buffered_frames"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 8560,
+  "title": "2026-07-10 cc_fr: PROVENANCE AUDIT \u2014 70 REJECT rows, only **3** record a binary sha256 and only **10** record any self-time. Plus: the 07-02 `from_utf8` REJECT does NOT contradict cod_fr's 51.82% SORT win",
+  "date": "2026-07-10",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "black_box",
+   "cod_fr",
+   "from_utf8"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 8615,
+  "title": "2026-07-10 cc_fr: CLOSES the line directly above \u2014 GETSET `_into` is SHIPPED, GETDEL `_into` is a REJECT, both now PROFILE-VERIFIED (they were prose)",
+  "date": "2026-07-10",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": false,
+  "sha": false,
+  "st_row": null,
+  "st_live": 2.55,
+  "st_sym": "frankenredis::process_buffered_frames",
+  "reasons": [
+   "V2",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "RespFrame::encode_into",
+   "Runtime::execute_plain_getset_borrowed_into",
+   "Runtime::plain_borrowed_default_key_write_allows",
+   "Store::getset_with",
+   "Store::hash_field_ttl_clear_for_key",
+   "Store::internal_entries_remove",
+   "__memmove_avx_unaligned_erms",
+   "__memset_avx2_unaligned_erms",
+   "cod_fr",
+   "internal_entries_remove",
+   "process_buffered_frames",
+   "write_buf"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 9272,
+  "title": "2026-07-11 cc_fr: MEASURED SUB-GATE \u2014 set/hash listpack decode intermediate-Vec elision (~1.05x, indistinguishable); reverted to stash",
+  "date": "2026-07-11",
+  "bead": null,
+  "claimed": 1.039,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": true,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [
+   "V1",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "decode_entry_raw",
+   "decode_hash_listpack_pairs",
+   "decode_listpack",
+   "decode_set_listpack_members",
+   "int_96",
+   "into_bytes"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 9842,
+  "title": "2026-07-13 SwiftWillow: NEGATIVE \u2014 REVERTED. LFU LSET write-side collapse byte-identical + correct but wallclock SUB-GATE (~1.17x indistinguishable) \u2014 owned-value dilution",
+  "date": "2026-07-13",
+  "bead": null,
+  "claimed": 1.167,
+  "floor": 0.007600000000000051,
+  "floor_src": "row: 2x |null median 1.0038 - 1|",
+  "has_null": true,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "contains_key",
+   "get_mut",
+   "lset_lfu_collapsed_matches_twoprobe",
+   "with_mutated_entry"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 10178,
+  "title": "2026-07-13 SandyMeadow: NEGATIVE HOLD \u2014 NO-SHIP. LFU ZPOPMAX-count 2 probes \u2192 1 is directionally faster but wall-clock noise-drowned",
+  "date": "2026-07-13",
+  "bead": "frankenredis-dyaks",
+  "claimed": 1.23,
+  "floor": 0.008399999999999963,
+  "floor_src": "row: 2x |null median 1.0042 - 1|",
+  "has_null": true,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V3n",
+   "V5"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "clippy::needless_range_loop",
+   "contains_key",
+   "get_mut",
+   "rng_seed",
+   "zpopmax_count",
+   "zpopmax_count_lfu_collapsed_matches_twoprobe"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 10367,
+  "title": "2026-07-14 BlackThrush: NO-SHIP (reverted) \u2014 LFU ZRANGEBYLEX member borrow-scan 2->1 is alloc-diluted",
+  "date": "2026-07-14",
+  "bead": null,
+  "claimed": 1.101,
+  "floor": 0.105,
+  "floor_src": "assumed: era default (-c50/P16, +/-10.5%)",
+  "has_null": true,
+  "sha": false,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V1",
+   "V3n",
+   "V5"
+  ],
+  "verdict": "VOID",
+  "syms": [
+   "contains_key",
+   "drop_if_expired",
+   "get_mut",
+   "lex_range_refs",
+   "lfu_tracking_enabled",
+   "rand_sample",
+   "record_keyspace_lookup",
+   "rng_seed",
+   "zrangebylex_members_borrow_scan",
+   "zrangebylex_members_borrow_scan_lfu_collapsed_matches_twoprobe"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 10791,
+  "title": "2026-07-14 MossyTrout: INVALID HOLD \u2014 NO-SHIP. packed zero-copy ZREVRANGE WITHSCORES borrowed-window candidate profiled, but A/B parser aborted",
+  "date": "2026-07-14",
+  "bead": "frankenredis-uhthd",
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": true,
+  "sha": true,
+  "st_row": null,
+  "st_live": 0.25,
+  "st_sym": "_copy_from_iter",
+  "reasons": [
+   "V3n"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "PackedZSet::index_slice_desc",
+   "PackedZSet::iter_desc",
+   "Store::zrevrange_withscores_borrow_scan",
+   "Vec::from_iter",
+   "clippy::needless_range_loop",
+   "packed_zset_borrow_slice_desc",
+   "record_at",
+   "usize::MAX"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 10892,
+  "title": "2026-07-14 CalmHeron: INVALID HOLD \u2014 NO-SHIP. LFU ZREVRANK WITHSCORE probe-collapse harness aborted before the timed path (frankenredis-n9pjx)",
+  "date": "2026-07-14",
+  "bead": null,
+  "claimed": null,
+  "floor": 0.02,
+  "floor_src": "assumed: in-process instr shape",
+  "has_null": true,
+  "sha": true,
+  "st_row": null,
+  "st_live": 0.82,
+  "st_sym": "<hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>",
+  "reasons": [
+   "V3n"
+  ],
+  "verdict": "PROVENANCE",
+  "syms": [
+   "HashMap::contains_key",
+   "Store::zrank_withscore",
+   "clippy::needless_range_loop",
+   "core_zset",
+   "cv_pct",
+   "get_mut",
+   "record_keyspace_lookup"
+  ]
+ },
+ {
+  "file": "perf_negative_evidence_ledger.md",
+  "line": 10975,
+  "title": "2026-07-15 CalmHeron: REJECT \u2014 `evaluate_expiry` dominated direct-subtract + clamp is instruction-identical (frankenredis-u6uwo)",
+  "date": "2026-07-15",
+  "bead": null,
+  "claimed": null,
+  "floor": 1e-05,
+  "floor_src": "row: 2x |null median 1.000000395 - 1|",
+  "has_null": true,
+  "sha": true,
+  "st_row": 12.83,
+  "st_live": 0.0,
+  "st_sym": null,
+  "reasons": [],
+  "verdict": "SOUND",
+  "syms": [
+   "cv_pct",
+   "evaluate_expiry",
+   "i64::MAX",
+   "saturating_sub",
+   "u64::MAX"
+  ]
+ }
+]
