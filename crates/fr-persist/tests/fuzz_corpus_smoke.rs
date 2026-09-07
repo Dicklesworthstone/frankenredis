@@ -106,7 +106,7 @@ fn fuzz_aof_manifest_parser_corpus_never_panics() {
     for entry in fs::read_dir(&dir).expect("read manifest corpus dir") {
         let entry = entry.expect("dir entry");
         let path = entry.path();
-        if !path.is_file() {
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("manifest") {
             continue;
         }
         let bytes = fs::read(&path)

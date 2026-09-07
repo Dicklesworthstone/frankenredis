@@ -1,0 +1,43 @@
+{
+  "schema_version": "frankenredis_fec_envelope/v1",
+  "artifact_id": "crates/fr-persist/tests/golden/manifest_empty.golden",
+  "artifact_type": "manifest",
+  "source_hash": "sha256:9a29f04e3a3d5efa369bdbb59411f694c0197f17f4f22f0d6bbc41c485a64b7d",
+  "padding": 436,
+  "symbol_size": 512,
+  "oti": [
+    0,
+    0,
+    0,
+    2,
+    0,
+    0,
+    2,
+    0,
+    1,
+    0,
+    1,
+    8
+  ],
+  "raptorq": {
+    "k": 1,
+    "repair_symbols": 8,
+    "overhead_ratio": 8.0,
+    "symbol_hashes": [
+      "sha256:559df52f4a56d61a6c3a3dd7ec40e2b1aa1a397ec33b80a88fc0a02763a732a0",
+      "sha256:18baa6370068560de1afffa7795e15af61266010d7da9265aba98921a38847ed",
+      "sha256:26dfeba9d1f635355a7ac489c46be61f607f5b857ecfd5da6159b7e9f5ae4215",
+      "sha256:2ddcf938739717b9e1a20d71778f76368fd9d9009847af4dc35ec34d3278b25e",
+      "sha256:d40dad10b714429a5a3fb99470fdf04414bb7cf65d6503c6dda7f48d1240c2a1",
+      "sha256:37fdcae37de9608e267968443cd0e6f8256ce2e16097b5723c45772dde9bc7d9",
+      "sha256:bdfb2ef43d338da78a36a37b17acd39b669f5e7bf6248182b3b880885b9f6bea",
+      "sha256:beeef7138694e70b6caa9d81f78ec0540d15731e682a4907746c421fc19accc0",
+      "sha256:5a4edc0c56e0e9bd071821fc1a02781ae127490104c0cb0ebc0b52a0b57a1bd3"
+    ]
+  },
+  "scrub": {
+    "last_ok_unix_ms": 1788723898190,
+    "status": "ok"
+  },
+  "decode_proofs": []
+}

@@ -23,6 +23,7 @@ fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
 fr-simd = { version = "0.1.0", path = "../fr-simd" }
 
 [dev-dependencies]
+fr-fec = { version = "0.1.0", path = "../fr-fec" }
 proptest.workspace = true
 criterion = "0.8"
 # (frankenredis-tgr69/ef928) Bench-only: lets int_render_itoa2 self-report the SHA-256 of the ELF

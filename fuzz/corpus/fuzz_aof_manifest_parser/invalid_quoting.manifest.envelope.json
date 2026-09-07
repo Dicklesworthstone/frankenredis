@@ -1,0 +1,43 @@
+{
+  "schema_version": "frankenredis_fec_envelope/v1",
+  "artifact_id": "fuzz/corpus/fuzz_aof_manifest_parser/invalid_quoting.manifest",
+  "artifact_type": "manifest",
+  "source_hash": "sha256:ef3c22687fbe773fbba83da9c50e4c0b39e18b9aa0c43f11fb4155b0239e102b",
+  "padding": 467,
+  "symbol_size": 512,
+  "oti": [
+    0,
+    0,
+    0,
+    2,
+    0,
+    0,
+    2,
+    0,
+    1,
+    0,
+    1,
+    8
+  ],
+  "raptorq": {
+    "k": 1,
+    "repair_symbols": 8,
+    "overhead_ratio": 8.0,
+    "symbol_hashes": [
+      "sha256:97e9402dfb21bd7b259d057b502131026fcd7492f95561b0c6d47d6a6643ba87",
+      "sha256:c7198dccf2140150ba1c1ba7dad95d391edaac5c75e59977988d396f718fd85b",
+      "sha256:9dc4eb547338fa33501edb8171533d0a8e1974bc0490aca4ff4c2e23e280e191",
+      "sha256:1cfa831aa05d769909caf77c2b5e019f3f4c109e73d9c78028cdf461488b52fc",
+      "sha256:152b30eebf53c67027a11d419ca9258d3c90ae8cb0052568cde24efae683bbcf",
+      "sha256:d6faf929ab58f4673df66929bc207404a48775cdfaab197361471d28a1785966",
+      "sha256:085f992ce13790794307ad76bd7253223b4d7342578a7322cd05200614aa5100",
+      "sha256:f1a3bae9812cc96d5bbd46e1579784b3303f068c403a9cb74811866bf13b36b4",
+      "sha256:9ee0562833c77747f5cf16271506d2effffd7e701bdb3e9da351121f5c7eac17"
+    ]
+  },
+  "scrub": {
+    "last_ok_unix_ms": 1788723898190,
+    "status": "ok"
+  },
+  "decode_proofs": []
+}
