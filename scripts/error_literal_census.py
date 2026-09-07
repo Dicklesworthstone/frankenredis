@@ -32,7 +32,7 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VENDORED = os.path.join(REPO, "legacy_redis_code", "redis", "src", "*.c")
-FR_SOURCES = os.path.join(REPO, "crates", "*", "src", "*.rs")
+FR_SOURCES = os.path.join(REPO, "crates", "*", "src", "**", "*.rs")
 
 MIN_LEN = 14  # shorter literals are too generic to attribute; they produce noise, not findings
 
@@ -60,6 +60,10 @@ ACCEPTED_ABSENT = {
         "without the !CLIENT_MULTI half would REGRESS SUBSCRIBE inside MULTI.",
     "PSUBSCRIBE isn't allowed for a DENY BLOCKING client":
         "same as SUBSCRIBE above; pubsub.c:568 carries the identical !CLIENT_MULTI exemption",
+    "SHUTDOWN without NOW or ABORT isn't allowed for DENY BLOCKING client":
+        "CORRECTLY absent. Upstream guards this with (!(flags & SHUTDOWN_NOW) && c->flags & CLIENT_DENY_BLOCKING) "
+        "(db.c:1218). SHUTDOWN is CMD_NOSCRIPT and CMD_NOMULTI in both tables, so no script or "
+        "transaction can reach the command, and fr has no module-client API. Branch is unreachable by construction.",
     "There was an error trying to save the ACLs. Please check the server logs for more "
     "information": "fr does not implement ACL SAVE to file",
     "Error purging dirty pages": "jemalloc-specific MEMORY PURGE path; fr uses mimalloc",
@@ -116,8 +120,10 @@ ACCEPTED_ABSENT = {
     #    precondition it guards has a site to live at. Both return together with that feature.
     "Filtered replica requires EOF capability":
         "fr implements no REPLCONF rdb-filter-only, so SLAVE_REQ_RDB_MASK is never set",
-    "Missing rdb-filter-only values":
-        "same: the argument this parses is never accepted",
+    "Function code is missing":
+        "CORRECTLY absent. Upstream functionLoadCommand has arity -3 (functions-load.json), and "
+        "its option-parsing while loop runs while argc_pos < c->argc - 1, so the following guard "
+        "argc_pos >= c->argc is mathematically unreachable in the incumbent too.",
     # -- C NEEDS A `default:`; RUST DOES NOT. Both of these are the unreachable arm of a switch
     #    over a closed set, kept by upstream against a future caller that forgets a case. Rust's
     #    match is exhaustive over the same set, so there is no arm for them to live in -- the
@@ -145,6 +151,13 @@ ACCEPTED_ABSENT = {
     "OOM in dictTryExpand":
         "DEBUG POPULATE's pre-expand. Same class as ALLOC_FAILURE below: Rust aborts on "
         "allocation failure rather than replying, so there is no site to answer from",
+    "Errors trying to SHUTDOWN. Check logs.":
+        "replyToClientsBlockedOnShutdown in blocked.c: fr does not block clients on shutdown; "
+        "it completes immediately or gracefully via cron without blocking client state.",
+    "Failed to save config file. Check server logs.":
+        "sentinelFlushConfigAndReply in sentinel.c: fr-sentinel does not implement file-backed config saving.",
+    "Only HELLO messages are accepted by Sentinel instances.":
+        "sentinelPublishCommand in sentinel.c: fr-sentinel does not route PUBLISH commands to the hello channel.",
 }
 
 # Literals whose absence says nothing because they describe a C allocation failure: Rust aborts
@@ -197,7 +210,7 @@ def fr_code_text():
     So: drop comment lines, keep code, and let the caller anchor its search on the opening quote.
     """
     parts = []
-    for path in sorted(glob.glob(FR_SOURCES)):
+    for path in sorted(glob.glob(FR_SOURCES, recursive=True)):
         for line in io.open(path, encoding="utf-8", errors="replace"):
             st = line.lstrip()
             if st.startswith("//"):
@@ -264,9 +277,9 @@ def self_test():
 
     # 2. CODE PREFIXES. fr writes the RESP code inside its literal; upstream leaves it to
     #    addReplyError. A message must not read as absent just because fr names its code.
-    for code in ("ERR", "NOPERM", "WRONGTYPE"):
+    for code in ("ERR", "NOPERM", "WRONGTYPE", "-INPROG"):
         text = '    "%s Some upstream phrase here".to_string()' % code
-        assert re.search(r'"[A-Z]+ ' + re.escape("Some upstream phrase here"), text), code
+        assert re.search(r'"-?[A-Z]+ ' + re.escape("Some upstream phrase here"), text), code
 
     # 3. COMMENT STRIPPING. fr quotes upstream C in doc comments constantly -- including in the
     #    comments these censuses write -- so a quotation must not count as an implementation.
@@ -371,7 +384,7 @@ def main():
         # addReplyError -- "ERR ", but also "NOPERM ", "WRONGTYPE ", "NOSCRIPT " and friends.
         # Allowing any leading uppercase code keeps this from reporting a message absent purely
         # because fr names its code explicitly.
-        if re.search(r'"[A-Z]+ ' + re.escape(lit), fr) is not None:
+        if re.search(r'"-?[A-Z]+ ' + re.escape(lit), fr) is not None:
             return True
         # COMPOSED MESSAGES. fr may build the reply as a prefix plus a tail that lives in a
         # `Display` impl, so the whole literal appears nowhere in the source even though the

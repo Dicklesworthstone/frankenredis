@@ -24199,6 +24199,8 @@ const READ_ONLY_SCRIPT_WRITE_ERROR: &str =
 const SCRIPT_STALE_REPLICA_ERROR: &str = "ERR Can not execute the command on a stale replica";
 const CLIENT_TRACKING_REDIRECT_MISSING: &str =
     "ERR The client ID you want redirect to does not exist";
+const CLIENT_TRACKING_REDIRECT_SINGLE: &str =
+    "ERR A client can only redirect to a single other client";
 const CLIENT_TRACKING_PREFIX_REQUIRES_BCAST: &str =
     "ERR PREFIX option requires BCAST mode to be enabled";
 const CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT: &str =
@@ -24443,6 +24445,11 @@ pub fn parse_client_tracking_state(argv: &[Vec<u8>]) -> Result<ClientTrackingSta
         if argv[idx].eq_ignore_ascii_case(b"REDIRECT") {
             if idx + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
+            }
+            if redirect.is_some() {
+                return Err(CommandError::Custom(
+                    CLIENT_TRACKING_REDIRECT_SINGLE.to_string(),
+                ));
             }
             let parsed = parse_i64_arg(&argv[idx + 1])?;
             if parsed <= 0 {
@@ -32681,6 +32688,7 @@ mod tests {
         CLIENT_TRACKING_BCAST_OPT_CONFLICT, CLIENT_TRACKING_BCAST_SWITCH_REQUIRES_DISABLE,
         CLIENT_TRACKING_OPT_SWITCH_REQUIRES_DISABLE, CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT,
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
+        CLIENT_TRACKING_REDIRECT_SINGLE,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
         SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, StreamLagInfo, acl_command_selectors_for_argv,
         canonical_command_fullname, check_command_arity, check_full_command_arity,
@@ -77350,6 +77358,18 @@ mod tests {
                 ],
                 CommandError::Custom(CLIENT_TRACKING_REDIRECT_MISSING.to_string()),
             ),
+            (
+                vec![
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    b"ON".to_vec(),
+                    b"REDIRECT".to_vec(),
+                    b"10".to_vec(),
+                    b"REDIRECT".to_vec(),
+                    b"20".to_vec(),
+                ],
+                CommandError::Custom(CLIENT_TRACKING_REDIRECT_SINGLE.to_string()),
+            ),
         ] {
             let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
             assert_eq!(err, expected);
@@ -88397,25 +88417,16 @@ mod tests {
                 );
             }
 
-            /// MR: Earlier REDIRECT options shadowed by a later REDIRECT must not change the final state.
+            /// Multiple REDIRECT options must be rejected matching upstream Redis networking.c.
             #[test]
-            fn mr_client_tracking_shadowed_redirect_last_wins(
+            fn mr_client_tracking_duplicate_redirect_rejected(
                 case in shadowed_redirect_case_strategy()
             ) {
-                let canonical = parse_client_tracking_state(&reordered_tracking_argv(&case.base))
-                    .expect("canonical redirect tracking argv should parse");
-                let shadowed = parse_client_tracking_state(&shadowed_redirect_tracking_argv(&case))
-                    .expect("shadowed redirect tracking argv should parse");
-
+                let err = parse_client_tracking_state(&shadowed_redirect_tracking_argv(&case))
+                    .expect_err("multiple REDIRECT options must be rejected");
                 prop_assert_eq!(
-                    &canonical,
-                    &shadowed,
-                    "earlier REDIRECT values should be shadowed by the final REDIRECT",
-                );
-                prop_assert_eq!(
-                    client_trackinginfo_frame(&canonical, 2),
-                    client_trackinginfo_frame(&shadowed, 2),
-                    "TRACKINGINFO should reflect only the effective redirect target",
+                    err,
+                    crate::CommandError::Custom(crate::CLIENT_TRACKING_REDIRECT_SINGLE.to_string()),
                 );
             }
 
