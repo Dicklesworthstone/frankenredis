@@ -1,0 +1,44 @@
+{
+  "schema_version": "frankenredis_fec_envelope/v1",
+  "artifact_id": "artifacts/evidence/LEDGER_CONTRACT.md",
+  "artifact_type": "ledger",
+  "source_hash": "sha256:5f59ccf92a8c04ba7244b00d4b2c96af3287fd91569ec1cff8bf1f4f0d0e8a2f",
+  "padding": 263,
+  "symbol_size": 512,
+  "oti": [
+    0,
+    0,
+    0,
+    4,
+    0,
+    0,
+    2,
+    0,
+    1,
+    0,
+    1,
+    8
+  ],
+  "raptorq": {
+    "k": 2,
+    "repair_symbols": 8,
+    "overhead_ratio": 4.0,
+    "symbol_hashes": [
+      "sha256:33fc953734b15c0c0c263841324b0dd6d9dcfeb93ca014094c6bebcfea014b06",
+      "sha256:c9f54a6b064c7c4b7df907f6189c0c652aea4dc4af09cbc1c94b7efed2578652",
+      "sha256:d27efa1c3a47eb9a9f95e4a4b695442c385771ce28f243cac790592842afdbd5",
+      "sha256:6b2dfe5370d6d25ced3361a1998a6c7b72d10a88d24f657d9319454e07da2678",
+      "sha256:fe395bbe8d41a8f63112689e00fce8df38184875c0e64b7d66ae6ede1b7a2b09",
+      "sha256:8cd46f3ff0a6193f1f8dd75ba69a344287ba2be0b2826540453799e8f367e040",
+      "sha256:55839e666352051b4053882db9eeec55c68ef1760499ed1dad8c2388d9e93dfe",
+      "sha256:8d09ca133ab26d3da3c24f81aa497270fb24e72730f358b7b1f9556433f47bb3",
+      "sha256:4d63a659eecb869be0f936cd1a6cf19ea6f63a9936f7c1abda39a682ac3fecff",
+      "sha256:37a151844ed5fc6efc1f62eb6b9a3448aed15c9674c2b748ec1dcef40e02c897"
+    ]
+  },
+  "scrub": {
+    "last_ok_unix_ms": 1788744412308,
+    "status": "ok"
+  },
+  "decode_proofs": []
+}

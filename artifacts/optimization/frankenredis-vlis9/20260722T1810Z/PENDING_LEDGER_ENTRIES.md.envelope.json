@@ -1,0 +1,43 @@
+{
+  "schema_version": "frankenredis_fec_envelope/v1",
+  "artifact_id": "artifacts/optimization/frankenredis-vlis9/20260722T1810Z/PENDING_LEDGER_ENTRIES.md",
+  "artifact_type": "ledger",
+  "source_hash": "sha256:3f66242e1436acb220185e91b91b28feee01fa764660477e33a09d1d1d0a1b6d",
+  "padding": 166,
+  "symbol_size": 512,
+  "oti": [
+    0,
+    0,
+    0,
+    2,
+    0,
+    0,
+    2,
+    0,
+    1,
+    0,
+    1,
+    8
+  ],
+  "raptorq": {
+    "k": 1,
+    "repair_symbols": 8,
+    "overhead_ratio": 8.0,
+    "symbol_hashes": [
+      "sha256:0a92c375f739dfee224552bde0f999e7f9497b4962678335436b7ca149077c43",
+      "sha256:1d2417639af83a3beea9eb0a1f82d7f47699f623dd49c99013e781cf32dc10ee",
+      "sha256:559b297aa95f6dd90d97ce517b1d727682348a3f0493e6b135f9cf992e86ef04",
+      "sha256:e506b1182d094945316b2b2b9411d5b39d59eddda896ef07eb3e9dea6aa91ee4",
+      "sha256:047ec6516b25468bd2f0438fecbe33f53a25bf756765bb4147ed4cb5ce69c751",
+      "sha256:c7a479794eaf4ec97b075a742200eeef0b8266a747366137be6aee51d0b636f8",
+      "sha256:381d0d6a0d398d5d77089c41dd4c87d876515ee2eb15558f8c949b70f0b408a2",
+      "sha256:ba6221d79fcc0d26343e21ef5a2a0988a503f4b8343a1cf045064587e34abd2a",
+      "sha256:7d89c1539bec6bde32e3dc62f2a364e2d18eb6b469b05fa51a6ddac72708bfbe"
+    ]
+  },
+  "scrub": {
+    "last_ok_unix_ms": 1788744412342,
+    "status": "ok"
+  },
+  "decode_proofs": []
+}

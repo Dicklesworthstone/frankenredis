@@ -1,0 +1,44 @@
+{
+  "schema_version": "frankenredis_fec_envelope/v1",
+  "artifact_id": "artifacts/optimization/ISOMORPHISM_PROOF_ROUND1.md",
+  "artifact_type": "ledger",
+  "source_hash": "sha256:bf804ba45b5ab3341adf386ad73e5689b7c435993cc693e6df9c753cbb86dfe4",
+  "padding": 248,
+  "symbol_size": 512,
+  "oti": [
+    0,
+    0,
+    0,
+    4,
+    0,
+    0,
+    2,
+    0,
+    1,
+    0,
+    1,
+    8
+  ],
+  "raptorq": {
+    "k": 2,
+    "repair_symbols": 8,
+    "overhead_ratio": 4.0,
+    "symbol_hashes": [
+      "sha256:47bc320bac137fd4b4926fe1ba4b6fc7714516912ce163672128900d112ba346",
+      "sha256:c865f190662762f7957072ec6eb6e8cadae589a3125a36e01ce88827a846ecce",
+      "sha256:090e08065ff83cb787d49abe537ec1d41d9d2da45c1a2b74ddbbd214080034dc",
+      "sha256:ccefc8f6551654149d94fc404eb6f9138dc131180aaf64ef21cb135719720e7b",
+      "sha256:cba34f51e8d3649fcd8db83e4d1ed2aaed8882d1e67963cbd34d4d72c27befb7",
+      "sha256:a5105149e459738620a46356397cbbde96a0926e7fa440d69a71bb0930007e26",
+      "sha256:e71d9f72a1d24ae700defeeeace5d70e57eb56a09c9f53b16bc399b7fb35f6bb",
+      "sha256:a50799bbe707906efa7fbdda9d2f41df57f1826e82781886fd6028f37de2fed8",
+      "sha256:35f1222e72d98a05cbfa1cee3c7accbc325198bbeba100aa93a254a75467ae6d",
+      "sha256:93949f971702311f4dac9e68d4bbff9326238a9bc2cdc4a10e20a71f5413b83b"
+    ]
+  },
+  "scrub": {
+    "last_ok_unix_ms": 1788744412362,
+    "status": "ok"
+  },
+  "decode_proofs": []
+}

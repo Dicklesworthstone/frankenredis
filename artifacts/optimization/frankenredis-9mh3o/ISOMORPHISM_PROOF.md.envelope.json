@@ -1,0 +1,48 @@
+{
+  "schema_version": "frankenredis_fec_envelope/v1",
+  "artifact_id": "artifacts/optimization/frankenredis-9mh3o/ISOMORPHISM_PROOF.md",
+  "artifact_type": "ledger",
+  "source_hash": "sha256:15c3a6373e706abed7e280cb8d1b915f0041de7b209a7cb1d57aa9f0611cf882",
+  "padding": 171,
+  "symbol_size": 512,
+  "oti": [
+    0,
+    0,
+    0,
+    12,
+    0,
+    0,
+    2,
+    0,
+    1,
+    0,
+    1,
+    8
+  ],
+  "raptorq": {
+    "k": 6,
+    "repair_symbols": 8,
+    "overhead_ratio": 1.3333333333333333,
+    "symbol_hashes": [
+      "sha256:e29c8ca8fe4079044c2a61782f63bb6ec9818c05d865277aa0646d0286d8dbfd",
+      "sha256:1304d21389aba0457b633581fcc670b8f5fd23db38d6300d62e0a11c113123cb",
+      "sha256:e16bf65a0a2ea257ee42468f98b9ddbf289fc92cc3222f88ddb5bab506cde5ea",
+      "sha256:0a5645ffa2019d6e8e0cf3baa17339238046983c982c7dc4baf648a1421109d9",
+      "sha256:22d3adcb72cce4d934a9710548bf3598a66ceb7718b5143fffacec3148359fae",
+      "sha256:8e07172f38fa3bfbe6cc4eeb3ba01e927cb819e747e4ac5eb1dc85ee3f7100ef",
+      "sha256:728307fe050e4c09264e45eba47b99354922bbe41e2a44ab1bff237a5746c4f3",
+      "sha256:9f4a7fbf98328cf752297f9fc56a0f7980925d55ecc97b7913478d33588e724c",
+      "sha256:40afa855ef1f410938debcbab35129bcd50f3858dadeb3475140b64359c2cdaa",
+      "sha256:3a011f675d7af079645ed5efa9cb16d042a5fa725d66e5ef0a1420a887f1dd0e",
+      "sha256:5df76cbbe99f6be5357b241a79fe1688646711bf4eddddba6ee1fd3310de26e4",
+      "sha256:67d209bef565f95b90e5e25fb809c0a82d112ce00d142e8b191f6c96dfc59a49",
+      "sha256:60a50003ec849861e9ddcfbb708bbdc040fe97b81d87c3624f15c72d015ffba6",
+      "sha256:e4a4cc4a081de281259d6336ef27749cf51da33883790e19066a453654d07277"
+    ]
+  },
+  "scrub": {
+    "last_ok_unix_ms": 1788744412359,
+    "status": "ok"
+  },
+  "decode_proofs": []
+}

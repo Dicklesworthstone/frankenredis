@@ -81,3 +81,34 @@ fn symbol_stream_serialization_roundtrip() {
         assert_eq!(orig.serialize(), deser.serialize());
     }
 }
+
+#[test]
+fn reproducibility_ledgers_raptorq_sidecars_scrub_clean() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let ledgers = [
+        "artifacts/evidence/LEDGER_CONTRACT.md",
+        "artifacts/optimization/campaign-20260725-cc/ledger_resurrection.json",
+        "artifacts/optimization/cod-pass49-borrowed-set-v2-20260606T2353Z/ISOMORPHISM_PROOF.md",
+        "artifacts/optimization/cod-perf-20260604-8yfmt-zero-copy-argv/ISOMORPHISM_PROOF.md",
+        "artifacts/optimization/cod-perf-20260605-ds9o7/ISOMORPHISM_PROOF.md",
+        "artifacts/optimization/frankenredis-9mh3o/ISOMORPHISM_PROOF.md",
+        "artifacts/optimization/frankenredis-incr-floor/20260724T0100Z/PENDING_LEDGER_ENTRY.md",
+        "artifacts/optimization/frankenredis-ptqye/ISOMORPHISM_PROOF.md",
+        "artifacts/optimization/frankenredis-vlis9/20260722T1810Z/PENDING_LEDGER_ENTRIES.md",
+        "artifacts/optimization/icywolf-perf-20260603-pass23-lazy-entry-digest/ISOMORPHISM_PROOF.md",
+        "artifacts/optimization/icywolf-perf-20260603-pass24-write-interest/ISOMORPHISM_PROOF.md",
+        "artifacts/optimization/icywolf-perf-20260603-pass25-rss-sampling/ISOMORPHISM_PROOF.md",
+        "artifacts/optimization/ISOMORPHISM_PROOF_ROUND1.md",
+        "artifacts/optimization/ISOMORPHISM_PROOF_ROUND2.md",
+        "artifacts/optimization/phase2c-gate/decision_ledger_sample.txt",
+        "artifacts/optimization/throughput-gap/ISOMORPHISM_PROOF_LAZY_DIGEST.md",
+    ];
+
+    for rel in ledgers {
+        let path = repo_root.join(rel);
+        assert!(path.exists(), "artifact missing: {}", path.display());
+        let gate_res = verify_sidecar_gate(&path, NOW);
+        assert!(gate_res.is_ok(), "gate check for {}", path.display());
+    }
+}
+

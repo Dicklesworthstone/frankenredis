@@ -1,0 +1,43 @@
+{
+  "schema_version": "frankenredis_fec_envelope/v1",
+  "artifact_id": "artifacts/optimization/phase2c-gate/decision_ledger_sample.txt",
+  "artifact_type": "ledger",
+  "source_hash": "sha256:5d0eac8753a0cc9781bf614278da0ef24f28da567bad1275d238adfe934b27ee",
+  "padding": 242,
+  "symbol_size": 512,
+  "oti": [
+    0,
+    0,
+    0,
+    2,
+    0,
+    0,
+    2,
+    0,
+    1,
+    0,
+    1,
+    8
+  ],
+  "raptorq": {
+    "k": 1,
+    "repair_symbols": 8,
+    "overhead_ratio": 8.0,
+    "symbol_hashes": [
+      "sha256:01d04c5f9b311c1eaabfa4ade8b8e45dc40903d277660ff3a9e50ba338fe0ac5",
+      "sha256:1a083f054d0bc0c2a39c59291373244bfb109a3c1241b1c0a5c124aa8c042ad4",
+      "sha256:4eade149140e759fcc60bd82a4e21b898c7eb30a915d9bee8ff7a118fb5db998",
+      "sha256:4315c6c5886055a1fd09a4a10481558322722ff6601959b06cfdfa93fc1c8c79",
+      "sha256:f5d7390eb5fe04dbb647c35cf589bcf78e8086b72ff0d06d8ebaa4d11123fc09",
+      "sha256:b45cbdede7cd179d60d842886839c9ab48f811510d0317ab5e36162ba30417c7",
+      "sha256:b9b0702d61d103ab6d72f71bd8e96e6971f51250995c4c860a3986f9bc15b112",
+      "sha256:7c278059590d3bfc44f4570d786f345ef72862265fadf02efbe9036df03569b9",
+      "sha256:75aa23cd3f1c5c5bb1127d892cf1e1b9e2ceea183c0f41ac4025a2442cec5c44"
+    ]
+  },
+  "scrub": {
+    "last_ok_unix_ms": 1788744412355,
+    "status": "ok"
+  },
+  "decode_proofs": []
+}

@@ -1,0 +1,47 @@
+{
+  "schema_version": "frankenredis_fec_envelope/v1",
+  "artifact_id": "artifacts/optimization/frankenredis-incr-floor/20260724T0100Z/PENDING_LEDGER_ENTRY.md",
+  "artifact_type": "ledger",
+  "source_hash": "sha256:92d215628071a2953e72fe247d9ab4af342d3ed3d2dd0f3e80706a65e2d66d3d",
+  "padding": 342,
+  "symbol_size": 512,
+  "oti": [
+    0,
+    0,
+    0,
+    10,
+    0,
+    0,
+    2,
+    0,
+    1,
+    0,
+    1,
+    8
+  ],
+  "raptorq": {
+    "k": 5,
+    "repair_symbols": 8,
+    "overhead_ratio": 1.6,
+    "symbol_hashes": [
+      "sha256:23fbbb86c6a75f2130ae7f37e04b1b758316d78c1a0685382944b2463072011a",
+      "sha256:e278dca27bd09038f0549885cec560f9dec5ab46683f9397b028bb846b52e948",
+      "sha256:6cffa117f37d0da75b9c29190205b821ba058a1c0411b9e1ac9f193805275f23",
+      "sha256:7e5590ad6108e95fdbb91f152500832e7eb22c80f0e88dbc88fa16cf66880ecb",
+      "sha256:c275a8f3ec57f8e60ba6bb526e60ab3b43feb90cfa4f724a5ba8b48adbe23091",
+      "sha256:db3ef13d1434b4b5eed3665c9520fc8ac86b34643a5fc6adc2accaffcaba24ce",
+      "sha256:d7a55a503148b4bb8bc100cde57e1d7d1126c70c86b1b0c9654d4305c9283524",
+      "sha256:187e355191856cee2da2b15d5bb3ef53783c77f053fc4764895d4f23b6196662",
+      "sha256:d80b510b724cf40dc7a79a52953f824710eb993c7b3f20a86e107b49b84eccb9",
+      "sha256:a902e3c1b696783f25654ff1b4ebe7c6f7847a5d8476ff3bc5e8ecb6dc4d7424",
+      "sha256:6aa57269cd15c5cc682a83aed1c4256a3e0925529a1b95e4db1e12a5b56ccae2",
+      "sha256:5c33bb3c31485b38f31d402936c2ea4f434077090808088583163ae3a7080ffb",
+      "sha256:e1ec0333fa0ac6852d8f4c8bf1c35a6df7c501477f5144c530562e1ea338bb91"
+    ]
+  },
+  "scrub": {
+    "last_ok_unix_ms": 1788744412334,
+    "status": "ok"
+  },
+  "decode_proofs": []
+}
