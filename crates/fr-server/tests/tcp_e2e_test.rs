@@ -5424,7 +5424,7 @@ fn pending_output_sync_reply(
 ) -> RespFrame {
     let port = reserve_port();
     let _server = spawn(port);
-    let mut client = connect_client(port);
+    let mut client = BufferedTcpClient::connect(port);
 
     // These frames deliberately share one write. A multi-megabyte ECHO reply
     // cannot drain before the following SYNC/PSYNC is dispatched, which is the
@@ -5433,15 +5433,13 @@ fn pending_output_sync_reply(
     let payload = vec![b'x'; 4 * 1024 * 1024];
     let mut pipeline = encode_command(&[b"ECHO", &payload]);
     pipeline.extend_from_slice(&encode_command(command));
-    client
-        .write_all(&pipeline)
-        .expect("write ECHO plus replication command");
+    client.write_all(&pipeline);
     assert_eq!(
-        read_response(&mut client),
+        client.read_response(),
         RespFrame::BulkString(Some(payload)),
         "the leading command must have produced the pending output"
     );
-    let reply = read_response(&mut client);
+    let reply = client.read_response();
     send_shutdown_nosave(port);
     reply
 }

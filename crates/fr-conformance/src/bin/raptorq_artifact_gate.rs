@@ -123,10 +123,15 @@ fn run() -> Result<ExitCode, String> {
     }
 
     // Gate D requirement: verify release-grade state artifact sidecar exists and is scrub-clean
-    let state_artifact = repo_root.join("crates/fr-persist/tests/golden/stream_type21_vendored_redis_724.dump");
+    let state_artifact =
+        repo_root.join("crates/fr-persist/tests/golden/stream_type21_vendored_redis_724.dump");
     if state_artifact.is_file() {
-        verify_sidecar_gate(&state_artifact, epoch_ms_now() as u64)
-            .map_err(|err| format!("release state artifact sidecar gate failed for {}: {err}", state_artifact.display()))?;
+        verify_sidecar_gate(&state_artifact, epoch_ms_now() as u64).map_err(|err| {
+            format!(
+                "release state artifact sidecar gate failed for {}: {err}",
+                state_artifact.display()
+            )
+        })?;
     }
 
     let run_dir = cli.output_root.join(&cli.run_id);

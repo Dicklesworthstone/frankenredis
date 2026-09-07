@@ -7590,6 +7590,7 @@ fn process_buffered_frames(
         // lookups + config read) — at batch start on a drained connection pending
         // is 0, so the common fast path skips it entirely.
         let pending_output = conn.pending_output_bytes();
+        runtime.set_session_output_buffer_bytes(pending_output);
         if pending_output > 0 {
             let client_id = conn.session.client_id;
             let output_hard_limit = *output_hard_limit_cache

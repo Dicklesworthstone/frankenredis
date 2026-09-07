@@ -14,8 +14,8 @@ use fr_command::{
     CLIENT_PAUSE_MODE_INVALID, CLIENT_PAUSE_TIMEOUT_INVALID, CommandError, MigrateKeySpec,
     apply_client_caching_mode, apply_client_reply_state, apply_client_tracking_update,
     build_unknown_args_preview, client_tracking_getredir_value, client_trackinginfo_frame,
-    command_acl_categories, commands_in_acl_category, command_table_row_is_visible,
-    dispatch_argv, execute_migrate, frame_to_argv, parse_client_tracking_state, parse_f64_arg,
+    command_acl_categories, command_table_row_is_visible, commands_in_acl_category, dispatch_argv,
+    execute_migrate, frame_to_argv, parse_client_tracking_state, parse_f64_arg,
     parse_migrate_request,
 };
 use fr_config::{
@@ -8226,6 +8226,15 @@ impl Runtime {
     #[must_use]
     pub fn client_session(&self) -> &ClientSession {
         &self.session
+    }
+
+    #[must_use]
+    pub fn client_session_mut(&mut self) -> &mut ClientSession {
+        &mut self.session
+    }
+
+    pub fn set_session_output_buffer_bytes(&mut self, bytes: usize) {
+        self.session.output_buffer_bytes = bytes;
     }
 
     /// Create a new `ClientSession` for this runtime's server state.
@@ -76421,7 +76430,10 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
         // HEXPIRE dispatches and sets TTL:
         assert_eq!(
-            rt.execute_frame(command(&[b"HEXPIRE", b"h", b"60", b"FIELDS", b"1", b"f1"]), 1000),
+            rt.execute_frame(
+                command(&[b"HEXPIRE", b"h", b"60", b"FIELDS", b"1", b"f1"]),
+                1000
+            ),
             RespFrame::Array(Some(vec![RespFrame::Integer(1)]))
         );
 
@@ -76445,7 +76457,10 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
         // Immediate reap with 0 TTL:
         assert_eq!(
-            rt.execute_frame(command(&[b"HEXPIRE", b"h", b"0", b"FIELDS", b"1", b"f1"]), 1000),
+            rt.execute_frame(
+                command(&[b"HEXPIRE", b"h", b"0", b"FIELDS", b"1", b"f1"]),
+                1000
+            ),
             RespFrame::Array(Some(vec![RespFrame::Integer(2)]))
         );
 
@@ -76504,7 +76519,14 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         let unsupported: &[&[&[u8]]] = &[
             &[b"HPEXPIRE", b"h", b"60000", b"FIELDS", b"1", b"f1"],
             &[b"HEXPIREAT", b"h", b"9999999999", b"FIELDS", b"1", b"f1"],
-            &[b"HPEXPIREAT", b"h", b"9999999999000", b"FIELDS", b"1", b"f1"],
+            &[
+                b"HPEXPIREAT",
+                b"h",
+                b"9999999999000",
+                b"FIELDS",
+                b"1",
+                b"f1",
+            ],
             &[b"HEXPIRETIME", b"h", b"FIELDS", b"1", b"f1"],
             &[b"HPEXPIRETIME", b"h", b"FIELDS", b"1", b"f1"],
             &[b"HPTTL", b"h", b"FIELDS", b"1", b"f1"],

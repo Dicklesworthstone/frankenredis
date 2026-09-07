@@ -147,5 +147,3 @@ fn release_grade_state_artifacts_raptorq_sidecars_scrub_clean() {
         assert!(gate_res.is_ok(), "gate check for {}", path.display());
     }
 }
-
-

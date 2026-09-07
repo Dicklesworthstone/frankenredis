@@ -5928,7 +5928,6 @@ impl ListValue {
             decided_by_write: multi_node,
         })
     }
-
 }
 
 impl ListValue {

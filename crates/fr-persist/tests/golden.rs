@@ -242,4 +242,3 @@ fn golden_manifests_raptorq_sidecars_scrub_clean() {
     }
     assert_eq!(fuzz_checked, 12, "expected 12 fuzz manifest sidecars");
 }
-
