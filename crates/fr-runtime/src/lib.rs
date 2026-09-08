@@ -45,8 +45,8 @@ use fr_store::{
     AclKeyPattern, ClientReplyState, ClientTrackingState, CommandRecordKind, DispatchAclLogContext,
     DispatchAclPermissionReason, DispatchAclPermissions, EvictionLoopFailure, EvictionLoopResult,
     EvictionLoopStatus, EvictionSafetyGateState, HistSlot, MaxmemoryPolicy, PendingAclLogEvent,
-    SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, StringBytes, decode_db_key, encode_db_key,
-    glob_match,
+    SLOWLOG_ENTRY_MAX_STRING, SnapshotEntryRef, Store, StoreError, StringBytes, decode_db_key,
+    encode_db_key, glob_match,
 };
 
 /// Re-exported so a cross-partition INFO aggregate can hold and merge per-command
@@ -52431,22 +52431,30 @@ fn try_encode_string_only_rdb_snapshot(
 
     store.expire_snapshot_volatile_keys(now_ms);
 
-    let keys = store.all_keys();
-    let mut entries = Vec::with_capacity(keys.len());
-    for key in &keys {
-        let Some((value, expires_at_ms)) = store.get_value_and_expiry(key) else {
-            continue;
-        };
-        let (db, logical_key) = decode_db_key(key).unwrap_or((0, key.as_slice()));
-        let Value::String(value) = value else {
-            return None;
-        };
-        entries.push(RdbStringEntryRef {
-            db,
-            key: logical_key,
-            value,
-            expire_ms: expires_at_ms,
-        });
+    let mut entries = Vec::with_capacity(store.dbsize());
+    let mut all_strings = true;
+    store.for_each_entry_ref(|key, value, expires_at_ms| {
+        if !all_strings {
+            return;
+        }
+        let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
+        match value {
+            Value::String(value) => {
+                entries.push(RdbStringEntryRef {
+                    db,
+                    key: logical_key,
+                    value,
+                    expire_ms: expires_at_ms,
+                });
+            }
+            _ => {
+                all_strings = false;
+            }
+        }
+    });
+
+    if !all_strings {
+        return None;
     }
 
     entries.sort_unstable_by(|left, right| {
@@ -52501,19 +52509,15 @@ fn store_to_rdb_entries_with_thresholds(
     store.expire_snapshot_volatile_keys(now_ms);
 
     let list_max_listpack_size = store.list_max_listpack_size;
-    let keys = store.all_keys();
-    let mut entries = Vec::with_capacity(keys.len());
-    for key in keys {
-        // (frankenredis-aqkvk) Probe the hash encoding BEFORE borrowing the value.
-        // The owned path could ask `store` afterwards because materialising the
-        // pairs ended the borrow; the borrowed path holds references into the
-        // store for as long as it needs the answer, so it has to be taken first.
-        // Only meaningful for hashes; cheap enough to take unconditionally.
-        let hash_is_hashtable = store.hash_is_hashtable_encoded(&key);
-        let Some((value, expires_at_ms)) = store.get_value_and_expiry(&key) else {
-            continue;
-        };
-        let (db, logical_key) = decode_db_key(&key).unwrap_or((0, key.as_slice()));
+    let snapshot_entries = store.snapshot_entries();
+    let mut entries = Vec::with_capacity(snapshot_entries.len());
+    for item in snapshot_entries {
+        let key = item.key;
+        let value = item.value;
+        let expires_at_ms = item.expire_ms;
+        let hash_is_hashtable = item.hash_is_hashtable;
+        let set_is_hashtable = item.set_is_hashtable;
+        let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
         let rdb_value = match value {
             Value::String(v) => RdbValue::String(v.to_vec()),
             Value::Integer(v) => RdbValue::String(v.to_string().into_bytes()),
@@ -52581,7 +52585,7 @@ fn store_to_rdb_entries_with_thresholds(
                 // are re-checked in O(1) from the count and longest member the record
                 // carries, because CONFIG can have moved them since the load.
                 if let Some(thresholds) = compact
-                    && !store.set_is_hashtable_encoded(&key)
+                    && !set_is_hashtable
                     && let Some((raw, member_count, max_member_len)) = s.retained_rdb_string()
                     && member_count <= thresholds.set_max_listpack_entries
                     && max_member_len <= thresholds.set_max_listpack_value
@@ -52594,7 +52598,7 @@ fn store_to_rdb_entries_with_thresholds(
                         max_member_len,
                     }
                 } else {
-                    let borrowed_blob = if store.set_is_hashtable_encoded(&key) {
+                    let borrowed_blob = if set_is_hashtable {
                         None
                     } else {
                         compact.and_then(|thresholds| {
@@ -52611,7 +52615,7 @@ fn store_to_rdb_entries_with_thresholds(
                         // emits the plain RDB_TYPE_SET so the encoding survives a
                         // save/load even when its content would otherwise re-derive to a
                         // smaller encoding. intset/listpack sets keep `Set` (re-derived).
-                        if store.set_is_hashtable_encoded(&key) {
+                        if set_is_hashtable {
                             // (frankenredis-2j9wz) Only a hashtable set needs an imposed
                             // order — its iteration is non-deterministic. intset/listpack
                             // sets are saved in native iteration order (ascending for
@@ -52631,13 +52635,18 @@ fn store_to_rdb_entries_with_thresholds(
                 // otherwise keep the legacy plain Hash encoding so older RDB
                 // files and types that never use per-field TTLs stay bit-
                 // identical. (br-frankenredis-th7q)
-                let physical = key.clone();
-                let has_any_ttl = store
-                    .hash_field_expires
-                    .range((physical.clone(), Vec::new())..)
-                    .next()
-                    .is_some_and(|((k, _), _)| k == &physical);
-                if has_any_ttl {
+                let has_any_ttl = if store.hash_field_expires.is_empty() {
+                    None
+                } else {
+                    let physical = key.to_vec();
+                    let any = store
+                        .hash_field_expires
+                        .range((physical.clone(), Vec::new())..)
+                        .next()
+                        .is_some_and(|((k, _), _)| k == &physical);
+                    if any { Some(physical) } else { None }
+                };
+                if let Some(physical) = has_any_ttl {
                     let mut fields: Vec<(Vec<u8>, Vec<u8>, Option<u64>)> = h
                         .iter()
                         .map(|(k_, v_)| {
@@ -52718,7 +52727,7 @@ fn store_to_rdb_entries_with_thresholds(
                     // its DUMP stays byte-stable across DEBUG RELOAD (fields sorted
                     // here would reload into sorted order and diverge, e.g. f0,f1,
                     // f10,f2,.. instead of f0,f1,..,f9,f10).
-                    if store.hash_is_hashtable_encoded(&key) {
+                    if hash_is_hashtable {
                         fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                     }
                     RdbValue::Hash(fields)
@@ -52795,13 +52804,13 @@ fn store_to_rdb_entries_with_thresholds(
                 // The owned build below still runs for any stream the listpacks3
                 // encoder declines -- exactly the streams `encode_stream_rdb_value`
                 // would have sent down `encode_private_stream_rdb_value` anyway.
-                let watermark = store.stream_watermark(&key).unwrap_or(None);
-                let entries_added = Some(store.stream_entries_added(&key, entries_map.len()));
-                let max_deleted = store.stream_max_deleted_id(&key);
+                let watermark = store.stream_watermark(key).unwrap_or(None);
+                let entries_added = Some(store.stream_entries_added(key, entries_map.len()));
+                let max_deleted = store.stream_max_deleted_id(key);
                 // Annotated because the blob builder below takes `&[...]`, which
                 // leaves the collect target ambiguous without it.
                 let groups: Vec<fr_persist::RdbStreamConsumerGroup> = store
-                    .stream_consumer_groups(&key)
+                    .stream_consumer_groups(key)
                     .map(|gs| {
                         gs.iter()
                             .map(|(name, group)| fr_persist::RdbStreamConsumerGroup {
