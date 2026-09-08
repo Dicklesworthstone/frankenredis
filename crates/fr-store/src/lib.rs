@@ -8284,19 +8284,20 @@ impl Store {
     /// KEYS still sorts, via `ordered_physical_keys_in_db` -- its output order is
     /// observable and pinned by fixtures.
     fn physical_keys_in_db_unordered(&mut self, db: usize) -> Vec<Vec<u8>> {
-        let keys: Vec<&[u8]> = if db == 0 {
+        if db == 0 {
             self.entries
                 .keys()
                 .filter(|key| decode_db_key(key).is_none())
+                .map(<[u8]>::to_vec)
                 .collect()
         } else {
             let prefix = encode_db_key(db, b"");
             self.entries
                 .keys()
                 .filter(|key| key.starts_with(&prefix))
+                .map(<[u8]>::to_vec)
                 .collect()
-        };
-        keys.into_iter().map(<[u8]>::to_vec).collect()
+        }
     }
 
     #[must_use]
@@ -15909,27 +15910,35 @@ impl Store {
             );
             swapped.extend_from_slice(right_prefix);
             swapped.extend_from_slice(&key[left_prefix.len()..]);
-            self.internal_entries_insert_with_expiry(swapped.clone(), entry, expires_at_ms);
-            if let Some(groups) = groups {
-                self.stream_groups.insert(swapped.clone(), groups);
+            let has_sidemaps = groups.is_some()
+                || last_id.is_some()
+                || entries_added.is_some()
+                || max_deleted_id.is_some()
+                || !field_ttls.is_empty();
+
+            if has_sidemaps {
+                if let Some(groups) = groups {
+                    self.stream_groups.insert(swapped.clone(), groups);
+                }
+                if let Some(last_id) = last_id {
+                    self.stream_last_ids.insert(swapped.clone(), last_id);
+                }
+                if let Some(entries_added) = entries_added {
+                    self.stream_entries_added
+                        .insert(swapped.clone(), entries_added);
+                }
+                if let Some(max_deleted_id) = max_deleted_id {
+                    self.stream_max_deleted_ids
+                        .insert(swapped.clone(), max_deleted_id);
+                }
+                // (frankenredis-sdmwz) Re-insert per-field hash TTLs at
+                // the swapped key so HTTL/HEXPIRETIME survive SWAPDB.
+                for (field, expires_at_ms) in field_ttls {
+                    self.hash_field_expires
+                        .insert((swapped.clone(), field), expires_at_ms);
+                }
             }
-            if let Some(last_id) = last_id {
-                self.stream_last_ids.insert(swapped.clone(), last_id);
-            }
-            if let Some(entries_added) = entries_added {
-                self.stream_entries_added
-                    .insert(swapped.clone(), entries_added);
-            }
-            if let Some(max_deleted_id) = max_deleted_id {
-                self.stream_max_deleted_ids
-                    .insert(swapped.clone(), max_deleted_id);
-            }
-            // (frankenredis-sdmwz) Re-insert per-field hash TTLs at
-            // the swapped key so HTTL/HEXPIRETIME survive SWAPDB.
-            for (field, expires_at_ms) in field_ttls {
-                self.hash_field_expires
-                    .insert((swapped.clone(), field), expires_at_ms);
-            }
+            self.internal_entries_insert_with_expiry(swapped, entry, expires_at_ms);
         }
 
         for (
@@ -15948,25 +15957,33 @@ impl Store {
             );
             swapped.extend_from_slice(left_prefix);
             swapped.extend_from_slice(&key[right_prefix.len()..]);
-            self.internal_entries_insert_with_expiry(swapped.clone(), entry, expires_at_ms);
-            if let Some(groups) = groups {
-                self.stream_groups.insert(swapped.clone(), groups);
+            let has_sidemaps = groups.is_some()
+                || last_id.is_some()
+                || entries_added.is_some()
+                || max_deleted_id.is_some()
+                || !field_ttls.is_empty();
+
+            if has_sidemaps {
+                if let Some(groups) = groups {
+                    self.stream_groups.insert(swapped.clone(), groups);
+                }
+                if let Some(last_id) = last_id {
+                    self.stream_last_ids.insert(swapped.clone(), last_id);
+                }
+                if let Some(entries_added) = entries_added {
+                    self.stream_entries_added
+                        .insert(swapped.clone(), entries_added);
+                }
+                if let Some(max_deleted_id) = max_deleted_id {
+                    self.stream_max_deleted_ids
+                        .insert(swapped.clone(), max_deleted_id);
+                }
+                for (field, expires_at_ms) in field_ttls {
+                    self.hash_field_expires
+                        .insert((swapped.clone(), field), expires_at_ms);
+                }
             }
-            if let Some(last_id) = last_id {
-                self.stream_last_ids.insert(swapped.clone(), last_id);
-            }
-            if let Some(entries_added) = entries_added {
-                self.stream_entries_added
-                    .insert(swapped.clone(), entries_added);
-            }
-            if let Some(max_deleted_id) = max_deleted_id {
-                self.stream_max_deleted_ids
-                    .insert(swapped.clone(), max_deleted_id);
-            }
-            for (field, expires_at_ms) in field_ttls {
-                self.hash_field_expires
-                    .insert((swapped.clone(), field), expires_at_ms);
-            }
+            self.internal_entries_insert_with_expiry(swapped, entry, expires_at_ms);
         }
 
         self.entries.set_shrink_suspended(false);
@@ -16004,8 +16021,19 @@ impl Store {
         // prefix, and the two sides cannot collide because they target different
         // databases. Sorting them was the single largest frame on a SWAPDB-only profile
         // (`__memcmp_avx2_movbe`, 8.94 pct), above the KeyDict work that does the job.
-        let left_keys: Vec<Vec<u8>> = self.physical_keys_in_db_unordered(left_db);
-        let right_keys: Vec<Vec<u8>> = self.physical_keys_in_db_unordered(right_db);
+        let (left_keys, right_keys) = {
+            let mut left = Vec::new();
+            let mut right = Vec::new();
+            for key in self.entries.keys() {
+                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                if db == left_db {
+                    left.push(key.to_vec());
+                } else if db == right_db {
+                    right.push(key.to_vec());
+                }
+            }
+            (left, right)
+        };
 
         let left_count = left_keys.len();
         let right_count = right_keys.len();
@@ -16064,12 +16092,6 @@ impl Store {
                     .map(|((_, f), v)| (f.clone(), *v))
                     .collect()
             };
-            let Some(entry) = self.internal_entries_remove(&key) else {
-                continue;
-            };
-            let logical = decode_db_key(&key)
-                .map(|(_, logical)| logical.to_vec())
-                .unwrap_or(key.clone());
             let groups = if self.stream_groups.is_empty() {
                 None
             } else {
@@ -16084,6 +16106,14 @@ impl Store {
                 None
             } else {
                 self.stream_entries_added.remove(key.as_slice())
+            };
+            let Some(entry) = self.internal_entries_remove(&key) else {
+                continue;
+            };
+            let logical = if let Some((_, logical)) = decode_db_key(&key) {
+                logical.to_vec()
+            } else {
+                key
             };
             left_entries.push((
                 logical,
@@ -16127,12 +16157,6 @@ impl Store {
                     .map(|((_, f), v)| (f.clone(), *v))
                     .collect()
             };
-            let Some(entry) = self.internal_entries_remove(&key) else {
-                continue;
-            };
-            let logical = decode_db_key(&key)
-                .map(|(_, logical)| logical.to_vec())
-                .unwrap_or(key.clone());
             let groups = if self.stream_groups.is_empty() {
                 None
             } else {
@@ -16147,6 +16171,14 @@ impl Store {
                 None
             } else {
                 self.stream_entries_added.remove(key.as_slice())
+            };
+            let Some(entry) = self.internal_entries_remove(&key) else {
+                continue;
+            };
+            let logical = if let Some((_, logical)) = decode_db_key(&key) {
+                logical.to_vec()
+            } else {
+                key
             };
             right_entries.push((
                 logical,
@@ -16171,26 +16203,38 @@ impl Store {
             field_ttls,
         ) in left_entries
         {
-            let swapped = encode_db_key(right_db, &logical);
-            self.internal_entries_insert_with_expiry(swapped.clone(), entry, expires_at_ms);
-            if let Some(groups) = groups {
-                self.stream_groups.insert(swapped.clone(), groups);
+            let swapped = if right_db == 0 {
+                logical
+            } else {
+                encode_db_key(right_db, &logical)
+            };
+            let has_sidemaps = groups.is_some()
+                || last_id.is_some()
+                || entries_added.is_some()
+                || max_deleted_id.is_some()
+                || !field_ttls.is_empty();
+
+            if has_sidemaps {
+                if let Some(groups) = groups {
+                    self.stream_groups.insert(swapped.clone(), groups);
+                }
+                if let Some(last_id) = last_id {
+                    self.stream_last_ids.insert(swapped.clone(), last_id);
+                }
+                if let Some(entries_added) = entries_added {
+                    self.stream_entries_added
+                        .insert(swapped.clone(), entries_added);
+                }
+                if let Some(max_deleted_id) = max_deleted_id {
+                    self.stream_max_deleted_ids
+                        .insert(swapped.clone(), max_deleted_id);
+                }
+                for (field, expires_at_ms) in field_ttls {
+                    self.hash_field_expires
+                        .insert((swapped.clone(), field), expires_at_ms);
+                }
             }
-            if let Some(last_id) = last_id {
-                self.stream_last_ids.insert(swapped.clone(), last_id);
-            }
-            if let Some(entries_added) = entries_added {
-                self.stream_entries_added
-                    .insert(swapped.clone(), entries_added);
-            }
-            if let Some(max_deleted_id) = max_deleted_id {
-                self.stream_max_deleted_ids
-                    .insert(swapped.clone(), max_deleted_id);
-            }
-            for (field, expires_at_ms) in field_ttls {
-                self.hash_field_expires
-                    .insert((swapped.clone(), field), expires_at_ms);
-            }
+            self.internal_entries_insert_with_expiry(swapped, entry, expires_at_ms);
         }
 
         for (
@@ -16204,26 +16248,38 @@ impl Store {
             field_ttls,
         ) in right_entries
         {
-            let swapped = encode_db_key(left_db, &logical);
-            self.internal_entries_insert_with_expiry(swapped.clone(), entry, expires_at_ms);
-            if let Some(groups) = groups {
-                self.stream_groups.insert(swapped.clone(), groups);
+            let swapped = if left_db == 0 {
+                logical
+            } else {
+                encode_db_key(left_db, &logical)
+            };
+            let has_sidemaps = groups.is_some()
+                || last_id.is_some()
+                || entries_added.is_some()
+                || max_deleted_id.is_some()
+                || !field_ttls.is_empty();
+
+            if has_sidemaps {
+                if let Some(groups) = groups {
+                    self.stream_groups.insert(swapped.clone(), groups);
+                }
+                if let Some(last_id) = last_id {
+                    self.stream_last_ids.insert(swapped.clone(), last_id);
+                }
+                if let Some(entries_added) = entries_added {
+                    self.stream_entries_added
+                        .insert(swapped.clone(), entries_added);
+                }
+                if let Some(max_deleted_id) = max_deleted_id {
+                    self.stream_max_deleted_ids
+                        .insert(swapped.clone(), max_deleted_id);
+                }
+                for (field, expires_at_ms) in field_ttls {
+                    self.hash_field_expires
+                        .insert((swapped.clone(), field), expires_at_ms);
+                }
             }
-            if let Some(last_id) = last_id {
-                self.stream_last_ids.insert(swapped.clone(), last_id);
-            }
-            if let Some(entries_added) = entries_added {
-                self.stream_entries_added
-                    .insert(swapped.clone(), entries_added);
-            }
-            if let Some(max_deleted_id) = max_deleted_id {
-                self.stream_max_deleted_ids
-                    .insert(swapped.clone(), max_deleted_id);
-            }
-            for (field, expires_at_ms) in field_ttls {
-                self.hash_field_expires
-                    .insert((swapped.clone(), field), expires_at_ms);
-            }
+            self.internal_entries_insert_with_expiry(swapped, entry, expires_at_ms);
         }
 
         // (frankenredis-4f8vx) Resume the policy. NOT followed by a shrink call: a swap
