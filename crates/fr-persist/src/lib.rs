@@ -2140,7 +2140,7 @@ fn encode_rdb_internal(
     }
 
     let mut sorted_entries: Vec<&RdbEntry> = entries.iter().collect();
-    sorted_entries.sort_by(|left, right| {
+    sorted_entries.sort_unstable_by(|left, right| {
         left.db
             .cmp(&right.db)
             .then_with(|| left.key.cmp(&right.key))
@@ -2634,7 +2634,7 @@ fn encode_compact_zset_listpack(
             .iter()
             .map(|(member, score)| (member.as_slice(), *score))
             .collect();
-        sorted_members.sort_by(|left, right| zset_member_cmp(*left, *right));
+        sorted_members.sort_unstable_by(|left, right| zset_member_cmp(*left, *right));
         encode_zset_score_listpack_blob(&sorted_members)?
     };
     let mut out = Vec::with_capacity(lp.len() + 4);
@@ -2686,7 +2686,7 @@ pub fn encode_zset_listpack_blob_borrowed(
         encode_zset_score_listpack_blob(members)
     } else {
         let mut sorted: Vec<(&[u8], f64)> = members.to_vec();
-        sorted.sort_by(|left, right| zset_member_cmp(*left, *right));
+        sorted.sort_unstable_by(|left, right| zset_member_cmp(*left, *right));
         encode_zset_score_listpack_blob(&sorted)
     }
 }
@@ -7409,7 +7409,9 @@ mod tests {
                 }
             })
             .collect();
-        refs.sort_by(|left, right| left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key)));
+        refs.sort_unstable_by(|left, right| {
+            left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key))
+        });
 
         let aux = [("redis-ver", "7.2.4"), ("frankenredis", "true")];
         let lib = b"#!lua name=borrowed\nredis.register_function('bf', function() return 1 end)";
@@ -12245,10 +12247,10 @@ mod tests {
                     entry.value = super::canonicalise_rdb_value(&entry.value);
                 }
                 match &mut entry.value {
-                    RdbValue::Set(members) => members.sort(),
-                    RdbValue::Hash(fields) => fields.sort(),
+                    RdbValue::Set(members) => members.sort_unstable(),
+                    RdbValue::Hash(fields) => fields.sort_unstable(),
                     RdbValue::SortedSet(members) => {
-                        members.sort_by(|left, right| {
+                        members.sort_unstable_by(|left, right| {
                             left.1
                                 .partial_cmp(&right.1)
                                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -12261,7 +12263,7 @@ mod tests {
                     _ => {}
                 }
             }
-            entries.sort_by(|left, right| {
+            entries.sort_unstable_by(|left, right| {
                 left.db
                     .cmp(&right.db)
                     .then_with(|| left.key.cmp(&right.key))

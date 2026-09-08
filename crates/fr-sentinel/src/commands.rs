@@ -1087,7 +1087,7 @@ fn cmd_info_cache(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
             state.get_master(&name)
         })
         .collect();
-    masters.sort_by(|left, right| left.name.cmp(&right.name));
+    masters.sort_unstable_by(|left, right| left.name.cmp(&right.name));
     masters.dedup_by(|left, right| left.name == right.name);
 
     let mut reply = Vec::with_capacity(masters.len() * 2);
@@ -1136,7 +1136,7 @@ fn info_cache_rows(instance: &crate::SentinelRedisInstance, now_ms: u64) -> Vec<
     rows.push(info_cache_row(instance, now_ms, instance.info_refresh));
 
     let mut replicas: Vec<_> = instance.slaves.values().collect();
-    replicas.sort_by(|left, right| left.name.cmp(&right.name));
+    replicas.sort_unstable_by(|left, right| left.name.cmp(&right.name));
     rows.extend(
         replicas
             .into_iter()
@@ -1355,7 +1355,7 @@ fn sorted_instance_info_maps<'a>(
     let mut instances: Vec<_> = instances
         .filter(|instance| !instance.is_slave() || instance.replica_announced)
         .collect();
-    instances.sort_by(|left, right| left.name.cmp(&right.name));
+    instances.sort_unstable_by(|left, right| left.name.cmp(&right.name));
     instances
         .into_iter()
         .map(|inst| instance_to_info_map(inst, now_ms, announce_hostnames))

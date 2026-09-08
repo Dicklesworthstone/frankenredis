@@ -28300,7 +28300,7 @@ impl Runtime {
         // k1's score, and the result is re-sorted below. Wrong-type was already
         // rejected by `ensure_zset_or_set_source` above.
         let mut result = self.server.store.zdiff_members_no_stats(&keys);
-        result.sort_by(|a, b| {
+        result.sort_unstable_by(|a, b| {
             a.1.partial_cmp(&b.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0))
@@ -28400,7 +28400,7 @@ impl Runtime {
             .server
             .store
             .zinter_members_argv_order_no_stats(keys, &[], b"SUM");
-        result.sort_by(|a, b| {
+        result.sort_unstable_by(|a, b| {
             a.1.partial_cmp(&b.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0))
@@ -49497,7 +49497,7 @@ impl Runtime {
                 .into_iter()
                 .flat_map(|channels| channels.iter().cloned())
                 .collect();
-            channels.sort();
+            channels.sort_unstable();
             if channels.is_empty() {
                 // (frankenredis-unsubcount) Upstream pubsubUnsubscribeAllChannels
                 // replies with clientTotalPubSubSubscriptionCount = channels +
@@ -49543,7 +49543,7 @@ impl Runtime {
                 .into_iter()
                 .flat_map(|patterns| patterns.iter().cloned())
                 .collect();
-            patterns.sort();
+            patterns.sort_unstable();
             if patterns.is_empty() {
                 // (frankenredis-unsubcount) Same as UNSUBSCRIBE: the reply count
                 // is the total channels + patterns, so a client holding only
@@ -49669,7 +49669,7 @@ impl Runtime {
             if let Some(pattern) = argv.get(2) {
                 channels.retain(|channel| fr_store::glob_match(pattern, channel));
             }
-            channels.sort();
+            channels.sort_unstable();
             return RespFrame::Array(Some(
                 channels
                     .into_iter()
@@ -49727,7 +49727,7 @@ impl Runtime {
             if let Some(pattern) = argv.get(2) {
                 channels.retain(|channel| fr_store::glob_match(pattern, channel));
             }
-            channels.sort();
+            channels.sort_unstable();
             return RespFrame::Array(Some(
                 channels
                     .into_iter()
@@ -49785,7 +49785,7 @@ impl Runtime {
                 .into_iter()
                 .flat_map(|channels| channels.iter().cloned())
                 .collect();
-            channels.sort();
+            channels.sort_unstable();
             if channels.is_empty() {
                 return self.current_pubsub_reply(b"sunsubscribe", None, 0);
             }
@@ -52449,7 +52449,9 @@ fn try_encode_string_only_rdb_snapshot(
         });
     }
 
-    entries.sort_by(|left, right| left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key)));
+    entries.sort_unstable_by(|left, right| {
+        left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key))
+    });
     Some(fr_persist::encode_rdb_string_entries_with_functions(
         &entries, aux, functions,
     ))
@@ -52615,7 +52617,7 @@ fn store_to_rdb_entries_with_thresholds(
                             // sets are saved in native iteration order (ascending for
                             // intset, insertion for listpack), matching redis, so the
                             // DUMP stays byte-stable across DEBUG RELOAD.
-                            members.sort();
+                            members.sort_unstable();
                             RdbValue::SetHashtable(members)
                         } else {
                             RdbValue::Set(members)
@@ -52646,7 +52648,7 @@ fn store_to_rdb_entries_with_thresholds(
                             (k_.to_vec(), v_.to_vec(), ttl)
                         })
                         .collect();
-                    fields.sort_by(|a, b| a.0.cmp(&b.0));
+                    fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                     RdbValue::HashWithTtls(fields)
                 } else if let Some(thresholds) =
                     compact.filter(|_| !cfg!(feature = "perf-ab-rdb-hash-owned"))
@@ -52690,7 +52692,7 @@ fn store_to_rdb_entries_with_thresholds(
                     let hashtable = hash_is_hashtable;
                     let mut borrowed: Vec<(&[u8], &[u8])> = h.iter().collect();
                     if hashtable {
-                        borrowed.sort_by(|a, b| a.0.cmp(b.0));
+                        borrowed.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     }
                     match fr_persist::encode_hash_listpack_blob_borrowed(&borrowed, thresholds) {
                         Some(blob) => RdbValue::HashListpack(blob),
@@ -52700,7 +52702,7 @@ fn store_to_rdb_entries_with_thresholds(
                                 .map(|(f, v)| (f.to_vec(), v.to_vec()))
                                 .collect();
                             if hashtable {
-                                fields.sort_by(|a, b| a.0.cmp(&b.0));
+                                fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                             }
                             RdbValue::Hash(fields)
                         }
@@ -52717,7 +52719,7 @@ fn store_to_rdb_entries_with_thresholds(
                     // here would reload into sorted order and diverge, e.g. f0,f1,
                     // f10,f2,.. instead of f0,f1,..,f9,f10).
                     if store.hash_is_hashtable_encoded(&key) {
-                        fields.sort_by(|a, b| a.0.cmp(&b.0));
+                        fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                     }
                     RdbValue::Hash(fields)
                 }

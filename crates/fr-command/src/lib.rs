@@ -7906,7 +7906,7 @@ fn geo_search_core(
             // Per-cell scan order is not global; restore ascending (score, member)
             // order so SORT_NONE output and the stable ASC/DESC tie-breaks match
             // the full scan byte-for-byte.
-            results.sort_by(|a, b| {
+            results.sort_unstable_by(|a, b| {
                 a.1.partial_cmp(&b.1)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| a.0.cmp(&b.0))
@@ -8678,7 +8678,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                     },
                 )?;
                 // Restore ascending (score, member) order to match the full scan.
-                results.sort_by(|a, b| {
+                results.sort_unstable_by(|a, b| {
                     a.1.partial_cmp(&b.1)
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| a.0.cmp(&b.0))
@@ -14667,7 +14667,7 @@ fn sunsubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Co
     if argv.len() < 2 {
         // Unsubscribe from all shard channels (sorted for deterministic order)
         let mut channels: Vec<Vec<u8>> = store.subscribed_shard_channels.iter().cloned().collect();
-        channels.sort();
+        channels.sort_unstable();
         if channels.is_empty() {
             return Ok(RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"sunsubscribe".to_vec())),
@@ -18920,7 +18920,7 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             .iter()
             .filter(|(_, count)| **count > 0)
             .collect();
-        codes.sort_by(|a, b| a.0.cmp(b.0));
+        codes.sort_unstable_by(|a, b| a.0.cmp(b.0));
         for (code, count) in codes {
             let _ = write!(info, "errorstat_{code}:count={count}\r\n");
         }
@@ -25427,7 +25427,7 @@ fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
                 .is_some_and(|t| t.as_bytes().eq_ignore_ascii_case(tf))
         });
     }
-    logical_keys.sort();
+    logical_keys.sort_unstable();
 
     // Cursor-based slicing: same single-pass semantics fr already
     // uses elsewhere (a 'large cursor returns []' shape, signalling
@@ -26803,7 +26803,7 @@ fn pubsub_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             let pattern = &argv[2];
             channels.retain(|ch| glob_match(pattern, ch));
         }
-        channels.sort();
+        channels.sort_unstable();
         Ok(RespFrame::Array(Some(
             channels
                 .into_iter()
@@ -26907,7 +26907,7 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     // absent from all others with keys[0]'s score, re-sorted below.
     let mut result = store.zdiff_members_no_stats(&keys);
     // (gauntlet B3) zset reply order: score asc, ties by member byte-lex.
-    result.sort_by(|a, b| {
+    result.sort_unstable_by(|a, b| {
         a.1.partial_cmp(&b.1)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))
@@ -27002,7 +27002,7 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     // does not matter.
     let mut result = store.zinter_members_argv_order_no_stats(&keys, &weights, &aggregate);
     // (gauntlet B3) zset reply order: score asc, ties by member byte-lex.
-    result.sort_by(|a, b| {
+    result.sort_unstable_by(|a, b| {
         a.1.partial_cmp(&b.1)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))
@@ -27068,7 +27068,7 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     // (gauntlet B3) Vendored zunionInterDiffGenericCommand replies in zset order:
     // score ascending, ties broken by member byte-lex. The HashMap above loses
     // ordering, so the tie-break is required for determinism.
-    entries.sort_by(|a, b| {
+    entries.sort_unstable_by(|a, b| {
         a.1.partial_cmp(&b.1)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))

@@ -967,15 +967,14 @@ impl LuaTableInner {
     /// Returns all hash pairs (string_hash + other_hash) as `(LuaValue, LuaValue)`.
     fn hash_pairs(&self) -> Vec<(LuaValue, LuaValue)> {
         let mut string_keys: Vec<&Vec<u8>> = self.string_hash.keys().collect();
-        string_keys.sort();
-        let mut pairs: Vec<(LuaValue, LuaValue)> = string_keys
-            .into_iter()
-            .filter_map(|k| {
-                self.string_hash
-                    .get(k)
-                    .map(|v| (LuaValue::Str(k.clone()), v.clone()))
-            })
-            .collect();
+        string_keys.sort_unstable();
+        let mut pairs: Vec<(LuaValue, LuaValue)> =
+            Vec::with_capacity(string_keys.len() + self.other_hash.len());
+        for k in string_keys {
+            if let Some(v) = self.string_hash.get(k) {
+                pairs.push((LuaValue::Str(k.clone()), v.clone()));
+            }
+        }
         pairs.extend(self.other_hash.iter().cloned());
         pairs
     }

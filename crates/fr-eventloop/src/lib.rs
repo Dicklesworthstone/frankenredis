@@ -1177,7 +1177,7 @@ mod tests {
                 entries.push(name);
             }
         }
-        entries.sort();
+        entries.sort_unstable();
         assert!(
             entries.len() >= 17,
             "fuzz_eventloop_validators corpus must have >= 17 seed files; got {}",
