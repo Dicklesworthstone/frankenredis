@@ -7093,7 +7093,7 @@ impl PackedZSet {
         // Byte-identical: an already-ordered input produces the same buffer whether
         // or not it is sorted again, and an out-of-order one still gets sorted.
         if !Self::owned_pairs_are_sorted(&pairs) {
-            pairs.sort_by(|(am, ascore), (bm, bscore)| zset_cmp(*ascore, am, *bscore, bm));
+            pairs.sort_unstable_by(|(am, ascore), (bm, bscore)| zset_cmp(*ascore, am, *bscore, bm));
         }
         let cap = pairs
             .iter()
@@ -7127,7 +7127,7 @@ impl PackedZSet {
 
     #[must_use]
     pub fn from_unique_pairs_borrowed(mut pairs: Vec<(&[u8], f64)>) -> Self {
-        pairs.sort_by(|(am, ascore), (bm, bscore)| zset_cmp(*ascore, am, *bscore, bm));
+        pairs.sort_unstable_by(|(am, ascore), (bm, bscore)| zset_cmp(*ascore, am, *bscore, bm));
         Self::from_sorted_unique_pairs_borrowed(pairs)
     }
 

@@ -1335,7 +1335,7 @@ impl FullZSetOrder {
 
     fn from_score_members(mut score_members: Vec<ScoreMember>) -> Self {
         if score_members.len() <= SORTED_SET_COMPACT_FULL_MAX_ENTRIES {
-            score_members.sort();
+            score_members.sort_unstable();
             Self::Compact(score_members)
         } else {
             Self::Tree(score_members.into_iter().map(|sm| (sm, ())).collect())
@@ -5972,7 +5972,7 @@ impl LatencyTracker {
                     .map(|sample| (event.clone(), sample))
             })
             .collect();
-        latest.sort_by(|left, right| left.0.cmp(&right.0));
+        latest.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         latest
     }
 
@@ -6593,7 +6593,7 @@ impl CommandHistogramTracker {
             };
         }
         with_direct_histogram_fields!(all_push);
-        result.sort_by(|a, b| a.0.cmp(b.0));
+        result.sort_unstable_by(|a, b| a.0.cmp(b.0));
         result
     }
 
@@ -25305,9 +25305,9 @@ impl Store {
                     Ok(result)
                 }
                 Value::Set(s) => {
-                    let mut members: Vec<_> = s.iter().map(|m| m.into_owned()).collect();
-                    members.sort();
-                    let result = members.into_iter().map(|m| (m, 1.0)).collect();
+                    let mut members: Vec<_> = s.iter().collect();
+                    members.sort_unstable();
+                    let result = members.into_iter().map(|m| (m.into_owned(), 1.0)).collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -25325,9 +25325,9 @@ impl Store {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => Ok(zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect()),
                 Value::Set(s) => {
-                    let mut members: Vec<_> = s.iter().map(|m| m.into_owned()).collect();
-                    members.sort();
-                    Ok(members.into_iter().map(|m| (m, 1.0)).collect())
+                    let mut members: Vec<_> = s.iter().collect();
+                    members.sort_unstable();
+                    Ok(members.into_iter().map(|m| (m.into_owned(), 1.0)).collect())
                 }
                 _ => Err(StoreError::WrongType),
             },
@@ -35321,7 +35321,7 @@ impl Store {
             Value::Set(s) => {
                 hash = fnv1a_update(hash, b"E");
                 let mut members: Vec<_> = s.iter().collect();
-                members.sort();
+                members.sort_unstable();
                 for m in members {
                     hash = fnv1a_update(hash, m.as_ref());
                 }
@@ -36656,7 +36656,7 @@ impl Store {
                 }
             })
             .collect();
-        libs.sort_by(|a, b| a.name.cmp(&b.name));
+        libs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         libs
     }
 
@@ -38196,20 +38196,20 @@ impl Store {
         }
 
         // Snapshot the remaining keys (sorted for deterministic output).
-        let mut keys: Vec<(usize, Vec<u8>, Vec<u8>)> = self
+        let mut keys: Vec<(usize, &[u8], &[u8])> = self
             .entries
             .keys()
             .map(|physical| {
                 let (db, logical) = decode_db_key(physical).unwrap_or((0, physical));
-                (db, logical.to_vec(), physical.to_vec())
+                (db, logical, physical)
             })
             .collect();
-        keys.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        keys.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)));
 
         let mut current_db = None;
 
         for (db, logical_key, physical_key) in keys {
-            let Some(entry) = self.entries.get(physical_key.as_slice()) else {
+            let Some(entry) = self.entries.get(physical_key) else {
                 continue;
             };
 
@@ -38220,12 +38220,12 @@ impl Store {
 
             match &entry.value {
                 Value::String(v) => {
-                    commands.push(vec![b"SET".to_vec(), logical_key.clone(), v.to_vec()]);
+                    commands.push(vec![b"SET".to_vec(), logical_key.to_vec(), v.to_vec()]);
                 }
                 Value::Integer(value) => {
                     commands.push(vec![
                         b"SET".to_vec(),
-                        logical_key.clone(),
+                        logical_key.to_vec(),
                         value.to_string().into_bytes(),
                     ]);
                 }
@@ -38233,11 +38233,11 @@ impl Store {
                     if !h.is_empty() {
                         // Sort fields for deterministic output.
                         let mut fields: Vec<(&[u8], &[u8])> = h.iter().collect();
-                        fields.sort_by(|a, b| a.0.cmp(b.0));
+                        fields.sort_unstable_by(|a, b| a.0.cmp(b.0));
                         for chunk in fields.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
                             // Redis aof.c::rewriteHashObject writes HMSET in
                             // batches capped by AOF_REWRITE_ITEMS_PER_CMD.
-                            let mut argv = vec![b"HMSET".to_vec(), logical_key.clone()];
+                            let mut argv = vec![b"HMSET".to_vec(), logical_key.to_vec()];
                             for (field, value) in chunk {
                                 argv.push(field.to_vec());
                                 argv.push(value.to_vec());
@@ -38252,15 +38252,15 @@ impl Store {
                         if !self.hash_field_expires.is_empty() {
                             let mut field_ttls: Vec<(Vec<u8>, u64)> = self
                                 .hash_field_expires
-                                .range((physical_key.clone(), Vec::new())..)
-                                .take_while(|((k, _), _)| k == &physical_key)
+                                .range((physical_key.to_vec(), Vec::new())..)
+                                .take_while(|((k, _), _)| k.as_slice() == physical_key)
                                 .map(|((_, f), &at)| (f.clone(), at))
                                 .collect();
                             field_ttls.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                             for (field, expires_at_ms) in field_ttls {
                                 commands.push(vec![
                                     b"HPEXPIREAT".to_vec(),
-                                    logical_key.clone(),
+                                    logical_key.to_vec(),
                                     expires_at_ms.to_string().into_bytes(),
                                     b"FIELDS".to_vec(),
                                     b"1".to_vec(),
@@ -38274,7 +38274,7 @@ impl Store {
                     if !l.is_empty() {
                         let items: Vec<&[u8]> = l.iter().collect();
                         for chunk in items.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
-                            let mut argv = vec![b"RPUSH".to_vec(), logical_key.clone()];
+                            let mut argv = vec![b"RPUSH".to_vec(), logical_key.to_vec()];
                             for item in chunk {
                                 argv.push((*item).to_vec());
                             }
@@ -38288,7 +38288,7 @@ impl Store {
                         let mut members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
                         members.sort_unstable();
                         for chunk in members.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
-                            let mut argv = vec![b"SADD".to_vec(), logical_key.clone()];
+                            let mut argv = vec![b"SADD".to_vec(), logical_key.to_vec()];
                             for member in chunk {
                                 argv.push(member.as_ref().to_vec());
                             }
@@ -38306,7 +38306,7 @@ impl Store {
                                 .then_with(|| a.0.cmp(b.0))
                         });
                         for chunk in pairs.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
-                            let mut argv = vec![b"ZADD".to_vec(), logical_key.clone()];
+                            let mut argv = vec![b"ZADD".to_vec(), logical_key.to_vec()];
                             for (member, score) in chunk {
                                 argv.push(redis_score_to_string(*score).into_bytes());
                                 argv.push((*member).to_vec());
@@ -38323,7 +38323,7 @@ impl Store {
                         // the following XSETID / XGROUP commands replay.
                         commands.push(vec![
                             b"XADD".to_vec(),
-                            logical_key.clone(),
+                            logical_key.to_vec(),
                             b"MAXLEN".to_vec(),
                             b"0".to_vec(),
                             b"0-1".to_vec(),
@@ -38335,7 +38335,7 @@ impl Store {
                         for ((ms, seq), fields) in entries.iter() {
                             let id = format!("{ms}-{seq}");
                             let mut argv =
-                                vec![b"XADD".to_vec(), logical_key.clone(), id.into_bytes()];
+                                vec![b"XADD".to_vec(), logical_key.to_vec(), id.into_bytes()];
                             for (fname, fval) in fields.iter() {
                                 argv.push(fname.to_vec());
                                 argv.push(fval.to_vec());
@@ -38350,18 +38350,18 @@ impl Store {
                     let max_entry_id = entries.keys().last().copied();
                     let watermark = self
                         .stream_last_ids
-                        .get(&physical_key)
+                        .get(physical_key)
                         .copied()
                         .or(max_entry_id)
                         .unwrap_or((0, 0));
                     let entries_added =
-                        self.stream_entries_added_value(&physical_key, entries.len());
-                    let max_deleted = self.stream_max_deleted_id(&physical_key).unwrap_or((0, 0));
+                        self.stream_entries_added_value(physical_key, entries.len());
+                    let max_deleted = self.stream_max_deleted_id(physical_key).unwrap_or((0, 0));
                     let (ms, seq) = watermark;
                     let (deleted_ms, deleted_seq) = max_deleted;
                     commands.push(vec![
                         b"XSETID".to_vec(),
-                        logical_key.clone(),
+                        logical_key.to_vec(),
                         format!("{ms}-{seq}").into_bytes(),
                         b"ENTRIESADDED".to_vec(),
                         entries_added.to_string().into_bytes(),
@@ -38370,7 +38370,7 @@ impl Store {
                     ]);
 
                     // Emit XGROUP CREATE for each consumer group.
-                    if let Some(groups) = self.stream_groups.get(&physical_key) {
+                    if let Some(groups) = self.stream_groups.get(physical_key) {
                         let mut group_names: Vec<&Vec<u8>> = groups.keys().collect();
                         group_names.sort_unstable();
                         for group_name in group_names {
@@ -38380,7 +38380,7 @@ impl Store {
                             let mut create = vec![
                                 b"XGROUP".to_vec(),
                                 b"CREATE".to_vec(),
-                                logical_key.clone(),
+                                logical_key.to_vec(),
                                 group_name.clone(),
                                 id.into_bytes(),
                                 b"ENTRIESREAD".to_vec(),
@@ -38395,7 +38395,7 @@ impl Store {
                             // replacing the old O(C·P) per-consumer PEL rescan.
                             append_group_consumer_aof_commands(
                                 group,
-                                &logical_key,
+                                logical_key,
                                 group_name,
                                 &mut commands,
                             );
@@ -38405,10 +38405,10 @@ impl Store {
             }
 
             // Emit PEXPIREAT if the key has an expiry timestamp.
-            if let Some(exp_ms) = self.expiry_ms(physical_key.as_slice()) {
+            if let Some(exp_ms) = self.expiry_ms(physical_key) {
                 commands.push(vec![
                     b"PEXPIREAT".to_vec(),
-                    logical_key.clone(),
+                    logical_key.to_vec(),
                     exp_ms.to_string().into_bytes(),
                 ]);
             }
@@ -80388,6 +80388,132 @@ mod tests {
         assert_eq!(hash_cmds[3][0], b"HPEXPIREAT");
         assert_eq!(hash_cmds[3][5], b"field_b");
         assert_eq!(hash_cmds[3][2], b"50000");
+    }
+
+    #[test]
+    fn aof_manifest_borrowed_keys_and_unstable_sort_matches_and_reports_ab() {
+        let mut store = Store::new();
+        for i in (0..100).rev() {
+            let key = format!("str_key_{i:04}").into_bytes();
+            let val = format!("str_val_{i}").into_bytes();
+            store.set(key, val, None, 1000);
+        }
+
+        // Multi-DB keys
+        for db in [1, 2, 5] {
+            for i in 0..10 {
+                let physical = encode_db_key(db, format!("db{db}_key_{i}").as_bytes());
+                store.set(physical, format!("val_{i}").into_bytes(), None, 1000);
+            }
+        }
+
+        // Hash with multiple fields
+        for f in 0..20 {
+            let field = format!("field_{f:02}").into_bytes();
+            let val = format!("hval_{f}").into_bytes();
+            let _ = store.hset(b"hash_multikey", field, val, 1000);
+        }
+
+        // Set
+        let set_members: Vec<Vec<u8>> = (0..25)
+            .map(|m| format!("smem_{m:02}").into_bytes())
+            .collect();
+        store.sadd(b"set_multikey", &set_members, 1000).unwrap();
+
+        // Verify zget_members_with_scores Cow sorting on Set
+        let zget_res = store
+            .zget_members_with_scores(b"set_multikey", 1000)
+            .unwrap();
+        assert_eq!(zget_res.len(), 25);
+        for window in zget_res.windows(2) {
+            assert!(window[0].0 < window[1].0);
+            assert_eq!(window[0].1, 1.0);
+        }
+        let zget_no_stats = store
+            .zget_members_with_scores_no_stats(b"set_multikey")
+            .unwrap();
+        assert_eq!(zget_res, zget_no_stats);
+
+        // Verify entry_state_digest / key_fingerprint consistency (which exercises Set sort_unstable)
+        let fp1 = store.key_fingerprint(b"set_multikey", 1000);
+        let fp2 = store.key_fingerprint(b"set_multikey", 1000);
+        assert_ne!(fp1, 0);
+        assert_eq!(fp1, fp2);
+
+        // Verify AOF rewrite determinism and command generation
+        let aof_cmds = store.to_aof_commands(1000);
+        assert!(!aof_cmds.is_empty());
+
+        // A/B test: compare old-style owned Vec clone + sort_by vs new borrowed slices + sort_unstable_by
+        let mut keys_pool: Vec<Vec<u8>> = Vec::new();
+        for i in 0..2000 {
+            let db = i % 4;
+            keys_pool.push(encode_db_key(db, format!("bench_key_{i:06}").as_bytes()));
+        }
+
+        let reps = 200u64;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            let mut keys: Vec<(usize, Vec<u8>, Vec<u8>)> = keys_pool
+                .iter()
+                .map(|physical| {
+                    let (db, logical) = super::decode_db_key(physical).unwrap_or((0, physical));
+                    (db, logical.to_vec(), physical.to_vec())
+                })
+                .collect();
+            keys.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+            std::hint::black_box(&keys[0]);
+        }
+        let old_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            let mut keys: Vec<(usize, &[u8], &[u8])> = keys_pool
+                .iter()
+                .map(|physical| {
+                    let (db, logical) = super::decode_db_key(physical).unwrap_or((0, physical));
+                    (db, logical, physical.as_slice())
+                })
+                .collect();
+            keys.sort_unstable_by(|left, right| {
+                left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1))
+            });
+            std::hint::black_box(&keys[0]);
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+
+        // Verify isomorphism between both approaches
+        let mut old_keys: Vec<(usize, Vec<u8>, Vec<u8>)> = keys_pool
+            .iter()
+            .map(|physical| {
+                let (db, logical) = super::decode_db_key(physical).unwrap_or((0, physical));
+                (db, logical.to_vec(), physical.to_vec())
+            })
+            .collect();
+        old_keys.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+        let mut new_keys: Vec<(usize, &[u8], &[u8])> = keys_pool
+            .iter()
+            .map(|physical| {
+                let (db, logical) = super::decode_db_key(physical).unwrap_or((0, physical));
+                (db, logical, physical.as_slice())
+            })
+            .collect();
+        new_keys
+            .sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)));
+
+        assert_eq!(old_keys.len(), new_keys.len());
+        for (old_k, new_k) in old_keys.iter().zip(new_keys.iter()) {
+            assert_eq!(old_k.0, new_k.0);
+            assert_eq!(old_k.1.as_slice(), new_k.1);
+            assert_eq!(old_k.2.as_slice(), new_k.2);
+        }
+
+        println!(
+            "aof manifest keys snapshot (n={}, reps={reps}): old_owned_stable={old_ns:.0} ns | new_borrowed_unstable={new_ns:.0} ns = {:.2}x speedup",
+            keys_pool.len(),
+            old_ns / new_ns
+        );
     }
 
     #[test]
