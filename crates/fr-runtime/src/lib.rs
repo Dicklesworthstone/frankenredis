@@ -52635,29 +52635,23 @@ fn store_to_rdb_entries_with_thresholds(
                 // otherwise keep the legacy plain Hash encoding so older RDB
                 // files and types that never use per-field TTLs stay bit-
                 // identical. (br-frankenredis-th7q)
-                let has_any_ttl = if store.hash_field_expires.is_empty() {
-                    None
-                } else {
-                    let physical = key.to_vec();
-                    let any = store
-                        .hash_field_expires
-                        .range((physical.clone(), Vec::new())..)
-                        .next()
-                        .is_some_and(|((k, _), _)| k == &physical);
-                    if any { Some(physical) } else { None }
-                };
-                if let Some(physical) = has_any_ttl {
+                let field_ttls = store.hash_field_ttls(key);
+                if !field_ttls.is_empty() {
                     let mut fields: Vec<(Vec<u8>, Vec<u8>, Option<u64>)> = h
                         .iter()
-                        .map(|(k_, v_)| {
-                            let ttl = store
-                                .hash_field_expires
-                                .get(&(physical.clone(), k_.to_vec()))
-                                .copied();
-                            (k_.to_vec(), v_.to_vec(), ttl)
-                        })
+                        .map(|(k_, v_)| (k_.to_vec(), v_.to_vec(), None))
                         .collect();
                     fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                    let mut ttl_idx = 0;
+                    for (f, _, ttl) in &mut fields {
+                        while ttl_idx < field_ttls.len() && field_ttls[ttl_idx].0 < f.as_slice() {
+                            ttl_idx += 1;
+                        }
+                        if ttl_idx < field_ttls.len() && field_ttls[ttl_idx].0 == f.as_slice() {
+                            *ttl = Some(field_ttls[ttl_idx].1);
+                            ttl_idx += 1;
+                        }
+                    }
                     RdbValue::HashWithTtls(fields)
                 } else if let Some(thresholds) =
                     compact.filter(|_| !cfg!(feature = "perf-ab-rdb-hash-owned"))
@@ -52706,13 +52700,10 @@ fn store_to_rdb_entries_with_thresholds(
                     match fr_persist::encode_hash_listpack_blob_borrowed(&borrowed, thresholds) {
                         Some(blob) => RdbValue::HashListpack(blob),
                         None => {
-                            let mut fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed
+                            let fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed
                                 .iter()
                                 .map(|(f, v)| (f.to_vec(), v.to_vec()))
                                 .collect();
-                            if hashtable {
-                                fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-                            }
                             RdbValue::Hash(fields)
                         }
                     }
