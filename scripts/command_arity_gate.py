@@ -93,6 +93,17 @@ def fr_subcommand_arities() -> dict[str, int]:
 # fr is not a sentinel; these exist upstream only in sentinel mode.
 SENTINEL_PREFIX = "sentinel|"
 
+# Forward-compatible Redis 7.4 hash-field TTL family registered in COMMAND_TABLE
+# per owner decision on bead rc-hash-ttl-contract-lhgr6 (0ed891809 + 4008e727a).
+# In 7.2.4 parity mode (default, boot opt-in off), dispatch_argv returns unknown-command
+# and command_table_row_is_visible hides them from introspection.
+# When present, their arities must match the established 7.4 contract.
+FORWARD_COMPAT_7_4 = {
+    "hexpire": -6,
+    "httl": -5,
+    "hpersist": -5,
+}
+
 
 def compare(label: str, inc: dict[str, int], fr: dict[str, int]) -> int:
     """Print a comparison and return the mismatch count."""
@@ -110,9 +121,22 @@ def compare(label: str, inc: dict[str, int], fr: dict[str, int]) -> int:
         print(f"  {len(missing)} in the incumbent and NOT in fr's table: "
               f"{', '.join(missing[:10])}")
     extra = sorted(set(fr) - set(inc))
-    if extra:
-        print(f"  {len(extra)} in fr and NOT upstream: {', '.join(extra[:10])}")
-    return len(mismatches) + len(missing) + len(extra)
+    unexpected_extra = [n for n in extra if n not in FORWARD_COMPAT_7_4]
+    mismatched_forward = [
+        (n, fr[n], FORWARD_COMPAT_7_4[n])
+        for n in extra
+        if n in FORWARD_COMPAT_7_4 and fr[n] != FORWARD_COMPAT_7_4[n]
+    ]
+    if mismatched_forward:
+        print("  forward-compatible 7.4 arity mismatch:")
+        for name, f, exp in mismatched_forward:
+            print(f"    {name}: fr has {f}, expected {exp}")
+    if unexpected_extra:
+        print(f"  {len(unexpected_extra)} in fr and NOT upstream: {', '.join(unexpected_extra[:10])}")
+    declared_forward = [n for n in extra if n in FORWARD_COMPAT_7_4 and fr[n] == FORWARD_COMPAT_7_4[n]]
+    if declared_forward:
+        print(f"  {len(declared_forward)} declared 7.4 forward-compat in fr: {', '.join(declared_forward)}")
+    return len(mismatches) + len(missing) + len(unexpected_extra) + len(mismatched_forward)
 
 
 def _self_test() -> int:
@@ -123,7 +147,13 @@ def _self_test() -> int:
     if compare("planted wrong arity", {"get": -2}, {"get": 2}) != 1:
         print("SELF-TEST FAIL: planted wrong arity was not counted")
         return 1
-    print("SELF-TEST PASS: arity gate catches planted missing and wrong commands")
+    if compare("planted unexpected extra", {"get": -2}, {"get": -2, "bogus": 1}) != 1:
+        print("SELF-TEST FAIL: planted unexpected extra was not counted")
+        return 1
+    if compare("planted wrong forward-compat arity", {"get": -2}, {"get": -2, "hexpire": -5}) != 1:
+        print("SELF-TEST FAIL: planted wrong forward-compat arity was not counted")
+        return 1
+    print("SELF-TEST PASS: arity gate catches planted missing, wrong, unexpected, and forward-compat arity commands")
     return 0
 
 
