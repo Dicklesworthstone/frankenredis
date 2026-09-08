@@ -2168,66 +2168,91 @@ type ConfigStaticParamIndex = HashMap<&'static str, &'static str, foldhash::qual
 
 static CONFIG_STATIC_PARAM_INDEX: OnceLock<ConfigStaticParamIndex> = OnceLock::new();
 
+type DynamicConfigParamSet = HashSet<&'static str, foldhash::quality::RandomState>;
+
+static DYNAMIC_CONFIG_PARAM_SET: OnceLock<DynamicConfigParamSet> = OnceLock::new();
+static CONFIG_STATIC_NON_DYNAMIC_PARAMS: OnceLock<Vec<(&'static str, &'static str)>> =
+    OnceLock::new();
+
 fn config_static_param_is_dynamic(name: &str) -> bool {
-    matches!(
-        name,
-        "masterauth"
-            | "masteruser"
-            | "maxmemory"
-            | "maxmemory-policy"
-            | "slowlog-log-slower-than"
-            | "slowlog-max-len"
-            | "hz"
-            | "hash-max-listpack-entries"
-            | "hash-max-listpack-value"
-            | "hash-max-ziplist-entries"
-            | "hash-max-ziplist-value"
-            | "set-max-intset-entries"
-            | "set-max-listpack-entries"
-            | "set-max-listpack-value"
-            | "zset-max-listpack-entries"
-            | "zset-max-listpack-value"
-            | "zset-max-ziplist-entries"
-            | "zset-max-ziplist-value"
-            | "hll-sparse-max-bytes"
-            | "list-max-listpack-size"
-            | "list-max-ziplist-size"
-            | "appendonly"
-            | "stop-writes-on-bgsave-error"
-            | "appendfilename"
-            | "appenddirname"
-            | "dbfilename"
-            | "dir"
-            | "aclfile"
-            | "maxclients"
-            | "busy-reply-threshold"
-            | "lua-time-limit"
-            | "maxmemory-samples"
-            | "repl-backlog-size"
-            | "repl-timeout"
-            | "replica-serve-stale-data"
-            | "replica-priority"
-            | "slave-priority"
-            | "repl-diskless-sync"
-            | "repl-diskless-sync-delay"
-            | "client-query-buffer-limit"
-            | "proto-max-bulk-len"
-            | "client-output-buffer-limit"
-            | "enable-debug-command"
-            | "port"
-    )
+    let set = DYNAMIC_CONFIG_PARAM_SET.get_or_init(|| {
+        let list: &[&'static str] = &[
+            "masterauth",
+            "masteruser",
+            "maxmemory",
+            "maxmemory-policy",
+            "slowlog-log-slower-than",
+            "slowlog-max-len",
+            "hz",
+            "hash-max-listpack-entries",
+            "hash-max-listpack-value",
+            "hash-max-ziplist-entries",
+            "hash-max-ziplist-value",
+            "set-max-intset-entries",
+            "set-max-listpack-entries",
+            "set-max-listpack-value",
+            "zset-max-listpack-entries",
+            "zset-max-listpack-value",
+            "zset-max-ziplist-entries",
+            "zset-max-ziplist-value",
+            "hll-sparse-max-bytes",
+            "list-max-listpack-size",
+            "list-max-ziplist-size",
+            "appendonly",
+            "stop-writes-on-bgsave-error",
+            "appendfilename",
+            "appenddirname",
+            "dbfilename",
+            "dir",
+            "aclfile",
+            "maxclients",
+            "busy-reply-threshold",
+            "lua-time-limit",
+            "maxmemory-samples",
+            "repl-backlog-size",
+            "repl-timeout",
+            "replica-serve-stale-data",
+            "replica-priority",
+            "slave-priority",
+            "repl-diskless-sync",
+            "repl-diskless-sync-delay",
+            "client-query-buffer-limit",
+            "proto-max-bulk-len",
+            "client-output-buffer-limit",
+            "enable-debug-command",
+            "port",
+        ];
+        let mut set = HashSet::with_capacity_and_hasher(
+            list.len(),
+            foldhash::quality::RandomState::default(),
+        );
+        for &p in list {
+            set.insert(p);
+        }
+        set
+    });
+    set.contains(name)
+}
+
+fn config_static_non_dynamic_params() -> &'static [(&'static str, &'static str)] {
+    CONFIG_STATIC_NON_DYNAMIC_PARAMS.get_or_init(|| {
+        CONFIG_STATIC_PARAMS
+            .iter()
+            .copied()
+            .filter(|&(name, _)| !config_static_param_is_dynamic(name))
+            .collect()
+    })
 }
 
 fn config_static_param_index() -> &'static ConfigStaticParamIndex {
     CONFIG_STATIC_PARAM_INDEX.get_or_init(|| {
+        let non_dynamic = config_static_non_dynamic_params();
         let mut index = HashMap::with_capacity_and_hasher(
-            CONFIG_STATIC_PARAMS.len(),
+            non_dynamic.len(),
             foldhash::quality::RandomState::default(),
         );
-        for &(name, default_value) in CONFIG_STATIC_PARAMS {
-            if !config_static_param_is_dynamic(name) {
-                index.insert(name, default_value);
-            }
+        for &(name, default_value) in non_dynamic {
+            index.insert(name, default_value);
         }
         index
     })
@@ -45063,24 +45088,48 @@ impl Runtime {
             // A trailing odd element was dropped before -- the old code shrank to `before`
             // and re-extended with whole pairs only -- and is still dropped, because `write`
             // only ever advances by two.
-            let mut read = before;
-            let mut write = before;
-            while read + 1 < entries.len() {
-                let keep = match &entries[read] {
-                    RespFrame::BulkString(Some(name)) => seen.insert(name.to_ascii_lowercase()),
-                    // A non-bulk key cannot be deduped, so it is always kept -- same as before.
-                    _ => true,
-                };
-                if keep {
-                    if write != read {
-                        entries.swap(write, read);
-                        entries.swap(write + 1, read + 1);
+            // (frankenredis-e6c9t) If there is only a single literal pattern (e.g. `CONFIG GET maxmemory`),
+            // it can emit at most one pair and there are no subsequent patterns to
+            // dedupe against, so probing `seen` is completely bypassed.
+            if argv.len() == 3 && is_literal {
+                // At most 1 pair, no subsequent patterns.
+            } else {
+                let mut read = before;
+                let mut write = before;
+                while read + 1 < entries.len() {
+                    let keep = match &entries[read] {
+                        RespFrame::BulkString(Some(name)) => {
+                            if !name.iter().any(u8::is_ascii_uppercase) {
+                                if seen.contains(name.as_slice()) {
+                                    false
+                                } else {
+                                    seen.insert(name.clone());
+                                    true
+                                }
+                            } else {
+                                let lower = name.to_ascii_lowercase();
+                                if seen.contains(lower.as_slice()) {
+                                    false
+                                } else {
+                                    seen.insert(lower);
+                                    true
+                                }
+                            }
+                        }
+                        // A non-bulk key cannot be deduped, so it is always kept -- same as before.
+                        _ => true,
+                    };
+                    if keep {
+                        if write != read {
+                            entries.swap(write, read);
+                            entries.swap(write + 1, read + 1);
+                        }
+                        write += 2;
                     }
-                    write += 2;
+                    read += 2;
                 }
-                read += 2;
+                entries.truncate(write);
             }
-            entries.truncate(write);
         }
         // RESP3 callers receive a Map (key → value); RESP2 callers
         // continue to receive the alternating-key/value Array form.
@@ -45668,36 +45717,11 @@ impl Runtime {
         }
         // Static configuration parameters that clients commonly probe.
         // If a parameter has been overridden via CONFIG SET, use the override.
-        for &(name, default_value) in CONFIG_STATIC_PARAMS {
-            // (frankenredis-e6c9t) PATTERN FIRST. The dynamic-skip chain below is ~23 string
-            // comparisons and it used to run on ALL 190 entries of CONFIG_STATIC_PARAMS,
-            // before the pattern filter that eliminates 189 of them — roughly 4,370 string
-            // compares per CONFIG GET to answer a question about one parameter. Both
-            // predicates are pure and both must hold to emit, so evaluating the CHEAP one
-            // first is semantically identical and runs the expensive chain once instead of
-            // 190 times.
-            //
-            // MEASURED cause: `collect_config_entries` was 21,043 instr/op (68.9 pct of
-            // CONFIG GET) after the glob engine was removed in the previous commit, and this
-            // loop is where it lives.
+        // (frankenredis-e6c9t) Pre-filtered `config_static_non_dynamic_params()` preserves
+        // relative order, excludes all 44 dynamic parameters at initialization, and eliminates
+        // ~4,370 string comparisons per walk.
+        for &(name, default_value) in config_static_non_dynamic_params() {
             if !Self::config_pattern_matches_known(pattern, is_literal, name) {
-                continue;
-            }
-            // Skip dynamically-managed params — we already emitted live values above.
-            //
-            // (frankenredis-e6c9t) ONE SOURCE OF TRUTH, and this is a correctness change
-            // before it is anything else. This test was a 44-name `||` chain written out
-            // inline, and `config_static_param_is_dynamic` is the SAME 44 names written out
-            // again — two copies of one list, which was survivable while the copies were the
-            // only consumers. It stopped being survivable when
-            // `collect_config_static_literal_indexed` landed: that path answers a LITERAL
-            // `CONFIG GET` from an index built by filtering on the HELPER, while this path
-            // answers a GLOB request by filtering on the CHAIN. Any drift between them makes
-            // one parameter's visibility depend on whether the client asked for it by name or
-            // by wildcard — a silent divergence no existing test covers, since each path is
-            // self-consistent. Calling the helper makes the two paths filter on the same
-            // predicate by construction rather than by review.
-            if config_static_param_is_dynamic(name) {
                 continue;
             }
             // The pattern already matched at the top of the loop.
