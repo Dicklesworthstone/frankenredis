@@ -7623,6 +7623,33 @@ pub fn decode_db_key(key: &[u8]) -> Option<(usize, &[u8])> {
     Some((db, &key[prefix_len..]))
 }
 
+#[must_use]
+pub fn remap_physical_db_key(mut key: Vec<u8>, from_db: usize, to_db: usize) -> Vec<u8> {
+    if from_db == to_db {
+        return key;
+    }
+    let prefix_len = DB_NAMESPACE_PREFIX.len() + std::mem::size_of::<u64>();
+    if from_db == 0 {
+        if to_db == 0 {
+            key
+        } else {
+            encode_db_key(to_db, &key)
+        }
+    } else if to_db == 0 {
+        if key.len() >= prefix_len && key.starts_with(DB_NAMESPACE_PREFIX) {
+            key.drain(..prefix_len);
+            key
+        } else {
+            key
+        }
+    } else if key.len() >= prefix_len && key.starts_with(DB_NAMESPACE_PREFIX) {
+        key[DB_NAMESPACE_PREFIX.len()..prefix_len].copy_from_slice(&(to_db as u64).to_be_bytes());
+        key
+    } else {
+        encode_db_key(to_db, &key)
+    }
+}
+
 #[inline]
 fn physical_key_belongs_to_db(key: &[u8], db: usize) -> bool {
     decode_db_key(key)
@@ -15782,15 +15809,20 @@ impl Store {
         // already O(matches) in the work they do afterwards; the keyspace RAM the
         // index cost was paid on every key of every workload. Identical key set:
         // the range was only ever a way to reach `starts_with(p)` faster.
-        let prefix_keys = |this: &Self, p: &[u8]| -> Vec<Vec<u8>> {
-            this.entries
-                .keys()
-                .filter(|k| k.starts_with(p))
-                .map(<[u8]>::to_vec)
-                .collect()
+        // A single pass gathers both prefixes without scanning the entire keyspace twice.
+        let (left_keys, right_keys) = {
+            let mut left = Vec::new();
+            let mut right = Vec::new();
+            for k in self.entries.keys() {
+                if k.starts_with(left_prefix) {
+                    left.push(k.to_vec());
+                }
+                if k.starts_with(right_prefix) {
+                    right.push(k.to_vec());
+                }
+            }
+            (left, right)
         };
-        let left_keys: Vec<Vec<u8>> = prefix_keys(self, left_prefix);
-        let right_keys: Vec<Vec<u8>> = prefix_keys(self, right_prefix);
 
         let left_count = left_keys.len();
         let right_count = right_keys.len();
@@ -16021,15 +16053,28 @@ impl Store {
         // prefix, and the two sides cannot collide because they target different
         // databases. Sorting them was the single largest frame on a SWAPDB-only profile
         // (`__memcmp_avx2_movbe`, 8.94 pct), above the KeyDict work that does the job.
+        let left_cap = self.dbsize_in_db(left_db);
+        let right_cap = self.dbsize_in_db(right_db);
+        if left_cap == 0 && right_cap == 0 {
+            self.dirty = self.dirty.saturating_add(1);
+            return 0;
+        }
+
         let (left_keys, right_keys) = {
-            let mut left = Vec::new();
-            let mut right = Vec::new();
+            let mut left = Vec::with_capacity(left_cap);
+            let mut right = Vec::with_capacity(right_cap);
             for key in self.entries.keys() {
                 let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
                 if db == left_db {
                     left.push(key.to_vec());
+                    if left.len() == left_cap && right.len() == right_cap {
+                        break;
+                    }
                 } else if db == right_db {
                     right.push(key.to_vec());
+                    if left.len() == left_cap && right.len() == right_cap {
+                        break;
+                    }
                 }
             }
             (left, right)
@@ -16110,13 +16155,9 @@ impl Store {
             let Some(entry) = self.internal_entries_remove(&key) else {
                 continue;
             };
-            let logical = if let Some((_, logical)) = decode_db_key(&key) {
-                logical.to_vec()
-            } else {
-                key
-            };
+            let swapped = remap_physical_db_key(key, left_db, right_db);
             left_entries.push((
-                logical,
+                swapped,
                 entry,
                 groups,
                 last_id,
@@ -16175,13 +16216,9 @@ impl Store {
             let Some(entry) = self.internal_entries_remove(&key) else {
                 continue;
             };
-            let logical = if let Some((_, logical)) = decode_db_key(&key) {
-                logical.to_vec()
-            } else {
-                key
-            };
+            let swapped = remap_physical_db_key(key, right_db, left_db);
             right_entries.push((
-                logical,
+                swapped,
                 entry,
                 groups,
                 last_id,
@@ -16193,7 +16230,7 @@ impl Store {
         }
 
         for (
-            logical,
+            swapped,
             entry,
             groups,
             last_id,
@@ -16203,11 +16240,6 @@ impl Store {
             field_ttls,
         ) in left_entries
         {
-            let swapped = if right_db == 0 {
-                logical
-            } else {
-                encode_db_key(right_db, &logical)
-            };
             let has_sidemaps = groups.is_some()
                 || last_id.is_some()
                 || entries_added.is_some()
@@ -16238,7 +16270,7 @@ impl Store {
         }
 
         for (
-            logical,
+            swapped,
             entry,
             groups,
             last_id,
@@ -16248,11 +16280,6 @@ impl Store {
             field_ttls,
         ) in right_entries
         {
-            let swapped = if left_db == 0 {
-                logical
-            } else {
-                encode_db_key(left_db, &logical)
-            };
             let has_sidemaps = groups.is_some()
                 || last_id.is_some()
                 || entries_added.is_some()
@@ -56061,6 +56088,59 @@ mod tests {
     }
 
     #[test]
+    fn swap_databases_empty_and_asymmetric_semantics() {
+        let mut store = Store::new();
+        // 1. Swapping two empty DBs (when entire store is empty)
+        let dirty_before = store.dirty;
+        assert_eq!(store.swap_databases(2, 3), 0);
+        assert_eq!(store.dirty, dirty_before + 1);
+
+        // 2. Swapping same DB returns 0 and bumps dirty
+        let dirty_before = store.dirty;
+        assert_eq!(store.swap_databases(2, 2), 0);
+        assert_eq!(store.dirty, dirty_before + 1);
+
+        // 3. Put keys in other DBs (e.g. DB 5 and DB 0)
+        store.set(b"k0".to_vec(), b"v0".to_vec(), None, 1);
+        store.set(encode_db_key(5, b"k5"), b"v5".to_vec(), None, 1);
+
+        // Swapping empty DB 2 and empty DB 3 when store has keys in DB 0 and 5:
+        // Must return 0, bump dirty, and not touch other DBs
+        let dirty_before = store.dirty;
+        assert_eq!(store.swap_databases(2, 3), 0);
+        assert_eq!(store.dirty, dirty_before + 1);
+        assert!(store.exists_no_touch(b"k0", 1));
+        assert!(store.exists_no_touch(&encode_db_key(5, b"k5"), 1));
+
+        // 4. Asymmetric swap: DB 1 has 3 keys, DB 2 has 0 keys
+        store.set(encode_db_key(1, b"a"), b"1".to_vec(), None, 1);
+        store.set(encode_db_key(1, b"b"), b"2".to_vec(), None, 1);
+        store.set(encode_db_key(1, b"c"), b"3".to_vec(), None, 1);
+        assert_eq!(store.dbsize_in_db(1), 3);
+        assert_eq!(store.dbsize_in_db(2), 0);
+
+        let touched = store.swap_databases(1, 2);
+        assert_eq!(touched, 3);
+        assert_eq!(store.dbsize_in_db(1), 0);
+        assert_eq!(store.dbsize_in_db(2), 3);
+        assert!(store.exists_no_touch(&encode_db_key(2, b"a"), 1));
+        assert!(store.exists_no_touch(&encode_db_key(2, b"b"), 1));
+        assert!(store.exists_no_touch(&encode_db_key(2, b"c"), 1));
+
+        // 5. Swap DB 2 with DB 0 (non-zero DB with DB 0)
+        assert_eq!(store.dbsize_in_db(0), 1);
+        assert_eq!(store.dbsize_in_db(2), 3);
+        let touched = store.swap_databases(0, 2);
+        assert_eq!(touched, 4);
+        assert_eq!(store.dbsize_in_db(0), 3);
+        assert_eq!(store.dbsize_in_db(2), 1);
+        assert!(store.exists_no_touch(b"a", 1));
+        assert!(store.exists_no_touch(b"b", 1));
+        assert!(store.exists_no_touch(b"c", 1));
+        assert!(store.exists_no_touch(&encode_db_key(2, b"k0"), 1));
+    }
+
+    #[test]
     fn swapdb_db_enumeration_isomorphic_and_faster_swapdb() {
         use super::{Store, encode_db_key};
 
@@ -82724,7 +82804,7 @@ mod tests {
     mod golden {
         use crate::{
             DB_NAMESPACE_PREFIX, decode_db_key, encode_db_key, glob_match, keyspace_events_parse,
-            keyspace_events_to_string,
+            keyspace_events_to_string, remap_physical_db_key,
         };
 
         #[test]
@@ -82786,6 +82866,22 @@ mod tests {
                 decode_db_key(short).is_none(),
                 "Short keys must return None"
             );
+        }
+
+        #[test]
+        fn golden_remap_physical_db_key_all_pairs() {
+            let logical = b"alpha_bravo_charlie";
+            for from_db in [0, 1, 2, 5, 15] {
+                for to_db in [0, 1, 2, 5, 15] {
+                    let from_key = encode_db_key(from_db, logical);
+                    let expected_to_key = encode_db_key(to_db, logical);
+                    let remapped = remap_physical_db_key(from_key, from_db, to_db);
+                    assert_eq!(
+                        remapped, expected_to_key,
+                        "Remapping from DB {from_db} to DB {to_db} must match encode_db_key"
+                    );
+                }
+            }
         }
 
         #[test]
