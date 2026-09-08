@@ -16184,7 +16184,8 @@ impl Store {
                     .insert(swapped.clone(), entries_added);
             }
             if let Some(max_deleted_id) = max_deleted_id {
-                self.stream_max_deleted_ids.insert(swapped.clone(), max_deleted_id);
+                self.stream_max_deleted_ids
+                    .insert(swapped.clone(), max_deleted_id);
             }
             for (field, expires_at_ms) in field_ttls {
                 self.hash_field_expires
@@ -16216,7 +16217,8 @@ impl Store {
                     .insert(swapped.clone(), entries_added);
             }
             if let Some(max_deleted_id) = max_deleted_id {
-                self.stream_max_deleted_ids.insert(swapped.clone(), max_deleted_id);
+                self.stream_max_deleted_ids
+                    .insert(swapped.clone(), max_deleted_id);
             }
             for (field, expires_at_ms) in field_ttls {
                 self.hash_field_expires
@@ -55901,12 +55903,16 @@ mod tests {
 
         // Field TTL for db1:other must now be at db0:other
         assert_eq!(
-            store.hash_field_expires.get(&(other0.clone(), b"x".to_vec())),
+            store
+                .hash_field_expires
+                .get(&(other0.clone(), b"x".to_vec())),
             Some(&88_888),
             "field TTL must follow other to db0"
         );
         assert!(
-            !store.hash_field_expires.contains_key(&(other1, b"x".to_vec())),
+            !store
+                .hash_field_expires
+                .contains_key(&(other1, b"x".to_vec())),
             "old db1:other field TTL must be gone"
         );
     }
