@@ -80298,6 +80298,99 @@ mod tests {
     }
 
     #[test]
+    fn aof_commands_and_all_keys_deterministic_ordering_and_optimizations() {
+        let mut store = Store::new();
+        // Insert keys out of order to verify all_keys sort_unstable determinism
+        store.set(b"k3".to_vec(), b"v3".to_vec(), None, 100);
+        store.set(b"k1".to_vec(), b"v1".to_vec(), None, 100);
+        store.set(b"k2".to_vec(), b"v2".to_vec(), None, 100);
+        assert_eq!(
+            store.all_keys(),
+            vec![b"k1".to_vec(), b"k2".to_vec(), b"k3".to_vec()]
+        );
+
+        // Sets deterministic ordering with sort_unstable
+        let mut set_store = Store::new();
+        let _ = set_store.sadd(
+            b"myset",
+            &[
+                b"delta".to_vec(),
+                b"alpha".to_vec(),
+                b"charlie".to_vec(),
+                b"bravo".to_vec(),
+            ],
+            100,
+        );
+        let set_cmds = set_store.to_aof_commands(100);
+        assert_eq!(set_cmds.len(), 2); // SELECT 0 + SADD
+        assert_eq!(
+            set_cmds[1],
+            vec![
+                b"SADD".to_vec(),
+                b"myset".to_vec(),
+                b"alpha".to_vec(),
+                b"bravo".to_vec(),
+                b"charlie".to_vec(),
+                b"delta".to_vec(),
+            ]
+        );
+
+        // Sorted set deterministic ordering with sort_unstable_by
+        let mut zset_store = Store::new();
+        let _ = zset_store.zadd(
+            b"myzset",
+            &[
+                (10.0, b"member_b".to_vec()),
+                (5.0, b"member_a".to_vec()),
+                (10.0, b"member_a_tie".to_vec()),
+            ],
+            100,
+        );
+        let zset_cmds = zset_store.to_aof_commands(100);
+        assert_eq!(zset_cmds.len(), 2); // SELECT 0 + ZADD
+        assert_eq!(
+            zset_cmds[1],
+            vec![
+                b"ZADD".to_vec(),
+                b"myzset".to_vec(),
+                b"5".to_vec(),
+                b"member_a".to_vec(),
+                b"10".to_vec(),
+                b"member_a_tie".to_vec(),
+                b"10".to_vec(),
+                b"member_b".to_vec(),
+            ]
+        );
+
+        // Hash with field-level TTLs emits HPEXPIREAT in sorted field order
+        let mut hash_store = Store::new();
+        let _ = hash_store.hset(b"myhash", b"field_b".to_vec(), b"val_b".to_vec(), 100);
+        let _ = hash_store.hset(b"myhash", b"field_a".to_vec(), b"val_a".to_vec(), 100);
+        hash_store.hash_field_set_abs_expiry(
+            b"myhash",
+            b"field_b",
+            50000,
+            HashFieldTtlCondition::None,
+            100,
+        );
+        hash_store.hash_field_set_abs_expiry(
+            b"myhash",
+            b"field_a",
+            40000,
+            HashFieldTtlCondition::None,
+            100,
+        );
+        let hash_cmds = hash_store.to_aof_commands(100);
+        assert_eq!(hash_cmds.len(), 4); // SELECT 0 + HMSET + 2 HPEXPIREAT
+        assert_eq!(hash_cmds[2][0], b"HPEXPIREAT");
+        assert_eq!(hash_cmds[2][5], b"field_a");
+        assert_eq!(hash_cmds[2][2], b"40000");
+        assert_eq!(hash_cmds[3][0], b"HPEXPIREAT");
+        assert_eq!(hash_cmds[3][5], b"field_b");
+        assert_eq!(hash_cmds[3][2], b"50000");
+    }
+
+    #[test]
     fn xreadgroup_increments_dirty_on_new_entries() {
         let mut store = Store::new();
         store
