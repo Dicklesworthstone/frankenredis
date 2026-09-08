@@ -15910,7 +15910,8 @@ impl Store {
                 .entries
                 .get(key.as_slice())
                 .is_some_and(|e| matches!(e.value, Value::Hash(_)));
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash {
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash
+            {
                 Vec::new()
             } else {
                 self.hash_field_expires
@@ -15962,7 +15963,8 @@ impl Store {
                 .entries
                 .get(key.as_slice())
                 .is_some_and(|e| matches!(e.value, Value::Hash(_)));
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash {
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash
+            {
                 Vec::new()
             } else {
                 self.hash_field_expires
@@ -16198,7 +16200,8 @@ impl Store {
                 .entries
                 .get(key.as_slice())
                 .is_some_and(|e| matches!(e.value, Value::Hash(_)));
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash {
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash
+            {
                 Vec::new()
             } else {
                 self.hash_field_expires
@@ -16263,7 +16266,8 @@ impl Store {
                 .entries
                 .get(key.as_slice())
                 .is_some_and(|e| matches!(e.value, Value::Hash(_)));
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash {
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash
+            {
                 Vec::new()
             } else {
                 self.hash_field_expires
