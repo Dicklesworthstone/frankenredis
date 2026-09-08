@@ -38137,7 +38137,7 @@ impl Store {
         // moving every key allocation through the sort before cloning it once for
         // the returned snapshot.
         let mut keys: Vec<&[u8]> = self.entries.keys().collect();
-        keys.sort();
+        keys.sort_unstable();
         keys.into_iter().map(|key| key.to_vec()).collect()
     }
 
@@ -38249,22 +38249,24 @@ impl Store {
                         // deadline via HPEXPIREAT (absolute ms) so replay
                         // recovers identical state regardless of now_ms at
                         // load time. (br-frankenredis-4bao)
-                        let mut field_ttls: Vec<(Vec<u8>, u64)> = self
-                            .hash_field_expires
-                            .range((physical_key.clone(), Vec::new())..)
-                            .take_while(|((k, _), _)| k == &physical_key)
-                            .map(|((_, f), &at)| (f.clone(), at))
-                            .collect();
-                        field_ttls.sort_by(|a, b| a.0.cmp(&b.0));
-                        for (field, expires_at_ms) in field_ttls {
-                            commands.push(vec![
-                                b"HPEXPIREAT".to_vec(),
-                                logical_key.clone(),
-                                expires_at_ms.to_string().into_bytes(),
-                                b"FIELDS".to_vec(),
-                                b"1".to_vec(),
-                                field,
-                            ]);
+                        if !self.hash_field_expires.is_empty() {
+                            let mut field_ttls: Vec<(Vec<u8>, u64)> = self
+                                .hash_field_expires
+                                .range((physical_key.clone(), Vec::new())..)
+                                .take_while(|((k, _), _)| k == &physical_key)
+                                .map(|((_, f), &at)| (f.clone(), at))
+                                .collect();
+                            field_ttls.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                            for (field, expires_at_ms) in field_ttls {
+                                commands.push(vec![
+                                    b"HPEXPIREAT".to_vec(),
+                                    logical_key.clone(),
+                                    expires_at_ms.to_string().into_bytes(),
+                                    b"FIELDS".to_vec(),
+                                    b"1".to_vec(),
+                                    field,
+                                ]);
+                            }
                         }
                     }
                 }
@@ -38282,13 +38284,13 @@ impl Store {
                 }
                 Value::Set(s) => {
                     if !s.is_empty() {
-                        // Sort members for deterministic output.
-                        let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
-                        members.sort();
+                        // Sort members for deterministic output without intermediate clone.
+                        let mut members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
+                        members.sort_unstable();
                         for chunk in members.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
                             let mut argv = vec![b"SADD".to_vec(), logical_key.clone()];
                             for member in chunk {
-                                argv.push(member.clone());
+                                argv.push(member.as_ref().to_vec());
                             }
                             commands.push(argv);
                         }
@@ -38298,7 +38300,7 @@ impl Store {
                     if !zs.is_empty() {
                         // Sort by score then member for deterministic output.
                         let mut pairs: Vec<(&[u8], f64)> = zs.iter().collect();
-                        pairs.sort_by(|a, b| {
+                        pairs.sort_unstable_by(|a, b| {
                             a.1.partial_cmp(&b.1)
                                 .unwrap_or(std::cmp::Ordering::Equal)
                                 .then_with(|| a.0.cmp(b.0))
@@ -38370,7 +38372,7 @@ impl Store {
                     // Emit XGROUP CREATE for each consumer group.
                     if let Some(groups) = self.stream_groups.get(&physical_key) {
                         let mut group_names: Vec<&Vec<u8>> = groups.keys().collect();
-                        group_names.sort();
+                        group_names.sort_unstable();
                         for group_name in group_names {
                             let group = &groups[group_name];
                             let (ms, seq) = group.last_delivered_id;
