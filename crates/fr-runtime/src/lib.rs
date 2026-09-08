@@ -45,8 +45,8 @@ use fr_store::{
     AclKeyPattern, ClientReplyState, ClientTrackingState, CommandRecordKind, DispatchAclLogContext,
     DispatchAclPermissionReason, DispatchAclPermissions, EvictionLoopFailure, EvictionLoopResult,
     EvictionLoopStatus, EvictionSafetyGateState, HistSlot, MaxmemoryPolicy, PendingAclLogEvent,
-    SLOWLOG_ENTRY_MAX_STRING, SnapshotEntryRef, Store, StoreError, StringBytes, decode_db_key,
-    encode_db_key, glob_match,
+    SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, StringBytes, decode_db_key, encode_db_key,
+    glob_match,
 };
 
 /// Re-exported so a cross-partition INFO aggregate can hold and merge per-command
@@ -52431,7 +52431,7 @@ fn try_encode_string_only_rdb_snapshot(
 
     store.expire_snapshot_volatile_keys(now_ms);
 
-    let mut entries = Vec::with_capacity(store.dbsize());
+    let mut entries = Vec::with_capacity(store.dbsize(now_ms));
     let mut all_strings = true;
     store.for_each_entry_ref(|key, value, expires_at_ms| {
         if !all_strings {

@@ -7980,6 +7980,16 @@ fn emit_list_range<'a>(
     }
 }
 
+/// Borrowed entry reference for RDB snapshotting without intermediate key clones or hash probes.
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotEntryRef<'a> {
+    pub key: &'a [u8],
+    pub value: &'a Value,
+    pub expire_ms: Option<u64>,
+    pub hash_is_hashtable: bool,
+    pub set_is_hashtable: bool,
+}
+
 impl Store {
     #[must_use]
     pub fn new() -> Self {
@@ -22017,8 +22027,7 @@ impl Store {
 
     #[inline]
     fn entry_hash_is_hashtable_encoded(&self, entry: &Entry) -> bool {
-        matches!(entry.value, Value::Hash(_))
-            && entry.has_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING)
+        matches!(entry.value, Value::Hash(_)) && entry.has_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING)
     }
 
     /// (frankenredis-2j9wz) True when the hash at `key` is hashtable-encoded.
@@ -38201,25 +38210,6 @@ impl Store {
         std::mem::take(&mut self.restore_discard_deletions)
     }
 
-    /// Generate AOF-compatible command sequences that reconstruct the entire store.
-    ///
-    /// Returns a list of command argv vectors. Loaded function libraries are serialized
-    /// as deterministic FUNCTION LOAD commands first. Non-expired entries are
-    /// then serialized as the appropriate write command (SET, HMSET, RPUSH, SADD, ZADD,
-    /// XADD), followed by PEXPIREAT if the key has an expiry. Expired entries are skipped.
-    ///
-    /// This is the core of AOF rewrite: the output can be wrapped in `AofRecord`
-/// Borrowed entry reference for RDB snapshotting without intermediate key clones or hash probes.
-#[derive(Debug, Clone, Copy)]
-pub struct SnapshotEntryRef<'a> {
-    pub key: &'a [u8],
-    pub value: &'a Value,
-    pub expire_ms: Option<u64>,
-    pub hash_is_hashtable: bool,
-    pub set_is_hashtable: bool,
-}
-
-impl Store {
     /// Returns borrowed references to all entries in the store for RDB serialization,
     /// evaluating expiration and encoding flags directly from entry metadata without
     /// sorting or cloning keys.
@@ -38247,9 +38237,9 @@ impl Store {
     }
 
     /// Visits borrowed references to all entries in the store without allocating or cloning keys.
-    pub fn for_each_entry_ref<F>(&self, mut f: F)
+    pub fn for_each_entry_ref<'a, F>(&'a self, mut f: F)
     where
-        F: FnMut(&[u8], &Value, Option<u64>),
+        F: FnMut(&'a [u8], &'a Value, Option<u64>),
     {
         let no_expires = self.expires_count == 0;
         for (key, entry) in self.entries.iter() {
@@ -38309,6 +38299,14 @@ impl Store {
             .map(|entry| (&entry.value, self.expiry_ms(key)))
     }
 
+    /// Generate AOF-compatible command sequences that reconstruct the entire store.
+    ///
+    /// Returns a list of command argv vectors. Loaded function libraries are serialized
+    /// as deterministic FUNCTION LOAD commands first. Non-expired entries are
+    /// then serialized as the appropriate write command (SET, HMSET, RPUSH, SADD, ZADD,
+    /// XADD), followed by PEXPIREAT if the key has an expiry. Expired entries are skipped.
+    ///
+    /// This is the core of AOF rewrite: the output can be wrapped in `AofRecord`
     /// and encoded/replayed to reconstruct the database from scratch.
     #[must_use]
     pub fn to_aof_commands(&mut self, now_ms: u64) -> Vec<Vec<Vec<u8>>> {
@@ -38332,8 +38330,16 @@ impl Store {
         }
 
         // Snapshot the remaining keys and values (sorted for deterministic output).
+        struct AofEntry<'a> {
+            db: usize,
+            logical_key: &'a [u8],
+            physical_key: &'a [u8],
+            value: &'a Value,
+            exp_ms: Option<u64>,
+        }
+
         let no_expires = self.expires_count == 0;
-        let mut keys: Vec<(usize, &[u8], &[u8], &Value, Option<u64>)> = self
+        let mut keys: Vec<AofEntry<'_>> = self
             .entries
             .iter()
             .map(|(physical, entry)| {
@@ -38343,14 +38349,31 @@ impl Store {
                 } else {
                     self.expiry_deadlines.get(physical).map(|d| d.get())
                 };
-                (db, logical, physical, &entry.value, exp_ms)
+                AofEntry {
+                    db,
+                    logical_key: logical,
+                    physical_key: physical,
+                    value: &entry.value,
+                    exp_ms,
+                }
             })
             .collect();
-        keys.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)));
+        keys.sort_unstable_by(|left, right| {
+            left.db
+                .cmp(&right.db)
+                .then_with(|| left.logical_key.cmp(right.logical_key))
+        });
 
         let mut current_db = None;
 
-        for (db, logical_key, physical_key, value, exp_ms) in keys {
+        for AofEntry {
+            db,
+            logical_key,
+            physical_key,
+            value,
+            exp_ms,
+        } in keys
+        {
             if current_db != Some(db) {
                 commands.push(vec![b"SELECT".to_vec(), db.to_string().into_bytes()]);
                 current_db = Some(db);
@@ -80817,6 +80840,76 @@ mod tests {
             keys_pool.len(),
             old_ns / new_ns
         );
+    }
+
+    #[test]
+    fn snapshot_entries_and_for_each_entry_ref_match_individual_probes() {
+        let mut store = Store::new();
+
+        // Empty store behavior
+        assert!(store.snapshot_entries().is_empty());
+        let mut empty_visited = 0;
+        store.for_each_entry_ref(|_, _, _| empty_visited += 1);
+        assert_eq!(empty_visited, 0);
+
+        // Populate store with various data types across DBs
+        store.set(b"str1".to_vec(), b"hello".to_vec(), None, 0);
+        store.set(b"str2".to_vec(), b"world".to_vec(), Some(5000), 1000);
+
+        store
+            .hset(b"hash1", b"f1".to_vec(), b"v1".to_vec(), 0)
+            .unwrap();
+        // A hash with a large field exceeding listpack limits triggers hashtable encoding
+        store
+            .hset(b"hash2", vec![b'k'; 100], b"v".to_vec(), 0)
+            .unwrap();
+
+        store.sadd(b"set1", &[b"m1"], 0).unwrap();
+        store.sadd(b"set2", &[b"m1"], 0).unwrap();
+        store.force_set_hashtable_encoding(b"set2");
+
+        store.rpush(b"list1", &[b"item1"], 0).unwrap();
+
+        let entries = store.snapshot_entries();
+        assert_eq!(entries.len(), 7);
+
+        // Every entry in snapshot_entries matches individual probe methods
+        for snap in &entries {
+            let (val, exp) = store
+                .get_value_and_expiry(snap.key)
+                .expect("key must exist");
+            assert_eq!(snap.value, val);
+            assert_eq!(snap.expire_ms, exp);
+            assert_eq!(
+                snap.hash_is_hashtable,
+                store.hash_is_hashtable_encoded(snap.key)
+            );
+            assert_eq!(
+                snap.set_is_hashtable,
+                store.set_is_hashtable_encoded(snap.key)
+            );
+        }
+
+        // Verify hash2 and set2 report hashtable encoding accurately
+        let hash2_snap = entries.iter().find(|e| e.key == b"hash2").unwrap();
+        assert!(hash2_snap.hash_is_hashtable);
+        let hash1_snap = entries.iter().find(|e| e.key == b"hash1").unwrap();
+        assert!(!hash1_snap.hash_is_hashtable);
+
+        let set2_snap = entries.iter().find(|e| e.key == b"set2").unwrap();
+        assert!(set2_snap.set_is_hashtable);
+        let set1_snap = entries.iter().find(|e| e.key == b"set1").unwrap();
+        assert!(!set1_snap.set_is_hashtable);
+
+        // for_each_entry_ref visits every entry without allocation
+        let mut visited_keys = std::collections::BTreeSet::new();
+        store.for_each_entry_ref(|key, val, exp| {
+            let (expected_val, expected_exp) = store.get_value_and_expiry(key).unwrap();
+            assert_eq!(val, expected_val);
+            assert_eq!(exp, expected_exp);
+            visited_keys.insert(key.to_vec());
+        });
+        assert_eq!(visited_keys.len(), 7);
     }
 
     #[test]
