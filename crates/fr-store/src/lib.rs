@@ -15267,7 +15267,9 @@ impl Store {
             // Whole-key removal drops any per-field hash TTL entries so the
             // field_expires map doesn't accumulate orphan rows.
             // (br-frankenredis-b8ut)
-            self.hash_field_ttl_clear_for_key(key);
+            if matches!(&entry.value, Value::Hash(_)) {
+                self.hash_field_ttl_clear_for_key(key);
+            }
             if matches!(&entry.value, Value::Stream(_)) {
                 self.stream_entries_added.remove(key);
                 self.stream_max_deleted_ids.remove(key);
@@ -15904,7 +15906,11 @@ impl Store {
             // Harvest per-field hash TTLs before removing the entry —
             // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
             // (frankenredis-sdmwz)
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
+            let is_hash = self
+                .entries
+                .get(key.as_slice())
+                .is_some_and(|e| matches!(e.value, Value::Hash(_)));
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash {
                 Vec::new()
             } else {
                 self.hash_field_expires
@@ -15952,7 +15958,11 @@ impl Store {
                 self.stream_max_deleted_ids.remove(key.as_slice())
             };
             let expires_at_ms = self.expiry_ms(key.as_slice());
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
+            let is_hash = self
+                .entries
+                .get(key.as_slice())
+                .is_some_and(|e| matches!(e.value, Value::Hash(_)));
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash {
                 Vec::new()
             } else {
                 self.hash_field_expires
@@ -16184,7 +16194,11 @@ impl Store {
             let expires_at_ms = self.expiry_ms(key.as_slice());
             // (frankenredis-bmyx5) Harvest per-field hash TTLs before removing the entry —
             // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
+            let is_hash = self
+                .entries
+                .get(key.as_slice())
+                .is_some_and(|e| matches!(e.value, Value::Hash(_)));
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash {
                 Vec::new()
             } else {
                 self.hash_field_expires
@@ -16245,7 +16259,11 @@ impl Store {
             let expires_at_ms = self.expiry_ms(key.as_slice());
             // (frankenredis-bmyx5) Harvest per-field hash TTLs before removing the entry —
             // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
+            let is_hash = self
+                .entries
+                .get(key.as_slice())
+                .is_some_and(|e| matches!(e.value, Value::Hash(_)));
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash {
                 Vec::new()
             } else {
                 self.hash_field_expires
@@ -33013,20 +33031,38 @@ impl Store {
         // hdel-fieldttl-guard on drop_expired_hash_fields. The range below allocates `key.to_vec()`
         // and walks the BTreeMap on EVERY key removal (DEL/GETDEL/LPOP-empty/expiry/...) for nothing;
         // an O(1) is_empty skips the alloc + probe. Byte-exact: an empty map has no field TTLs to clear.
-        if self.hash_field_expires.is_empty() {
+        if self.hash_field_expires.is_empty() && self.hash_field_expired_counts.is_empty() {
             return;
         }
-        // BTreeMap range over (key, _) prefix to enumerate + retain.
-        let victims: Vec<(Vec<u8>, Vec<u8>)> = self
-            .hash_field_expires
-            .range((key.to_vec(), Vec::new())..)
-            .take_while(|((k, _), _)| k.as_slice() == key)
-            .map(|((k, f), _)| (k.clone(), f.clone()))
-            .collect();
-        for composite in victims {
-            self.hash_field_expires.remove(&composite);
+        if !self.hash_field_expires.is_empty() {
+            // BTreeMap range over (key, _) prefix to enumerate + retain.
+            let victims: Vec<(Vec<u8>, Vec<u8>)> = self
+                .hash_field_expires
+                .range((key.to_vec(), Vec::new())..)
+                .take_while(|((k, _), _)| k.as_slice() == key)
+                .map(|((k, f), _)| (k.clone(), f.clone()))
+                .collect();
+            for composite in victims {
+                self.hash_field_expires.remove(&composite);
+            }
         }
-        self.hash_field_expired_counts.remove(key);
+        if !self.hash_field_expired_counts.is_empty() {
+            self.hash_field_expired_counts.remove(key);
+        }
+    }
+
+    /// Returns any per-field TTLs for the given physical hash key as borrowed `(&[u8], u64)` pairs,
+    /// sorted by field name. Returns an empty Vec without allocating if `hash_field_expires` is empty.
+    #[must_use]
+    pub fn hash_field_ttls<'a>(&'a self, physical_key: &[u8]) -> Vec<(&'a [u8], u64)> {
+        if self.hash_field_expires.is_empty() {
+            return Vec::new();
+        }
+        self.hash_field_expires
+            .range((physical_key.to_vec(), Vec::new())..)
+            .take_while(|((k, _), _)| k.as_slice() == physical_key)
+            .map(|((_, f), &ttl)| (f.as_slice(), ttl))
+            .collect()
     }
 
     /// Cumulative count of per-field TTL reaps for `key` since the
@@ -38411,21 +38447,14 @@ impl Store {
                         // recovers identical state regardless of now_ms at
                         // load time. (br-frankenredis-4bao)
                         if !self.hash_field_expires.is_empty() {
-                            let mut field_ttls: Vec<(Vec<u8>, u64)> = self
-                                .hash_field_expires
-                                .range((physical_key.to_vec(), Vec::new())..)
-                                .take_while(|((k, _), _)| k.as_slice() == physical_key)
-                                .map(|((_, f), &at)| (f.clone(), at))
-                                .collect();
-                            field_ttls.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-                            for (field, expires_at_ms) in field_ttls {
+                            for (field, expires_at_ms) in self.hash_field_ttls(physical_key) {
                                 commands.push(vec![
                                     b"HPEXPIREAT".to_vec(),
                                     logical_key.to_vec(),
                                     expires_at_ms.to_string().into_bytes(),
                                     b"FIELDS".to_vec(),
                                     b"1".to_vec(),
-                                    field,
+                                    field.to_vec(),
                                 ]);
                             }
                         }
