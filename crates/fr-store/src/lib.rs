@@ -7650,6 +7650,25 @@ pub fn remap_physical_db_key(mut key: Vec<u8>, from_db: usize, to_db: usize) -> 
     }
 }
 
+#[must_use]
+pub fn remap_prefix(mut key: Vec<u8>, from_prefix: &[u8], to_prefix: &[u8]) -> Vec<u8> {
+    if from_prefix == to_prefix {
+        return key;
+    }
+    if from_prefix.len() == to_prefix.len() && key.starts_with(from_prefix) {
+        key[..to_prefix.len()].copy_from_slice(to_prefix);
+        key
+    } else if key.starts_with(from_prefix) {
+        let mut swapped =
+            Vec::with_capacity(to_prefix.len() + key.len().saturating_sub(from_prefix.len()));
+        swapped.extend_from_slice(to_prefix);
+        swapped.extend_from_slice(&key[from_prefix.len()..]);
+        swapped
+    } else {
+        key
+    }
+}
+
 #[inline]
 fn physical_key_belongs_to_db(key: &[u8], db: usize) -> bool {
     decode_db_key(key)
@@ -15755,12 +15774,24 @@ impl Store {
             .map(|k| k.to_vec())
             .collect();
         let removed = keys.len() as u64;
+        if removed == 0 {
+            self.dirty = self.dirty.saturating_add(1);
+            return 0;
+        }
         for key in keys {
             self.internal_entries_remove(&key);
-            self.stream_groups.remove(key.as_slice());
-            self.stream_last_ids.remove(key.as_slice());
-            self.stream_entries_added.remove(key.as_slice());
-            self.stream_max_deleted_ids.remove(key.as_slice());
+            if !self.stream_groups.is_empty() {
+                self.stream_groups.remove(key.as_slice());
+            }
+            if !self.stream_last_ids.is_empty() {
+                self.stream_last_ids.remove(key.as_slice());
+            }
+            if !self.stream_entries_added.is_empty() {
+                self.stream_entries_added.remove(key.as_slice());
+            }
+            if !self.stream_max_deleted_ids.is_empty() {
+                self.stream_max_deleted_ids.remove(key.as_slice());
+            }
         }
         if self.entries.is_empty() {
             self.release_empty_keyspace_capacity();
@@ -15770,23 +15801,36 @@ impl Store {
     }
 
     pub fn flush_database(&mut self, db: usize) -> u64 {
-        let keys: Vec<Vec<u8>> = self
-            .entries
-            .keys()
-            .filter(|key| {
-                decode_db_key(key)
-                    .map(|(entry_db, _)| entry_db == db)
-                    .unwrap_or(db == 0)
-            })
-            .map(|k| k.to_vec())
-            .collect();
+        let cap = self.dbsize_in_db(db);
+        if cap == 0 {
+            self.dirty = self.dirty.saturating_add(1);
+            return 0;
+        }
+        let mut keys = Vec::with_capacity(cap);
+        for key in self.entries.keys() {
+            let entry_db = decode_db_key(key).map(|(d, _)| d).unwrap_or(0);
+            if entry_db == db {
+                keys.push(key.to_vec());
+                if keys.len() == cap {
+                    break;
+                }
+            }
+        }
         let removed = keys.len() as u64;
         for key in keys {
             self.internal_entries_remove(&key);
-            self.stream_groups.remove(key.as_slice());
-            self.stream_last_ids.remove(key.as_slice());
-            self.stream_entries_added.remove(key.as_slice());
-            self.stream_max_deleted_ids.remove(key.as_slice());
+            if !self.stream_groups.is_empty() {
+                self.stream_groups.remove(key.as_slice());
+            }
+            if !self.stream_last_ids.is_empty() {
+                self.stream_last_ids.remove(key.as_slice());
+            }
+            if !self.stream_entries_added.is_empty() {
+                self.stream_entries_added.remove(key.as_slice());
+            }
+            if !self.stream_max_deleted_ids.is_empty() {
+                self.stream_max_deleted_ids.remove(key.as_slice());
+            }
         }
         if self.entries.is_empty() {
             self.release_empty_keyspace_capacity();
@@ -15826,6 +15870,10 @@ impl Store {
 
         let left_count = left_keys.len();
         let right_count = right_keys.len();
+        if left_count == 0 && right_count == 0 {
+            self.dirty = self.dirty.saturating_add(1);
+            return 0;
+        }
 
         self.entries.set_shrink_suspended(true);
 
@@ -15867,8 +15915,9 @@ impl Store {
             } else {
                 self.stream_entries_added.remove(key.as_slice())
             };
+            let swapped = remap_prefix(key, left_prefix, right_prefix);
             left_entries.push((
-                key,
+                swapped,
                 entry,
                 groups,
                 last_id,
@@ -15914,8 +15963,9 @@ impl Store {
             } else {
                 self.stream_entries_added.remove(key.as_slice())
             };
+            let swapped = remap_prefix(key, right_prefix, left_prefix);
             right_entries.push((
-                key,
+                swapped,
                 entry,
                 groups,
                 last_id,
@@ -15927,7 +15977,7 @@ impl Store {
         }
 
         for (
-            key,
+            swapped,
             entry,
             groups,
             last_id,
@@ -15937,11 +15987,6 @@ impl Store {
             field_ttls,
         ) in left_entries
         {
-            let mut swapped = Vec::with_capacity(
-                right_prefix.len() + key.len().saturating_sub(left_prefix.len()),
-            );
-            swapped.extend_from_slice(right_prefix);
-            swapped.extend_from_slice(&key[left_prefix.len()..]);
             let has_sidemaps = groups.is_some()
                 || last_id.is_some()
                 || entries_added.is_some()
@@ -15974,7 +16019,7 @@ impl Store {
         }
 
         for (
-            key,
+            swapped,
             entry,
             groups,
             last_id,
@@ -15984,11 +16029,6 @@ impl Store {
             field_ttls,
         ) in right_entries
         {
-            let mut swapped = Vec::with_capacity(
-                left_prefix.len() + key.len().saturating_sub(right_prefix.len()),
-            );
-            swapped.extend_from_slice(left_prefix);
-            swapped.extend_from_slice(&key[right_prefix.len()..]);
             let has_sidemaps = groups.is_some()
                 || last_id.is_some()
                 || entries_added.is_some()
@@ -56141,6 +56181,118 @@ mod tests {
     }
 
     #[test]
+    fn flush_database_and_prefix_semantics() {
+        let mut store = Store::new();
+
+        // 1. Flush empty DB on empty store returns 0 and bumps dirty
+        let dirty_before = store.dirty;
+        assert_eq!(store.flush_database(0), 0);
+        assert_eq!(store.dirty, dirty_before + 1);
+
+        let dirty_before = store.dirty;
+        assert_eq!(store.flush_database(3), 0);
+        assert_eq!(store.dirty, dirty_before + 1);
+
+        // 2. Populate DB 0, DB 1, DB 2
+        store.set(b"k0_a".to_vec(), b"v0".to_vec(), None, 1);
+        store.set(b"k0_b".to_vec(), b"v0".to_vec(), None, 1);
+        store.set(encode_db_key(1, b"k1_a"), b"v1".to_vec(), None, 1);
+        store.set(encode_db_key(1, b"k1_b"), b"v1".to_vec(), None, 1);
+        store.set(encode_db_key(1, b"k1_c"), b"v1".to_vec(), None, 1);
+        store.set(encode_db_key(2, b"k2_a"), b"v2".to_vec(), None, 1);
+
+        assert_eq!(store.dbsize_in_db(0), 2);
+        assert_eq!(store.dbsize_in_db(1), 3);
+        assert_eq!(store.dbsize_in_db(2), 1);
+        assert_eq!(store.dbsize_in_db(5), 0);
+
+        // Flushing empty DB 5 when other DBs populated must return 0, bump dirty, not touch others
+        let dirty_before = store.dirty;
+        assert_eq!(store.flush_database(5), 0);
+        assert_eq!(store.dirty, dirty_before + 1);
+        assert_eq!(store.dbsize_in_db(0), 2);
+        assert_eq!(store.dbsize_in_db(1), 3);
+        assert_eq!(store.dbsize_in_db(2), 1);
+
+        // Flushing DB 1 removes 3 keys
+        let removed = store.flush_database(1);
+        assert_eq!(removed, 3);
+        assert_eq!(store.dbsize_in_db(1), 0);
+        assert_eq!(store.dbsize_in_db(0), 2);
+        assert_eq!(store.dbsize_in_db(2), 1);
+        assert!(!store.exists_no_touch(&encode_db_key(1, b"k1_a"), 1));
+
+        // Flushing DB 0 removes 2 keys
+        let removed = store.flush_database(0);
+        assert_eq!(removed, 2);
+        assert_eq!(store.dbsize_in_db(0), 0);
+        assert_eq!(store.dbsize_in_db(2), 1);
+
+        // Flushing DB 2 removes 1 key and leaves store completely empty
+        let removed = store.flush_database(2);
+        assert_eq!(removed, 1);
+        assert_eq!(store.dbsize_in_db(2), 0);
+        assert!(store.entries.is_empty());
+
+        // 3. Test flush_prefix
+        store.set(b"pre:1".to_vec(), b"v".to_vec(), None, 1);
+        store.set(b"pre:2".to_vec(), b"v".to_vec(), None, 1);
+        store.set(b"other:1".to_vec(), b"v".to_vec(), None, 1);
+
+        // Non-existent prefix returns 0 and bumps dirty
+        let dirty_before = store.dirty;
+        assert_eq!(store.flush_prefix(b"nonexistent:"), 0);
+        assert_eq!(store.dirty, dirty_before + 1);
+
+        // Existing prefix removes matching keys
+        assert_eq!(store.flush_prefix(b"pre:"), 2);
+        assert!(!store.exists_no_touch(b"pre:1", 1));
+        assert!(!store.exists_no_touch(b"pre:2", 1));
+        assert!(store.exists_no_touch(b"other:1", 1));
+
+        // 4. Test swap_prefixes
+        store.flushdb();
+        // Empty swap_prefixes returns 0
+        let dirty_before = store.dirty;
+        assert_eq!(store.swap_prefixes(b"p1:", b"p2:"), 0);
+        assert_eq!(store.dirty, dirty_before + 1);
+
+        // Equal length in-place swap
+        store.set(b"p1:item".to_vec(), b"val1".to_vec(), None, 1);
+        store.set(b"p2:item".to_vec(), b"val2".to_vec(), None, 1);
+        let touched = store.swap_prefixes(b"p1:", b"p2:");
+        assert_eq!(touched, 2);
+        assert_eq!(
+            store.get(b"p1:item", 1).unwrap().as_deref(),
+            Some(b"val2".as_slice())
+        );
+        assert_eq!(
+            store.get(b"p2:item", 1).unwrap().as_deref(),
+            Some(b"val1".as_slice())
+        );
+
+        // Unequal length swap
+        store.flushdb();
+        store.set(b"short:item".to_vec(), b"s_val".to_vec(), None, 1);
+        store.set(
+            b"much_longer_prefix:item".to_vec(),
+            b"l_val".to_vec(),
+            None,
+            1,
+        );
+        let touched = store.swap_prefixes(b"short:", b"much_longer_prefix:");
+        assert_eq!(touched, 2);
+        assert_eq!(
+            store.get(b"short:item", 1).unwrap().as_deref(),
+            Some(b"l_val".as_slice())
+        );
+        assert_eq!(
+            store.get(b"much_longer_prefix:item", 1).unwrap().as_deref(),
+            Some(b"s_val".as_slice())
+        );
+    }
+
+    #[test]
     fn swapdb_db_enumeration_isomorphic_and_faster_swapdb() {
         use super::{Store, encode_db_key};
 
@@ -82804,7 +82956,7 @@ mod tests {
     mod golden {
         use crate::{
             DB_NAMESPACE_PREFIX, decode_db_key, encode_db_key, glob_match, keyspace_events_parse,
-            keyspace_events_to_string, remap_physical_db_key,
+            keyspace_events_to_string, remap_physical_db_key, remap_prefix,
         };
 
         #[test]
@@ -82882,6 +83034,32 @@ mod tests {
                     );
                 }
             }
+        }
+
+        #[test]
+        fn golden_remap_prefix() {
+            // 1. Same prefix is identity
+            let key = b"prefix:suffix".to_vec();
+            assert_eq!(remap_prefix(key.clone(), b"prefix:", b"prefix:"), key);
+
+            // 2. Equal length prefixes: in-place replacement
+            let key = b"left_prefix:data_payload".to_vec();
+            let remapped = remap_prefix(key, b"left_prefix:", b"rght_prefix:");
+            assert_eq!(remapped, b"rght_prefix:data_payload");
+
+            // 3. From shorter to longer prefix
+            let key = b"s:data".to_vec();
+            let remapped = remap_prefix(key, b"s:", b"long_prefix:");
+            assert_eq!(remapped, b"long_prefix:data");
+
+            // 4. From longer to shorter prefix
+            let key = b"long_prefix:data".to_vec();
+            let remapped = remap_prefix(key, b"long_prefix:", b"s:");
+            assert_eq!(remapped, b"s:data");
+
+            // 5. Non-matching prefix is identity
+            let key = b"other:data".to_vec();
+            assert_eq!(remap_prefix(key.clone(), b"prefix:", b"target:"), key);
         }
 
         #[test]
