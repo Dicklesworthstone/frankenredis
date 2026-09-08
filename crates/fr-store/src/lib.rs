@@ -14818,6 +14818,9 @@ impl Store {
 
     #[inline]
     fn expiry_ms(&self, key: &[u8]) -> Option<u64> {
+        if self.expires_count == 0 {
+            return None;
+        }
         self.expiry_deadlines
             .get(key)
             .map(|deadline| deadline.get())
@@ -14838,6 +14841,9 @@ impl Store {
 
     #[inline]
     fn key_has_expiry(&self, key: &[u8]) -> bool {
+        if self.expires_count == 0 {
+            return false;
+        }
         self.expiry_deadlines.contains_key(key)
     }
 
@@ -21982,6 +21988,21 @@ impl Store {
 
     // ── Set operations ──────────────────────────────────────────
 
+    #[inline]
+    fn entry_set_is_hashtable_encoded(&self, entry: &Entry) -> bool {
+        let Value::Set(s) = &entry.value else {
+            return false;
+        };
+        entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING)
+            || (!entry.has_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING)
+                && !Self::set_fits_intset(s, self.set_max_intset_entries)
+                && !Self::set_fits_listpack(
+                    s,
+                    self.set_max_listpack_entries,
+                    self.set_max_listpack_value,
+                ))
+    }
+
     /// Whether the set at `key` is currently HASHTABLE-encoded (non-mutating, no
     /// keyspace-stat side effects). Mirrors the `Value::Set` arm of
     /// `object_encoding`. Used by the RDB save path to record the encoding so a
@@ -21989,19 +22010,15 @@ impl Store {
     /// round-trip. (frankenredis-39is8)
     #[must_use]
     pub fn set_is_hashtable_encoded(&self, key: &[u8]) -> bool {
-        self.entries.get(key).is_some_and(|entry| {
-            let Value::Set(s) = &entry.value else {
-                return false;
-            };
-            entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING)
-                || (!entry.has_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING)
-                    && !Self::set_fits_intset(s, self.set_max_intset_entries)
-                    && !Self::set_fits_listpack(
-                        s,
-                        self.set_max_listpack_entries,
-                        self.set_max_listpack_value,
-                    ))
-        })
+        self.entries
+            .get(key)
+            .is_some_and(|entry| self.entry_set_is_hashtable_encoded(entry))
+    }
+
+    #[inline]
+    fn entry_hash_is_hashtable_encoded(&self, entry: &Entry) -> bool {
+        matches!(entry.value, Value::Hash(_))
+            && entry.has_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING)
     }
 
     /// (frankenredis-2j9wz) True when the hash at `key` is hashtable-encoded.
@@ -22013,10 +22030,9 @@ impl Store {
     /// `force_hash_hashtable_encoding` is the canonical encoding indicator (the
     /// same flag `object_encoding` reads after the a0p5p forward-only fix).
     pub fn hash_is_hashtable_encoded(&self, key: &[u8]) -> bool {
-        self.entries.get(key).is_some_and(|entry| {
-            matches!(entry.value, Value::Hash(_))
-                && entry.has_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING)
-        })
+        self.entries
+            .get(key)
+            .is_some_and(|entry| self.entry_hash_is_hashtable_encoded(entry))
     }
 
     /// Force the set at `key` to report `hashtable` encoding (sticky). Used by the
@@ -38193,6 +38209,59 @@ impl Store {
     /// XADD), followed by PEXPIREAT if the key has an expiry. Expired entries are skipped.
     ///
     /// This is the core of AOF rewrite: the output can be wrapped in `AofRecord`
+/// Borrowed entry reference for RDB snapshotting without intermediate key clones or hash probes.
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotEntryRef<'a> {
+    pub key: &'a [u8],
+    pub value: &'a Value,
+    pub expire_ms: Option<u64>,
+    pub hash_is_hashtable: bool,
+    pub set_is_hashtable: bool,
+}
+
+impl Store {
+    /// Returns borrowed references to all entries in the store for RDB serialization,
+    /// evaluating expiration and encoding flags directly from entry metadata without
+    /// sorting or cloning keys.
+    #[must_use]
+    pub fn snapshot_entries(&self) -> Vec<SnapshotEntryRef<'_>> {
+        let no_expires = self.expires_count == 0;
+        let mut entries = Vec::with_capacity(self.entries.len());
+        for (key, entry) in self.entries.iter() {
+            let expire_ms = if no_expires {
+                None
+            } else {
+                self.expiry_ms(key)
+            };
+            let hash_is_hashtable = self.entry_hash_is_hashtable_encoded(entry);
+            let set_is_hashtable = self.entry_set_is_hashtable_encoded(entry);
+            entries.push(SnapshotEntryRef {
+                key,
+                value: &entry.value,
+                expire_ms,
+                hash_is_hashtable,
+                set_is_hashtable,
+            });
+        }
+        entries
+    }
+
+    /// Visits borrowed references to all entries in the store without allocating or cloning keys.
+    pub fn for_each_entry_ref<F>(&self, mut f: F)
+    where
+        F: FnMut(&[u8], &Value, Option<u64>),
+    {
+        let no_expires = self.expires_count == 0;
+        for (key, entry) in self.entries.iter() {
+            let expire_ms = if no_expires {
+                None
+            } else {
+                self.expiry_ms(key)
+            };
+            f(key, &entry.value, expire_ms);
+        }
+    }
+
     /// Return all key names in the store (sorted for determinism).
     #[must_use]
     pub fn all_keys(&self) -> Vec<Vec<u8>> {
@@ -38262,30 +38331,32 @@ impl Store {
             ]);
         }
 
-        // Snapshot the remaining keys (sorted for deterministic output).
-        let mut keys: Vec<(usize, &[u8], &[u8])> = self
+        // Snapshot the remaining keys and values (sorted for deterministic output).
+        let no_expires = self.expires_count == 0;
+        let mut keys: Vec<(usize, &[u8], &[u8], &Value, Option<u64>)> = self
             .entries
-            .keys()
-            .map(|physical| {
+            .iter()
+            .map(|(physical, entry)| {
                 let (db, logical) = decode_db_key(physical).unwrap_or((0, physical));
-                (db, logical, physical)
+                let exp_ms = if no_expires {
+                    None
+                } else {
+                    self.expiry_deadlines.get(physical).map(|d| d.get())
+                };
+                (db, logical, physical, &entry.value, exp_ms)
             })
             .collect();
         keys.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)));
 
         let mut current_db = None;
 
-        for (db, logical_key, physical_key) in keys {
-            let Some(entry) = self.entries.get(physical_key) else {
-                continue;
-            };
-
+        for (db, logical_key, physical_key, value, exp_ms) in keys {
             if current_db != Some(db) {
                 commands.push(vec![b"SELECT".to_vec(), db.to_string().into_bytes()]);
                 current_db = Some(db);
             }
 
-            match &entry.value {
+            match value {
                 Value::String(v) => {
                     commands.push(vec![b"SET".to_vec(), logical_key.to_vec(), v.to_vec()]);
                 }
@@ -38472,7 +38543,7 @@ impl Store {
             }
 
             // Emit PEXPIREAT if the key has an expiry timestamp.
-            if let Some(exp_ms) = self.expiry_ms(physical_key) {
+            if let Some(exp_ms) = exp_ms {
                 commands.push(vec![
                     b"PEXPIREAT".to_vec(),
                     logical_key.to_vec(),
