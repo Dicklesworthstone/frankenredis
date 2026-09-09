@@ -52393,7 +52393,9 @@ pub(crate) fn render_rdb_snapshot_bytes(
     } else {
         let thresholds = live_compact_thresholds(store);
         let entries = store_to_rdb_entries_borrowed(store, Some(&thresholds));
-        fr_persist::encode_rdb_with_functions_and_thresholds(&entries, aux, &fn_refs, thresholds)
+        fr_persist::encode_rdb_borrowed_with_functions_and_thresholds(
+            &entries, aux, &fn_refs, thresholds,
+        )
     }
 }
 
@@ -52438,12 +52440,15 @@ fn store_to_rdb_entries_with_thresholds(
 ) -> Vec<RdbEntry> {
     store.expire_snapshot_volatile_keys(now_ms);
     store_to_rdb_entries_borrowed(store, compact)
+        .into_iter()
+        .map(fr_persist::RdbEntryRef::into_owned)
+        .collect()
 }
 
-fn store_to_rdb_entries_borrowed(
-    store: &Store,
+fn store_to_rdb_entries_borrowed<'a>(
+    store: &'a Store,
     compact: Option<&fr_persist::CompactRdbThresholds>,
-) -> Vec<RdbEntry> {
+) -> Vec<fr_persist::RdbEntryRef<'a>> {
     use fr_store::Value;
 
     let list_max_listpack_size = store.list_max_listpack_size;
@@ -52457,8 +52462,8 @@ fn store_to_rdb_entries_borrowed(
         let set_is_hashtable = item.set_is_hashtable;
         let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
         let rdb_value = match value {
-            Value::String(v) => RdbValue::String(v.to_vec()),
-            Value::Integer(v) => RdbValue::String(v.to_string().into_bytes()),
+            Value::String(v) => fr_persist::RdbValueRef::String(v.as_slice()),
+            Value::Integer(v) => fr_persist::RdbValueRef::Integer(*v),
             Value::List(l) => {
                 // (BlackThrush 2026-08-27) VERBATIM FIRST, the fourth arm of the lever.
                 // A list still holding the RDB record body it was loaded from re-saves
@@ -52482,8 +52487,8 @@ fn store_to_rdb_entries_borrowed(
                     && (fr_persist::rdb_compression_enabled()
                         || !quicklist2_body_is_lzf_framed(raw))
                 {
-                    RdbValue::ListQuicklist2Retained {
-                        raw: raw.to_vec(),
+                    fr_persist::RdbValueRef::ListQuicklist2Retained {
+                        raw: std::borrow::Cow::Borrowed(raw),
                         // EMPTY ON PURPOSE, and the apply side knows it: the save has
                         // no decompressed nodes to hand over and manufacturing them
                         // would undo the whole point. A consumer that APPLIES this
@@ -52491,9 +52496,9 @@ fn store_to_rdb_entries_borrowed(
                         nodes: Vec::new(),
                     }
                 } else if let Some(nodes) = l.quicklist_packed_node_blobs(list_max_listpack_size) {
-                    RdbValue::ListQuicklist2Packed(nodes)
+                    fr_persist::RdbValueRef::ListQuicklist2Packed(nodes)
                 } else {
-                    RdbValue::List(l.iter().map(<[u8]>::to_vec).collect())
+                    fr_persist::RdbValueRef::List(l.iter().map(<[u8]>::to_vec).collect())
                 }
             }
             Value::Set(s) => {
@@ -52530,8 +52535,8 @@ fn store_to_rdb_entries_borrowed(
                     && (fr_persist::rdb_compression_enabled()
                         || !fr_persist::rdb_string_is_lzf_framed(raw))
                 {
-                    RdbValue::SetListpackRetained {
-                        raw: raw.to_vec(),
+                    fr_persist::RdbValueRef::SetListpackRetained {
+                        raw: std::borrow::Cow::Borrowed(raw),
                         member_count,
                         max_member_len,
                     }
@@ -52546,7 +52551,7 @@ fn store_to_rdb_entries_borrowed(
                         })
                     };
                     if let Some(blob) = borrowed_blob {
-                        RdbValue::SetListpack(blob)
+                        fr_persist::RdbValueRef::SetListpack(blob)
                     } else {
                         let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
                         // (frankenredis-39is8) Save by ACTUAL encoding: a hashtable set
@@ -52560,9 +52565,9 @@ fn store_to_rdb_entries_borrowed(
                             // intset, insertion for listpack), matching redis, so the
                             // DUMP stays byte-stable across DEBUG RELOAD.
                             members.sort_unstable();
-                            RdbValue::SetHashtable(members)
+                            fr_persist::RdbValueRef::SetHashtable(members)
                         } else {
-                            RdbValue::Set(members)
+                            fr_persist::RdbValueRef::Set(members)
                         }
                     }
                 }
@@ -52590,7 +52595,7 @@ fn store_to_rdb_entries_borrowed(
                             ttl_idx += 1;
                         }
                     }
-                    RdbValue::HashWithTtls(fields)
+                    fr_persist::RdbValueRef::HashWithTtls(fields)
                 } else if let Some(thresholds) =
                     compact.filter(|_| !cfg!(feature = "perf-ab-rdb-hash-owned"))
                     && let Some((raw, pair_count, max_entry_len)) = h.retained_rdb_string()
@@ -52616,8 +52621,8 @@ fn store_to_rdb_entries_borrowed(
                     // which this value cannot see. BOTH thresholds are re-checked in
                     // O(1) from the count and longest entry the record carries,
                     // because CONFIG can have moved them since the load.
-                    RdbValue::HashListpackRetained {
-                        raw,
+                    fr_persist::RdbValueRef::HashListpackRetained {
+                        raw: std::borrow::Cow::Owned(raw),
                         pair_count,
                         max_entry_len,
                     }
@@ -52636,13 +52641,13 @@ fn store_to_rdb_entries_borrowed(
                         borrowed.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     }
                     match fr_persist::encode_hash_listpack_blob_borrowed(&borrowed, thresholds) {
-                        Some(blob) => RdbValue::HashListpack(blob),
+                        Some(blob) => fr_persist::RdbValueRef::HashListpack(blob),
                         None => {
                             let fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed
                                 .iter()
                                 .map(|(f, v)| (f.to_vec(), v.to_vec()))
                                 .collect();
-                            RdbValue::Hash(fields)
+                            fr_persist::RdbValueRef::Hash(fields)
                         }
                     }
                 } else {
@@ -52659,7 +52664,7 @@ fn store_to_rdb_entries_borrowed(
                     if hash_is_hashtable {
                         fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                     }
-                    RdbValue::Hash(fields)
+                    fr_persist::RdbValueRef::Hash(fields)
                 }
             }
             Value::SortedSet(zs) => {
@@ -52701,8 +52706,8 @@ fn store_to_rdb_entries_borrowed(
                     && (fr_persist::rdb_compression_enabled()
                         || !fr_persist::rdb_string_is_lzf_framed(raw))
                 {
-                    RdbValue::ZsetListpackRetained {
-                        raw: raw.to_vec(),
+                    fr_persist::RdbValueRef::ZsetListpackRetained {
+                        raw: std::borrow::Cow::Borrowed(raw),
                         pair_count: len,
                         max_member_len,
                     }
@@ -52712,11 +52717,11 @@ fn store_to_rdb_entries_borrowed(
                         fr_persist::encode_zset_listpack_blob_borrowed(&borrowed, thresholds)
                     });
                     if let Some(blob) = borrowed_blob {
-                        RdbValue::ZsetListpack(blob)
+                        fr_persist::RdbValueRef::ZsetListpack(blob)
                     } else {
                         let members: Vec<(Vec<u8>, f64)> =
                             zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
-                        RdbValue::SortedSet(members)
+                        fr_persist::RdbValueRef::SortedSet(members)
                     }
                 }
             }
@@ -52798,7 +52803,7 @@ fn store_to_rdb_entries_borrowed(
                     && skeleton.max_deleted() == max_deleted
                     && skeleton.groups() == groups.as_slice()
                 {
-                    RdbValue::StreamListpacks3(skeleton.upstream_payload().to_vec())
+                    fr_persist::RdbValueRef::StreamListpacks3(skeleton.upstream_payload().to_vec())
                 } else {
                     type BorrowedStreamEntry<'a> = (u64, u64, Vec<(&'a [u8], &'a [u8])>);
                     let borrowed_entries: Vec<BorrowedStreamEntry<'_>> = entries_map
@@ -52812,7 +52817,7 @@ fn store_to_rdb_entries_borrowed(
                         entries_added,
                         max_deleted,
                     ) {
-                        RdbValue::StreamListpacks3(blob)
+                        fr_persist::RdbValueRef::StreamListpacks3(blob)
                     } else {
                         let stream_entries: Vec<fr_persist::StreamEntry> = borrowed_entries
                             .into_iter()
@@ -52827,7 +52832,7 @@ fn store_to_rdb_entries_borrowed(
                                 )
                             })
                             .collect();
-                        RdbValue::Stream(
+                        fr_persist::RdbValueRef::Stream(
                             stream_entries,
                             watermark,
                             groups,
@@ -52839,9 +52844,9 @@ fn store_to_rdb_entries_borrowed(
                 }
             }
         };
-        entries.push(RdbEntry {
+        entries.push(fr_persist::RdbEntryRef {
             db,
-            key: logical_key.to_vec(),
+            key: logical_key,
             value: rdb_value,
             expire_ms: expires_at_ms,
         });

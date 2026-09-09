@@ -4794,7 +4794,8 @@ impl SmallStr {
         }
     }
 
-    fn as_slice(&self) -> &[u8] {
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
         match self {
             Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
             Self::Heap(bytes) => bytes,

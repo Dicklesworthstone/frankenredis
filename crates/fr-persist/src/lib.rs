@@ -2573,9 +2573,7 @@ fn encode_rdb_borrowed_internal<'a>(
             }
         } else {
             sorted_entries.sort_unstable_by(|left, right| {
-                left.db
-                    .cmp(&right.db)
-                    .then_with(|| left.key.cmp(right.key))
+                left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key))
             });
 
             let mut group_start = 0usize;
