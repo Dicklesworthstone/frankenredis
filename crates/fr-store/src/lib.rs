@@ -36803,6 +36803,12 @@ impl Store {
         libs
     }
 
+    /// Returns true if any function libraries are registered.
+    #[must_use]
+    pub fn has_function_libraries(&self) -> bool {
+        !self.function_libraries.is_empty()
+    }
+
     /// Flush all function libraries.
     pub fn function_flush(&mut self) {
         self.function_libraries.clear();
