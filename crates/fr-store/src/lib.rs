@@ -38276,10 +38276,12 @@ impl Store {
         entries
     }
 
-    /// Visits borrowed references to all entries in the store without allocating or cloning keys.
-    pub fn for_each_entry_ref<'a, F>(&'a self, mut f: F)
+    /// Visits borrowed references to entries in the store until the closure returns `false`,
+    /// without allocating or cloning keys. Returns `true` if all entries were visited,
+    /// or `false` if iteration was aborted early.
+    pub fn try_for_each_entry_ref<'a, F>(&'a self, mut f: F) -> bool
     where
-        F: FnMut(&'a [u8], &'a Value, Option<u64>),
+        F: FnMut(&'a [u8], &'a Value, Option<u64>) -> bool,
     {
         let no_expires = self.expires_count == 0;
         for (key, entry) in self.entries.iter() {
@@ -38288,8 +38290,22 @@ impl Store {
             } else {
                 self.expiry_ms(key)
             };
-            f(key, &entry.value, expire_ms);
+            if !f(key, &entry.value, expire_ms) {
+                return false;
+            }
         }
+        true
+    }
+
+    /// Visits borrowed references to all entries in the store without allocating or cloning keys.
+    pub fn for_each_entry_ref<'a, F>(&'a self, mut f: F)
+    where
+        F: FnMut(&'a [u8], &'a Value, Option<u64>),
+    {
+        self.try_for_each_entry_ref(|key, value, expire_ms| {
+            f(key, value, expire_ms);
+            true
+        });
     }
 
     /// Return all key names in the store (sorted for determinism).
@@ -80943,6 +80959,24 @@ mod tests {
             visited_keys.insert(key.to_vec());
         });
         assert_eq!(visited_keys.len(), 7);
+
+        // try_for_each_entry_ref stops immediately when returning false
+        let mut early_count = 0;
+        let all = store.try_for_each_entry_ref(|_, _, _| {
+            early_count += 1;
+            early_count < 3
+        });
+        assert!(!all);
+        assert_eq!(early_count, 3);
+
+        // try_for_each_entry_ref returns true when visiting all entries
+        let mut full_count = 0;
+        let all_completed = store.try_for_each_entry_ref(|_, _, _| {
+            full_count += 1;
+            true
+        });
+        assert!(all_completed);
+        assert_eq!(full_count, 7);
     }
 
     #[test]

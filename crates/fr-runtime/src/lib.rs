@@ -49130,19 +49130,14 @@ impl Runtime {
         {
             bytes
         } else {
-            let entries = {
-                let thresholds = live_compact_thresholds(&self.server.store);
-                store_to_rdb_entries_with_thresholds(
-                    &mut self.server.store,
-                    now_ms,
-                    Some(&thresholds),
-                )
-            };
+            let thresholds = live_compact_thresholds(&self.server.store);
+            let entries = store_to_rdb_entries_with_thresholds(
+                &mut self.server.store,
+                now_ms,
+                Some(&thresholds),
+            );
             fr_persist::encode_rdb_with_functions_and_thresholds(
-                &entries,
-                &aux,
-                &fn_refs,
-                live_compact_thresholds(&self.server.store),
+                &entries, &aux, &fn_refs, thresholds,
             )
         };
         fr_persist::write_aof_manifest_dir(&dir, &basename, seq, &base_rdb, &[])?;
@@ -49212,19 +49207,14 @@ impl Runtime {
             {
                 bytes
             } else {
-                let entries = {
-                    let thresholds = live_compact_thresholds(&self.server.store);
-                    store_to_rdb_entries_with_thresholds(
-                        &mut self.server.store,
-                        now_ms,
-                        Some(&thresholds),
-                    )
-                };
+                let thresholds = live_compact_thresholds(&self.server.store);
+                let entries = store_to_rdb_entries_with_thresholds(
+                    &mut self.server.store,
+                    now_ms,
+                    Some(&thresholds),
+                );
                 fr_persist::encode_rdb_with_functions_and_thresholds(
-                    &entries,
-                    &aux,
-                    &fn_refs,
-                    live_compact_thresholds(&self.server.store),
+                    &entries, &aux, &fn_refs, thresholds,
                 )
             };
             if fr_persist::write_rdb_bytes(&path, &encoded).is_err() {
@@ -52432,11 +52422,7 @@ fn try_encode_string_only_rdb_snapshot(
     store.expire_snapshot_volatile_keys(now_ms);
 
     let mut entries = Vec::with_capacity(store.dbsize(now_ms));
-    let mut all_strings = true;
-    store.for_each_entry_ref(|key, value, expires_at_ms| {
-        if !all_strings {
-            return;
-        }
+    let all_strings = store.try_for_each_entry_ref(|key, value, expires_at_ms| {
         let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
         match value {
             Value::String(value) => {
@@ -52446,10 +52432,9 @@ fn try_encode_string_only_rdb_snapshot(
                     value,
                     expire_ms: expires_at_ms,
                 });
+                true
             }
-            _ => {
-                all_strings = false;
-            }
+            _ => false,
         }
     });
 
