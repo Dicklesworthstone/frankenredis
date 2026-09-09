@@ -5087,6 +5087,9 @@ impl StringBytes<'_> {
 }
 
 fn integer_decimal_bytes(value: i64) -> Vec<u8> {
+    if (0..10).contains(&value) {
+        return vec![b'0' + value as u8];
+    }
     let mut scratch = [0u8; 20];
     let start = fr_protocol::write_u64_digits(&mut scratch, 20, value.unsigned_abs());
     let mut out = Vec::with_capacity(i64_text_len(value));
@@ -5102,6 +5105,10 @@ fn integer_decimal_bytes(value: i64) -> Vec<u8> {
 /// written length. Byte-identical to [`integer_decimal_bytes`] but WITHOUT the
 /// per-call `Vec` — lets intset reads stream members with zero heap allocation.
 fn integer_decimal_into(out: &mut [u8; 21], value: i64) -> usize {
+    if (0..10).contains(&value) {
+        out[0] = b'0' + value as u8;
+        return 1;
+    }
     let mut scratch = [0u8; 20];
     let start = fr_protocol::write_u64_digits(&mut scratch, 20, value.unsigned_abs());
     let digits = &scratch[start..];
@@ -37345,7 +37352,7 @@ impl Store {
         }) {
             return Some(cache.payload.clone());
         }
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(64);
         let mut cache_dump_payload = false;
         match &entry.value {
             Value::String(v) => {
@@ -37638,22 +37645,16 @@ impl Store {
             return Err(envelope_err());
         }
         let version_offset = payload.len() - DUMP_TRAILER_LEN;
-        let version = u16::from_le_bytes(
-            payload[version_offset..version_offset + DUMP_VERSION_LEN]
-                .try_into()
-                .map_err(|_| envelope_err())?,
-        );
+        let version = u16::from_le_bytes([payload[version_offset], payload[version_offset + 1]]);
         if version > RDB_DUMP_VERSION {
             return Err(envelope_err());
         }
 
         // Validate CRC64: last 8 bytes are CRC over everything before them
         let crc_offset = payload.len() - DUMP_CRC64_LEN;
-        let stored_crc = u64::from_le_bytes(
-            payload[crc_offset..crc_offset + DUMP_CRC64_LEN]
-                .try_into()
-                .map_err(|_| envelope_err())?,
-        );
+        let mut crc_bytes = [0u8; 8];
+        crc_bytes.copy_from_slice(&payload[crc_offset..]);
+        let stored_crc = u64::from_le_bytes(crc_bytes);
         let computed_crc = fr_persist::crc64_redis(&payload[..crc_offset]);
         if stored_crc != computed_crc {
             return Err(envelope_err());
