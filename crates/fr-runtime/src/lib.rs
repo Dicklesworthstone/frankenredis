@@ -52723,18 +52723,15 @@ fn store_to_rdb_entries_borrowed<'a>(
                         }
                     }
                 } else {
-                    let mut fields: Vec<(
-                        std::borrow::Cow<'_, [u8]>,
-                        std::borrow::Cow<'_, [u8]>,
-                    )> = h
-                        .iter()
-                        .map(|(k_, v_)| {
-                            (
-                                std::borrow::Cow::Borrowed(k_),
-                                std::borrow::Cow::Borrowed(v_),
-                            )
-                        })
-                        .collect();
+                    let mut fields: Vec<(std::borrow::Cow<'_, [u8]>, std::borrow::Cow<'_, [u8]>)> =
+                        h.iter()
+                            .map(|(k_, v_)| {
+                                (
+                                    std::borrow::Cow::Borrowed(k_),
+                                    std::borrow::Cow::Borrowed(v_),
+                                )
+                            })
+                            .collect();
                     // (frankenredis-2j9wz) Only a hashtable hash needs an imposed
                     // field order — its iteration is non-deterministic. A listpack
                     // hash is saved in native insertion order, matching redis, so

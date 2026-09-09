@@ -1572,6 +1572,16 @@ impl<'a> RdbEntryRef<'a> {
     }
 }
 
+/// Borrowed field-value pair for hash encoding.
+pub type RdbHashPairRef<'a> = (std::borrow::Cow<'a, [u8]>, std::borrow::Cow<'a, [u8]>);
+
+/// Borrowed field-value-ttl tuple for hash-with-ttls encoding.
+pub type RdbHashWithTtlFieldRef<'a> = (
+    std::borrow::Cow<'a, [u8]>,
+    std::borrow::Cow<'a, [u8]>,
+    Option<u64>,
+);
+
 /// Borrowed value types supported in our RDB format.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RdbValueRef<'a> {
@@ -1592,14 +1602,14 @@ pub enum RdbValueRef<'a> {
         member_count: usize,
         max_member_len: usize,
     },
-    Hash(Vec<(std::borrow::Cow<'a, [u8]>, std::borrow::Cow<'a, [u8]>)>),
+    Hash(Vec<RdbHashPairRef<'a>>),
     HashListpack(Vec<u8>),
     HashListpackRetained {
         raw: std::borrow::Cow<'a, [u8]>,
         pair_count: usize,
         max_entry_len: usize,
     },
-    HashWithTtls(Vec<(std::borrow::Cow<'a, [u8]>, std::borrow::Cow<'a, [u8]>, Option<u64>)>),
+    HashWithTtls(Vec<RdbHashWithTtlFieldRef<'a>>),
     SortedSet(Vec<(std::borrow::Cow<'a, [u8]>, f64)>),
     ZsetListpack(Vec<u8>),
     ZsetListpackRetained {
@@ -3432,7 +3442,12 @@ fn encode_zset_score_listpack_blob_from_members<T: AsRef<[u8]>>(
     let mut encoded = listpack_blob_with_header(cap);
     let mut scratch = Vec::new();
     for (member, score) in sorted_members {
-        encode_zset_score_listpack_entry_with_scratch(&mut encoded, member.as_ref(), *score, &mut scratch);
+        encode_zset_score_listpack_entry_with_scratch(
+            &mut encoded,
+            member.as_ref(),
+            *score,
+            &mut scratch,
+        );
     }
     finish_listpack_blob(encoded, sorted_members.len().saturating_mul(2))
 }
@@ -3598,7 +3613,11 @@ fn encode_compact_list_quicklist2<T: AsRef<[u8]>>(
 /// [`quicklist2_node_count`] but reading pre-memoized per-item listpack lengths from
 /// `lens` (`lens[i] == listpack_entry_encoded_len(items[i])`) instead of recomputing
 /// them. Same node-boundary logic; byte-identical count.
-fn quicklist2_node_count_with_lens<T: AsRef<[u8]>>(items: &[T], lens: &[usize], budget: usize) -> usize {
+fn quicklist2_node_count_with_lens<T: AsRef<[u8]>>(
+    items: &[T],
+    lens: &[usize],
+    budget: usize,
+) -> usize {
     let mut node_count = 0;
     let mut packed_has_items = false;
     let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
