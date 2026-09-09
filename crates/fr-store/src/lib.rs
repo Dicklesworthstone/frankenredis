@@ -38393,7 +38393,7 @@ impl Store {
         // re-sorts keys, so the drop order is irrelevant). (frankenredis-cc aofrewrite-expire)
         self.expire_snapshot_volatile_keys(now_ms);
 
-        let mut commands = Vec::new();
+        let mut commands = Vec::with_capacity(self.entries.len());
 
         for library in self.function_list(None) {
             commands.push(vec![
@@ -38472,7 +38472,9 @@ impl Store {
                         for chunk in fields.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
                             // Redis aof.c::rewriteHashObject writes HMSET in
                             // batches capped by AOF_REWRITE_ITEMS_PER_CMD.
-                            let mut argv = vec![b"HMSET".to_vec(), logical_key.to_vec()];
+                            let mut argv = Vec::with_capacity(2 + chunk.len() * 2);
+                            argv.push(b"HMSET".to_vec());
+                            argv.push(logical_key.to_vec());
                             for (field, value) in chunk {
                                 argv.push(field.to_vec());
                                 argv.push(value.to_vec());
@@ -38502,7 +38504,9 @@ impl Store {
                     if !l.is_empty() {
                         let items: Vec<&[u8]> = l.iter().collect();
                         for chunk in items.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
-                            let mut argv = vec![b"RPUSH".to_vec(), logical_key.to_vec()];
+                            let mut argv = Vec::with_capacity(2 + chunk.len());
+                            argv.push(b"RPUSH".to_vec());
+                            argv.push(logical_key.to_vec());
                             for item in chunk {
                                 argv.push((*item).to_vec());
                             }
@@ -38516,7 +38520,9 @@ impl Store {
                         let mut members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
                         members.sort_unstable();
                         for chunk in members.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
-                            let mut argv = vec![b"SADD".to_vec(), logical_key.to_vec()];
+                            let mut argv = Vec::with_capacity(2 + chunk.len());
+                            argv.push(b"SADD".to_vec());
+                            argv.push(logical_key.to_vec());
                             for member in chunk {
                                 argv.push(member.as_ref().to_vec());
                             }
@@ -38534,7 +38540,9 @@ impl Store {
                                 .then_with(|| a.0.cmp(b.0))
                         });
                         for chunk in pairs.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
-                            let mut argv = vec![b"ZADD".to_vec(), logical_key.to_vec()];
+                            let mut argv = Vec::with_capacity(2 + chunk.len() * 2);
+                            argv.push(b"ZADD".to_vec());
+                            argv.push(logical_key.to_vec());
                             for (member, score) in chunk {
                                 argv.push(redis_score_to_string(*score).into_bytes());
                                 argv.push((*member).to_vec());
@@ -38562,8 +38570,10 @@ impl Store {
                         // Each stream entry becomes a separate XADD command.
                         for ((ms, seq), fields) in entries.iter() {
                             let id = format!("{ms}-{seq}");
-                            let mut argv =
-                                vec![b"XADD".to_vec(), logical_key.to_vec(), id.into_bytes()];
+                            let mut argv = Vec::with_capacity(3 + fields.len() * 2);
+                            argv.push(b"XADD".to_vec());
+                            argv.push(logical_key.to_vec());
+                            argv.push(id.into_bytes());
                             for (fname, fval) in fields.iter() {
                                 argv.push(fname.to_vec());
                                 argv.push(fval.to_vec());
@@ -38605,18 +38615,19 @@ impl Store {
                             let group = &groups[group_name];
                             let (ms, seq) = group.last_delivered_id;
                             let id = format!("{ms}-{seq}");
-                            let mut create = vec![
+                            let entries_read_arg = group.entries_read.map_or_else(
+                                || b"-1".to_vec(),
+                                |entries_read| entries_read.to_string().into_bytes(),
+                            );
+                            let create = vec![
                                 b"XGROUP".to_vec(),
                                 b"CREATE".to_vec(),
                                 logical_key.to_vec(),
                                 group_name.clone(),
                                 id.into_bytes(),
                                 b"ENTRIESREAD".to_vec(),
+                                entries_read_arg,
                             ];
-                            create.push(group.entries_read.map_or_else(
-                                || b"-1".to_vec(),
-                                |entries_read| entries_read.to_string().into_bytes(),
-                            ));
                             commands.push(create);
 
                             // (frankenredis-377jl) O(P + C log C) grouped emit,

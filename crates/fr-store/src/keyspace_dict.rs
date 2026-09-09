@@ -936,11 +936,12 @@ impl<V> KeyDict<V> {
             dict: self,
             bucket: 0,
             current: NIL,
+            remaining: self.count,
         }
     }
 
     /// Iterate keys in unspecified order.
-    pub fn keys(&self) -> impl Iterator<Item = &[u8]> {
+    pub fn keys(&self) -> impl ExactSizeIterator<Item = &[u8]> {
         self.iter().map(|(k, _)| k)
     }
 
@@ -1069,6 +1070,7 @@ pub struct KeyDictIter<'a, V> {
     dict: &'a KeyDict<V>,
     bucket: usize,
     current: u32,
+    remaining: usize,
 }
 
 impl<'a, V> Iterator for KeyDictIter<'a, V> {
@@ -1079,6 +1081,7 @@ impl<'a, V> Iterator for KeyDictIter<'a, V> {
             if self.current != NIL {
                 let node = self.dict.nodes.get(self.current);
                 self.current = node.next;
+                self.remaining = self.remaining.saturating_sub(1);
                 return Some((node.key.as_slice(), &node.value));
             }
             if self.bucket >= self.dict.buckets.len() {
@@ -1087,6 +1090,18 @@ impl<'a, V> Iterator for KeyDictIter<'a, V> {
             self.current = self.dict.buckets[self.bucket];
             self.bucket += 1;
         }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<'a, V> ExactSizeIterator for KeyDictIter<'a, V> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.remaining
     }
 }
 
@@ -1992,5 +2007,22 @@ mod tests {
         assert!(d.is_empty());
         assert_eq!(d.iter().count(), 0);
         assert_eq!(d.get(b"i0"), None);
+    }
+
+    #[test]
+    fn iter_exact_size() {
+        let mut d: KeyDict<u32> = KeyDict::new();
+        for i in 0..50u32 {
+            d.insert(format!("k{i}").into_bytes().into_boxed_slice(), i);
+        }
+        let mut it = d.iter();
+        assert_eq!(it.len(), 50);
+        assert_eq!(it.size_hint(), (50, Some(50)));
+        let _ = it.next();
+        assert_eq!(it.len(), 49);
+        assert_eq!(it.size_hint(), (49, Some(49)));
+        let keys_it = d.keys();
+        assert_eq!(keys_it.len(), 50);
+        assert_eq!(keys_it.size_hint(), (50, Some(50)));
     }
 }
