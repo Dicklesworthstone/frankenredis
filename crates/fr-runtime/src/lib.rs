@@ -52340,6 +52340,10 @@ fn try_encode_string_only_rdb_snapshot(
 ) -> Option<Vec<u8>> {
     use fr_store::Value;
 
+    if !store.entries_are_all_strings() {
+        return None;
+    }
+
     let mut entries = Vec::with_capacity(store.len());
     let mut has_multiple_dbs = false;
     let all_strings = store.try_for_each_entry_ref(|key, value, expires_at_ms| {
@@ -52509,7 +52513,9 @@ fn store_to_rdb_entries_borrowed<'a>(
                 } else if let Some(nodes) = l.quicklist_packed_node_cows(list_max_listpack_size) {
                     fr_persist::RdbValueRef::ListQuicklist2Packed(nodes)
                 } else {
-                    fr_persist::RdbValueRef::List(l.iter().map(<[u8]>::to_vec).collect())
+                    fr_persist::RdbValueRef::List(
+                        l.iter().map(std::borrow::Cow::Borrowed).collect(),
+                    )
                 }
             }
             Value::Set(s) => {
@@ -52557,7 +52563,7 @@ fn store_to_rdb_entries_borrowed<'a>(
                     if fits_intset {
                         fr_persist::RdbValueRef::IntSet(std::borrow::Cow::Borrowed(ints))
                     } else {
-                        let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+                        let mut members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
                         if set_is_hashtable {
                             members.sort_unstable();
                             fr_persist::RdbValueRef::SetHashtable(members)
@@ -52581,7 +52587,7 @@ fn store_to_rdb_entries_borrowed<'a>(
                     if let Some(blob) = borrowed_blob {
                         fr_persist::RdbValueRef::SetListpack(blob)
                     } else {
-                        let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+                        let mut members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
                         // (frankenredis-39is8) Save by ACTUAL encoding: a hashtable set
                         // emits the plain RDB_TYPE_SET so the encoding survives a
                         // save/load even when its content would otherwise re-derive to a
@@ -52608,17 +52614,27 @@ fn store_to_rdb_entries_borrowed<'a>(
                 // identical. (br-frankenredis-th7q)
                 let field_ttls = store_ref.hash_field_ttls(key);
                 if !field_ttls.is_empty() {
-                    let mut fields: Vec<(Vec<u8>, Vec<u8>, Option<u64>)> = h
+                    let mut fields: Vec<(
+                        std::borrow::Cow<'_, [u8]>,
+                        std::borrow::Cow<'_, [u8]>,
+                        Option<u64>,
+                    )> = h
                         .iter()
-                        .map(|(k_, v_)| (k_.to_vec(), v_.to_vec(), None))
+                        .map(|(k_, v_)| {
+                            (
+                                std::borrow::Cow::Borrowed(k_),
+                                std::borrow::Cow::Borrowed(v_),
+                                None,
+                            )
+                        })
                         .collect();
                     fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                     let mut ttl_idx = 0;
                     for (f, _, ttl) in &mut fields {
-                        while ttl_idx < field_ttls.len() && field_ttls[ttl_idx].0 < f.as_slice() {
+                        while ttl_idx < field_ttls.len() && field_ttls[ttl_idx].0 < f.as_ref() {
                             ttl_idx += 1;
                         }
-                        if ttl_idx < field_ttls.len() && field_ttls[ttl_idx].0 == f.as_slice() {
+                        if ttl_idx < field_ttls.len() && field_ttls[ttl_idx].0 == f.as_ref() {
                             *ttl = Some(field_ttls[ttl_idx].1);
                             ttl_idx += 1;
                         }
@@ -52665,9 +52681,17 @@ fn store_to_rdb_entries_borrowed<'a>(
                     // produced anyway.
                     let hashtable = hash_is_hashtable;
                     if h.len() > thresholds.hash_max_listpack_entries {
-                        let mut fields: Vec<(Vec<u8>, Vec<u8>)> = h
+                        let mut fields: Vec<(
+                            std::borrow::Cow<'_, [u8]>,
+                            std::borrow::Cow<'_, [u8]>,
+                        )> = h
                             .iter()
-                            .map(|(k_, v_)| (k_.to_vec(), v_.to_vec()))
+                            .map(|(k_, v_)| {
+                                (
+                                    std::borrow::Cow::Borrowed(k_),
+                                    std::borrow::Cow::Borrowed(v_),
+                                )
+                            })
                             .collect();
                         if hashtable {
                             fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -52682,18 +52706,34 @@ fn store_to_rdb_entries_borrowed<'a>(
                         {
                             Some(blob) => fr_persist::RdbValueRef::HashListpack(blob),
                             None => {
-                                let fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed
-                                    .iter()
-                                    .map(|(f, v)| (f.to_vec(), v.to_vec()))
+                                let fields: Vec<(
+                                    std::borrow::Cow<'_, [u8]>,
+                                    std::borrow::Cow<'_, [u8]>,
+                                )> = borrowed
+                                    .into_iter()
+                                    .map(|(f, v)| {
+                                        (
+                                            std::borrow::Cow::Borrowed(f),
+                                            std::borrow::Cow::Borrowed(v),
+                                        )
+                                    })
                                     .collect();
                                 fr_persist::RdbValueRef::Hash(fields)
                             }
                         }
                     }
                 } else {
-                    let mut fields: Vec<(Vec<u8>, Vec<u8>)> = h
+                    let mut fields: Vec<(
+                        std::borrow::Cow<'_, [u8]>,
+                        std::borrow::Cow<'_, [u8]>,
+                    )> = h
                         .iter()
-                        .map(|(k_, v_)| (k_.to_vec(), v_.to_vec()))
+                        .map(|(k_, v_)| {
+                            (
+                                std::borrow::Cow::Borrowed(k_),
+                                std::borrow::Cow::Borrowed(v_),
+                            )
+                        })
                         .collect();
                     // (frankenredis-2j9wz) Only a hashtable hash needs an imposed
                     // field order — its iteration is non-deterministic. A listpack
@@ -52762,8 +52802,10 @@ fn store_to_rdb_entries_borrowed<'a>(
                     if let Some(blob) = borrowed_blob {
                         fr_persist::RdbValueRef::ZsetListpack(blob)
                     } else {
-                        let members: Vec<(Vec<u8>, f64)> =
-                            zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
+                        let members: Vec<(std::borrow::Cow<'_, [u8]>, f64)> = zs
+                            .iter_asc()
+                            .map(|(m, s)| (std::borrow::Cow::Borrowed(m), s))
+                            .collect();
                         fr_persist::RdbValueRef::SortedSet(members)
                     }
                 }
