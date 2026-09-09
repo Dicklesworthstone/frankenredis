@@ -3160,7 +3160,11 @@ fn encode_compact_set_intset<T: AsRef<[u8]>>(
     // canonical parser instead of formatting a String per candidate member.
     let mut values = Vec::with_capacity(members.len());
     for raw in members {
-        let value = parse_listpack_integer(raw.as_ref())?;
+        let b = raw.as_ref();
+        if !matches!(b.first(), Some(&c) if c.is_ascii_digit() || c == b'-') {
+            return None;
+        }
+        let value = parse_listpack_integer(b)?;
         values.push(value);
     }
     let width = intset_width(&values);
@@ -3224,7 +3228,10 @@ pub fn encode_set_listpack_blob_borrowed(
     // BEFORE its listpack arm. Decline so that decision stays exactly where it is.
     if members.len() <= thresholds.set_max_intset_entries
         && !members.is_empty()
-        && members.iter().all(|m| parse_listpack_integer(m).is_some())
+        && members.iter().all(|m| {
+            matches!(m.first(), Some(&b) if b.is_ascii_digit() || b == b'-')
+                && parse_listpack_integer(m).is_some()
+        })
     {
         return None;
     }
