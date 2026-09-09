@@ -37354,7 +37354,20 @@ impl Store {
             }
             Value::Integer(value) => {
                 buf.push(RDB_TYPE_STRING);
-                encode_rdb_string(&mut buf, value.to_string().as_bytes());
+                if !encode_integer_rdb_i64_into(&mut buf, *value) {
+                    let mut digits = [0u8; 20];
+                    let (neg, uval) = if *value < 0 {
+                        (true, (*value as i128).unsigned_abs() as u64)
+                    } else {
+                        (false, *value as u64)
+                    };
+                    let mut pos = fr_protocol::write_u64_digits(&mut digits, 20, uval);
+                    if neg {
+                        pos -= 1;
+                        digits[pos] = b'-';
+                    }
+                    encode_rdb_string(&mut buf, &digits[pos..]);
+                }
             }
             Value::List(l) => {
                 buf.push(RDB_TYPE_LIST_QUICKLIST_2);
@@ -38293,8 +38306,11 @@ impl Store {
             } else {
                 self.expiry_ms(key)
             };
-            let hash_is_hashtable = self.entry_hash_is_hashtable_encoded(entry);
-            let set_is_hashtable = self.entry_set_is_hashtable_encoded(entry);
+            let (hash_is_hashtable, set_is_hashtable) = match &entry.value {
+                Value::Hash(_) => (self.entry_hash_is_hashtable_encoded(entry), false),
+                Value::Set(_) => (false, self.entry_set_is_hashtable_encoded(entry)),
+                _ => (false, false),
+            };
             f(SnapshotEntryRef {
                 key,
                 value: &entry.value,
@@ -38791,8 +38807,7 @@ fn encode_length(buf: &mut Vec<u8>, len: usize) {
 }
 
 fn encode_rdb_string(buf: &mut Vec<u8>, data: &[u8]) {
-    if let Some(encoded) = encode_integer_rdb_string(data) {
-        buf.extend_from_slice(&encoded);
+    if encode_integer_rdb_string_into(buf, data) {
         return;
     }
     // (frankenredis-9zltv) Mirror upstream's rdbSaveLzfStringObject
@@ -39376,24 +39391,40 @@ fn restore_stream_groups(
     Ok(restored)
 }
 
-fn encode_integer_rdb_string(data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() > 11 {
-        return None;
+fn encode_integer_rdb_string_into(buf: &mut Vec<u8>, data: &[u8]) -> bool {
+    if data.is_empty() || data.len() > 11 {
+        return false;
+    }
+    if !data[0].is_ascii_digit() && data[0] != b'-' {
+        return false;
+    }
+    if data.len() == 1 && data[0].is_ascii_digit() {
+        buf.push(RDB_ENCVAL | RDB_ENC_INT8);
+        buf.push(data[0] - b'0');
+        return true;
     }
 
-    let value = parse_i64(data).ok()?;
+    let Ok(value) = parse_i64(data) else {
+        return false;
+    };
+    encode_integer_rdb_i64_into(buf, value)
+}
+
+fn encode_integer_rdb_i64_into(buf: &mut Vec<u8>, value: i64) -> bool {
     if let Ok(value) = i8::try_from(value) {
-        Some(vec![RDB_ENCVAL | RDB_ENC_INT8, value as u8])
+        buf.push(RDB_ENCVAL | RDB_ENC_INT8);
+        buf.push(value as u8);
+        true
     } else if let Ok(value) = i16::try_from(value) {
-        let mut encoded = vec![RDB_ENCVAL | RDB_ENC_INT16];
-        encoded.extend_from_slice(&value.to_le_bytes());
-        Some(encoded)
+        buf.push(RDB_ENCVAL | RDB_ENC_INT16);
+        buf.extend_from_slice(&value.to_le_bytes());
+        true
     } else if let Ok(value) = i32::try_from(value) {
-        let mut encoded = vec![RDB_ENCVAL | RDB_ENC_INT32];
-        encoded.extend_from_slice(&value.to_le_bytes());
-        Some(encoded)
+        buf.push(RDB_ENCVAL | RDB_ENC_INT32);
+        buf.extend_from_slice(&value.to_le_bytes());
+        true
     } else {
-        None
+        false
     }
 }
 

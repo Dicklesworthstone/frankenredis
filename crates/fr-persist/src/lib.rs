@@ -2462,7 +2462,7 @@ fn encode_rdb_internal(
             }
         }
         if !sorted {
-            let single = entries.iter().all(|e| e.db == first_db);
+            let single = single_db && entries.iter().all(|e| e.db == first_db);
             (first_db, single, false, 0)
         } else {
             (first_db, single_db, true, expires)
@@ -2631,7 +2631,7 @@ fn encode_rdb_borrowed_internal<'a>(
             }
         }
         if !sorted {
-            let single = entries.iter().all(|e| e.db == first_db);
+            let single = single_db && entries.iter().all(|e| e.db == first_db);
             (first_db, single, false, 0)
         } else {
             (first_db, single_db, true, expires)
@@ -3008,20 +3008,26 @@ fn encode_rdb_entry_borrowed(
             rdb_encode_string_with(buf, v, compress);
         }
         RdbValueRef::Integer(val) => {
-            let mut digits = [0u8; 20];
-            let (neg, uval) = if *val < 0 {
-                (true, (*val as i128).unsigned_abs() as u64)
-            } else {
-                (false, *val as u64)
-            };
-            let mut pos = fr_protocol::write_u64_digits(&mut digits, 20, uval);
-            if neg {
-                pos -= 1;
-                digits[pos] = b'-';
-            }
             buf.push(RDB_TYPE_STRING);
             rdb_encode_string_with(buf, entry.key, compress);
-            rdb_encode_string_with(buf, &digits[pos..], compress);
+            if (0..10).contains(val) {
+                buf.push(1);
+                buf.push(b'0' + *val as u8);
+            } else {
+                let mut digits = [0u8; 20];
+                let (neg, uval) = if *val < 0 {
+                    (true, (*val as i128).unsigned_abs() as u64)
+                } else {
+                    (false, *val as u64)
+                };
+                let mut pos = fr_protocol::write_u64_digits(&mut digits, 20, uval);
+                if neg {
+                    pos -= 1;
+                    digits[pos] = b'-';
+                }
+                buf.push((20 - pos) as u8);
+                buf.extend_from_slice(&digits[pos..]);
+            }
         }
         RdbValueRef::List(items) => {
             if let Some(thresholds) = options.compact.as_ref()
