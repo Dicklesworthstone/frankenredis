@@ -7710,19 +7710,17 @@ impl Runtime {
         {
             bytes
         } else {
-            let entries = {
-                let thresholds = live_compact_thresholds(&self.server.store);
-                store_to_rdb_entries_with_thresholds(
-                    &mut self.server.store,
-                    now_ms,
-                    Some(&thresholds),
-                )
-            };
+            let thresholds = live_compact_thresholds(&self.server.store);
+            let entries = store_to_rdb_entries_with_thresholds(
+                &mut self.server.store,
+                now_ms,
+                Some(&thresholds),
+            );
             fr_persist::encode_rdb_with_functions_and_thresholds(
                 &entries,
                 &[],
                 &fn_refs,
-                live_compact_thresholds(&self.server.store),
+                thresholds,
             )
         };
         let decoded = match fr_persist::decode_rdb_prefix(&bytes) {
@@ -8022,19 +8020,14 @@ impl Runtime {
         {
             bytes
         } else {
-            let entries = {
-                let thresholds = live_compact_thresholds(&self.server.store);
-                store_to_rdb_entries_with_thresholds(
-                    &mut self.server.store,
-                    now_ms,
-                    Some(&thresholds),
-                )
-            };
+            let thresholds = live_compact_thresholds(&self.server.store);
+            let entries = store_to_rdb_entries_with_thresholds(
+                &mut self.server.store,
+                now_ms,
+                Some(&thresholds),
+            );
             fr_persist::encode_rdb_with_functions_and_thresholds(
-                &entries,
-                &aux,
-                &fn_refs,
-                live_compact_thresholds(&self.server.store),
+                &entries, &aux, &fn_refs, thresholds,
             )
         }
     }
@@ -52421,26 +52414,23 @@ fn try_encode_string_only_rdb_snapshot(
 
     store.expire_snapshot_volatile_keys(now_ms);
 
-    let mut entries = Vec::with_capacity(store.dbsize(now_ms));
-    let all_strings = store.try_for_each_entry_ref(|key, value, expires_at_ms| {
-        let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
-        match value {
-            Value::String(value) => {
-                entries.push(RdbStringEntryRef {
-                    db,
-                    key: logical_key,
-                    value,
-                    expire_ms: expires_at_ms,
-                });
-                true
-            }
-            _ => false,
-        }
-    });
-
-    if !all_strings {
+    if !store.entries_are_all_strings() {
         return None;
     }
+
+    let mut entries = Vec::with_capacity(store.len());
+    let store_ref = &*store;
+    store_ref.for_each_entry_ref(|key, value, expires_at_ms| {
+        let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
+        if let Value::String(value) = value {
+            entries.push(RdbStringEntryRef {
+                db,
+                key: logical_key,
+                value,
+                expire_ms: expires_at_ms,
+            });
+        }
+    });
 
     entries.sort_unstable_by(|left, right| {
         left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key))
@@ -52494,9 +52484,9 @@ fn store_to_rdb_entries_with_thresholds(
     store.expire_snapshot_volatile_keys(now_ms);
 
     let list_max_listpack_size = store.list_max_listpack_size;
-    let snapshot_entries = store.snapshot_entries();
-    let mut entries = Vec::with_capacity(snapshot_entries.len());
-    for item in snapshot_entries {
+    let store_ref = &*store;
+    let mut entries = Vec::with_capacity(store_ref.len());
+    store_ref.for_each_snapshot_entry_ref(|item| {
         let key = item.key;
         let value = item.value;
         let expires_at_ms = item.expire_ms;
@@ -52620,7 +52610,7 @@ fn store_to_rdb_entries_with_thresholds(
                 // otherwise keep the legacy plain Hash encoding so older RDB
                 // files and types that never use per-field TTLs stay bit-
                 // identical. (br-frankenredis-th7q)
-                let field_ttls = store.hash_field_ttls(key);
+                let field_ttls = store_ref.hash_field_ttls(key);
                 if !field_ttls.is_empty() {
                     let mut fields: Vec<(Vec<u8>, Vec<u8>, Option<u64>)> = h
                         .iter()
@@ -52780,12 +52770,12 @@ fn store_to_rdb_entries_with_thresholds(
                 // The owned build below still runs for any stream the listpacks3
                 // encoder declines -- exactly the streams `encode_stream_rdb_value`
                 // would have sent down `encode_private_stream_rdb_value` anyway.
-                let watermark = store.stream_watermark(key).unwrap_or(None);
-                let entries_added = Some(store.stream_entries_added(key, entries_map.len()));
-                let max_deleted = store.stream_max_deleted_id(key);
+                let watermark = store_ref.stream_watermark(key).unwrap_or(None);
+                let entries_added = Some(store_ref.stream_entries_added(key, entries_map.len()));
+                let max_deleted = store_ref.stream_max_deleted_id(key);
                 // Annotated because the blob builder below takes `&[...]`, which
                 // leaves the collect target ambiguous without it.
-                let groups: Vec<fr_persist::RdbStreamConsumerGroup> = store
+                let groups: Vec<fr_persist::RdbStreamConsumerGroup> = store_ref
                     .stream_consumer_groups(key)
                     .map(|gs| {
                         gs.iter()
@@ -52892,7 +52882,7 @@ fn store_to_rdb_entries_with_thresholds(
             value: rdb_value,
             expire_ms: expires_at_ms,
         });
-    }
+    });
     entries
 }
 

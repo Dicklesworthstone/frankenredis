@@ -38250,13 +38250,22 @@ impl Store {
         std::mem::take(&mut self.restore_discard_deletions)
     }
 
-    /// Returns borrowed references to all entries in the store for RDB serialization,
-    /// evaluating expiration and encoding flags directly from entry metadata without
-    /// sorting or cloning keys.
+    /// Returns true if all entries in the store are Value::String.
+    /// Aborts immediately on encountering the first non-string entry.
     #[must_use]
-    pub fn snapshot_entries(&self) -> Vec<SnapshotEntryRef<'_>> {
+    pub fn entries_are_all_strings(&self) -> bool {
+        self.entries
+            .iter()
+            .all(|(_, e)| matches!(e.value, Value::String(_)))
+    }
+
+    /// Visits borrowed references to all entries in the store with snapshot metadata
+    /// without allocating intermediate collections or cloning keys.
+    pub fn for_each_snapshot_entry_ref<'a, F>(&'a self, mut f: F)
+    where
+        F: FnMut(SnapshotEntryRef<'a>),
+    {
         let no_expires = self.expires_count == 0;
-        let mut entries = Vec::with_capacity(self.entries.len());
         for (key, entry) in self.entries.iter() {
             let expire_ms = if no_expires {
                 None
@@ -38265,7 +38274,7 @@ impl Store {
             };
             let hash_is_hashtable = self.entry_hash_is_hashtable_encoded(entry);
             let set_is_hashtable = self.entry_set_is_hashtable_encoded(entry);
-            entries.push(SnapshotEntryRef {
+            f(SnapshotEntryRef {
                 key,
                 value: &entry.value,
                 expire_ms,
@@ -38273,6 +38282,15 @@ impl Store {
                 set_is_hashtable,
             });
         }
+    }
+
+    /// Returns borrowed references to all entries in the store for RDB serialization,
+    /// evaluating expiration and encoding flags directly from entry metadata without
+    /// sorting or cloning keys.
+    #[must_use]
+    pub fn snapshot_entries(&self) -> Vec<SnapshotEntryRef<'_>> {
+        let mut entries = Vec::with_capacity(self.entries.len());
+        self.for_each_snapshot_entry_ref(|entry| entries.push(entry));
         entries
     }
 
@@ -80977,6 +80995,30 @@ mod tests {
         });
         assert!(all_completed);
         assert_eq!(full_count, 7);
+
+        // entries_are_all_strings correctly identifies mixed vs string-only store
+        assert!(!store.entries_are_all_strings());
+        let mut str_only_store = Store::new();
+        assert!(str_only_store.entries_are_all_strings());
+        str_only_store.set(b"s1".to_vec(), b"v1".to_vec(), None, 0);
+        str_only_store.set(b"s2".to_vec(), b"v2".to_vec(), Some(100), 0);
+        assert!(str_only_store.entries_are_all_strings());
+        str_only_store
+            .hset(b"h1", b"f".to_vec(), b"v".to_vec(), 0)
+            .unwrap();
+        assert!(!str_only_store.entries_are_all_strings());
+
+        // for_each_snapshot_entry_ref visits every entry matching snapshot_entries
+        let mut snapshot_ref_entries = Vec::new();
+        store.for_each_snapshot_entry_ref(|entry| {
+            snapshot_ref_entries.push((
+                entry.key.to_vec(),
+                entry.expire_ms,
+                entry.hash_is_hashtable,
+                entry.set_is_hashtable,
+            ));
+        });
+        assert_eq!(snapshot_ref_entries.len(), 7);
     }
 
     #[test]
