@@ -38364,8 +38364,19 @@ impl Store {
             return;
         }
         self.rebuild_volatile_keys_if_dirty();
-        let volatile_keys: Vec<Vec<u8>> = self.volatile_keys.iter().map(|k| k.to_vec()).collect();
-        for key in &volatile_keys {
+        let mut expired_keys: Vec<Vec<u8>> = self
+            .expiry_deadlines
+            .iter()
+            .filter_map(|(k, deadline)| {
+                if evaluate_expiry(now_ms, Some(deadline.get())).should_evict {
+                    Some(k.to_vec())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        expired_keys.sort_unstable();
+        for key in &expired_keys {
             self.drop_if_expired(key, now_ms);
         }
     }
@@ -47946,6 +47957,30 @@ mod tests {
         assert_eq!(
             store.take_lazy_expired_propagation(),
             vec![b"expired".to_vec()]
+        );
+    }
+
+    #[test]
+    fn snapshot_expire_drops_only_due_deadlines_with_deterministic_propagation() {
+        let mut store = Store::new();
+        store.set(b"k1".to_vec(), b"v1".to_vec(), Some(200), 0);
+        store.set(b"k2".to_vec(), b"v2".to_vec(), Some(500), 0);
+        store.set(b"k3".to_vec(), b"v3".to_vec(), Some(100), 0);
+        store.set(b"k4".to_vec(), b"v4".to_vec(), Some(10_000), 0);
+        store.set(b"k5".to_vec(), b"v5".to_vec(), None, 0);
+
+        store.expire_snapshot_volatile_keys(300);
+
+        assert!(!store.exists(b"k1", 300));
+        assert!(store.exists(b"k2", 300));
+        assert!(!store.exists(b"k3", 300));
+        assert!(store.exists(b"k4", 300));
+        assert!(store.exists(b"k5", 300));
+
+        assert_eq!(store.stat_expired_keys, 2);
+        assert_eq!(
+            store.take_lazy_expired_propagation(),
+            vec![b"k1".to_vec(), b"k3".to_vec()]
         );
     }
 
