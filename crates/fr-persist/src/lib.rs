@@ -3983,11 +3983,19 @@ fn encode_sorted_intset_blob(values: &[i64], width: u32) -> Option<Vec<u8>> {
 // ELEMENT on the RDB save/load path, and the plain hint is DECLINED by LLVM for
 // bodies this size -- 9d7be9b44 measured it moving the ratio 0.1 pct with the call
 // count byte-for-byte unchanged.
-#[inline(always)]
+#[inline]
 fn encode_listpack_backlen(buf: &mut Vec<u8>, len: usize) {
     if len <= 127 {
         buf.push(len as u8);
-    } else if len < 16_383 {
+    } else {
+        encode_listpack_backlen_multibyte(buf, len);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn encode_listpack_backlen_multibyte(buf: &mut Vec<u8>, len: usize) {
+    if len < 16_383 {
         buf.push((len >> 7) as u8);
         buf.push(((len & 0x7F) as u8) | 0x80);
     } else if len < 2_097_151 {
@@ -4128,7 +4136,9 @@ fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
         buf.extend_from_slice(&value.to_le_bytes());
     }
     let data_len = buf.len() - start;
-    encode_listpack_backlen(buf, data_len);
+    // An integer entry's data_len is at most 9 bytes (0xF4 + 8-byte i64), which is always <= 127.
+    // The listpack backlen for len <= 127 is exactly a single byte containing len.
+    buf.push(data_len as u8);
 }
 
 // (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: called once per
@@ -4137,7 +4147,11 @@ fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
 // count byte-for-byte unchanged.
 #[inline(always)]
 fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
-    if let Some(value) = parse_listpack_integer(entry) {
+    let looks_numeric = matches!(entry.first(), Some(&b) if b.is_ascii_digit() || b == b'-');
+    if let Some(value) = looks_numeric
+        .then(|| parse_listpack_integer(entry))
+        .flatten()
+    {
         encode_listpack_integer_entry(buf, value);
         return;
     }

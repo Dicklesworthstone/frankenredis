@@ -39138,7 +39138,11 @@ fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
             5
         }
     }
-    let data_len = if let Some(value) = parse_listpack_integer(entry) {
+    let looks_numeric = matches!(entry.first(), Some(&b) if b.is_ascii_digit() || b == b'-');
+    let data_len = if let Some(value) = looks_numeric
+        .then(|| parse_listpack_integer(entry))
+        .flatten()
+    {
         // Mirror encode_listpack_integer_entry's value-byte count.
         if (0..=127).contains(&value) {
             1
@@ -39894,11 +39898,17 @@ fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
         buf.extend_from_slice(&value.to_le_bytes());
     }
     let data_len = buf.len() - start;
-    encode_listpack_backlen(buf, data_len);
+    // An integer entry's data_len is at most 9 bytes (0xF4 + 8-byte i64), which is always <= 127.
+    // The listpack backlen for len <= 127 is exactly a single byte containing len.
+    buf.push(data_len as u8);
 }
 
 fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
-    if let Some(value) = parse_listpack_integer(entry) {
+    let looks_numeric = matches!(entry.first(), Some(&b) if b.is_ascii_digit() || b == b'-');
+    if let Some(value) = looks_numeric
+        .then(|| parse_listpack_integer(entry))
+        .flatten()
+    {
         encode_listpack_integer_entry(buf, value);
         return;
     }
