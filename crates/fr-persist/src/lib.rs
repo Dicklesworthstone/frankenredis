@@ -2083,35 +2083,61 @@ pub fn encode_rdb_string_entries_with_functions(
         rdb_encode_string_with(&mut buf, code, compress);
     }
 
-    let mut group_start = 0usize;
-    while group_start < entries.len() {
-        let db = entries[group_start].db;
-        let mut group_end = group_start;
-        let mut db_expires = 0usize;
-        while group_end < entries.len() && entries[group_end].db == db {
-            if entries[group_end].expire_ms.is_some() {
-                db_expires += 1;
+    let is_single_db = entries.first().map_or(0, |e| e.db) == entries.last().map_or(0, |e| e.db);
+
+    if is_single_db {
+        if let Some(first) = entries.first() {
+            let db = first.db;
+            let db_expires = entries.iter().filter(|e| e.expire_ms.is_some()).count();
+
+            buf.push(RDB_OPCODE_SELECTDB);
+            rdb_encode_length(&mut buf, db);
+            buf.push(RDB_OPCODE_RESIZEDB);
+            rdb_encode_length(&mut buf, entries.len());
+            rdb_encode_length(&mut buf, db_expires);
+
+            for entry in entries {
+                if let Some(ms) = entry.expire_ms {
+                    buf.push(RDB_OPCODE_EXPIRETIME_MS);
+                    buf.extend_from_slice(&ms.to_le_bytes());
+                }
+
+                buf.push(RDB_TYPE_STRING);
+                rdb_encode_string_with(&mut buf, entry.key, compress);
+                rdb_encode_string_with(&mut buf, entry.value, compress);
             }
-            group_end += 1;
         }
-
-        buf.push(RDB_OPCODE_SELECTDB);
-        rdb_encode_length(&mut buf, db);
-        buf.push(RDB_OPCODE_RESIZEDB);
-        rdb_encode_length(&mut buf, group_end - group_start);
-        rdb_encode_length(&mut buf, db_expires);
-
-        for entry in &entries[group_start..group_end] {
-            if let Some(ms) = entry.expire_ms {
-                buf.push(RDB_OPCODE_EXPIRETIME_MS);
-                buf.extend_from_slice(&ms.to_le_bytes());
+    } else {
+        let mut group_start = 0usize;
+        while group_start < entries.len() {
+            let db = entries[group_start].db;
+            let mut group_end = group_start;
+            let mut db_expires = 0usize;
+            while group_end < entries.len() && entries[group_end].db == db {
+                if entries[group_end].expire_ms.is_some() {
+                    db_expires += 1;
+                }
+                group_end += 1;
             }
 
-            buf.push(RDB_TYPE_STRING);
-            rdb_encode_string_with(&mut buf, entry.key, compress);
-            rdb_encode_string_with(&mut buf, entry.value, compress);
+            buf.push(RDB_OPCODE_SELECTDB);
+            rdb_encode_length(&mut buf, db);
+            buf.push(RDB_OPCODE_RESIZEDB);
+            rdb_encode_length(&mut buf, group_end - group_start);
+            rdb_encode_length(&mut buf, db_expires);
+
+            for entry in &entries[group_start..group_end] {
+                if let Some(ms) = entry.expire_ms {
+                    buf.push(RDB_OPCODE_EXPIRETIME_MS);
+                    buf.extend_from_slice(&ms.to_le_bytes());
+                }
+
+                buf.push(RDB_TYPE_STRING);
+                rdb_encode_string_with(&mut buf, entry.key, compress);
+                rdb_encode_string_with(&mut buf, entry.value, compress);
+            }
+            group_start = group_end;
         }
-        group_start = group_end;
     }
 
     buf.push(RDB_OPCODE_EOF);
@@ -2167,65 +2193,109 @@ fn encode_rdb_internal(
         rdb_encode_string_with(&mut buf, code, compress);
     }
 
-    let is_sorted = entries.len() <= 1
-        || entries.windows(2).all(|pair| {
-            pair[0].db < pair[1].db || (pair[0].db == pair[1].db && pair[0].key <= pair[1].key)
-        });
+    let first_db = entries.first().map(|e| e.db).unwrap_or(0);
+    let is_single_db = entries.iter().all(|e| e.db == first_db);
+
+    let is_sorted = if is_single_db {
+        entries.windows(2).all(|pair| pair[0].key <= pair[1].key)
+    } else {
+        entries.len() <= 1
+            || entries.windows(2).all(|pair| {
+                pair[0].db < pair[1].db || (pair[0].db == pair[1].db && pair[0].key <= pair[1].key)
+            })
+    };
 
     if is_sorted {
-        let mut group_start = 0usize;
-        while group_start < entries.len() {
-            let db = entries[group_start].db;
-            let mut group_end = group_start;
-            let mut db_expires = 0usize;
-            while group_end < entries.len() && entries[group_end].db == db {
-                if entries[group_end].expire_ms.is_some() {
-                    db_expires += 1;
+        if is_single_db {
+            if !entries.is_empty() {
+                let db = first_db;
+                let db_expires = entries.iter().filter(|e| e.expire_ms.is_some()).count();
+                buf.push(RDB_OPCODE_SELECTDB);
+                rdb_encode_length(&mut buf, db);
+                buf.push(RDB_OPCODE_RESIZEDB);
+                rdb_encode_length(&mut buf, entries.len());
+                rdb_encode_length(&mut buf, db_expires);
+
+                for entry in entries {
+                    encode_rdb_entry(&mut buf, entry, &options, compress);
                 }
-                group_end += 1;
             }
+        } else {
+            let mut group_start = 0usize;
+            while group_start < entries.len() {
+                let db = entries[group_start].db;
+                let mut group_end = group_start;
+                let mut db_expires = 0usize;
+                while group_end < entries.len() && entries[group_end].db == db {
+                    if entries[group_end].expire_ms.is_some() {
+                        db_expires += 1;
+                    }
+                    group_end += 1;
+                }
 
-            buf.push(RDB_OPCODE_SELECTDB);
-            rdb_encode_length(&mut buf, db);
-            buf.push(RDB_OPCODE_RESIZEDB);
-            rdb_encode_length(&mut buf, group_end - group_start);
-            rdb_encode_length(&mut buf, db_expires);
+                buf.push(RDB_OPCODE_SELECTDB);
+                rdb_encode_length(&mut buf, db);
+                buf.push(RDB_OPCODE_RESIZEDB);
+                rdb_encode_length(&mut buf, group_end - group_start);
+                rdb_encode_length(&mut buf, db_expires);
 
-            for entry in &entries[group_start..group_end] {
-                encode_rdb_entry(&mut buf, entry, &options, compress);
+                for entry in &entries[group_start..group_end] {
+                    encode_rdb_entry(&mut buf, entry, &options, compress);
+                }
+                group_start = group_end;
             }
-            group_start = group_end;
         }
     } else {
         let mut sorted_entries: Vec<&RdbEntry> = entries.iter().collect();
-        sorted_entries.sort_unstable_by(|left, right| {
-            left.db
-                .cmp(&right.db)
-                .then_with(|| left.key.cmp(&right.key))
-        });
+        if is_single_db {
+            sorted_entries.sort_unstable_by(|left, right| left.key.cmp(&right.key));
 
-        let mut group_start = 0usize;
-        while group_start < sorted_entries.len() {
-            let db = sorted_entries[group_start].db;
-            let mut group_end = group_start;
-            let mut db_expires = 0usize;
-            while group_end < sorted_entries.len() && sorted_entries[group_end].db == db {
-                if sorted_entries[group_end].expire_ms.is_some() {
-                    db_expires += 1;
+            if !sorted_entries.is_empty() {
+                let db = first_db;
+                let db_expires = sorted_entries
+                    .iter()
+                    .filter(|e| e.expire_ms.is_some())
+                    .count();
+                buf.push(RDB_OPCODE_SELECTDB);
+                rdb_encode_length(&mut buf, db);
+                buf.push(RDB_OPCODE_RESIZEDB);
+                rdb_encode_length(&mut buf, sorted_entries.len());
+                rdb_encode_length(&mut buf, db_expires);
+
+                for &entry in &sorted_entries {
+                    encode_rdb_entry(&mut buf, entry, &options, compress);
                 }
-                group_end += 1;
             }
+        } else {
+            sorted_entries.sort_unstable_by(|left, right| {
+                left.db
+                    .cmp(&right.db)
+                    .then_with(|| left.key.cmp(&right.key))
+            });
 
-            buf.push(RDB_OPCODE_SELECTDB);
-            rdb_encode_length(&mut buf, db);
-            buf.push(RDB_OPCODE_RESIZEDB);
-            rdb_encode_length(&mut buf, group_end - group_start);
-            rdb_encode_length(&mut buf, db_expires);
+            let mut group_start = 0usize;
+            while group_start < sorted_entries.len() {
+                let db = sorted_entries[group_start].db;
+                let mut group_end = group_start;
+                let mut db_expires = 0usize;
+                while group_end < sorted_entries.len() && sorted_entries[group_end].db == db {
+                    if sorted_entries[group_end].expire_ms.is_some() {
+                        db_expires += 1;
+                    }
+                    group_end += 1;
+                }
 
-            for &entry in &sorted_entries[group_start..group_end] {
-                encode_rdb_entry(&mut buf, entry, &options, compress);
+                buf.push(RDB_OPCODE_SELECTDB);
+                rdb_encode_length(&mut buf, db);
+                buf.push(RDB_OPCODE_RESIZEDB);
+                rdb_encode_length(&mut buf, group_end - group_start);
+                rdb_encode_length(&mut buf, db_expires);
+
+                for &entry in &sorted_entries[group_start..group_end] {
+                    encode_rdb_entry(&mut buf, entry, &options, compress);
+                }
+                group_start = group_end;
             }
-            group_start = group_end;
         }
     }
 

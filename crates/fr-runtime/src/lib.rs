@@ -52334,9 +52334,13 @@ fn try_encode_string_only_rdb_snapshot(
     use fr_store::Value;
 
     let mut entries = Vec::with_capacity(store.len());
+    let mut has_multiple_dbs = false;
     let all_strings = store.try_for_each_entry_ref(|key, value, expires_at_ms| {
         if let Value::String(value) = value {
             let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
+            if db != 0 {
+                has_multiple_dbs = true;
+            }
             entries.push(RdbStringEntryRef {
                 db,
                 key: logical_key,
@@ -52353,9 +52357,13 @@ fn try_encode_string_only_rdb_snapshot(
         return None;
     }
 
-    entries.sort_unstable_by(|left, right| {
-        left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key))
-    });
+    if has_multiple_dbs {
+        entries.sort_unstable_by(|left, right| {
+            left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key))
+        });
+    } else {
+        entries.sort_unstable_by(|left, right| left.key.cmp(right.key));
+    }
     Some(fr_persist::encode_rdb_string_entries_with_functions(
         &entries, aux, functions,
     ))

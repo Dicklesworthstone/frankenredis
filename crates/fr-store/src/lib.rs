@@ -899,18 +899,18 @@ fn append_group_consumer_aof_commands(
         match by_consumer.get(consumer.as_slice()) {
             Some(entries) if !entries.is_empty() => {
                 for &((pending_ms, pending_seq), last_delivered_ms, deliveries) in entries {
-                    let pending_id = format!("{pending_ms}-{pending_seq}");
+                    let pending_id = format_aof_stream_id(pending_ms, pending_seq);
                     commands.push(vec![
                         b"XCLAIM".to_vec(),
                         logical_key.to_vec(),
                         group_name.to_vec(),
                         consumer.clone(),
                         b"0".to_vec(),
-                        pending_id.into_bytes(),
+                        pending_id,
                         b"TIME".to_vec(),
-                        last_delivered_ms.to_string().into_bytes(),
+                        format_aof_u64(last_delivered_ms),
                         b"RETRYCOUNT".to_vec(),
-                        deliveries.to_string().into_bytes(),
+                        format_aof_u64(deliveries),
                         b"JUSTID".to_vec(),
                         b"FORCE".to_vec(),
                     ]);
@@ -7613,14 +7613,14 @@ pub fn encode_db_key(db: usize, key: &[u8]) -> Vec<u8> {
 
 #[must_use]
 pub fn decode_db_key(key: &[u8]) -> Option<(usize, &[u8])> {
-    let db_len = std::mem::size_of::<u64>();
-    let prefix_len = DB_NAMESPACE_PREFIX.len() + db_len;
-    if key.len() < prefix_len || !key.starts_with(DB_NAMESPACE_PREFIX) {
+    const DB_LEN: usize = std::mem::size_of::<u64>();
+    const PREFIX_LEN: usize = DB_NAMESPACE_PREFIX.len() + DB_LEN;
+    if key.len() < PREFIX_LEN || key[0] != b'\0' || !key.starts_with(DB_NAMESPACE_PREFIX) {
         return None;
     }
-    let db_bytes: [u8; 8] = key[DB_NAMESPACE_PREFIX.len()..prefix_len].try_into().ok()?;
+    let db_bytes: [u8; 8] = key[DB_NAMESPACE_PREFIX.len()..PREFIX_LEN].try_into().ok()?;
     let db = usize::try_from(u64::from_be_bytes(db_bytes)).ok()?;
-    Some((db, &key[prefix_len..]))
+    Some((db, &key[PREFIX_LEN..]))
 }
 
 #[must_use]
@@ -38423,12 +38423,14 @@ impl Store {
 
         let mut commands = Vec::with_capacity(self.entries.len());
 
-        for library in self.function_list(None) {
-            commands.push(vec![
-                b"FUNCTION".to_vec(),
-                b"LOAD".to_vec(),
-                library.code.clone(),
-            ]);
+        if self.has_function_libraries() {
+            for library in self.function_list(None) {
+                commands.push(vec![
+                    b"FUNCTION".to_vec(),
+                    b"LOAD".to_vec(),
+                    library.code.clone(),
+                ]);
+            }
         }
 
         // Snapshot the remaining keys and values (sorted for deterministic output).
@@ -38441,11 +38443,15 @@ impl Store {
         }
 
         let no_expires = self.expires_count == 0;
+        let mut has_multiple_dbs = false;
         let mut keys: Vec<AofEntry<'_>> = self
             .entries
             .iter()
             .map(|(physical, entry)| {
                 let (db, logical) = decode_db_key(physical).unwrap_or((0, physical));
+                if db != 0 {
+                    has_multiple_dbs = true;
+                }
                 let exp_ms = if no_expires {
                     None
                 } else {
@@ -38460,11 +38466,15 @@ impl Store {
                 }
             })
             .collect();
-        keys.sort_unstable_by(|left, right| {
-            left.db
-                .cmp(&right.db)
-                .then_with(|| left.logical_key.cmp(right.logical_key))
-        });
+        if has_multiple_dbs {
+            keys.sort_unstable_by(|left, right| {
+                left.db
+                    .cmp(&right.db)
+                    .then_with(|| left.logical_key.cmp(right.logical_key))
+            });
+        } else {
+            keys.sort_unstable_by(|left, right| left.logical_key.cmp(right.logical_key));
+        }
 
         let mut current_db = None;
 
@@ -38477,7 +38487,7 @@ impl Store {
         } in keys
         {
             if current_db != Some(db) {
-                commands.push(vec![b"SELECT".to_vec(), db.to_string().into_bytes()]);
+                commands.push(vec![b"SELECT".to_vec(), format_aof_u64(db as u64)]);
                 current_db = Some(db);
             }
 
@@ -38489,7 +38499,7 @@ impl Store {
                     commands.push(vec![
                         b"SET".to_vec(),
                         logical_key.to_vec(),
-                        value.to_string().into_bytes(),
+                        format_aof_i64(*value),
                     ]);
                 }
                 Value::Hash(h) => {
@@ -38519,7 +38529,7 @@ impl Store {
                                 commands.push(vec![
                                     b"HPEXPIREAT".to_vec(),
                                     logical_key.to_vec(),
-                                    expires_at_ms.to_string().into_bytes(),
+                                    format_aof_u64(expires_at_ms),
                                     b"FIELDS".to_vec(),
                                     b"1".to_vec(),
                                     field.to_vec(),
@@ -38597,11 +38607,11 @@ impl Store {
                     } else {
                         // Each stream entry becomes a separate XADD command.
                         for ((ms, seq), fields) in entries.iter() {
-                            let id = format!("{ms}-{seq}");
+                            let id = format_aof_stream_id(*ms, *seq);
                             let mut argv = Vec::with_capacity(3 + fields.len() * 2);
                             argv.push(b"XADD".to_vec());
                             argv.push(logical_key.to_vec());
-                            argv.push(id.into_bytes());
+                            argv.push(id);
                             for (fname, fval) in fields.iter() {
                                 argv.push(fname.to_vec());
                                 argv.push(fval.to_vec());
@@ -38628,11 +38638,11 @@ impl Store {
                     commands.push(vec![
                         b"XSETID".to_vec(),
                         logical_key.to_vec(),
-                        format!("{ms}-{seq}").into_bytes(),
+                        format_aof_stream_id(ms, seq),
                         b"ENTRIESADDED".to_vec(),
-                        entries_added.to_string().into_bytes(),
+                        format_aof_u64(entries_added),
                         b"MAXDELETEDID".to_vec(),
-                        format!("{deleted_ms}-{deleted_seq}").into_bytes(),
+                        format_aof_stream_id(deleted_ms, deleted_seq),
                     ]);
 
                     // Emit XGROUP CREATE for each consumer group.
@@ -38642,17 +38652,16 @@ impl Store {
                         for group_name in group_names {
                             let group = &groups[group_name];
                             let (ms, seq) = group.last_delivered_id;
-                            let id = format!("{ms}-{seq}");
-                            let entries_read_arg = group.entries_read.map_or_else(
-                                || b"-1".to_vec(),
-                                |entries_read| entries_read.to_string().into_bytes(),
-                            );
+                            let id = format_aof_stream_id(ms, seq);
+                            let entries_read_arg = group
+                                .entries_read
+                                .map_or_else(|| b"-1".to_vec(), format_aof_u64);
                             let create = vec![
                                 b"XGROUP".to_vec(),
                                 b"CREATE".to_vec(),
                                 logical_key.to_vec(),
                                 group_name.clone(),
-                                id.into_bytes(),
+                                id,
                                 b"ENTRIESREAD".to_vec(),
                                 entries_read_arg,
                             ];
@@ -38676,13 +38685,54 @@ impl Store {
                 commands.push(vec![
                     b"PEXPIREAT".to_vec(),
                     logical_key.to_vec(),
-                    exp_ms.to_string().into_bytes(),
+                    format_aof_u64(exp_ms),
                 ]);
             }
         }
 
         commands
     }
+}
+
+#[inline]
+fn format_aof_u64(val: u64) -> Vec<u8> {
+    let mut buf = [0u8; 20];
+    let pos = fr_protocol::write_u64_digits(&mut buf, 20, val);
+    buf[pos..].to_vec()
+}
+
+#[inline]
+fn format_aof_i64(val: i64) -> Vec<u8> {
+    if (0..10).contains(&val) {
+        return vec![b'0' + val as u8];
+    }
+    let (neg, uval) = if val < 0 {
+        (true, (val as i128).unsigned_abs() as u64)
+    } else {
+        (false, val as u64)
+    };
+    let mut buf = [0u8; 20];
+    let mut pos = fr_protocol::write_u64_digits(&mut buf, 20, uval);
+    if neg {
+        pos -= 1;
+        buf[pos] = b'-';
+    }
+    buf[pos..].to_vec()
+}
+
+#[inline]
+fn format_aof_stream_id(ms: u64, seq: u64) -> Vec<u8> {
+    let mut digits_ms = [0u8; 20];
+    let p_ms = fr_protocol::write_u64_digits(&mut digits_ms, 20, ms);
+    let ms_bytes = &digits_ms[p_ms..];
+    let mut digits_seq = [0u8; 20];
+    let p_seq = fr_protocol::write_u64_digits(&mut digits_seq, 20, seq);
+    let seq_bytes = &digits_seq[p_seq..];
+    let mut res = Vec::with_capacity(ms_bytes.len() + 1 + seq_bytes.len());
+    res.extend_from_slice(ms_bytes);
+    res.push(b'-');
+    res.extend_from_slice(seq_bytes);
+    res
 }
 
 /// CRC16-CCITT (poly 0x1021) helper retained for older internal fixtures.
