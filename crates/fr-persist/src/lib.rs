@@ -373,8 +373,15 @@ pub fn write_aof_manifest_dir(
     let base_file = format!("{basename}.{seq}.base.rdb");
     let incr_file = format!("{basename}.{seq}.incr.aof");
 
-    write_rdb_bytes_atomically(&dir.join(&base_file), base_rdb)?;
-    write_rdb_bytes_atomically(&dir.join(&incr_file), &encode_aof_stream(incr_records))?;
+    write_file_atomically_without_dir_sync(&dir.join(&base_file), base_rdb)?;
+    let empty_slice: &[u8] = &[];
+    let incr_bytes = if incr_records.is_empty() {
+        empty_slice
+    } else {
+        &encode_aof_stream(incr_records)
+    };
+    write_file_atomically_without_dir_sync(&dir.join(&incr_file), incr_bytes)?;
+    sync_parent_dir(dir)?;
 
     let manifest = AofManifest {
         base: Some(AofManifestEntry {
@@ -697,18 +704,22 @@ fn push_manifest_entry(out: &mut String, entry: &AofManifestEntry) {
     out.push_str("file ");
     out.push_str(&format_manifest_file_name(&entry.file_name));
     out.push_str(" seq ");
-    out.push_str(&entry.file_seq.to_string());
+    let mut buf = [0u8; 20];
+    let pos = fr_protocol::write_u64_digits(&mut buf, 20, entry.file_seq);
+    if let Ok(s) = std::str::from_utf8(&buf[pos..]) {
+        out.push_str(s);
+    }
     out.push_str(" type ");
     out.push(entry.file_type.as_manifest_char());
     out.push('\n');
 }
 
-fn format_manifest_file_name(file_name: &str) -> String {
+fn format_manifest_file_name(file_name: &str) -> std::borrow::Cow<'_, str> {
     if file_name
         .bytes()
         .all(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'"' | b'\'' | b'\\'))
     {
-        return file_name.to_string();
+        return std::borrow::Cow::Borrowed(file_name);
     }
 
     let mut out = String::from("\"");
@@ -723,7 +734,7 @@ fn format_manifest_file_name(file_name: &str) -> String {
         }
     }
     out.push('"');
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 impl AofRecord {
@@ -6755,14 +6766,20 @@ pub fn write_rdb_bytes(path: &Path, bytes: &[u8]) -> Result<(), PersistError> {
     write_rdb_bytes_atomically(path, bytes)
 }
 
-/// Durably write RDB bytes to `path` via a temp file + rename + parent fsync.
-fn write_rdb_bytes_atomically(path: &Path, encoded: &[u8]) -> Result<(), PersistError> {
+/// Durably write bytes to `path` via a temp file + rename, WITHOUT syncing the parent directory.
+fn write_file_atomically_without_dir_sync(path: &Path, encoded: &[u8]) -> Result<(), PersistError> {
     let tmp_path = path.with_extension("rdb.tmp");
     let mut file = std::fs::File::create(&tmp_path)?;
     file.write_all(encoded)?;
     file.sync_all()?;
     drop(file);
     std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+/// Durably write RDB bytes to `path` via a temp file + rename + parent fsync.
+fn write_rdb_bytes_atomically(path: &Path, encoded: &[u8]) -> Result<(), PersistError> {
+    write_file_atomically_without_dir_sync(path, encoded)?;
     sync_parent_dir(path)?;
     Ok(())
 }

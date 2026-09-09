@@ -49061,13 +49061,20 @@ impl Runtime {
         // the plain RDB SAVE path, where no oracle size comparison applies.
         // aof-base=1 marks this RDB preamble as an AOF base (upstream
         // rewriteAppendOnlyFile sets it for the preamble).
-        let ctime_secs = (now_ms / 1000).to_string();
-        let used_mem_bytes = self.partition_used_memory().to_string();
+        let mut ctime_buf = [0u8; 20];
+        let ctime_pos = fr_protocol::write_u64_digits(&mut ctime_buf, 20, now_ms / 1000);
+        let ctime_str = std::str::from_utf8(&ctime_buf[ctime_pos..]).unwrap_or("0");
+
+        let mut mem_buf = [0u8; 20];
+        let mem_pos =
+            fr_protocol::write_u64_digits(&mut mem_buf, 20, self.partition_used_memory() as u64);
+        let mem_str = std::str::from_utf8(&mem_buf[mem_pos..]).unwrap_or("0");
+
         let aux = [
             ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
             ("redis-bits", "64"),
-            ("ctime", ctime_secs.as_str()),
-            ("used-mem", used_mem_bytes.as_str()),
+            ("ctime", ctime_str),
+            ("used-mem", mem_str),
             ("aof-base", "1"),
         ];
         let base_rdb = render_rdb_snapshot_bytes(&mut self.server.store, now_ms, &aux);
