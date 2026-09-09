@@ -29,7 +29,7 @@ use packed_set::{
 use fr_expire::evaluate_expiry;
 // The d2string listpack-score decision is shared with fr-persist's RDB-save encoder.
 // Keeping one copy in fr-protocol is what stops the two from drifting apart again.
-use fr_protocol::{ZsetScoreListpackEntry, zset_score_listpack_entry};
+use fr_protocol::{ZsetScoreListpackEntry, push_redis_double_ascii, zset_score_listpack_entry};
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -37468,6 +37468,7 @@ impl Store {
                     // (frankenredis perf: zset DUMP direct-emit, code-first batch-test pending)
                     let mut encoded = Vec::with_capacity(zs.len().saturating_mul(48));
                     let mut entry_count = 0usize;
+                    let mut score_scratch = Vec::with_capacity(32);
                     for (member, score) in zs.iter_asc() {
                         encode_listpack_entry(&mut encoded, member);
                         // Decide the score entry from the f64 itself rather than formatting
@@ -37481,16 +37482,14 @@ impl Store {
                                 encode_listpack_integer_entry(&mut encoded, int_score);
                             }
                             ZsetScoreListpackEntry::Str => {
-                                encode_listpack_string_entry(
-                                    &mut encoded,
-                                    redis_score_to_string(score).as_bytes(),
-                                );
+                                score_scratch.clear();
+                                push_redis_double_ascii(&mut score_scratch, score);
+                                encode_listpack_string_entry(&mut encoded, &score_scratch);
                             }
                             ZsetScoreListpackEntry::Reparse => {
-                                encode_listpack_entry(
-                                    &mut encoded,
-                                    redis_score_to_string(score).as_bytes(),
-                                );
+                                score_scratch.clear();
+                                push_redis_double_ascii(&mut score_scratch, score);
+                                encode_listpack_entry(&mut encoded, &score_scratch);
                             }
                         }
                         entry_count += 2;
@@ -38560,16 +38559,29 @@ impl Store {
                 Value::Set(s) => {
                     if !s.is_empty() {
                         // Sort members for deterministic output without intermediate clone.
-                        let mut members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
-                        members.sort_unstable();
-                        for chunk in members.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
-                            let mut argv = Vec::with_capacity(2 + chunk.len());
-                            argv.push(b"SADD".to_vec());
-                            argv.push(logical_key.to_vec());
-                            for member in chunk {
-                                argv.push(member.as_ref().to_vec());
+                        if let Some(mut members) = s.borrowed_generic_members() {
+                            members.sort_unstable();
+                            for chunk in members.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
+                                let mut argv = Vec::with_capacity(2 + chunk.len());
+                                argv.push(b"SADD".to_vec());
+                                argv.push(logical_key.to_vec());
+                                for member in chunk {
+                                    argv.push((*member).to_vec());
+                                }
+                                commands.push(argv);
                             }
-                            commands.push(argv);
+                        } else {
+                            let mut members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
+                            members.sort_unstable();
+                            for chunk in members.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
+                                let mut argv = Vec::with_capacity(2 + chunk.len());
+                                argv.push(b"SADD".to_vec());
+                                argv.push(logical_key.to_vec());
+                                for member in chunk {
+                                    argv.push(member.as_ref().to_vec());
+                                }
+                                commands.push(argv);
+                            }
                         }
                     }
                 }
@@ -38587,7 +38599,9 @@ impl Store {
                             argv.push(b"ZADD".to_vec());
                             argv.push(logical_key.to_vec());
                             for (member, score) in chunk {
-                                argv.push(redis_score_to_string(*score).into_bytes());
+                                let mut score_bytes = Vec::with_capacity(24);
+                                push_redis_double_ascii(&mut score_bytes, *score);
+                                argv.push(score_bytes);
                                 argv.push((*member).to_vec());
                             }
                             commands.push(argv);
@@ -38701,6 +38715,9 @@ impl Store {
 
 #[inline]
 fn format_aof_u64(val: u64) -> Vec<u8> {
+    if val < 10 {
+        return vec![b'0' + val as u8];
+    }
     let mut buf = [0u8; 20];
     let pos = fr_protocol::write_u64_digits(&mut buf, 20, val);
     buf[pos..].to_vec()
