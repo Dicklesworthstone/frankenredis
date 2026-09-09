@@ -52454,6 +52454,7 @@ fn store_to_rdb_entries_borrowed<'a>(
     let list_max_listpack_size = store.list_max_listpack_size;
     let store_ref = store;
     let mut entries = Vec::with_capacity(store.len());
+    let mut has_multiple_dbs = false;
     store_ref.for_each_snapshot_entry_ref(|item| {
         let key = item.key;
         let value = item.value;
@@ -52461,6 +52462,9 @@ fn store_to_rdb_entries_borrowed<'a>(
         let hash_is_hashtable = item.hash_is_hashtable;
         let set_is_hashtable = item.set_is_hashtable;
         let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
+        if db != 0 {
+            has_multiple_dbs = true;
+        }
         let rdb_value = match value {
             Value::String(v) => fr_persist::RdbValueRef::String(v.as_slice()),
             Value::Integer(v) => fr_persist::RdbValueRef::Integer(*v),
@@ -52851,6 +52855,13 @@ fn store_to_rdb_entries_borrowed<'a>(
             expire_ms: expires_at_ms,
         });
     });
+    if has_multiple_dbs {
+        entries.sort_unstable_by(|left, right| {
+            left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key))
+        });
+    } else {
+        entries.sort_unstable_by(|left, right| left.key.cmp(right.key));
+    }
     entries
 }
 
