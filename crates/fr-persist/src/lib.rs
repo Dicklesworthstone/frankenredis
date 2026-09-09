@@ -2862,6 +2862,229 @@ fn encode_rdb_entry(
     }
 }
 
+fn encode_rdb_entry_borrowed(
+    buf: &mut Vec<u8>,
+    entry: &RdbEntryRef<'_>,
+    options: &RdbEncodeOptions,
+    compress: bool,
+) {
+    // Expiry
+    if let Some(ms) = entry.expire_ms {
+        buf.push(RDB_OPCODE_EXPIRETIME_MS);
+        buf.extend_from_slice(&ms.to_le_bytes());
+    }
+
+    // Type + key + value
+    match &entry.value {
+        RdbValueRef::String(v) => {
+            buf.push(RDB_TYPE_STRING);
+            rdb_encode_string_with(buf, entry.key, compress);
+            rdb_encode_string_with(buf, v, compress);
+        }
+        RdbValueRef::Integer(val) => {
+            let mut digits = [0u8; 20];
+            let (neg, uval) = if *val < 0 {
+                (true, (*val as i128).unsigned_abs() as u64)
+            } else {
+                (false, *val as u64)
+            };
+            let mut pos = fr_protocol::write_u64_digits(&mut digits, 20, uval);
+            if neg {
+                pos -= 1;
+                digits[pos] = b'-';
+            }
+            buf.push(RDB_TYPE_STRING);
+            rdb_encode_string_with(buf, entry.key, compress);
+            rdb_encode_string_with(buf, &digits[pos..], compress);
+        }
+        RdbValueRef::List(items) => {
+            if let Some(thresholds) = options.compact.as_ref()
+                && let Some(payload) = encode_compact_list_quicklist2(items, thresholds)
+            {
+                buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+                rdb_encode_string_with(buf, entry.key, compress);
+                buf.extend_from_slice(&payload);
+            } else {
+                buf.push(RDB_TYPE_LIST);
+                rdb_encode_string_with(buf, entry.key, compress);
+                rdb_encode_length(buf, items.len());
+                for item in items {
+                    rdb_encode_string_with(buf, item, compress);
+                }
+            }
+        }
+        RdbValueRef::ListQuicklist2Packed(nodes) => {
+            let payload = encode_quicklist2_packed_payload(nodes);
+            buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+            rdb_encode_string_with(buf, entry.key, compress);
+            buf.extend_from_slice(&payload);
+        }
+        RdbValueRef::ListQuicklist2Retained { raw, .. } => {
+            buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+            rdb_encode_string_with(buf, entry.key, compress);
+            buf.extend_from_slice(raw.as_ref());
+        }
+        RdbValueRef::SetListpack(blob) => {
+            buf.push(RDB_TYPE_SET_LISTPACK);
+            rdb_encode_string_with(buf, entry.key, compress);
+            rdb_encode_string_with(buf, blob, compress);
+        }
+        RdbValueRef::SetListpackRetained { raw, .. } => {
+            buf.push(RDB_TYPE_SET_LISTPACK);
+            rdb_encode_string_with(buf, entry.key, compress);
+            buf.extend_from_slice(raw.as_ref());
+        }
+        RdbValueRef::Set(members) => {
+            if let Some(thresholds) = options.compact.as_ref() {
+                if let Some(payload) = encode_compact_set_intset(members, thresholds) {
+                    buf.push(RDB_TYPE_SET_INTSET);
+                    rdb_encode_string_with(buf, entry.key, compress);
+                    buf.extend_from_slice(&payload);
+                } else if let Some(payload) =
+                    encode_compact_set_listpack(members, thresholds, compress)
+                {
+                    buf.push(RDB_TYPE_SET_LISTPACK);
+                    rdb_encode_string_with(buf, entry.key, compress);
+                    buf.extend_from_slice(&payload);
+                } else {
+                    buf.push(RDB_TYPE_SET);
+                    rdb_encode_string_with(buf, entry.key, compress);
+                    rdb_encode_length(buf, members.len());
+                    for member in members {
+                        rdb_encode_string_with(buf, member, compress);
+                    }
+                }
+            } else {
+                buf.push(RDB_TYPE_SET);
+                rdb_encode_string_with(buf, entry.key, compress);
+                rdb_encode_length(buf, members.len());
+                for member in members {
+                    rdb_encode_string_with(buf, member, compress);
+                }
+            }
+        }
+        RdbValueRef::IntSet(members) => {
+            let width = intset_width(members);
+            if let Some(blob) = encode_sorted_intset_blob(members, width) {
+                buf.push(RDB_TYPE_SET_INTSET);
+                rdb_encode_string_with(buf, entry.key, compress);
+                rdb_encode_string_with(buf, &blob, compress);
+            } else {
+                buf.push(RDB_TYPE_SET);
+                rdb_encode_string_with(buf, entry.key, compress);
+                rdb_encode_length(buf, members.len());
+                for member in members {
+                    rdb_encode_string_with(buf, &decimal_i64_bytes(*member), compress);
+                }
+            }
+        }
+        RdbValueRef::SetHashtable(members) => {
+            buf.push(RDB_TYPE_SET);
+            rdb_encode_string_with(buf, entry.key, compress);
+            rdb_encode_length(buf, members.len());
+            for member in members {
+                rdb_encode_string_with(buf, member, compress);
+            }
+        }
+        RdbValueRef::Hash(fields) => {
+            if let Some(thresholds) = options.compact.as_ref()
+                && let Some(payload) = encode_compact_hash_listpack(fields, thresholds, compress)
+            {
+                buf.push(RDB_TYPE_HASH_LISTPACK);
+                rdb_encode_string_with(buf, entry.key, compress);
+                buf.extend_from_slice(&payload);
+            } else {
+                buf.push(RDB_TYPE_HASH);
+                rdb_encode_string_with(buf, entry.key, compress);
+                rdb_encode_length(buf, fields.len());
+                for (field, value) in fields {
+                    rdb_encode_string_with(buf, field, compress);
+                    rdb_encode_string_with(buf, value, compress);
+                }
+            }
+        }
+        RdbValueRef::HashListpack(blob) => {
+            buf.push(RDB_TYPE_HASH_LISTPACK);
+            rdb_encode_string_with(buf, entry.key, compress);
+            rdb_encode_string_with(buf, blob, compress);
+        }
+        RdbValueRef::HashListpackRetained { raw, .. } => {
+            buf.push(RDB_TYPE_HASH_LISTPACK);
+            rdb_encode_string_with(buf, entry.key, compress);
+            buf.extend_from_slice(raw.as_ref());
+        }
+        RdbValueRef::HashWithTtls(fields) => {
+            buf.push(RDB_TYPE_HASH_WITH_TTLS);
+            rdb_encode_string_with(buf, entry.key, compress);
+            rdb_encode_length(buf, fields.len());
+            for (field, value, expires_ms) in fields {
+                rdb_encode_string_with(buf, field, compress);
+                rdb_encode_string_with(buf, value, compress);
+                let encoded = expires_ms.unwrap_or(u64::MAX);
+                buf.extend_from_slice(&encoded.to_le_bytes());
+            }
+        }
+        RdbValueRef::ZsetListpack(blob) => {
+            buf.push(RDB_TYPE_ZSET_LISTPACK);
+            rdb_encode_string_with(buf, entry.key, compress);
+            rdb_encode_string_with(buf, blob, compress);
+        }
+        RdbValueRef::ZsetListpackRetained { raw, .. } => {
+            buf.push(RDB_TYPE_ZSET_LISTPACK);
+            rdb_encode_string_with(buf, entry.key, compress);
+            buf.extend_from_slice(raw.as_ref());
+        }
+        RdbValueRef::SortedSet(members) => {
+            if let Some(thresholds) = options.compact.as_ref()
+                && let Some(payload) = encode_compact_zset_listpack(members, thresholds, compress)
+            {
+                buf.push(RDB_TYPE_ZSET_LISTPACK);
+                rdb_encode_string_with(buf, entry.key, compress);
+                buf.extend_from_slice(&payload);
+            } else {
+                buf.push(RDB_TYPE_ZSET_2);
+                rdb_encode_string_with(buf, entry.key, compress);
+                rdb_encode_length(buf, members.len());
+                for (member, score) in members {
+                    rdb_encode_string_with(buf, member, compress);
+                    buf.extend_from_slice(&score.to_le_bytes());
+                }
+            }
+        }
+        RdbValueRef::StreamListpacks3(blob) => {
+            buf.push(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3);
+            rdb_encode_string_with(buf, entry.key, compress);
+            buf.extend_from_slice(blob);
+        }
+        RdbValueRef::StreamSkeleton(skeleton) => {
+            buf.push(skeleton.upstream_type_byte());
+            rdb_encode_string_with(buf, entry.key, compress);
+            buf.extend_from_slice(skeleton.upstream_payload());
+        }
+        RdbValueRef::Stream(
+            stream_entries,
+            watermark,
+            groups,
+            metadata,
+            entries_added,
+            max_deleted,
+        ) => {
+            encode_stream_rdb_value(
+                buf,
+                entry.key,
+                StreamRdbValueParts {
+                    entries: stream_entries,
+                    watermark: *watermark,
+                    groups,
+                    metadata,
+                    entries_added: *entries_added,
+                    max_deleted: *max_deleted,
+                },
+            );
+        }
+    }
+}
+
 // ── Compact-shape selection (br-frankenredis-91kt) ─────────────────
 //
 // Each helper below returns `Some(payload)` if the input fits the
