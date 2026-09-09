@@ -1142,6 +1142,19 @@ pub fn read_aof_file(path: &Path) -> Result<Vec<AofRecord>, PersistError> {
 /// Redis RDB file format version we emit.
 const RDB_VERSION: u32 = 11;
 
+/// RDB file header bytes: "REDIS" magic followed by 4-digit version (e.g. "REDIS0011").
+const RDB_MAGIC_HEADER: [u8; 9] = [
+    b'R',
+    b'E',
+    b'D',
+    b'I',
+    b'S',
+    b'0' + ((RDB_VERSION / 1000) % 10) as u8,
+    b'0' + ((RDB_VERSION / 100) % 10) as u8,
+    b'0' + ((RDB_VERSION / 10) % 10) as u8,
+    b'0' + (RDB_VERSION % 10) as u8,
+];
+
 /// RDB opcodes.
 const RDB_OPCODE_AUX: u8 = 0xFA;
 const RDB_OPCODE_SELECTDB: u8 = 0xFE;
@@ -1634,6 +1647,7 @@ pub struct DecodedStreamRest {
 }
 
 /// Encode an RDB length using Redis's variable-length encoding.
+#[inline]
 fn rdb_encode_length(buf: &mut Vec<u8>, len: usize) {
     if len < 64 {
         buf.push(len as u8);
@@ -1652,6 +1666,7 @@ fn rdb_encode_length(buf: &mut Vec<u8>, len: usize) {
 /// Number of bytes `rdb_encode_length` would emit for the given length.
 /// Used by `rdb_encode_string` to decide whether the LZF wire form is
 /// strictly smaller than the raw form. (br-frankenredis-1uin)
+#[inline]
 fn rdb_length_size(len: usize) -> usize {
     if len < 64 {
         1
@@ -1703,13 +1718,24 @@ pub fn rdb_string_is_lzf_framed(raw: &[u8]) -> bool {
     raw.first() == Some(&0xC3)
 }
 
+#[inline]
 fn rdb_encode_string(buf: &mut Vec<u8>, data: &[u8]) {
+    // Fast path: strings <= 20 bytes never compress in upstream Redis, so skip the atomic
+    // load of RDB_COMPRESSION entirely.
+    if let Ok(len) = u8::try_from(data.len())
+        && len <= 20
+    {
+        buf.push(len);
+        buf.extend_from_slice(data);
+        return;
+    }
     rdb_encode_string_with(buf, data, rdb_compression_enabled());
 }
 
 /// The flag is a parameter here so tests can exercise BOTH arms without mutating the process
 /// global — `feedback_shared_oracle_config_pollution` is on record about a test that flips a
 /// shared setting racing every other test in the binary.
+#[inline]
 fn rdb_encode_string_with(buf: &mut Vec<u8>, data: &[u8], compress: bool) {
     // Upstream skips LZF below this threshold because even a run of
     // repeated bytes cannot compress enough to beat the wire overhead.
@@ -2041,11 +2067,10 @@ pub fn encode_rdb_string_entries_with_functions(
         pair[0].db < pair[1].db || (pair[0].db == pair[1].db && pair[0].key <= pair[1].key)
     }));
 
-    let mut buf = Vec::new();
+    let initial_cap = 128usize.saturating_add(entries.len().saturating_mul(16));
+    let mut buf = Vec::with_capacity(initial_cap);
 
-    buf.extend_from_slice(b"REDIS");
-    let version_str = format!("{RDB_VERSION:04}");
-    buf.extend_from_slice(version_str.as_bytes());
+    buf.extend_from_slice(&RDB_MAGIC_HEADER);
 
     for (key, value) in aux {
         encode_rdb_aux_field(&mut buf, key, value);
@@ -2055,6 +2080,8 @@ pub fn encode_rdb_string_entries_with_functions(
         buf.push(RDB_OPCODE_FUNCTION2);
         rdb_encode_string(&mut buf, code);
     }
+
+    let compress = rdb_compression_enabled();
 
     let mut group_start = 0usize;
     while group_start < entries.len() {
@@ -2081,8 +2108,8 @@ pub fn encode_rdb_string_entries_with_functions(
             }
 
             buf.push(RDB_TYPE_STRING);
-            rdb_encode_string(&mut buf, entry.key);
-            rdb_encode_string(&mut buf, entry.value);
+            rdb_encode_string_with(&mut buf, entry.key, compress);
+            rdb_encode_string_with(&mut buf, entry.value, compress);
         }
         group_start = group_end;
     }
@@ -2120,12 +2147,11 @@ fn encode_rdb_internal(
     functions: &[&[u8]],
     options: RdbEncodeOptions,
 ) -> Vec<u8> {
-    let mut buf = Vec::new();
+    let initial_cap = 128usize.saturating_add(entries.len().saturating_mul(16));
+    let mut buf = Vec::with_capacity(initial_cap);
 
     // Magic + version
-    buf.extend_from_slice(b"REDIS");
-    let version_str = format!("{RDB_VERSION:04}");
-    buf.extend_from_slice(version_str.as_bytes());
+    buf.extend_from_slice(&RDB_MAGIC_HEADER);
 
     // Auxiliary fields (metadata like redis-ver, ctime, etc.)
     for (key, value) in aux {
