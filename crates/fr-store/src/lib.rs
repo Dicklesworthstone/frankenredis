@@ -15905,20 +15905,22 @@ impl Store {
             let expires_at_ms = self.expiry_ms(key.as_slice());
             // Harvest per-field hash TTLs before removing the entry —
             // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
-            // (frankenredis-sdmwz)
-            let is_hash = self
-                .entries
-                .get(key.as_slice())
-                .is_some_and(|e| matches!(e.value, Value::Hash(_)));
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash
-            {
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
                 Vec::new()
             } else {
-                self.hash_field_expires
-                    .range((key.clone(), Vec::new())..)
-                    .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
-                    .map(|((_, f), v)| (f.clone(), *v))
-                    .collect()
+                let is_hash = self
+                    .entries
+                    .get(key.as_slice())
+                    .is_some_and(|e| matches!(e.value, Value::Hash(_)));
+                if is_hash {
+                    self.hash_field_expires
+                        .range((key.clone(), Vec::new())..)
+                        .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
+                        .map(|((_, f), v)| (f.clone(), *v))
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             };
             let Some(entry) = self.internal_entries_remove(&key) else {
                 continue;
@@ -15959,19 +15961,22 @@ impl Store {
                 self.stream_max_deleted_ids.remove(key.as_slice())
             };
             let expires_at_ms = self.expiry_ms(key.as_slice());
-            let is_hash = self
-                .entries
-                .get(key.as_slice())
-                .is_some_and(|e| matches!(e.value, Value::Hash(_)));
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash
-            {
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
                 Vec::new()
             } else {
-                self.hash_field_expires
-                    .range((key.clone(), Vec::new())..)
-                    .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
-                    .map(|((_, f), v)| (f.clone(), *v))
-                    .collect()
+                let is_hash = self
+                    .entries
+                    .get(key.as_slice())
+                    .is_some_and(|e| matches!(e.value, Value::Hash(_)));
+                if is_hash {
+                    self.hash_field_expires
+                        .range((key.clone(), Vec::new())..)
+                        .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
+                        .map(|((_, f), v)| (f.clone(), *v))
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             };
             let Some(entry) = self.internal_entries_remove(&key) else {
                 continue;
@@ -16196,19 +16201,22 @@ impl Store {
             let expires_at_ms = self.expiry_ms(key.as_slice());
             // (frankenredis-bmyx5) Harvest per-field hash TTLs before removing the entry —
             // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
-            let is_hash = self
-                .entries
-                .get(key.as_slice())
-                .is_some_and(|e| matches!(e.value, Value::Hash(_)));
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash
-            {
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
                 Vec::new()
             } else {
-                self.hash_field_expires
-                    .range((key.clone(), Vec::new())..)
-                    .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
-                    .map(|((_, f), v)| (f.clone(), *v))
-                    .collect()
+                let is_hash = self
+                    .entries
+                    .get(key.as_slice())
+                    .is_some_and(|e| matches!(e.value, Value::Hash(_)));
+                if is_hash {
+                    self.hash_field_expires
+                        .range((key.clone(), Vec::new())..)
+                        .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
+                        .map(|((_, f), v)| (f.clone(), *v))
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             };
             let groups = if self.stream_groups.is_empty() {
                 None
@@ -16262,19 +16270,22 @@ impl Store {
             let expires_at_ms = self.expiry_ms(key.as_slice());
             // (frankenredis-bmyx5) Harvest per-field hash TTLs before removing the entry —
             // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
-            let is_hash = self
-                .entries
-                .get(key.as_slice())
-                .is_some_and(|e| matches!(e.value, Value::Hash(_)));
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() || !is_hash
-            {
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
                 Vec::new()
             } else {
-                self.hash_field_expires
-                    .range((key.clone(), Vec::new())..)
-                    .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
-                    .map(|((_, f), v)| (f.clone(), *v))
-                    .collect()
+                let is_hash = self
+                    .entries
+                    .get(key.as_slice())
+                    .is_some_and(|e| matches!(e.value, Value::Hash(_)));
+                if is_hash {
+                    self.hash_field_expires
+                        .range((key.clone(), Vec::new())..)
+                        .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
+                        .map(|((_, f), v)| (f.clone(), *v))
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             };
             let groups = if self.stream_groups.is_empty() {
                 None
