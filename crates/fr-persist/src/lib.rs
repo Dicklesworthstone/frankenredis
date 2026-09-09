@@ -1540,6 +1540,151 @@ pub enum RdbValue {
     ),
 }
 
+/// Borrowed RDB entry for snapshot paths that can borrow store keys and string values directly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RdbEntryRef<'a> {
+    pub db: usize,
+    pub key: &'a [u8],
+    pub value: RdbValueRef<'a>,
+    pub expire_ms: Option<u64>,
+}
+
+impl<'a> RdbEntryRef<'a> {
+    #[must_use]
+    pub fn into_owned(self) -> RdbEntry {
+        RdbEntry {
+            db: self.db,
+            key: self.key.to_vec(),
+            value: self.value.into_owned(),
+            expire_ms: self.expire_ms,
+        }
+    }
+}
+
+/// Borrowed value types supported in our RDB format.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RdbValueRef<'a> {
+    String(&'a [u8]),
+    Integer(i64),
+    List(Vec<Vec<u8>>),
+    ListQuicklist2Packed(Vec<Vec<u8>>),
+    ListQuicklist2Retained {
+        raw: std::borrow::Cow<'a, [u8]>,
+        nodes: Vec<Vec<u8>>,
+    },
+    Set(Vec<Vec<u8>>),
+    IntSet(Vec<i64>),
+    SetHashtable(Vec<Vec<u8>>),
+    SetListpack(Vec<u8>),
+    SetListpackRetained {
+        raw: std::borrow::Cow<'a, [u8]>,
+        member_count: usize,
+        max_member_len: usize,
+    },
+    Hash(Vec<(Vec<u8>, Vec<u8>)>),
+    HashListpack(Vec<u8>),
+    HashListpackRetained {
+        raw: std::borrow::Cow<'a, [u8]>,
+        pair_count: usize,
+        max_entry_len: usize,
+    },
+    HashWithTtls(Vec<(Vec<u8>, Vec<u8>, Option<u64>)>),
+    SortedSet(Vec<(Vec<u8>, f64)>),
+    ZsetListpack(Vec<u8>),
+    ZsetListpackRetained {
+        raw: std::borrow::Cow<'a, [u8]>,
+        pair_count: usize,
+        max_member_len: usize,
+    },
+    StreamListpacks3(Vec<u8>),
+    StreamSkeleton(Box<rdb_stream::UpstreamStreamSkeleton>),
+    Stream(
+        Vec<StreamEntry>,
+        Option<(u64, u64)>,
+        Vec<RdbStreamConsumerGroup>,
+        Option<RdbStreamMetadata>,
+        Option<u64>,
+        Option<(u64, u64)>,
+    ),
+}
+
+impl<'a> RdbValueRef<'a> {
+    #[must_use]
+    pub fn into_owned(self) -> RdbValue {
+        match self {
+            Self::String(v) => RdbValue::String(v.to_vec()),
+            Self::Integer(val) => {
+                let mut digits = [0u8; 20];
+                let (neg, uval) = if val < 0 {
+                    (true, (val as i128).unsigned_abs() as u64)
+                } else {
+                    (false, val as u64)
+                };
+                let mut pos = fr_protocol::write_u64_digits(&mut digits, 20, uval);
+                if neg {
+                    pos -= 1;
+                    digits[pos] = b'-';
+                }
+                RdbValue::String(digits[pos..].to_vec())
+            }
+            Self::List(items) => RdbValue::List(items),
+            Self::ListQuicklist2Packed(nodes) => RdbValue::ListQuicklist2Packed(nodes),
+            Self::ListQuicklist2Retained { raw, nodes } => RdbValue::ListQuicklist2Retained {
+                raw: raw.into_owned(),
+                nodes,
+            },
+            Self::Set(members) => RdbValue::Set(members),
+            Self::IntSet(members) => RdbValue::IntSet(members),
+            Self::SetHashtable(members) => RdbValue::SetHashtable(members),
+            Self::SetListpack(blob) => RdbValue::SetListpack(blob),
+            Self::SetListpackRetained {
+                raw,
+                member_count,
+                max_member_len,
+            } => RdbValue::SetListpackRetained {
+                raw: raw.into_owned(),
+                member_count,
+                max_member_len,
+            },
+            Self::Hash(fields) => RdbValue::Hash(fields),
+            Self::HashListpack(blob) => RdbValue::HashListpack(blob),
+            Self::HashListpackRetained {
+                raw,
+                pair_count,
+                max_entry_len,
+            } => RdbValue::HashListpackRetained {
+                raw: raw.into_owned(),
+                pair_count,
+                max_entry_len,
+            },
+            Self::HashWithTtls(fields) => RdbValue::HashWithTtls(fields),
+            Self::SortedSet(members) => RdbValue::SortedSet(members),
+            Self::ZsetListpack(blob) => RdbValue::ZsetListpack(blob),
+            Self::ZsetListpackRetained {
+                raw,
+                pair_count,
+                max_member_len,
+            } => RdbValue::ZsetListpackRetained {
+                raw: raw.into_owned(),
+                pair_count,
+                max_member_len,
+            },
+            Self::StreamListpacks3(blob) => RdbValue::StreamListpacks3(blob),
+            Self::StreamSkeleton(s) => RdbValue::StreamSkeleton(s),
+            Self::Stream(entries, watermark, groups, metadata, entries_added, max_deleted) => {
+                RdbValue::Stream(
+                    entries,
+                    watermark,
+                    groups,
+                    metadata,
+                    entries_added,
+                    max_deleted,
+                )
+            }
+        }
+    }
+}
+
 /// Encode a Redis 7.2+ STREAM_LISTPACKS_3 payload for DUMP/RESTORE values.
 ///
 /// The returned bytes start after the type byte and before the DUMP trailer.
@@ -2018,11 +2163,6 @@ pub fn encode_rdb_with_functions_and_thresholds(
     )
 }
 
-/// Encode a complete RDB file for an already-sorted, string-only keyspace.
-///
-/// This mirrors `encode_rdb_with_functions` for `RdbValue::String` entries but
-/// avoids materializing `RdbEntry`/`RdbValue` vectors when the runtime can borrow
-/// store keys and values directly. Callers must pass entries sorted by `(db,
 /// (frankenredis-rc-info-persistence-aof-fields-2qwr3) Encode an RDB AUX field.
 ///
 /// Upstream Redis 7.2.4 (`rdbSaveInfoAuxFields` / `rdbSaveAuxFieldStrInt`) writes the
@@ -2056,7 +2196,32 @@ fn encode_rdb_aux_field(buf: &mut Vec<u8>, key: &str, value: &str, compress: boo
     rdb_encode_string_with(buf, value.as_bytes(), compress);
 }
 
-/// key)`; debug builds assert that contract.
+/// Encode a complete RDB file from borrowed entries including FUNCTION libraries,
+/// choosing compact type tags against the supplied (live) thresholds rather than
+/// the compiled defaults.
+#[must_use]
+pub fn encode_rdb_borrowed_with_functions_and_thresholds<'a>(
+    entries: &[RdbEntryRef<'a>],
+    aux: &[(&str, &str)],
+    functions: &[&[u8]],
+    thresholds: CompactRdbThresholds,
+) -> Vec<u8> {
+    encode_rdb_borrowed_internal(
+        entries,
+        aux,
+        functions,
+        RdbEncodeOptions {
+            compact: Some(thresholds),
+        },
+    )
+}
+
+/// Encode a complete RDB file for an already-sorted, string-only keyspace.
+///
+/// This mirrors `encode_rdb_with_functions` for `RdbValue::String` entries but
+/// avoids materializing `RdbEntry`/`RdbValue` vectors when the runtime can borrow
+/// store keys and values directly. Callers must pass entries sorted by `(db, key)`;
+/// debug builds assert that contract.
 #[must_use]
 pub fn encode_rdb_string_entries_with_functions(
     entries: &[RdbStringEntryRef<'_>],
@@ -2293,6 +2458,146 @@ fn encode_rdb_internal(
 
                 for &entry in &sorted_entries[group_start..group_end] {
                     encode_rdb_entry(&mut buf, entry, &options, compress);
+                }
+                group_start = group_end;
+            }
+        }
+    }
+
+    // EOF
+    buf.push(RDB_OPCODE_EOF);
+    let checksum = crc64_redis(&buf);
+    buf.extend_from_slice(&checksum.to_le_bytes());
+
+    buf
+}
+
+fn encode_rdb_borrowed_internal<'a>(
+    entries: &[RdbEntryRef<'a>],
+    aux: &[(&str, &str)],
+    functions: &[&[u8]],
+    options: RdbEncodeOptions,
+) -> Vec<u8> {
+    let initial_cap = 128usize.saturating_add(entries.len().saturating_mul(16));
+    let mut buf = Vec::with_capacity(initial_cap);
+
+    // Magic + version
+    buf.extend_from_slice(&RDB_MAGIC_HEADER);
+
+    let compress = rdb_compression_enabled();
+
+    // Auxiliary fields (metadata like redis-ver, ctime, etc.)
+    for (key, value) in aux {
+        encode_rdb_aux_field(&mut buf, key, value, compress);
+    }
+
+    // FUNCTION libraries are written after aux and before the keyspace, one
+    // RDB_OPCODE_FUNCTION2 record (the library source) each.
+    for code in functions {
+        buf.push(RDB_OPCODE_FUNCTION2);
+        rdb_encode_string_with(&mut buf, code, compress);
+    }
+
+    let first_db = entries.first().map(|e| e.db).unwrap_or(0);
+    let is_single_db = entries.iter().all(|e| e.db == first_db);
+
+    let is_sorted = if is_single_db {
+        entries.windows(2).all(|pair| pair[0].key <= pair[1].key)
+    } else {
+        entries.len() <= 1
+            || entries.windows(2).all(|pair| {
+                pair[0].db < pair[1].db || (pair[0].db == pair[1].db && pair[0].key <= pair[1].key)
+            })
+    };
+
+    if is_sorted {
+        if is_single_db {
+            if !entries.is_empty() {
+                let db = first_db;
+                let db_expires = entries.iter().filter(|e| e.expire_ms.is_some()).count();
+                buf.push(RDB_OPCODE_SELECTDB);
+                rdb_encode_length(&mut buf, db);
+                buf.push(RDB_OPCODE_RESIZEDB);
+                rdb_encode_length(&mut buf, entries.len());
+                rdb_encode_length(&mut buf, db_expires);
+
+                for entry in entries {
+                    encode_rdb_entry_borrowed(&mut buf, entry, &options, compress);
+                }
+            }
+        } else {
+            let mut group_start = 0usize;
+            while group_start < entries.len() {
+                let db = entries[group_start].db;
+                let mut group_end = group_start;
+                let mut db_expires = 0usize;
+                while group_end < entries.len() && entries[group_end].db == db {
+                    if entries[group_end].expire_ms.is_some() {
+                        db_expires += 1;
+                    }
+                    group_end += 1;
+                }
+
+                buf.push(RDB_OPCODE_SELECTDB);
+                rdb_encode_length(&mut buf, db);
+                buf.push(RDB_OPCODE_RESIZEDB);
+                rdb_encode_length(&mut buf, group_end - group_start);
+                rdb_encode_length(&mut buf, db_expires);
+
+                for entry in &entries[group_start..group_end] {
+                    encode_rdb_entry_borrowed(&mut buf, entry, &options, compress);
+                }
+                group_start = group_end;
+            }
+        }
+    } else {
+        let mut sorted_entries: Vec<&RdbEntryRef<'a>> = entries.iter().collect();
+        if is_single_db {
+            sorted_entries.sort_unstable_by(|left, right| left.key.cmp(right.key));
+
+            if !sorted_entries.is_empty() {
+                let db = first_db;
+                let db_expires = sorted_entries
+                    .iter()
+                    .filter(|e| e.expire_ms.is_some())
+                    .count();
+                buf.push(RDB_OPCODE_SELECTDB);
+                rdb_encode_length(&mut buf, db);
+                buf.push(RDB_OPCODE_RESIZEDB);
+                rdb_encode_length(&mut buf, sorted_entries.len());
+                rdb_encode_length(&mut buf, db_expires);
+
+                for &entry in &sorted_entries {
+                    encode_rdb_entry_borrowed(&mut buf, entry, &options, compress);
+                }
+            }
+        } else {
+            sorted_entries.sort_unstable_by(|left, right| {
+                left.db
+                    .cmp(&right.db)
+                    .then_with(|| left.key.cmp(right.key))
+            });
+
+            let mut group_start = 0usize;
+            while group_start < sorted_entries.len() {
+                let db = sorted_entries[group_start].db;
+                let mut group_end = group_start;
+                let mut db_expires = 0usize;
+                while group_end < sorted_entries.len() && sorted_entries[group_end].db == db {
+                    if sorted_entries[group_end].expire_ms.is_some() {
+                        db_expires += 1;
+                    }
+                    group_end += 1;
+                }
+
+                buf.push(RDB_OPCODE_SELECTDB);
+                rdb_encode_length(&mut buf, db);
+                buf.push(RDB_OPCODE_RESIZEDB);
+                rdb_encode_length(&mut buf, group_end - group_start);
+                rdb_encode_length(&mut buf, db_expires);
+
+                for &entry in &sorted_entries[group_start..group_end] {
+                    encode_rdb_entry_borrowed(&mut buf, entry, &options, compress);
                 }
                 group_start = group_end;
             }
