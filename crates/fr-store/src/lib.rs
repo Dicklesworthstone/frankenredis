@@ -39925,19 +39925,30 @@ fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
 /// listpack DUMP, and letting this body go out-of-line costs ~10% of DUMP instructions.
 #[inline]
 fn encode_listpack_string_entry(buf: &mut Vec<u8>, entry: &[u8]) {
-    let start = buf.len();
     if entry.len() < 64 {
-        buf.push(0x80 | entry.len() as u8);
+        let len = entry.len() as u8;
+        buf.push(0x80 | len);
+        buf.extend_from_slice(entry);
+        buf.push(len + 1);
     } else if entry.len() < 4096 {
-        buf.push(0xE0 | ((entry.len() >> 8) as u8 & 0x0F));
-        buf.push((entry.len() & 0xFF) as u8);
+        let len = entry.len();
+        buf.push(0xE0 | ((len >> 8) as u8 & 0x0F));
+        buf.push((len & 0xFF) as u8);
+        buf.extend_from_slice(entry);
+        let data_len = len + 2;
+        if data_len <= 127 {
+            buf.push(data_len as u8);
+        } else {
+            encode_listpack_backlen_multibyte(buf, data_len);
+        }
     } else {
+        let len = entry.len();
         buf.push(0xF0);
-        buf.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&(len as u32).to_le_bytes());
+        buf.extend_from_slice(entry);
+        let data_len = len + 5;
+        encode_listpack_backlen_multibyte(buf, data_len);
     }
-    buf.extend_from_slice(entry);
-    let data_len = buf.len() - start;
-    encode_listpack_backlen(buf, data_len);
 }
 
 /// (frankenredis-qj6jn) The SAME split `308db786f` made in `list_lp_entry_bytes`, at a second
@@ -39950,6 +39961,7 @@ fn encode_listpack_string_entry(buf: &mut Vec<u8>, entry: &[u8]) {
 /// The four cold arms are what makes it expensive: they are the bulk of the function's code and
 /// they are laid out in line with the hot one. Moving them behind a call the hot path never makes
 /// leaves the compare and the push.
+#[allow(dead_code)]
 #[inline]
 fn encode_listpack_backlen(buf: &mut Vec<u8>, len: usize) {
     if len <= 127 {

@@ -4076,6 +4076,7 @@ fn encode_sorted_intset_blob(values: &[i64], width: u32) -> Option<Vec<u8>> {
 // ELEMENT on the RDB save/load path, and the plain hint is DECLINED by LLVM for
 // bodies this size -- 9d7be9b44 measured it moving the ratio 0.1 pct with the call
 // count byte-for-byte unchanged.
+#[allow(dead_code)]
 #[inline]
 fn encode_listpack_backlen(buf: &mut Vec<u8>, len: usize) {
     if len <= 127 {
@@ -4259,19 +4260,30 @@ fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
 // count byte-for-byte unchanged.
 #[inline(always)]
 fn encode_listpack_string_entry(buf: &mut Vec<u8>, entry: &[u8]) {
-    let start = buf.len();
     if entry.len() < 64 {
-        buf.push(0x80 | entry.len() as u8);
+        let len = entry.len() as u8;
+        buf.push(0x80 | len);
+        buf.extend_from_slice(entry);
+        buf.push(len + 1);
     } else if entry.len() < 4096 {
-        buf.push(0xE0 | ((entry.len() >> 8) as u8 & 0x0F));
-        buf.push((entry.len() & 0xFF) as u8);
+        let len = entry.len();
+        buf.push(0xE0 | ((len >> 8) as u8 & 0x0F));
+        buf.push((len & 0xFF) as u8);
+        buf.extend_from_slice(entry);
+        let data_len = len + 2;
+        if data_len <= 127 {
+            buf.push(data_len as u8);
+        } else {
+            encode_listpack_backlen_multibyte(buf, data_len);
+        }
     } else {
+        let len = entry.len();
         buf.push(0xF0);
-        buf.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&(len as u32).to_le_bytes());
+        buf.extend_from_slice(entry);
+        let data_len = len + 5;
+        encode_listpack_backlen_multibyte(buf, data_len);
     }
-    buf.extend_from_slice(entry);
-    let data_len = buf.len() - start;
-    encode_listpack_backlen(buf, data_len);
 }
 
 /// Encode a flat list of byte-strings as an upstream-compatible
