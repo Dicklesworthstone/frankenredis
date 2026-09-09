@@ -47,6 +47,7 @@ pub(crate) fn decimal_i64_bytes(value: i64) -> Vec<u8> {
 
 thread_local! {
     static LZF_SCRATCH: RefCell<LzfScratch> = const { RefCell::new(LzfScratch::new()) };
+    static LZF_OUT_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1957,19 +1958,31 @@ fn rdb_encode_string_with(buf: &mut Vec<u8>, data: &[u8], compress: bool) {
     }
 
     // Upstream's compressed-fits budget: `out_len = in_len - 4`.
-    // lzf_compress returns None if it can't fit within that.
+    // lzf_compress_into returns false if it can't fit within that.
     let budget = data.len() - 4;
-    if let Some(compressed) = lzf_compress(data, budget) {
-        let raw_size = rdb_length_size(data.len()) + data.len();
-        let lzf_size =
-            1 + rdb_length_size(compressed.len()) + rdb_length_size(data.len()) + compressed.len();
-        if lzf_size < raw_size {
-            buf.push(0xC3);
-            rdb_encode_length(buf, compressed.len());
-            rdb_encode_length(buf, data.len());
-            buf.extend_from_slice(&compressed);
-            return;
+    let compressed_emitted = LZF_OUT_SCRATCH.with(|out_cell| {
+        let mut out = out_cell.borrow_mut();
+        if lzf_compress_into(data, budget, &mut out) {
+            let raw_size = rdb_length_size(data.len()) + data.len();
+            let lzf_size = 1 + rdb_length_size(out.len()) + rdb_length_size(data.len()) + out.len();
+            if lzf_size < raw_size {
+                buf.push(0xC3);
+                rdb_encode_length(buf, out.len());
+                rdb_encode_length(buf, data.len());
+                buf.extend_from_slice(&out);
+                if out.capacity() > 64 * 1024 {
+                    out.shrink_to(64 * 1024);
+                }
+                return true;
+            }
         }
+        if out.capacity() > 64 * 1024 {
+            out.shrink_to(64 * 1024);
+        }
+        false
+    });
+    if compressed_emitted {
+        return;
     }
     rdb_encode_length(buf, data.len());
     buf.extend_from_slice(data);
@@ -3547,21 +3560,25 @@ fn encode_compact_list_quicklist2<T: AsRef<[u8]>>(
     // saving is real when the parse is non-trivial (integer / short-string items,
     // where the length is a comparable cost to LZF per node); long-string items reject
     // in `parse_listpack_integer` on `len >= 21` so it is a wash for them, never worse.
-    let lens: Vec<usize> = items
-        .iter()
-        .map(|it| listpack_entry_encoded_len(it.as_ref()))
-        .collect();
-    let mut buf = Vec::new();
-    rdb_encode_length(
-        &mut buf,
-        quicklist2_node_count_with_lens(items, &lens, budget),
-    );
+    let mut total_lens = 0usize;
+    let mut lens = Vec::with_capacity(items.len());
+    for it in items {
+        let el = listpack_entry_encoded_len(it.as_ref());
+        total_lens = total_lens.saturating_add(el);
+        lens.push(el);
+    }
+    let node_count = quicklist2_node_count_with_lens(items, &lens, budget);
+    let estimated_cap = total_lens
+        .saturating_add(node_count.saturating_mul(16))
+        .saturating_add(32);
+    let mut buf = Vec::with_capacity(estimated_cap);
+    rdb_encode_length(&mut buf, node_count);
     // Keep a borrowed slice roster for each PACKED node and let the shared
     // listpack encoder build the node payload. A direct streaming encoder was
     // measured slower on the focused quicklist RDB gate, so the buffered path
     // remains the production path while the 1 GiB threshold below preserves
     // Redis-compatible PLAIN/PACKED classification.
-    let mut packed: Vec<&[u8]> = Vec::new();
+    let mut packed: Vec<&[u8]> = Vec::with_capacity(items.len().min(128));
     let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
     // (frankenredis-qj6jn) `packed_bytes` is not just the node-boundary accumulator: at the
     // moment of a flush it IS the finished blob length, because it starts at
@@ -4359,7 +4376,11 @@ pub fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
         };
         header + entry.len()
     };
-    data_len + backlen_len(data_len)
+    if data_len <= 127 {
+        data_len + 1
+    } else {
+        data_len + backlen_len(data_len)
+    }
 }
 
 /// Encode an ordered list of byte-strings into a standard listpack blob
@@ -4502,12 +4523,23 @@ fn rdb_decode_length(data: &[u8]) -> Option<(usize, usize)> {
 ///
 /// (br-frankenredis-1uin)
 pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    if lzf_compress_into(input, out_budget, &mut out) {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Compress `input` into `out` with budget `out_budget`. Returns `true` if compression
+/// succeeded and output fits within budget. `out` is cleared before writing.
+pub fn lzf_compress_into(input: &[u8], out_budget: usize, out: &mut Vec<u8>) -> bool {
     // SIMD == true routes `>= 128 B` match tails through `fr_simd`'s AVX2 kernel
     // (see `lzf_match_tail_len`): byte-identical output, Pareto-safe (short matches
     // stay on the inlined local loop), a measured win on run-heavy payloads
     // (sparse-bitmap / zero-run / repeated-large-value DUMP). (g9h0v follow-up)
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_with_scratch::<true>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_with_scratch::<true>(input, out_budget, &mut scratch.borrow_mut(), out)
     })
 }
 
@@ -4529,9 +4561,14 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
 /// measures time only.
 #[doc(hidden)]
 pub fn bench_lzf_compress<const SIMD: bool>(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
-    LZF_SCRATCH.with(|scratch| {
-        lzf_compress_with_scratch::<SIMD>(input, out_budget, &mut scratch.borrow_mut())
-    })
+    let mut out = Vec::new();
+    if LZF_SCRATCH.with(|scratch| {
+        lzf_compress_with_scratch::<SIMD>(input, out_budget, &mut scratch.borrow_mut(), &mut out)
+    }) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 /// Same-binary A/B hook for the match-table dispatch.
@@ -4546,13 +4583,19 @@ pub fn bench_lzf_compress_table<const HOIST: bool>(
     input: &[u8],
     out_budget: usize,
 ) -> Option<Vec<u8>> {
-    LZF_SCRATCH.with(|scratch| {
+    let mut out = Vec::new();
+    if LZF_SCRATCH.with(|scratch| {
         lzf_compress_dispatch::<true, HOIST, true, true, false, false, false>(
             input,
             out_budget,
             &mut scratch.borrow_mut(),
+            &mut out,
         )
-    })
+    }) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 /// Same-binary A/B hook for the literal-run emission.
@@ -4569,13 +4612,19 @@ pub fn bench_lzf_compress_literals<const BATCH: bool>(
     input: &[u8],
     out_budget: usize,
 ) -> Option<Vec<u8>> {
-    LZF_SCRATCH.with(|scratch| {
+    let mut out = Vec::new();
+    if LZF_SCRATCH.with(|scratch| {
         lzf_compress_dispatch::<true, true, BATCH, true, false, false, false>(
             input,
             out_budget,
             &mut scratch.borrow_mut(),
+            &mut out,
         )
-    })
+    }) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 /// Same-binary A/B hook for the per-literal-byte budget guard (slice 3).
@@ -4613,13 +4662,19 @@ pub fn bench_lzf_compress_widetag<const WIDETAG: bool>(
     input: &[u8],
     out_budget: usize,
 ) -> Option<Vec<u8>> {
-    LZF_SCRATCH.with(|scratch| {
+    let mut out = Vec::new();
+    if LZF_SCRATCH.with(|scratch| {
         lzf_compress_dispatch::<true, true, false, false, true, true, WIDETAG>(
             input,
             out_budget,
             &mut scratch.borrow_mut(),
+            &mut out,
         )
-    })
+    }) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 #[doc(hidden)]
@@ -4627,13 +4682,19 @@ pub fn bench_lzf_compress_tier<const TIER: bool>(
     input: &[u8],
     out_budget: usize,
 ) -> Option<Vec<u8>> {
-    LZF_SCRATCH.with(|scratch| {
+    let mut out = Vec::new();
+    if LZF_SCRATCH.with(|scratch| {
         lzf_compress_dispatch::<true, true, false, false, true, TIER, false>(
             input,
             out_budget,
             &mut scratch.borrow_mut(),
+            &mut out,
         )
-    })
+    }) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 #[doc(hidden)]
@@ -4641,13 +4702,19 @@ pub fn bench_lzf_compress_xortag<const XORTAG: bool>(
     input: &[u8],
     out_budget: usize,
 ) -> Option<Vec<u8>> {
-    LZF_SCRATCH.with(|scratch| {
+    let mut out = Vec::new();
+    if LZF_SCRATCH.with(|scratch| {
         lzf_compress_dispatch::<true, true, false, false, XORTAG, false, false>(
             input,
             out_budget,
             &mut scratch.borrow_mut(),
+            &mut out,
         )
-    })
+    }) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 #[doc(hidden)]
@@ -4655,13 +4722,19 @@ pub fn bench_lzf_compress_guard<const GUARD: bool>(
     input: &[u8],
     out_budget: usize,
 ) -> Option<Vec<u8>> {
-    LZF_SCRATCH.with(|scratch| {
+    let mut out = Vec::new();
+    if LZF_SCRATCH.with(|scratch| {
         lzf_compress_dispatch::<true, true, false, GUARD, false, false, false>(
             input,
             out_budget,
             &mut scratch.borrow_mut(),
+            &mut out,
         )
-    })
+    }) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 /// Same-binary A/B hook exposing the WHOLE dispatch tuple.
@@ -4690,13 +4763,19 @@ pub fn bench_lzf_compress_tuple<
     input: &[u8],
     out_budget: usize,
 ) -> Option<Vec<u8>> {
-    LZF_SCRATCH.with(|scratch| {
+    let mut out = Vec::new();
+    if LZF_SCRATCH.with(|scratch| {
         lzf_compress_dispatch::<SIMD, HOIST, BATCH, GUARD, XORTAG, TIER, WIDETAG>(
             input,
             out_budget,
             &mut scratch.borrow_mut(),
+            &mut out,
         )
-    })
+    }) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -5088,7 +5167,8 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
     input: &[u8],
     out_budget: usize,
     scratch: &mut LzfScratch,
-) -> Option<Vec<u8>> {
+    out: &mut Vec<u8>,
+) -> bool {
     // BATCH == false: the per-push literal arm. Batching the literal run into one
     // `extend_from_slice` was MEASURED SLOWER on the listpack DUMP shape this kernel
     // actually runs on (+8.1%, 17,226.7 -> 18,614.7 instr/op under callgrind) and is
@@ -5113,7 +5193,9 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
     // shape, -258 on incompressible and -91 on run-heavy -- a win on every payload, and
     // bit-identical across three draws. Sound only while in_len < 16 MiB, which is exactly
     // when this table representation is chosen.
-    lzf_compress_dispatch::<SIMD, true, false, false, true, true, true>(input, out_budget, scratch)
+    lzf_compress_dispatch::<SIMD, true, false, false, true, true, true>(
+        input, out_budget, scratch, out,
+    )
 }
 
 /// Choose the match-table representation ONCE per call and hand the compressor a
@@ -5137,12 +5219,18 @@ fn lzf_compress_dispatch<
     input: &[u8],
     out_budget: usize,
     scratch: &mut LzfScratch,
-) -> Option<Vec<u8>> {
+    out: &mut Vec<u8>,
+) -> bool {
     // Nothing to compress: bail before touching the table, so an empty input
     // still costs no allocation and burns no epoch (the core repeats this check,
     // which is what makes the two arms' bail behaviour identical).
     if input.is_empty() || out_budget == 0 {
-        return None;
+        out.clear();
+        return false;
+    }
+    out.clear();
+    if out.capacity() < out_budget {
+        out.reserve(out_budget - out.capacity());
     }
     // Sizes/resizes the active table and returns this call's epoch tag. Must run
     // before the fixed-size view is taken: it is what guarantees the length.
@@ -5162,6 +5250,7 @@ fn lzf_compress_dispatch<
                     out_budget,
                     &mut LzfPacked16Table::<XORTAG>(table),
                     generation,
+                    out,
                 );
             }
             if let Ok(table) = <&mut [u32; LZF_HSIZE]>::try_from(scratch.packed.as_mut_slice()) {
@@ -5170,6 +5259,7 @@ fn lzf_compress_dispatch<
                     out_budget,
                     &mut LzfPackedTable::<XORTAG>(table),
                     generation,
+                    out,
                 );
             }
         } else if let Ok(table) =
@@ -5180,6 +5270,7 @@ fn lzf_compress_dispatch<
                 out_budget,
                 &mut LzfWideTable(table),
                 generation,
+                out,
             );
         }
     }
@@ -5188,6 +5279,7 @@ fn lzf_compress_dispatch<
         out_budget,
         &mut LzfDynTable(scratch),
         generation,
+        out,
     )
 }
 
@@ -5202,7 +5294,8 @@ fn lzf_compress_core<
     out_budget: usize,
     table: &mut T,
     generation: u32,
-) -> Option<Vec<u8>> {
+    out: &mut Vec<u8>,
+) -> bool {
     // Faithful port of vendored deps/lzf/lzf_c.c with HLOG=16 and the
     // VERY_FAST configuration redis builds (lzfP.h: VERY_FAST=1,
     // ULTRA_FAST=0). Reproducing the rolling `hval`, the liblzf IDX hash,
@@ -5217,7 +5310,8 @@ fn lzf_compress_core<
 
     let in_len = input.len();
     if in_len == 0 || out_budget == 0 {
-        return None;
+        out.clear();
+        return false;
     }
 
     // BATCH == true defers the literal bytes instead of pushing them one at a time.
@@ -5234,17 +5328,18 @@ fn lzf_compress_core<
     // is what `op` would be. That keeps the bail points -- and so the raw-vs-compressed
     // decision, which is observable in the DUMP payload -- byte-exact with the
     // per-push arm. (frankenredis-qj6jn slice 2)
-    let mut out: Vec<u8> = Vec::with_capacity(out_budget);
+    out.clear();
     // The table stores ip+1 (0 = unset). Epoch tags make stale slots read as
     // unset, preserving the zero-initialised C table semantics without clearing
     // 256 KiB on every compression attempt. (frankenredis-gu5nf.27) The epoch is
     // taken by the caller, which also picks the table representation.
     let mut ip: usize = 0;
     let mut lit: usize = 0;
-    let mut lit_hdr_pos: usize = out.len();
+    let mut lit_hdr_pos: usize = 0;
     out.push(0); // start run: placeholder literal-run header
     if out.len() > out_budget {
-        return None;
+        out.clear();
+        return false;
     }
 
     // `hval` is a rolling 32-bit value: FRST(ip) = (ip[0]<<8)|ip[1] seeds
@@ -5366,7 +5461,8 @@ fn lzf_compress_core<
                 if (!TIER || vlen + 4 >= out_budget)
                     && vlen - usize::from(lit == 0) + 4 >= out_budget
                 {
-                    return None;
+                    out.clear();
+                    return false;
                 }
 
                 // Stop the open literal run (op[-lit-1] = lit-1; op -= !lit).
@@ -5435,7 +5531,8 @@ fn lzf_compress_core<
             // (at most one byte per position plus one header per 32) and is the path that was
             // going to throw its work away regardless.
             if GUARD && (if BATCH { out.len() + lit } else { out.len() }) >= out_budget {
-                return None;
+                out.clear();
+                return false;
             }
             if !BATCH {
                 out.push(input[ip]);
@@ -5458,7 +5555,8 @@ fn lzf_compress_core<
     // C: if (op + 3 > out_end) return 0;  -- reserve room for the tail
     // literals and the closing run header before flushing. (frankenredis-wmh2p)
     if (if BATCH { out.len() + lit } else { out.len() }) + 3 > out_budget {
-        return None;
+        out.clear();
+        return false;
     }
     while ip < in_len {
         if !BATCH {
@@ -5488,9 +5586,10 @@ fn lzf_compress_core<
     }
 
     if out.is_empty() || out.len() > out_budget {
-        return None;
+        out.clear();
+        return false;
     }
-    Some(out)
+    true
 }
 
 /// Decode an RDB string. Returns `(bytes, consumed)` or `None`.

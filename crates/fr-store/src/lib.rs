@@ -88,6 +88,7 @@ pub enum BitRangeUnit {
 
 thread_local! {
     static TOUCH_DISABLED: Cell<bool> = const { Cell::new(false) };
+    static LZF_DUMP_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 struct TouchGuard {
@@ -38791,19 +38792,32 @@ fn encode_rdb_string(buf: &mut Vec<u8>, data: &[u8]) {
     // FILE writes; both consult the same flag so they cannot drift apart.
     if data.len() > 20 && fr_persist::rdb_compression_enabled() {
         let budget = data.len() - 4;
-        if let Some(compressed) = fr_persist::lzf_compress(data, budget) {
-            let raw_size = encoded_length_size(data.len()) + data.len();
-            let lzf_size = 1
-                + encoded_length_size(compressed.len())
-                + encoded_length_size(data.len())
-                + compressed.len();
-            if lzf_size < raw_size {
-                buf.push(0xC3);
-                encode_length(buf, compressed.len());
-                encode_length(buf, data.len());
-                buf.extend_from_slice(&compressed);
-                return;
+        let compressed_emitted = LZF_DUMP_SCRATCH.with(|out_cell| {
+            let mut out = out_cell.borrow_mut();
+            if fr_persist::lzf_compress_into(data, budget, &mut out) {
+                let raw_size = encoded_length_size(data.len()) + data.len();
+                let lzf_size = 1
+                    + encoded_length_size(out.len())
+                    + encoded_length_size(data.len())
+                    + out.len();
+                if lzf_size < raw_size {
+                    buf.push(0xC3);
+                    encode_length(buf, out.len());
+                    encode_length(buf, data.len());
+                    buf.extend_from_slice(&out);
+                    if out.capacity() > 64 * 1024 {
+                        out.shrink_to(64 * 1024);
+                    }
+                    return true;
+                }
             }
+            if out.capacity() > 64 * 1024 {
+                out.shrink_to(64 * 1024);
+            }
+            false
+        });
+        if compressed_emitted {
+            return;
         }
     }
     encode_length(buf, data.len());
@@ -39171,7 +39185,11 @@ fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
         };
         header + entry.len()
     };
-    data_len + backlen_len(data_len)
+    if data_len <= 127 {
+        data_len + 1
+    } else {
+        data_len + backlen_len(data_len)
+    }
 }
 
 /// Upstream quicklist.c uses raw value length plus this estimate, not exact

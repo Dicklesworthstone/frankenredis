@@ -5736,7 +5736,11 @@ fn list_lp_entry_bytes(elem: &[u8]) -> u64 {
         Some(&b) if b.is_ascii_digit() || b == b'-' => list_lp_entry_data_len_maybe_int(elem),
         _ => list_lp_string_data_len(elem.len()),
     };
-    data_len + list_lp_backlen_bytes(data_len)
+    if data_len <= 127 {
+        data_len + 1
+    } else {
+        data_len + list_lp_backlen_bytes(data_len)
+    }
 }
 
 /// A list value plus the incrementally-maintained state backing its OBJECT
