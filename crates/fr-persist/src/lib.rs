@@ -2033,9 +2033,9 @@ pub fn encode_rdb_with_functions_and_thresholds(
 ///
 /// All other fields (e.g. `redis-ver`, `repl-id`, arbitrary custom keys) and values that
 /// do not parse as integers are emitted as standard length-prefixed strings via `rdb_encode_string`.
-fn encode_rdb_aux_field(buf: &mut Vec<u8>, key: &str, value: &str) {
+fn encode_rdb_aux_field(buf: &mut Vec<u8>, key: &str, value: &str, compress: bool) {
     buf.push(RDB_OPCODE_AUX);
-    rdb_encode_string(buf, key.as_bytes());
+    rdb_encode_string_with(buf, key.as_bytes(), compress);
     match key {
         "redis-bits" | "aof-base" => {
             if let Ok(num) = value.parse::<i8>() {
@@ -2053,7 +2053,7 @@ fn encode_rdb_aux_field(buf: &mut Vec<u8>, key: &str, value: &str) {
         }
         _ => {}
     }
-    rdb_encode_string(buf, value.as_bytes());
+    rdb_encode_string_with(buf, value.as_bytes(), compress);
 }
 
 /// key)`; debug builds assert that contract.
@@ -2072,16 +2072,16 @@ pub fn encode_rdb_string_entries_with_functions(
 
     buf.extend_from_slice(&RDB_MAGIC_HEADER);
 
+    let compress = rdb_compression_enabled();
+
     for (key, value) in aux {
-        encode_rdb_aux_field(&mut buf, key, value);
+        encode_rdb_aux_field(&mut buf, key, value, compress);
     }
 
     for code in functions {
         buf.push(RDB_OPCODE_FUNCTION2);
-        rdb_encode_string(&mut buf, code);
+        rdb_encode_string_with(&mut buf, code, compress);
     }
-
-    let compress = rdb_compression_enabled();
 
     let mut group_start = 0usize;
     while group_start < entries.len() {
@@ -2153,288 +2153,80 @@ fn encode_rdb_internal(
     // Magic + version
     buf.extend_from_slice(&RDB_MAGIC_HEADER);
 
+    let compress = rdb_compression_enabled();
+
     // Auxiliary fields (metadata like redis-ver, ctime, etc.)
     for (key, value) in aux {
-        encode_rdb_aux_field(&mut buf, key, value);
+        encode_rdb_aux_field(&mut buf, key, value, compress);
     }
 
     // FUNCTION libraries are written after aux and before the keyspace, one
     // RDB_OPCODE_FUNCTION2 record (the library source) each.
     for code in functions {
         buf.push(RDB_OPCODE_FUNCTION2);
-        rdb_encode_string(&mut buf, code);
+        rdb_encode_string_with(&mut buf, code, compress);
     }
 
-    let mut sorted_entries: Vec<&RdbEntry> = entries.iter().collect();
-    sorted_entries.sort_unstable_by(|left, right| {
-        left.db
-            .cmp(&right.db)
-            .then_with(|| left.key.cmp(&right.key))
-    });
+    let is_sorted = entries.len() <= 1
+        || entries.windows(2).all(|pair| {
+            pair[0].db < pair[1].db || (pair[0].db == pair[1].db && pair[0].key <= pair[1].key)
+        });
 
-    let mut group_start = 0usize;
-    while group_start < sorted_entries.len() {
-        let db = sorted_entries[group_start].db;
-        let mut group_end = group_start;
-        let mut db_expires = 0usize;
-        while group_end < sorted_entries.len() && sorted_entries[group_end].db == db {
-            if sorted_entries[group_end].expire_ms.is_some() {
-                db_expires += 1;
+    if is_sorted {
+        let mut group_start = 0usize;
+        while group_start < entries.len() {
+            let db = entries[group_start].db;
+            let mut group_end = group_start;
+            let mut db_expires = 0usize;
+            while group_end < entries.len() && entries[group_end].db == db {
+                if entries[group_end].expire_ms.is_some() {
+                    db_expires += 1;
+                }
+                group_end += 1;
             }
-            group_end += 1;
+
+            buf.push(RDB_OPCODE_SELECTDB);
+            rdb_encode_length(&mut buf, db);
+            buf.push(RDB_OPCODE_RESIZEDB);
+            rdb_encode_length(&mut buf, group_end - group_start);
+            rdb_encode_length(&mut buf, db_expires);
+
+            for entry in &entries[group_start..group_end] {
+                encode_rdb_entry(&mut buf, entry, &options, compress);
+            }
+            group_start = group_end;
         }
+    } else {
+        let mut sorted_entries: Vec<&RdbEntry> = entries.iter().collect();
+        sorted_entries.sort_unstable_by(|left, right| {
+            left.db
+                .cmp(&right.db)
+                .then_with(|| left.key.cmp(&right.key))
+        });
 
-        buf.push(RDB_OPCODE_SELECTDB);
-        rdb_encode_length(&mut buf, db);
-        buf.push(RDB_OPCODE_RESIZEDB);
-        rdb_encode_length(&mut buf, group_end - group_start);
-        rdb_encode_length(&mut buf, db_expires);
-
-        for &entry in &sorted_entries[group_start..group_end] {
-            // Expiry
-            if let Some(ms) = entry.expire_ms {
-                buf.push(RDB_OPCODE_EXPIRETIME_MS);
-                buf.extend_from_slice(&ms.to_le_bytes());
+        let mut group_start = 0usize;
+        while group_start < sorted_entries.len() {
+            let db = sorted_entries[group_start].db;
+            let mut group_end = group_start;
+            let mut db_expires = 0usize;
+            while group_end < sorted_entries.len() && sorted_entries[group_end].db == db {
+                if sorted_entries[group_end].expire_ms.is_some() {
+                    db_expires += 1;
+                }
+                group_end += 1;
             }
 
-            // Type + key + value
-            match &entry.value {
-                RdbValue::String(v) => {
-                    buf.push(RDB_TYPE_STRING);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    rdb_encode_string(&mut buf, v);
-                }
-                RdbValue::List(items) => {
-                    if let Some(thresholds) = options.compact.as_ref()
-                        && let Some(payload) = encode_compact_list_quicklist2(items, thresholds)
-                    {
-                        buf.push(RDB_TYPE_LIST_QUICKLIST_2);
-                        rdb_encode_string(&mut buf, &entry.key);
-                        buf.extend_from_slice(&payload);
-                    } else {
-                        buf.push(RDB_TYPE_LIST);
-                        rdb_encode_string(&mut buf, &entry.key);
-                        rdb_encode_length(&mut buf, items.len());
-                        for item in items {
-                            rdb_encode_string(&mut buf, item);
-                        }
-                    }
-                }
-                RdbValue::ListQuicklist2Packed(nodes) => {
-                    let payload = encode_quicklist2_packed_payload(nodes);
-                    buf.push(RDB_TYPE_LIST_QUICKLIST_2);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    buf.extend_from_slice(&payload);
-                }
-                // VERBATIM, one level deeper: this is the ENCODED record body, so it
-                // is spliced in whole. The arm above re-runs `rdb_encode_string` per
-                // node to reproduce bytes already sitting in the value.
-                RdbValue::ListQuicklist2Retained { raw, .. } => {
-                    buf.push(RDB_TYPE_LIST_QUICKLIST_2);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    buf.extend_from_slice(raw);
-                }
-                // VERBATIM: the save side already built exactly the bytes the
-                // listpack arm below would have produced, from borrowed members.
-                RdbValue::SetListpack(blob) => {
-                    buf.push(RDB_TYPE_SET_LISTPACK);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    rdb_encode_string(&mut buf, blob);
-                }
-                // VERBATIM, one level deeper: this blob is the ENCODED string, not
-                // the listpack, so it is spliced in whole. `rdb_encode_string` here
-                // would re-run `lzf_compress` to reproduce bytes already in the value.
-                RdbValue::SetListpackRetained { raw, .. } => {
-                    buf.push(RDB_TYPE_SET_LISTPACK);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    buf.extend_from_slice(raw);
-                }
-                RdbValue::Set(members) => {
-                    if let Some(thresholds) = options.compact.as_ref() {
-                        if let Some(payload) = encode_compact_set_intset(members, thresholds) {
-                            buf.push(RDB_TYPE_SET_INTSET);
-                            rdb_encode_string(&mut buf, &entry.key);
-                            buf.extend_from_slice(&payload);
-                        } else if let Some(payload) =
-                            encode_compact_set_listpack(members, thresholds)
-                        {
-                            buf.push(RDB_TYPE_SET_LISTPACK);
-                            rdb_encode_string(&mut buf, &entry.key);
-                            buf.extend_from_slice(&payload);
-                        } else {
-                            buf.push(RDB_TYPE_SET);
-                            rdb_encode_string(&mut buf, &entry.key);
-                            rdb_encode_length(&mut buf, members.len());
-                            for member in members {
-                                rdb_encode_string(&mut buf, member);
-                            }
-                        }
-                    } else {
-                        buf.push(RDB_TYPE_SET);
-                        rdb_encode_string(&mut buf, &entry.key);
-                        rdb_encode_length(&mut buf, members.len());
-                        for member in members {
-                            rdb_encode_string(&mut buf, member);
-                        }
-                    }
-                }
-                RdbValue::IntSet(members) => {
-                    // `IntSet` is produced only from a canonical RDB intset;
-                    // retain that wire representation without decimal-string
-                    // materialization when the decoded entry is re-emitted.
-                    let width = intset_width(members);
-                    if let Some(blob) = encode_sorted_intset_blob(members, width) {
-                        buf.push(RDB_TYPE_SET_INTSET);
-                        rdb_encode_string(&mut buf, &entry.key);
-                        rdb_encode_string(&mut buf, &blob);
-                    } else {
-                        // An RDB value cannot practically exceed `u32::MAX`
-                        // entries, but preserve set semantics rather than
-                        // emitting a malformed intset if one is constructed
-                        // programmatically beyond that wire limit.
-                        buf.push(RDB_TYPE_SET);
-                        rdb_encode_string(&mut buf, &entry.key);
-                        rdb_encode_length(&mut buf, members.len());
-                        for member in members {
-                            rdb_encode_string(&mut buf, &decimal_i64_bytes(*member));
-                        }
-                    }
-                }
-                RdbValue::SetHashtable(members) => {
-                    // (frankenredis-39is8) A hashtable-encoded set always emits
-                    // the plain RDB_TYPE_SET, regardless of whether its content
-                    // would otherwise fit intset/listpack — matching upstream's
-                    // save-by-encoding so the encoding survives a save/load.
-                    buf.push(RDB_TYPE_SET);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    rdb_encode_length(&mut buf, members.len());
-                    for member in members {
-                        rdb_encode_string(&mut buf, member);
-                    }
-                }
-                RdbValue::Hash(fields) => {
-                    if let Some(thresholds) = options.compact.as_ref()
-                        && let Some(payload) = encode_compact_hash_listpack(fields, thresholds)
-                    {
-                        buf.push(RDB_TYPE_HASH_LISTPACK);
-                        rdb_encode_string(&mut buf, &entry.key);
-                        buf.extend_from_slice(&payload);
-                    } else {
-                        buf.push(RDB_TYPE_HASH);
-                        rdb_encode_string(&mut buf, &entry.key);
-                        rdb_encode_length(&mut buf, fields.len());
-                        for (field, value) in fields {
-                            rdb_encode_string(&mut buf, field);
-                            rdb_encode_string(&mut buf, value);
-                        }
-                    }
-                }
-                // (frankenredis-aqkvk) A hash carried in blob form re-encodes
-                // VERBATIM. That is not just cheaper than re-deriving a listpack
-                // from decoded pairs — it is the more faithful round trip, since
-                // upstream saves by ENCODING rather than by re-deriving from
-                // content, the same reason `SetHashtable` exists separately from
-                // `Set`.
-                RdbValue::HashListpack(blob) => {
-                    buf.push(RDB_TYPE_HASH_LISTPACK);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    rdb_encode_string(&mut buf, blob);
-                }
-                // VERBATIM, one level deeper: this blob is the ENCODED string, not
-                // the listpack, so it is spliced in whole. `rdb_encode_string` here
-                // would re-run `lzf_compress` to reproduce bytes already in the value.
-                RdbValue::HashListpackRetained { raw, .. } => {
-                    buf.push(RDB_TYPE_HASH_LISTPACK);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    buf.extend_from_slice(raw);
-                }
-                RdbValue::HashWithTtls(fields) => {
-                    buf.push(RDB_TYPE_HASH_WITH_TTLS);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    rdb_encode_length(&mut buf, fields.len());
-                    for (field, value, expires_ms) in fields {
-                        rdb_encode_string(&mut buf, field);
-                        rdb_encode_string(&mut buf, value);
-                        // u64::MAX sentinel = "no TTL". Any other value is
-                        // the absolute ms-since-epoch deadline.
-                        let encoded = expires_ms.unwrap_or(u64::MAX);
-                        buf.extend_from_slice(&encoded.to_le_bytes());
-                    }
-                }
-                // VERBATIM: the save side already built exactly the bytes the
-                // listpack arm below would have produced, from borrowed members.
-                RdbValue::ZsetListpack(blob) => {
-                    buf.push(RDB_TYPE_ZSET_LISTPACK);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    rdb_encode_string(&mut buf, blob);
-                }
-                // VERBATIM, one level deeper: this blob is the ENCODED string, not
-                // the listpack, so it is spliced in whole. `rdb_encode_string` here
-                // would re-run `lzf_compress` to reproduce bytes that are already
-                // sitting in the value -- the largest single frame in the arm.
-                RdbValue::ZsetListpackRetained { raw, .. } => {
-                    buf.push(RDB_TYPE_ZSET_LISTPACK);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    buf.extend_from_slice(raw);
-                }
-                RdbValue::SortedSet(members) => {
-                    if let Some(thresholds) = options.compact.as_ref()
-                        && let Some(payload) = encode_compact_zset_listpack(members, thresholds)
-                    {
-                        buf.push(RDB_TYPE_ZSET_LISTPACK);
-                        rdb_encode_string(&mut buf, &entry.key);
-                        buf.extend_from_slice(&payload);
-                    } else {
-                        buf.push(RDB_TYPE_ZSET_2);
-                        rdb_encode_string(&mut buf, &entry.key);
-                        rdb_encode_length(&mut buf, members.len());
-                        for (member, score) in members {
-                            rdb_encode_string(&mut buf, member);
-                            // ZSET2 encoding: 8-byte LE double
-                            buf.extend_from_slice(&score.to_le_bytes());
-                        }
-                    }
-                }
-                // VERBATIM: the save side already built exactly the payload the
-                // upstream arm inside `encode_stream_rdb_value` would produce.
-                RdbValue::StreamListpacks3(blob) => {
-                    buf.push(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3);
-                    rdb_encode_string(&mut buf, &entry.key);
-                    buf.extend_from_slice(blob);
-                }
-                // VERBATIM, same reasoning: a skeleton still holds the exact
-                // upstream record body it was decoded from, so a loaded stream
-                // re-saves byte-for-byte without re-deriving a payload from
-                // entries it has not even decoded.
-                RdbValue::StreamSkeleton(skeleton) => {
-                    buf.push(skeleton.upstream_type_byte());
-                    rdb_encode_string(&mut buf, &entry.key);
-                    buf.extend_from_slice(skeleton.upstream_payload());
-                }
-                RdbValue::Stream(
-                    stream_entries,
-                    watermark,
-                    groups,
-                    metadata,
-                    entries_added,
-                    max_deleted,
-                ) => {
-                    encode_stream_rdb_value(
-                        &mut buf,
-                        &entry.key,
-                        StreamRdbValueParts {
-                            entries: stream_entries,
-                            watermark: *watermark,
-                            groups,
-                            metadata,
-                            entries_added: *entries_added,
-                            max_deleted: *max_deleted,
-                        },
-                    );
-                }
+            buf.push(RDB_OPCODE_SELECTDB);
+            rdb_encode_length(&mut buf, db);
+            buf.push(RDB_OPCODE_RESIZEDB);
+            rdb_encode_length(&mut buf, group_end - group_start);
+            rdb_encode_length(&mut buf, db_expires);
+
+            for &entry in &sorted_entries[group_start..group_end] {
+                encode_rdb_entry(&mut buf, entry, &options, compress);
             }
+            group_start = group_end;
         }
-        group_start = group_end;
     }
 
     // EOF
@@ -2443,6 +2235,256 @@ fn encode_rdb_internal(
     buf.extend_from_slice(&checksum.to_le_bytes());
 
     buf
+}
+
+fn encode_rdb_entry(
+    buf: &mut Vec<u8>,
+    entry: &RdbEntry,
+    options: &RdbEncodeOptions,
+    compress: bool,
+) {
+    // Expiry
+    if let Some(ms) = entry.expire_ms {
+        buf.push(RDB_OPCODE_EXPIRETIME_MS);
+        buf.extend_from_slice(&ms.to_le_bytes());
+    }
+
+    // Type + key + value
+    match &entry.value {
+        RdbValue::String(v) => {
+            buf.push(RDB_TYPE_STRING);
+            rdb_encode_string_with(buf, &entry.key, compress);
+            rdb_encode_string_with(buf, v, compress);
+        }
+        RdbValue::List(items) => {
+            if let Some(thresholds) = options.compact.as_ref()
+                && let Some(payload) = encode_compact_list_quicklist2(items, thresholds)
+            {
+                buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+                rdb_encode_string_with(buf, &entry.key, compress);
+                buf.extend_from_slice(&payload);
+            } else {
+                buf.push(RDB_TYPE_LIST);
+                rdb_encode_string_with(buf, &entry.key, compress);
+                rdb_encode_length(buf, items.len());
+                for item in items {
+                    rdb_encode_string_with(buf, item, compress);
+                }
+            }
+        }
+        RdbValue::ListQuicklist2Packed(nodes) => {
+            let payload = encode_quicklist2_packed_payload(nodes);
+            buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+            rdb_encode_string_with(buf, &entry.key, compress);
+            buf.extend_from_slice(&payload);
+        }
+        // VERBATIM, one level deeper: this is the ENCODED record body, so it
+        // is spliced in whole. The arm above re-runs `rdb_encode_string` per
+        // node to reproduce bytes already sitting in the value.
+        RdbValue::ListQuicklist2Retained { raw, .. } => {
+            buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+            rdb_encode_string_with(buf, &entry.key, compress);
+            buf.extend_from_slice(raw);
+        }
+        // VERBATIM: the save side already built exactly the bytes the
+        // listpack arm below would have produced, from borrowed members.
+        RdbValue::SetListpack(blob) => {
+            buf.push(RDB_TYPE_SET_LISTPACK);
+            rdb_encode_string_with(buf, &entry.key, compress);
+            rdb_encode_string_with(buf, blob, compress);
+        }
+        // VERBATIM, one level deeper: this blob is the ENCODED string, not
+        // the listpack, so it is spliced in whole. `rdb_encode_string` here
+        // would re-run `lzf_compress` to reproduce bytes already in the value.
+        RdbValue::SetListpackRetained { raw, .. } => {
+            buf.push(RDB_TYPE_SET_LISTPACK);
+            rdb_encode_string_with(buf, &entry.key, compress);
+            buf.extend_from_slice(raw);
+        }
+        RdbValue::Set(members) => {
+            if let Some(thresholds) = options.compact.as_ref() {
+                if let Some(payload) = encode_compact_set_intset(members, thresholds) {
+                    buf.push(RDB_TYPE_SET_INTSET);
+                    rdb_encode_string_with(buf, &entry.key, compress);
+                    buf.extend_from_slice(&payload);
+                } else if let Some(payload) =
+                    encode_compact_set_listpack(members, thresholds, compress)
+                {
+                    buf.push(RDB_TYPE_SET_LISTPACK);
+                    rdb_encode_string_with(buf, &entry.key, compress);
+                    buf.extend_from_slice(&payload);
+                } else {
+                    buf.push(RDB_TYPE_SET);
+                    rdb_encode_string_with(buf, &entry.key, compress);
+                    rdb_encode_length(buf, members.len());
+                    for member in members {
+                        rdb_encode_string_with(buf, member, compress);
+                    }
+                }
+            } else {
+                buf.push(RDB_TYPE_SET);
+                rdb_encode_string_with(buf, &entry.key, compress);
+                rdb_encode_length(buf, members.len());
+                for member in members {
+                    rdb_encode_string_with(buf, member, compress);
+                }
+            }
+        }
+        RdbValue::IntSet(members) => {
+            // `IntSet` is produced only from a canonical RDB intset;
+            // retain that wire representation without decimal-string
+            // materialization when the decoded entry is re-emitted.
+            let width = intset_width(members);
+            if let Some(blob) = encode_sorted_intset_blob(members, width) {
+                buf.push(RDB_TYPE_SET_INTSET);
+                rdb_encode_string_with(buf, &entry.key, compress);
+                rdb_encode_string_with(buf, &blob, compress);
+            } else {
+                // An RDB value cannot practically exceed `u32::MAX`
+                // entries, but preserve set semantics rather than
+                // emitting a malformed intset if one is constructed
+                // programmatically beyond that wire limit.
+                buf.push(RDB_TYPE_SET);
+                rdb_encode_string_with(buf, &entry.key, compress);
+                rdb_encode_length(buf, members.len());
+                for member in members {
+                    rdb_encode_string_with(buf, &decimal_i64_bytes(*member), compress);
+                }
+            }
+        }
+        RdbValue::SetHashtable(members) => {
+            // (frankenredis-39is8) A hashtable-encoded set always emits
+            // the plain RDB_TYPE_SET, regardless of whether its content
+            // would otherwise fit intset/listpack — matching upstream's
+            // save-by-encoding so the encoding survives a save/load.
+            buf.push(RDB_TYPE_SET);
+            rdb_encode_string_with(buf, &entry.key, compress);
+            rdb_encode_length(buf, members.len());
+            for member in members {
+                rdb_encode_string_with(buf, member, compress);
+            }
+        }
+        RdbValue::Hash(fields) => {
+            if let Some(thresholds) = options.compact.as_ref()
+                && let Some(payload) = encode_compact_hash_listpack(fields, thresholds, compress)
+            {
+                buf.push(RDB_TYPE_HASH_LISTPACK);
+                rdb_encode_string_with(buf, &entry.key, compress);
+                buf.extend_from_slice(&payload);
+            } else {
+                buf.push(RDB_TYPE_HASH);
+                rdb_encode_string_with(buf, &entry.key, compress);
+                rdb_encode_length(buf, fields.len());
+                for (field, value) in fields {
+                    rdb_encode_string_with(buf, field, compress);
+                    rdb_encode_string_with(buf, value, compress);
+                }
+            }
+        }
+        // (frankenredis-aqkvk) A hash carried in blob form re-encodes
+        // VERBATIM. That is not just cheaper than re-deriving a listpack
+        // from decoded pairs — it is the more faithful round trip, since
+        // upstream saves by ENCODING rather than by re-deriving from
+        // content, the same reason `SetHashtable` exists separately from
+        // `Set`.
+        RdbValue::HashListpack(blob) => {
+            buf.push(RDB_TYPE_HASH_LISTPACK);
+            rdb_encode_string_with(buf, &entry.key, compress);
+            rdb_encode_string_with(buf, blob, compress);
+        }
+        // VERBATIM, one level deeper: this blob is the ENCODED string, not
+        // the listpack, so it is spliced in whole. `rdb_encode_string` here
+        // would re-run `lzf_compress` to reproduce bytes already in the value.
+        RdbValue::HashListpackRetained { raw, .. } => {
+            buf.push(RDB_TYPE_HASH_LISTPACK);
+            rdb_encode_string_with(buf, &entry.key, compress);
+            buf.extend_from_slice(raw);
+        }
+        RdbValue::HashWithTtls(fields) => {
+            buf.push(RDB_TYPE_HASH_WITH_TTLS);
+            rdb_encode_string_with(buf, &entry.key, compress);
+            rdb_encode_length(buf, fields.len());
+            for (field, value, expires_ms) in fields {
+                rdb_encode_string_with(buf, field, compress);
+                rdb_encode_string_with(buf, value, compress);
+                // u64::MAX sentinel = "no TTL". Any other value is
+                // the absolute ms-since-epoch deadline.
+                let encoded = expires_ms.unwrap_or(u64::MAX);
+                buf.extend_from_slice(&encoded.to_le_bytes());
+            }
+        }
+        // VERBATIM: the save side already built exactly the bytes the
+        // listpack arm below would have produced, from borrowed members.
+        RdbValue::ZsetListpack(blob) => {
+            buf.push(RDB_TYPE_ZSET_LISTPACK);
+            rdb_encode_string_with(buf, &entry.key, compress);
+            rdb_encode_string_with(buf, blob, compress);
+        }
+        // VERBATIM, one level deeper: this blob is the ENCODED string, not
+        // the listpack, so it is spliced in whole. `rdb_encode_string` here
+        // would re-run `lzf_compress` to reproduce bytes that are already
+        // sitting in the value -- the largest single frame in the arm.
+        RdbValue::ZsetListpackRetained { raw, .. } => {
+            buf.push(RDB_TYPE_ZSET_LISTPACK);
+            rdb_encode_string_with(buf, &entry.key, compress);
+            buf.extend_from_slice(raw);
+        }
+        RdbValue::SortedSet(members) => {
+            if let Some(thresholds) = options.compact.as_ref()
+                && let Some(payload) = encode_compact_zset_listpack(members, thresholds, compress)
+            {
+                buf.push(RDB_TYPE_ZSET_LISTPACK);
+                rdb_encode_string_with(buf, &entry.key, compress);
+                buf.extend_from_slice(&payload);
+            } else {
+                buf.push(RDB_TYPE_ZSET_2);
+                rdb_encode_string_with(buf, &entry.key, compress);
+                rdb_encode_length(buf, members.len());
+                for (member, score) in members {
+                    rdb_encode_string_with(buf, member, compress);
+                    // ZSET2 encoding: 8-byte LE double
+                    buf.extend_from_slice(&score.to_le_bytes());
+                }
+            }
+        }
+        // VERBATIM: the save side already built exactly the payload the
+        // upstream arm inside `encode_stream_rdb_value` would produce.
+        RdbValue::StreamListpacks3(blob) => {
+            buf.push(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3);
+            rdb_encode_string_with(buf, &entry.key, compress);
+            buf.extend_from_slice(blob);
+        }
+        // VERBATIM, same reasoning: a skeleton still holds the exact
+        // upstream record body it was decoded from, so a loaded stream
+        // re-saves byte-for-byte without re-deriving a payload from
+        // entries it has not even decoded.
+        RdbValue::StreamSkeleton(skeleton) => {
+            buf.push(skeleton.upstream_type_byte());
+            rdb_encode_string_with(buf, &entry.key, compress);
+            buf.extend_from_slice(skeleton.upstream_payload());
+        }
+        RdbValue::Stream(
+            stream_entries,
+            watermark,
+            groups,
+            metadata,
+            entries_added,
+            max_deleted,
+        ) => {
+            encode_stream_rdb_value(
+                buf,
+                &entry.key,
+                StreamRdbValueParts {
+                    entries: stream_entries,
+                    watermark: *watermark,
+                    groups,
+                    metadata,
+                    entries_added: *entries_added,
+                    max_deleted: *max_deleted,
+                },
+            );
+        }
+    }
 }
 
 // ── Compact-shape selection (br-frankenredis-91kt) ─────────────────
@@ -2480,6 +2522,7 @@ fn encode_compact_set_intset(
 fn encode_compact_set_listpack(
     members: &[Vec<u8>],
     thresholds: &CompactRdbThresholds,
+    compress: bool,
 ) -> Option<Vec<u8>> {
     if members.len() > thresholds.set_max_listpack_entries {
         return None;
@@ -2497,7 +2540,7 @@ fn encode_compact_set_listpack(
     // and the compressed form is smaller). Emitting it raw made DUMP/RDB diverge
     // from redis for large listpack hashes/sets/zsets (a 200-field hash dumped
     // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
-    rdb_encode_string(&mut out, &lp);
+    rdb_encode_string_with(&mut out, &lp, compress);
     Some(out)
 }
 
@@ -2558,6 +2601,7 @@ fn encode_set_listpack_blob(members: &[Vec<u8>]) -> Option<Vec<u8>> {
 fn encode_compact_hash_listpack(
     fields: &[(Vec<u8>, Vec<u8>)],
     thresholds: &CompactRdbThresholds,
+    compress: bool,
 ) -> Option<Vec<u8>> {
     if fields.len() > thresholds.hash_max_listpack_entries {
         return None;
@@ -2574,7 +2618,7 @@ fn encode_compact_hash_listpack(
     // and the compressed form is smaller). Emitting it raw made DUMP/RDB diverge
     // from redis for large listpack hashes/sets/zsets (a 200-field hash dumped
     // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
-    rdb_encode_string(&mut out, &lp);
+    rdb_encode_string_with(&mut out, &lp, compress);
     Some(out)
 }
 
@@ -2636,6 +2680,7 @@ pub fn encode_hash_listpack_blob_borrowed(
 fn encode_compact_zset_listpack(
     members: &[(Vec<u8>, f64)],
     thresholds: &CompactRdbThresholds,
+    compress: bool,
 ) -> Option<Vec<u8>> {
     if members.len() > thresholds.zset_max_listpack_entries {
         return None;
@@ -2669,7 +2714,7 @@ fn encode_compact_zset_listpack(
     // and the compressed form is smaller). Emitting it raw made DUMP/RDB diverge
     // from redis for large listpack hashes/sets/zsets (a 200-field hash dumped
     // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
-    rdb_encode_string(&mut out, &lp);
+    rdb_encode_string_with(&mut out, &lp, compress);
     Some(out)
 }
 
@@ -6155,6 +6200,61 @@ pub fn read_rdb_file_with_functions(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn rdb_encode_presorted_and_unsorted_entries_produce_identical_bytes() {
+        use crate::{RdbEntry, RdbValue, decode_rdb, encode_rdb};
+
+        let sorted = vec![
+            RdbEntry {
+                db: 0,
+                key: b"a".to_vec(),
+                value: RdbValue::String(b"val_a".to_vec()),
+                expire_ms: None,
+            },
+            RdbEntry {
+                db: 0,
+                key: b"b".to_vec(),
+                value: RdbValue::List(vec![b"i1".to_vec(), b"i2".to_vec()]),
+                expire_ms: Some(12345),
+            },
+            RdbEntry {
+                db: 0,
+                key: b"c".to_vec(),
+                value: RdbValue::Hash(vec![(b"f1".to_vec(), b"v1".to_vec())]),
+                expire_ms: None,
+            },
+            RdbEntry {
+                db: 1,
+                key: b"d".to_vec(),
+                value: RdbValue::Set(vec![b"m1".to_vec(), b"m2".to_vec()]),
+                expire_ms: None,
+            },
+            RdbEntry {
+                db: 1,
+                key: b"e".to_vec(),
+                value: RdbValue::SortedSet(vec![(b"z1".to_vec(), 1.5)]),
+                expire_ms: None,
+            },
+        ];
+
+        let unsorted = vec![
+            sorted[4].clone(),
+            sorted[1].clone(),
+            sorted[0].clone(),
+            sorted[3].clone(),
+            sorted[2].clone(),
+        ];
+
+        let aux = [("redis-ver", "7.2.4"), ("frankenredis", "true")];
+        let bytes_sorted = encode_rdb(&sorted, &aux);
+        let bytes_unsorted = encode_rdb(&unsorted, &aux);
+
+        assert_eq!(bytes_sorted, bytes_unsorted);
+
+        let decoded = decode_rdb(&bytes_sorted).expect("decode should succeed");
+        assert_eq!(decoded.0.len(), 5);
+    }
 
     /// (frankenredis-qj6jn) `decimal_i64_into` writes where the caller wants the bytes; the
     /// tuple-returning `decimal_i64_scratch` is now a thin wrapper over it. Both must agree with
