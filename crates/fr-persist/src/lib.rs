@@ -1578,13 +1578,13 @@ pub enum RdbValueRef<'a> {
     String(&'a [u8]),
     Integer(i64),
     List(Vec<Vec<u8>>),
-    ListQuicklist2Packed(Vec<Vec<u8>>),
+    ListQuicklist2Packed(Vec<std::borrow::Cow<'a, [u8]>>),
     ListQuicklist2Retained {
         raw: std::borrow::Cow<'a, [u8]>,
         nodes: Vec<Vec<u8>>,
     },
     Set(Vec<Vec<u8>>),
-    IntSet(Vec<i64>),
+    IntSet(std::borrow::Cow<'a, [i64]>),
     SetHashtable(Vec<Vec<u8>>),
     SetListpack(Vec<u8>),
     SetListpackRetained {
@@ -1639,13 +1639,18 @@ impl<'a> RdbValueRef<'a> {
                 RdbValue::String(digits[pos..].to_vec())
             }
             Self::List(items) => RdbValue::List(items),
-            Self::ListQuicklist2Packed(nodes) => RdbValue::ListQuicklist2Packed(nodes),
+            Self::ListQuicklist2Packed(nodes) => RdbValue::ListQuicklist2Packed(
+                nodes
+                    .into_iter()
+                    .map(std::borrow::Cow::into_owned)
+                    .collect(),
+            ),
             Self::ListQuicklist2Retained { raw, nodes } => RdbValue::ListQuicklist2Retained {
                 raw: raw.into_owned(),
                 nodes,
             },
             Self::Set(members) => RdbValue::Set(members),
-            Self::IntSet(members) => RdbValue::IntSet(members),
+            Self::IntSet(members) => RdbValue::IntSet(members.into_owned()),
             Self::SetHashtable(members) => RdbValue::SetHashtable(members),
             Self::SetListpack(blob) => RdbValue::SetListpack(blob),
             Self::SetListpackRetained {
@@ -2973,8 +2978,8 @@ fn encode_rdb_entry_borrowed(
             }
         }
         RdbValueRef::IntSet(members) => {
-            let width = intset_width(members);
-            if let Some(blob) = encode_sorted_intset_blob(members, width) {
+            let width = intset_width(members.as_ref());
+            if let Some(blob) = encode_sorted_intset_blob(members.as_ref(), width) {
                 buf.push(RDB_TYPE_SET_INTSET);
                 rdb_encode_string_with(buf, entry.key, compress);
                 rdb_encode_string_with(buf, &blob, compress);
@@ -2982,7 +2987,7 @@ fn encode_rdb_entry_borrowed(
                 buf.push(RDB_TYPE_SET);
                 rdb_encode_string_with(buf, entry.key, compress);
                 rdb_encode_length(buf, members.len());
-                for member in members {
+                for member in members.iter() {
                     rdb_encode_string_with(buf, &decimal_i64_bytes(*member), compress);
                 }
             }
@@ -3394,8 +3399,9 @@ fn encode_zset_score_listpack_blob_from_members(
             .map(|(m, _)| m.len() + 11 + 32)
             .sum::<usize>();
     let mut encoded = listpack_blob_with_header(cap);
+    let mut scratch = Vec::new();
     for (member, score) in sorted_members {
-        encode_zset_score_listpack_entry(&mut encoded, member, *score);
+        encode_zset_score_listpack_entry_with_scratch(&mut encoded, member, *score, &mut scratch);
     }
     finish_listpack_blob(encoded, sorted_members.len().saturating_mul(2))
 }
@@ -3411,8 +3417,9 @@ fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Ve
             .map(|(m, _)| m.len() + 11 + 32)
             .sum::<usize>();
     let mut encoded = listpack_blob_with_header(cap);
+    let mut scratch = Vec::new();
     for (member, score) in sorted_members {
-        encode_zset_score_listpack_entry(&mut encoded, member, *score);
+        encode_zset_score_listpack_entry_with_scratch(&mut encoded, member, *score, &mut scratch);
     }
     finish_listpack_blob(encoded, sorted_members.len().saturating_mul(2))
 }
@@ -3431,23 +3438,35 @@ fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Ve
 // bodies this size -- 9d7be9b44 measured it moving the ratio 0.1 pct with the call
 // count byte-for-byte unchanged.
 #[inline(always)]
-fn encode_zset_score_listpack_entry(encoded: &mut Vec<u8>, member: &[u8], score: f64) {
+fn encode_zset_score_listpack_entry_with_scratch(
+    encoded: &mut Vec<u8>,
+    member: &[u8],
+    score: f64,
+    scratch: &mut Vec<u8>,
+) {
     encode_listpack_entry(encoded, member);
     match fr_protocol::zset_score_listpack_entry(score) {
         fr_protocol::ZsetScoreListpackEntry::Int(score) => {
             encode_listpack_integer_entry(encoded, score);
         }
         fr_protocol::ZsetScoreListpackEntry::Str => {
-            let mut rendered = Vec::with_capacity(24);
-            fr_protocol::push_redis_double_ascii(&mut rendered, score);
-            encode_listpack_string_entry(encoded, &rendered);
+            scratch.clear();
+            fr_protocol::push_redis_double_ascii(scratch, score);
+            encode_listpack_string_entry(encoded, scratch);
         }
         fr_protocol::ZsetScoreListpackEntry::Reparse => {
-            let mut rendered = Vec::with_capacity(24);
-            fr_protocol::push_redis_double_ascii(&mut rendered, score);
-            encode_listpack_entry(encoded, &rendered);
+            scratch.clear();
+            fr_protocol::push_redis_double_ascii(scratch, score);
+            encode_listpack_entry(encoded, scratch);
         }
     }
+}
+
+#[cfg(test)]
+#[inline(always)]
+fn encode_zset_score_listpack_entry(encoded: &mut Vec<u8>, member: &[u8], score: f64) {
+    let mut scratch = Vec::new();
+    encode_zset_score_listpack_entry_with_scratch(encoded, member, score, &mut scratch);
 }
 
 fn encode_compact_list_quicklist2(
@@ -3670,14 +3689,19 @@ fn listpack_blob_header_matches(blob: &[u8]) -> bool {
     total == blob.len()
 }
 
-fn encode_quicklist2_packed_payload(nodes: &[Vec<u8>]) -> Vec<u8> {
+fn encode_quicklist2_packed_payload<T: AsRef<[u8]>>(nodes: &[T]) -> Vec<u8> {
     debug_assert!(!nodes.is_empty());
-    debug_assert!(nodes.iter().all(|node| listpack_blob_header_matches(node)));
-    let mut buf = Vec::new();
+    debug_assert!(
+        nodes
+            .iter()
+            .all(|node| listpack_blob_header_matches(node.as_ref()))
+    );
+    let total_len = nodes.iter().map(|n| n.as_ref().len() + 10).sum::<usize>();
+    let mut buf = Vec::with_capacity(total_len + 8);
     rdb_encode_length(&mut buf, nodes.len());
     for node in nodes {
         rdb_encode_length(&mut buf, 2);
-        rdb_encode_string(&mut buf, node);
+        rdb_encode_string(&mut buf, node.as_ref());
     }
     buf
 }

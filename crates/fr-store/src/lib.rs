@@ -1955,7 +1955,8 @@ impl SortedSet {
         }
     }
 
-    fn len(&self) -> usize {
+    #[must_use]
+    pub fn len(&self) -> usize {
         // Answered from the record's own count while the value is still retained.
         // Routing this through `inner()` would materialize every RDB-loaded zset
         // the moment the store asked how big it was -- the eager-reader trap that
@@ -1971,7 +1972,8 @@ impl SortedSet {
         }
     }
 
-    fn is_empty(&self) -> bool {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -3940,7 +3942,8 @@ impl SetValue {
     /// The raw sorted-ascending i64 members when intset-encoded; `None` for the
     /// generic encoding. Lets hot paths (e.g. DUMP) consume the integers directly
     /// instead of round-tripping each through `set_int_to_bytes` + `parse_i64`.
-    pub(crate) fn as_int_slice(&self) -> Option<&[i64]> {
+    #[must_use]
+    pub fn as_int_slice(&self) -> Option<&[i64]> {
         match self {
             SetValue::Int(v) => Some(v),
             SetValue::Generic(_) => None,

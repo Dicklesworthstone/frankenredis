@@ -52506,7 +52506,7 @@ fn store_to_rdb_entries_borrowed<'a>(
                         // value rather than encoding it re-derives them from `raw`.
                         nodes: Vec::new(),
                     }
-                } else if let Some(nodes) = l.quicklist_packed_node_blobs(list_max_listpack_size) {
+                } else if let Some(nodes) = l.quicklist_packed_node_cows(list_max_listpack_size) {
                     fr_persist::RdbValueRef::ListQuicklist2Packed(nodes)
                 } else {
                     fr_persist::RdbValueRef::List(l.iter().map(<[u8]>::to_vec).collect())
@@ -52551,11 +52551,28 @@ fn store_to_rdb_entries_borrowed<'a>(
                         member_count,
                         max_member_len,
                     }
+                } else if let Some(ints) = s.as_int_slice() {
+                    let fits_intset =
+                        compact.is_some_and(|th| ints.len() <= th.set_max_intset_entries);
+                    if fits_intset {
+                        fr_persist::RdbValueRef::IntSet(std::borrow::Cow::Borrowed(ints))
+                    } else {
+                        let mut members: Vec<Vec<u8>> = s.iter().map(|m| m.into_owned()).collect();
+                        if set_is_hashtable {
+                            members.sort_unstable();
+                            fr_persist::RdbValueRef::SetHashtable(members)
+                        } else {
+                            fr_persist::RdbValueRef::Set(members)
+                        }
+                    }
                 } else {
                     let borrowed_blob = if set_is_hashtable {
                         None
                     } else {
                         compact.and_then(|thresholds| {
+                            if s.len() > thresholds.set_max_listpack_entries {
+                                return None;
+                            }
                             s.borrowed_generic_members().and_then(|borrowed| {
                                 fr_persist::encode_set_listpack_blob_borrowed(&borrowed, thresholds)
                             })
@@ -52647,18 +52664,30 @@ fn store_to_rdb_entries_borrowed<'a>(
                     // owned form below, which is what the encoder would have
                     // produced anyway.
                     let hashtable = hash_is_hashtable;
-                    let mut borrowed: Vec<(&[u8], &[u8])> = h.iter().collect();
-                    if hashtable {
-                        borrowed.sort_unstable_by(|a, b| a.0.cmp(b.0));
-                    }
-                    match fr_persist::encode_hash_listpack_blob_borrowed(&borrowed, thresholds) {
-                        Some(blob) => fr_persist::RdbValueRef::HashListpack(blob),
-                        None => {
-                            let fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed
-                                .iter()
-                                .map(|(f, v)| (f.to_vec(), v.to_vec()))
-                                .collect();
-                            fr_persist::RdbValueRef::Hash(fields)
+                    if h.len() > thresholds.hash_max_listpack_entries {
+                        let mut fields: Vec<(Vec<u8>, Vec<u8>)> = h
+                            .iter()
+                            .map(|(k_, v_)| (k_.to_vec(), v_.to_vec()))
+                            .collect();
+                        if hashtable {
+                            fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                        }
+                        fr_persist::RdbValueRef::Hash(fields)
+                    } else {
+                        let mut borrowed: Vec<(&[u8], &[u8])> = h.iter().collect();
+                        if hashtable {
+                            borrowed.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                        }
+                        match fr_persist::encode_hash_listpack_blob_borrowed(&borrowed, thresholds)
+                        {
+                            Some(blob) => fr_persist::RdbValueRef::HashListpack(blob),
+                            None => {
+                                let fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed
+                                    .iter()
+                                    .map(|(f, v)| (f.to_vec(), v.to_vec()))
+                                    .collect();
+                                fr_persist::RdbValueRef::Hash(fields)
+                            }
                         }
                     }
                 } else {
@@ -52724,6 +52753,9 @@ fn store_to_rdb_entries_borrowed<'a>(
                     }
                 } else {
                     let borrowed_blob = compact.and_then(|thresholds| {
+                        if zs.len() > thresholds.zset_max_listpack_entries {
+                            return None;
+                        }
                         let borrowed: Vec<(&[u8], f64)> = zs.iter_asc().collect();
                         fr_persist::encode_zset_listpack_blob_borrowed(&borrowed, thresholds)
                     });
@@ -65938,6 +65970,10 @@ mod tests {
                 rt.execute_frame(command(&[b"ZADD", b"myzset", b"1.5", b"z1"]), 8),
                 RespFrame::Integer(1)
             );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SADD", b"myintset", b"10", b"20", b"30"]), 9),
+                RespFrame::Integer(3)
+            );
             rt
         };
 
@@ -65972,6 +66008,7 @@ mod tests {
         assert!(rt1.server.store.exists(b"myhash", now_ms));
         assert!(rt1.server.store.exists(b"mylist", now_ms));
         assert!(rt1.server.store.exists(b"myset", now_ms));
+        assert!(rt1.server.store.exists(b"myintset", now_ms));
         assert!(rt1.server.store.exists(b"myzset", now_ms));
 
         // Verify both payloads decode cleanly and match
