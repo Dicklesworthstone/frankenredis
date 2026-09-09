@@ -1577,30 +1577,30 @@ impl<'a> RdbEntryRef<'a> {
 pub enum RdbValueRef<'a> {
     String(&'a [u8]),
     Integer(i64),
-    List(Vec<Vec<u8>>),
+    List(Vec<std::borrow::Cow<'a, [u8]>>),
     ListQuicklist2Packed(Vec<std::borrow::Cow<'a, [u8]>>),
     ListQuicklist2Retained {
         raw: std::borrow::Cow<'a, [u8]>,
         nodes: Vec<Vec<u8>>,
     },
-    Set(Vec<Vec<u8>>),
+    Set(Vec<std::borrow::Cow<'a, [u8]>>),
     IntSet(std::borrow::Cow<'a, [i64]>),
-    SetHashtable(Vec<Vec<u8>>),
+    SetHashtable(Vec<std::borrow::Cow<'a, [u8]>>),
     SetListpack(Vec<u8>),
     SetListpackRetained {
         raw: std::borrow::Cow<'a, [u8]>,
         member_count: usize,
         max_member_len: usize,
     },
-    Hash(Vec<(Vec<u8>, Vec<u8>)>),
+    Hash(Vec<(std::borrow::Cow<'a, [u8]>, std::borrow::Cow<'a, [u8]>)>),
     HashListpack(Vec<u8>),
     HashListpackRetained {
         raw: std::borrow::Cow<'a, [u8]>,
         pair_count: usize,
         max_entry_len: usize,
     },
-    HashWithTtls(Vec<(Vec<u8>, Vec<u8>, Option<u64>)>),
-    SortedSet(Vec<(Vec<u8>, f64)>),
+    HashWithTtls(Vec<(std::borrow::Cow<'a, [u8]>, std::borrow::Cow<'a, [u8]>, Option<u64>)>),
+    SortedSet(Vec<(std::borrow::Cow<'a, [u8]>, f64)>),
     ZsetListpack(Vec<u8>),
     ZsetListpackRetained {
         raw: std::borrow::Cow<'a, [u8]>,
@@ -1638,7 +1638,12 @@ impl<'a> RdbValueRef<'a> {
                 }
                 RdbValue::String(digits[pos..].to_vec())
             }
-            Self::List(items) => RdbValue::List(items),
+            Self::List(items) => RdbValue::List(
+                items
+                    .into_iter()
+                    .map(std::borrow::Cow::into_owned)
+                    .collect(),
+            ),
             Self::ListQuicklist2Packed(nodes) => RdbValue::ListQuicklist2Packed(
                 nodes
                     .into_iter()
@@ -1649,9 +1654,19 @@ impl<'a> RdbValueRef<'a> {
                 raw: raw.into_owned(),
                 nodes,
             },
-            Self::Set(members) => RdbValue::Set(members),
+            Self::Set(members) => RdbValue::Set(
+                members
+                    .into_iter()
+                    .map(std::borrow::Cow::into_owned)
+                    .collect(),
+            ),
             Self::IntSet(members) => RdbValue::IntSet(members.into_owned()),
-            Self::SetHashtable(members) => RdbValue::SetHashtable(members),
+            Self::SetHashtable(members) => RdbValue::SetHashtable(
+                members
+                    .into_iter()
+                    .map(std::borrow::Cow::into_owned)
+                    .collect(),
+            ),
             Self::SetListpack(blob) => RdbValue::SetListpack(blob),
             Self::SetListpackRetained {
                 raw,
@@ -1662,7 +1677,12 @@ impl<'a> RdbValueRef<'a> {
                 member_count,
                 max_member_len,
             },
-            Self::Hash(fields) => RdbValue::Hash(fields),
+            Self::Hash(fields) => RdbValue::Hash(
+                fields
+                    .into_iter()
+                    .map(|(f, v)| (f.into_owned(), v.into_owned()))
+                    .collect(),
+            ),
             Self::HashListpack(blob) => RdbValue::HashListpack(blob),
             Self::HashListpackRetained {
                 raw,
@@ -1673,8 +1693,18 @@ impl<'a> RdbValueRef<'a> {
                 pair_count,
                 max_entry_len,
             },
-            Self::HashWithTtls(fields) => RdbValue::HashWithTtls(fields),
-            Self::SortedSet(members) => RdbValue::SortedSet(members),
+            Self::HashWithTtls(fields) => RdbValue::HashWithTtls(
+                fields
+                    .into_iter()
+                    .map(|(f, v, ttl)| (f.into_owned(), v.into_owned(), ttl))
+                    .collect(),
+            ),
+            Self::SortedSet(members) => RdbValue::SortedSet(
+                members
+                    .into_iter()
+                    .map(|(m, score)| (m.into_owned(), score))
+                    .collect(),
+            ),
             Self::ZsetListpack(blob) => RdbValue::ZsetListpack(blob),
             Self::ZsetListpackRetained {
                 raw,
@@ -2494,7 +2524,7 @@ fn encode_rdb_borrowed_internal<'a>(
     functions: &[&[u8]],
     options: RdbEncodeOptions,
 ) -> Vec<u8> {
-    let initial_cap = 128usize.saturating_add(entries.len().saturating_mul(16));
+    let initial_cap = 128usize.saturating_add(entries.len().saturating_mul(32));
     let mut buf = Vec::with_capacity(initial_cap);
 
     // Magic + version
@@ -2923,7 +2953,7 @@ fn encode_rdb_entry_borrowed(
                 rdb_encode_string_with(buf, entry.key, compress);
                 rdb_encode_length(buf, items.len());
                 for item in items {
-                    rdb_encode_string_with(buf, item, compress);
+                    rdb_encode_string_with(buf, item.as_ref(), compress);
                 }
             }
         }
@@ -2965,7 +2995,7 @@ fn encode_rdb_entry_borrowed(
                     rdb_encode_string_with(buf, entry.key, compress);
                     rdb_encode_length(buf, members.len());
                     for member in members {
-                        rdb_encode_string_with(buf, member, compress);
+                        rdb_encode_string_with(buf, member.as_ref(), compress);
                     }
                 }
             } else {
@@ -2973,7 +3003,7 @@ fn encode_rdb_entry_borrowed(
                 rdb_encode_string_with(buf, entry.key, compress);
                 rdb_encode_length(buf, members.len());
                 for member in members {
-                    rdb_encode_string_with(buf, member, compress);
+                    rdb_encode_string_with(buf, member.as_ref(), compress);
                 }
             }
         }
@@ -2997,7 +3027,7 @@ fn encode_rdb_entry_borrowed(
             rdb_encode_string_with(buf, entry.key, compress);
             rdb_encode_length(buf, members.len());
             for member in members {
-                rdb_encode_string_with(buf, member, compress);
+                rdb_encode_string_with(buf, member.as_ref(), compress);
             }
         }
         RdbValueRef::Hash(fields) => {
@@ -3012,8 +3042,8 @@ fn encode_rdb_entry_borrowed(
                 rdb_encode_string_with(buf, entry.key, compress);
                 rdb_encode_length(buf, fields.len());
                 for (field, value) in fields {
-                    rdb_encode_string_with(buf, field, compress);
-                    rdb_encode_string_with(buf, value, compress);
+                    rdb_encode_string_with(buf, field.as_ref(), compress);
+                    rdb_encode_string_with(buf, value.as_ref(), compress);
                 }
             }
         }
@@ -3032,8 +3062,8 @@ fn encode_rdb_entry_borrowed(
             rdb_encode_string_with(buf, entry.key, compress);
             rdb_encode_length(buf, fields.len());
             for (field, value, expires_ms) in fields {
-                rdb_encode_string_with(buf, field, compress);
-                rdb_encode_string_with(buf, value, compress);
+                rdb_encode_string_with(buf, field.as_ref(), compress);
+                rdb_encode_string_with(buf, value.as_ref(), compress);
                 let encoded = expires_ms.unwrap_or(u64::MAX);
                 buf.extend_from_slice(&encoded.to_le_bytes());
             }
@@ -3060,7 +3090,7 @@ fn encode_rdb_entry_borrowed(
                 rdb_encode_string_with(buf, entry.key, compress);
                 rdb_encode_length(buf, members.len());
                 for (member, score) in members {
-                    rdb_encode_string_with(buf, member, compress);
+                    rdb_encode_string_with(buf, member.as_ref(), compress);
                     buf.extend_from_slice(&score.to_le_bytes());
                 }
             }
@@ -3107,8 +3137,8 @@ fn encode_rdb_entry_borrowed(
 // `payload` does NOT include the leading type byte or the key — those
 // are emitted by `encode_rdb_internal` per-value-kind.
 
-fn encode_compact_set_intset(
-    members: &[Vec<u8>],
+fn encode_compact_set_intset<T: AsRef<[u8]>>(
+    members: &[T],
     thresholds: &CompactRdbThresholds,
 ) -> Option<Vec<u8>> {
     if members.len() > thresholds.set_max_intset_entries {
@@ -3120,7 +3150,7 @@ fn encode_compact_set_intset(
     // canonical parser instead of formatting a String per candidate member.
     let mut values = Vec::with_capacity(members.len());
     for raw in members {
-        let value = parse_listpack_integer(raw)?;
+        let value = parse_listpack_integer(raw.as_ref())?;
         values.push(value);
     }
     let width = intset_width(&values);
@@ -3131,8 +3161,8 @@ fn encode_compact_set_intset(
     Some(out)
 }
 
-fn encode_compact_set_listpack(
-    members: &[Vec<u8>],
+fn encode_compact_set_listpack<T: AsRef<[u8]>>(
+    members: &[T],
     thresholds: &CompactRdbThresholds,
     compress: bool,
 ) -> Option<Vec<u8>> {
@@ -3141,7 +3171,7 @@ fn encode_compact_set_listpack(
     }
     if members
         .iter()
-        .any(|m| m.len() > thresholds.set_max_listpack_value)
+        .any(|m| m.as_ref().len() > thresholds.set_max_listpack_value)
     {
         return None;
     }
@@ -3196,22 +3226,22 @@ pub fn encode_set_listpack_blob_borrowed(
     finish_listpack_blob(encoded, members.len())
 }
 
-fn encode_set_listpack_blob(members: &[Vec<u8>]) -> Option<Vec<u8>> {
+fn encode_set_listpack_blob<T: AsRef<[u8]>>(members: &[T]) -> Option<Vec<u8>> {
     // Pre-size to a safe upper bound (each listpack string entry is <= len + ~10 of
     // type-header + backlen; int-encoded entries are shorter) so the blob is built in ONE
     // allocation instead of growing from empty (≈log2(size) realloc+copies per key on the
     // bulk RDB-save path). Under-estimates are harmless (Vec just grows); output is
     // byte-identical. (frankenredis perf: presize listpack blob, code-first batch-test pending)
-    let cap = LISTPACK_BLOB_OVERHEAD + members.iter().map(|m| m.len() + 11).sum::<usize>();
+    let cap = LISTPACK_BLOB_OVERHEAD + members.iter().map(|m| m.as_ref().len() + 11).sum::<usize>();
     let mut encoded = listpack_blob_with_header(cap);
     for member in members {
-        encode_listpack_entry(&mut encoded, member);
+        encode_listpack_entry(&mut encoded, member.as_ref());
     }
     finish_listpack_blob(encoded, members.len())
 }
 
-fn encode_compact_hash_listpack(
-    fields: &[(Vec<u8>, Vec<u8>)],
+fn encode_compact_hash_listpack<T: AsRef<[u8]>>(
+    fields: &[(T, T)],
     thresholds: &CompactRdbThresholds,
     compress: bool,
 ) -> Option<Vec<u8>> {
@@ -3219,7 +3249,8 @@ fn encode_compact_hash_listpack(
         return None;
     }
     if fields.iter().any(|(f, v)| {
-        f.len() > thresholds.hash_max_listpack_value || v.len() > thresholds.hash_max_listpack_value
+        f.as_ref().len() > thresholds.hash_max_listpack_value
+            || v.as_ref().len() > thresholds.hash_max_listpack_value
     }) {
         return None;
     }
@@ -3234,19 +3265,19 @@ fn encode_compact_hash_listpack(
     Some(out)
 }
 
-fn encode_hash_listpack_blob(fields: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec<u8>> {
+fn encode_hash_listpack_blob<T: AsRef<[u8]>>(fields: &[(T, T)]) -> Option<Vec<u8>> {
     // Pre-size to a safe upper bound (two entries per field, each <= len + ~10) so the blob
     // is built in one allocation. Under-estimates are harmless; output byte-identical.
     // (frankenredis perf: presize listpack blob, code-first batch-test pending)
     let cap = LISTPACK_BLOB_OVERHEAD
         + fields
             .iter()
-            .map(|(f, v)| f.len() + v.len() + 22)
+            .map(|(f, v)| f.as_ref().len() + v.as_ref().len() + 22)
             .sum::<usize>();
     let mut encoded = listpack_blob_with_header(cap);
     for (field, value) in fields {
-        encode_listpack_entry(&mut encoded, field);
-        encode_listpack_entry(&mut encoded, value);
+        encode_listpack_entry(&mut encoded, field.as_ref());
+        encode_listpack_entry(&mut encoded, value.as_ref());
     }
     finish_listpack_blob(encoded, fields.len().saturating_mul(2))
 }
@@ -3289,8 +3320,8 @@ pub fn encode_hash_listpack_blob_borrowed(
     finish_listpack_blob(encoded, fields.len().saturating_mul(2))
 }
 
-fn encode_compact_zset_listpack(
-    members: &[(Vec<u8>, f64)],
+fn encode_compact_zset_listpack<T: AsRef<[u8]>>(
+    members: &[(T, f64)],
     thresholds: &CompactRdbThresholds,
     compress: bool,
 ) -> Option<Vec<u8>> {
@@ -3299,7 +3330,7 @@ fn encode_compact_zset_listpack(
     }
     if members
         .iter()
-        .any(|(m, _)| m.len() > thresholds.zset_max_listpack_value)
+        .any(|(m, _)| m.as_ref().len() > thresholds.zset_max_listpack_value)
     {
         return None;
     }
@@ -3315,7 +3346,7 @@ fn encode_compact_zset_listpack(
     } else {
         let mut sorted_members: Vec<(&[u8], f64)> = members
             .iter()
-            .map(|(member, score)| (member.as_slice(), *score))
+            .map(|(member, score)| (member.as_ref(), *score))
             .collect();
         sorted_members.sort_unstable_by(|left, right| zset_member_cmp(*left, *right));
         encode_zset_score_listpack_blob(&sorted_members)?
@@ -3381,27 +3412,27 @@ fn borrowed_zset_members_are_sorted(members: &[(&[u8], f64)]) -> bool {
         .all(|pair| zset_member_cmp(pair[0], pair[1]) != std::cmp::Ordering::Greater)
 }
 
-fn zset_members_are_sorted(members: &[(Vec<u8>, f64)]) -> bool {
+fn zset_members_are_sorted<T: AsRef<[u8]>>(members: &[(T, f64)]) -> bool {
     members.windows(2).all(|pair| {
         zset_member_cmp(
-            (pair[0].0.as_slice(), pair[0].1),
-            (pair[1].0.as_slice(), pair[1].1),
+            (pair[0].0.as_ref(), pair[0].1),
+            (pair[1].0.as_ref(), pair[1].1),
         ) != std::cmp::Ordering::Greater
     })
 }
 
-fn encode_zset_score_listpack_blob_from_members(
-    sorted_members: &[(Vec<u8>, f64)],
+fn encode_zset_score_listpack_blob_from_members<T: AsRef<[u8]>>(
+    sorted_members: &[(T, f64)],
 ) -> Option<Vec<u8>> {
     let cap = LISTPACK_BLOB_OVERHEAD
         + sorted_members
             .iter()
-            .map(|(m, _)| m.len() + 11 + 32)
+            .map(|(m, _)| m.as_ref().len() + 11 + 32)
             .sum::<usize>();
     let mut encoded = listpack_blob_with_header(cap);
     let mut scratch = Vec::new();
     for (member, score) in sorted_members {
-        encode_zset_score_listpack_entry_with_scratch(&mut encoded, member, *score, &mut scratch);
+        encode_zset_score_listpack_entry_with_scratch(&mut encoded, member.as_ref(), *score, &mut scratch);
     }
     finish_listpack_blob(encoded, sorted_members.len().saturating_mul(2))
 }
@@ -3469,8 +3500,8 @@ fn encode_zset_score_listpack_entry(encoded: &mut Vec<u8>, member: &[u8], score:
     encode_zset_score_listpack_entry_with_scratch(encoded, member, score, &mut scratch);
 }
 
-fn encode_compact_list_quicklist2(
-    items: &[Vec<u8>],
+fn encode_compact_list_quicklist2<T: AsRef<[u8]>>(
+    items: &[T],
     thresholds: &CompactRdbThresholds,
 ) -> Option<Vec<u8>> {
     // Upstream lists are ALWAYS quicklist-encoded (RDB_TYPE_LIST_QUICKLIST_2):
@@ -3496,7 +3527,7 @@ fn encode_compact_list_quicklist2(
     // in `parse_listpack_integer` on `len >= 21` so it is a wash for them, never worse.
     let lens: Vec<usize> = items
         .iter()
-        .map(|it| listpack_entry_encoded_len(it))
+        .map(|it| listpack_entry_encoded_len(it.as_ref()))
         .collect();
     let mut buf = Vec::new();
     rdb_encode_length(
@@ -3537,6 +3568,7 @@ fn encode_compact_list_quicklist2(
     };
     const QUICKLIST_PACKED_THRESHOLD: usize = 1 << 30;
     for (i, item) in items.iter().enumerate() {
+        let item = item.as_ref();
         if item.len() >= QUICKLIST_PACKED_THRESHOLD {
             // (frankenredis-1z4ba) Upstream marks a node PLAIN only when
             // isLargeElement(sz) = sz >= packed_threshold (1<<30, 1 GiB). A merely
@@ -3556,7 +3588,7 @@ fn encode_compact_list_quicklist2(
             flush(&mut packed, &mut buf, packed_bytes)?;
             packed_bytes = LISTPACK_BLOB_OVERHEAD;
         }
-        packed.push(item.as_slice());
+        packed.push(item);
         packed_bytes += entry_bytes;
     }
     flush(&mut packed, &mut buf, packed_bytes)?;
@@ -3566,12 +3598,12 @@ fn encode_compact_list_quicklist2(
 /// [`quicklist2_node_count`] but reading pre-memoized per-item listpack lengths from
 /// `lens` (`lens[i] == listpack_entry_encoded_len(items[i])`) instead of recomputing
 /// them. Same node-boundary logic; byte-identical count.
-fn quicklist2_node_count_with_lens(items: &[Vec<u8>], lens: &[usize], budget: usize) -> usize {
+fn quicklist2_node_count_with_lens<T: AsRef<[u8]>>(items: &[T], lens: &[usize], budget: usize) -> usize {
     let mut node_count = 0;
     let mut packed_has_items = false;
     let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
     for (i, item) in items.iter().enumerate() {
-        if item.len() > budget {
+        if item.as_ref().len() > budget {
             if packed_has_items {
                 node_count += 1;
                 packed_has_items = false;
