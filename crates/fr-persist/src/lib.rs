@@ -1583,6 +1583,17 @@ pub type RdbHashWithTtlFieldRef<'a> = (
     Option<u64>,
 );
 
+/// Stream payload data for RDB representation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RdbStreamValue {
+    pub entries: Vec<StreamEntry>,
+    pub watermark: Option<(u64, u64)>,
+    pub groups: Vec<RdbStreamConsumerGroup>,
+    pub metadata: Option<RdbStreamMetadata>,
+    pub entries_added: Option<u64>,
+    pub max_deleted: Option<(u64, u64)>,
+}
+
 /// Borrowed value types supported in our RDB format.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RdbValueRef<'a> {
@@ -1592,7 +1603,6 @@ pub enum RdbValueRef<'a> {
     ListQuicklist2Packed(Vec<std::borrow::Cow<'a, [u8]>>),
     ListQuicklist2Retained {
         raw: std::borrow::Cow<'a, [u8]>,
-        nodes: Vec<Vec<u8>>,
     },
     Set(Vec<std::borrow::Cow<'a, [u8]>>),
     IntSet(std::borrow::Cow<'a, [i64]>),
@@ -1620,14 +1630,7 @@ pub enum RdbValueRef<'a> {
     },
     StreamListpacks3(Vec<u8>),
     StreamSkeleton(Box<rdb_stream::UpstreamStreamSkeleton>),
-    Stream(
-        Vec<StreamEntry>,
-        Option<(u64, u64)>,
-        Vec<RdbStreamConsumerGroup>,
-        Option<RdbStreamMetadata>,
-        Option<u64>,
-        Option<(u64, u64)>,
-    ),
+    Stream(Box<RdbStreamValue>),
 }
 
 impl<'a> RdbValueRef<'a> {
@@ -1661,9 +1664,9 @@ impl<'a> RdbValueRef<'a> {
                     .map(std::borrow::Cow::into_owned)
                     .collect(),
             ),
-            Self::ListQuicklist2Retained { raw, nodes } => RdbValue::ListQuicklist2Retained {
+            Self::ListQuicklist2Retained { raw } => RdbValue::ListQuicklist2Retained {
                 raw: raw.into_owned(),
-                nodes,
+                nodes: Vec::new(),
             },
             Self::Set(members) => RdbValue::Set(
                 members
@@ -1728,16 +1731,14 @@ impl<'a> RdbValueRef<'a> {
             },
             Self::StreamListpacks3(blob) => RdbValue::StreamListpacks3(blob),
             Self::StreamSkeleton(s) => RdbValue::StreamSkeleton(s),
-            Self::Stream(entries, watermark, groups, metadata, entries_added, max_deleted) => {
-                RdbValue::Stream(
-                    entries,
-                    watermark,
-                    groups,
-                    metadata,
-                    entries_added,
-                    max_deleted,
-                )
-            }
+            Self::Stream(stream) => RdbValue::Stream(
+                stream.entries,
+                stream.watermark,
+                stream.groups,
+                stream.metadata,
+                stream.entries_added,
+                stream.max_deleted,
+            ),
         }
     }
 }
@@ -2427,23 +2428,52 @@ fn encode_rdb_internal(
         rdb_encode_string_with(&mut buf, code, compress);
     }
 
-    let first_db = entries.first().map(|e| e.db).unwrap_or(0);
-    let is_single_db = entries.iter().all(|e| e.db == first_db);
-
-    let is_sorted = if is_single_db {
-        entries.windows(2).all(|pair| pair[0].key <= pair[1].key)
+    let (first_db, is_single_db, is_sorted, single_db_expires) = if entries.is_empty() {
+        (0, true, true, 0)
+    } else if entries.len() == 1 {
+        (
+            entries[0].db,
+            true,
+            true,
+            usize::from(entries[0].expire_ms.is_some()),
+        )
     } else {
-        entries.len() <= 1
-            || entries.windows(2).all(|pair| {
-                pair[0].db < pair[1].db || (pair[0].db == pair[1].db && pair[0].key <= pair[1].key)
-            })
+        let first_db = entries[0].db;
+        let mut single_db = true;
+        let mut sorted = true;
+        let mut expires = usize::from(entries[0].expire_ms.is_some());
+        for pair in entries.windows(2) {
+            if pair[1].expire_ms.is_some() {
+                expires += 1;
+            }
+            if pair[1].db != first_db {
+                single_db = false;
+            }
+            if single_db {
+                if pair[0].key > pair[1].key {
+                    sorted = false;
+                    break;
+                }
+            } else if pair[0].db > pair[1].db
+                || (pair[0].db == pair[1].db && pair[0].key > pair[1].key)
+            {
+                sorted = false;
+                break;
+            }
+        }
+        if !sorted {
+            let single = entries.iter().all(|e| e.db == first_db);
+            (first_db, single, false, 0)
+        } else {
+            (first_db, single_db, true, expires)
+        }
     };
 
     if is_sorted {
         if is_single_db {
             if !entries.is_empty() {
                 let db = first_db;
-                let db_expires = entries.iter().filter(|e| e.expire_ms.is_some()).count();
+                let db_expires = single_db_expires;
                 buf.push(RDB_OPCODE_SELECTDB);
                 rdb_encode_length(&mut buf, db);
                 buf.push(RDB_OPCODE_RESIZEDB);
@@ -2567,23 +2597,52 @@ fn encode_rdb_borrowed_internal<'a>(
         rdb_encode_string_with(&mut buf, code, compress);
     }
 
-    let first_db = entries.first().map(|e| e.db).unwrap_or(0);
-    let is_single_db = entries.iter().all(|e| e.db == first_db);
-
-    let is_sorted = if is_single_db {
-        entries.windows(2).all(|pair| pair[0].key <= pair[1].key)
+    let (first_db, is_single_db, is_sorted, single_db_expires) = if entries.is_empty() {
+        (0, true, true, 0)
+    } else if entries.len() == 1 {
+        (
+            entries[0].db,
+            true,
+            true,
+            usize::from(entries[0].expire_ms.is_some()),
+        )
     } else {
-        entries.len() <= 1
-            || entries.windows(2).all(|pair| {
-                pair[0].db < pair[1].db || (pair[0].db == pair[1].db && pair[0].key <= pair[1].key)
-            })
+        let first_db = entries[0].db;
+        let mut single_db = true;
+        let mut sorted = true;
+        let mut expires = usize::from(entries[0].expire_ms.is_some());
+        for pair in entries.windows(2) {
+            if pair[1].expire_ms.is_some() {
+                expires += 1;
+            }
+            if pair[1].db != first_db {
+                single_db = false;
+            }
+            if single_db {
+                if pair[0].key > pair[1].key {
+                    sorted = false;
+                    break;
+                }
+            } else if pair[0].db > pair[1].db
+                || (pair[0].db == pair[1].db && pair[0].key > pair[1].key)
+            {
+                sorted = false;
+                break;
+            }
+        }
+        if !sorted {
+            let single = entries.iter().all(|e| e.db == first_db);
+            (first_db, single, false, 0)
+        } else {
+            (first_db, single_db, true, expires)
+        }
     };
 
     if is_sorted {
         if is_single_db {
             if !entries.is_empty() {
                 let db = first_db;
-                let db_expires = entries.iter().filter(|e| e.expire_ms.is_some()).count();
+                let db_expires = single_db_expires;
                 buf.push(RDB_OPCODE_SELECTDB);
                 rdb_encode_length(&mut buf, db);
                 buf.push(RDB_OPCODE_RESIZEDB);
@@ -2986,7 +3045,7 @@ fn encode_rdb_entry_borrowed(
             rdb_encode_string_with(buf, entry.key, compress);
             buf.extend_from_slice(&payload);
         }
-        RdbValueRef::ListQuicklist2Retained { raw, .. } => {
+        RdbValueRef::ListQuicklist2Retained { raw } => {
             buf.push(RDB_TYPE_LIST_QUICKLIST_2);
             rdb_encode_string_with(buf, entry.key, compress);
             buf.extend_from_slice(raw.as_ref());
@@ -3128,24 +3187,17 @@ fn encode_rdb_entry_borrowed(
             rdb_encode_string_with(buf, entry.key, compress);
             buf.extend_from_slice(skeleton.upstream_payload());
         }
-        RdbValueRef::Stream(
-            stream_entries,
-            watermark,
-            groups,
-            metadata,
-            entries_added,
-            max_deleted,
-        ) => {
+        RdbValueRef::Stream(stream) => {
             encode_stream_rdb_value(
                 buf,
                 entry.key,
                 StreamRdbValueParts {
-                    entries: stream_entries,
-                    watermark: *watermark,
-                    groups,
-                    metadata,
-                    entries_added: *entries_added,
-                    max_deleted: *max_deleted,
+                    entries: &stream.entries,
+                    watermark: stream.watermark,
+                    groups: &stream.groups,
+                    metadata: &stream.metadata,
+                    entries_added: stream.entries_added,
+                    max_deleted: stream.max_deleted,
                 },
             );
         }

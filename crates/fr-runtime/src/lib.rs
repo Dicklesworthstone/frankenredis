@@ -52504,11 +52504,6 @@ fn store_to_rdb_entries_borrowed<'a>(
                 {
                     fr_persist::RdbValueRef::ListQuicklist2Retained {
                         raw: std::borrow::Cow::Borrowed(raw),
-                        // EMPTY ON PURPOSE, and the apply side knows it: the save has
-                        // no decompressed nodes to hand over and manufacturing them
-                        // would undo the whole point. A consumer that APPLIES this
-                        // value rather than encoding it re-derives them from `raw`.
-                        nodes: Vec::new(),
                     }
                 } else if let Some(nodes) = l.quicklist_packed_node_cows(list_max_listpack_size) {
                     fr_persist::RdbValueRef::ListQuicklist2Packed(nodes)
@@ -52916,14 +52911,14 @@ fn store_to_rdb_entries_borrowed<'a>(
                                 )
                             })
                             .collect();
-                        fr_persist::RdbValueRef::Stream(
-                            stream_entries,
+                        fr_persist::RdbValueRef::Stream(Box::new(fr_persist::RdbStreamValue {
+                            entries: stream_entries,
                             watermark,
                             groups,
-                            None,
+                            metadata: None,
                             entries_added,
                             max_deleted,
-                        )
+                        }))
                     }
                 }
             }
