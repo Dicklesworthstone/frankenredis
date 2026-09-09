@@ -52614,11 +52614,7 @@ fn store_to_rdb_entries_borrowed<'a>(
                 // identical. (br-frankenredis-th7q)
                 let field_ttls = store_ref.hash_field_ttls(key);
                 if !field_ttls.is_empty() {
-                    let mut fields: Vec<(
-                        std::borrow::Cow<'_, [u8]>,
-                        std::borrow::Cow<'_, [u8]>,
-                        Option<u64>,
-                    )> = h
+                    let mut fields: Vec<fr_persist::RdbHashWithTtlFieldRef<'_>> = h
                         .iter()
                         .map(|(k_, v_)| {
                             (
@@ -52681,10 +52677,7 @@ fn store_to_rdb_entries_borrowed<'a>(
                     // produced anyway.
                     let hashtable = hash_is_hashtable;
                     if h.len() > thresholds.hash_max_listpack_entries {
-                        let mut fields: Vec<(
-                            std::borrow::Cow<'_, [u8]>,
-                            std::borrow::Cow<'_, [u8]>,
-                        )> = h
+                        let mut fields: Vec<fr_persist::RdbHashPairRef<'_>> = h
                             .iter()
                             .map(|(k_, v_)| {
                                 (
@@ -52706,10 +52699,7 @@ fn store_to_rdb_entries_borrowed<'a>(
                         {
                             Some(blob) => fr_persist::RdbValueRef::HashListpack(blob),
                             None => {
-                                let fields: Vec<(
-                                    std::borrow::Cow<'_, [u8]>,
-                                    std::borrow::Cow<'_, [u8]>,
-                                )> = borrowed
+                                let fields: Vec<fr_persist::RdbHashPairRef<'_>> = borrowed
                                     .into_iter()
                                     .map(|(f, v)| {
                                         (
@@ -52723,15 +52713,15 @@ fn store_to_rdb_entries_borrowed<'a>(
                         }
                     }
                 } else {
-                    let mut fields: Vec<(std::borrow::Cow<'_, [u8]>, std::borrow::Cow<'_, [u8]>)> =
-                        h.iter()
-                            .map(|(k_, v_)| {
-                                (
-                                    std::borrow::Cow::Borrowed(k_),
-                                    std::borrow::Cow::Borrowed(v_),
-                                )
-                            })
-                            .collect();
+                    let mut fields: Vec<fr_persist::RdbHashPairRef<'_>> = h
+                        .iter()
+                        .map(|(k_, v_)| {
+                            (
+                                std::borrow::Cow::Borrowed(k_),
+                                std::borrow::Cow::Borrowed(v_),
+                            )
+                        })
+                        .collect();
                     // (frankenredis-2j9wz) Only a hashtable hash needs an imposed
                     // field order — its iteration is non-deterministic. A listpack
                     // hash is saved in native insertion order, matching redis, so
