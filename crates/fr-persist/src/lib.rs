@@ -25,6 +25,10 @@ pub mod ziplist;
 /// Writing into the caller's buffer removes the return slot; the buffer that will be KEPT is the
 /// buffer that gets written.
 pub(crate) fn decimal_i64_into(dst: &mut [u8; 20], value: i64) -> usize {
+    if (0..10).contains(&value) {
+        dst[19] = b'0' + value as u8;
+        return 19;
+    }
     let end = dst.len();
     let mut start = fr_protocol::write_u64_digits(dst, end, value.unsigned_abs());
     if value < 0 {
@@ -41,6 +45,9 @@ pub(crate) fn decimal_i64_scratch(value: i64) -> ([u8; 20], usize) {
 }
 
 pub(crate) fn decimal_i64_bytes(value: i64) -> Vec<u8> {
+    if (0..10).contains(&value) {
+        return vec![b'0' + value as u8];
+    }
     let (scratch, start) = decimal_i64_scratch(value);
     scratch[start..].to_vec()
 }
@@ -2848,8 +2855,10 @@ fn encode_rdb_entry(
                 buf.push(RDB_TYPE_SET);
                 rdb_encode_string_with(buf, &entry.key, compress);
                 rdb_encode_length(buf, members.len());
+                let mut scratch = [0u8; 20];
                 for member in members {
-                    rdb_encode_string_with(buf, &decimal_i64_bytes(*member), compress);
+                    let start = decimal_i64_into(&mut scratch, *member);
+                    rdb_encode_string_with(buf, &scratch[start..], compress);
                 }
             }
         }
@@ -3105,8 +3114,10 @@ fn encode_rdb_entry_borrowed(
                 buf.push(RDB_TYPE_SET);
                 rdb_encode_string_with(buf, entry.key, compress);
                 rdb_encode_length(buf, members.len());
+                let mut scratch = [0u8; 20];
                 for member in members.iter() {
-                    rdb_encode_string_with(buf, &decimal_i64_bytes(*member), compress);
+                    let start = decimal_i64_into(&mut scratch, *member);
+                    rdb_encode_string_with(buf, &scratch[start..], compress);
                 }
             }
         }
@@ -4136,13 +4147,23 @@ fn encode_sorted_intset_blob(values: &[i64], width: u32) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(8usize.saturating_add(values.len() * width as usize));
     out.extend_from_slice(&width.to_le_bytes());
     out.extend_from_slice(&len.to_le_bytes());
-    for value in values {
-        match width {
-            2 => out.extend_from_slice(&i16::try_from(*value).ok()?.to_le_bytes()),
-            4 => out.extend_from_slice(&i32::try_from(*value).ok()?.to_le_bytes()),
-            8 => out.extend_from_slice(&value.to_le_bytes()),
-            _ => unreachable!("width is one of 2, 4, 8"),
+    match width {
+        2 => {
+            for value in values {
+                out.extend_from_slice(&i16::try_from(*value).ok()?.to_le_bytes());
+            }
         }
+        4 => {
+            for value in values {
+                out.extend_from_slice(&i32::try_from(*value).ok()?.to_le_bytes());
+            }
+        }
+        8 => {
+            for value in values {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        _ => unreachable!("width is one of 2, 4, 8"),
     }
     Some(out)
 }
@@ -4188,6 +4209,9 @@ fn encode_listpack_backlen_multibyte(buf: &mut Vec<u8>, len: usize) {
 fn parse_listpack_integer(entry: &[u8]) -> Option<i64> {
     if entry.is_empty() || entry.len() >= 21 {
         return None;
+    }
+    if entry.len() == 1 && entry[0].is_ascii_digit() {
+        return Some((entry[0] - b'0') as i64);
     }
     // Accept only the CANONICAL decimal form (exactly what the prior
     // `value.to_string() == entry` round-trip accepted), but WITHOUT allocating a

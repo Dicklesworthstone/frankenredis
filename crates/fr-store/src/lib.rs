@@ -39676,13 +39676,23 @@ fn encode_intset(values: &[i64]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(8 + values.len() * usize::try_from(width).ok()?);
     out.extend_from_slice(&width.to_le_bytes());
     out.extend_from_slice(&len.to_le_bytes());
-    for value in values {
-        match width {
-            2 => out.extend_from_slice(&i16::try_from(*value).ok()?.to_le_bytes()),
-            4 => out.extend_from_slice(&i32::try_from(*value).ok()?.to_le_bytes()),
-            8 => out.extend_from_slice(&value.to_le_bytes()),
-            _ => unreachable!("width selected above"),
+    match width {
+        2 => {
+            for value in values {
+                out.extend_from_slice(&i16::try_from(*value).ok()?.to_le_bytes());
+            }
         }
+        4 => {
+            for value in values {
+                out.extend_from_slice(&i32::try_from(*value).ok()?.to_le_bytes());
+            }
+        }
+        8 => {
+            for value in values {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        _ => unreachable!("width selected above"),
     }
     Some(out)
 }
