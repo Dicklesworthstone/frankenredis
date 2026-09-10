@@ -52340,18 +52340,21 @@ fn try_encode_string_only_rdb_snapshot(
 ) -> Option<Vec<u8>> {
     use fr_store::Value;
 
-    if !store.entries_are_all_strings() {
-        return None;
-    }
-
-    let mut entries = Vec::with_capacity(store.len());
+    let total_len = store.len();
+    let is_all_db0 = store.dbsize_in_db(0) == total_len;
+    let mut entries = Vec::with_capacity(total_len);
     let mut has_multiple_dbs = false;
     let all_strings = store.try_for_each_entry_ref(|key, value, expires_at_ms| {
         if let Value::String(value) = value {
-            let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
-            if db != 0 {
-                has_multiple_dbs = true;
-            }
+            let (db, logical_key) = if is_all_db0 {
+                (0, key)
+            } else {
+                let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
+                if db != 0 {
+                    has_multiple_dbs = true;
+                }
+                (db, logical_key)
+            };
             entries.push(RdbStringEntryRef {
                 db,
                 key: logical_key,
@@ -52464,7 +52467,9 @@ fn store_to_rdb_entries_borrowed<'a>(
 
     let list_max_listpack_size = store.list_max_listpack_size;
     let store_ref = store;
-    let mut entries = Vec::with_capacity(store.len());
+    let total_len = store.len();
+    let is_all_db0 = store.dbsize_in_db(0) == total_len;
+    let mut entries = Vec::with_capacity(total_len);
     let mut has_multiple_dbs = false;
     store_ref.for_each_snapshot_entry_ref(|item| {
         let key = item.key;
@@ -52472,10 +52477,15 @@ fn store_to_rdb_entries_borrowed<'a>(
         let expires_at_ms = item.expire_ms;
         let hash_is_hashtable = item.hash_is_hashtable;
         let set_is_hashtable = item.set_is_hashtable;
-        let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
-        if db != 0 {
-            has_multiple_dbs = true;
-        }
+        let (db, logical_key) = if is_all_db0 {
+            (0, key)
+        } else {
+            let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
+            if db != 0 {
+                has_multiple_dbs = true;
+            }
+            (db, logical_key)
+        };
         let rdb_value = match value {
             Value::String(v) => fr_persist::RdbValueRef::String(v.as_slice()),
             Value::Integer(v) => fr_persist::RdbValueRef::Integer(*v),
