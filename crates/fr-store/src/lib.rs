@@ -37897,13 +37897,10 @@ impl Store {
                         if cursor + 8 > data_end {
                             return Err(StoreError::InvalidDumpPayload);
                         }
-                        let score = f64::from_le_bytes(
-                            payload[cursor..cursor + 8]
-                                .try_into()
-                                .map_err(|_| StoreError::InvalidDumpPayload)?,
-                        );
+                        let mut score_bytes = [0u8; 8];
+                        score_bytes.copy_from_slice(&payload[cursor..cursor + 8]);
                         cursor += 8;
-                        score
+                        f64::from_le_bytes(score_bytes)
                     } else {
                         let (score, consumed) =
                             decode_rdb_legacy_double(payload, cursor, data_end)?;
@@ -38012,8 +38009,9 @@ impl Store {
                     Plain(Vec<u8>),
                     Packed(Vec<u8>, Vec<fr_persist::listpack::ListpackValueSpan>),
                 }
-                let mut nodes = Vec::with_capacity(node_count);
-                let mut all_packed = true;
+                let mut packed: Vec<(Vec<u8>, Vec<fr_persist::listpack::ListpackValueSpan>)> =
+                    Vec::with_capacity(node_count);
+                let mut fallback_nodes: Option<Vec<QuicklistNode>> = None;
                 for _ in 0..node_count {
                     let (container, consumed) = decode_length(payload, cursor)?;
                     cursor += consumed;
@@ -38024,7 +38022,13 @@ impl Store {
                             if item.is_empty() {
                                 return Err(StoreError::InvalidDumpPayload);
                             }
-                            all_packed = false;
+                            let nodes = fallback_nodes.get_or_insert_with(|| {
+                                let mut v = Vec::with_capacity(node_count);
+                                for (bytes, entries) in packed.drain(..) {
+                                    v.push(QuicklistNode::Packed(bytes, entries));
+                                }
+                                v
+                            });
                             nodes.push(QuicklistNode::Plain(item));
                         }
                         2 => {
@@ -38033,30 +38037,16 @@ impl Store {
                             cursor += consumed;
                             let entries = fr_persist::listpack::decode_value_spans(&listpack)
                                 .map_err(|_| StoreError::InvalidDumpPayload)?;
-                            nodes.push(QuicklistNode::Packed(listpack, entries));
+                            if let Some(nodes) = &mut fallback_nodes {
+                                nodes.push(QuicklistNode::Packed(listpack, entries));
+                            } else {
+                                packed.push((listpack, entries));
+                            }
                         }
                         _ => return Err(StoreError::InvalidDumpPayload),
                     }
                 }
-                if all_packed {
-                    let packed: Vec<(Vec<u8>, Vec<fr_persist::listpack::ListpackValueSpan>)> =
-                        nodes
-                            .into_iter()
-                            .map(|node| match node {
-                                QuicklistNode::Packed(bytes, entries) => (bytes, entries),
-                                QuicklistNode::Plain(_) => {
-                                    unreachable!("all_packed excludes plain nodes")
-                                }
-                            })
-                            .collect();
-                    let body = payload
-                        .get(body_start..cursor)
-                        .ok_or(StoreError::InvalidDumpPayload)?
-                        .to_vec();
-                    let list = ListValue::retained_quicklist2_from_spans(&packed, body)
-                        .ok_or(StoreError::InvalidDumpPayload)?;
-                    Value::List(Box::new(list))
-                } else {
+                if let Some(nodes) = fallback_nodes {
                     let mut restored = Vec::with_capacity(nodes.len());
                     for node in nodes {
                         match node {
@@ -38083,6 +38073,14 @@ impl Store {
                     if list.is_empty() {
                         return Err(StoreError::InvalidDumpPayload);
                     }
+                    Value::List(Box::new(list))
+                } else {
+                    let body = payload
+                        .get(body_start..cursor)
+                        .ok_or(StoreError::InvalidDumpPayload)?
+                        .to_vec();
+                    let list = ListValue::retained_quicklist2_from_spans(&packed, body)
+                        .ok_or(StoreError::InvalidDumpPayload)?;
                     Value::List(Box::new(list))
                 }
             }
@@ -38189,12 +38187,17 @@ impl Store {
                 if spans.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let members: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(&listpack)).collect();
+                let mut members = Vec::with_capacity(spans.len());
+                let mut max_member_len = 0_usize;
+                for s in &spans {
+                    let member = s.as_bytes(&listpack);
+                    max_member_len = max_member_len.max(member.len());
+                    members.push(member);
+                }
                 // (frankenredis-3uuan) The set encoding refresh below tests every member
                 // length against set-max-listpack-value; report the max from the members
                 // we already hold instead of re-walking the built GenericSet.
-                restored_max_element_len =
-                    Some(members.iter().map(|member| member.len()).max().unwrap_or(0));
+                restored_max_element_len = Some(max_member_len);
                 // Dedup-check then BULK-build. from_unique_str_members appends each
                 // member with no lookup (O(n)); insertion order — the only observable
                 // order for a listpack set — is unchanged. RESTORE still rejects a
