@@ -15020,18 +15020,16 @@ impl Store {
         expires_at_ms: Option<u64>,
         target_db: usize,
     ) {
-        if let Some(exp) = expires_at_ms {
-            if let Some(nonzero) = std::num::NonZeroU64::new(exp) {
-                self.expiry_deadlines
-                    .insert(store_key_from_slice(key.as_slice()), nonzero);
-                self.expires_count = self.expires_count.saturating_add(1);
-                if target_db < self.database_count {
-                    self.db_expires_counts[target_db] =
-                        self.db_expires_counts[target_db].saturating_add(1);
-                }
-                self.track_expiry_deadline(exp);
-                self.mark_volatile_keys_dirty();
+        if let Some(nonzero) = expires_at_ms.and_then(std::num::NonZeroU64::new) {
+            self.expiry_deadlines
+                .insert(store_key_from_slice(key.as_slice()), nonzero);
+            self.expires_count = self.expires_count.saturating_add(1);
+            if target_db < self.database_count {
+                self.db_expires_counts[target_db] =
+                    self.db_expires_counts[target_db].saturating_add(1);
             }
+            self.track_expiry_deadline(nonzero.get());
+            self.mark_volatile_keys_dirty();
         }
         if target_db < self.database_count {
             self.db_key_counts[target_db] = self.db_key_counts[target_db].saturating_add(1);
@@ -16238,28 +16236,29 @@ impl Store {
                     continue;
                 }
 
-                if let Some(lp) = &left_prefix {
-                    if left.len() < left_cap && key.starts_with(lp) {
-                        left.push(key.to_vec());
-                        continue;
-                    }
+                if let Some(lp) = &left_prefix
+                    && left.len() < left_cap
+                    && key.starts_with(lp)
+                {
+                    left.push(key.to_vec());
+                    continue;
                 }
-                if let Some(rp) = &right_prefix {
-                    if right.len() < right_cap && key.starts_with(rp) {
-                        right.push(key.to_vec());
-                        continue;
-                    }
+                if let Some(rp) = &right_prefix
+                    && right.len() < right_cap
+                    && key.starts_with(rp)
+                {
+                    right.push(key.to_vec());
+                    continue;
                 }
 
-                if (left_db == 0 && left.len() < left_cap)
-                    || (right_db == 0 && right.len() < right_cap)
+                if ((left_db == 0 && left.len() < left_cap)
+                    || (right_db == 0 && right.len() < right_cap))
+                    && decode_db_key(key).is_none()
                 {
-                    if decode_db_key(key).is_none() {
-                        if left_db == 0 && left.len() < left_cap {
-                            left.push(key.to_vec());
-                        } else if right_db == 0 && right.len() < right_cap {
-                            right.push(key.to_vec());
-                        }
+                    if left_db == 0 && left.len() < left_cap {
+                        left.push(key.to_vec());
+                    } else if right_db == 0 && right.len() < right_cap {
+                        right.push(key.to_vec());
                     }
                 }
             }
