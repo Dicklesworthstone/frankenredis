@@ -2781,10 +2781,9 @@ fn encode_rdb_entry(
             }
         }
         RdbValue::ListQuicklist2Packed(nodes) => {
-            let payload = encode_quicklist2_packed_payload(nodes);
             buf.push(RDB_TYPE_LIST_QUICKLIST_2);
             rdb_encode_string_with(buf, &entry.key, compress);
-            buf.extend_from_slice(&payload);
+            encode_quicklist2_packed_payload_into(buf, nodes, compress);
         }
         // VERBATIM, one level deeper: this is the ENCODED record body, so it
         // is spliced in whole. The arm above re-runs `rdb_encode_string` per
@@ -2815,12 +2814,10 @@ fn encode_rdb_entry(
                     buf.push(RDB_TYPE_SET_INTSET);
                     rdb_encode_string_with(buf, &entry.key, compress);
                     buf.extend_from_slice(&payload);
-                } else if let Some(payload) =
-                    encode_compact_set_listpack(members, thresholds, compress)
-                {
+                } else if let Some(blob) = encode_compact_set_listpack_blob(members, thresholds) {
                     buf.push(RDB_TYPE_SET_LISTPACK);
                     rdb_encode_string_with(buf, &entry.key, compress);
-                    buf.extend_from_slice(&payload);
+                    rdb_encode_string_with(buf, &blob, compress);
                 } else {
                     buf.push(RDB_TYPE_SET);
                     rdb_encode_string_with(buf, &entry.key, compress);
@@ -2876,11 +2873,11 @@ fn encode_rdb_entry(
         }
         RdbValue::Hash(fields) => {
             if let Some(thresholds) = options.compact.as_ref()
-                && let Some(payload) = encode_compact_hash_listpack(fields, thresholds, compress)
+                && let Some(blob) = encode_compact_hash_listpack_blob(fields, thresholds)
             {
                 buf.push(RDB_TYPE_HASH_LISTPACK);
                 rdb_encode_string_with(buf, &entry.key, compress);
-                buf.extend_from_slice(&payload);
+                rdb_encode_string_with(buf, &blob, compress);
             } else {
                 buf.push(RDB_TYPE_HASH);
                 rdb_encode_string_with(buf, &entry.key, compress);
@@ -2941,11 +2938,11 @@ fn encode_rdb_entry(
         }
         RdbValue::SortedSet(members) => {
             if let Some(thresholds) = options.compact.as_ref()
-                && let Some(payload) = encode_compact_zset_listpack(members, thresholds, compress)
+                && let Some(blob) = encode_compact_zset_listpack_blob(members, thresholds)
             {
                 buf.push(RDB_TYPE_ZSET_LISTPACK);
                 rdb_encode_string_with(buf, &entry.key, compress);
-                buf.extend_from_slice(&payload);
+                rdb_encode_string_with(buf, &blob, compress);
             } else {
                 buf.push(RDB_TYPE_ZSET_2);
                 rdb_encode_string_with(buf, &entry.key, compress);
@@ -3055,10 +3052,9 @@ fn encode_rdb_entry_borrowed(
             }
         }
         RdbValueRef::ListQuicklist2Packed(nodes) => {
-            let payload = encode_quicklist2_packed_payload(nodes);
             buf.push(RDB_TYPE_LIST_QUICKLIST_2);
             rdb_encode_string_with(buf, entry.key, compress);
-            buf.extend_from_slice(&payload);
+            encode_quicklist2_packed_payload_into(buf, nodes, compress);
         }
         RdbValueRef::ListQuicklist2Retained { raw } => {
             buf.push(RDB_TYPE_LIST_QUICKLIST_2);
@@ -3081,12 +3077,10 @@ fn encode_rdb_entry_borrowed(
                     buf.push(RDB_TYPE_SET_INTSET);
                     rdb_encode_string_with(buf, entry.key, compress);
                     buf.extend_from_slice(&payload);
-                } else if let Some(payload) =
-                    encode_compact_set_listpack(members, thresholds, compress)
-                {
+                } else if let Some(blob) = encode_compact_set_listpack_blob(members, thresholds) {
                     buf.push(RDB_TYPE_SET_LISTPACK);
                     rdb_encode_string_with(buf, entry.key, compress);
-                    buf.extend_from_slice(&payload);
+                    rdb_encode_string_with(buf, &blob, compress);
                 } else {
                     buf.push(RDB_TYPE_SET);
                     rdb_encode_string_with(buf, entry.key, compress);
@@ -3131,11 +3125,11 @@ fn encode_rdb_entry_borrowed(
         }
         RdbValueRef::Hash(fields) => {
             if let Some(thresholds) = options.compact.as_ref()
-                && let Some(payload) = encode_compact_hash_listpack(fields, thresholds, compress)
+                && let Some(blob) = encode_compact_hash_listpack_blob(fields, thresholds)
             {
                 buf.push(RDB_TYPE_HASH_LISTPACK);
                 rdb_encode_string_with(buf, entry.key, compress);
-                buf.extend_from_slice(&payload);
+                rdb_encode_string_with(buf, &blob, compress);
             } else {
                 buf.push(RDB_TYPE_HASH);
                 rdb_encode_string_with(buf, entry.key, compress);
@@ -3179,11 +3173,11 @@ fn encode_rdb_entry_borrowed(
         }
         RdbValueRef::SortedSet(members) => {
             if let Some(thresholds) = options.compact.as_ref()
-                && let Some(payload) = encode_compact_zset_listpack(members, thresholds, compress)
+                && let Some(blob) = encode_compact_zset_listpack_blob(members, thresholds)
             {
                 buf.push(RDB_TYPE_ZSET_LISTPACK);
                 rdb_encode_string_with(buf, entry.key, compress);
-                buf.extend_from_slice(&payload);
+                rdb_encode_string_with(buf, &blob, compress);
             } else {
                 buf.push(RDB_TYPE_ZSET_2);
                 rdb_encode_string_with(buf, entry.key, compress);
@@ -3257,10 +3251,9 @@ fn encode_compact_set_intset<T: AsRef<[u8]>>(
     Some(out)
 }
 
-fn encode_compact_set_listpack<T: AsRef<[u8]>>(
+fn encode_compact_set_listpack_blob<T: AsRef<[u8]>>(
     members: &[T],
     thresholds: &CompactRdbThresholds,
-    compress: bool,
 ) -> Option<Vec<u8>> {
     if members.len() > thresholds.set_max_listpack_entries {
         return None;
@@ -3271,15 +3264,7 @@ fn encode_compact_set_listpack<T: AsRef<[u8]>>(
     {
         return None;
     }
-    let lp = encode_set_listpack_blob(members)?;
-    let mut out = Vec::with_capacity(lp.len() + 4);
-    // Upstream rdbSaveObject persists a listpack via rdbSaveRawString, which LZF-
-    // compresses it when it is large enough to beat the wire overhead (>20 bytes
-    // and the compressed form is smaller). Emitting it raw made DUMP/RDB diverge
-    // from redis for large listpack hashes/sets/zsets (a 200-field hash dumped
-    // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
-    rdb_encode_string_with(&mut out, &lp, compress);
-    Some(out)
+    encode_set_listpack_blob(members)
 }
 
 /// Borrowed-member twin of [`encode_set_listpack_blob`], with the eligibility
@@ -3339,10 +3324,9 @@ fn encode_set_listpack_blob<T: AsRef<[u8]>>(members: &[T]) -> Option<Vec<u8>> {
     finish_listpack_blob(encoded, members.len())
 }
 
-fn encode_compact_hash_listpack<T: AsRef<[u8]>>(
+fn encode_compact_hash_listpack_blob<T: AsRef<[u8]>>(
     fields: &[(T, T)],
     thresholds: &CompactRdbThresholds,
-    compress: bool,
 ) -> Option<Vec<u8>> {
     if fields.len() > thresholds.hash_max_listpack_entries {
         return None;
@@ -3353,15 +3337,7 @@ fn encode_compact_hash_listpack<T: AsRef<[u8]>>(
     }) {
         return None;
     }
-    let lp = encode_hash_listpack_blob(fields)?;
-    let mut out = Vec::with_capacity(lp.len() + 4);
-    // Upstream rdbSaveObject persists a listpack via rdbSaveRawString, which LZF-
-    // compresses it when it is large enough to beat the wire overhead (>20 bytes
-    // and the compressed form is smaller). Emitting it raw made DUMP/RDB diverge
-    // from redis for large listpack hashes/sets/zsets (a 200-field hash dumped
-    // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
-    rdb_encode_string_with(&mut out, &lp, compress);
-    Some(out)
+    encode_hash_listpack_blob(fields)
 }
 
 fn encode_hash_listpack_blob<T: AsRef<[u8]>>(fields: &[(T, T)]) -> Option<Vec<u8>> {
@@ -3419,10 +3395,9 @@ pub fn encode_hash_listpack_blob_borrowed(
     finish_listpack_blob(encoded, fields.len().saturating_mul(2))
 }
 
-fn encode_compact_zset_listpack<T: AsRef<[u8]>>(
+fn encode_compact_zset_listpack_blob<T: AsRef<[u8]>>(
     members: &[(T, f64)],
     thresholds: &CompactRdbThresholds,
-    compress: bool,
 ) -> Option<Vec<u8>> {
     if members.len() > thresholds.zset_max_listpack_entries {
         return None;
@@ -3440,24 +3415,16 @@ fn encode_compact_zset_listpack<T: AsRef<[u8]>>(
         return None;
     }
 
-    let lp = if zset_members_are_sorted(members) {
-        encode_zset_score_listpack_blob_from_members(members)?
+    if zset_members_are_sorted(members) {
+        encode_zset_score_listpack_blob_from_members(members)
     } else {
         let mut sorted_members: Vec<(&[u8], f64)> = members
             .iter()
             .map(|(member, score)| (member.as_ref(), *score))
             .collect();
         sorted_members.sort_unstable_by(|left, right| zset_member_cmp(*left, *right));
-        encode_zset_score_listpack_blob(&sorted_members)?
-    };
-    let mut out = Vec::with_capacity(lp.len() + 4);
-    // Upstream rdbSaveObject persists a listpack via rdbSaveRawString, which LZF-
-    // compresses it when it is large enough to beat the wire overhead (>20 bytes
-    // and the compressed form is smaller). Emitting it raw made DUMP/RDB diverge
-    // from redis for large listpack hashes/sets/zsets (a 200-field hash dumped
-    // 2200 bytes vs redis's 1560). (frankenredis listpack DUMP LZF parity)
-    rdb_encode_string_with(&mut out, &lp, compress);
-    Some(out)
+        encode_zset_score_listpack_blob(&sorted_members)
+    }
 }
 
 fn zset_member_cmp(left: (&[u8], f64), right: (&[u8], f64)) -> std::cmp::Ordering {
@@ -3833,21 +3800,22 @@ fn listpack_blob_header_matches(blob: &[u8]) -> bool {
     total == blob.len()
 }
 
-fn encode_quicklist2_packed_payload<T: AsRef<[u8]>>(nodes: &[T]) -> Vec<u8> {
+fn encode_quicklist2_packed_payload_into<T: AsRef<[u8]>>(
+    buf: &mut Vec<u8>,
+    nodes: &[T],
+    compress: bool,
+) {
     debug_assert!(!nodes.is_empty());
     debug_assert!(
         nodes
             .iter()
             .all(|node| listpack_blob_header_matches(node.as_ref()))
     );
-    let total_len = nodes.iter().map(|n| n.as_ref().len() + 10).sum::<usize>();
-    let mut buf = Vec::with_capacity(total_len + 8);
-    rdb_encode_length(&mut buf, nodes.len());
+    rdb_encode_length(buf, nodes.len());
     for node in nodes {
-        rdb_encode_length(&mut buf, 2);
-        rdb_encode_string(&mut buf, node.as_ref());
+        buf.push(2);
+        rdb_encode_string_with(buf, node.as_ref(), compress);
     }
-    buf
 }
 
 struct StreamRdbValueParts<'a> {
@@ -4303,9 +4271,9 @@ fn listpack_int_bytes_are_canonical(entry: &[u8]) -> bool {
 // count byte-for-byte unchanged.
 #[inline(always)]
 fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
-    let start = buf.len();
     if (0..=127).contains(&value) {
         buf.push(value as u8);
+        buf.push(1);
     } else if (-4096..=4095).contains(&value) {
         let encoded = if value < 0 {
             ((1_i64 << 13) + value) as u16
@@ -4314,24 +4282,25 @@ fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
         };
         buf.push(((encoded >> 8) as u8) | 0xC0);
         buf.push((encoded & 0xFF) as u8);
+        buf.push(2);
     } else if let Ok(value) = i16::try_from(value) {
         buf.push(0xF1);
         buf.extend_from_slice(&value.to_le_bytes());
+        buf.push(3);
     } else if (-8_388_608..=8_388_607).contains(&value) {
         let bytes = (value as i32).to_le_bytes();
         buf.push(0xF2);
         buf.extend_from_slice(&bytes[..3]);
+        buf.push(4);
     } else if let Ok(value) = i32::try_from(value) {
         buf.push(0xF3);
         buf.extend_from_slice(&value.to_le_bytes());
+        buf.push(5);
     } else {
         buf.push(0xF4);
         buf.extend_from_slice(&value.to_le_bytes());
+        buf.push(9);
     }
-    let data_len = buf.len() - start;
-    // An integer entry's data_len is at most 9 bytes (0xF4 + 8-byte i64), which is always <= 127.
-    // The listpack backlen for len <= 127 is exactly a single byte containing len.
-    buf.push(data_len as u8);
 }
 
 // (BlackThrush 2026-08-26) `#[inline(always)]`, not `#[inline]`: called once per

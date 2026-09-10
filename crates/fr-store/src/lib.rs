@@ -39912,6 +39912,9 @@ fn encode_hash_listpack_dump(hash: &HashFieldMap) -> Option<Vec<u8>> {
 }
 
 fn parse_listpack_integer(entry: &[u8]) -> Option<i64> {
+    if entry.len() == 1 && entry[0].is_ascii_digit() {
+        return Some((entry[0] - b'0') as i64);
+    }
     if entry.is_empty() || entry.len() >= 21 {
         return None;
     }
@@ -39952,9 +39955,9 @@ fn listpack_int_bytes_are_canonical(entry: &[u8]) -> bool {
 }
 
 fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
-    let start = buf.len();
     if (0..=127).contains(&value) {
         buf.push(value as u8);
+        buf.push(1);
     } else if (-4096..=4095).contains(&value) {
         let encoded = if value < 0 {
             ((1_i64 << 13) + value) as u16
@@ -39963,24 +39966,25 @@ fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
         };
         buf.push(((encoded >> 8) as u8) | 0xC0);
         buf.push((encoded & 0xFF) as u8);
+        buf.push(2);
     } else if let Ok(value) = i16::try_from(value) {
         buf.push(0xF1);
         buf.extend_from_slice(&value.to_le_bytes());
+        buf.push(3);
     } else if (-8_388_608..=8_388_607).contains(&value) {
         let bytes = (value as i32).to_le_bytes();
         buf.push(0xF2);
         buf.extend_from_slice(&bytes[..3]);
+        buf.push(4);
     } else if let Ok(value) = i32::try_from(value) {
         buf.push(0xF3);
         buf.extend_from_slice(&value.to_le_bytes());
+        buf.push(5);
     } else {
         buf.push(0xF4);
         buf.extend_from_slice(&value.to_le_bytes());
+        buf.push(9);
     }
-    let data_len = buf.len() - start;
-    // An integer entry's data_len is at most 9 bytes (0xF4 + 8-byte i64), which is always <= 127.
-    // The listpack backlen for len <= 127 is exactly a single byte containing len.
-    buf.push(data_len as u8);
 }
 
 fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
