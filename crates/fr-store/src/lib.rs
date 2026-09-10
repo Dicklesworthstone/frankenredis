@@ -2090,6 +2090,27 @@ impl SortedSet {
         }
     }
 
+    fn from_unique_pairs_with_shape(
+        pairs: Vec<(Vec<u8>, f64)>,
+        max_member_len: usize,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> Self {
+        if pairs.len() <= max_listpack_entries && max_member_len <= max_listpack_value {
+            Self {
+                repr: SortedSetRepr::Ready(SortedSetInner::Packed(PackedZSet::from_unique_pairs(
+                    pairs,
+                ))),
+            }
+        } else {
+            Self {
+                repr: SortedSetRepr::Ready(SortedSetInner::Full(FullSortedSet::from_unique_pairs(
+                    pairs,
+                ))),
+            }
+        }
+    }
+
     fn from_unique_borrowed_pairs_with_shape(
         pairs: Vec<(&[u8], f64)>,
         max_member_len: usize,
@@ -37831,13 +37852,16 @@ impl Store {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 let mut set = GenericSet::default();
+                let mut max_member_len = 0_usize;
                 for _ in 0..count {
                     let (member, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += consumed;
+                    max_member_len = max_member_len.max(member.len());
                     if !set.insert(member) {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                 }
+                restored_max_element_len = Some(max_member_len);
                 // (frankenredis-bbyfz) Re-derive the optimal encoding from content,
                 // like redis rdbLoadObject — a RESTORE'd small RDB_TYPE_SET becomes
                 // intset/listpack, NOT a forced hashtable. from_index_set rebuilds
@@ -37868,17 +37892,26 @@ impl Store {
                 // identical: from_unique_pairs preserves insertion order and derives the
                 // same encoding (used for the byte-exact hset bulk-load path).
                 let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(count);
+                let mut max_element_len = 0_usize;
+                let mut total_bytes = 0_usize;
                 for _ in 0..count {
                     let (field, fc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += fc;
                     let (value, vc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += vc;
+                    max_element_len = max_element_len.max(field.len()).max(value.len());
+                    total_bytes += field.len() + value.len();
                     pairs.push((field, value));
                 }
                 if restore_items_have_duplicate_key(&pairs, |(field, _)| field.as_slice()) {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                Value::Hash(Box::new(HashFieldMap::from_unique_pairs(pairs)))
+                restored_max_element_len = Some(max_element_len);
+                Value::Hash(Box::new(HashFieldMap::from_unique_pairs_with_shape(
+                    pairs,
+                    max_element_len,
+                    total_bytes,
+                )))
             }
             RDB_TYPE_ZSET | RDB_TYPE_ZSET_2 => {
                 // Sorted set
@@ -37902,9 +37935,11 @@ impl Store {
                 // incremental maybe_promote path converges to. Byte-identical (verified:
                 // DIGEST-VALUE + OBJECT ENCODING + ZRANGE WITHSCORES vs redis 7.2.4).
                 let mut pairs: Vec<(Vec<u8>, f64)> = Vec::with_capacity(count);
+                let mut max_member_len = 0_usize;
                 for _ in 0..count {
                     let (member, mc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += mc;
+                    max_member_len = max_member_len.max(member.len());
                     let score = if type_byte == RDB_TYPE_ZSET_2 {
                         if cursor + 8 > data_end {
                             return Err(StoreError::InvalidDumpPayload);
@@ -37927,8 +37962,10 @@ impl Store {
                 if restore_items_have_duplicate_key(&pairs, |(member, _)| member.as_slice()) {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let zs = SortedSet::from_unique_pairs_with_limits(
+                restored_max_element_len = Some(max_member_len);
+                let zs = SortedSet::from_unique_pairs_with_shape(
                     pairs,
+                    max_member_len,
                     zset_max_entries,
                     zset_max_value,
                 );

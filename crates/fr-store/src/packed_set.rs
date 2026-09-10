@@ -1226,6 +1226,32 @@ impl HashFieldMap {
         }
     }
 
+    /// Specialized twin of [`Self::from_unique_pairs`] when caller has already tracked
+    /// the maximum element length and total payload bytes during decode/ingestion.
+    /// Eliminates both the threshold scan (`.any(...)`) and the capacity pre-sizing pass (`.map(...).sum()`).
+    #[must_use]
+    pub fn from_unique_pairs_with_shape(
+        pairs: Vec<(Vec<u8>, Vec<u8>)>,
+        max_element_len: usize,
+        total_payload_bytes: usize,
+    ) -> Self {
+        let to_hash = pairs.len() > PACKED_MAX_ENTRIES || max_element_len > PACKED_MAX_VALUE;
+        let bytes = total_payload_bytes.saturating_add(pairs.len().saturating_mul(10));
+        if to_hash {
+            let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
+            for (field, value) in pairs {
+                h.insert(&field, &value);
+            }
+            HashFieldMap::Hash(h)
+        } else {
+            let mut p = PackedStrMap::with_capacity(bytes);
+            for (field, value) in pairs {
+                p.append(&field, &value);
+            }
+            HashFieldMap::Packed(p)
+        }
+    }
+
     /// Borrowed-input twin of [`Self::from_unique_pairs`] for the RESTORE/RDB-load
     /// path: the field/value bytes are COPIED into the packed/hash storage by
     /// `append`/`insert` either way, so taking borrowed slices (e.g. zero-copy
