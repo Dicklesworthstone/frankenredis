@@ -3402,16 +3402,13 @@ fn encode_compact_zset_listpack_blob<T: AsRef<[u8]>>(
     if members.len() > thresholds.zset_max_listpack_entries {
         return None;
     }
-    if members
-        .iter()
-        .any(|(m, _)| m.as_ref().len() > thresholds.zset_max_listpack_value)
-    {
-        return None;
-    }
-    // Reject NaN scores — upstream's zset listpack path uses
+    // Reject oversized members and NaN scores — upstream's zset listpack path uses
     // `d2string` which doesn't represent NaN; the wire form would be
     // unparseable on the read side.
-    if members.iter().any(|(_, score)| score.is_nan()) {
+    if members
+        .iter()
+        .any(|(m, score)| m.as_ref().len() > thresholds.zset_max_listpack_value || score.is_nan())
+    {
         return None;
     }
 
@@ -3452,11 +3449,8 @@ pub fn encode_zset_listpack_blob_borrowed(
     }
     if members
         .iter()
-        .any(|(m, _)| m.len() > thresholds.zset_max_listpack_value)
+        .any(|(m, score)| m.len() > thresholds.zset_max_listpack_value || score.is_nan())
     {
-        return None;
-    }
-    if members.iter().any(|(_, score)| score.is_nan()) {
         return None;
     }
     // `iter_asc` hands these over in ascending order already, but check rather
@@ -3496,7 +3490,7 @@ fn encode_zset_score_listpack_blob_from_members<T: AsRef<[u8]>>(
             .map(|(m, _)| m.as_ref().len() + 11 + 32)
             .sum::<usize>();
     let mut encoded = listpack_blob_with_header(cap);
-    let mut scratch = Vec::new();
+    let mut scratch = Vec::with_capacity(32);
     for (member, score) in sorted_members {
         encode_zset_score_listpack_entry_with_scratch(
             &mut encoded,
@@ -3519,7 +3513,7 @@ fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Ve
             .map(|(m, _)| m.len() + 11 + 32)
             .sum::<usize>();
     let mut encoded = listpack_blob_with_header(cap);
-    let mut scratch = Vec::new();
+    let mut scratch = Vec::with_capacity(32);
     for (member, score) in sorted_members {
         encode_zset_score_listpack_entry_with_scratch(&mut encoded, member, *score, &mut scratch);
     }
@@ -3567,7 +3561,7 @@ fn encode_zset_score_listpack_entry_with_scratch(
 #[cfg(test)]
 #[inline(always)]
 fn encode_zset_score_listpack_entry(encoded: &mut Vec<u8>, member: &[u8], score: f64) {
-    let mut scratch = Vec::new();
+    let mut scratch = Vec::with_capacity(32);
     encode_zset_score_listpack_entry_with_scratch(encoded, member, score, &mut scratch);
 }
 
