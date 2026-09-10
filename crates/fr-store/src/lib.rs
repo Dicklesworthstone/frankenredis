@@ -15013,6 +15013,32 @@ impl Store {
         self.internal_entries_insert_with_expiry_impl::<true>(key, entry, expires_at_ms)
     }
 
+    fn insert_swapped_entry(
+        &mut self,
+        key: Vec<u8>,
+        entry: Entry,
+        expires_at_ms: Option<u64>,
+        target_db: usize,
+    ) {
+        if let Some(exp) = expires_at_ms {
+            if let Some(nonzero) = std::num::NonZeroU64::new(exp) {
+                self.expiry_deadlines
+                    .insert(store_key_from_slice(key.as_slice()), nonzero);
+                self.expires_count = self.expires_count.saturating_add(1);
+                if target_db < self.database_count {
+                    self.db_expires_counts[target_db] =
+                        self.db_expires_counts[target_db].saturating_add(1);
+                }
+                self.track_expiry_deadline(exp);
+                self.mark_volatile_keys_dirty();
+            }
+        }
+        if target_db < self.database_count {
+            self.db_key_counts[target_db] = self.db_key_counts[target_db].saturating_add(1);
+        }
+        self.entries.insert(key.as_slice(), entry);
+    }
+
     /// `internal_entries_insert_with_expiry` with a `const GATE` selecting whether the
     /// owned-key clone for `expiry_deadlines` is elided when the write sets NO TTL (the
     /// production form, `GATE = true`) or always taken (the pre-elision baseline,
@@ -15214,7 +15240,11 @@ impl Store {
     }
 
     fn internal_entries_remove(&mut self, key: &[u8]) -> Option<Entry> {
-        let old_expiry = self.expiry_ms(key);
+        let old_expiry = if self.expires_count == 0 {
+            None
+        } else {
+            self.expiry_ms(key)
+        };
         if let Some(entry) = self.entries.remove(key) {
             self.invalidate_write_side_caches(key);
             // (cc_fr) `old_expiry` came from `expiry_ms` == `expiry_deadlines.get(key)`, so
@@ -15837,9 +15867,23 @@ impl Store {
             return 0;
         }
         let mut keys = Vec::with_capacity(cap);
+        let prefix = if db != 0 {
+            let mut p = [0u8; 14];
+            p[..6].copy_from_slice(DB_NAMESPACE_PREFIX);
+            p[6..14].copy_from_slice(&(db as u64).to_be_bytes());
+            Some(p)
+        } else {
+            None
+        };
         for key in self.entries.keys() {
-            let entry_db = decode_db_key(key).map(|(d, _)| d).unwrap_or(0);
-            if entry_db == db {
+            let matches_db = if let Some(p) = &prefix {
+                key.starts_with(p)
+            } else if key.first() != Some(&b'\0') {
+                true
+            } else {
+                decode_db_key(key).is_none()
+            };
+            if matches_db {
                 keys.push(key.to_vec());
                 if keys.len() == cap {
                     break;
@@ -16111,6 +16155,21 @@ impl Store {
     }
 
     pub fn swap_databases(&mut self, left_db: usize, right_db: usize) -> u64 {
+        struct SwappedEntry {
+            swapped_key: Vec<u8>,
+            entry: Entry,
+            expires_at_ms: Option<u64>,
+        }
+
+        struct SwappedSidemaps {
+            key: Vec<u8>,
+            groups: Option<StreamGroupState>,
+            last_id: Option<StreamId>,
+            entries_added: Option<u64>,
+            max_deleted_id: Option<StreamId>,
+            field_ttls: Vec<(Vec<u8>, u64)>,
+        }
+
         // (frankenredis-b0exs) See swap_prefixes: bulk key movement, drop cache.
         self.stream_pel_summary_cache.clear();
         if left_db == right_db {
@@ -16148,17 +16207,59 @@ impl Store {
         let (left_keys, right_keys) = {
             let mut left = Vec::with_capacity(left_cap);
             let mut right = Vec::with_capacity(right_cap);
+
+            let left_prefix = if left_db != 0 {
+                let mut p = [0u8; 14];
+                p[..6].copy_from_slice(DB_NAMESPACE_PREFIX);
+                p[6..14].copy_from_slice(&(left_db as u64).to_be_bytes());
+                Some(p)
+            } else {
+                None
+            };
+            let right_prefix = if right_db != 0 {
+                let mut p = [0u8; 14];
+                p[..6].copy_from_slice(DB_NAMESPACE_PREFIX);
+                p[6..14].copy_from_slice(&(right_db as u64).to_be_bytes());
+                Some(p)
+            } else {
+                None
+            };
+
             for key in self.entries.keys() {
-                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
-                if db == left_db {
-                    left.push(key.to_vec());
-                    if left.len() == left_cap && right.len() == right_cap {
-                        break;
+                if left.len() == left_cap && right.len() == right_cap {
+                    break;
+                }
+                if key.first() != Some(&b'\0') {
+                    if left_db == 0 && left.len() < left_cap {
+                        left.push(key.to_vec());
+                    } else if right_db == 0 && right.len() < right_cap {
+                        right.push(key.to_vec());
                     }
-                } else if db == right_db {
-                    right.push(key.to_vec());
-                    if left.len() == left_cap && right.len() == right_cap {
-                        break;
+                    continue;
+                }
+
+                if let Some(lp) = &left_prefix {
+                    if left.len() < left_cap && key.starts_with(lp) {
+                        left.push(key.to_vec());
+                        continue;
+                    }
+                }
+                if let Some(rp) = &right_prefix {
+                    if right.len() < right_cap && key.starts_with(rp) {
+                        right.push(key.to_vec());
+                        continue;
+                    }
+                }
+
+                if (left_db == 0 && left.len() < left_cap)
+                    || (right_db == 0 && right.len() < right_cap)
+                {
+                    if decode_db_key(key).is_none() {
+                        if left_db == 0 && left.len() < left_cap {
+                            left.push(key.to_vec());
+                        } else if right_db == 0 && right.len() < right_cap {
+                            right.push(key.to_vec());
+                        }
                     }
                 }
             }
@@ -16193,6 +16294,7 @@ impl Store {
         self.entries.set_shrink_suspended(true);
 
         let mut left_entries = Vec::with_capacity(left_count);
+        let mut left_sidemaps = Vec::new();
         for key in left_keys {
             // (frankenredis-4f8vx) Four stream sidemaps are probed PER KEY here, and on
             // any keyspace without streams all four are empty, so every probe is a
@@ -16210,7 +16312,11 @@ impl Store {
             } else {
                 self.stream_max_deleted_ids.remove(key.as_slice())
             };
-            let expires_at_ms = self.expiry_ms(key.as_slice());
+            let expires_at_ms = if self.expires_count == 0 {
+                None
+            } else {
+                self.expiry_ms(key.as_slice())
+            };
             // (frankenredis-bmyx5) Harvest per-field hash TTLs before removing the entry —
             // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
             let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
@@ -16249,19 +16355,30 @@ impl Store {
                 continue;
             };
             let swapped = remap_physical_db_key(key, left_db, right_db);
-            left_entries.push((
-                swapped,
+            let has_sidemaps = groups.is_some()
+                || last_id.is_some()
+                || entries_added.is_some()
+                || max_deleted_id.is_some()
+                || !field_ttls.is_empty();
+            if has_sidemaps {
+                left_sidemaps.push(SwappedSidemaps {
+                    key: swapped.clone(),
+                    groups,
+                    last_id,
+                    entries_added,
+                    max_deleted_id,
+                    field_ttls,
+                });
+            }
+            left_entries.push(SwappedEntry {
+                swapped_key: swapped,
                 entry,
-                groups,
-                last_id,
-                entries_added,
-                max_deleted_id,
                 expires_at_ms,
-                field_ttls,
-            ));
+            });
         }
 
         let mut right_entries = Vec::with_capacity(right_count);
+        let mut right_sidemaps = Vec::new();
         for key in right_keys {
             // (frankenredis-4f8vx) Four stream sidemaps are probed PER KEY here, and on
             // any keyspace without streams all four are empty, so every probe is a
@@ -16279,7 +16396,11 @@ impl Store {
             } else {
                 self.stream_max_deleted_ids.remove(key.as_slice())
             };
-            let expires_at_ms = self.expiry_ms(key.as_slice());
+            let expires_at_ms = if self.expires_count == 0 {
+                None
+            } else {
+                self.expiry_ms(key.as_slice())
+            };
             // (frankenredis-bmyx5) Harvest per-field hash TTLs before removing the entry —
             // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
             let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
@@ -16318,96 +16439,81 @@ impl Store {
                 continue;
             };
             let swapped = remap_physical_db_key(key, right_db, left_db);
-            right_entries.push((
-                swapped,
+            let has_sidemaps = groups.is_some()
+                || last_id.is_some()
+                || entries_added.is_some()
+                || max_deleted_id.is_some()
+                || !field_ttls.is_empty();
+            if has_sidemaps {
+                right_sidemaps.push(SwappedSidemaps {
+                    key: swapped.clone(),
+                    groups,
+                    last_id,
+                    entries_added,
+                    max_deleted_id,
+                    field_ttls,
+                });
+            }
+            right_entries.push(SwappedEntry {
+                swapped_key: swapped,
                 entry,
-                groups,
-                last_id,
-                entries_added,
-                max_deleted_id,
                 expires_at_ms,
-                field_ttls,
-            ));
+            });
         }
 
-        for (
-            swapped,
-            entry,
-            groups,
-            last_id,
-            entries_added,
-            max_deleted_id,
-            expires_at_ms,
-            field_ttls,
-        ) in left_entries
-        {
-            let has_sidemaps = groups.is_some()
-                || last_id.is_some()
-                || entries_added.is_some()
-                || max_deleted_id.is_some()
-                || !field_ttls.is_empty();
-
-            if has_sidemaps {
-                if let Some(groups) = groups {
-                    self.stream_groups.insert(swapped.clone(), groups);
-                }
-                if let Some(last_id) = last_id {
-                    self.stream_last_ids.insert(swapped.clone(), last_id);
-                }
-                if let Some(entries_added) = entries_added {
-                    self.stream_entries_added
-                        .insert(swapped.clone(), entries_added);
-                }
-                if let Some(max_deleted_id) = max_deleted_id {
-                    self.stream_max_deleted_ids
-                        .insert(swapped.clone(), max_deleted_id);
-                }
-                for (field, expires_at_ms) in field_ttls {
-                    self.hash_field_expires
-                        .insert((swapped.clone(), field), expires_at_ms);
-                }
+        // Direct swapped re-insertion: keys are guaranteed fresh (both dbs drained),
+        // bypassing redundant contains_key/get lookups, keyspace events, and decode_db_key.
+        for entry in left_entries {
+            self.insert_swapped_entry(
+                entry.swapped_key,
+                entry.entry,
+                entry.expires_at_ms,
+                right_db,
+            );
+        }
+        for sidemaps in left_sidemaps {
+            if let Some(groups) = sidemaps.groups {
+                self.stream_groups.insert(sidemaps.key.clone(), groups);
             }
-            self.internal_entries_insert_with_expiry(swapped, entry, expires_at_ms);
+            if let Some(last_id) = sidemaps.last_id {
+                self.stream_last_ids.insert(sidemaps.key.clone(), last_id);
+            }
+            if let Some(entries_added) = sidemaps.entries_added {
+                self.stream_entries_added
+                    .insert(sidemaps.key.clone(), entries_added);
+            }
+            if let Some(max_deleted_id) = sidemaps.max_deleted_id {
+                self.stream_max_deleted_ids
+                    .insert(sidemaps.key.clone(), max_deleted_id);
+            }
+            for (field, expires_at_ms) in sidemaps.field_ttls {
+                self.hash_field_expires
+                    .insert((sidemaps.key.clone(), field), expires_at_ms);
+            }
         }
 
-        for (
-            swapped,
-            entry,
-            groups,
-            last_id,
-            entries_added,
-            max_deleted_id,
-            expires_at_ms,
-            field_ttls,
-        ) in right_entries
-        {
-            let has_sidemaps = groups.is_some()
-                || last_id.is_some()
-                || entries_added.is_some()
-                || max_deleted_id.is_some()
-                || !field_ttls.is_empty();
-
-            if has_sidemaps {
-                if let Some(groups) = groups {
-                    self.stream_groups.insert(swapped.clone(), groups);
-                }
-                if let Some(last_id) = last_id {
-                    self.stream_last_ids.insert(swapped.clone(), last_id);
-                }
-                if let Some(entries_added) = entries_added {
-                    self.stream_entries_added
-                        .insert(swapped.clone(), entries_added);
-                }
-                if let Some(max_deleted_id) = max_deleted_id {
-                    self.stream_max_deleted_ids
-                        .insert(swapped.clone(), max_deleted_id);
-                }
-                for (field, expires_at_ms) in field_ttls {
-                    self.hash_field_expires
-                        .insert((swapped.clone(), field), expires_at_ms);
-                }
+        for entry in right_entries {
+            self.insert_swapped_entry(entry.swapped_key, entry.entry, entry.expires_at_ms, left_db);
+        }
+        for sidemaps in right_sidemaps {
+            if let Some(groups) = sidemaps.groups {
+                self.stream_groups.insert(sidemaps.key.clone(), groups);
             }
-            self.internal_entries_insert_with_expiry(swapped, entry, expires_at_ms);
+            if let Some(last_id) = sidemaps.last_id {
+                self.stream_last_ids.insert(sidemaps.key.clone(), last_id);
+            }
+            if let Some(entries_added) = sidemaps.entries_added {
+                self.stream_entries_added
+                    .insert(sidemaps.key.clone(), entries_added);
+            }
+            if let Some(max_deleted_id) = sidemaps.max_deleted_id {
+                self.stream_max_deleted_ids
+                    .insert(sidemaps.key.clone(), max_deleted_id);
+            }
+            for (field, expires_at_ms) in sidemaps.field_ttls {
+                self.hash_field_expires
+                    .insert((sidemaps.key.clone(), field), expires_at_ms);
+            }
         }
 
         // (frankenredis-4f8vx) Resume the policy. NOT followed by a shrink call: a swap
