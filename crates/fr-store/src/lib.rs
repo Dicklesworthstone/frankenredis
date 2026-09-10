@@ -2090,16 +2090,13 @@ impl SortedSet {
         }
     }
 
-    fn from_unique_borrowed_pairs_with_limits(
+    fn from_unique_borrowed_pairs_with_shape(
         pairs: Vec<(&[u8], f64)>,
+        max_member_len: usize,
         max_listpack_entries: usize,
         max_listpack_value: usize,
     ) -> Self {
-        if pairs.len() <= max_listpack_entries
-            && pairs
-                .iter()
-                .all(|(member, _)| member.len() <= max_listpack_value)
-        {
+        if pairs.len() <= max_listpack_entries && max_member_len <= max_listpack_value {
             let packed = if PackedZSet::borrowed_pairs_are_sorted(&pairs) {
                 // RDB_TYPE_ZSET_LISTPACK is normally written in this order by
                 // Redis. Retain the defensive fallback below for legal foreign
@@ -2122,6 +2119,21 @@ impl SortedSet {
                 ))),
             }
         }
+    }
+
+    #[cfg(test)]
+    fn from_unique_borrowed_pairs_with_limits(
+        pairs: Vec<(&[u8], f64)>,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> Self {
+        let max_member_len = pairs.iter().map(|(m, _)| m.len()).max().unwrap_or(0);
+        Self::from_unique_borrowed_pairs_with_shape(
+            pairs,
+            max_member_len,
+            max_listpack_entries,
+            max_listpack_value,
+        )
     }
 
     fn remove(&mut self, member: &[u8]) -> bool {
@@ -38189,25 +38201,31 @@ impl Store {
                 }
                 let mut members = Vec::with_capacity(spans.len());
                 let mut max_member_len = 0_usize;
+                let mut total_member_bytes = 0_usize;
                 for s in &spans {
                     let member = s.as_bytes(&listpack);
                     max_member_len = max_member_len.max(member.len());
+                    total_member_bytes += member.len();
                     members.push(member);
                 }
                 // (frankenredis-3uuan) The set encoding refresh below tests every member
                 // length against set-max-listpack-value; report the max from the members
                 // we already hold instead of re-walking the built GenericSet.
                 restored_max_element_len = Some(max_member_len);
-                // Dedup-check then BULK-build. from_unique_str_members appends each
-                // member with no lookup (O(n)); insertion order — the only observable
-                // order for a listpack set — is unchanged. RESTORE still rejects a
-                // duplicate member.
+                // Dedup-check then BULK-build. from_unique_str_members_with_shape appends each
+                // member with no lookup (O(n)) and skips the tier/budget inspection loop.
+                // Insertion order — the only observable order for a listpack set — is unchanged.
+                // RESTORE still rejects a duplicate member.
                 if restore_items_have_duplicate_key(&members, |member| *member) {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 force_set_listpack_encoding = true;
                 Value::Set(Box::new(SetValue::Generic(
-                    GenericSet::from_unique_str_members(&members),
+                    GenericSet::from_unique_str_members_with_shape(
+                        &members,
+                        max_member_len,
+                        total_member_bytes,
+                    ),
                 )))
             }
             RDB_TYPE_ZSET_LISTPACK => {
@@ -40553,8 +40571,9 @@ fn zset_from_listpack_spans(listpack: &[u8]) -> Result<(SortedSet, usize), Store
     }
 
     Ok((
-        SortedSet::from_unique_borrowed_pairs_with_limits(
+        SortedSet::from_unique_borrowed_pairs_with_shape(
             pairs,
+            max_member_len,
             SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES,
             SORTED_SET_PACKED_DEFAULT_MAX_VALUE,
         ),

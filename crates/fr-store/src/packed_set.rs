@@ -677,6 +677,33 @@ impl GenericSet {
     /// an empty set — the loop's mid-stream Packed→Hash promotion preserves
     /// insertion order, and the final encoding is `Hash` iff `count > PACKED_MAX_ENTRIES`
     /// or some member exceeds `PACKED_MAX_VALUE`, the same predicate decided here.
+    /// Builds a `GenericSet` from unique members when max member length and total member bytes
+    /// are already known (e.g. computed during span extraction on RESTORE/RDB load),
+    /// skipping the member inspection traversal completely.
+    #[must_use]
+    pub fn from_unique_str_members_with_shape<M: AsRef<[u8]>>(
+        members: &[M],
+        max_member_len: usize,
+        total_member_bytes: usize,
+    ) -> Self {
+        let n = members.len();
+        let packed = n <= PACKED_MAX_ENTRIES && max_member_len <= PACKED_MAX_VALUE;
+        let bytes = total_member_bytes + n * 2;
+        if packed {
+            let mut p = PackedStrSet::with_capacity(bytes);
+            for m in members {
+                p.append(m.as_ref());
+            }
+            Self::from_inner(GenericSetInner::Packed(p))
+        } else {
+            let mut h = CompactStrSet::with_capacity(n, bytes);
+            for m in members {
+                h.insert(m.as_ref());
+            }
+            Self::from_inner(GenericSetInner::Hash(h))
+        }
+    }
+
     /// Skips the per-insert O(n) `PackedStrSet::contains` scan, so an N-member
     /// build is O(N) instead of O(N²). Callers must guarantee uniqueness.
     #[must_use]
