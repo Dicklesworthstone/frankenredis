@@ -52639,7 +52639,7 @@ fn store_to_rdb_entries_borrowed<'a>(
                     && pair_count <= thresholds.hash_max_listpack_entries
                     && max_entry_len <= thresholds.hash_max_listpack_value
                     && (fr_persist::rdb_compression_enabled()
-                        || !fr_persist::rdb_string_is_lzf_framed(&raw))
+                        || !fr_persist::rdb_string_is_lzf_framed(raw))
                 {
                     // (BlackThrush 2026-08-27) VERBATIM FIRST, the third arm of the
                     // lever. A hash still holding the RDB string it was loaded from
@@ -52649,8 +52649,8 @@ fn store_to_rdb_entries_borrowed<'a>(
                     // `lzf_compress` -- 4,225,400 Ir/op, the largest frame in the arm.
                     //
                     // `retained_rdb_string()` is `Some` only while nothing has read the
-                    // hash: a read fills the OnceCell and DROPS the raw bytes, and a
-                    // write replaces the whole `HashFieldMap` variant.
+                    // hash: a read fills the OnceCell, and a write replaces the whole
+                    // `HashFieldMap` variant.
                     //
                     // The one thing that lives OUTSIDE the value is per-field TTLs,
                     // and the `has_any_ttl` branch above has already claimed every
@@ -52659,7 +52659,7 @@ fn store_to_rdb_entries_borrowed<'a>(
                     // O(1) from the count and longest entry the record carries,
                     // because CONFIG can have moved them since the load.
                     fr_persist::RdbValueRef::HashListpackRetained {
-                        raw: std::borrow::Cow::Owned(raw),
+                        raw: std::borrow::Cow::Borrowed(raw),
                         pair_count,
                         max_entry_len,
                     }

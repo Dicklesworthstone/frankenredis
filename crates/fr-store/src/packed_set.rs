@@ -856,11 +856,7 @@ pub struct VerbatimListpackHash {
     /// The RDB-ENCODED string (length prefix, LZF framing and all) while this hash
     /// has been loaded from an RDB FILE and not yet read. `None` once decoded, and
     /// `None` from the start for the eager RESTORE constructor.
-    ///
-    /// (BlackThrush 2026-08-27) A `RefCell` so the OnceCell initialiser can TAKE it:
-    /// after materialisation the compressed copy is dead weight, and holding both
-    /// would be an RSS regression against the incumbent for any hash that is read.
-    raw: std::cell::RefCell<Option<Box<[u8]>>>,
+    raw: Option<Box<[u8]>>,
     /// Pair count, known without decoding. Answers `len()` from the header, which is
     /// load-bearing: the store asks a value its length while STORING it and again on
     /// the save side's encoding check, and routing that through the materialiser has
@@ -957,7 +953,7 @@ impl VerbatimListpackHash {
             slots,
         });
         Ok(Ok(Self {
-            raw: std::cell::RefCell::new(None),
+            raw: None,
             len,
             max_entry_len,
             decoded,
@@ -974,7 +970,7 @@ impl VerbatimListpackHash {
     #[must_use]
     pub fn pending(raw: Vec<u8>, pair_count: usize, max_entry_len: usize) -> Self {
         Self {
-            raw: std::cell::RefCell::new(Some(raw.into_boxed_slice())),
+            raw: Some(raw.into_boxed_slice()),
             len: pair_count,
             max_entry_len,
             decoded: std::cell::OnceCell::new(),
@@ -983,21 +979,18 @@ impl VerbatimListpackHash {
 
     /// The retained RDB string, when this hash has not been read yet.
     ///
-    /// `None` once anything has read it -- a read fills the `OnceCell` and DROPS the
-    /// raw bytes -- so a `Some` here means the pairs are exactly as the record spelled
-    /// them. Returns `(raw, pair_count, max_entry_len)`, the last two so a caller can
-    /// re-check thresholds in O(1) and re-emit the record's own shape. Cloned rather
-    /// than borrowed because the bytes live behind a `RefCell`; the caller copies them
-    /// into the RDB buffer either way.
+    /// `None` once anything has read it, so a `Some` here means the pairs are exactly as
+    /// the record spelled them. Returns `(raw, pair_count, max_entry_len)`, the last two so
+    /// a caller can re-check thresholds in O(1) and re-emit the record's own shape. Borrowed
+    /// without heap allocation or copying.
     #[must_use]
-    pub fn retained_rdb_string(&self) -> Option<(Vec<u8>, usize, usize)> {
+    pub fn retained_rdb_string(&self) -> Option<(&[u8], usize, usize)> {
         if self.decoded.get().is_some() {
             return None;
         }
         self.raw
-            .borrow()
-            .as_ref()
-            .map(|raw| (raw.to_vec(), self.len, self.max_entry_len))
+            .as_deref()
+            .map(|raw| (raw, self.len, self.max_entry_len))
     }
 
     /// The decoded half, materialising it from the retained RDB string on first use.
@@ -1009,10 +1002,9 @@ impl VerbatimListpackHash {
         self.decoded.get_or_init(|| {
             let raw = self
                 .raw
-                .borrow_mut()
-                .take()
+                .as_deref()
                 .expect("a VerbatimListpackHash is either decoded or holds its rdb string");
-            let (bytes, _) = fr_persist::rdb_decode_string_payload(&raw)
+            let (bytes, _) = fr_persist::rdb_decode_string_payload(raw)
                 .expect("validated retained hash must decode its rdb string");
             let entries = fr_persist::listpack::decode_value_spans(&bytes)
                 .expect("validated retained hash must decode its listpack");
@@ -1165,7 +1157,7 @@ impl HashFieldMap {
     /// The retained RDB string, when this hash was loaded from an RDB file and
     /// nothing has read it since. `None` for every other tier and every decoded one.
     #[must_use]
-    pub fn retained_rdb_string(&self) -> Option<(Vec<u8>, usize, usize)> {
+    pub fn retained_rdb_string(&self) -> Option<(&[u8], usize, usize)> {
         match self {
             HashFieldMap::Listpack(l) => l.retained_rdb_string(),
             HashFieldMap::Packed(_) | HashFieldMap::Hash(_) => None,
