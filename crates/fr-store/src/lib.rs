@@ -38007,7 +38007,7 @@ impl Store {
                 cursor += consumed;
                 enum QuicklistNode {
                     Plain(Vec<u8>),
-                    Packed(Vec<u8>, Vec<fr_persist::listpack::ListpackValueSpan>),
+                    Packed(Vec<u8>),
                 }
                 let mut packed: Vec<(Vec<u8>, Vec<fr_persist::listpack::ListpackValueSpan>)> =
                     Vec::with_capacity(node_count);
@@ -38024,8 +38024,8 @@ impl Store {
                             }
                             let nodes = fallback_nodes.get_or_insert_with(|| {
                                 let mut v = Vec::with_capacity(node_count);
-                                for (bytes, entries) in packed.drain(..) {
-                                    v.push(QuicklistNode::Packed(bytes, entries));
+                                for (bytes, _) in packed.drain(..) {
+                                    v.push(QuicklistNode::Packed(bytes));
                                 }
                                 v
                             });
@@ -38038,7 +38038,7 @@ impl Store {
                             let entries = fr_persist::listpack::decode_value_spans(&listpack)
                                 .map_err(|_| StoreError::InvalidDumpPayload)?;
                             if let Some(nodes) = &mut fallback_nodes {
-                                nodes.push(QuicklistNode::Packed(listpack, entries));
+                                nodes.push(QuicklistNode::Packed(listpack));
                             } else {
                                 packed.push((listpack, entries));
                             }
@@ -38053,7 +38053,7 @@ impl Store {
                             QuicklistNode::Plain(item) => {
                                 restored.push(RestoredListNode::Plain(item));
                             }
-                            QuicklistNode::Packed(listpack, _) => {
+                            QuicklistNode::Packed(listpack) => {
                                 let spans =
                                     fr_persist::listpack::decode_retained_listpack_spans(&listpack)
                                         .map_err(|_| StoreError::InvalidDumpPayload)?;
