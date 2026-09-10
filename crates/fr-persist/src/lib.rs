@@ -2323,12 +2323,29 @@ pub fn encode_rdb_string_entries_with_functions(
         rdb_encode_string_with(&mut buf, code, compress);
     }
 
-    let is_single_db = entries.first().map_or(0, |e| e.db) == entries.last().map_or(0, |e| e.db);
+    let (first_db, is_single_db, single_db_expires) = if entries.is_empty() {
+        (0, true, 0)
+    } else if entries.len() == 1 {
+        (
+            entries[0].db,
+            true,
+            usize::from(entries[0].expire_ms.is_some()),
+        )
+    } else {
+        let first_db = entries[0].db;
+        let is_single = first_db == entries[entries.len() - 1].db;
+        let expires = if is_single {
+            entries.iter().filter(|e| e.expire_ms.is_some()).count()
+        } else {
+            0
+        };
+        (first_db, is_single, expires)
+    };
 
     if is_single_db {
-        if let Some(first) = entries.first() {
-            let db = first.db;
-            let db_expires = entries.iter().filter(|e| e.expire_ms.is_some()).count();
+        if !entries.is_empty() {
+            let db = first_db;
+            let db_expires = single_db_expires;
 
             buf.push(RDB_OPCODE_SELECTDB);
             rdb_encode_length(&mut buf, db);
@@ -2451,7 +2468,7 @@ fn encode_rdb_internal(
             if pair[1].expire_ms.is_some() {
                 expires += 1;
             }
-            if pair[1].db != first_db {
+            if single_db && pair[1].db != first_db {
                 single_db = false;
             }
             if sorted {
@@ -2612,7 +2629,7 @@ fn encode_rdb_borrowed_internal<'a>(
             if pair[1].expire_ms.is_some() {
                 expires += 1;
             }
-            if pair[1].db != first_db {
+            if single_db && pair[1].db != first_db {
                 single_db = false;
             }
             if sorted {
@@ -3240,13 +3257,21 @@ fn encode_compact_set_listpack_blob<T: AsRef<[u8]>>(
     if members.len() > thresholds.set_max_listpack_entries {
         return None;
     }
-    if members
-        .iter()
-        .any(|m| m.as_ref().len() > thresholds.set_max_listpack_value)
-    {
-        return None;
+    let max_val = thresholds.set_max_listpack_value;
+    let mut total_bytes = 0usize;
+    for m in members {
+        let len = m.as_ref().len();
+        if len > max_val {
+            return None;
+        }
+        total_bytes += len;
     }
-    encode_set_listpack_blob(members)
+    let cap = LISTPACK_BLOB_OVERHEAD + total_bytes + members.len() * 11;
+    let mut encoded = listpack_blob_with_header(cap);
+    for member in members {
+        encode_listpack_entry(&mut encoded, member.as_ref());
+    }
+    finish_listpack_blob(encoded, members.len())
 }
 
 /// Borrowed-member twin of [`encode_set_listpack_blob`], with the eligibility
@@ -3267,24 +3292,27 @@ pub fn encode_set_listpack_blob_borrowed(
     if members.len() > thresholds.set_max_listpack_entries {
         return None;
     }
-    if members
-        .iter()
-        .any(|m| m.len() > thresholds.set_max_listpack_value)
-    {
+    let max_val = thresholds.set_max_listpack_value;
+    let check_intset = members.len() <= thresholds.set_max_intset_entries && !members.is_empty();
+    let mut all_ints = check_intset;
+    let mut total_bytes = 0usize;
+    for m in members {
+        let len = m.len();
+        if len > max_val {
+            return None;
+        }
+        total_bytes += len;
+        if all_ints
+            && (!matches!(m.first(), Some(&b) if b.is_ascii_digit() || b == b'-')
+                || parse_listpack_integer(m).is_none())
+        {
+            all_ints = false;
+        }
+    }
+    if all_ints {
         return None;
     }
-    // An all-integer set reaches RDB_TYPE_SET_INTSET, which the encoder tries
-    // BEFORE its listpack arm. Decline so that decision stays exactly where it is.
-    if members.len() <= thresholds.set_max_intset_entries
-        && !members.is_empty()
-        && members.iter().all(|m| {
-            matches!(m.first(), Some(&b) if b.is_ascii_digit() || b == b'-')
-                && parse_listpack_integer(m).is_some()
-        })
-    {
-        return None;
-    }
-    let cap = LISTPACK_BLOB_OVERHEAD + members.iter().map(|m| m.len() + 11).sum::<usize>();
+    let cap = LISTPACK_BLOB_OVERHEAD + total_bytes + members.len() * 11;
     let mut encoded = listpack_blob_with_header(cap);
     for member in members {
         encode_listpack_entry(&mut encoded, member);
@@ -3292,6 +3320,7 @@ pub fn encode_set_listpack_blob_borrowed(
     finish_listpack_blob(encoded, members.len())
 }
 
+#[cfg(test)]
 fn encode_set_listpack_blob<T: AsRef<[u8]>>(members: &[T]) -> Option<Vec<u8>> {
     // Pre-size to a safe upper bound (each listpack string entry is <= len + ~10 of
     // type-header + backlen; int-encoded entries are shorter) so the blob is built in ONE
@@ -3313,15 +3342,26 @@ fn encode_compact_hash_listpack_blob<T: AsRef<[u8]>>(
     if fields.len() > thresholds.hash_max_listpack_entries {
         return None;
     }
-    if fields.iter().any(|(f, v)| {
-        f.as_ref().len() > thresholds.hash_max_listpack_value
-            || v.as_ref().len() > thresholds.hash_max_listpack_value
-    }) {
-        return None;
+    let max_val = thresholds.hash_max_listpack_value;
+    let mut total_bytes = 0usize;
+    for (f, v) in fields {
+        let flen = f.as_ref().len();
+        let vlen = v.as_ref().len();
+        if flen > max_val || vlen > max_val {
+            return None;
+        }
+        total_bytes += flen + vlen;
     }
-    encode_hash_listpack_blob(fields)
+    let cap = LISTPACK_BLOB_OVERHEAD + total_bytes + fields.len() * 22;
+    let mut encoded = listpack_blob_with_header(cap);
+    for (field, value) in fields {
+        encode_listpack_entry(&mut encoded, field.as_ref());
+        encode_listpack_entry(&mut encoded, value.as_ref());
+    }
+    finish_listpack_blob(encoded, fields.len().saturating_mul(2))
 }
 
+#[cfg(test)]
 fn encode_hash_listpack_blob<T: AsRef<[u8]>>(fields: &[(T, T)]) -> Option<Vec<u8>> {
     // Pre-size to a safe upper bound (two entries per field, each <= len + ~10) so the blob
     // is built in one allocation. Under-estimates are harmless; output byte-identical.
@@ -3359,16 +3399,17 @@ pub fn encode_hash_listpack_blob_borrowed(
     if fields.len() > thresholds.hash_max_listpack_entries {
         return None;
     }
-    if fields.iter().any(|(f, v)| {
-        f.len() > thresholds.hash_max_listpack_value || v.len() > thresholds.hash_max_listpack_value
-    }) {
-        return None;
+    let max_val = thresholds.hash_max_listpack_value;
+    let mut total_bytes = 0usize;
+    for (f, v) in fields {
+        let flen = f.len();
+        let vlen = v.len();
+        if flen > max_val || vlen > max_val {
+            return None;
+        }
+        total_bytes += flen + vlen;
     }
-    let cap = LISTPACK_BLOB_OVERHEAD
-        + fields
-            .iter()
-            .map(|(f, v)| f.len() + v.len() + 22)
-            .sum::<usize>();
+    let cap = LISTPACK_BLOB_OVERHEAD + total_bytes + fields.len() * 22;
     let mut encoded = listpack_blob_with_header(cap);
     for (field, value) in fields {
         encode_listpack_entry(&mut encoded, field);
@@ -3387,22 +3428,25 @@ fn encode_compact_zset_listpack_blob<T: AsRef<[u8]>>(
     // Reject oversized members and NaN scores — upstream's zset listpack path uses
     // `d2string` which doesn't represent NaN; the wire form would be
     // unparseable on the read side.
-    if members
-        .iter()
-        .any(|(m, score)| m.as_ref().len() > thresholds.zset_max_listpack_value || score.is_nan())
-    {
-        return None;
+    let max_val = thresholds.zset_max_listpack_value;
+    let mut total_member_bytes = 0usize;
+    for (m, score) in members {
+        let len = m.as_ref().len();
+        if len > max_val || score.is_nan() {
+            return None;
+        }
+        total_member_bytes += len;
     }
 
     if zset_members_are_sorted(members) {
-        encode_zset_score_listpack_blob_from_members(members)
+        encode_zset_score_listpack_blob_from_members(members, total_member_bytes)
     } else {
         let mut sorted_members: Vec<(&[u8], f64)> = members
             .iter()
             .map(|(member, score)| (member.as_ref(), *score))
             .collect();
         sorted_members.sort_unstable_by(|left, right| zset_member_cmp(*left, *right));
-        encode_zset_score_listpack_blob(&sorted_members)
+        encode_zset_score_listpack_blob(&sorted_members, total_member_bytes)
     }
 }
 
@@ -3429,21 +3473,25 @@ pub fn encode_zset_listpack_blob_borrowed(
     if members.len() > thresholds.zset_max_listpack_entries {
         return None;
     }
-    if members
-        .iter()
-        .any(|(m, score)| m.len() > thresholds.zset_max_listpack_value || score.is_nan())
-    {
-        return None;
+    let max_val = thresholds.zset_max_listpack_value;
+    let mut total_member_bytes = 0usize;
+    for (m, score) in members {
+        let len = m.len();
+        if len > max_val || score.is_nan() {
+            return None;
+        }
+        total_member_bytes += len;
     }
+
     // `iter_asc` hands these over in ascending order already, but check rather
     // than assume: the predicate is the same one the owned path applies, and a
     // caller that ever passes an unordered slice still gets the sorted blob.
     if borrowed_zset_members_are_sorted(members) {
-        encode_zset_score_listpack_blob(members)
+        encode_zset_score_listpack_blob(members, total_member_bytes)
     } else {
         let mut sorted: Vec<(&[u8], f64)> = members.to_vec();
         sorted.sort_unstable_by(|left, right| zset_member_cmp(*left, *right));
-        encode_zset_score_listpack_blob(&sorted)
+        encode_zset_score_listpack_blob(&sorted, total_member_bytes)
     }
 }
 
@@ -3465,12 +3513,9 @@ fn zset_members_are_sorted<T: AsRef<[u8]>>(members: &[(T, f64)]) -> bool {
 
 fn encode_zset_score_listpack_blob_from_members<T: AsRef<[u8]>>(
     sorted_members: &[(T, f64)],
+    total_member_bytes: usize,
 ) -> Option<Vec<u8>> {
-    let cap = LISTPACK_BLOB_OVERHEAD
-        + sorted_members
-            .iter()
-            .map(|(m, _)| m.as_ref().len() + 11 + 32)
-            .sum::<usize>();
+    let cap = LISTPACK_BLOB_OVERHEAD + total_member_bytes + sorted_members.len().saturating_mul(43);
     let mut encoded = listpack_blob_with_header(cap);
     let mut scratch = Vec::with_capacity(32);
     for (member, score) in sorted_members {
@@ -3484,16 +3529,11 @@ fn encode_zset_score_listpack_blob_from_members<T: AsRef<[u8]>>(
     finish_listpack_blob(encoded, sorted_members.len().saturating_mul(2))
 }
 
-fn encode_zset_score_listpack_blob(sorted_members: &[(&[u8], f64)]) -> Option<Vec<u8>> {
-    // Pre-size to a safe upper bound: per member, the member entry (<= len + ~10) plus the
-    // score entry (a d2string/i64 decimal, always <= ~21 chars + ~10 header => budget 32) so
-    // the blob is built in one allocation. Under-estimates are harmless; output byte-identical.
-    // (frankenredis perf: presize listpack blob, code-first batch-test pending)
-    let cap = LISTPACK_BLOB_OVERHEAD
-        + sorted_members
-            .iter()
-            .map(|(m, _)| m.len() + 11 + 32)
-            .sum::<usize>();
+fn encode_zset_score_listpack_blob(
+    sorted_members: &[(&[u8], f64)],
+    total_member_bytes: usize,
+) -> Option<Vec<u8>> {
+    let cap = LISTPACK_BLOB_OVERHEAD + total_member_bytes + sorted_members.len().saturating_mul(43);
     let mut encoded = listpack_blob_with_header(cap);
     let mut scratch = Vec::with_capacity(32);
     for (member, score) in sorted_members {
