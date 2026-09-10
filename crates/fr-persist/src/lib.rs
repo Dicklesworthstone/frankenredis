@@ -1949,9 +1949,7 @@ fn rdb_encode_string(buf: &mut Vec<u8>, data: &[u8]) {
 fn rdb_encode_string_with(buf: &mut Vec<u8>, data: &[u8], compress: bool) {
     // Upstream skips LZF below this threshold because even a run of
     // repeated bytes cannot compress enough to beat the wire overhead.
-    if let Ok(len) = u8::try_from(data.len())
-        && len <= 20
-    {
+    if let Ok(len @ 0..=20) = u8::try_from(data.len()) {
         buf.push(len);
         buf.extend_from_slice(data);
         return;
@@ -2456,24 +2454,19 @@ fn encode_rdb_internal(
             if pair[1].db != first_db {
                 single_db = false;
             }
-            if single_db {
-                if pair[0].key > pair[1].key {
+            if sorted {
+                if single_db {
+                    if pair[0].key > pair[1].key {
+                        sorted = false;
+                    }
+                } else if pair[0].db > pair[1].db
+                    || (pair[0].db == pair[1].db && pair[0].key > pair[1].key)
+                {
                     sorted = false;
-                    break;
                 }
-            } else if pair[0].db > pair[1].db
-                || (pair[0].db == pair[1].db && pair[0].key > pair[1].key)
-            {
-                sorted = false;
-                break;
             }
         }
-        if !sorted {
-            let single = single_db && entries.iter().all(|e| e.db == first_db);
-            (first_db, single, false, 0)
-        } else {
-            (first_db, single_db, true, expires)
-        }
+        (first_db, single_db, sorted, expires)
     };
 
     if is_sorted {
@@ -2523,10 +2516,7 @@ fn encode_rdb_internal(
 
             if !sorted_entries.is_empty() {
                 let db = first_db;
-                let db_expires = sorted_entries
-                    .iter()
-                    .filter(|e| e.expire_ms.is_some())
-                    .count();
+                let db_expires = single_db_expires;
                 buf.push(RDB_OPCODE_SELECTDB);
                 rdb_encode_length(&mut buf, db);
                 buf.push(RDB_OPCODE_RESIZEDB);
@@ -2625,24 +2615,19 @@ fn encode_rdb_borrowed_internal<'a>(
             if pair[1].db != first_db {
                 single_db = false;
             }
-            if single_db {
-                if pair[0].key > pair[1].key {
+            if sorted {
+                if single_db {
+                    if pair[0].key > pair[1].key {
+                        sorted = false;
+                    }
+                } else if pair[0].db > pair[1].db
+                    || (pair[0].db == pair[1].db && pair[0].key > pair[1].key)
+                {
                     sorted = false;
-                    break;
                 }
-            } else if pair[0].db > pair[1].db
-                || (pair[0].db == pair[1].db && pair[0].key > pair[1].key)
-            {
-                sorted = false;
-                break;
             }
         }
-        if !sorted {
-            let single = single_db && entries.iter().all(|e| e.db == first_db);
-            (first_db, single, false, 0)
-        } else {
-            (first_db, single_db, true, expires)
-        }
+        (first_db, single_db, sorted, expires)
     };
 
     if is_sorted {
@@ -2692,10 +2677,7 @@ fn encode_rdb_borrowed_internal<'a>(
 
             if !sorted_entries.is_empty() {
                 let db = first_db;
-                let db_expires = sorted_entries
-                    .iter()
-                    .filter(|e| e.expire_ms.is_some())
-                    .count();
+                let db_expires = single_db_expires;
                 buf.push(RDB_OPCODE_SELECTDB);
                 rdb_encode_length(&mut buf, db);
                 buf.push(RDB_OPCODE_RESIZEDB);
