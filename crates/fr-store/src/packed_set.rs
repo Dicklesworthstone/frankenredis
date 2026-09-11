@@ -62,6 +62,7 @@ impl PackedStrSet {
         PackedStrSetIter {
             buf: &self.buf,
             pos: 0,
+            remaining: self.len,
         }
     }
 
@@ -128,6 +129,7 @@ impl<'a> FromIterator<&'a [u8]> for PackedStrSet {
 pub struct PackedStrSetIter<'a> {
     buf: &'a [u8],
     pos: usize,
+    remaining: usize,
 }
 
 impl<'a> Iterator for PackedStrSetIter<'a> {
@@ -140,9 +142,17 @@ impl<'a> Iterator for PackedStrSetIter<'a> {
         let (mlen, data_start) = read_varint(self.buf, self.pos);
         let data_end = data_start + mlen;
         self.pos = data_end;
+        self.remaining = self.remaining.saturating_sub(1);
         Some(&self.buf[data_start..data_end])
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
 }
+
+impl<'a> ExactSizeIterator for PackedStrSetIter<'a> {}
 
 /// LEB128 unsigned varint: 1 byte for lengths < 128 (the common case for
 /// listpack-eligible members ≤ 64 bytes), growing 7 bits at a time.
@@ -855,7 +865,17 @@ impl<'a> Iterator for GenericSetIter<'a> {
             GenericSetIter::Hash(it) => it.next(),
         }
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            GenericSetIter::Packed(it) => it.size_hint(),
+            GenericSetIter::Hash(it) => it.size_hint(),
+        }
+    }
 }
+
+impl<'a> ExactSizeIterator for GenericSetIter<'a> {}
 
 // `HashFieldBytes` / `FieldHashTable` (the former inline-or-heap IndexMap backing
 // for the Hash variant) were superseded by `CompactFieldMap` (frankenredis-ideww).
@@ -1116,7 +1136,15 @@ impl<'a> Iterator for VerbatimListpackHashIter<'a> {
         self.pair_index += 1;
         Some(item)
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.map.len().saturating_sub(self.pair_index);
+        (rem, Some(rem))
+    }
 }
+
+impl<'a> ExactSizeIterator for VerbatimListpackHashIter<'a> {}
 
 /// Storage for a hash's field→value map: a packed listpack-style buffer while
 /// small, promoting to an `IndexMap` hashtable past the threshold. Drop-in for
@@ -1675,7 +1703,18 @@ impl<'a> Iterator for HashFieldMapKeyIter<'a> {
             HashFieldMapKeyIter::Listpack(it) => it.next().map(|(k, _)| k),
         }
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            HashFieldMapKeyIter::Packed(it) => it.size_hint(),
+            HashFieldMapKeyIter::Hash(it) => it.size_hint(),
+            HashFieldMapKeyIter::Listpack(it) => it.size_hint(),
+        }
+    }
 }
+
+impl<'a> ExactSizeIterator for HashFieldMapKeyIter<'a> {}
 
 /// Borrowing iterator over a `HashFieldMap`'s (field, value) pairs.
 pub enum HashFieldMapIter<'a> {
@@ -1694,7 +1733,18 @@ impl<'a> Iterator for HashFieldMapIter<'a> {
             HashFieldMapIter::Listpack(it) => it.next(),
         }
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            HashFieldMapIter::Packed(it) => it.size_hint(),
+            HashFieldMapIter::Hash(it) => it.size_hint(),
+            HashFieldMapIter::Listpack(it) => it.size_hint(),
+        }
+    }
 }
+
+impl<'a> ExactSizeIterator for HashFieldMapIter<'a> {}
 
 // ─────────────── compact arena+index field map (frankenredis-ideww) ──────────
 
@@ -2251,7 +2301,15 @@ impl<'a> Iterator for CompactFieldMapIter<'a> {
         self.pos += 1;
         Some(pair)
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.map.len().saturating_sub(self.pos);
+        (rem, Some(rem))
+    }
 }
+
+impl<'a> ExactSizeIterator for CompactFieldMapIter<'a> {}
 
 /// (CrimsonHawk) Field-only insertion-order iterator over a [`CompactFieldMap`],
 /// decoding just the field (no value varint/slice) per entry.
@@ -2267,7 +2325,15 @@ impl<'a> Iterator for CompactFieldMapFieldIter<'a> {
         self.pos += 1;
         Some(f)
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.map.len().saturating_sub(self.pos);
+        (rem, Some(rem))
+    }
 }
+
+impl<'a> ExactSizeIterator for CompactFieldMapFieldIter<'a> {}
 
 /// (frankenredis-ideww) Member-only compact set for the hashtable-range set
 /// encoding — a thin wrapper over [`CompactFieldMap`] (members map to an empty
@@ -2377,7 +2443,15 @@ impl<'a> Iterator for CompactStrSetIter<'a> {
         self.pos += 1;
         Some(m)
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.map.len().saturating_sub(self.pos);
+        (rem, Some(rem))
+    }
 }
+
+impl<'a> ExactSizeIterator for CompactStrSetIter<'a> {}
 
 /// (frankenredis-p8wd1) Compact storage for ONE stream entry's fields: an
 /// ORDERED list of (field, value) byte pairs packed contiguously into a single
@@ -3894,6 +3968,7 @@ impl PackedStrMap {
         PackedStrMapIter {
             buf: &self.buf,
             pos: 0,
+            remaining: self.len,
         }
     }
 }
@@ -3912,6 +3987,7 @@ impl FromIterator<(Vec<u8>, Vec<u8>)> for PackedStrMap {
 pub struct PackedStrMapIter<'a> {
     buf: &'a [u8],
     pos: usize,
+    remaining: usize,
 }
 
 impl<'a> Iterator for PackedStrMapIter<'a> {
@@ -3925,9 +4001,17 @@ impl<'a> Iterator for PackedStrMapIter<'a> {
         let (vlen, v_start) = read_varint(self.buf, k_end);
         let v_end = v_start + vlen;
         self.pos = v_end;
+        self.remaining = self.remaining.saturating_sub(1);
         Some((&self.buf[k_start..k_end], &self.buf[v_start..v_end]))
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
 }
+
+impl<'a> ExactSizeIterator for PackedStrMapIter<'a> {}
 
 // ───────────────────────── packed string LIST (for small lists) ─────────────
 
@@ -4160,6 +4244,7 @@ impl PackedList {
         PackedListIter {
             buf: &self.buf,
             pos: 0,
+            remaining: self.len,
         }
     }
 
@@ -4191,6 +4276,7 @@ impl<'a> FromIterator<&'a [u8]> for PackedList {
 pub struct PackedListIter<'a> {
     buf: &'a [u8],
     pos: usize,
+    remaining: usize,
 }
 
 impl<'a> Iterator for PackedListIter<'a> {
@@ -4202,9 +4288,17 @@ impl<'a> Iterator for PackedListIter<'a> {
         let (elen, e_start) = read_varint(self.buf, self.pos);
         let e_end = e_start + elen;
         self.pos = e_end;
+        self.remaining = self.remaining.saturating_sub(1);
         Some(&self.buf[e_start..e_end])
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
 }
+
+impl<'a> ExactSizeIterator for PackedListIter<'a> {}
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -7492,7 +7586,11 @@ impl PackedZSet {
     /// Iterate `(member, score)` in ascending `(score, member)` order.
     #[must_use]
     pub fn iter(&self) -> PackedZSetIter<'_> {
-        PackedZSetIter { zset: self, pos: 0 }
+        PackedZSetIter {
+            zset: self,
+            pos: 0,
+            remaining: self.len,
+        }
     }
 
     /// `(member, score)` pairs in DESCENDING order (mirrors SortedSet::iter_desc).
@@ -7760,6 +7858,7 @@ impl PackedZSet {
 pub struct PackedZSetIter<'a> {
     zset: &'a PackedZSet,
     pos: usize,
+    remaining: usize,
 }
 
 impl<'a> Iterator for PackedZSetIter<'a> {
@@ -7770,9 +7869,17 @@ impl<'a> Iterator for PackedZSetIter<'a> {
         }
         let (m, s, end) = self.zset.record_at(self.pos);
         self.pos = end;
+        self.remaining = self.remaining.saturating_sub(1);
         Some((m, s))
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
 }
+
+impl<'a> ExactSizeIterator for PackedZSetIter<'a> {}
 
 /// (frankenredis-ym6ih) Pre-optimization delete path, kept ONLY for the A/B
 /// micro-bench `swap_remove_perf_legacy_vs_new_ym6ih`. This is the original
