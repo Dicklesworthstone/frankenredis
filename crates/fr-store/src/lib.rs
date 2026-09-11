@@ -15070,6 +15070,28 @@ impl Store {
         self.entries.insert(key.as_slice(), entry);
     }
 
+    fn remove_swapped_entry(
+        &mut self,
+        key: &[u8],
+        db: usize,
+        expires_at_ms: Option<u64>,
+    ) -> Option<Entry> {
+        let entry = self.entries.remove(key)?;
+        if let Some(nonzero) = expires_at_ms.and_then(std::num::NonZeroU64::new) {
+            self.expiry_deadlines.remove(key);
+            self.forget_volatile_key(key);
+            self.untrack_expiry_deadline(nonzero.get());
+            self.expires_count = self.expires_count.saturating_sub(1);
+            if db < self.database_count {
+                self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
+            }
+        }
+        if db < self.database_count {
+            self.db_key_counts[db] = self.db_key_counts[db].saturating_sub(1);
+        }
+        Some(entry)
+    }
+
     /// `internal_entries_insert_with_expiry` with a `const GATE` selecting whether the
     /// owned-key clone for `expiry_deadlines` is elided when the write sets NO TTL (the
     /// production form, `GATE = true`) or always taken (the pre-elision baseline,
@@ -16349,25 +16371,6 @@ impl Store {
             } else {
                 self.expiry_ms(key.as_slice())
             };
-            // (frankenredis-bmyx5) Harvest per-field hash TTLs before removing the entry —
-            // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
-                Vec::new()
-            } else {
-                let is_hash = self
-                    .entries
-                    .get(key.as_slice())
-                    .is_some_and(|e| matches!(e.value, Value::Hash(_)));
-                if is_hash {
-                    self.hash_field_expires
-                        .range((key.clone(), Vec::new())..)
-                        .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
-                        .map(|((_, f), v)| (f.clone(), *v))
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            };
             let groups = if self.stream_groups.is_empty() {
                 None
             } else {
@@ -16383,8 +16386,33 @@ impl Store {
             } else {
                 self.stream_entries_added.remove(key.as_slice())
             };
-            let Some(entry) = self.internal_entries_remove(&key) else {
+            // Direct swapped removal: avoids redundant expiry_ms lookups, decode_db_key,
+            // per-key write-side cache probes, duplicate stream metadata drops, and
+            // per-key keyspace generation / digest churn.
+            let Some(entry) = self.remove_swapped_entry(key.as_slice(), left_db, expires_at_ms)
+            else {
                 continue;
+            };
+            // (frankenredis-bmyx5) Harvest per-field hash TTLs before clearing metadata —
+            // checked directly on the removed entry without redundant KeyDict::get lookup.
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
+                if !self.hash_field_expired_counts.is_empty()
+                    && matches!(&entry.value, Value::Hash(_))
+                {
+                    self.hash_field_expired_counts.remove(key.as_slice());
+                }
+                Vec::new()
+            } else if matches!(&entry.value, Value::Hash(_)) {
+                let ttls: Vec<(Vec<u8>, u64)> = self
+                    .hash_field_expires
+                    .range((key.clone(), Vec::new())..)
+                    .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
+                    .map(|((_, f), v)| (f.clone(), *v))
+                    .collect();
+                self.hash_field_ttl_clear_for_key(key.as_slice());
+                ttls
+            } else {
+                Vec::new()
             };
             let swapped = remap_physical_db_key(key, left_db, right_db);
             let has_sidemaps = groups.is_some()
@@ -16412,17 +16440,6 @@ impl Store {
         let mut right_entries = Vec::with_capacity(right_count);
         let mut right_sidemaps = Vec::new();
         for key in right_keys {
-            // (frankenredis-4f8vx) Four stream sidemaps are probed PER KEY here, and on
-            // any keyspace without streams all four are empty, so every probe is a
-            // foldhash of the key plus a miss. Callgrind attributed 79.2M Ir (6.21 pct)
-            // to ONE instantiation alone: `stream_max_deleted_ids` and `stream_last_ids`
-            // share a `StreamId` value type, so they monomorphise together and the
-            // profile shows 1,200,000 calls for 600,000 key-ops -- 2 per key.
-            //
-            // `remove` on an empty map returns `None`, exactly what skipping yields, so
-            // the guard is behaviour-preserving by construction. Same `is_empty()` shape
-            // `invalidate_write_side_caches` already uses for the three write-side
-            // caches (53w9n-sib); these four were never given it.
             let max_deleted_id = if self.stream_max_deleted_ids.is_empty() {
                 None
             } else {
@@ -16432,25 +16449,6 @@ impl Store {
                 None
             } else {
                 self.expiry_ms(key.as_slice())
-            };
-            // (frankenredis-bmyx5) Harvest per-field hash TTLs before removing the entry —
-            // internal_entries_remove drops them via hash_field_ttl_clear_for_key.
-            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
-                Vec::new()
-            } else {
-                let is_hash = self
-                    .entries
-                    .get(key.as_slice())
-                    .is_some_and(|e| matches!(e.value, Value::Hash(_)));
-                if is_hash {
-                    self.hash_field_expires
-                        .range((key.clone(), Vec::new())..)
-                        .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
-                        .map(|((_, f), v)| (f.clone(), *v))
-                        .collect()
-                } else {
-                    Vec::new()
-                }
             };
             let groups = if self.stream_groups.is_empty() {
                 None
@@ -16467,8 +16465,28 @@ impl Store {
             } else {
                 self.stream_entries_added.remove(key.as_slice())
             };
-            let Some(entry) = self.internal_entries_remove(&key) else {
+            let Some(entry) = self.remove_swapped_entry(key.as_slice(), right_db, expires_at_ms)
+            else {
                 continue;
+            };
+            let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
+                if !self.hash_field_expired_counts.is_empty()
+                    && matches!(&entry.value, Value::Hash(_))
+                {
+                    self.hash_field_expired_counts.remove(key.as_slice());
+                }
+                Vec::new()
+            } else if matches!(&entry.value, Value::Hash(_)) {
+                let ttls: Vec<(Vec<u8>, u64)> = self
+                    .hash_field_expires
+                    .range((key.clone(), Vec::new())..)
+                    .take_while(|((k, _), _)| k.as_slice() == key.as_slice())
+                    .map(|((_, f), v)| (f.clone(), *v))
+                    .collect();
+                self.hash_field_ttl_clear_for_key(key.as_slice());
+                ttls
+            } else {
+                Vec::new()
             };
             let swapped = remap_physical_db_key(key, right_db, left_db);
             let has_sidemaps = groups.is_some()
@@ -16556,6 +16574,20 @@ impl Store {
         self.entries.set_shrink_suspended(false);
 
         let touched = (left_count + right_count) as u64;
+        if touched > 0 {
+            self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            if !self.hll_register_cache.is_empty() {
+                self.hll_register_cache.clear();
+            }
+            if !self.dump_payload_cache.is_empty() {
+                self.clear_dump_payload_cache();
+            }
+            let mut mem = self.mem_estimate_cache.borrow_mut();
+            if !mem.is_empty() {
+                mem.clear();
+            }
+        }
         self.dirty = self.dirty.saturating_add(touched.max(1));
         touched
     }
