@@ -15,6 +15,7 @@ pub use fr_sentinel::consensus::{PeerAsk as SentinelPeerAsk, PeerReply as Sentin
 /// fr-server can name the type without depending on fr-sentinel directly.
 pub use fr_sentinel::failover::FailoverIo as SentinelFailoverIo;
 use keyspace_dict::KeyDict;
+pub use packed_set::GenericSetIter;
 #[cfg(any(test, feature = "bench-reference"))]
 #[doc(hidden)]
 pub use packed_set::PackedStreamLogBTreeReference;
@@ -1147,6 +1148,18 @@ impl SortedSet {
         match &self.repr {
             SortedSetRepr::Pending(p) if p.decoded.get().is_none() => {
                 Some((&p.raw, p.len, p.max_member_len))
+            }
+            _ => None,
+        }
+    }
+
+    /// For a packed sorted set, returns the exact sum of all member byte lengths in O(1) time.
+    /// Returns `None` for hashtable/full and pending representations.
+    #[must_use]
+    pub fn packed_total_bytes(&self) -> Option<usize> {
+        match &self.repr {
+            SortedSetRepr::Ready(SortedSetInner::Packed(p)) => {
+                Some(p.byte_len().saturating_sub(p.len().saturating_mul(9)))
             }
             _ => None,
         }
@@ -3970,6 +3983,24 @@ impl SetValue {
         match self {
             SetValue::Int(_) => None,
             SetValue::Generic(g) => Some(g.iter().collect()),
+        }
+    }
+
+    /// Borrowed members iterator for generically encoded sets without materializing a Vec.
+    #[must_use]
+    pub fn generic_iter(&self) -> Option<packed_set::GenericSetIter<'_>> {
+        match self {
+            SetValue::Int(_) => None,
+            SetValue::Generic(g) => Some(g.iter()),
+        }
+    }
+
+    /// For a packed generic set, returns the exact sum of all member byte lengths in O(1) time.
+    #[must_use]
+    pub fn packed_total_bytes(&self) -> Option<usize> {
+        match self {
+            SetValue::Int(_) => None,
+            SetValue::Generic(g) => g.packed_total_bytes(),
         }
     }
 

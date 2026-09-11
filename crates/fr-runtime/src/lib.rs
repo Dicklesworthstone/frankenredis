@@ -52593,14 +52593,16 @@ fn store_to_rdb_entries_borrowed<'a>(
                     if s.len() > thresholds.set_max_listpack_entries {
                         let members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
                         fr_persist::RdbValueRef::Set(members)
-                    } else if let Some(borrowed) = s.borrowed_generic_members() {
-                        match fr_persist::encode_set_listpack_blob_borrowed(&borrowed, thresholds) {
+                    } else if let Some(git) = s.generic_iter() {
+                        match fr_persist::encode_set_listpack_blob_from_iter(
+                            git,
+                            s.len(),
+                            s.packed_total_bytes(),
+                            thresholds,
+                        ) {
                             Some(blob) => fr_persist::RdbValueRef::SetListpack(blob),
                             None => {
-                                let members: Vec<std::borrow::Cow<'_, [u8]>> = borrowed
-                                    .into_iter()
-                                    .map(std::borrow::Cow::Borrowed)
-                                    .collect();
+                                let members: Vec<std::borrow::Cow<'_, [u8]>> = s.iter().collect();
                                 fr_persist::RdbValueRef::Set(members)
                             }
                         }
@@ -52697,11 +52699,30 @@ fn store_to_rdb_entries_borrowed<'a>(
                             fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                         }
                         fr_persist::RdbValueRef::Hash(fields)
+                    } else if !hashtable {
+                        match fr_persist::encode_hash_listpack_blob_from_iter(
+                            h.iter(),
+                            h.len(),
+                            h.packed_total_bytes(),
+                            thresholds,
+                        ) {
+                            Some(blob) => fr_persist::RdbValueRef::HashListpack(blob),
+                            None => {
+                                let fields: Vec<fr_persist::RdbHashPairRef<'_>> = h
+                                    .iter()
+                                    .map(|(f, v)| {
+                                        (
+                                            std::borrow::Cow::Borrowed(f),
+                                            std::borrow::Cow::Borrowed(v),
+                                        )
+                                    })
+                                    .collect();
+                                fr_persist::RdbValueRef::Hash(fields)
+                            }
+                        }
                     } else {
                         let mut borrowed: Vec<(&[u8], &[u8])> = h.iter().collect();
-                        if hashtable {
-                            borrowed.sort_unstable_by(|a, b| a.0.cmp(b.0));
-                        }
+                        borrowed.sort_unstable_by(|a, b| a.0.cmp(b.0));
                         match fr_persist::encode_hash_listpack_blob_borrowed(&borrowed, thresholds)
                         {
                             Some(blob) => fr_persist::RdbValueRef::HashListpack(blob),
@@ -52793,13 +52814,16 @@ fn store_to_rdb_entries_borrowed<'a>(
                             .collect();
                         fr_persist::RdbValueRef::SortedSet(members)
                     } else {
-                        let borrowed: Vec<(&[u8], f64)> = zs.iter_asc().collect();
-                        match fr_persist::encode_zset_listpack_blob_borrowed(&borrowed, thresholds)
-                        {
+                        match fr_persist::encode_zset_listpack_blob_from_sorted_iter(
+                            zs.iter_asc(),
+                            zs.len(),
+                            zs.packed_total_bytes(),
+                            thresholds,
+                        ) {
                             Some(blob) => fr_persist::RdbValueRef::ZsetListpack(blob),
                             None => {
-                                let members: Vec<(std::borrow::Cow<'_, [u8]>, f64)> = borrowed
-                                    .into_iter()
+                                let members: Vec<(std::borrow::Cow<'_, [u8]>, f64)> = zs
+                                    .iter_asc()
                                     .map(|(m, s)| (std::borrow::Cow::Borrowed(m), s))
                                     .collect();
                                 fr_persist::RdbValueRef::SortedSet(members)
