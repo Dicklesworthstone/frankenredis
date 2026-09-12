@@ -15077,48 +15077,18 @@ impl Store {
         self.internal_entries_insert_with_expiry_impl::<true>(key, entry, expires_at_ms)
     }
 
-    fn insert_swapped_entry(
-        &mut self,
-        key: Vec<u8>,
-        entry: Entry,
-        expires_at_ms: Option<u64>,
-        target_db: usize,
-    ) {
+    fn insert_swapped_entry(&mut self, key: Vec<u8>, entry: Entry, expires_at_ms: Option<u64>) {
         if let Some(nonzero) = expires_at_ms.and_then(std::num::NonZeroU64::new) {
             self.expiry_deadlines
                 .insert(store_key_from_slice(key.as_slice()), nonzero);
-            self.expires_count = self.expires_count.saturating_add(1);
-            if target_db < self.database_count {
-                self.db_expires_counts[target_db] =
-                    self.db_expires_counts[target_db].saturating_add(1);
-            }
-            self.track_expiry_deadline(nonzero.get());
-            self.mark_volatile_keys_dirty();
-        }
-        if target_db < self.database_count {
-            self.db_key_counts[target_db] = self.db_key_counts[target_db].saturating_add(1);
         }
         self.entries.insert(key.as_slice(), entry);
     }
 
-    fn remove_swapped_entry(
-        &mut self,
-        key: &[u8],
-        db: usize,
-        expires_at_ms: Option<u64>,
-    ) -> Option<Entry> {
+    fn remove_swapped_entry(&mut self, key: &[u8], expires_at_ms: Option<u64>) -> Option<Entry> {
         let entry = self.entries.remove(key)?;
-        if let Some(nonzero) = expires_at_ms.and_then(std::num::NonZeroU64::new) {
+        if expires_at_ms.is_some() {
             self.expiry_deadlines.remove(key);
-            self.forget_volatile_key(key);
-            self.untrack_expiry_deadline(nonzero.get());
-            self.expires_count = self.expires_count.saturating_sub(1);
-            if db < self.database_count {
-                self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
-            }
-        }
-        if db < self.database_count {
-            self.db_key_counts[db] = self.db_key_counts[db].saturating_sub(1);
         }
         Some(entry)
     }
@@ -16378,6 +16348,7 @@ impl Store {
         // assertion below caught it.
         self.entries.set_shrink_suspended(true);
 
+        let mut had_any_expiring = false;
         let mut left_entries = Vec::with_capacity(left_count);
         let mut left_sidemaps = Vec::new();
         for key in left_keys {
@@ -16400,7 +16371,11 @@ impl Store {
             let expires_at_ms = if self.expires_count == 0 {
                 None
             } else {
-                self.expiry_ms(key.as_slice())
+                let exp = self.expiry_ms(key.as_slice());
+                if exp.is_some() {
+                    had_any_expiring = true;
+                }
+                exp
             };
             let groups = if self.stream_groups.is_empty() {
                 None
@@ -16420,8 +16395,7 @@ impl Store {
             // Direct swapped removal: avoids redundant expiry_ms lookups, decode_db_key,
             // per-key write-side cache probes, duplicate stream metadata drops, and
             // per-key keyspace generation / digest churn.
-            let Some(entry) = self.remove_swapped_entry(key.as_slice(), left_db, expires_at_ms)
-            else {
+            let Some(entry) = self.remove_swapped_entry(key.as_slice(), expires_at_ms) else {
                 continue;
             };
             // (frankenredis-bmyx5) Harvest per-field hash TTLs before clearing metadata —
@@ -16479,7 +16453,11 @@ impl Store {
             let expires_at_ms = if self.expires_count == 0 {
                 None
             } else {
-                self.expiry_ms(key.as_slice())
+                let exp = self.expiry_ms(key.as_slice());
+                if exp.is_some() {
+                    had_any_expiring = true;
+                }
+                exp
             };
             let groups = if self.stream_groups.is_empty() {
                 None
@@ -16496,8 +16474,7 @@ impl Store {
             } else {
                 self.stream_entries_added.remove(key.as_slice())
             };
-            let Some(entry) = self.remove_swapped_entry(key.as_slice(), right_db, expires_at_ms)
-            else {
+            let Some(entry) = self.remove_swapped_entry(key.as_slice(), expires_at_ms) else {
                 continue;
             };
             let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
@@ -16545,12 +16522,7 @@ impl Store {
         // Direct swapped re-insertion: keys are guaranteed fresh (both dbs drained),
         // bypassing redundant contains_key/get lookups, keyspace events, and decode_db_key.
         for entry in left_entries {
-            self.insert_swapped_entry(
-                entry.swapped_key,
-                entry.entry,
-                entry.expires_at_ms,
-                right_db,
-            );
+            self.insert_swapped_entry(entry.swapped_key, entry.entry, entry.expires_at_ms);
         }
         for sidemaps in left_sidemaps {
             if let Some(groups) = sidemaps.groups {
@@ -16574,7 +16546,7 @@ impl Store {
         }
 
         for entry in right_entries {
-            self.insert_swapped_entry(entry.swapped_key, entry.entry, entry.expires_at_ms, left_db);
+            self.insert_swapped_entry(entry.swapped_key, entry.entry, entry.expires_at_ms);
         }
         for sidemaps in right_sidemaps {
             if let Some(groups) = sidemaps.groups {
@@ -16595,6 +16567,20 @@ impl Store {
                 self.hash_field_expires
                     .insert((sidemaps.key.clone(), field), expires_at_ms);
             }
+        }
+
+        if had_any_expiring {
+            self.mark_volatile_keys_dirty();
+        }
+        if left_db < self.database_count && right_db < self.database_count {
+            self.db_key_counts.swap(left_db, right_db);
+            self.db_expires_counts.swap(left_db, right_db);
+        } else if left_db < self.database_count {
+            self.db_key_counts[left_db] = 0;
+            self.db_expires_counts[left_db] = 0;
+        } else if right_db < self.database_count {
+            self.db_key_counts[right_db] = 0;
+            self.db_expires_counts[right_db] = 0;
         }
 
         // (frankenredis-4f8vx) Resume the policy. NOT followed by a shrink call: a swap
@@ -56786,6 +56772,79 @@ mod tests {
         assert!(store.exists_no_touch(b"b", 1));
         assert!(store.exists_no_touch(b"c", 1));
         assert!(store.exists_no_touch(&encode_db_key(2, b"k0"), 1));
+    }
+
+    #[test]
+    fn swap_databases_preserves_expiry_counts_and_deadlines() {
+        let mut store = Store::new();
+
+        // Populate DB 0 with 2 expiring keys and 1 persistent key
+        store.set(b"exp0_a".to_vec(), b"v".to_vec(), Some(5_000), 1_000);
+        store.set(b"exp0_b".to_vec(), b"v".to_vec(), Some(10_000), 1_000);
+        store.set(b"persist0".to_vec(), b"v".to_vec(), None, 1_000);
+
+        // Populate DB 1 with 1 expiring key and 2 persistent keys
+        store.set(
+            encode_db_key(1, b"exp1_a"),
+            b"v".to_vec(),
+            Some(20_000),
+            1_000,
+        );
+        store.set(encode_db_key(1, b"persist1_a"), b"v".to_vec(), None, 1_000);
+        store.set(encode_db_key(1, b"persist1_b"), b"v".to_vec(), None, 1_000);
+
+        assert_eq!(store.dbsize_in_db(0), 3);
+        assert_eq!(store.dbsize_in_db(1), 3);
+        assert_eq!(store.expires_in_db(0), 2);
+        assert_eq!(store.expires_in_db(1), 1);
+        assert_eq!(store.expires_count, 3);
+
+        // Swap DB 0 and DB 1
+        let touched = store.swap_databases(0, 1);
+        assert_eq!(touched, 6);
+
+        // Counts must be cleanly swapped
+        assert_eq!(store.dbsize_in_db(0), 3);
+        assert_eq!(store.dbsize_in_db(1), 3);
+        assert_eq!(store.expires_in_db(0), 1);
+        assert_eq!(store.expires_in_db(1), 2);
+        assert_eq!(store.expires_count, 3);
+
+        // Expirations in DB 0 (formerly DB 1's exp1_a)
+        assert_eq!(store.pttl(b"exp1_a", 1_000), PttlValue::Remaining(20_000));
+        assert!(store.exists_no_touch(b"persist1_a", 1_000));
+        assert!(store.exists_no_touch(b"persist1_b", 1_000));
+
+        // Expirations in DB 1 (formerly DB 0's exp0_a, exp0_b)
+        assert_eq!(
+            store.pttl(&encode_db_key(1, b"exp0_a"), 1_000),
+            PttlValue::Remaining(5_000)
+        );
+        assert_eq!(
+            store.pttl(&encode_db_key(1, b"exp0_b"), 1_000),
+            PttlValue::Remaining(10_000)
+        );
+        assert!(store.exists_no_touch(&encode_db_key(1, b"persist0"), 1_000));
+
+        // Expire key at 7_000: exp0_a in DB 1 should expire (deadline 6_000)
+        assert!(store.exists(b"exp1_a", 7_000)); // deadline 21_000 -> alive
+        assert!(!store.exists(&encode_db_key(1, b"exp0_a"), 7_000)); // expired
+        assert!(store.exists(&encode_db_key(1, b"exp0_b"), 7_000)); // deadline 11_000 -> alive
+
+        assert_eq!(store.dbsize_in_db(0), 3);
+        assert_eq!(store.dbsize_in_db(1), 2);
+        assert_eq!(store.expires_in_db(0), 1);
+        assert_eq!(store.expires_in_db(1), 1);
+        assert_eq!(store.expires_count, 2);
+
+        // Second swap restores
+        let touched = store.swap_databases(0, 1);
+        assert_eq!(touched, 5);
+        assert_eq!(store.dbsize_in_db(0), 2);
+        assert_eq!(store.dbsize_in_db(1), 3);
+        assert_eq!(store.expires_in_db(0), 1);
+        assert_eq!(store.expires_in_db(1), 1);
+        assert_eq!(store.expires_count, 2);
     }
 
     #[test]
