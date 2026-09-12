@@ -3320,6 +3320,50 @@ pub fn encode_set_listpack_blob_borrowed(
     finish_listpack_blob(encoded, members.len())
 }
 
+/// Streaming twin of [`encode_set_listpack_blob_borrowed`] that encodes directly from
+/// any iterator of `&[u8]` without materializing an intermediate vector.
+///
+/// Avoids materializing an intermediate `Vec<&[u8]>` per set on the RDB/BGSAVE
+/// serialization path when the set is generically encoded.
+#[must_use]
+pub fn encode_set_listpack_blob_from_iter<'a, I>(
+    iter: I,
+    member_count: usize,
+    total_bytes: Option<usize>,
+    thresholds: &CompactRdbThresholds,
+) -> Option<Vec<u8>>
+where
+    I: IntoIterator<Item = &'a [u8]>,
+{
+    if member_count > thresholds.set_max_listpack_entries {
+        return None;
+    }
+    let max_val = thresholds.set_max_listpack_value;
+    let check_intset = member_count <= thresholds.set_max_intset_entries && member_count > 0;
+    let mut all_ints = check_intset;
+    let cap = match total_bytes {
+        Some(tb) => LISTPACK_BLOB_OVERHEAD + tb + member_count.saturating_mul(11),
+        None => LISTPACK_BLOB_OVERHEAD + member_count.saturating_mul(max_val + 11),
+    };
+    let mut encoded = listpack_blob_with_header(cap);
+    for m in iter {
+        if m.len() > max_val {
+            return None;
+        }
+        if all_ints
+            && (!matches!(m.first(), Some(&b) if b.is_ascii_digit() || b == b'-')
+                || parse_listpack_integer(m).is_none())
+        {
+            all_ints = false;
+        }
+        encode_listpack_entry(&mut encoded, m);
+    }
+    if all_ints {
+        return None;
+    }
+    finish_listpack_blob(encoded, member_count)
+}
+
 #[cfg(test)]
 fn encode_set_listpack_blob<T: AsRef<[u8]>>(members: &[T]) -> Option<Vec<u8>> {
     // Pre-size to a safe upper bound (each listpack string entry is <= len + ~10 of
@@ -3418,6 +3462,40 @@ pub fn encode_hash_listpack_blob_borrowed(
     finish_listpack_blob(encoded, fields.len().saturating_mul(2))
 }
 
+/// Streaming twin of [`encode_hash_listpack_blob_borrowed`] that encodes directly from
+/// any iterator of `(&[u8], &[u8])` without materializing an intermediate vector.
+///
+/// Avoids materializing an intermediate `Vec<(&[u8], &[u8])>` per hash on the RDB/BGSAVE
+/// serialization path when the fields are in native insertion order.
+#[must_use]
+pub fn encode_hash_listpack_blob_from_iter<'a, I>(
+    iter: I,
+    pair_count: usize,
+    total_bytes: Option<usize>,
+    thresholds: &CompactRdbThresholds,
+) -> Option<Vec<u8>>
+where
+    I: IntoIterator<Item = (&'a [u8], &'a [u8])>,
+{
+    if pair_count > thresholds.hash_max_listpack_entries {
+        return None;
+    }
+    let max_val = thresholds.hash_max_listpack_value;
+    let cap = match total_bytes {
+        Some(tb) => LISTPACK_BLOB_OVERHEAD + tb + pair_count.saturating_mul(22),
+        None => LISTPACK_BLOB_OVERHEAD + pair_count.saturating_mul(max_val.saturating_mul(2) + 22),
+    };
+    let mut encoded = listpack_blob_with_header(cap);
+    for (f, v) in iter {
+        if f.len() > max_val || v.len() > max_val {
+            return None;
+        }
+        encode_listpack_entry(&mut encoded, f);
+        encode_listpack_entry(&mut encoded, v);
+    }
+    finish_listpack_blob(encoded, pair_count.saturating_mul(2))
+}
+
 fn encode_compact_zset_listpack_blob<T: AsRef<[u8]>>(
     members: &[(T, f64)],
     thresholds: &CompactRdbThresholds,
@@ -3493,6 +3571,40 @@ pub fn encode_zset_listpack_blob_borrowed(
         sorted.sort_unstable_by(|left, right| zset_member_cmp(*left, *right));
         encode_zset_score_listpack_blob(&sorted, total_member_bytes)
     }
+}
+
+/// Streaming twin of [`encode_zset_listpack_blob_borrowed`] that encodes directly from
+/// an already sorted iterator of `(&[u8], f64)` without materializing an intermediate vector.
+///
+/// Avoids materializing an intermediate `Vec<(&[u8], f64)>` per zset on the RDB/BGSAVE
+/// serialization path when the iterator is already in ascending score/member order.
+#[must_use]
+pub fn encode_zset_listpack_blob_from_sorted_iter<'a, I>(
+    iter: I,
+    member_count: usize,
+    total_bytes: Option<usize>,
+    thresholds: &CompactRdbThresholds,
+) -> Option<Vec<u8>>
+where
+    I: IntoIterator<Item = (&'a [u8], f64)>,
+{
+    if member_count > thresholds.zset_max_listpack_entries {
+        return None;
+    }
+    let max_val = thresholds.zset_max_listpack_value;
+    let cap = match total_bytes {
+        Some(tb) => LISTPACK_BLOB_OVERHEAD + tb + member_count.saturating_mul(43),
+        None => LISTPACK_BLOB_OVERHEAD + member_count.saturating_mul(max_val + 43),
+    };
+    let mut encoded = listpack_blob_with_header(cap);
+    let mut scratch = Vec::with_capacity(32);
+    for (member, score) in iter {
+        if member.len() > max_val || score.is_nan() {
+            return None;
+        }
+        encode_zset_score_listpack_entry_with_scratch(&mut encoded, member, score, &mut scratch);
+    }
+    finish_listpack_blob(encoded, member_count.saturating_mul(2))
 }
 
 /// Borrowed twin of [`zset_members_are_sorted`]; same comparator, same predicate.
@@ -8352,9 +8464,12 @@ mod tests {
         RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry,
         RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decimal_i64_bytes,
         decode_intset_values, decode_rdb, decode_rdb_prefix, encode_compact_set_intset,
-        encode_hash_listpack_blob, encode_listpack_strings_blob, encode_rdb,
-        encode_rdb_with_functions, encode_rdb_with_options, encode_set_listpack_blob, lzf_compress,
-        lzf_decompress, rdb_decode_string, rdb_encode_length, rdb_encode_string,
+        encode_hash_listpack_blob, encode_hash_listpack_blob_borrowed,
+        encode_hash_listpack_blob_from_iter, encode_listpack_strings_blob, encode_rdb,
+        encode_rdb_with_functions, encode_rdb_with_options, encode_set_listpack_blob,
+        encode_set_listpack_blob_borrowed, encode_set_listpack_blob_from_iter,
+        encode_zset_listpack_blob_borrowed, encode_zset_listpack_blob_from_sorted_iter,
+        lzf_compress, lzf_decompress, rdb_decode_string, rdb_encode_length, rdb_encode_string,
     };
 
     fn append_rdb_checksum(encoded: &mut Vec<u8>) {
@@ -10631,6 +10746,108 @@ mod tests {
                 crate::listpack::ListpackEntry::Integer(-2),
                 crate::listpack::ListpackEntry::String(b"hello\0world".to_vec()),
             ]
+        );
+    }
+
+    #[test]
+    fn streaming_listpack_blob_encoders_match_borrowed() {
+        let thresholds = CompactRdbThresholds::default();
+
+        // 1. Set: valid mixed members (not all ints)
+        let set_members: Vec<&[u8]> = vec![b"alpha", b"127", b"4095", b"-2", b"hello\0world"];
+        let total_set_bytes: usize = set_members.iter().map(|m| m.len()).sum();
+        let set_borrowed = encode_set_listpack_blob_borrowed(&set_members, &thresholds);
+        let set_streamed_none = encode_set_listpack_blob_from_iter(
+            set_members.iter().copied(),
+            set_members.len(),
+            None,
+            &thresholds,
+        );
+        let set_streamed_some = encode_set_listpack_blob_from_iter(
+            set_members.iter().copied(),
+            set_members.len(),
+            Some(total_set_bytes),
+            &thresholds,
+        );
+        assert!(set_borrowed.is_some());
+        assert_eq!(set_borrowed, set_streamed_none);
+        assert_eq!(set_borrowed, set_streamed_some);
+
+        // Set: all ints should return None (intset preferred)
+        let set_ints: Vec<&[u8]> = vec![b"1", b"2", b"3"];
+        assert_eq!(
+            encode_set_listpack_blob_borrowed(&set_ints, &thresholds),
+            None
+        );
+        assert_eq!(
+            encode_set_listpack_blob_from_iter(
+                set_ints.iter().copied(),
+                set_ints.len(),
+                None,
+                &thresholds,
+            ),
+            None
+        );
+
+        // 2. Hash: field-value pairs
+        let hash_pairs: Vec<(&[u8], &[u8])> = vec![
+            (b"f1", b"v1"),
+            (b"f2", b"val2"),
+            (b"field_three", b"value_three"),
+        ];
+        let total_hash_bytes: usize = hash_pairs.iter().map(|(f, v)| f.len() + v.len()).sum();
+        let hash_borrowed = encode_hash_listpack_blob_borrowed(&hash_pairs, &thresholds);
+        let hash_streamed_none = encode_hash_listpack_blob_from_iter(
+            hash_pairs.iter().copied(),
+            hash_pairs.len(),
+            None,
+            &thresholds,
+        );
+        let hash_streamed_some = encode_hash_listpack_blob_from_iter(
+            hash_pairs.iter().copied(),
+            hash_pairs.len(),
+            Some(total_hash_bytes),
+            &thresholds,
+        );
+        assert!(hash_borrowed.is_some());
+        assert_eq!(hash_borrowed, hash_streamed_none);
+        assert_eq!(hash_borrowed, hash_streamed_some);
+
+        // 3. Sorted Set: member-score pairs (in ascending score/lex order)
+        let zset_pairs: Vec<(&[u8], f64)> =
+            vec![(b"a", 1.0), (b"b", 2.5), (b"c", 10.0), (b"d", 10.0)];
+        let total_zset_bytes: usize = zset_pairs.iter().map(|(m, _)| m.len()).sum();
+        let zset_borrowed = encode_zset_listpack_blob_borrowed(&zset_pairs, &thresholds);
+        let zset_streamed_none = encode_zset_listpack_blob_from_sorted_iter(
+            zset_pairs.iter().copied(),
+            zset_pairs.len(),
+            None,
+            &thresholds,
+        );
+        let zset_streamed_some = encode_zset_listpack_blob_from_sorted_iter(
+            zset_pairs.iter().copied(),
+            zset_pairs.len(),
+            Some(total_zset_bytes),
+            &thresholds,
+        );
+        assert!(zset_borrowed.is_some());
+        assert_eq!(zset_borrowed, zset_streamed_none);
+        assert_eq!(zset_borrowed, zset_streamed_some);
+
+        // Zset with NaN score should return None
+        let zset_nan: Vec<(&[u8], f64)> = vec![(b"a", f64::NAN)];
+        assert_eq!(
+            encode_zset_listpack_blob_borrowed(&zset_nan, &thresholds),
+            None
+        );
+        assert_eq!(
+            encode_zset_listpack_blob_from_sorted_iter(
+                zset_nan.iter().copied(),
+                zset_nan.len(),
+                None,
+                &thresholds,
+            ),
+            None
         );
     }
 

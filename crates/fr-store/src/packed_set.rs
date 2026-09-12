@@ -814,6 +814,18 @@ impl GenericSet {
             GenericSetInner::Hash(h) => GenericSetIter::Hash(h.iter()),
         }
     }
+
+    /// For a packed set, returns the exact sum of all member byte lengths in O(1) time.
+    /// Returns `None` for hashtable and listpack representations.
+    #[must_use]
+    pub fn packed_total_bytes(&self) -> Option<usize> {
+        match &self.repr {
+            GenericSetRepr::Ready(GenericSetInner::Packed(p)) => {
+                Some(p.byte_len().saturating_sub(p.len()))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Set equality is order-independent (matches `IndexSet`'s `PartialEq`), so a
@@ -1216,6 +1228,16 @@ impl HashFieldMap {
         match self {
             HashFieldMap::Listpack(l) => l.retained_rdb_string(),
             HashFieldMap::Packed(_) | HashFieldMap::Hash(_) => None,
+        }
+    }
+
+    /// For a packed hash, returns the exact sum of all field and value byte lengths in O(1) time.
+    /// Returns `None` for hashtable and listpack representations.
+    #[must_use]
+    pub fn packed_total_bytes(&self) -> Option<usize> {
+        match self {
+            HashFieldMap::Packed(p) => Some(p.byte_len().saturating_sub(p.len().saturating_mul(2))),
+            _ => None,
         }
     }
 
