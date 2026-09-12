@@ -2083,4 +2083,39 @@ mod tests {
         assert_eq!(keys_it.len(), 50);
         assert_eq!(keys_it.size_hint(), (50, Some(50)));
     }
+
+    #[test]
+    fn insert_vec_inline_and_heap_keys() {
+        let mut d: KeyDict<u64> = KeyDict::new();
+
+        // Short inline keys (<= 15 bytes)
+        let short_key = b"short_key".to_vec();
+        assert_eq!(d.insert_vec(short_key.clone(), 100), None);
+        assert_eq!(d.get(&short_key), Some(&100));
+
+        // Long heap keys (> 15 bytes)
+        let long_key = b"this_is_a_very_long_key_exceeding_15_bytes".to_vec();
+        assert_eq!(d.insert_vec(long_key.clone(), 200), None);
+        assert_eq!(d.get(&long_key), Some(&200));
+
+        // Overwrite short key
+        assert_eq!(d.insert_vec(short_key.clone(), 101), Some(100));
+        assert_eq!(d.get(&short_key), Some(&101));
+
+        // Overwrite long key
+        assert_eq!(d.insert_vec(long_key.clone(), 201), Some(200));
+        assert_eq!(d.get(&long_key), Some(&201));
+
+        // Keyspace length
+        assert_eq!(d.len(), 2);
+        assert_eq!(
+            d.get_key_value(&long_key),
+            Some((long_key.as_slice(), &201))
+        );
+
+        // Remove
+        assert_eq!(d.remove(&short_key), Some(101));
+        assert_eq!(d.remove(&long_key), Some(201));
+        assert!(d.is_empty());
+    }
 }
