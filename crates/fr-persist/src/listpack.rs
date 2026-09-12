@@ -1000,6 +1000,7 @@ pub fn decode_zset_listpack_pairs(data: &[u8]) -> Result<Vec<(Vec<u8>, f64)>, Li
                     RawKind::String(range) => std::str::from_utf8(&data[usize_range(range)])
                         .ok()
                         .and_then(|s| s.parse::<f64>().ok())
+                        .filter(|score| !score.is_nan())
                         .ok_or(ListpackError::InvalidScore)?,
                 };
                 pairs.push((member, score));
@@ -1040,6 +1041,7 @@ pub fn decode_zset_listpack_pairs_orig(data: &[u8]) -> Result<Vec<(Vec<u8>, f64)
             ListpackEntry::String(bytes) => std::str::from_utf8(&bytes)
                 .ok()
                 .and_then(|s| s.parse::<f64>().ok())
+                .filter(|score| !score.is_nan())
                 .ok_or(ListpackError::InvalidScore)?,
         };
         members.push((member.into_bytes(), score));
@@ -3506,6 +3508,11 @@ mod tests {
         let bad = assemble(&[&entry_6bit_str(b"m0"), &entry_6bit_str(b"not_a_number")]);
         assert!(decode_zset_listpack_pairs(&bad).is_err());
         assert!(decode_zset_listpack_pairs_orig(&bad).is_err());
+
+        // NaN string score must be rejected.
+        let nan_lp = assemble(&[&entry_6bit_str(b"m0"), &entry_6bit_str(b"nan")]);
+        assert!(decode_zset_listpack_pairs(&nan_lp).is_err());
+        assert!(decode_zset_listpack_pairs_orig(&nan_lp).is_err());
 
         // Truncated blob (drop the terminator → header total_bytes mismatch).
         let mut trunc = assemble(&[&entry_6bit_str(b"m0"), &entry_7bit_uint(1)]);
