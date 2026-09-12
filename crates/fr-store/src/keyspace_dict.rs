@@ -361,6 +361,20 @@ impl NodeKey {
     }
 
     #[inline]
+    fn from_vec(key: Vec<u8>) -> Self {
+        if key.len() <= NODE_KEY_INLINE_CAP {
+            let mut bytes = [0u8; NODE_KEY_INLINE_CAP];
+            bytes[..key.len()].copy_from_slice(&key);
+            Self::Inline {
+                len: key.len() as u8,
+                bytes,
+            }
+        } else {
+            Self::Heap(key.into_boxed_slice())
+        }
+    }
+
+    #[inline]
     fn as_slice(&self) -> &[u8] {
         match self {
             Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
@@ -801,6 +815,50 @@ impl<V> KeyDict<V> {
         let idx = self.alloc_node(Node {
             hash: h,
             key: NodeKey::from_slice(key),
+            value,
+            next: head,
+        });
+        self.buckets[b] = idx;
+        self.first_byte_bits[b] |= Self::first_byte_bit(self.nodes.get(idx).key.as_slice());
+        self.count += 1;
+        if self.count > self.buckets.len() {
+            self.grow();
+        }
+        None
+    }
+
+    /// Insert `key`/`value` when the caller already owns a `Vec<u8>`.
+    ///
+    /// When the key exceeds [`NODE_KEY_INLINE_CAP`], this reuses the vector's heap
+    /// buffer directly via [`NodeKey::from_vec`] / [`Vec::into_boxed_slice`] instead
+    /// of cloning the slice into a fresh heap box. (frankenredis-4f8vx)
+    pub fn insert_vec(&mut self, key: Vec<u8>, value: V) -> Option<V> {
+        let h = self.hash_key(&key);
+        let b = self.bucket_of(h);
+        // Overwrite in place if present.
+        let mut cur = self.buckets[b];
+        while cur != NIL {
+            let node = self.nodes.get_mut(cur);
+            if node.hash == h && node.key.as_slice() == key.as_slice() {
+                return Some(std::mem::replace(&mut node.value, value));
+            }
+            cur = node.next;
+        }
+        // Grow before linking the new node when the insert would exceed load
+        // factor 1. That avoids writing a node into the old table only to
+        // immediately rebuild its chain in `grow`.
+        let b = if self.count == self.buckets.len() {
+            self.grow();
+            self.bucket_of(h)
+        } else {
+            b
+        };
+        // Prepend a fresh node (head insertion; order within a bucket is not
+        // observable — SCAN emits whole buckets).
+        let head = self.buckets[b];
+        let idx = self.alloc_node(Node {
+            hash: h,
+            key: NodeKey::from_vec(key),
             value,
             next: head,
         });
@@ -2024,5 +2082,40 @@ mod tests {
         let keys_it = d.keys();
         assert_eq!(keys_it.len(), 50);
         assert_eq!(keys_it.size_hint(), (50, Some(50)));
+    }
+
+    #[test]
+    fn insert_vec_inline_and_heap_keys() {
+        let mut d: KeyDict<u64> = KeyDict::new();
+
+        // Short inline keys (<= 15 bytes)
+        let short_key = b"short_key".to_vec();
+        assert_eq!(d.insert_vec(short_key.clone(), 100), None);
+        assert_eq!(d.get(&short_key), Some(&100));
+
+        // Long heap keys (> 15 bytes)
+        let long_key = b"this_is_a_very_long_key_exceeding_15_bytes".to_vec();
+        assert_eq!(d.insert_vec(long_key.clone(), 200), None);
+        assert_eq!(d.get(&long_key), Some(&200));
+
+        // Overwrite short key
+        assert_eq!(d.insert_vec(short_key.clone(), 101), Some(100));
+        assert_eq!(d.get(&short_key), Some(&101));
+
+        // Overwrite long key
+        assert_eq!(d.insert_vec(long_key.clone(), 201), Some(200));
+        assert_eq!(d.get(&long_key), Some(&201));
+
+        // Keyspace length
+        assert_eq!(d.len(), 2);
+        assert_eq!(
+            d.get_key_value(&long_key),
+            Some((long_key.as_slice(), &201))
+        );
+
+        // Remove
+        assert_eq!(d.remove(&short_key), Some(101));
+        assert_eq!(d.remove(&long_key), Some(201));
+        assert!(d.is_empty());
     }
 }
