@@ -30496,6 +30496,14 @@ fn swapdb_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
     let dbc = store.database_count;
     let parse_index = |arg: &[u8], invalid: &'static str| -> Result<usize, CommandError> {
         let parsed = parse_i64_arg(arg).map_err(|_| CommandError::Custom(invalid.to_string()))?;
+        // (frankenredis-wal9t) Upstream's SWAPDB uses the bespoke
+        // "invalid first/second DB index" wording for BOTH the
+        // parse-failure (non-numeric input) AND the i32-overflow
+        // path. Values inside i32 but >= dbnum continue to use the
+        // generic "DB index is out of range".
+        if i32::try_from(parsed).is_err() {
+            return Err(CommandError::Custom(invalid.to_string()));
+        }
         if !(0..dbc as i64).contains(&parsed) {
             return Err(CommandError::Custom(
                 "ERR DB index is out of range".to_string(),
@@ -56666,11 +56674,14 @@ mod tests {
             None
         );
 
-        // Parse failure on argv[1] surfaces the bespoke first-index wording.
+        // Parse failure on argv[1] surfaces the bespoke first-index wording,
+        // including values that fit in i64 but overflow i32 (wal9t).
         for bad in [
             b"abc".as_slice(),
             b"".as_slice(),
             b"99999999999999999999".as_slice(),
+            b"3000000000".as_slice(),
+            b"-3000000000".as_slice(),
         ] {
             let err = dispatch_argv(
                 &[b"SWAPDB".to_vec(), bad.to_vec(), b"0".to_vec()],
@@ -56685,17 +56696,27 @@ mod tests {
             );
         }
 
-        // Parse failure on argv[2] surfaces the second-index wording.
-        let err = dispatch_argv(
-            &[b"SWAPDB".to_vec(), b"0".to_vec(), b"abc".to_vec()],
-            &mut store,
-            0,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            CommandError::Custom("ERR invalid second DB index".to_string())
-        );
+        // Parse failure on argv[2] surfaces the second-index wording,
+        // including values that fit in i64 but overflow i32 (wal9t).
+        for bad in [
+            b"abc".as_slice(),
+            b"".as_slice(),
+            b"99999999999999999999".as_slice(),
+            b"3000000000".as_slice(),
+            b"-3000000000".as_slice(),
+        ] {
+            let err = dispatch_argv(
+                &[b"SWAPDB".to_vec(), b"0".to_vec(), bad.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                CommandError::Custom("ERR invalid second DB index".to_string()),
+                "argv[2]: {bad:?}"
+            );
+        }
 
         // Numeric but >= dbnum → out-of-range wording (default dbnum=16).
         let err = dispatch_argv(
