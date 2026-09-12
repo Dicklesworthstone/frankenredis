@@ -7709,7 +7709,13 @@ pub fn remap_physical_db_key(mut key: Vec<u8>, from_db: usize, to_db: usize) -> 
         if to_db == 0 {
             key
         } else {
-            encode_db_key(to_db, &key)
+            let old_len = key.len();
+            key.resize(old_len + prefix_len, 0);
+            key.copy_within(0..old_len, prefix_len);
+            key[..DB_NAMESPACE_PREFIX.len()].copy_from_slice(DB_NAMESPACE_PREFIX);
+            key[DB_NAMESPACE_PREFIX.len()..prefix_len]
+                .copy_from_slice(&(to_db as u64).to_be_bytes());
+            key
         }
     } else if to_db == 0 {
         if key.len() >= prefix_len && key.starts_with(DB_NAMESPACE_PREFIX) {
@@ -15082,7 +15088,7 @@ impl Store {
             self.expiry_deadlines
                 .insert(store_key_from_slice(key.as_slice()), nonzero);
         }
-        self.entries.insert(key.as_slice(), entry);
+        self.entries.insert_vec(key, entry);
     }
 
     fn remove_swapped_entry(&mut self, key: &[u8], expires_at_ms: Option<u64>) -> Option<Entry> {
@@ -16279,15 +16285,25 @@ impl Store {
                 None
             };
 
+            let push_db0_key = |target_db: usize, k: &[u8]| -> Vec<u8> {
+                if target_db != 0 {
+                    let mut v = Vec::with_capacity(14 + k.len());
+                    v.extend_from_slice(k);
+                    v
+                } else {
+                    k.to_vec()
+                }
+            };
+
             for key in self.entries.keys() {
                 if left.len() == left_cap && right.len() == right_cap {
                     break;
                 }
                 if key.first() != Some(&b'\0') {
                     if left_db == 0 && left.len() < left_cap {
-                        left.push(key.to_vec());
+                        left.push(push_db0_key(right_db, key));
                     } else if right_db == 0 && right.len() < right_cap {
-                        right.push(key.to_vec());
+                        right.push(push_db0_key(left_db, key));
                     }
                     continue;
                 }
@@ -16312,9 +16328,9 @@ impl Store {
                     && decode_db_key(key).is_none()
                 {
                     if left_db == 0 && left.len() < left_cap {
-                        left.push(key.to_vec());
+                        left.push(push_db0_key(right_db, key));
                     } else if right_db == 0 && right.len() < right_cap {
-                        right.push(key.to_vec());
+                        right.push(push_db0_key(left_db, key));
                     }
                 }
             }
