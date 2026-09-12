@@ -172,6 +172,7 @@ ubs_*.jsonl
 /*.md
 !README.md
 !CHANGELOG.md
+!UPGRADE_LOG.md
 !AGENTS.md
 !CONTRIBUTING.md
 !LICENSE*
