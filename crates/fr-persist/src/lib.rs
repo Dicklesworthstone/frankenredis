@@ -7065,6 +7065,7 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                             let score = std::str::from_utf8(&pair[1])
                                 .ok()
                                 .and_then(|s| s.parse::<f64>().ok())
+                                .filter(|score| !score.is_nan())
                                 .ok_or(PersistError::InvalidFrame)?;
                             members.push((pair[0].clone(), score));
                         }

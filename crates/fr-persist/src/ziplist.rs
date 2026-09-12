@@ -21,8 +21,8 @@ pub fn decode_ziplist(data: &[u8]) -> Option<Vec<Vec<u8>>> {
         return None;
     }
     let zlbytes = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
-    // The blob must be self-describing — its header length equals its own size.
-    if zlbytes != data.len() {
+    // The blob must be self-describing — its header length equals its own size, and ends with 0xFF.
+    if zlbytes != data.len() || *data.last()? != 0xFF {
         return None;
     }
     let zllen = u16::from_le_bytes(data[8..10].try_into().ok()?);
@@ -32,6 +32,9 @@ pub fn decode_ziplist(data: &[u8]) -> Option<Vec<Vec<u8>>> {
     loop {
         let b = *data.get(i)?;
         if b == 0xFF {
+            if i != data.len() - 1 {
+                return None; // 0xFF encountered before end of ziplist
+            }
             break; // ziplist terminator
         }
         // prevlen: 1 byte if < 0xFE, else 0xFE followed by a 4-byte length.
@@ -121,21 +124,30 @@ pub fn decode_ziplist(data: &[u8]) -> Option<Vec<Vec<u8>>> {
 /// walk to the `0xFF` end marker. Lengths are a single byte when `< 254`, else
 /// `0xFE` + a 4-byte little-endian length.
 pub fn decode_zipmap(data: &[u8]) -> Option<Vec<Vec<u8>>> {
-    if data.is_empty() {
+    if data.len() < 2 || *data.last()? != 0xFF {
         return None;
     }
-    let mut i = 1usize; // skip the zmlen hint
+    let expected_count = data[0];
+    let mut i = 1usize;
     let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut seen_keys = std::collections::HashSet::new();
     loop {
         let b = *data.get(i)?;
         if b == 0xFF {
+            if i != data.len() - 1 {
+                return None; // 0xFF encountered before end of zipmap
+            }
             break; // zipmap terminator
         }
         // Field.
         let (klen, adv) = zipmap_decode_len(data, i)?;
         i += adv;
         let kend = i.checked_add(klen)?;
-        out.push(data.get(i..kend)?.to_vec());
+        let key = data.get(i..kend)?.to_vec();
+        if !seen_keys.insert(key.clone()) {
+            return None; // duplicate keys rejected
+        }
+        out.push(key);
         i = kend;
         // Value: length, one "free" padding byte, then the value bytes.
         let (vlen, adv) = zipmap_decode_len(data, i)?;
@@ -146,7 +158,10 @@ pub fn decode_zipmap(data: &[u8]) -> Option<Vec<Vec<u8>>> {
         out.push(data.get(i..vend)?.to_vec());
         i = vend.checked_add(free)?;
     }
-    if !out.len().is_multiple_of(2) {
+    if out.is_empty() || !out.len().is_multiple_of(2) {
+        return None;
+    }
+    if expected_count != 254 && (out.len() / 2) != expected_count as usize {
         return None;
     }
     Some(out)
@@ -315,5 +330,37 @@ mod tests {
         let blob = [0x01, 0x01, b'k', 0x01, 0x02, b'v', 0xAA, 0xBB, 0xFF];
         let entries = decode_zipmap(&blob).expect("decode");
         assert_eq!(entries, vec![b"k".to_vec(), b"v".to_vec()]);
+    }
+
+    #[test]
+    fn ziplist_rejects_premature_terminator() {
+        let mut zl = assemble_ziplist(&[str6(b"x"), str6(b"y")]);
+        zl[10] = 0xFF;
+        assert!(decode_ziplist(&zl).is_none());
+    }
+
+    #[test]
+    fn zipmap_rejects_empty_count_mismatch_and_duplicates() {
+        // Empty zipmap is rejected (matches Redis zipmapValidateIntegrity)
+        assert!(decode_zipmap(&[0x00, 0xFF]).is_none());
+        assert!(decode_zipmap(&[0xFF]).is_none());
+
+        // Count mismatch (expected 3, but only 2 pairs present)
+        let blob_wrong_count = [
+            0x03, 0x02, b'f', b'1', 0x02, 0x00, b'v', b'1', 0x02, b'f', b'2', 0x02, 0x00, b'v',
+            b'2', 0xFF,
+        ];
+        assert!(decode_zipmap(&blob_wrong_count).is_none());
+
+        // Premature terminator (trailing garbage after 0xFF)
+        let blob_trailing = [0x01, 0x02, b'f', b'1', 0x02, 0x00, b'v', b'1', 0xFF, 0x00];
+        assert!(decode_zipmap(&blob_trailing).is_none());
+
+        // Duplicate keys
+        let blob_dup = [
+            0x02, 0x02, b'k', b'1', 0x02, 0x00, b'v', b'1', 0x02, b'k', b'1', 0x02, 0x00, b'v',
+            b'2', 0xFF,
+        ];
+        assert!(decode_zipmap(&blob_dup).is_none());
     }
 }
