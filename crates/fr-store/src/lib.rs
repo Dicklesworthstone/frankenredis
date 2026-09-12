@@ -1153,6 +1153,16 @@ impl SortedSet {
         }
     }
 
+    /// Would a sorted set of exactly this shape land on the PACKED tier?
+    ///
+    /// The retention guard: `pending()` materializes to `Packed`, so it may only be
+    /// built for a shape that lands on that tier.
+    #[must_use]
+    pub fn shape_lands_packed(pair_count: usize, max_member_len: usize) -> bool {
+        pair_count <= SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES
+            && max_member_len <= SORTED_SET_PACKED_DEFAULT_MAX_VALUE
+    }
+
     /// For a packed sorted set, returns the exact sum of all member byte lengths in O(1) time.
     /// Returns `None` for hashtable/full and pending representations.
     #[must_use]
@@ -24928,6 +24938,7 @@ impl Store {
         if len == 0
             || len > zset_max_entries
             || max_member_len > zset_max_value
+            || !SortedSet::shape_lands_packed(len, max_member_len)
             || self.entries.contains_key(key)
         {
             return Err(raw);
@@ -38286,59 +38297,81 @@ impl Store {
                 Value::Set(Box::new(SetValue::Int(ints)))
             }
             RDB_TYPE_SET_LISTPACK => {
+                let raw_start = cursor;
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                // Decode the members as ZERO-COPY spans (borrowed ranges into the
-                // listpack blob; integer entries render to inline bytes) instead of
-                // exploding to N owned Vec<u8> via decode_listpack_strings. The bulk
-                // build (from_unique_str_members) copies each member into the set's
-                // own storage either way, so the per-member owned Vec was pure
-                // transient alloc churn — the same elimination the QUICKLIST_2 RESTORE
-                // arm already does. Byte-identical: spans preserve listpack order and
-                // bytes. (BlackThrush: RESTORE decode zero-copy span build)
-                let spans = fr_persist::listpack::decode_value_spans(&listpack)
+                // (frankenredis-33832) Retain the on-disk listpack string UNDECODED when
+                // duplicate-free and within live limits, matching the RDB-load retention
+                // path (`set_load_retained_listpack`). Skips member span allocations,
+                // duplicate checks, and PackedStrSet arena copying. Re-saving via
+                // BGSAVE/BGREWRITEAOF preserves the exact bytes with zero re-compression.
+                let shape = fr_persist::listpack::set_listpack_shape(&listpack)
                     .map_err(|_| StoreError::InvalidDumpPayload)?;
-                if spans.is_empty() {
+                if shape.has_duplicate_member || shape.member_count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                let mut members = Vec::with_capacity(spans.len());
-                let mut max_member_len = 0_usize;
-                let mut total_member_bytes = 0_usize;
-                for s in &spans {
-                    let member = s.as_bytes(&listpack);
-                    max_member_len = max_member_len.max(member.len());
-                    total_member_bytes += member.len();
-                    members.push(member);
-                }
-                // (frankenredis-3uuan) The set encoding refresh below tests every member
-                // length against set-max-listpack-value; report the max from the members
-                // we already hold instead of re-walking the built GenericSet.
-                restored_max_element_len = Some(max_member_len);
-                // Dedup-check then BULK-build. from_unique_str_members_with_shape appends each
-                // member with no lookup (O(n)) and skips the tier/budget inspection loop.
-                // Insertion order — the only observable order for a listpack set — is unchanged.
-                // RESTORE still rejects a duplicate member.
-                if restore_items_have_duplicate_key(&members, |member| *member) {
-                    return Err(StoreError::InvalidDumpPayload);
-                }
+                restored_max_element_len = Some(shape.max_member_len);
                 force_set_listpack_encoding = true;
-                Value::Set(Box::new(SetValue::Generic(
-                    GenericSet::from_unique_str_members_with_shape(
-                        &members,
-                        max_member_len,
-                        total_member_bytes,
-                    ),
-                )))
+                if !shape.has_possible_int_member
+                    && shape.member_count <= self.set_max_listpack_entries
+                    && shape.max_member_len <= self.set_max_listpack_value
+                    && GenericSet::shape_lands_packed(shape.member_count, shape.max_member_len)
+                {
+                    Value::Set(Box::new(SetValue::Generic(GenericSet::pending(
+                        payload[raw_start..cursor].to_vec(),
+                        shape.member_count,
+                        shape.max_member_len,
+                    ))))
+                } else {
+                    let spans = fr_persist::listpack::decode_value_spans(&listpack)
+                        .map_err(|_| StoreError::InvalidDumpPayload)?;
+                    let mut members = Vec::with_capacity(spans.len());
+                    let mut total_member_bytes = 0_usize;
+                    for s in &spans {
+                        let member = s.as_bytes(&listpack);
+                        total_member_bytes += member.len();
+                        members.push(member);
+                    }
+                    Value::Set(Box::new(SetValue::Generic(
+                        GenericSet::from_unique_str_members_with_shape(
+                            &members,
+                            shape.max_member_len,
+                            total_member_bytes,
+                        ),
+                    )))
+                }
             }
             RDB_TYPE_ZSET_LISTPACK => {
+                let raw_start = cursor;
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                let (zs, max_member_len) = zset_from_listpack_spans(&listpack)?;
-                if zs.is_empty() {
+                // (frankenredis-33832) Retain the on-disk listpack string UNDECODED when
+                // duplicate-free and within live limits, matching the RDB-load retention
+                // path (`zset_load_retained_listpack`). Skips pair allocations, duplicate
+                // checks, and PackedZSet buffer copying. Re-saving via BGSAVE/BGREWRITEAOF
+                // preserves the exact bytes with zero re-compression.
+                let shape = fr_persist::listpack::zset_listpack_shape(&listpack)
+                    .map_err(|_| StoreError::InvalidDumpPayload)?;
+                if shape.has_duplicate_member || shape.pair_count == 0 {
                     return Err(StoreError::InvalidDumpPayload);
                 }
-                restored_max_element_len = Some(max_member_len);
-                Value::SortedSet(Box::new(zs))
+                restored_max_element_len = Some(shape.max_member_len);
+                if shape.pair_count <= self.zset_max_listpack_entries
+                    && shape.max_member_len <= self.zset_max_listpack_value
+                    && SortedSet::shape_lands_packed(shape.pair_count, shape.max_member_len)
+                {
+                    Value::SortedSet(Box::new(SortedSet::pending(
+                        payload[raw_start..cursor].to_vec(),
+                        shape.pair_count,
+                        shape.max_member_len,
+                    )))
+                } else {
+                    let (zs, _) = zset_from_listpack_spans(&listpack)?;
+                    if zs.is_empty() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
+                    Value::SortedSet(Box::new(zs))
+                }
             }
             RDB_TYPE_ZSET_ZIPLIST => {
                 let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -80041,6 +80074,92 @@ mod tests {
         store2.restore_key(b"z", 0, &payload, false, 100).unwrap();
         assert_eq!(store2.zscore(b"z", b"a", 100).unwrap(), Some(1.5));
         assert_eq!(store2.zscore(b"z", b"b", 100).unwrap(), Some(2.5));
+    }
+
+    #[test]
+    fn restore_retains_set_and_zset_listpacks_until_read() {
+        let mut store = Store::new();
+        store
+            .sadd(b"s", &[b"foo".to_vec(), b"bar".to_vec()], 100)
+            .unwrap();
+        store
+            .zadd(
+                b"z",
+                &[(10.5, b"alpha".to_vec()), (20.5, b"beta".to_vec())],
+                100,
+            )
+            .unwrap();
+
+        let s_payload = store.dump_key(b"s", 100).unwrap();
+        let z_payload = store.dump_key(b"z", 100).unwrap();
+
+        let mut restored = Store::new();
+        restored
+            .restore_key(b"s", 0, &s_payload, false, 100)
+            .unwrap();
+        restored
+            .restore_key(b"z", 0, &z_payload, false, 100)
+            .unwrap();
+
+        // Immediately after RESTORE, both keys retain their RDB listpack bytes
+        {
+            let s_entry = restored.entries.get(b"s".as_slice()).unwrap();
+            let Value::Set(s) = &s_entry.value else {
+                panic!("expected Set");
+            };
+            let Some(generic) = s.as_generic() else {
+                panic!("expected Generic");
+            };
+            assert!(generic.retained_rdb_string().is_some());
+            assert_eq!(generic.len(), 2);
+
+            let z_entry = restored.entries.get(b"z".as_slice()).unwrap();
+            let Value::SortedSet(zs) = &z_entry.value else {
+                panic!("expected SortedSet");
+            };
+            assert!(zs.retained_rdb_string().is_some());
+            assert_eq!(zs.len(), 2);
+        }
+
+        // SCARD / ZCARD should read length without materializing
+        assert_eq!(restored.scard(b"s", 100).unwrap(), 2);
+        assert_eq!(restored.zcard(b"z", 100).unwrap(), 2);
+
+        // Verify still retained after card queries
+        {
+            let s_entry = restored.entries.get(b"s".as_slice()).unwrap();
+            let Value::Set(s) = &s_entry.value else {
+                panic!("expected Set");
+            };
+            assert!(s.as_generic().unwrap().retained_rdb_string().is_some());
+
+            let z_entry = restored.entries.get(b"z".as_slice()).unwrap();
+            let Value::SortedSet(zs) = &z_entry.value else {
+                panic!("expected SortedSet");
+            };
+            assert!(zs.retained_rdb_string().is_some());
+        }
+
+        // Reading members collapses/materializes correctly
+        assert!(restored.sismember(b"s", b"foo", 100).unwrap());
+        assert!(!restored.sismember(b"s", b"baz", 100).unwrap());
+        assert_eq!(restored.zscore(b"z", b"alpha", 100).unwrap(), Some(10.5));
+        assert_eq!(restored.zscore(b"z", b"beta", 100).unwrap(), Some(20.5));
+
+        // After reading members, decoded is populated and retained_rdb_string() is None
+        {
+            let s_entry = restored.entries.get(b"s".as_slice()).unwrap();
+            let Value::Set(s) = &s_entry.value else {
+                panic!("expected Set");
+            };
+            assert!(s.as_generic().unwrap().retained_rdb_string().is_none());
+
+            let z_entry = restored.entries.get(b"z".as_slice()).unwrap();
+            let Value::SortedSet(zs) = &z_entry.value else {
+                panic!("expected SortedSet");
+            };
+            assert!(zs.retained_rdb_string().is_none());
+        }
     }
 
     #[test]
