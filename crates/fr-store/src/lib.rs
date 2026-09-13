@@ -15093,20 +15093,21 @@ impl Store {
         self.internal_entries_insert_with_expiry_impl::<true>(key, entry, expires_at_ms)
     }
 
-    fn insert_swapped_entry(&mut self, key: Vec<u8>, entry: Entry, expires_at_ms: Option<u64>) {
-        if let Some(nonzero) = expires_at_ms.and_then(std::num::NonZeroU64::new) {
+    fn insert_swapped_entry(
+        &mut self,
+        key: Vec<u8>,
+        entry: Entry,
+        expires_deadline: Option<std::num::NonZeroU64>,
+    ) {
+        if let Some(nonzero) = expires_deadline {
             self.expiry_deadlines
                 .insert(store_key_from_slice(key.as_slice()), nonzero);
         }
         self.entries.insert_vec(key, entry);
     }
 
-    fn remove_swapped_entry(&mut self, key: &[u8], expires_at_ms: Option<u64>) -> Option<Entry> {
-        let entry = self.entries.remove(key)?;
-        if expires_at_ms.is_some() {
-            self.expiry_deadlines.remove(key);
-        }
-        Some(entry)
+    fn remove_swapped_entry(&mut self, key: &[u8]) -> Option<Entry> {
+        self.entries.remove(key)
     }
 
     /// `internal_entries_insert_with_expiry` with a `const GATE` selecting whether the
@@ -16228,7 +16229,7 @@ impl Store {
         struct SwappedEntry {
             swapped_key: Vec<u8>,
             entry: Entry,
-            expires_at_ms: Option<u64>,
+            expires_deadline: Option<std::num::NonZeroU64>,
         }
 
         struct SwappedSidemaps {
@@ -16394,14 +16395,14 @@ impl Store {
             } else {
                 self.stream_max_deleted_ids.remove(key.as_slice())
             };
-            let expires_at_ms = if self.expires_count == 0 {
+            let expires_deadline = if self.expires_count == 0 {
                 None
             } else {
-                let exp = self.expiry_ms(key.as_slice());
-                if exp.is_some() {
+                let dl = self.expiry_deadlines.remove(key.as_slice());
+                if dl.is_some() {
                     had_any_expiring = true;
                 }
-                exp
+                dl
             };
             let groups = if self.stream_groups.is_empty() {
                 None
@@ -16421,7 +16422,11 @@ impl Store {
             // Direct swapped removal: avoids redundant expiry_ms lookups, decode_db_key,
             // per-key write-side cache probes, duplicate stream metadata drops, and
             // per-key keyspace generation / digest churn.
-            let Some(entry) = self.remove_swapped_entry(key.as_slice(), expires_at_ms) else {
+            let Some(entry) = self.remove_swapped_entry(key.as_slice()) else {
+                if let Some(dl) = expires_deadline {
+                    self.expiry_deadlines
+                        .insert(store_key_from_slice(key.as_slice()), dl);
+                }
                 continue;
             };
             // (frankenredis-bmyx5) Harvest per-field hash TTLs before clearing metadata —
@@ -16464,7 +16469,7 @@ impl Store {
             left_entries.push(SwappedEntry {
                 swapped_key: swapped,
                 entry,
-                expires_at_ms,
+                expires_deadline,
             });
         }
 
@@ -16476,14 +16481,14 @@ impl Store {
             } else {
                 self.stream_max_deleted_ids.remove(key.as_slice())
             };
-            let expires_at_ms = if self.expires_count == 0 {
+            let expires_deadline = if self.expires_count == 0 {
                 None
             } else {
-                let exp = self.expiry_ms(key.as_slice());
-                if exp.is_some() {
+                let dl = self.expiry_deadlines.remove(key.as_slice());
+                if dl.is_some() {
                     had_any_expiring = true;
                 }
-                exp
+                dl
             };
             let groups = if self.stream_groups.is_empty() {
                 None
@@ -16500,7 +16505,11 @@ impl Store {
             } else {
                 self.stream_entries_added.remove(key.as_slice())
             };
-            let Some(entry) = self.remove_swapped_entry(key.as_slice(), expires_at_ms) else {
+            let Some(entry) = self.remove_swapped_entry(key.as_slice()) else {
+                if let Some(dl) = expires_deadline {
+                    self.expiry_deadlines
+                        .insert(store_key_from_slice(key.as_slice()), dl);
+                }
                 continue;
             };
             let field_ttls: Vec<(Vec<u8>, u64)> = if self.hash_field_expires.is_empty() {
@@ -16541,14 +16550,14 @@ impl Store {
             right_entries.push(SwappedEntry {
                 swapped_key: swapped,
                 entry,
-                expires_at_ms,
+                expires_deadline,
             });
         }
 
         // Direct swapped re-insertion: keys are guaranteed fresh (both dbs drained),
         // bypassing redundant contains_key/get lookups, keyspace events, and decode_db_key.
         for entry in left_entries {
-            self.insert_swapped_entry(entry.swapped_key, entry.entry, entry.expires_at_ms);
+            self.insert_swapped_entry(entry.swapped_key, entry.entry, entry.expires_deadline);
         }
         for sidemaps in left_sidemaps {
             if let Some(groups) = sidemaps.groups {
@@ -16572,7 +16581,7 @@ impl Store {
         }
 
         for entry in right_entries {
-            self.insert_swapped_entry(entry.swapped_key, entry.entry, entry.expires_at_ms);
+            self.insert_swapped_entry(entry.swapped_key, entry.entry, entry.expires_deadline);
         }
         for sidemaps in right_sidemaps {
             if let Some(groups) = sidemaps.groups {
