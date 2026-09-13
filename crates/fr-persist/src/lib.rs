@@ -2274,6 +2274,8 @@ fn encode_rdb_aux_field(buf: &mut Vec<u8>, key: &str, value: &str, compress: boo
 /// Encode a complete RDB file from borrowed entries including FUNCTION libraries,
 /// choosing compact type tags against the supplied (live) thresholds rather than
 /// the compiled defaults.
+///
+/// Callers must pass entries sorted by `(db, key)`; debug builds assert that contract.
 #[must_use]
 pub fn encode_rdb_borrowed_with_functions_and_thresholds<'a>(
     entries: &[RdbEntryRef<'a>],
@@ -2611,128 +2613,66 @@ fn encode_rdb_borrowed_internal<'a>(
         rdb_encode_string_with(&mut buf, code, compress);
     }
 
-    let (first_db, is_single_db, is_sorted, single_db_expires) = if entries.is_empty() {
-        (0, true, true, 0)
+    debug_assert!(entries.windows(2).all(|pair| {
+        pair[0].db < pair[1].db || (pair[0].db == pair[1].db && pair[0].key <= pair[1].key)
+    }));
+
+    let (first_db, is_single_db, single_db_expires) = if entries.is_empty() {
+        (0, true, 0)
     } else if entries.len() == 1 {
         (
             entries[0].db,
-            true,
             true,
             usize::from(entries[0].expire_ms.is_some()),
         )
     } else {
         let first_db = entries[0].db;
-        let mut single_db = true;
-        let mut sorted = true;
-        let mut expires = usize::from(entries[0].expire_ms.is_some());
-        for pair in entries.windows(2) {
-            if pair[1].expire_ms.is_some() {
-                expires += 1;
-            }
-            if single_db && pair[1].db != first_db {
-                single_db = false;
-            }
-            if sorted {
-                if single_db {
-                    if pair[0].key > pair[1].key {
-                        sorted = false;
-                    }
-                } else if pair[0].db > pair[1].db
-                    || (pair[0].db == pair[1].db && pair[0].key > pair[1].key)
-                {
-                    sorted = false;
-                }
-            }
-        }
-        (first_db, single_db, sorted, expires)
+        let is_single = first_db == entries[entries.len() - 1].db;
+        let expires = if is_single {
+            entries.iter().filter(|e| e.expire_ms.is_some()).count()
+        } else {
+            0
+        };
+        (first_db, is_single, expires)
     };
 
-    if is_sorted {
-        if is_single_db {
-            if !entries.is_empty() {
-                let db = first_db;
-                let db_expires = single_db_expires;
-                buf.push(RDB_OPCODE_SELECTDB);
-                rdb_encode_length(&mut buf, db);
-                buf.push(RDB_OPCODE_RESIZEDB);
-                rdb_encode_length(&mut buf, entries.len());
-                rdb_encode_length(&mut buf, db_expires);
+    if is_single_db {
+        if !entries.is_empty() {
+            let db = first_db;
+            let db_expires = single_db_expires;
+            buf.push(RDB_OPCODE_SELECTDB);
+            rdb_encode_length(&mut buf, db);
+            buf.push(RDB_OPCODE_RESIZEDB);
+            rdb_encode_length(&mut buf, entries.len());
+            rdb_encode_length(&mut buf, db_expires);
 
-                for entry in entries {
-                    encode_rdb_entry_borrowed(&mut buf, entry, &options, compress);
-                }
-            }
-        } else {
-            let mut group_start = 0usize;
-            while group_start < entries.len() {
-                let db = entries[group_start].db;
-                let mut group_end = group_start;
-                let mut db_expires = 0usize;
-                while group_end < entries.len() && entries[group_end].db == db {
-                    if entries[group_end].expire_ms.is_some() {
-                        db_expires += 1;
-                    }
-                    group_end += 1;
-                }
-
-                buf.push(RDB_OPCODE_SELECTDB);
-                rdb_encode_length(&mut buf, db);
-                buf.push(RDB_OPCODE_RESIZEDB);
-                rdb_encode_length(&mut buf, group_end - group_start);
-                rdb_encode_length(&mut buf, db_expires);
-
-                for entry in &entries[group_start..group_end] {
-                    encode_rdb_entry_borrowed(&mut buf, entry, &options, compress);
-                }
-                group_start = group_end;
+            for entry in entries {
+                encode_rdb_entry_borrowed(&mut buf, entry, &options, compress);
             }
         }
     } else {
-        let mut sorted_entries: Vec<&RdbEntryRef<'a>> = entries.iter().collect();
-        if is_single_db {
-            sorted_entries.sort_unstable_by(|left, right| left.key.cmp(right.key));
-
-            if !sorted_entries.is_empty() {
-                let db = first_db;
-                let db_expires = single_db_expires;
-                buf.push(RDB_OPCODE_SELECTDB);
-                rdb_encode_length(&mut buf, db);
-                buf.push(RDB_OPCODE_RESIZEDB);
-                rdb_encode_length(&mut buf, sorted_entries.len());
-                rdb_encode_length(&mut buf, db_expires);
-
-                for &entry in &sorted_entries {
-                    encode_rdb_entry_borrowed(&mut buf, entry, &options, compress);
+        let mut group_start = 0usize;
+        while group_start < entries.len() {
+            let db = entries[group_start].db;
+            let mut group_end = group_start;
+            let mut db_expires = 0usize;
+            while group_end < entries.len() && entries[group_end].db == db {
+                if entries[group_end].expire_ms.is_some() {
+                    db_expires += 1;
                 }
+                group_end += 1;
             }
-        } else {
-            sorted_entries.sort_unstable_by(|left, right| {
-                left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key))
-            });
 
-            let mut group_start = 0usize;
-            while group_start < sorted_entries.len() {
-                let db = sorted_entries[group_start].db;
-                let mut group_end = group_start;
-                let mut db_expires = 0usize;
-                while group_end < sorted_entries.len() && sorted_entries[group_end].db == db {
-                    if sorted_entries[group_end].expire_ms.is_some() {
-                        db_expires += 1;
-                    }
-                    group_end += 1;
-                }
+            buf.push(RDB_OPCODE_SELECTDB);
+            rdb_encode_length(&mut buf, db);
+            buf.push(RDB_OPCODE_RESIZEDB);
+            rdb_encode_length(&mut buf, group_end - group_start);
+            rdb_encode_length(&mut buf, db_expires);
 
-                buf.push(RDB_OPCODE_SELECTDB);
-                rdb_encode_length(&mut buf, db);
-                buf.push(RDB_OPCODE_RESIZEDB);
-                rdb_encode_length(&mut buf, group_end - group_start);
-                rdb_encode_length(&mut buf, db_expires);
-
-                for &entry in &sorted_entries[group_start..group_end] {
-                    encode_rdb_entry_borrowed(&mut buf, entry, &options, compress);
-                }
-                group_start = group_end;
+            for entry in &entries[group_start..group_end] {
+                encode_rdb_entry_borrowed(&mut buf, entry, &options, compress);
             }
+            group_start = group_end;
         }
     }
 
