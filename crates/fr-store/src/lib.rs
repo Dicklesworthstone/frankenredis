@@ -11872,13 +11872,9 @@ impl Store {
         self.record_keyspace_lookup(key, now_ms);
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let lfu_state = match self.entries.get_mut(key) {
             Some(entry) => {
+                let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 let lfu = (entry.lfu_freq, entry.lfu_last_touch_min);
                 match &entry.value {
