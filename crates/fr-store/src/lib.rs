@@ -38647,11 +38647,8 @@ impl Store {
             ),
             _ => {}
         }
-        let old_was_stream = self
-            .entries
-            .get(key)
-            .is_some_and(|old_entry| matches!(&old_entry.value, Value::Stream(_)));
-        if self.entries.contains_key(key) {
+        if replace && let Some(old_entry) = self.entries.get(key) {
+            let old_was_stream = matches!(&old_entry.value, Value::Stream(_));
             // RESTORE REPLACE semantically discards the old object even though
             // the key name is unchanged. Reuse the keyspace slot for speed, but
             // clear per-object sidecars that belong to the old value.
