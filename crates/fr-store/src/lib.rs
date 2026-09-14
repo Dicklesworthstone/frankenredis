@@ -15125,13 +15125,15 @@ impl Store {
         expires_at_ms: Option<u64>,
     ) -> Option<Entry> {
         let db = decode_db_key(&key).map(|(db, _)| db).unwrap_or(0);
-        let is_new_key = !self.entries.contains_key(key.as_slice());
-        let old_expiry = self.expiry_ms(key.as_slice());
+        let (is_new_key, old_expiry) = match self.entries.get(key.as_slice()) {
+            Some(old_entry) => {
+                entry.modification_count = old_entry.modification_count.wrapping_add(1);
+                (false, self.expiry_ms(key.as_slice()))
+            }
+            None => (true, None),
+        };
         let new_expiry = expires_at_ms.and_then(std::num::NonZeroU64::new);
         let new_is_stream = matches!(&entry.value, Value::Stream(_));
-        if let Some(old_entry) = self.entries.get(key.as_slice()) {
-            entry.modification_count = old_entry.modification_count.wrapping_add(1);
-        }
 
         let new_has_expiry = new_expiry.is_some();
         if new_has_expiry {
@@ -15264,12 +15266,10 @@ impl Store {
                 }
             }
             None => {
-                // A SET without a new TTL clears any prior deadline. (cc_fr) Guard the probe on
-                // expires_count: with no TTL-bearing key anywhere the deadline map is empty, so this
-                // key can't be in it and the remove is a guaranteed no-op — skip the foldhash on the
-                // common no-TTL SET/insert. Byte-identical (absent-key remove is a no-op); mirrors the
-                // expires_count no-TTL guards on drop_if_expired.
-                if self.expires_count != 0 {
+                // A SET without a new TTL clears any prior deadline. If old_expiry was None
+                // (all new keys and no-TTL overwrites), the key was not in expiry_deadlines
+                // and the remove is a guaranteed no-op — skip the foldhash and probe.
+                if old_expiry.is_some() {
                     self.expiry_deadlines.remove(key.as_slice());
                 }
             }
