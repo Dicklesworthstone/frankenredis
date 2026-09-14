@@ -52473,23 +52473,51 @@ fn store_to_rdb_entries_borrowed<'a>(
     let store_ref = store;
     let total_len = store.len();
     let is_all_db0 = store.dbsize_in_db(0) == total_len;
-    let mut entries = Vec::with_capacity(total_len);
+    #[derive(Clone, Copy)]
+    struct PresortEntry<'a> {
+        db: usize,
+        logical_key: &'a [u8],
+        item: fr_store::SnapshotEntryRef<'a>,
+    }
+
+    let mut presort = Vec::with_capacity(total_len);
     let mut has_multiple_dbs = false;
     store_ref.for_each_snapshot_entry_ref(|item| {
-        let key = item.key;
-        let value = item.value;
-        let expires_at_ms = item.expire_ms;
-        let hash_is_hashtable = item.hash_is_hashtable;
-        let set_is_hashtable = item.set_is_hashtable;
         let (db, logical_key) = if is_all_db0 {
-            (0, key)
+            (0, item.key)
         } else {
-            let (db, logical_key) = decode_db_key(key).unwrap_or((0, key));
+            let (db, logical_key) = decode_db_key(item.key).unwrap_or((0, item.key));
             if db != 0 {
                 has_multiple_dbs = true;
             }
             (db, logical_key)
         };
+        presort.push(PresortEntry {
+            db,
+            logical_key,
+            item,
+        });
+    });
+
+    if has_multiple_dbs {
+        presort.sort_unstable_by(|left, right| {
+            left.db
+                .cmp(&right.db)
+                .then_with(|| left.logical_key.cmp(right.logical_key))
+        });
+    } else {
+        presort.sort_unstable_by(|left, right| left.logical_key.cmp(right.logical_key));
+    }
+
+    let mut entries = Vec::with_capacity(total_len);
+    for presorted in presort {
+        let key = presorted.item.key;
+        let logical_key = presorted.logical_key;
+        let db = presorted.db;
+        let value = presorted.item.value;
+        let expires_at_ms = presorted.item.expire_ms;
+        let hash_is_hashtable = presorted.item.hash_is_hashtable;
+        let set_is_hashtable = presorted.item.set_is_hashtable;
         let rdb_value = match value {
             Value::String(v) => fr_persist::RdbValueRef::String(v.as_slice()),
             Value::Integer(v) => fr_persist::RdbValueRef::Integer(*v),
@@ -52967,13 +52995,6 @@ fn store_to_rdb_entries_borrowed<'a>(
             value: rdb_value,
             expire_ms: expires_at_ms,
         });
-    });
-    if has_multiple_dbs {
-        entries.sort_unstable_by(|left, right| {
-            left.db.cmp(&right.db).then_with(|| left.key.cmp(right.key))
-        });
-    } else {
-        entries.sort_unstable_by(|left, right| left.key.cmp(right.key));
     }
     entries
 }
