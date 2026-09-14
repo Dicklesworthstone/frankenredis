@@ -1072,15 +1072,18 @@ struct PendingZSet {
 fn materialize_pending_zset(raw: &[u8]) -> SortedSetInner {
     let (listpack, _) = fr_persist::rdb_decode_string_payload(raw)
         .expect("validated retained zset must decode its rdb string");
-    let mut pairs = fr_persist::listpack::decode_zset_listpack_pairs(&listpack)
+    let spans = fr_persist::listpack::decode_zset_spans_and_scores(&listpack)
         .expect("validated retained zset must decode its listpack");
-    // The eager load path canonicalises in place before building; a retained one
-    // has to fold -0.0 to +0.0 at exactly the same point or the two routes would
-    // disagree on a score the payload spells as "-0".
-    for pair in &mut pairs {
-        pair.1 = canonicalize_zero_score(pair.1);
-    }
-    SortedSetInner::Packed(PackedZSet::from_unique_pairs(pairs))
+    let pairs: Vec<(&[u8], f64)> = spans
+        .iter()
+        .map(|(span, score)| (span.as_bytes(&listpack), canonicalize_zero_score(*score)))
+        .collect();
+    let packed = if PackedZSet::borrowed_pairs_are_sorted(&pairs) {
+        PackedZSet::from_sorted_unique_pairs_borrowed(pairs)
+    } else {
+        PackedZSet::from_unique_pairs_borrowed(pairs)
+    };
+    SortedSetInner::Packed(packed)
 }
 
 impl SortedSet {
@@ -11869,13 +11872,9 @@ impl Store {
         self.record_keyspace_lookup(key, now_ms);
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let lfu_state = match self.entries.get_mut(key) {
             Some(entry) => {
+                let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 let lfu = (entry.lfu_freq, entry.lfu_last_touch_min);
                 match &entry.value {
@@ -15122,13 +15121,15 @@ impl Store {
         expires_at_ms: Option<u64>,
     ) -> Option<Entry> {
         let db = decode_db_key(&key).map(|(db, _)| db).unwrap_or(0);
-        let is_new_key = !self.entries.contains_key(key.as_slice());
-        let old_expiry = self.expiry_ms(key.as_slice());
+        let (is_new_key, old_expiry) = match self.entries.get(key.as_slice()) {
+            Some(old_entry) => {
+                entry.modification_count = old_entry.modification_count.wrapping_add(1);
+                (false, self.expiry_ms(key.as_slice()))
+            }
+            None => (true, None),
+        };
         let new_expiry = expires_at_ms.and_then(std::num::NonZeroU64::new);
         let new_is_stream = matches!(&entry.value, Value::Stream(_));
-        if let Some(old_entry) = self.entries.get(key.as_slice()) {
-            entry.modification_count = old_entry.modification_count.wrapping_add(1);
-        }
 
         let new_has_expiry = new_expiry.is_some();
         if new_has_expiry {
@@ -15261,12 +15262,10 @@ impl Store {
                 }
             }
             None => {
-                // A SET without a new TTL clears any prior deadline. (cc_fr) Guard the probe on
-                // expires_count: with no TTL-bearing key anywhere the deadline map is empty, so this
-                // key can't be in it and the remove is a guaranteed no-op — skip the foldhash on the
-                // common no-TTL SET/insert. Byte-identical (absent-key remove is a no-op); mirrors the
-                // expires_count no-TTL guards on drop_if_expired.
-                if self.expires_count != 0 {
+                // A SET without a new TTL clears any prior deadline. If old_expiry was None
+                // (all new keys and no-TTL overwrites), the key was not in expiry_deadlines
+                // and the remove is a guaranteed no-op — skip the foldhash and probe.
+                if old_expiry.is_some() {
                     self.expiry_deadlines.remove(key.as_slice());
                 }
             }
@@ -38644,11 +38643,8 @@ impl Store {
             ),
             _ => {}
         }
-        let old_was_stream = self
-            .entries
-            .get(key)
-            .is_some_and(|old_entry| matches!(&old_entry.value, Value::Stream(_)));
-        if self.entries.contains_key(key) {
+        if replace && let Some(old_entry) = self.entries.get(key) {
+            let old_was_stream = matches!(&old_entry.value, Value::Stream(_));
             // RESTORE REPLACE semantically discards the old object even though
             // the key name is unchanged. Reuse the keyspace slot for speed, but
             // clear per-object sidecars that belong to the old value.
@@ -38811,6 +38807,7 @@ impl Store {
         if !self.has_expiry_due(now_ms) {
             return;
         }
+        self.rebuild_volatile_keys_if_dirty();
         let mut expired_keys: Vec<Vec<u8>> = self
             .expiry_deadlines
             .iter()

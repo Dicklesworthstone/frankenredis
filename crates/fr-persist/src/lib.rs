@@ -2309,7 +2309,7 @@ pub fn encode_rdb_string_entries_with_functions(
         pair[0].db < pair[1].db || (pair[0].db == pair[1].db && pair[0].key <= pair[1].key)
     }));
 
-    let initial_cap = 128usize.saturating_add(entries.len().saturating_mul(16));
+    let initial_cap = 128usize.saturating_add(entries.len().saturating_mul(32));
     let mut buf = Vec::with_capacity(initial_cap);
 
     buf.extend_from_slice(&RDB_MAGIC_HEADER);
@@ -2432,7 +2432,7 @@ fn encode_rdb_internal(
     functions: &[&[u8]],
     options: RdbEncodeOptions,
 ) -> Vec<u8> {
-    let initial_cap = 128usize.saturating_add(entries.len().saturating_mul(16));
+    let initial_cap = 128usize.saturating_add(entries.len().saturating_mul(64));
     let mut buf = Vec::with_capacity(initial_cap);
 
     // Magic + version
@@ -2593,7 +2593,7 @@ fn encode_rdb_borrowed_internal<'a>(
     functions: &[&[u8]],
     options: RdbEncodeOptions,
 ) -> Vec<u8> {
-    let initial_cap = 128usize.saturating_add(entries.len().saturating_mul(32));
+    let initial_cap = 128usize.saturating_add(entries.len().saturating_mul(64));
     let mut buf = Vec::with_capacity(initial_cap);
 
     // Magic + version

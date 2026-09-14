@@ -395,8 +395,15 @@ fn materialize_pending_set(raw: &[u8]) -> GenericSetInner {
         .expect("validated retained set must decode its rdb string");
     let spans = fr_persist::listpack::decode_value_spans(&listpack)
         .expect("validated retained set must decode its listpack");
-    let members: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(&listpack)).collect();
-    GenericSet::from_unique_str_members(&members).into_inner()
+    let mut total_bytes = 0_usize;
+    for s in &spans {
+        total_bytes += s.byte_len();
+    }
+    let mut p = PackedStrSet::with_capacity(total_bytes + spans.len() * 2);
+    for s in &spans {
+        p.append(s.as_bytes(&listpack));
+    }
+    GenericSetInner::Packed(p)
 }
 
 impl GenericSet {
