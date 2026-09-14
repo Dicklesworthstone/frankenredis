@@ -38811,6 +38811,7 @@ impl Store {
         if !self.has_expiry_due(now_ms) {
             return;
         }
+        self.rebuild_volatile_keys_if_dirty();
         let mut expired_keys: Vec<Vec<u8>> = self
             .expiry_deadlines
             .iter()
