@@ -1072,15 +1072,18 @@ struct PendingZSet {
 fn materialize_pending_zset(raw: &[u8]) -> SortedSetInner {
     let (listpack, _) = fr_persist::rdb_decode_string_payload(raw)
         .expect("validated retained zset must decode its rdb string");
-    let mut pairs = fr_persist::listpack::decode_zset_listpack_pairs(&listpack)
+    let spans = fr_persist::listpack::decode_zset_spans_and_scores(&listpack)
         .expect("validated retained zset must decode its listpack");
-    // The eager load path canonicalises in place before building; a retained one
-    // has to fold -0.0 to +0.0 at exactly the same point or the two routes would
-    // disagree on a score the payload spells as "-0".
-    for pair in &mut pairs {
-        pair.1 = canonicalize_zero_score(pair.1);
-    }
-    SortedSetInner::Packed(PackedZSet::from_unique_pairs(pairs))
+    let pairs: Vec<(&[u8], f64)> = spans
+        .iter()
+        .map(|(span, score)| (span.as_bytes(&listpack), canonicalize_zero_score(*score)))
+        .collect();
+    let packed = if PackedZSet::borrowed_pairs_are_sorted(&pairs) {
+        PackedZSet::from_sorted_unique_pairs_borrowed(pairs)
+    } else {
+        PackedZSet::from_unique_pairs_borrowed(pairs)
+    };
+    SortedSetInner::Packed(packed)
 }
 
 impl SortedSet {
