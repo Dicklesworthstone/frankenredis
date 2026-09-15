@@ -9961,47 +9961,34 @@ impl Store {
         value: &[u8],
         now_ms: u64,
     ) {
-        // (CrimsonHawk) With no volatile keys (expires_count==0) drop_if_expired can never
-        // evict, so its return value == entries.contains_key(key). Use the single
-        // contains_key probe and skip drop_if_expired's SECOND lookup (the expiry_ms map
-        // probe) + the expired-key eviction/notification/propagation machinery. Byte-
-        // identical: an expired key requires a TTL, which keeps expires_count>0 and takes
-        // the full drop path. This is the LIVE SET/GETSET/MSET write path (fr-runtime).
-        let key_present = if GUARD && self.expires_count == 0 {
-            self.entries.contains_key(key)
-        } else {
-            self.drop_if_expired(key, now_ms)
-        };
-        if !key_present {
-            let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-            let lfu_tracking_enabled = self.lfu_tracking_enabled();
-            entry.lfu_freq = if lfu_tracking_enabled {
-                LFU_INIT_VAL
-            } else {
-                0
-            };
-            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
-            if lfu_tracking_enabled {
-                entry.mark_redis_lfu_clock_field();
-            }
-            self.internal_entries_insert(key.to_vec(), entry);
-            self.dirty = self.dirty.saturating_add(1);
-            return;
-        }
-
-        let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay_time = self.lfu_decay_time;
-        // (CrimsonHawk) With no volatile keys the overwritten key cannot carry a TTL, so
-        // expiry_ms is always None here — skip the second expiry-map probe. Byte-identical.
         let old_expiry = if self.expires_count != 0 {
             self.expiry_ms(key)
         } else {
             None
         };
+        if (!GUARD && self.expires_count == 0)
+            || (old_expiry.is_some() && evaluate_expiry(now_ms, old_expiry).should_evict)
+        {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
         let (old_expiry, old_was_stream) = {
             let Some(entry) = self.entries.get_mut(key) else {
-                self.set(key.to_vec(), value.to_vec(), None, now_ms);
+                let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                entry.lfu_freq = if lfu_tracking_enabled {
+                    LFU_INIT_VAL
+                } else {
+                    0
+                };
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                self.internal_entries_insert(key.to_vec(), entry);
+                self.dirty = self.dirty.saturating_add(1);
                 return;
             };
             let old_was_stream = matches!(&entry.value, Value::Stream(_));
@@ -10055,46 +10042,31 @@ impl Store {
     /// re-inserting the deadline. Missing or expired keys are inserted without a TTL.
     #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn set_keep_ttl_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
-        let key_present = if self.expires_count != 0 {
-            self.drop_if_expired(key, now_ms)
-        } else {
-            self.entries.contains_key(key)
-        };
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
 
         // `set_with_abs_expiry`, the previous KEEPTTL path, performs this cleanup before replacing
         // the entry regardless of its current type. Preserve that behavior for leaked side-map
         // metadata as well as real stream entries.
         self.drop_stream_side_metadata(key);
 
-        if !key_present {
-            let lfu_tracking_enabled = self.lfu_tracking_enabled();
-            let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-            entry.lfu_freq = if lfu_tracking_enabled {
-                LFU_INIT_VAL
-            } else {
-                0
-            };
-            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
-            if lfu_tracking_enabled {
-                entry.mark_redis_lfu_clock_field();
-            }
-            self.internal_entries_insert(key.to_vec(), entry);
-            self.dirty = self.dirty.saturating_add(1);
-            return;
-        }
-
-        // (BlackThrush) SET KEEPTTL overwrite writes a scalar (String/Integer), which is never a
-        // mem_estimate_cache member, so skip its always-miss remove (rationale in
-        // invalidate_write_side_caches). If this overwrites a cached collection with a scalar, the
-        // stale estimate is never read (the scalar returns early, not via the cache) — byte-identical.
-        self.invalidate_write_side_caches_scalar(key);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
         let old_was_stream = {
             let Some(entry) = self.entries.get_mut(key) else {
-                // `drop_if_expired` / `contains_key` and `get_mut` cannot disagree in this
-                // single-threaded store. Keep a behavior-correct fallback for defensive parity.
-                self.set_with_abs_expiry(key.to_vec(), value.to_vec(), None, now_ms);
+                let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                entry.lfu_freq = if lfu_tracking_enabled {
+                    LFU_INIT_VAL
+                } else {
+                    0
+                };
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                self.internal_entries_insert(key.to_vec(), entry);
+                self.dirty = self.dirty.saturating_add(1);
                 return;
             };
             let old_was_stream = matches!(&entry.value, Value::Stream(_));
@@ -10116,6 +10088,8 @@ impl Store {
             }
             old_was_stream
         };
+
+        self.invalidate_write_side_caches_scalar(key);
 
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if old_was_stream {
@@ -10241,35 +10215,33 @@ impl Store {
     }
 
     pub fn set_plain_owned(&mut self, key: Vec<u8>, value: Vec<u8>, now_ms: u64) {
-        let key_present = if self.expires_count != 0 {
-            self.drop_if_expired(key.as_slice(), now_ms)
+        let old_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key.as_slice())
         } else {
-            self.entries.contains_key(key.as_slice())
+            None
         };
-        if !key_present {
-            let mut entry = Entry::new(canonical_string_value(value), now_ms);
-            let lfu_tracking_enabled = self.lfu_tracking_enabled();
-            entry.lfu_freq = if lfu_tracking_enabled {
-                LFU_INIT_VAL
-            } else {
-                0
-            };
-            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
-            if lfu_tracking_enabled {
-                entry.mark_redis_lfu_clock_field();
-            }
-            self.internal_entries_insert(key, entry);
-            self.dirty = self.dirty.saturating_add(1);
-            return;
+        if old_expiry.is_some() && evaluate_expiry(now_ms, old_expiry).should_evict {
+            self.drop_if_expired(key.as_slice(), now_ms);
         }
 
         let db = decode_db_key(key.as_slice()).map(|(db, _)| db).unwrap_or(0);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
-        let old_expiry = self.expiry_ms(key.as_slice());
         let (old_expiry, old_was_stream) = {
             let Some(entry) = self.entries.get_mut(key.as_slice()) else {
-                self.set(key, value, None, now_ms);
+                let mut entry = Entry::new(canonical_string_value(value), now_ms);
+                let lfu_tracking_enabled = self.lfu_tracking_enabled();
+                entry.lfu_freq = if lfu_tracking_enabled {
+                    LFU_INIT_VAL
+                } else {
+                    0
+                };
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                self.internal_entries_insert(key, entry);
+                self.dirty = self.dirty.saturating_add(1);
                 return;
             };
             let old_was_stream = matches!(&entry.value, Value::Stream(_));
@@ -10364,13 +10336,16 @@ impl Store {
 
     /// Returns the current absolute expiry timestamp for a key, if any.
     pub fn get_expires_at_ms(&mut self, key: &[u8], now_ms: u64) -> Option<u64> {
-        // (perf) Guard the bare no-TTL reap probe on expires_count (see sadd/hset_borrowed): the
-        // access below (get_mut / expiry_ms) resolves presence, so the drop degrades to a
-        // discarded contains_key when nothing is volatile. Byte-identical (nothing evicts).
-        if self.expires_count != 0 {
-            self.drop_if_expired(key, now_ms);
+        if self.expires_count == 0 {
+            return None;
         }
-        self.expiry_ms(key)
+        let expiry = self.expiry_ms(key)?;
+        if evaluate_expiry(now_ms, Some(expiry)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            None
+        } else {
+            Some(expiry)
+        }
     }
 
     pub fn expiretime_value(&mut self, key: &[u8], now_ms: u64) -> ExpireTimeValue {
@@ -11295,7 +11270,7 @@ impl Store {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the entry access below re-probes the key). Byte-identical: with expires_count==0
         // no key can carry an expiry, so drop_if_expired never evicts.
-        if self.expires_count != 0 {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -12213,7 +12188,7 @@ impl Store {
     ) -> Result<usize, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the entry access below re-probes entries). Byte-identical; see sadd.
-        if self.expires_count != 0 {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -12404,7 +12379,7 @@ impl Store {
     ) -> Result<bool, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the entry access below re-probes entries). Byte-identical; see sadd.
-        if self.expires_count != 0 {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
         }
         // (frankenredis-uwhyl) Mirror redis setbitCommand: reject when the byte
