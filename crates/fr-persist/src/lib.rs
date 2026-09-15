@@ -7093,7 +7093,7 @@ pub fn write_rdb_bytes_with_sidecar(
     write_rdb_bytes_atomically(path, bytes)?;
     if !bytes.is_empty() {
         let symbol_size = 512_u16;
-        let k = (bytes.len() + symbol_size as usize - 1) / symbol_size as usize;
+        let k = bytes.len().div_ceil(symbol_size as usize);
         let repair_symbols = (k / 8).clamp(8, 128);
         fr_fec::write_sidecar(path, "state", repair_symbols, symbol_size, now_unix_ms)
             .map_err(|e| PersistError::Io(std::io::Error::other(e)))?;
@@ -7140,31 +7140,28 @@ pub fn read_rdb_file_with_functions(
 ) -> Result<(Vec<RdbEntry>, BTreeMap<String, String>, Vec<Vec<u8>>), PersistError> {
     match std::fs::read(path) {
         Ok(data) => {
-            if !data.is_empty() {
-                if let Ok(decoded) = decode_rdb_prefix(&data) {
-                    if decoded.consumed == data.len() {
-                        return Ok((decoded.entries, decoded.aux, decoded.functions));
-                    }
-                }
+            if !data.is_empty()
+                && let Ok(decoded) = decode_rdb_prefix(&data)
+                && decoded.consumed == data.len()
+            {
+                return Ok((decoded.entries, decoded.aux, decoded.functions));
             }
             // (Spec §9/§19) If the RDB snapshot is corrupted, truncated, or damaged,
             // attempt systematic RaptorQ forward-error-correction recovery if sidecars exist.
-            if let Some(recovered) = try_recover_rdb_from_sidecar(path) {
-                if let Ok(decoded) = decode_rdb_prefix(&recovered) {
-                    if decoded.consumed == recovered.len() {
-                        return Ok((decoded.entries, decoded.aux, decoded.functions));
-                    }
-                }
+            if let Some(recovered) = try_recover_rdb_from_sidecar(path)
+                && let Ok(decoded) = decode_rdb_prefix(&recovered)
+                && decoded.consumed == recovered.len()
+            {
+                return Ok((decoded.entries, decoded.aux, decoded.functions));
             }
             Err(PersistError::InvalidFrame)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(recovered) = try_recover_rdb_from_sidecar(path) {
-                if let Ok(decoded) = decode_rdb_prefix(&recovered) {
-                    if decoded.consumed == recovered.len() {
-                        return Ok((decoded.entries, decoded.aux, decoded.functions));
-                    }
-                }
+            if let Some(recovered) = try_recover_rdb_from_sidecar(path)
+                && let Ok(decoded) = decode_rdb_prefix(&recovered)
+                && decoded.consumed == recovered.len()
+            {
+                return Ok((decoded.entries, decoded.aux, decoded.functions));
             }
             Ok((Vec::new(), BTreeMap::new(), Vec::new()))
         }
@@ -14054,8 +14051,7 @@ mod tests {
             assert!(sym_path.exists(), "symbols must exist");
 
             // 2. Read back clean snapshot.
-            let (read_entries, read_aux) =
-                crate::read_rdb_file(&rdb_path).expect("read clean RDB");
+            let (read_entries, read_aux) = crate::read_rdb_file(&rdb_path).expect("read clean RDB");
             assert_eq!(read_entries.len(), 2);
             assert_eq!(read_aux.get("redis-ver"), Some(&"7.2.4".to_string()));
 
@@ -14081,16 +14077,12 @@ mod tests {
                 recovered_entries.iter().map(|e| e.key.clone()).collect();
             assert!(keys.contains(b"hello".as_slice()));
             assert!(keys.contains(b"counter".as_slice()));
-            assert_eq!(
-                recovered_aux.get("redis-ver"),
-                Some(&"7.2.4".to_string())
-            );
+            assert_eq!(recovered_aux.get("redis-ver"), Some(&"7.2.4".to_string()));
 
             // Verify that the envelope was updated with the DecodeProof.
-            let env = fr_fec::envelope_from_json(
-                &std::fs::read_to_string(&env_path).expect("read env"),
-            )
-            .expect("parse env");
+            let env =
+                fr_fec::envelope_from_json(&std::fs::read_to_string(&env_path).expect("read env"))
+                    .expect("parse env");
             assert_eq!(env.scrub.status, "recovered");
             assert_eq!(env.decode_proofs.len(), 1);
 

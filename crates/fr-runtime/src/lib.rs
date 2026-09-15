@@ -45527,9 +45527,7 @@ impl Runtime {
             )));
         }
         if Self::config_pattern_matches_known(pattern, is_literal, "rdb-fec") {
-            entries.push(RespFrame::BulkString(Some(
-                b"rdb-fec".to_vec(),
-            )));
+            entries.push(RespFrame::BulkString(Some(b"rdb-fec".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 if self.server.rdb_fec_enabled {
                     b"yes".to_vec()
@@ -46484,10 +46482,7 @@ impl Runtime {
                     Ok(s) if s.eq_ignore_ascii_case("yes") => true,
                     Ok(s) if s.eq_ignore_ascii_case("no") => false,
                     _ => {
-                        return config_set_failed(
-                            "rdb-fec",
-                            "argument must be 'yes' or 'no'",
-                        );
+                        return config_set_failed("rdb-fec", "argument must be 'yes' or 'no'");
                     }
                 };
                 next_rdb_fec_enabled = Some(parsed);
@@ -74959,7 +74954,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
         assert_eq!(
             rt.execute_frame(command(&[b"CONFIG", b"SET", b"rdb-fec", b"no"]), 0),
-            RespFrame::SimpleString(b"OK".to_vec())
+            RespFrame::SimpleString("OK".to_string())
         );
         assert!(!rt.rdb_fec_enabled());
         assert_eq!(
@@ -74972,7 +74967,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
         assert_eq!(
             rt.execute_frame(command(&[b"CONFIG", b"SET", b"rdb-fec", b"yes"]), 0),
-            RespFrame::SimpleString(b"OK".to_vec())
+            RespFrame::SimpleString("OK".to_string())
         );
         assert!(rt.rdb_fec_enabled());
     }
@@ -79200,7 +79195,10 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
     #[test]
     fn save_rdb_generates_fec_sidecars_and_heals_corruption() {
-        let dir = std::env::temp_dir().join(format!("fr_runtime_rdb_fec_recovery_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_rdb_fec_recovery_test_{}",
+            std::process::id()
+        ));
         let _ = std::fs::create_dir_all(&dir);
         let rdb_path = dir.join("fec_test_dump.rdb");
         let envelope_path = dir.join("fec_test_dump.rdb.envelope.json");
@@ -79239,7 +79237,9 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         // 3. Fresh runtime loads RDB - auto-heals using RaptorQ sidecar!
         let mut rt2 = Runtime::default_strict();
         rt2.set_rdb_path(rdb_path.clone());
-        let loaded = rt2.load_rdb(100).expect("load_rdb should succeed by healing from sidecar");
+        let loaded = rt2
+            .load_rdb(100)
+            .expect("load_rdb should succeed by healing from sidecar");
         assert_eq!(loaded, 2);
 
         assert_eq!(
@@ -79252,10 +79252,9 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         );
 
         // 4. Verify envelope records decode proof and recovered status
-        let env = fr_fec::envelope_from_json(
-            &std::fs::read_to_string(&envelope_path).expect("read env"),
-        )
-        .expect("parse env");
+        let env =
+            fr_fec::envelope_from_json(&std::fs::read_to_string(&envelope_path).expect("read env"))
+                .expect("parse env");
         assert_eq!(env.scrub.status, "recovered");
         assert_eq!(env.decode_proofs.len(), 1);
 
@@ -79263,7 +79262,9 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         std::fs::write(&rdb_path, b"").expect("truncate rdb");
         let mut rt3 = Runtime::default_strict();
         rt3.set_rdb_path(rdb_path.clone());
-        let loaded3 = rt3.load_rdb(200).expect("load_rdb must heal 0-byte truncated rdb");
+        let loaded3 = rt3
+            .load_rdb(200)
+            .expect("load_rdb must heal 0-byte truncated rdb");
         assert_eq!(loaded3, 2);
         assert_eq!(
             rt3.execute_frame(command(&[b"GET", b"mykey"]), 201),
