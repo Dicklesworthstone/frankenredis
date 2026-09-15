@@ -7140,44 +7140,79 @@ pub fn read_rdb_file_with_functions(
 ) -> Result<(Vec<RdbEntry>, BTreeMap<String, String>, Vec<Vec<u8>>), PersistError> {
     match std::fs::read(path) {
         Ok(data) => {
-            if data.is_empty() {
-                return Err(PersistError::InvalidFrame);
-            }
-            match decode_rdb_prefix(&data) {
-                Ok(decoded) if decoded.consumed == data.len() => {
-                    Ok((decoded.entries, decoded.aux, decoded.functions))
-                }
-                _ => {
-                    // (Spec §9/§19) If the RDB snapshot is corrupted, truncated, or damaged,
-                    // attempt systematic RaptorQ forward-error-correction recovery if sidecars exist.
-                    let (env_path, sym_path) = fr_fec::sidecar_paths(path);
-                    if env_path.exists() && sym_path.exists() {
-                        let now_unix_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0);
-                        if let Ok(fr_fec::ScrubOutcome::Recovered { source, proof: _ }) =
-                            fr_fec::scrub_sidecar(path, now_unix_ms)
-                        {
-                            if let Ok(recovered) = decode_rdb_prefix(&source)
-                                && recovered.consumed == source.len()
-                            {
-                                return Ok((
-                                    recovered.entries,
-                                    recovered.aux,
-                                    recovered.functions,
-                                ));
-                            }
-                        }
+            if !data.is_empty() {
+                if let Ok(decoded) = decode_rdb_prefix(&data) {
+                    if decoded.consumed == data.len() {
+                        return Ok((decoded.entries, decoded.aux, decoded.functions));
                     }
-                    Err(PersistError::InvalidFrame)
                 }
             }
+            // (Spec §9/§19) If the RDB snapshot is corrupted, truncated, or damaged,
+            // attempt systematic RaptorQ forward-error-correction recovery if sidecars exist.
+            if let Some(recovered) = try_recover_rdb_from_sidecar(path) {
+                if let Ok(decoded) = decode_rdb_prefix(&recovered) {
+                    if decoded.consumed == recovered.len() {
+                        return Ok((decoded.entries, decoded.aux, decoded.functions));
+                    }
+                }
+            }
+            Err(PersistError::InvalidFrame)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(recovered) = try_recover_rdb_from_sidecar(path) {
+                if let Ok(decoded) = decode_rdb_prefix(&recovered) {
+                    if decoded.consumed == recovered.len() {
+                        return Ok((decoded.entries, decoded.aux, decoded.functions));
+                    }
+                }
+            }
             Ok((Vec::new(), BTreeMap::new(), Vec::new()))
         }
         Err(e) => Err(PersistError::Io(e)),
+    }
+}
+
+/// (Spec §9/§19) Attempts systematic RaptorQ forward-error-correction recovery of an RDB
+/// snapshot file from its durability sidecars (`.envelope.json` and `.symbols`).
+///
+/// If recovery succeeds:
+/// - Repairs and writes the source RDB bytes back to `path` on disk.
+/// - Appends a [`fr_fec::DecodeProof`] to `decode_proofs` in the envelope and sets scrub status to `recovered`.
+/// - Returns the recovered bytes.
+pub fn try_recover_rdb_from_sidecar(path: &Path) -> Option<Vec<u8>> {
+    let (env_path, sym_path) = fr_fec::sidecar_paths(path);
+    if !env_path.exists() || !sym_path.exists() {
+        return None;
+    }
+    let now_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let (mut envelope, symbols) = fr_fec::read_sidecar(path).ok()?;
+    let outcome = fr_fec::scrub_sidecar(path, now_unix_ms).ok()?;
+
+    match outcome {
+        fr_fec::ScrubOutcome::Recovered { source, .. } => Some(source),
+        fr_fec::ScrubOutcome::Clean => {
+            // The sidecar symbols are 100% intact, but the RDB file on disk was corrupted,
+            // truncated, or missing. Decode the source from intact symbols, persist proof into
+            // the envelope, and restore the RDB file on disk.
+            let (source, proof) = fr_fec::decode_artifact(
+                &envelope,
+                &symbols,
+                "rdb snapshot on disk damaged; recovered from intact RaptorQ sidecar",
+                now_unix_ms,
+            )
+            .ok()?;
+            envelope.decode_proofs.push(proof);
+            envelope.scrub.status = "recovered".to_string();
+            let json = fr_fec::envelope_to_json(&envelope);
+            let _ = std::fs::write(&env_path, json);
+            let _ = std::fs::write(path, &source);
+            Some(source)
+        }
+        fr_fec::ScrubOutcome::Failed { .. } => None,
     }
 }
 

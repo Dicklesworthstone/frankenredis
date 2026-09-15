@@ -2201,6 +2201,7 @@ fn config_static_param_is_dynamic(name: &str) -> bool {
             "list-max-ziplist-size",
             "appendonly",
             "stop-writes-on-bgsave-error",
+            "rdb-fec",
             "appendfilename",
             "appenddirname",
             "dbfilename",
@@ -79250,9 +79251,51 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
             RespFrame::BulkString(Some(b"12345".to_vec()))
         );
 
+        // 4. Verify envelope records decode proof and recovered status
+        let env = fr_fec::envelope_from_json(
+            &std::fs::read_to_string(&envelope_path).expect("read env"),
+        )
+        .expect("parse env");
+        assert_eq!(env.scrub.status, "recovered");
+        assert_eq!(env.decode_proofs.len(), 1);
+
+        // 5. Truncate RDB to 0 bytes and verify recovery
+        std::fs::write(&rdb_path, b"").expect("truncate rdb");
+        let mut rt3 = Runtime::default_strict();
+        rt3.set_rdb_path(rdb_path.clone());
+        let loaded3 = rt3.load_rdb(200).expect("load_rdb must heal 0-byte truncated rdb");
+        assert_eq!(loaded3, 2);
+        assert_eq!(
+            rt3.execute_frame(command(&[b"GET", b"mykey"]), 201),
+            RespFrame::BulkString(Some(b"myval".to_vec()))
+        );
+
+        // 6. When rdb-fec is set to no, sidecars are not written
+        let no_fec_rdb = dir.join("no_fec_dump.rdb");
+        let no_fec_env = dir.join("no_fec_dump.rdb.envelope.json");
+        let no_fec_sym = dir.join("no_fec_dump.rdb.symbols");
+        let mut rt_nofec = Runtime::default_strict();
+        rt_nofec.set_rdb_path(no_fec_rdb.clone());
+        assert_eq!(
+            rt_nofec.execute_frame(command(&[b"CONFIG", b"SET", b"rdb-fec", b"no"]), 300),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt_nofec.execute_frame(command(&[b"SET", b"k", b"v"]), 301),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt_nofec.execute_frame(command(&[b"SAVE"]), 302),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(no_fec_rdb.exists());
+        assert!(!no_fec_env.exists());
+        assert!(!no_fec_sym.exists());
+
         let _ = std::fs::remove_file(&rdb_path);
         let _ = std::fs::remove_file(&envelope_path);
         let _ = std::fs::remove_file(&symbols_path);
+        let _ = std::fs::remove_file(&no_fec_rdb);
         let _ = std::fs::remove_dir(&dir);
     }
 
