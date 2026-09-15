@@ -9735,74 +9735,14 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<StringBytes<'_>>, StoreError> {
-        // (frankenredis-get-single-lookup) When the DB holds NO key with a TTL
-        // and LFU eviction sampling is off (the default LRU config), a GET can
-        // never lazily expire its key and consumes no RNG, so the
-        // `drop_if_expired` exists-probe + expiry-map probe inside
-        // `record_keyspace_lookup` are pure overhead layered on top of the value
-        // `get_mut` — three hash+probes per GET. Collapse to ONE `entries`
-        // lookup that serves both keyspace hit/miss accounting and the value
-        // fetch. Byte-identical: a TTL-less key cannot evict, so
-        // `record_keyspace_lookup` would have returned the same hit/miss (bumping
-        // the identical counter) with no lazy-expiry eviction / propagation /
-        // notification, and with LFU off `touch_access` reads no RNG (the
-        // `rand_sample` argument is unused on the LRU path).
-        if self.count_expiring_keys() == 0 && !self.lfu_tracking_enabled() {
-            let lfu_decay = self.lfu_decay_time;
-            let lfu_log_factor = self.lfu_log_factor;
-            // (frankenredis-keymiss-oqhbi build debt) See `keymiss_notify_enabled`.
-            if self.keymiss_notify_enabled() && !self.entries.contains_key(key) {
-                self.record_keyspace_miss(key);
-                return Ok(None);
-            }
-            return match self.entries.get_mut(key) {
-                Some(entry) => {
-                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
-                    if !entry.value.is_string_like() {
-                        return Err(StoreError::WrongType);
-                    }
-                    entry.touch_access(now_ms, false, lfu_decay, lfu_log_factor, 0);
-                    let value = entry
-                        .value
-                        .string_bytes_inline()
-                        .expect("string-like value exposes bytes");
-                    Ok(Some(value))
-                }
-                None => {
-                    // Only reachable with `m` off; see the branch above.
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
-                    Ok(None)
-                }
-            };
-        }
-        // (frankenredis-cc get-ttl-lru-single-lookup) Extend the no-TTL fast path above
-        // to the common CACHE config: TTL-bearing keys present but LRU (LFU sampling off).
-        // With LFU off, `touch_access`'s `rand_sample` is unused (0) and no RNG is
-        // consumed, so there is no `next_rand` `&mut self` call to tangle with the value
-        // `get_mut`, and the read cannot diverge. Peek the expiry first — delegating an
-        // actually-expired key to the full `drop_if_expired` for removal / notification /
-        // propagation — then a SINGLE `entries.get_mut` serves keyspace hit/miss
-        // accounting AND the value fetch, collapsing the slow path's
-        // `record_keyspace_lookup` (drop_if_expired probe) + `get_mut` double lookup.
-        // Byte-identical: a non-LFU read consumes no RNG and bumps the same hit/miss
-        // counter with the same lazy-expiry behaviour as the slow path below.
+        // (frankenredis-get-single-lookup) For non-LFU reads (the default configuration),
+        // delegate directly to `lookup_live_for_read_mut` which folds keyspace lookup, lazy expiry,
+        // and hit/miss accounting into a single probe without consuming RNG.
         if !self.lfu_tracking_enabled() {
             let lfu_decay = self.lfu_decay_time;
             let lfu_log_factor = self.lfu_log_factor;
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
-            {
-                self.drop_if_expired(key, now_ms);
-                self.record_keyspace_miss(key);
-                return Ok(None);
-            }
-            // (frankenredis-keymiss-oqhbi build debt) See `keymiss_notify_enabled`.
-            if self.keymiss_notify_enabled() && !self.entries.contains_key(key) {
-                self.record_keyspace_miss(key);
-                return Ok(None);
-            }
-            return match self.entries.get_mut(key) {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
                 Some(entry) => {
-                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                     if !entry.value.is_string_like() {
                         return Err(StoreError::WrongType);
                     }
@@ -9813,11 +9753,7 @@ impl Store {
                         .expect("string-like value exposes bytes");
                     Ok(Some(value))
                 }
-                None => {
-                    // Only reachable with `m` off; see the branch above.
-                    self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
-                    Ok(None)
-                }
+                None => Ok(None),
             };
         }
         self.get_string_bytes_lfu_impl::<true>(key, now_ms)
@@ -11068,6 +11004,7 @@ impl Store {
         };
         if evaluate_expiry(now_ms, peeked_expiry).should_evict {
             self.drop_if_expired(key, now_ms);
+            return false;
         }
         if !self.entries.contains_key(key) {
             return false;
@@ -11152,6 +11089,7 @@ impl Store {
         };
         if evaluate_expiry(now_ms, peeked_expiry).should_evict {
             self.drop_if_expired(key, now_ms);
+            return false;
         }
         if !self.entries.contains_key(key) {
             return false;
@@ -11573,27 +11511,14 @@ impl Store {
         if !self.lfu_tracking_enabled() {
             let mut results = Vec::with_capacity(keys.len());
             for key in keys {
-                if self.expires_count != 0
-                    && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
-                {
-                    self.drop_if_expired(key, now_ms);
-                    self.record_keyspace_miss(key);
+                if let Some(entry) = self.lookup_live_for_read_mut(key, now_ms) {
+                    let v = entry.value.string_owned();
+                    if v.is_some() {
+                        entry.touch(now_ms);
+                    }
+                    results.push(v);
+                } else {
                     results.push(None);
-                    continue;
-                }
-                match self.entries.get_mut(key) {
-                    Some(entry) => {
-                        self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
-                        let v = entry.value.string_owned();
-                        if v.is_some() {
-                            entry.touch(now_ms);
-                        }
-                        results.push(v);
-                    }
-                    None => {
-                        self.record_keyspace_miss(key);
-                        results.push(None);
-                    }
                 }
             }
             return results;
