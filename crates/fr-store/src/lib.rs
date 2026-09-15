@@ -17644,54 +17644,7 @@ impl Store {
         field: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        // (CrimsonHawk) Non-LFU single-lookup collapse, gated on NO per-field TTLs anywhere
-        // (`hash_field_expires.is_empty()`, the common case — HEXPIRE is rare). Then
-        // `drop_hash_field_if_expired` is a guaranteed no-op (fast-exits on the empty map;
-        // can neither reap a field nor empty→remove the hash), so the slow path's
-        // `record_keyspace_lookup` + separate `get_mut` double probe collapses to one
-        // `lookup_live_for_read_mut`. Byte-identical: same key-level lazy-expiry, hit/miss
-        // (counted once — no field-drop can change key presence here), unconditional `touch`
-        // (incl WRONGTYPE), and value. LFU / field-TTL paths left verbatim.
-        if self.hash_field_expires.is_empty() && !self.lfu_tracking_enabled() {
-            return match self.lookup_live_for_read_mut(key, now_ms) {
-                Some(entry) => {
-                    entry.touch(now_ms);
-                    match &entry.value {
-                        Value::Hash(m) => Ok(m.get(field).map(<[u8]>::to_vec)),
-                        _ => Err(StoreError::WrongType),
-                    }
-                }
-                None => Ok(None),
-            };
-        }
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(None);
-        }
-        // Reap the specific field if its per-field TTL lapsed so expired
-        // fields are invisible at the hash-read layer (Redis 7.4
-        // br-frankenredis-b8ut).
-        self.drop_hash_field_if_expired(key, field, now_ms);
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                entry.touch(now_ms);
-                match &entry.value {
-                    Value::Hash(m) => Ok(m.get(field).map(<[u8]>::to_vec)),
-                    _ => Err(StoreError::WrongType),
-                }
-            }
-            None => Ok(None),
-        }
+        self.hget_with(key, field, now_ms, |val| val.map(<[u8]>::to_vec))
     }
 
     /// Zero-copy HGET: borrows the field value bytes (or `None` for a missing
@@ -18177,31 +18130,16 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        self.drop_expired_hash_fields(key, now_ms);
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                entry.touch(now_ms);
-                match &entry.value {
-                    Value::Hash(m) => Ok(m.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect()),
-                    _ => Err(StoreError::WrongType),
-                }
-            }
-            None => Ok(Vec::new()),
-        }
+        let mut pairs = Vec::new();
+        let mut current_field = None;
+        self.hgetall_borrow_scan(key, now_ms, |event| match event {
+            SmembersScanEvent::Len(n) => pairs.reserve_exact(n),
+            SmembersScanEvent::Member(b) => match current_field.take() {
+                Some(f) => pairs.push((f, b.to_vec())),
+                None => current_field = Some(b.to_vec()),
+            },
+        })?;
+        Ok(pairs)
     }
 
     /// Borrow-scan variant of `hgetall` for the zero-copy reply fast path:
@@ -18601,31 +18539,12 @@ impl Store {
     }
 
     pub fn hvals(&mut self, key: &[u8], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        self.drop_expired_hash_fields(key, now_ms);
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                entry.touch(now_ms);
-                match &entry.value {
-                    Value::Hash(m) => Ok(m.values().map(<[u8]>::to_vec).collect()),
-                    _ => Err(StoreError::WrongType),
-                }
-            }
-            None => Ok(Vec::new()),
-        }
+        let mut vals = Vec::new();
+        self.hcollection_borrow_scan(key, now_ms, true, |event| match event {
+            SmembersScanEvent::Len(n) => vals.reserve_exact(n),
+            SmembersScanEvent::Member(b) => vals.push(b.to_vec()),
+        })?;
+        Ok(vals)
     }
 
     pub fn hmget(
