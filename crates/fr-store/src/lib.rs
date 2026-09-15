@@ -8772,7 +8772,11 @@ impl Store {
         // `drop_if_expired` already performs the keyspace lookup and now reports
         // whether the key survived, so the separate `contains_key` it used to do
         // here (a second hash lookup on every read) is gone. (frankenredis-shewy)
-        let hit = self.drop_if_expired(key, now_ms);
+        let hit = if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms)
+        } else {
+            self.entries.contains_key(key)
+        };
         if hit {
             self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
         } else {
@@ -9926,7 +9930,9 @@ impl Store {
         px_ttl_ms: Option<u64>,
         now_ms: u64,
     ) {
-        self.drop_if_expired(key.as_slice(), now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key.as_slice(), now_ms);
+        }
         let expires_at_ms = px_ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
         // (frankenredis-lfuinit) Upstream evict.h::LFU_INIT_VAL = 5.
         // SET on a fresh key under an LFU policy creates the object via
@@ -10297,7 +10303,12 @@ impl Store {
     }
 
     pub fn set_plain_owned(&mut self, key: Vec<u8>, value: Vec<u8>, now_ms: u64) {
-        if !self.drop_if_expired(key.as_slice(), now_ms) {
+        let key_present = if self.expires_count != 0 {
+            self.drop_if_expired(key.as_slice(), now_ms)
+        } else {
+            self.entries.contains_key(key.as_slice())
+        };
+        if !key_present {
             let mut entry = Entry::new(canonical_string_value(value), now_ms);
             let lfu_tracking_enabled = self.lfu_tracking_enabled();
             entry.lfu_freq = if lfu_tracking_enabled {
@@ -10375,7 +10386,9 @@ impl Store {
         expires_at_ms: Option<u64>,
         now_ms: u64,
     ) {
-        self.drop_if_expired(key.as_slice(), now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key.as_slice(), now_ms);
+        }
         // (frankenredis-lfuinit) Upstream evict.h::LFU_INIT_VAL = 5.
         // SET on a fresh key under an LFU policy creates the object via
         // createObject → initObjectLFUOrLRU which seeds the counter at
@@ -10867,7 +10880,11 @@ impl Store {
         // second keyspace probe. Return the reap directly. Byte-identical; one fewer foldhash
         // lookup per call (2 -> 1), amplified per-key in the MSETNX / MOVE / COPY / RENAMENX
         // existence prechecks that call this in a loop.
-        self.drop_if_expired(key, now_ms)
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms)
+        } else {
+            self.entries.contains_key(key)
+        }
     }
 
     /// Pure presence check against the keyspace map — no lazy expiry, no
@@ -11044,7 +11061,11 @@ impl Store {
         // (cc_fr) Peek the deadline ONCE and reuse it as `old_expiry` below — a due key is
         // dropped and returns via `contains_key`, so any path reaching the TTL-set has an
         // unchanged expiry (the redundant second `expiry_ms` hash+probe is elided).
-        let peeked_expiry = self.expiry_ms(key);
+        let peeked_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
         if evaluate_expiry(now_ms, peeked_expiry).should_evict {
             self.drop_if_expired(key, now_ms);
         }
@@ -11124,7 +11145,11 @@ impl Store {
         // existence check. Mirrors the relative-time sibling `expire_milliseconds`; the
         // absolute-time variant (EXPIREAT/PEXPIREAT) was missed by that collapse. Byte-exact
         // (no RNG, no stat; a live/absent key's drop_if_expired had no side effect).
-        let peeked_expiry = self.expiry_ms(key);
+        let peeked_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
         if evaluate_expiry(now_ms, peeked_expiry).should_evict {
             self.drop_if_expired(key, now_ms);
         }
@@ -12793,7 +12818,7 @@ impl Store {
         ops: &[(u64, u8, bool)],
         now_ms: u64,
     ) -> Vec<i64> {
-        if !self.drop_if_expired(key, now_ms) {
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return ops
                 .iter()
                 .map(|&(off, bits, signed)| bitfield_read(&[], off, bits, signed))
@@ -12824,7 +12849,9 @@ impl Store {
         bits: u8,
         now_ms: u64,
     ) -> Result<(), StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let end_bit = bit_offset.saturating_add(u64::from(bits));
         let needed_bytes = end_bit.div_ceil(8) as usize;
         // (frankenredis-g3ioa) redis bounds BITFIELD by the OFFSET byte-index, NOT
@@ -14102,7 +14129,7 @@ impl Store {
         // by the caller's existence precheck (object_cmd's exists_no_touch), and
         // DEBUG OBJECT (the other caller) must not bump stats at all — upstream
         // OBJECT IDLETIME does exactly one lookupKeyRead. (frankenredis-934ax)
-        if !self.drop_if_expired(key, now_ms) {
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return None;
         }
         self.object_idletime_raw(key, now_ms)
@@ -14232,7 +14259,9 @@ impl Store {
                 None => false,
             };
         }
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -23331,8 +23360,10 @@ impl Store {
         if keys.is_empty() {
             return Ok(None);
         }
-        for key in keys {
-            self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            for key in keys {
+                self.drop_if_expired(key, now_ms);
+            }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -23874,8 +23905,10 @@ impl Store {
         keys: &[&[u8]],
         now_ms: u64,
     ) -> Result<Option<SetValue>, StoreError> {
-        for key in keys {
-            self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            for key in keys {
+                self.drop_if_expired(key, now_ms);
+            }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -23996,8 +24029,10 @@ impl Store {
         let Some(first_key) = keys.first().copied() else {
             return Ok(None);
         };
-        for key in keys {
-            self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            for key in keys {
+                self.drop_if_expired(key, now_ms);
+            }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
@@ -24122,21 +24157,21 @@ impl Store {
         // SPOP is a write (upstream t_set.c::spopCommand uses lookupKeyWriteOrReply),
         // so it must NOT bump keyspace_hits/misses — only lookupKeyRead* does.
         // Use the non-counting expiry-aware lookup. (frankenredis-934ax)
-        if !self.drop_if_expired(key, now_ms) {
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return Ok(None);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_val = self.next_rand();
-        let lfu_rand = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let mut should_remove_key = false;
         let member = match self.entries.get_mut(key) {
             Some(entry) => {
+                let rand_val = Self::lcg_next_seed(&mut self.rng_seed);
+                let lfu_rand = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand);
                 }
@@ -24210,7 +24245,7 @@ impl Store {
         // `spop` opens with `drop_if_expired`; a missing/expired key early-returns Ok(None) BEFORE
         // it draws rand_val, so the loop makes NO draw for it — and none for the final failed call
         // after the set is drained + the key removed. Hence there is no "wasted" draw to replay.
-        if !self.drop_if_expired(key, now_ms) {
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return Ok(Vec::new());
         }
         // (SilverBirch) ONE keyspace probe for the whole pop batch. Previously the non-LFU path did
@@ -24806,7 +24841,9 @@ impl Store {
     /// other type is WRONGTYPE. Lets the command layer validate every source
     /// up front so an empty first source can't mask a wrong-type later one.
     pub fn ensure_zset_or_set_source(&mut self, key: &[u8], now_ms: u64) -> Result<(), StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         match self.entries.get(key) {
             None => Ok(()),
             Some(entry) => match &entry.value {
@@ -25858,7 +25895,9 @@ impl Store {
         let mut has_empty = false;
 
         for &key in keys {
-            self.drop_if_expired(key, now_ms);
+            if self.expires_count != 0 {
+                self.drop_if_expired(key, now_ms);
+            }
             match self.entries.get_mut(key) {
                 Some(entry) => {
                     if ZSetAlgebraInput::from_value(&entry.value).is_none() {
@@ -29863,8 +29902,10 @@ impl Store {
         // keyspace_hits/misses via LOOKUP_WRITE). (frankenredis-ljtdo)
         let exists = if record_stat {
             self.record_keyspace_lookup(key, now_ms)
-        } else {
+        } else if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms)
+        } else {
+            self.entries.contains_key(key)
         };
         if !exists {
             return Ok((false, None));
@@ -31876,7 +31917,7 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<StreamInfoBounds>, StoreError> {
-        if !self.drop_if_expired(key, now_ms) {
+        if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
             return Ok(None);
         }
         match self.entries.get(key) {
@@ -32055,7 +32096,9 @@ impl Store {
         group: &[u8],
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         match self.entries.get(key) {
             None => Err(StoreError::KeyNotFound),
             Some(entry) => match &entry.value {
@@ -32076,7 +32119,9 @@ impl Store {
         entries_read: Option<u64>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => {
@@ -32148,7 +32193,9 @@ impl Store {
         consumer: &[u8],
         now_ms: u64,
     ) -> Result<Option<bool>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => {
@@ -32381,7 +32428,9 @@ impl Store {
         max_deleted_id: Option<StreamId>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
@@ -32697,7 +32746,9 @@ impl Store {
         // deterministic PFCOUNT). Multi-key PFCOUNT never touches the cache.
         if keys.len() == 1 {
             let key = keys[0];
-            self.drop_if_expired(key, now_ms);
+            if self.expires_count != 0 {
+                self.drop_if_expired(key, now_ms);
+            }
             let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
                 self.next_rand()
             } else {
@@ -32760,7 +32811,9 @@ impl Store {
 
         let mut merged: Vec<u8> = Vec::with_capacity(HLL_REGISTERS);
         for &key in keys {
-            self.drop_if_expired(key, now_ms);
+            if self.expires_count != 0 {
+                self.drop_if_expired(key, now_ms);
+            }
             let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
                 self.next_rand()
             } else {
@@ -32815,7 +32868,9 @@ impl Store {
         let mut saw_dense_input = false;
 
         // Include dest if it already holds an HLL, and preserve its TTL
-        self.drop_if_expired(dest, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(dest, now_ms);
+        }
         let existing_ttl = if self.expires_count != 0 {
             self.expiry_ms(dest)
         } else {
@@ -32834,7 +32889,9 @@ impl Store {
 
         // Merge all sources
         for &src in sources {
-            self.drop_if_expired(src, now_ms);
+            if self.expires_count != 0 {
+                self.drop_if_expired(src, now_ms);
+            }
             if let Some(entry) = self.entries.get(src) {
                 let Some(data) = entry.value.string_bytes() else {
                     return Err(StoreError::WrongType);
@@ -32868,7 +32925,9 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => {
@@ -32902,7 +32961,9 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<()>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => {
                 let Some(data) = entry.value.string_bytes() else {
@@ -32921,7 +32982,9 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<String>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => {
                 let Some(data) = entry.value.string_bytes() else {
@@ -32945,7 +33008,9 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<&'static str>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => {
                 let Some(data) = entry.value.string_bytes() else {
@@ -32967,7 +33032,9 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<bool>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         match self.entries.get_mut(key) {
             Some(entry) => {
@@ -33555,7 +33622,9 @@ impl Store {
         let mut total_bytes = 0usize;
         let mut lens: Vec<usize> = Vec::with_capacity(keys.len());
         for &key in keys {
-            self.drop_if_expired(key, now_ms);
+            if self.expires_count != 0 {
+                self.drop_if_expired(key, now_ms);
+            }
             let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
                 self.next_rand()
             } else {
@@ -33730,7 +33799,9 @@ impl Store {
             HashMap::default();
 
         for (i, &key) in keys.iter().enumerate() {
-            self.drop_if_expired(key, now_ms);
+            if self.expires_count != 0 {
+                self.drop_if_expired(key, now_ms);
+            }
             let weight = weights.get(i).copied().unwrap_or(1.0);
             let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
                 self.next_rand()
@@ -33825,7 +33896,9 @@ impl Store {
         let mut has_empty = false;
 
         for (i, &key) in keys.iter().enumerate() {
-            self.drop_if_expired(key, now_ms);
+            if self.expires_count != 0 {
+                self.drop_if_expired(key, now_ms);
+            }
             match self.entries.get(key) {
                 Some(entry) => match &entry.value {
                     Value::SortedSet(zs) => {
@@ -37909,7 +37982,9 @@ impl Store {
         // Check if key exists first (before payload validation) to match Redis behavior.
         // Redis returns BUSYKEY if the key exists and REPLACE is not specified, even
         // if the payload is malformed.
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
         if !replace && self.entries.contains_key(key) {
             return Err(StoreError::BusyKey);
         }
@@ -38747,7 +38822,9 @@ impl Store {
 
     /// Drop a key if it has expired. Public wrapper for RDB/snapshot use.
     pub fn expire_key_if_stale(&mut self, key: &[u8], now_ms: u64) {
-        self.drop_if_expired(key, now_ms);
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
     }
 
     /// Get a reference to an entry's value and expiry for RDB serialization.
