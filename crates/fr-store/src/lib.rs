@@ -13712,7 +13712,7 @@ impl Store {
         let Some(old_expiry) = deadline else {
             return false;
         };
-        self.with_mutated_entry(key, |_| {});
+        self.record_proven_existing_entry_mutation::<true>(key);
         self.set_existing_expiry_ms(key, None);
         self.forget_volatile_key(key);
         self.update_expiry_deadline(Some(old_expiry), None);
@@ -14974,12 +14974,13 @@ impl Store {
                 }
             }
             None => {
-                // Removing a TTL: original gated on entries-presence before touching the deadline
-                // map + marking the digest stale (absent key ⇒ no-op, digest untouched).
-                if !self.entries.contains_key(key) {
+                // Removing a TTL: if no expirations exist or key has no expiry, removing from
+                // expiry_deadlines is a no-op; return early without touching entries or marking
+                // digest stale. Since expiry_deadlines ⊆ entries, a successful remove proves the
+                // key exists and its TTL actually changed, so mark digest stale below.
+                if self.expires_count == 0 || self.expiry_deadlines.remove(key).is_none() {
                     return;
                 }
-                self.expiry_deadlines.remove(key);
             }
         }
         // (bugfix) `entry_state_digest` hashes the key's expiry, so changing the TTL changes the
@@ -33441,7 +33442,7 @@ impl Store {
                 }
                 Some(deadline) => {
                     let added_expiry = old_expiry.is_none();
-                    self.with_mutated_entry(key, |_| {});
+                    self.record_proven_existing_entry_mutation::<true>(key);
                     self.set_existing_expiry_ms(key, Some(deadline));
                     if added_expiry {
                         self.expires_count = self.expires_count.saturating_add(1);
@@ -33462,7 +33463,7 @@ impl Store {
                 }
                 None => {
                     if old_expiry.is_some() {
-                        self.with_mutated_entry(key, |_| {});
+                        self.record_proven_existing_entry_mutation::<true>(key);
                         self.set_existing_expiry_ms(key, None);
                         self.forget_volatile_key(key);
                         self.update_expiry_deadline(old_expiry, None);
