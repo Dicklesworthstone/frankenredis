@@ -14077,7 +14077,10 @@ mod tests {
             let (recovered_entries, recovered_aux) =
                 crate::read_rdb_file(&rdb_path).expect("auto-heal corrupted RDB");
             assert_eq!(recovered_entries.len(), 2);
-            assert_eq!(recovered_entries[0].key, b"hello");
+            let keys: std::collections::HashSet<Vec<u8>> =
+                recovered_entries.iter().map(|e| e.key.clone()).collect();
+            assert!(keys.contains(b"hello".as_slice()));
+            assert!(keys.contains(b"counter".as_slice()));
             assert_eq!(
                 recovered_aux.get("redis-ver"),
                 Some(&"7.2.4".to_string())
