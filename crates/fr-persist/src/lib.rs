@@ -7079,6 +7079,28 @@ pub fn write_rdb_bytes(path: &Path, bytes: &[u8]) -> Result<(), PersistError> {
     write_rdb_bytes_atomically(path, bytes)
 }
 
+/// Durably write already-encoded RDB bytes to `path` and generate RFC 6330
+/// RaptorQ forward-error-correction sidecars (`.envelope.json` and `.symbols`).
+///
+/// Implements the spec §9/§19 systematic durability drill contract for
+/// long-lived state artifacts: source symbols plus repair packets allow
+/// damaged or truncated RDB snapshots to be scrubbed and healed on reload.
+pub fn write_rdb_bytes_with_sidecar(
+    path: &Path,
+    bytes: &[u8],
+    now_unix_ms: u64,
+) -> Result<(), PersistError> {
+    write_rdb_bytes_atomically(path, bytes)?;
+    if !bytes.is_empty() {
+        let symbol_size = 512_u16;
+        let k = (bytes.len() + symbol_size as usize - 1) / symbol_size as usize;
+        let repair_symbols = (k / 8).clamp(8, 128);
+        fr_fec::write_sidecar(path, "state", repair_symbols, symbol_size, now_unix_ms)
+            .map_err(|e| PersistError::Io(std::io::Error::other(e)))?;
+    }
+    Ok(())
+}
+
 /// Durably write bytes to `path` via a temp file + rename, WITHOUT syncing the parent directory.
 fn write_file_atomically_without_dir_sync(path: &Path, encoded: &[u8]) -> Result<(), PersistError> {
     let tmp_path = path.with_extension("rdb.tmp");
@@ -7101,21 +7123,17 @@ fn write_rdb_bytes_atomically(path: &Path, encoded: &[u8]) -> Result<(), Persist
 pub fn read_rdb_file(
     path: &Path,
 ) -> Result<(Vec<RdbEntry>, BTreeMap<String, String>), PersistError> {
-    match std::fs::read(path) {
-        Ok(data) => {
-            if data.is_empty() {
-                return Err(PersistError::InvalidFrame);
-            }
-            decode_rdb(&data)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((Vec::new(), BTreeMap::new())),
-        Err(e) => Err(PersistError::Io(e)),
-    }
+    let (entries, aux, _) = read_rdb_file_with_functions(path)?;
+    Ok((entries, aux))
 }
 
 /// Like [`read_rdb_file`] but also returns the `FUNCTION2` library payloads
 /// captured from the dump, so the caller can re-register them into the function
 /// engine. A missing file yields empty collections. (frankenredis-tm139)
+///
+/// If an existing RDB snapshot file has corrupted or truncated bytes,
+/// automatically checks for RaptorQ durability sidecars (`.envelope.json` and `.symbols`)
+/// and repairs the snapshot before decoding (spec §9/§19).
 #[allow(clippy::type_complexity)]
 pub fn read_rdb_file_with_functions(
     path: &Path,
@@ -7125,11 +7143,36 @@ pub fn read_rdb_file_with_functions(
             if data.is_empty() {
                 return Err(PersistError::InvalidFrame);
             }
-            let decoded = decode_rdb_prefix(&data)?;
-            if decoded.consumed != data.len() {
-                return Err(PersistError::InvalidFrame);
+            match decode_rdb_prefix(&data) {
+                Ok(decoded) if decoded.consumed == data.len() => {
+                    Ok((decoded.entries, decoded.aux, decoded.functions))
+                }
+                _ => {
+                    // (Spec §9/§19) If the RDB snapshot is corrupted, truncated, or damaged,
+                    // attempt systematic RaptorQ forward-error-correction recovery if sidecars exist.
+                    let (env_path, sym_path) = fr_fec::sidecar_paths(path);
+                    if env_path.exists() && sym_path.exists() {
+                        let now_unix_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        if let Ok(fr_fec::ScrubOutcome::Recovered { source, proof: _ }) =
+                            fr_fec::scrub_sidecar(path, now_unix_ms)
+                        {
+                            if let Ok(recovered) = decode_rdb_prefix(&source)
+                                && recovered.consumed == source.len()
+                            {
+                                return Ok((
+                                    recovered.entries,
+                                    recovered.aux,
+                                    recovered.functions,
+                                ));
+                            }
+                        }
+                    }
+                    Err(PersistError::InvalidFrame)
+                }
             }
-            Ok((decoded.entries, decoded.aux, decoded.functions))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Ok((Vec::new(), BTreeMap::new(), Vec::new()))
@@ -13941,6 +13984,82 @@ mod tests {
                 prop_assert_eq!(decoded.len(), 1);
                 prop_assert_eq!(&decoded[0], &record);
             }
+        }
+
+        #[test]
+        fn rdb_sidecar_roundtrip_and_corruption_recovery() {
+            let dir = std::env::temp_dir().join(format!("fr_rdb_fec_test_{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let rdb_path = dir.join("test_snapshot.rdb");
+
+            let entries = vec![
+                crate::RdbEntry {
+                    db: 0,
+                    key: b"hello".to_vec(),
+                    value: crate::RdbValue::String(b"world".to_vec()),
+                    expire_ms: None,
+                },
+                crate::RdbEntry {
+                    db: 0,
+                    key: b"counter".to_vec(),
+                    value: crate::RdbValue::String(b"100".to_vec()),
+                    expire_ms: Some(1_700_000_000_000),
+                },
+            ];
+            let aux = [("redis-ver", "7.2.4")];
+            let encoded = crate::encode_rdb(&entries, &aux);
+
+            // 1. Write RDB with sidecar.
+            let now_ms = 1_700_000_000_000_u64;
+            crate::write_rdb_bytes_with_sidecar(&rdb_path, &encoded, now_ms)
+                .expect("write with sidecar");
+
+            let (env_path, sym_path) = fr_fec::sidecar_paths(&rdb_path);
+            assert!(env_path.exists(), "envelope must exist");
+            assert!(sym_path.exists(), "symbols must exist");
+
+            // 2. Read back clean snapshot.
+            let (read_entries, read_aux) =
+                crate::read_rdb_file(&rdb_path).expect("read clean RDB");
+            assert_eq!(read_entries.len(), 2);
+            assert_eq!(read_aux.get("redis-ver"), Some(&"7.2.4".to_string()));
+
+            // 3. Corrupt bytes in the RDB file (simulating disk bit-rot / torn write).
+            let mut corrupted = std::fs::read(&rdb_path).expect("read before corrupt");
+            assert!(corrupted.len() > 20);
+            corrupted[15] ^= 0xff;
+            corrupted[16] ^= 0xaa;
+            std::fs::write(&rdb_path, &corrupted).expect("write corrupted");
+
+            // Without sidecar, decode_rdb(&corrupted) would fail checksum or opcode:
+            assert!(
+                crate::decode_rdb(&corrupted).is_err(),
+                "corrupted data must fail bare decode"
+            );
+
+            // 4. read_rdb_file automatically detects corruption, repairs from RaptorQ symbols,
+            // logs DecodeProof into the envelope, and succeeds!
+            let (recovered_entries, recovered_aux) =
+                crate::read_rdb_file(&rdb_path).expect("auto-heal corrupted RDB");
+            assert_eq!(recovered_entries.len(), 2);
+            assert_eq!(recovered_entries[0].key, b"hello");
+            assert_eq!(
+                recovered_aux.get("redis-ver"),
+                Some(&"7.2.4".to_string())
+            );
+
+            // Verify that the envelope was updated with the DecodeProof.
+            let env = fr_fec::envelope_from_json(
+                &std::fs::read_to_string(&env_path).expect("read env"),
+            )
+            .expect("parse env");
+            assert_eq!(env.scrub.status, "recovered");
+            assert_eq!(env.decode_proofs.len(), 1);
+
+            let _ = std::fs::remove_file(&rdb_path);
+            let _ = std::fs::remove_file(&env_path);
+            let _ = std::fs::remove_file(&sym_path);
+            let _ = std::fs::remove_dir(&dir);
         }
     }
 }
