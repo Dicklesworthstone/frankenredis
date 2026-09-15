@@ -54254,6 +54254,115 @@ mod tests {
         );
     }
 
+    #[test]
+    fn spop_bitop_zstore_restore_bare_drop_guard_matches() {
+        // 1. Test SPOP with expires_count == 0 and expires_count > 0
+        let mut s = Store::new();
+        assert_eq!(s.spop(b"nonexistent", 1).unwrap(), None);
+        s.sadd(b"set1", &[b"elem1".to_vec()], 1).unwrap();
+        assert_eq!(s.expires_count, 0);
+        let popped = s.spop(b"set1", 2).unwrap();
+        assert_eq!(popped, Some(b"elem1".to_vec()));
+        assert_eq!(s.spop(b"set1", 3).unwrap(), None);
+
+        // SPOP with expired key
+        let mut s2 = Store::new();
+        s2.sadd(b"exp_set", &[b"elem".to_vec()], 1).unwrap();
+        s2.expire_at_milliseconds(b"exp_set", 100, 1);
+        assert!(s2.expires_count >= 1);
+        // Before expiry: pops element
+        assert_eq!(s2.spop(b"exp_set", 50).unwrap(), Some(b"elem".to_vec()));
+        // After expiry:
+        s2.sadd(b"exp_set2", &[b"elem".to_vec()], 1).unwrap();
+        s2.expire_at_milliseconds(b"exp_set2", 100, 1);
+        assert_eq!(s2.spop(b"exp_set2", 150).unwrap(), None);
+        assert_eq!(s2.get(b"exp_set2", 150).unwrap(), None);
+
+        // 2. Test BITOP with expires_count == 0 and expires_count > 0
+        let mut s3 = Store::new();
+        s3.set(b"b1".to_vec(), vec![0b10101010], None, 1);
+        s3.set(b"b2".to_vec(), vec![0b01010101], None, 1);
+        assert_eq!(s3.expires_count, 0);
+        let len = s3.bitop(b"AND", b"b_out", &[b"b1", b"b2"], 2).unwrap();
+        assert_eq!(len, 1);
+        assert_eq!(s3.get(b"b_out", 2).unwrap(), Some(vec![0b00000000]));
+
+        // BITOP with expired source key
+        s3.expire_at_milliseconds(b"b1", 100, 2);
+        assert!(s3.expires_count >= 1);
+        let len2 = s3.bitop(b"OR", b"b_out2", &[b"b1", b"b2"], 150).unwrap();
+        assert_eq!(len2, 1);
+        // b1 expired so treated as empty bytes (padded with 0s)
+        assert_eq!(s3.get(b"b_out2", 150).unwrap(), Some(vec![0b01010101]));
+
+        // 3. Test ZUNIONSTORE / ZINTERSTORE with expires_count == 0 and expires_count > 0
+        let mut s4 = Store::new();
+        s4.zadd(b"z1", &[(10.0, b"m1".to_vec()), (20.0, b"m2".to_vec())], 1)
+            .unwrap();
+        s4.zadd(b"z2", &[(30.0, b"m2".to_vec()), (40.0, b"m3".to_vec())], 1)
+            .unwrap();
+        assert_eq!(s4.expires_count, 0);
+        let u_count = s4
+            .zunionstore(b"z_out", &[b"z1", b"z2"], &[], b"SUM", 2)
+            .unwrap();
+        assert_eq!(u_count, 3);
+        let i_count = s4
+            .zinterstore(b"z_i_out", &[b"z1", b"z2"], &[], b"SUM", 2)
+            .unwrap();
+        assert_eq!(i_count, 1);
+
+        // ZUNIONSTORE with expired input key
+        s4.expire_at_milliseconds(b"z1", 100, 2);
+        assert!(s4.expires_count >= 1);
+        let u_count2 = s4
+            .zunionstore(b"z_out2", &[b"z1", b"z2"], &[], b"SUM", 150)
+            .unwrap();
+        assert_eq!(u_count2, 2); // only z2 members
+
+        // 4. Test RESTORE with expires_count == 0 and expires_count > 0
+        let mut s5 = Store::new();
+        s5.set(b"k_busy".to_vec(), b"val".to_vec(), None, 1);
+        assert_eq!(s5.expires_count, 0);
+        assert!(matches!(
+            s5.restore_key(b"k_busy", 0, b"dump", false, 2),
+            Err(StoreError::BusyKey)
+        ));
+
+        s5.expire_at_milliseconds(b"k_busy", 100, 2);
+        assert!(s5.expires_count >= 1);
+        // At now_ms=150, k_busy is expired and dropped, but dump payload is invalid format
+        // so it fails payload validation rather than BusyKey
+        assert!(!matches!(
+            s5.restore_key(b"k_busy", 0, b"dump", false, 150),
+            Err(StoreError::BusyKey)
+        ));
+
+        // 5. Test expire_key_if_stale
+        let mut s6 = Store::new();
+        s6.set(b"stale_k".to_vec(), b"val".to_vec(), None, 1);
+        assert_eq!(s6.expires_count, 0);
+        s6.expire_key_if_stale(b"stale_k", 2);
+        assert!(s6.entries.contains_key(b"stale_k".as_slice()));
+
+        s6.expire_at_milliseconds(b"stale_k", 100, 2);
+        assert!(s6.expires_count >= 1);
+        s6.expire_key_if_stale(b"stale_k", 150);
+        assert!(!s6.entries.contains_key(b"stale_k".as_slice()));
+
+        // 6. Test HLL debug methods with expires_count == 0 and expires_count > 0
+        let mut s7 = Store::new();
+        assert_eq!(s7.hll_debug_validate(b"nonexistent", 1).unwrap(), None);
+        assert_eq!(s7.hll_debug_decode(b"nonexistent", 1).unwrap(), None);
+        assert_eq!(s7.hll_debug_encoding(b"nonexistent", 1).unwrap(), None);
+        assert_eq!(s7.hll_debug_todense(b"nonexistent", 1).unwrap(), None);
+
+        s7.pfadd(b"hll_exp", &[b"elem".to_vec()], 1).unwrap();
+        s7.expire_at_milliseconds(b"hll_exp", 100, 1);
+        assert!(s7.expires_count >= 1);
+        assert_eq!(s7.hll_debug_validate(b"hll_exp", 150).unwrap(), None);
+        assert_eq!(s7.get(b"hll_exp", 150).unwrap(), None);
+    }
+
     // (CrimsonHawk) srandmember_count_borrow_scan produces BYTE-IDENTICAL sampled members to the
     // clone srandmember_count (fixed rng_seed 0xDEADBEEF + non-LFU sadd doesn't consume RNG ⇒ two
     // (CrimsonHawk) zrandmember_count_member_borrow_scan yields BYTE-IDENTICAL sampled members to
