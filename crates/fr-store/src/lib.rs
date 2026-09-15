@@ -9866,7 +9866,9 @@ impl Store {
         px_ttl_ms: Option<u64>,
         now_ms: u64,
     ) {
-        if self.expires_count != 0 {
+        if self.expires_count != 0
+            && evaluate_expiry(now_ms, self.expiry_ms(key.as_slice())).should_evict
+        {
             self.drop_if_expired(key.as_slice(), now_ms);
         }
         let expires_at_ms = px_ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
@@ -10322,7 +10324,9 @@ impl Store {
         expires_at_ms: Option<u64>,
         now_ms: u64,
     ) {
-        if self.expires_count != 0 {
+        if self.expires_count != 0
+            && evaluate_expiry(now_ms, self.expiry_ms(key.as_slice())).should_evict
+        {
             self.drop_if_expired(key.as_slice(), now_ms);
         }
         // (frankenredis-lfuinit) Upstream evict.h::LFU_INIT_VAL = 5.
@@ -10456,7 +10460,8 @@ impl Store {
             // the eliminated per-key lookup is itself gated at 1.75x isolated
             // (bitfield_resolve_lookup).
             let key = key.as_ref();
-            if self.expires_count != 0 {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
             }
             if self.internal_entries_remove(key).is_some() {
@@ -15265,86 +15270,79 @@ impl Store {
     }
 
     fn internal_entries_remove(&mut self, key: &[u8]) -> Option<Entry> {
+        let entry = self.entries.remove(key)?;
         let old_expiry = if self.expires_count == 0 {
             None
         } else {
-            self.expiry_ms(key)
+            self.expiry_deadlines
+                .remove(key)
+                .map(|deadline| deadline.get())
         };
-        if let Some(entry) = self.entries.remove(key) {
-            self.invalidate_write_side_caches(key);
-            // (cc_fr) `old_expiry` came from `expiry_ms` == `expiry_deadlines.get(key)`, so
-            // is_none() means the key is absent from the map — skip the foldhash probe on the
-            // no-TTL removal (the common case). Byte-identical: an absent key's remove is a no-op.
-            if old_expiry.is_some() {
-                self.expiry_deadlines.remove(key);
-            }
-            // (frankenredis-sszgp) Only a key that HAD a TTL was ever in `volatile_keys`
-            // (`volatile_keys ⊆ expiry_deadlines.keys()` when clean; `forget_volatile_key`
-            // early-returns when dirty), so on the common no-TTL key removal (DEL/GETDEL/expiry of
-            // a key without a deadline) `forget_volatile_key` is a guaranteed no-op — a wasted
-            // BTreeSet remove-miss (O(log n) when the set is clean & non-empty, e.g. deleting a
-            // no-TTL key alongside TTL'd keys). Gate it on `old_expiry.is_some()` (already read
-            // above). Byte-identical (an absent key's remove is a no-op).
-            if old_expiry.is_some() {
-                self.forget_volatile_key(key);
-            }
-            // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
-            // resume points.
-            self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
-            self.update_expiry_deadline(old_expiry, None);
-            let db = decode_db_key(key).map_or(0, |(db, _)| db);
-            if db < self.database_count {
-                self.db_key_counts[db] = self.db_key_counts[db].saturating_sub(1);
-            }
-            if old_expiry.is_some() {
-                self.expires_count = self.expires_count.saturating_sub(1);
-                if db < self.database_count {
-                    self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
-                }
-            }
-            // (frankenredis-ne7sg) A collection emptied in place — the whole-key-removal
-            // case of ZREM/SREM/ZPOP/SPOP/HDEL/LPOP/… — was hashed into running_digest
-            // with its FULL contents, but the entry we hold here is now empty. XORing
-            // out the empty entry's hash would never remove the full-contents hash and
-            // leaves running_digest wrong while digest_stale stays false. An empty
-            // collection can never persist as a key, so an empty entry at removal ALWAYS
-            // means a mutate-to-empty caller: mark the digest stale for a full recompute
-            // rather than an incorrect incremental XOR. Clean removals (DEL / expiry of a
-            // non-empty entry, string values) keep the fast incremental path.
-            let mutated_to_empty = match &entry.value {
-                Value::Hash(h) => h.is_empty(),
-                Value::List(l) => l.is_empty(),
-                Value::Set(s) => s.is_empty(),
-                Value::SortedSet(zs) => zs.is_empty(),
-                Value::Stream(_) | Value::String(_) | Value::Integer(_) => false,
-            };
-            // (frankenredis-8x1i9) Skip the O(value) removed-entry hash when the
-            // digest is already stale — update_digest_hashes would discard it and
-            // DEBUG DIGEST recomputes via full scan. Preserve the mutation count.
-            if self.digest_stale {
-                self.bump_digest_mutations();
-            } else if mutated_to_empty {
-                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-            } else {
-                self.update_digest_hashes(
-                    Some(Self::entry_state_digest(key, &entry, old_expiry)),
-                    None,
-                );
-            }
-            // Whole-key removal drops any per-field hash TTL entries so the
-            // field_expires map doesn't accumulate orphan rows.
-            // (br-frankenredis-b8ut)
-            if matches!(&entry.value, Value::Hash(_)) {
-                self.hash_field_ttl_clear_for_key(key);
-            }
-            if matches!(&entry.value, Value::Stream(_)) {
-                self.stream_entries_added.remove(key);
-                self.stream_max_deleted_ids.remove(key);
-            }
-            Some(entry)
-        } else {
-            None
+        self.invalidate_write_side_caches(key);
+        // (frankenredis-sszgp) Only a key that HAD a TTL was ever in `volatile_keys`
+        // (`volatile_keys ⊆ expiry_deadlines.keys()` when clean; `forget_volatile_key`
+        // early-returns when dirty), so on the common no-TTL key removal (DEL/GETDEL/expiry of
+        // a key without a deadline) `forget_volatile_key` is a guaranteed no-op — a wasted
+        // BTreeSet remove-miss (O(log n) when the set is clean & non-empty, e.g. deleting a
+        // no-TTL key alongside TTL'd keys). Gate it on `old_expiry.is_some()` (already read
+        // above). Byte-identical (an absent key's remove is a no-op).
+        if old_expiry.is_some() {
+            self.forget_volatile_key(key);
         }
+        // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
+        // resume points.
+        self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
+        self.update_expiry_deadline(old_expiry, None);
+        let db = decode_db_key(key).map_or(0, |(db, _)| db);
+        if db < self.database_count {
+            self.db_key_counts[db] = self.db_key_counts[db].saturating_sub(1);
+        }
+        if old_expiry.is_some() {
+            self.expires_count = self.expires_count.saturating_sub(1);
+            if db < self.database_count {
+                self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
+            }
+        }
+        // (frankenredis-ne7sg) A collection emptied in place — the whole-key-removal
+        // case of ZREM/SREM/ZPOP/SPOP/HDEL/LPOP/… — was hashed into running_digest
+        // with its FULL contents, but the entry we hold here is now empty. XORing
+        // out the empty entry's hash would never remove the full-contents hash and
+        // leaves running_digest wrong while digest_stale stays false. An empty
+        // collection can never persist as a key, so an empty entry at removal ALWAYS
+        // means a mutate-to-empty caller: mark the digest stale for a full recompute
+        // rather than an incorrect incremental XOR. Clean removals (DEL / expiry of a
+        // non-empty entry, string values) keep the fast incremental path.
+        let mutated_to_empty = match &entry.value {
+            Value::Hash(h) => h.is_empty(),
+            Value::List(l) => l.is_empty(),
+            Value::Set(s) => s.is_empty(),
+            Value::SortedSet(zs) => zs.is_empty(),
+            Value::Stream(_) | Value::String(_) | Value::Integer(_) => false,
+        };
+        // (frankenredis-8x1i9) Skip the O(value) removed-entry hash when the
+        // digest is already stale — update_digest_hashes would discard it and
+        // DEBUG DIGEST recomputes via full scan. Preserve the mutation count.
+        if self.digest_stale {
+            self.bump_digest_mutations();
+        } else if mutated_to_empty {
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        } else {
+            self.update_digest_hashes(
+                Some(Self::entry_state_digest(key, &entry, old_expiry)),
+                None,
+            );
+        }
+        // Whole-key removal drops any per-field hash TTL entries so the
+        // field_expires map doesn't accumulate orphan rows.
+        // (br-frankenredis-b8ut)
+        if matches!(&entry.value, Value::Hash(_)) {
+            self.hash_field_ttl_clear_for_key(key);
+        }
+        if matches!(&entry.value, Value::Stream(_)) {
+            self.stream_entries_added.remove(key);
+            self.stream_max_deleted_ids.remove(key);
+        }
+        Some(entry)
     }
 
     /// Emit the upstream-matching `hexpired` keyspace notification for a
@@ -33012,8 +33010,9 @@ impl Store {
         if self.expires_count == 0 {
             return self.entries.contains_key(key);
         }
-        let entry = self.entries.get(key);
-        let exists = entry.is_some();
+        if !self.entries.contains_key(key) {
+            return false;
+        }
         let should_evict = evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict;
         if should_evict && self.internal_entries_remove(key).is_some() {
             self.drop_stream_side_metadata(key);
@@ -33031,7 +33030,7 @@ impl Store {
             self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", logical_key, db);
             return false;
         }
-        exists
+        true
     }
 
     /// Upstream's `lookupKeyWrite` side effect: collect the key if its TTL has passed.
@@ -50104,6 +50103,49 @@ mod tests {
             "expired key removed"
         );
         assert!(t.get(b"live", 600).unwrap().is_some());
+    }
+
+    #[test]
+    fn drop_if_expired_and_internal_entries_remove_single_probe_parity() {
+        let mut s = Store::new();
+        s.set(b"perm".to_vec(), b"p_val".to_vec(), None, 100);
+        s.set(b"future".to_vec(), b"f_val".to_vec(), Some(500), 100);
+        s.set(b"expired".to_vec(), b"e_val".to_vec(), Some(50), 100);
+        assert_eq!(s.expires_count, 2);
+
+        let dirty_before = s.dirty;
+        let expired_before = s.stat_expired_keys;
+        assert!(!s.drop_if_expired(b"nonexistent", 200));
+        assert_eq!(s.dirty, dirty_before);
+        assert_eq!(s.stat_expired_keys, expired_before);
+
+        let removed = s.del_borrowed(
+            &[
+                b"expired".as_slice(),
+                b"perm".as_slice(),
+                b"future".as_slice(),
+                b"nonexistent".as_slice(),
+            ],
+            200,
+        );
+        assert_eq!(removed, 2);
+        assert_eq!(s.expires_count, 0);
+        assert_eq!(s.stat_expired_keys, expired_before + 1);
+        assert!(s.get(b"expired", 200).unwrap().is_none());
+        assert!(s.get(b"perm", 200).unwrap().is_none());
+        assert!(s.get(b"future", 200).unwrap().is_none());
+
+        s.set(b"live_ttl".to_vec(), b"v1".to_vec(), Some(1000), 200);
+        assert_eq!(s.expires_count, 1);
+        s.set(b"live_ttl".to_vec(), b"v2".to_vec(), None, 300);
+        assert_eq!(s.expires_count, 0);
+        assert_eq!(s.get(b"live_ttl", 300).unwrap().unwrap(), b"v2");
+
+        s.set(b"dead_ttl".to_vec(), b"d1".to_vec(), Some(50), 300);
+        assert_eq!(s.expires_count, 1);
+        s.set(b"dead_ttl".to_vec(), b"d2".to_vec(), Some(500), 400);
+        assert_eq!(s.expires_count, 1);
+        assert_eq!(s.get(b"dead_ttl", 400).unwrap().unwrap(), b"d2");
     }
 
     // (CrimsonHawk) SCARD/ZCARD/SISMEMBER non-LFU single-lookup collapse must be byte-
