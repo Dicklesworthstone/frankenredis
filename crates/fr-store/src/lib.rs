@@ -9626,7 +9626,7 @@ impl Store {
         let count = value.as_ref().map_or(0, SetValue::len);
         if let Some(value) = value.filter(|v| !v.is_empty()) {
             let entry = self.set_value_entry(value, now_ms);
-            self.internal_entries_insert(destination.to_vec(), entry);
+            self.internal_entries_insert(destination, entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if self.internal_entries_remove(destination).is_some() {
             // (perf) Use the empty-guarded helper instead of two unconditional removes: on a
@@ -9907,7 +9907,7 @@ impl Store {
         if lfu_tracking_enabled {
             entry.mark_redis_lfu_clock_field();
         }
-        self.internal_entries_insert_with_expiry_impl::<GATE>(key, entry, expires_at_ms);
+        self.internal_entries_insert_with_expiry_impl::<GATE>(&key, entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
     }
 
@@ -9997,7 +9997,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
-                self.internal_entries_insert(key.to_vec(), entry);
+                self.internal_entries_insert(key, entry);
                 self.dirty = self.dirty.saturating_add(1);
                 return;
             };
@@ -10075,7 +10075,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
-                self.internal_entries_insert(key.to_vec(), entry);
+                self.internal_entries_insert(key, entry);
                 self.dirty = self.dirty.saturating_add(1);
                 return;
             };
@@ -10187,7 +10187,7 @@ impl Store {
             if lfu_tracking_enabled {
                 entry.mark_redis_lfu_clock_field();
             }
-            self.internal_entries_insert(key.to_vec(), entry);
+            self.internal_entries_insert(key, entry);
         } else {
             // (BlackThrush) SET KEEPTTL GET overwrite writes a scalar → never a mem_estimate_cache
             // member; skip the always-miss remove (byte-identical, see invalidate_write_side_caches).
@@ -10250,7 +10250,7 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
-                self.internal_entries_insert(key, entry);
+                self.internal_entries_insert(&key, entry);
                 self.dirty = self.dirty.saturating_add(1);
                 return;
             };
@@ -10340,7 +10340,7 @@ impl Store {
         if lfu_tracking_enabled {
             entry.mark_redis_lfu_clock_field();
         }
-        self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
+        self.internal_entries_insert_with_expiry(&key, entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
     }
 
@@ -10914,10 +10914,7 @@ impl Store {
                 let next = 0_i64
                     .checked_add(delta)
                     .ok_or(StoreError::IntegerOverflow)?;
-                self.internal_entries_insert(
-                    key.to_vec(),
-                    Entry::new(Value::Integer(next), now_ms),
-                );
+                self.internal_entries_insert(key, Entry::new(Value::Integer(next), now_ms));
                 self.dirty = self.dirty.saturating_add(1);
                 return Ok(next);
             }
@@ -11363,10 +11360,7 @@ impl Store {
                 ));
             }
             let len = value.len();
-            self.internal_entries_insert(
-                key.to_vec(),
-                Entry::new(Value::String(value.into()), now_ms),
-            );
+            self.internal_entries_insert(key, Entry::new(Value::String(value.into()), now_ms));
             self.dirty = self.dirty.saturating_add(1);
             Ok(len)
         }
@@ -11622,7 +11616,7 @@ impl Store {
         // straight into the canonical Value (inline for small strings) instead of
         // via a throwaway clone. Byte-identical to the prior owned path.
         self.internal_entries_insert(
-            key.to_vec(),
+            key,
             Entry::new(canonical_string_value_from_slice(value), now_ms),
         );
         self.dirty = self.dirty.saturating_add(1);
@@ -11709,7 +11703,7 @@ impl Store {
                 None => None,
             };
             let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-            self.internal_entries_insert(key, new_entry);
+            self.internal_entries_insert(&key, new_entry);
             self.dirty = self.dirty.saturating_add(1);
             return Ok(old);
         }
@@ -11727,7 +11721,7 @@ impl Store {
                 self.drop_if_expired(key.as_slice(), now_ms);
                 self.record_keyspace_miss(&key);
                 let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-                self.internal_entries_insert(key, new_entry);
+                self.internal_entries_insert(&key, new_entry);
                 self.dirty = self.dirty.saturating_add(1);
                 return Ok(None);
             }
@@ -11750,7 +11744,7 @@ impl Store {
                 new_entry.lfu_freq = freq;
                 new_entry.lfu_last_touch_min = last_touch;
             }
-            self.internal_entries_insert(key, new_entry);
+            self.internal_entries_insert(&key, new_entry);
             self.dirty = self.dirty.saturating_add(1);
             return Ok(old);
         }
@@ -11779,7 +11773,7 @@ impl Store {
             new_entry.lfu_freq = freq;
             new_entry.lfu_last_touch_min = last_touch;
         }
-        self.internal_entries_insert(key, new_entry);
+        self.internal_entries_insert(&key, new_entry);
         self.dirty = self.dirty.saturating_add(1);
         Ok(old)
     }
@@ -11804,7 +11798,7 @@ impl Store {
                 None => sink(None),
             }
             let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-            self.internal_entries_insert(key.to_vec(), new_entry);
+            self.internal_entries_insert(key, new_entry);
             self.dirty = self.dirty.saturating_add(1);
             return Ok(());
         }
@@ -11837,7 +11831,7 @@ impl Store {
             new_entry.lfu_freq = freq;
             new_entry.lfu_last_touch_min = last_touch;
         }
-        self.internal_entries_insert(key.to_vec(), new_entry);
+        self.internal_entries_insert(key, new_entry);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
     }
@@ -11893,7 +11887,7 @@ impl Store {
         // (br-frankenredis-incrfloatenc)
         let mut entry = Entry::new(Value::String(next.clone().into()), now_ms);
         entry.set_flag(ENTRY_FORCE_STRING_ENCODING, true);
-        self.internal_entries_insert_with_expiry(key.to_vec(), entry, expires_at_ms);
+        self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
         self.dirty = self.dirty.saturating_add(1);
         Ok(next)
     }
@@ -12305,7 +12299,7 @@ impl Store {
                 let mut entry = Entry::new(Value::String(current.into()), now_ms);
                 // (br-frankenredis-84bv)
                 entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-                self.internal_entries_insert(key.to_vec(), entry);
+                self.internal_entries_insert(key, entry);
                 self.dirty = self.dirty.saturating_add(1);
                 Ok(new_len)
             }
@@ -12502,7 +12496,7 @@ impl Store {
                 // (br-frankenredis-setbitenc) — newly-created keys
                 // also use raw encoding via dbAdd in upstream.
                 entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-                self.internal_entries_insert(key.to_vec(), entry);
+                self.internal_entries_insert(key, entry);
                 self.dirty = self.dirty.saturating_add(1);
                 Ok(old_bit)
             }
@@ -12809,7 +12803,7 @@ impl Store {
         }
         let mut entry = Entry::new(Value::String(vec![0u8; needed_bytes].into()), now_ms);
         entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-        self.internal_entries_insert(key.to_vec(), entry);
+        self.internal_entries_insert(key, entry);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
     }
@@ -12898,7 +12892,7 @@ impl Store {
         // dbUnshareStringValue / dbAdd which always store values with raw
         // encoding. (br-frankenredis-bitfieldenc)
         entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-        self.internal_entries_insert(key.to_vec(), entry);
+        self.internal_entries_insert(key, entry);
         if changed {
             self.dirty = self.dirty.saturating_add(1);
         }
@@ -13019,7 +13013,7 @@ impl Store {
                         || old_unsigned != bitfield_read(&bytes, bit_offset, bits, false);
                     let mut entry = Entry::new(Value::String(bytes.into()), now_ms);
                     entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-                    self.internal_entries_insert(key.to_vec(), entry);
+                    self.internal_entries_insert(key, entry);
                     if changed {
                         self.dirty = self.dirty.saturating_add(1);
                     }
@@ -13030,7 +13024,7 @@ impl Store {
                     let mut entry =
                         Entry::new(Value::String(vec![0u8; needed_bytes].into()), now_ms);
                     entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-                    self.internal_entries_insert(key.to_vec(), entry);
+                    self.internal_entries_insert(key, entry);
                     self.dirty = self.dirty.saturating_add(1);
                     Ok(None)
                 }
@@ -13115,7 +13109,7 @@ impl Store {
                     // new-key contract via `created_empty`+`first_write` below.
                     let mut entry = Entry::new(Value::String(Vec::new().into()), now_ms);
                     entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-                    self.internal_entries_insert(key.to_vec(), entry);
+                    self.internal_entries_insert(key, entry);
                     created_empty = true;
                 }
             }
@@ -14258,7 +14252,7 @@ impl Store {
             self.stream_entries_added.remove(newkey);
             self.stream_max_deleted_ids.remove(newkey);
         }
-        self.internal_entries_insert_with_expiry(newkey.to_vec(), entry, moved_expiry);
+        self.internal_entries_insert_with_expiry(newkey, entry, moved_expiry);
         if let Some(groups) = moved_groups {
             self.stream_groups.insert(newkey.to_vec(), groups);
         }
@@ -14332,7 +14326,7 @@ impl Store {
         } else {
             None
         };
-        self.internal_entries_insert_with_expiry(newkey.to_vec(), entry, moved_expiry);
+        self.internal_entries_insert_with_expiry(newkey, entry, moved_expiry);
         if let Some(groups) = moved_groups {
             self.stream_groups.insert(newkey.to_vec(), groups);
         }
@@ -14692,7 +14686,7 @@ impl Store {
         now_ms: u64,
     ) -> &mut Entry {
         if !self.entries.contains_key(key) {
-            self.internal_entries_insert(key.to_vec(), Entry::new(default_value(), now_ms));
+            self.internal_entries_insert(key, Entry::new(default_value(), now_ms));
         }
         self.entries
             .get_mut(key)
@@ -14707,7 +14701,7 @@ impl Store {
     /// hashmap lookup on every call.
     fn ensure_entry(&mut self, key: &[u8], default_value: impl FnOnce() -> Value, now_ms: u64) {
         if !self.entries.contains_key(key) {
-            self.internal_entries_insert(key.to_vec(), Entry::new(default_value(), now_ms));
+            self.internal_entries_insert(key, Entry::new(default_value(), now_ms));
         }
     }
 
@@ -14816,7 +14810,7 @@ impl Store {
                 self.bump_digest_mutations();
                 return result;
             }
-            self.internal_entries_insert(key.to_vec(), Entry::new(default_value(), now_ms));
+            self.internal_entries_insert(key, Entry::new(default_value(), now_ms));
             let entry = self
                 .entries
                 .get_mut(key)
@@ -14839,7 +14833,7 @@ impl Store {
             self.update_digest_hashes(Some(old_hash), Some(new_hash));
             return result;
         }
-        self.internal_entries_insert(key.to_vec(), Entry::new(default_value(), now_ms));
+        self.internal_entries_insert(key, Entry::new(default_value(), now_ms));
         let entry = self
             .entries
             .get_mut(key)
@@ -15024,13 +15018,13 @@ impl Store {
         }
     }
 
-    fn internal_entries_insert(&mut self, key: Vec<u8>, entry: Entry) -> Option<Entry> {
+    fn internal_entries_insert(&mut self, key: &[u8], entry: Entry) -> Option<Entry> {
         self.internal_entries_insert_with_expiry(key, entry, None)
     }
 
     fn internal_entries_insert_with_expiry(
         &mut self,
-        key: Vec<u8>,
+        key: &[u8],
         entry: Entry,
         expires_at_ms: Option<u64>,
     ) -> Option<Entry> {
@@ -15061,15 +15055,15 @@ impl Store {
     /// form monomorphizes with no runtime branch.
     fn internal_entries_insert_with_expiry_impl<const GATE: bool>(
         &mut self,
-        key: Vec<u8>,
+        key: &[u8],
         mut entry: Entry,
         expires_at_ms: Option<u64>,
     ) -> Option<Entry> {
-        let db = decode_db_key(&key).map(|(db, _)| db).unwrap_or(0);
-        let (is_new_key, old_expiry) = match self.entries.get(key.as_slice()) {
+        let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+        let (is_new_key, old_expiry) = match self.entries.get(key) {
             Some(old_entry) => {
                 entry.modification_count = old_entry.modification_count.wrapping_add(1);
-                (false, self.expiry_ms(key.as_slice()))
+                (false, self.expiry_ms(key))
             }
             None => (true, None),
         };
@@ -15120,10 +15114,10 @@ impl Store {
             // builds it from the argument; an overwrite still reads the dict's stored
             // copy so the deadline map and the keyspace agree byte for byte.
             if is_new_key {
-                Some(store_key_from_slice(key.as_slice()))
+                Some(store_key_from_slice(key))
             } else {
                 self.entries
-                    .get_key_value(key.as_slice())
+                    .get_key_value(key)
                     .map(|(key, _)| store_key_from_slice(key))
             }
         } else {
@@ -15151,7 +15145,7 @@ impl Store {
             // dirty), so `forget_volatile_key` is a guaranteed no-op — a wasted BTreeSet remove-miss
             // on EVERY new-key SET (the top benchmark write, routed here via internal_entries_insert
             // with new_expiry=None). Gate on `old_expiry.is_some()`. Byte-identical.
-            self.forget_volatile_key(&key);
+            self.forget_volatile_key(key);
         }
         // (BlackThrush) The `mem_estimate_cache` holds ONLY expensive collection estimates, so a
         // scalar (string/integer) insert can never be a member — skip its always-miss remove and
@@ -15162,18 +15156,18 @@ impl Store {
         // early, not via the cache) and is purged on the key's eventual delete. A collection insert
         // (RESTORE/COPY of a large value) keeps the full three-cache invalidation.
         if value_estimate_is_expensive(&entry.value) {
-            self.invalidate_write_side_caches(&key);
+            self.invalidate_write_side_caches(key);
         } else {
-            self.invalidate_write_side_caches_scalar(&key);
+            self.invalidate_write_side_caches_scalar(key);
         }
         let old_entry = if is_new_key {
             // New key: the dict owns the bytes, inline in its node when short enough.
-            self.entries.insert(key.as_slice(), entry)
+            self.entries.insert(key, entry)
         } else {
             // Overwrite: replace the value in place, reusing the node's existing key
             // (no key allocation on the hot SET-existing path).
             self.entries
-                .get_mut(key.as_slice())
+                .get_mut(key)
                 .map(|slot| std::mem::replace(slot, entry))
         };
         // (frankenredis-keymiss-oqhbi sibling) Upstream fires `new` from dbAddInternal
@@ -15188,9 +15182,9 @@ impl Store {
         // computed above for `canonical_key` and `is_ttl_rearm`, so the condition is the existing
         // one rather than a second opinion about what "new" means.
         if is_new_key {
-            let (event_db, logical_key) = match decode_db_key(&key) {
+            let (event_db, logical_key) = match decode_db_key(key) {
                 Some((decoded_db, logical)) => (decoded_db, logical),
-                None => (db, key.as_slice()),
+                None => (db, key),
             };
             self.notify_keyspace_event(NOTIFY_NEW, "new", logical_key, event_db);
         }
@@ -15200,7 +15194,7 @@ impl Store {
                 // deadline in place — which is why the clone above was skipped for it. New /
                 // newly-volatile keys fall through to insert the freshly-cloned canonical key.
                 // Byte-identical final map state (insert on an existing key keeps its key too).
-                if let Some(slot) = self.expiry_deadlines.get_mut(key.as_slice()) {
+                if let Some(slot) = self.expiry_deadlines.get_mut(key) {
                     *slot = deadline;
                 } else if let Some(expiry_key) = expiry_key {
                     self.expiry_deadlines.insert(expiry_key, deadline);
@@ -15211,7 +15205,7 @@ impl Store {
                 // (all new keys and no-TTL overwrites), the key was not in expiry_deadlines
                 // and the remove is a guaranteed no-op — skip the foldhash and probe.
                 if old_expiry.is_some() {
-                    self.expiry_deadlines.remove(key.as_slice());
+                    self.expiry_deadlines.remove(key);
                 }
             }
         }
@@ -15219,10 +15213,10 @@ impl Store {
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if let Some(old) = old_entry {
             if matches!(&old.value, Value::Stream(_)) && !new_is_stream {
-                self.stream_groups.remove(&key);
-                self.stream_last_ids.remove(&key);
-                self.stream_entries_added.remove(&key);
-                self.stream_max_deleted_ids.remove(&key);
+                self.stream_groups.remove(key);
+                self.stream_last_ids.remove(key);
+                self.stream_entries_added.remove(key);
+                self.stream_max_deleted_ids.remove(key);
             }
             if old_expiry.is_some() {
                 self.expires_count = self.expires_count.saturating_sub(1);
@@ -16786,7 +16780,7 @@ impl Store {
                     }
                     None => {
                         self.internal_entries_insert(
-                            key.to_vec(),
+                            key,
                             Entry::new(Value::Hash(Box::default()), now_ms),
                         );
                         self.entries
@@ -16803,10 +16797,7 @@ impl Store {
                     .get_mut(key)
                     .expect("hash entry present at LFU probe is still present")
             } else {
-                self.internal_entries_insert(
-                    key.to_vec(),
-                    Entry::new(Value::Hash(Box::default()), now_ms),
-                );
+                self.internal_entries_insert(key, Entry::new(Value::Hash(Box::default()), now_ms));
                 self.entries
                     .get_mut(key)
                     .expect("hash entry inserted above must exist")
@@ -17211,10 +17202,7 @@ impl Store {
                 .get_mut(key)
                 .expect("hash entry present at read is still present")
         } else {
-            self.internal_entries_insert(
-                key.to_vec(),
-                Entry::new(Value::Hash(Box::default()), now_ms),
-            );
+            self.internal_entries_insert(key, Entry::new(Value::Hash(Box::default()), now_ms));
             self.entries
                 .get_mut(key)
                 .expect("hash entry inserted above must exist")
@@ -17398,7 +17386,7 @@ impl Store {
                     max_entries,
                     max_value,
                 );
-                self.internal_entries_insert(key.to_vec(), entry);
+                self.internal_entries_insert(key, entry);
                 Ok(is_new)
             }
         };
@@ -17500,7 +17488,7 @@ impl Store {
                             max_entries,
                             max_value,
                         );
-                        self.internal_entries_insert(key.to_vec(), entry);
+                        self.internal_entries_insert(key, entry);
                         Ok(is_new)
                     }
                 }
@@ -17541,10 +17529,7 @@ impl Store {
                 .get_mut(key)
                 .expect("hash entry present at LFU probe is still present")
         } else {
-            self.internal_entries_insert(
-                key.to_vec(),
-                Entry::new(Value::Hash(Box::default()), now_ms),
-            );
+            self.internal_entries_insert(key, Entry::new(Value::Hash(Box::default()), now_ms));
             self.entries
                 .get_mut(key)
                 .expect("hash entry inserted above must exist")
@@ -18829,7 +18814,7 @@ impl Store {
             if lfu_tracking_enabled {
                 if !should_bump_lfu {
                     self.internal_entries_insert(
-                        key.to_vec(),
+                        key,
                         Entry::new(Value::Hash(Box::default()), now_ms),
                     );
                 }
@@ -18960,7 +18945,7 @@ impl Store {
                 }
                 None => {
                     self.internal_entries_insert(
-                        key.to_vec(),
+                        key,
                         Entry::new(Value::Hash(Box::default()), now_ms),
                     );
                     let entry = self
@@ -18979,7 +18964,7 @@ impl Store {
             if lfu_tracking_enabled {
                 if !should_bump_lfu {
                     self.internal_entries_insert(
-                        key.to_vec(),
+                        key,
                         Entry::new(Value::Hash(Box::default()), now_ms),
                     );
                 }
@@ -19215,7 +19200,7 @@ impl Store {
             if lfu_tracking_enabled {
                 if !should_bump_lfu {
                     self.internal_entries_insert(
-                        key.to_vec(),
+                        key,
                         Entry::new(Value::Hash(Box::default()), now_ms),
                     );
                 }
@@ -19817,10 +19802,7 @@ impl Store {
                     self.list_max_listpack_size,
                 );
                 let len = l.len();
-                self.internal_entries_insert(
-                    key.to_vec(),
-                    Entry::new(Value::List(Box::new(l)), now_ms),
-                );
+                self.internal_entries_insert(key, Entry::new(Value::List(Box::new(l)), now_ms));
                 self.dirty = self.dirty.saturating_add(values.len() as u64);
                 Ok(len)
             }
@@ -19927,10 +19909,7 @@ impl Store {
                     self.list_max_listpack_size,
                 );
                 let len = l.len();
-                self.internal_entries_insert(
-                    key.to_vec(),
-                    Entry::new(Value::List(Box::new(l)), now_ms),
-                );
+                self.internal_entries_insert(key, Entry::new(Value::List(Box::new(l)), now_ms));
                 self.dirty = self.dirty.saturating_add(values.len() as u64);
                 Ok(len)
             }
@@ -20041,10 +20020,7 @@ impl Store {
                     self.list_max_listpack_size,
                 );
                 let len = l.len();
-                self.internal_entries_insert(
-                    key.to_vec(),
-                    Entry::new(Value::List(Box::new(l)), now_ms),
-                );
+                self.internal_entries_insert(key, Entry::new(Value::List(Box::new(l)), now_ms));
                 self.dirty = self.dirty.saturating_add(n as u64);
                 Ok(len)
             }
@@ -20128,7 +20104,7 @@ impl Store {
         };
         let len = list.len();
         let entry = Entry::new(Value::List(Box::new(list)), now_ms);
-        self.internal_entries_insert(key.to_vec(), entry);
+        self.internal_entries_insert(key, entry);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(len as u64);
         Ok(len)
@@ -20175,10 +20151,7 @@ impl Store {
             return Err(StoreError::InvalidDumpPayload);
         }
         let len = list.len();
-        self.internal_entries_insert(
-            key.to_vec(),
-            Entry::new(Value::List(Box::new(list)), now_ms),
-        );
+        self.internal_entries_insert(key, Entry::new(Value::List(Box::new(list)), now_ms));
         self.dirty = self.dirty.saturating_add(len as u64);
         Ok(len)
     }
@@ -21717,7 +21690,7 @@ impl Store {
                     self.list_max_listpack_size,
                 );
                 self.internal_entries_insert_with_expiry(
-                    destination.to_vec(),
+                    destination,
                     Entry::new(Value::List(Box::new(l)), now_ms),
                     source_ttl,
                 );
@@ -22223,7 +22196,7 @@ impl Store {
                     self.list_max_listpack_size,
                 );
                 self.internal_entries_insert_with_expiry(
-                    destination.to_vec(),
+                    destination,
                     Entry::new(Value::List(Box::new(l)), now_ms),
                     source_ttl,
                 );
@@ -22371,7 +22344,7 @@ impl Store {
             max_listpack_entries,
             max_listpack_value,
         );
-        self.internal_entries_insert(key.to_vec(), entry);
+        self.internal_entries_insert(key, entry);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         let added = member_count as u64;
         self.dirty = self.dirty.saturating_add(added);
@@ -22410,7 +22383,7 @@ impl Store {
         } else {
             let added = u64::try_from(members.len()).unwrap_or(u64::MAX);
             let entry = Entry::new(Value::Set(Box::new(SetValue::Int(members))), now_ms);
-            self.internal_entries_insert(key.to_vec(), entry);
+            self.internal_entries_insert(key, entry);
             self.dirty = self.dirty.saturating_add(added);
             Ok(())
         }
@@ -22589,7 +22562,7 @@ impl Store {
                     max_listpack_entries,
                     max_listpack_value,
                 );
-                self.internal_entries_insert(key.to_vec(), entry);
+                self.internal_entries_insert(key, entry);
                 self.dirty = self.dirty.saturating_add(added);
                 Ok(added)
             }
@@ -24826,7 +24799,7 @@ impl Store {
             let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
             entry.touch_write(now_ms, lfu_tracking_enabled);
             Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
-            self.internal_entries_insert(key.to_vec(), entry);
+            self.internal_entries_insert(key, entry);
             Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
             self.dirty = self.dirty.saturating_add((added + changed) as u64);
             return Ok(added);
@@ -24944,7 +24917,7 @@ impl Store {
             zset_max_entries,
             zset_max_value,
         );
-        self.internal_entries_insert(key.to_vec(), entry);
+        self.internal_entries_insert(key, entry);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(len as u64);
         Ok(len)
@@ -24997,7 +24970,7 @@ impl Store {
                 zset_max_entries,
                 zset_max_value,
             );
-            self.internal_entries_insert(key.to_vec(), entry);
+            self.internal_entries_insert(key, entry);
             Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
             self.dirty = self.dirty.saturating_add(added as u64);
             return Ok(added);
@@ -25096,7 +25069,7 @@ impl Store {
             entry.touch_lru(now_ms);
             entry.modification_count = mutations;
             Self::refresh_zset_encoding_flag(&mut entry, max_entries, max_value);
-            self.internal_entries_insert(key.to_vec(), entry);
+            self.internal_entries_insert(key, entry);
             (true, mutations)
         };
 
@@ -25238,7 +25211,7 @@ impl Store {
                 let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
                 entry.touch_write(now_ms, lfu_tracking_enabled);
                 Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
-                self.internal_entries_insert(key.to_vec(), entry);
+                self.internal_entries_insert(key, entry);
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 self.dirty = self.dirty.saturating_add(added as u64);
                 return Ok(added);
@@ -25325,7 +25298,7 @@ impl Store {
                 let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
                 entry.touch_write(now_ms, lfu_tracking_enabled);
                 Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
-                self.internal_entries_insert(key.to_vec(), entry);
+                self.internal_entries_insert(key, entry);
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 self.dirty = self.dirty.saturating_add((added + changed) as u64);
                 return Ok(added);
@@ -25333,7 +25306,7 @@ impl Store {
             let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
             entry.touch_write(now_ms, lfu_tracking_enabled);
             Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
-            self.internal_entries_insert(key.to_vec(), entry);
+            self.internal_entries_insert(key, entry);
             Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
             self.dirty = self.dirty.saturating_add(1);
             return Ok(1);
@@ -25418,7 +25391,7 @@ impl Store {
                 let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
                 entry.touch_write(now_ms, lfu_tracking_enabled);
                 Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
-                self.internal_entries_insert(key.to_vec(), entry);
+                self.internal_entries_insert(key, entry);
                 Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
                 self.dirty = self.dirty.saturating_add((added + changed) as u64);
                 if opts.ch {
@@ -27707,7 +27680,7 @@ impl Store {
             // left an over-threshold rank result reporting listpack.
             Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
         }
-        self.internal_entries_insert(key, entry);
+        self.internal_entries_insert(&key, entry);
         // (frankenredis-bhd3u) Writing the destination set is a keyspace
         // mutation — bump dirty so ZRANGESTORE is persisted to RDB/AOF,
         // replicated, and surfaces keyspace notifications (all gate on the
@@ -27999,7 +27972,7 @@ impl Store {
                     .expect("zset entry present at probe is still present")
             } else {
                 self.internal_entries_insert(
-                    key.to_vec(),
+                    key,
                     Entry::new(Value::SortedSet(Box::new(SortedSet::new())), now_ms),
                 );
                 self.entries
@@ -28037,7 +28010,7 @@ impl Store {
                 ),
                 None => {
                     self.internal_entries_insert(
-                        key.to_vec(),
+                        key,
                         Entry::new(Value::SortedSet(Box::new(SortedSet::new())), now_ms),
                     );
                     let entry = self
@@ -30039,7 +30012,7 @@ impl Store {
                 self.stream_last_ids.insert(key.to_vec(), id);
                 self.stream_entries_added.insert(key.to_vec(), 1);
                 self.internal_entries_insert(
-                    key.to_vec(),
+                    key,
                     Entry::new(Value::Stream(Box::new(entries)), now_ms),
                 );
                 self.dirty = self.dirty.saturating_add(1);
@@ -30138,7 +30111,7 @@ impl Store {
         }
         self.stream_entries_added.insert(key.to_vec(), count);
         self.internal_entries_insert(
-            key.to_vec(),
+            key,
             Entry::new(
                 Value::Stream(Box::new(StreamEntries::pending(skeleton, last_id))),
                 now_ms,
@@ -30193,10 +30166,7 @@ impl Store {
             self.stream_last_ids.insert(key.to_vec(), last_id);
         }
         self.stream_entries_added.insert(key.to_vec(), count);
-        self.internal_entries_insert(
-            key.to_vec(),
-            Entry::new(Value::Stream(Box::new(map)), now_ms),
-        );
+        self.internal_entries_insert(key, Entry::new(Value::Stream(Box::new(map)), now_ms));
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(count);
     }
@@ -31922,7 +31892,7 @@ impl Store {
             self.drop_stream_side_metadata(key);
             self.stream_entries_added.insert(key.to_vec(), 0);
             self.internal_entries_insert(
-                key.to_vec(),
+                key,
                 Entry::new(Value::Stream(Box::new(StreamEntries::new())), now_ms),
             );
         }
@@ -32472,7 +32442,7 @@ impl Store {
             // report raw object encoding rather than embstr.
             entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
             entry.touch_write(now_ms, lfu_tracking_enabled);
-            self.internal_entries_insert(key.to_vec(), entry);
+            self.internal_entries_insert(key, entry);
             self.dirty = self
                 .dirty
                 .saturating_add(1_u64.saturating_add(register_updates));
@@ -32567,7 +32537,7 @@ impl Store {
             // is well under the 44-byte embstr threshold. (br-frankenredis-bitopenc)
             entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
             entry.touch_write(now_ms, lfu_tracking_enabled);
-            self.internal_entries_insert_with_expiry(key.to_vec(), entry, expires_at);
+            self.internal_entries_insert_with_expiry(key, entry, expires_at);
             self.hll_register_cache_store(key, registers);
             let updated = u64::from(created).saturating_add(register_updates);
             self.dirty = self.dirty.saturating_add(updated);
@@ -32822,7 +32792,7 @@ impl Store {
         // PFMERGE's destination is a raw-encoded HLL string, same as pfadd.
         entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
         entry.touch_write(now_ms, lfu_tracking_enabled);
-        self.internal_entries_insert_with_expiry(dest.to_vec(), entry, existing_ttl);
+        self.internal_entries_insert_with_expiry(dest, entry, existing_ttl);
         self.hll_register_cache_store(dest, merged);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
@@ -33677,7 +33647,7 @@ impl Store {
             // (br-frankenredis-bitopenc)
             let mut entry = Entry::new(Value::String(result.into()), now_ms);
             entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-            self.internal_entries_insert(dest.to_vec(), entry);
+            self.internal_entries_insert(dest, entry);
             self.dirty = self.dirty.saturating_add(1);
         }
         Ok(len)
@@ -33767,7 +33737,7 @@ impl Store {
                 SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
             // (frankenredis-v4ba8) re-derive listpack/skiplist from the result.
             let entry = self.zset_dest_entry(zs, now_ms);
-            self.internal_entries_insert(dest.to_vec(), entry);
+            self.internal_entries_insert(dest, entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
             self.dirty = self.dirty.saturating_add(1);
@@ -33940,7 +33910,7 @@ impl Store {
         if count > 0 {
             // (frankenredis-v4ba8) re-derive listpack/skiplist from the result.
             let entry = self.zset_dest_entry(result, now_ms);
-            self.internal_entries_insert(dest.to_vec(), entry);
+            self.internal_entries_insert(dest, entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
             self.dirty = self.dirty.saturating_add(1);
@@ -35523,7 +35493,7 @@ impl Store {
             self.last_del_removed.push(source.to_vec());
         }
         self.internal_entries_insert_with_expiry(
-            destination.to_vec(),
+            destination,
             entry.into_duplicate_for_copy(now_ms),
             source_expiry,
         );
@@ -35604,7 +35574,7 @@ impl Store {
                     .insert(destination.to_vec(), max_deleted_id);
             }
         }
-        self.internal_entries_insert_with_expiry(destination.to_vec(), entry, source_expiry);
+        self.internal_entries_insert_with_expiry(destination, entry, source_expiry);
         self.dirty = self.dirty.saturating_add(1);
         Ok(true)
     }
@@ -35662,7 +35632,7 @@ impl Store {
         // passes a non-empty list here.
         let stored = elements.len() as u64;
         self.internal_entries_insert(
-            key,
+            &key,
             Entry::new(Value::List(Box::new(elements.into_iter().collect())), 0),
         );
         self.dirty = self.dirty.saturating_add(stored.max(1));
@@ -35794,7 +35764,7 @@ impl Store {
         let zs = SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
         // (frankenredis-v4ba8) re-derive listpack/skiplist from the result.
         let entry = self.zset_dest_entry(zs, now_ms);
-        self.internal_entries_insert(dest.to_vec(), entry);
+        self.internal_entries_insert(dest, entry);
         self.dirty = self.dirty.saturating_add(1);
     }
 
@@ -35821,7 +35791,7 @@ impl Store {
             SortedSet::from_unique_pairs_with_limits(members, zset_max_entries, zset_max_value);
         // (frankenredis-v4ba8) re-derive listpack/skiplist from the result.
         let entry = self.zset_dest_entry(zs, now_ms);
-        self.internal_entries_insert(dest.to_vec(), entry);
+        self.internal_entries_insert(dest, entry);
         self.dirty = self.dirty.saturating_add(1);
     }
 
@@ -38589,7 +38559,7 @@ impl Store {
         } else {
             entry.set_restore_idletime(metadata.idletime_secs.unwrap_or(0), now_ms);
         }
-        self.internal_entries_insert_with_expiry(key.to_vec(), entry, expires_at_ms);
+        self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
         if let Some(last_id) = restored_stream_last_id {
             self.stream_last_ids.insert(key.to_vec(), last_id);
         }
@@ -46852,7 +46822,7 @@ mod tests {
 
         let expires_at_ms = expected.expiry_ms(b"n");
         expected.internal_entries_insert_with_expiry(
-            b"n".to_vec(),
+            b"n",
             Entry::new(Value::Integer(42), 2_000),
             expires_at_ms,
         );
@@ -52104,7 +52074,7 @@ mod tests {
         ] {
             let build = || {
                 let mut store = Store::new();
-                store.internal_entries_insert(source.clone(), Entry::new(seed.clone(), 1_000));
+                store.internal_entries_insert(&source, Entry::new(seed.clone(), 1_000));
                 store
             };
             let mut candidate = build();
