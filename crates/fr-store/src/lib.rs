@@ -2116,6 +2116,7 @@ impl SortedSet {
         }
     }
 
+    #[allow(dead_code)]
     fn from_unique_pairs_with_shape(
         pairs: Vec<(Vec<u8>, f64)>,
         max_member_len: usize,
@@ -4925,6 +4926,15 @@ impl From<Vec<u8>> for SmallStr {
 impl From<&[u8]> for SmallStr {
     fn from(value: &[u8]) -> Self {
         Self::from_slice(value)
+    }
+}
+
+impl<'a> From<Cow<'a, [u8]>> for SmallStr {
+    fn from(value: Cow<'a, [u8]>) -> Self {
+        match value {
+            Cow::Borrowed(b) => Self::from_slice(b),
+            Cow::Owned(o) => Self::from_vec(o),
+        }
     }
 }
 
@@ -37955,7 +37965,7 @@ impl Store {
         let mut restored_max_element_len: Option<usize> = None;
         let value = match type_byte {
             RDB_TYPE_STRING => {
-                let (v, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (v, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 Value::String(v.into())
             }
@@ -37984,10 +37994,10 @@ impl Store {
                 let mut set = GenericSet::default();
                 let mut max_member_len = 0_usize;
                 for _ in 0..count {
-                    let (member, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                    let (member, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                     cursor += consumed;
                     max_member_len = max_member_len.max(member.len());
-                    if !set.insert(member) {
+                    if !set.insert_borrowed(&member) {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                 }
@@ -38021,27 +38031,33 @@ impl Store {
                 // uniqueness, so the dedup-check preserves the per-element reject). Byte-
                 // identical: from_unique_pairs preserves insertion order and derives the
                 // same encoding (used for the byte-exact hset bulk-load path).
-                let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(count);
+                let mut pairs: Vec<(Cow<'_, [u8]>, Cow<'_, [u8]>)> = Vec::with_capacity(count);
                 let mut max_element_len = 0_usize;
                 let mut total_bytes = 0_usize;
                 for _ in 0..count {
-                    let (field, fc) = decode_rdb_string(payload, cursor, data_end)?;
+                    let (field, fc) = decode_rdb_string_cow(payload, cursor, data_end)?;
                     cursor += fc;
-                    let (value, vc) = decode_rdb_string(payload, cursor, data_end)?;
+                    let (value, vc) = decode_rdb_string_cow(payload, cursor, data_end)?;
                     cursor += vc;
                     max_element_len = max_element_len.max(field.len()).max(value.len());
                     total_bytes += field.len() + value.len();
                     pairs.push((field, value));
                 }
-                if restore_items_have_duplicate_key(&pairs, |(field, _)| field.as_slice()) {
+                if restore_items_have_duplicate_key(&pairs, |(field, _)| field.as_ref()) {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 restored_max_element_len = Some(max_element_len);
-                Value::Hash(Box::new(HashFieldMap::from_unique_pairs_with_shape(
-                    pairs,
-                    max_element_len,
-                    total_bytes,
-                )))
+                let borrowed_pairs: Vec<(&[u8], &[u8])> = pairs
+                    .iter()
+                    .map(|(f, v)| (f.as_ref(), v.as_ref()))
+                    .collect();
+                Value::Hash(Box::new(
+                    HashFieldMap::from_unique_borrowed_pairs_with_shape(
+                        &borrowed_pairs,
+                        max_element_len,
+                        total_bytes,
+                    ),
+                ))
             }
             RDB_TYPE_ZSET | RDB_TYPE_ZSET_2 => {
                 // Sorted set
@@ -38064,10 +38080,10 @@ impl Store {
                 // picks Packed vs Full by the SAME final count/size condition the
                 // incremental maybe_promote path converges to. Byte-identical (verified:
                 // DIGEST-VALUE + OBJECT ENCODING + ZRANGE WITHSCORES vs redis 7.2.4).
-                let mut pairs: Vec<(Vec<u8>, f64)> = Vec::with_capacity(count);
+                let mut pairs: Vec<(Cow<'_, [u8]>, f64)> = Vec::with_capacity(count);
                 let mut max_member_len = 0_usize;
                 for _ in 0..count {
-                    let (member, mc) = decode_rdb_string(payload, cursor, data_end)?;
+                    let (member, mc) = decode_rdb_string_cow(payload, cursor, data_end)?;
                     cursor += mc;
                     max_member_len = max_member_len.max(member.len());
                     let score = if type_byte == RDB_TYPE_ZSET_2 {
@@ -38089,12 +38105,14 @@ impl Store {
                     }
                     pairs.push((member, canonicalize_zero_score(score)));
                 }
-                if restore_items_have_duplicate_key(&pairs, |(member, _)| member.as_slice()) {
+                if restore_items_have_duplicate_key(&pairs, |(member, _)| member.as_ref()) {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 restored_max_element_len = Some(max_member_len);
-                let zs = SortedSet::from_unique_pairs_with_shape(
-                    pairs,
+                let borrowed_pairs: Vec<(&[u8], f64)> =
+                    pairs.iter().map(|(m, s)| (m.as_ref(), *s)).collect();
+                let zs = SortedSet::from_unique_borrowed_pairs_with_shape(
+                    borrowed_pairs,
                     max_member_len,
                     zset_max_entries,
                     zset_max_value,
@@ -38155,7 +38173,7 @@ impl Store {
                 )))
             }
             RDB_TYPE_LIST_ZIPLIST => {
-                let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (ziplist, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 let mut list = VecDeque::new();
                 decode_ziplist_each(&ziplist, |item| list.push_back(item))?;
@@ -38212,10 +38230,11 @@ impl Store {
                         }
                         2 => {
                             let (listpack, consumed) =
-                                decode_rdb_string(payload, cursor, data_end)?;
+                                decode_rdb_string_cow(payload, cursor, data_end)?;
                             cursor += consumed;
                             let entries = fr_persist::listpack::decode_value_spans(&listpack)
                                 .map_err(|_| StoreError::InvalidDumpPayload)?;
+                            let listpack = listpack.into_owned();
                             if let Some(nodes) = &mut fallback_nodes {
                                 nodes.push(QuicklistNode::Packed(listpack));
                             } else {
@@ -38268,7 +38287,7 @@ impl Store {
                 cursor += consumed;
                 let mut list = VecDeque::new();
                 for _ in 0..node_count {
-                    let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                    let (ziplist, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                     cursor += consumed;
                     decode_ziplist_each(&ziplist, |item| list.push_back(item))?;
                 }
@@ -38279,7 +38298,7 @@ impl Store {
             }
             RDB_TYPE_HASH_LISTPACK => {
                 let raw_start = cursor;
-                let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (listpack, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 // (frankenredis-33832) Retain the on-disk listpack string UNDECODED when
                 // duplicate-free and within live limits, matching the RDB-load retention
@@ -38316,7 +38335,7 @@ impl Store {
                 }
             }
             RDB_TYPE_HASH_ZIPLIST => {
-                let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (ziplist, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 let hash = hash_from_ziplist(&ziplist)?;
                 if hash.is_empty() {
@@ -38325,7 +38344,7 @@ impl Store {
                 Value::Hash(Box::new(hash))
             }
             RDB_TYPE_HASH_ZIPMAP => {
-                let (zipmap, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (zipmap, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 let hash = decode_zipmap_pairs(&zipmap)?;
                 if hash.is_empty() {
@@ -38334,7 +38353,7 @@ impl Store {
                 Value::Hash(Box::new(hash))
             }
             RDB_TYPE_SET_INTSET => {
-                let (intset, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (intset, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 // (CrimsonHawk) decode_intset_ints returns the i64s directly and validates
                 // STRICTLY-INCREASING order, so the result is already sorted + unique —
@@ -38351,7 +38370,7 @@ impl Store {
             }
             RDB_TYPE_SET_LISTPACK => {
                 let raw_start = cursor;
-                let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (listpack, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 // (frankenredis-33832) Retain the on-disk listpack string UNDECODED when
                 // duplicate-free and within live limits, matching the RDB-load retention
@@ -38396,7 +38415,7 @@ impl Store {
             }
             RDB_TYPE_ZSET_LISTPACK => {
                 let raw_start = cursor;
-                let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (listpack, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 // (frankenredis-33832) Retain the on-disk listpack string UNDECODED when
                 // duplicate-free and within live limits, matching the RDB-load retention
@@ -38427,7 +38446,7 @@ impl Store {
                 }
             }
             RDB_TYPE_ZSET_ZIPLIST => {
-                let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (ziplist, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 let zs = zset_from_ziplist(&ziplist)?;
                 if zs.is_empty() {
@@ -39779,21 +39798,41 @@ fn decode_length(data: &[u8], offset: usize) -> Result<(usize, usize), StoreErro
     }
 }
 
-fn decode_rdb_string(
-    data: &[u8],
+fn decode_rdb_string_cow<'a>(
+    data: &'a [u8],
     offset: usize,
     data_end: usize,
-) -> Result<(Vec<u8>, usize), StoreError> {
+) -> Result<(Cow<'a, [u8]>, usize), StoreError> {
     if offset >= data_end {
         return Err(StoreError::InvalidDumpPayload);
     }
 
     let first = data[offset];
     if (first & RDB_ENCVAL) == RDB_ENCVAL {
-        return decode_encoded_rdb_string(data, offset, data_end);
+        let (vec, consumed) = decode_encoded_rdb_string(data, offset, data_end)?;
+        return Ok((Cow::Owned(vec), consumed));
     }
 
-    decode_dump_bulk(data, offset, data_end)
+    let (len, len_bytes) = decode_length(data, offset)?;
+    let start = offset
+        .checked_add(len_bytes)
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    let end = start
+        .checked_add(len)
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    if end > data_end {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    Ok((Cow::Borrowed(&data[start..end]), len_bytes + len))
+}
+
+fn decode_rdb_string(
+    data: &[u8],
+    offset: usize,
+    data_end: usize,
+) -> Result<(Vec<u8>, usize), StoreError> {
+    let (cow, consumed) = decode_rdb_string_cow(data, offset, data_end)?;
+    Ok((cow.into_owned(), consumed))
 }
 
 fn decode_encoded_rdb_string(
