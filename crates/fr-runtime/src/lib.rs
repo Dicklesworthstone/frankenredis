@@ -6928,7 +6928,11 @@ fn aof_manifest_path(path: &std::path::Path) -> std::path::PathBuf {
 fn parse_aof_history_seq(name: &str, basename: &str) -> Option<u64> {
     let rest = name.strip_prefix(basename)?.strip_prefix('.')?;
     let (seq_str, suffix) = rest.split_once('.')?;
-    if suffix != "base.rdb" && suffix != "incr.aof" {
+    if suffix != "base.rdb"
+        && suffix != "incr.aof"
+        && suffix != "base.rdb.envelope.json"
+        && suffix != "base.rdb.symbols"
+    {
         return None;
     }
     seq_str.parse::<u64>().ok()
@@ -49129,7 +49133,18 @@ impl Runtime {
             ("aof-base", "1"),
         ];
         let base_rdb = render_rdb_snapshot_bytes(&mut self.server.store, now_ms, &aux);
-        fr_persist::write_aof_manifest_dir(&dir, &basename, seq, &base_rdb, &[])?;
+        if self.server.rdb_fec_enabled {
+            fr_persist::write_aof_manifest_dir_with_sidecar(
+                &dir,
+                &basename,
+                seq,
+                &base_rdb,
+                &[],
+                now_ms,
+            )?;
+        } else {
+            fr_persist::write_aof_manifest_dir(&dir, &basename, seq, &base_rdb, &[])?;
+        }
         self.server.aof_current_seq = seq;
         // The base now fully represents current state; the incremental flush
         // must resume appending only records captured after this rewrite, so
@@ -79298,6 +79313,88 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         let _ = std::fs::remove_file(&symbols_path);
         let _ = std::fs::remove_file(&no_fec_rdb);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn bgrewriteaof_generates_fec_sidecars_and_heals_corruption() {
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_bgrewriteaof_fec_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let aof_path = dir.join("appendonly.aof");
+        let manifest_path = dir.join("appendonly.aof.manifest");
+        let manifest_env = dir.join("appendonly.aof.manifest.envelope.json");
+        let manifest_sym = dir.join("appendonly.aof.manifest.symbols");
+        let base_rdb_path = dir.join("appendonly.aof.1.base.rdb");
+        let base_env = dir.join("appendonly.aof.1.base.rdb.envelope.json");
+        let base_sym = dir.join("appendonly.aof.1.base.rdb.symbols");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(aof_path.clone());
+        assert!(rt.rdb_fec_enabled());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"aofkey", b"aofval"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // 1. BGREWRITEAOF generates appendonlydir files + RaptorQ sidecars for manifest and base RDB
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1),
+            RespFrame::SimpleString("Background append only file rewriting started".to_string())
+        );
+
+        assert!(manifest_path.exists(), "manifest must exist");
+        assert!(manifest_env.exists(), "manifest envelope must exist");
+        assert!(manifest_sym.exists(), "manifest symbols must exist");
+        assert!(base_rdb_path.exists(), "base rdb must exist");
+        assert!(base_env.exists(), "base rdb envelope must exist");
+        assert!(base_sym.exists(), "base rdb symbols must exist");
+
+        // 2. Corrupt base RDB on disk
+        let mut base_bytes = std::fs::read(&base_rdb_path).expect("read base rdb");
+        assert!(base_bytes.len() > 15);
+        base_bytes[10] ^= 0xff;
+        base_bytes[11] ^= 0xaa;
+        std::fs::write(&base_rdb_path, &base_bytes).expect("write corrupted base rdb");
+
+        // 3. New runtime loads AOF - auto-heals base RDB from sidecar!
+        let mut rt2 = Runtime::default_strict();
+        rt2.set_aof_path(aof_path.clone());
+        let loaded = rt2
+            .load_aof(100)
+            .expect("load_aof must heal base RDB from sidecar");
+        assert_eq!(loaded, 1);
+        assert_eq!(
+            rt2.execute_frame(command(&[b"GET", b"aofkey"]), 101),
+            RespFrame::BulkString(Some(b"aofval".to_vec()))
+        );
+
+        // Verify base envelope was updated to recovered
+        let b_env =
+            fr_fec::envelope_from_json(&std::fs::read_to_string(&base_env).expect("read base env"))
+                .expect("parse base env");
+        assert_eq!(b_env.scrub.status, "recovered");
+        assert_eq!(b_env.decode_proofs.len(), 1);
+
+        // 4. Corrupt manifest on disk and verify recovery
+        let mut m_bytes = std::fs::read(&manifest_path).expect("read manifest");
+        m_bytes[0] ^= 0xff;
+        std::fs::write(&manifest_path, &m_bytes).expect("write corrupted manifest");
+
+        let mut rt3 = Runtime::default_strict();
+        rt3.set_aof_path(aof_path.clone());
+        let loaded3 = rt3
+            .load_aof(200)
+            .expect("load_aof must heal manifest from sidecar");
+        assert_eq!(loaded3, 1);
+        assert_eq!(
+            rt3.execute_frame(command(&[b"GET", b"aofkey"]), 201),
+            RespFrame::BulkString(Some(b"aofval".to_vec()))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (frankenredis-30hub) Mirror upstream server.c::initServerConfig

@@ -313,9 +313,35 @@ pub fn parse_aof_manifest(input: &str) -> Result<AofManifest, PersistError> {
 }
 
 pub fn read_aof_manifest_file(path: &Path) -> Result<AofManifest, PersistError> {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => parse_aof_manifest(&contents),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AofManifest::default()),
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            if let Ok(contents) = std::str::from_utf8(&bytes)
+                && let Ok(manifest) = parse_aof_manifest(contents)
+            {
+                return Ok(manifest);
+            }
+            if let Some(recovered_bytes) = try_recover_rdb_from_sidecar(path)
+                && let Ok(recovered_str) = std::str::from_utf8(&recovered_bytes)
+                && let Ok(manifest) = parse_aof_manifest(recovered_str)
+            {
+                Ok(manifest)
+            } else {
+                match std::str::from_utf8(&bytes) {
+                    Ok(contents) => parse_aof_manifest(contents),
+                    Err(_) => Err(PersistError::InvalidFrame),
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(recovered_bytes) = try_recover_rdb_from_sidecar(path)
+                && let Ok(recovered_str) = std::str::from_utf8(&recovered_bytes)
+                && let Ok(manifest) = parse_aof_manifest(recovered_str)
+            {
+                Ok(manifest)
+            } else {
+                Ok(AofManifest::default())
+            }
+        }
         Err(error) => Err(PersistError::Io(error)),
     }
 }
@@ -345,14 +371,36 @@ pub fn read_aof_manifest_dir(manifest_path: &Path) -> Result<MultipartAofLoad, P
         .map_or_else(|| Path::new(".").to_path_buf(), Path::to_path_buf);
     let mut out = MultipartAofLoad::default();
     for entry in manifest.replay_entries() {
-        let data = std::fs::read(dir.join(&entry.file_name)).map_err(PersistError::Io)?;
+        let entry_path = dir.join(&entry.file_name);
+        let data = match std::fs::read(&entry_path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(recovered) = try_recover_rdb_from_sidecar(&entry_path) {
+                    recovered
+                } else {
+                    return Err(PersistError::Io(e));
+                }
+            }
+            Err(e) => return Err(PersistError::Io(e)),
+        };
         if data.is_empty() {
             continue;
         }
         let is_rdb_base =
             entry.file_type == AofManifestFileType::Base && entry.file_name.ends_with(".rdb");
         if is_rdb_base {
-            let decoded = decode_rdb_prefix(&data)?;
+            let decoded = match decode_rdb_prefix(&data) {
+                Ok(dec) => dec,
+                Err(err) => {
+                    if let Some(recovered) = try_recover_rdb_from_sidecar(&entry_path)
+                        && let Ok(dec) = decode_rdb_prefix(&recovered)
+                    {
+                        dec
+                    } else {
+                        return Err(err);
+                    }
+                }
+            };
             out.base_rdb_entries = decoded.entries;
             out.base_rdb_functions = decoded.functions;
         } else {
@@ -410,6 +458,52 @@ pub fn write_aof_manifest_dir(
         &dir.join(format!("{basename}.manifest")),
         format_aof_manifest(&manifest).as_bytes(),
     )
+}
+
+/// Like [`write_aof_manifest_dir`] but generates RFC 6330 RaptorQ
+/// durability sidecars (`.envelope.json` and `.symbols`) for the base RDB snapshot
+/// and the AOF manifest (spec §9/§19).
+pub fn write_aof_manifest_dir_with_sidecar(
+    dir: &Path,
+    basename: &str,
+    seq: u64,
+    base_rdb: &[u8],
+    incr_records: &[AofRecord],
+    now_unix_ms: u64,
+) -> Result<(), PersistError> {
+    std::fs::create_dir_all(dir).map_err(PersistError::Io)?;
+    let base_file = format!("{basename}.{seq}.base.rdb");
+    let incr_file = format!("{basename}.{seq}.incr.aof");
+    let base_path = dir.join(&base_file);
+
+    write_rdb_bytes_with_sidecar(&base_path, base_rdb, now_unix_ms)?;
+    let empty_slice: &[u8] = &[];
+    let incr_bytes = if incr_records.is_empty() {
+        empty_slice
+    } else {
+        &encode_aof_stream(incr_records)
+    };
+    write_file_atomically_without_dir_sync(&dir.join(&incr_file), incr_bytes)?;
+    sync_parent_dir(dir)?;
+
+    let manifest = AofManifest {
+        base: Some(AofManifestEntry {
+            file_name: base_file,
+            file_seq: seq,
+            file_type: AofManifestFileType::Base,
+        }),
+        history: Vec::new(),
+        incremental: vec![AofManifestEntry {
+            file_name: incr_file,
+            file_seq: seq,
+            file_type: AofManifestFileType::Incremental,
+        }],
+        curr_base_file_seq: seq,
+        curr_incr_file_seq: seq,
+    };
+    let manifest_path = dir.join(format!("{basename}.manifest"));
+    let manifest_bytes = format_aof_manifest(&manifest);
+    write_rdb_bytes_with_sidecar(&manifest_path, manifest_bytes.as_bytes(), now_unix_ms)
 }
 
 #[must_use]
@@ -7069,6 +7163,31 @@ pub fn write_rdb_file_with_functions(
     functions: &[&[u8]],
 ) -> Result<(), PersistError> {
     write_rdb_bytes_atomically(path, &encode_rdb_with_functions(entries, aux, functions))
+}
+
+/// Like [`write_rdb_file`] but generates RFC 6330 RaptorQ durability sidecars
+/// (`.envelope.json` and `.symbols`) alongside the RDB file (spec §9/§19).
+pub fn write_rdb_file_with_sidecar(
+    path: &Path,
+    entries: &[RdbEntry],
+    aux: &[(&str, &str)],
+    now_unix_ms: u64,
+) -> Result<(), PersistError> {
+    let bytes = encode_rdb(entries, aux);
+    write_rdb_bytes_with_sidecar(path, &bytes, now_unix_ms)
+}
+
+/// Like [`write_rdb_file_with_functions`] but generates RFC 6330 RaptorQ durability sidecars
+/// (`.envelope.json` and `.symbols`) alongside the RDB file (spec §9/§19).
+pub fn write_rdb_file_with_functions_and_sidecar(
+    path: &Path,
+    entries: &[RdbEntry],
+    aux: &[(&str, &str)],
+    functions: &[&[u8]],
+    now_unix_ms: u64,
+) -> Result<(), PersistError> {
+    let bytes = encode_rdb_with_functions(entries, aux, functions);
+    write_rdb_bytes_with_sidecar(path, &bytes, now_unix_ms)
 }
 
 /// Durably write already-encoded RDB `bytes` to `path` (temp file + rename +
@@ -14090,6 +14209,93 @@ mod tests {
             let _ = std::fs::remove_file(&env_path);
             let _ = std::fs::remove_file(&sym_path);
             let _ = std::fs::remove_dir(&dir);
+        }
+
+        #[test]
+        fn aof_manifest_dir_sidecar_roundtrip_and_corruption_recovery() {
+            let dir = std::env::temp_dir().join(format!("fr_aof_fec_test_{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let manifest_path = dir.join("appendonly.aof.manifest");
+
+            let base_entries = vec![crate::RdbEntry {
+                db: 0,
+                key: b"aof_base_key".to_vec(),
+                value: crate::RdbValue::String(b"aof_base_val".to_vec()),
+                expire_ms: None,
+            }];
+            let aux = [("redis-ver", "7.2.4")];
+            let base_rdb = crate::encode_rdb(&base_entries, &aux);
+            let incr = vec![crate::AofRecord {
+                argv: vec![b"SET".to_vec(), b"aof_incr_key".to_vec(), b"v".to_vec()],
+            }];
+
+            let now_ms = 1_700_000_000_000_u64;
+            crate::write_aof_manifest_dir_with_sidecar(
+                &dir,
+                "appendonly.aof",
+                1,
+                &base_rdb,
+                &incr,
+                now_ms,
+            )
+            .expect("write aof manifest dir with sidecars");
+
+            let (manifest_env, manifest_sym) = fr_fec::sidecar_paths(&manifest_path);
+            let (base_env, base_sym) =
+                fr_fec::sidecar_paths(dir.join("appendonly.aof.1.base.rdb"));
+            assert!(manifest_env.exists(), "manifest envelope must exist");
+            assert!(manifest_sym.exists(), "manifest symbols must exist");
+            assert!(base_env.exists(), "base rdb envelope must exist");
+            assert!(base_sym.exists(), "base rdb symbols must exist");
+
+            // 1. Read clean AOF directory.
+            let loaded = crate::read_aof_manifest_dir(&manifest_path).expect("read clean AOF");
+            assert_eq!(loaded.base_rdb_entries.len(), 1);
+            assert_eq!(loaded.base_rdb_entries[0].key, b"aof_base_key");
+            assert_eq!(loaded.records.len(), 1);
+
+            // 2. Corrupt manifest on disk.
+            let mut manifest_bytes = std::fs::read(&manifest_path).expect("read manifest");
+            assert!(manifest_bytes.len() > 5);
+            manifest_bytes[0] ^= 0xff;
+            manifest_bytes[1] ^= 0xee;
+            std::fs::write(&manifest_path, &manifest_bytes).expect("write corrupted manifest");
+
+            // read_aof_manifest_dir recovers corrupted manifest from sidecars:
+            let loaded_after_manifest_corrupt =
+                crate::read_aof_manifest_dir(&manifest_path).expect("auto-heal manifest");
+            assert_eq!(loaded_after_manifest_corrupt.base_rdb_entries.len(), 1);
+            let m_env = fr_fec::envelope_from_json(
+                &std::fs::read_to_string(&manifest_env).expect("read manifest env"),
+            )
+            .expect("parse manifest env");
+            assert_eq!(m_env.scrub.status, "recovered");
+            assert_eq!(m_env.decode_proofs.len(), 1);
+
+            // 3. Corrupt base RDB on disk.
+            let base_path = dir.join("appendonly.aof.1.base.rdb");
+            let mut base_bytes = std::fs::read(&base_path).expect("read base rdb");
+            assert!(base_bytes.len() > 10);
+            base_bytes[5] ^= 0xff;
+            base_bytes[6] ^= 0xdd;
+            std::fs::write(&base_path, &base_bytes).expect("write corrupted base rdb");
+
+            // read_aof_manifest_dir recovers corrupted base RDB from sidecars:
+            let loaded_after_base_corrupt =
+                crate::read_aof_manifest_dir(&manifest_path).expect("auto-heal base rdb");
+            assert_eq!(loaded_after_base_corrupt.base_rdb_entries.len(), 1);
+            assert_eq!(
+                loaded_after_base_corrupt.base_rdb_entries[0].key,
+                b"aof_base_key"
+            );
+            let b_env = fr_fec::envelope_from_json(
+                &std::fs::read_to_string(&base_env).expect("read base env"),
+            )
+            .expect("parse base env");
+            assert_eq!(b_env.scrub.status, "recovered");
+            assert_eq!(b_env.decode_proofs.len(), 1);
+
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }
