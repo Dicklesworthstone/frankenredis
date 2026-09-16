@@ -1286,6 +1286,7 @@ impl HashFieldMap {
     /// Specialized twin of [`Self::from_unique_pairs`] when caller has already tracked
     /// the maximum element length and total payload bytes during decode/ingestion.
     /// Eliminates both the threshold scan (`.any(...)`) and the capacity pre-sizing pass (`.map(...).sum()`).
+    #[allow(dead_code)]
     #[must_use]
     pub fn from_unique_pairs_with_shape(
         pairs: Vec<(Vec<u8>, Vec<u8>)>,
@@ -1304,6 +1305,31 @@ impl HashFieldMap {
             let mut p = PackedStrMap::with_capacity(bytes);
             for (field, value) in pairs {
                 p.append(&field, &value);
+            }
+            HashFieldMap::Packed(p)
+        }
+    }
+
+    /// Borrowed-input specialized twin when caller has pre-tracked max element length and total payload bytes.
+    /// Avoids intermediate `Vec<u8>` allocations for fields and values on RESTORE.
+    #[must_use]
+    pub fn from_unique_borrowed_pairs_with_shape(
+        pairs: &[(&[u8], &[u8])],
+        max_element_len: usize,
+        total_payload_bytes: usize,
+    ) -> Self {
+        let to_hash = Self::tier_needs_hashtable(pairs.len(), max_element_len);
+        let bytes = total_payload_bytes.saturating_add(pairs.len().saturating_mul(10));
+        if to_hash {
+            let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
+            for (field, value) in pairs {
+                h.append_known_absent(field, value);
+            }
+            HashFieldMap::Hash(h)
+        } else {
+            let mut p = PackedStrMap::with_capacity(bytes);
+            for (field, value) in pairs {
+                p.append(field, value);
             }
             HashFieldMap::Packed(p)
         }
