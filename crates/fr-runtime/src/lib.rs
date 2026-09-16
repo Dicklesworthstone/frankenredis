@@ -1930,6 +1930,7 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("stop-writes-on-bgsave-error", "yes"),
     ("rdbcompression", "yes"),
     ("rdbchecksum", "yes"),
+    ("rdb-fec", "yes"),
     ("dbfilename", "dump.rdb"),
     ("rdb-del-sync-files", "no"),
     ("dir", "."),
@@ -2200,6 +2201,7 @@ fn config_static_param_is_dynamic(name: &str) -> bool {
             "list-max-ziplist-size",
             "appendonly",
             "stop-writes-on-bgsave-error",
+            "rdb-fec",
             "appendfilename",
             "appenddirname",
             "dbfilename",
@@ -4748,6 +4750,8 @@ pub struct ServerState {
     /// `save ""` -- snapshotting disabled, the ordinary cache configuration -- fr refused writes
     /// that Redis 7.2.4 serves. See `active_disk_write_denial`.
     rdb_save_points_configured: bool,
+    /// Whether RaptorQ FEC sidecars (.envelope.json and .symbols) are generated on RDB snapshot saves.
+    pub rdb_fec_enabled: bool,
     /// Replica promotion priority reported in INFO replication / CONFIG.
     pub replica_priority: usize,
     /// (frankenredis-w1djx) Longest single event-loop cycle observed, in microseconds.
@@ -5065,6 +5069,7 @@ impl Default for ServerState {
             // Upstream's CONFIG_DEFAULT_SAVE_PARAMS ("3600 1 300 100 60 10000") is non-empty, and
             // fr's own default `save` string matches it, so the default is "configured".
             rdb_save_points_configured: true,
+            rdb_fec_enabled: true,
             masteruser: None,
             masterauth: None,
             replica_serve_stale_data: true,
@@ -5148,6 +5153,10 @@ impl ServerState {
 
     pub fn set_rdb_path(&mut self, path: std::path::PathBuf) {
         self.rdb_path = Some(path);
+    }
+
+    pub fn set_rdb_fec(&mut self, enabled: bool) {
+        self.rdb_fec_enabled = enabled;
     }
 
     pub fn set_acl_file_path(&mut self, path: std::path::PathBuf) {
@@ -6919,7 +6928,11 @@ fn aof_manifest_path(path: &std::path::Path) -> std::path::PathBuf {
 fn parse_aof_history_seq(name: &str, basename: &str) -> Option<u64> {
     let rest = name.strip_prefix(basename)?.strip_prefix('.')?;
     let (seq_str, suffix) = rest.split_once('.')?;
-    if suffix != "base.rdb" && suffix != "incr.aof" {
+    if suffix != "base.rdb"
+        && suffix != "incr.aof"
+        && suffix != "base.rdb.envelope.json"
+        && suffix != "base.rdb.symbols"
+    {
         return None;
     }
     seq_str.parse::<u64>().ok()
@@ -7193,6 +7206,15 @@ impl Runtime {
     #[must_use]
     pub fn rdb_path(&self) -> Option<&std::path::Path> {
         self.server.rdb_path.as_deref()
+    }
+
+    pub fn set_rdb_fec(&mut self, enabled: bool) {
+        self.server.rdb_fec_enabled = enabled;
+    }
+
+    #[must_use]
+    pub fn rdb_fec_enabled(&self) -> bool {
+        self.server.rdb_fec_enabled
     }
 
     pub fn set_acl_file_path(&mut self, path: std::path::PathBuf) {
@@ -45508,6 +45530,16 @@ impl Runtime {
                 },
             )));
         }
+        if Self::config_pattern_matches_known(pattern, is_literal, "rdb-fec") {
+            entries.push(RespFrame::BulkString(Some(b"rdb-fec".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                if self.server.rdb_fec_enabled {
+                    b"yes".to_vec()
+                } else {
+                    b"no".to_vec()
+                },
+            )));
+        }
         if Self::config_pattern_matches_known(pattern, is_literal, "appendfilename") {
             entries.push(RespFrame::BulkString(Some(b"appendfilename".to_vec())));
             let filename = self
@@ -45746,6 +45778,7 @@ impl Runtime {
         let mut next_min_replicas_to_write: Option<usize> = None;
         let mut next_min_replicas_max_lag: Option<u64> = None;
         let mut next_stop_writes_on_bgsave_error: Option<bool> = None;
+        let mut next_rdb_fec_enabled: Option<bool> = None;
         let mut next_query_buffer_limit: Option<usize> = None;
         let mut next_proto_max_bulk_len: Option<usize> = None;
         let mut next_client_output_buffer_limits: Option<ClientOutputBufferLimits> = None;
@@ -46440,6 +46473,25 @@ impl Runtime {
                 next_stop_writes_on_bgsave_error = Some(parsed);
                 static_override_updates.push((
                     "stop-writes-on-bgsave-error".to_string(),
+                    if parsed {
+                        "yes".to_string()
+                    } else {
+                        "no".to_string()
+                    },
+                ));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("rdb-fec") {
+                let parsed = match std::str::from_utf8(&pair[1]) {
+                    Ok(s) if s.eq_ignore_ascii_case("yes") => true,
+                    Ok(s) if s.eq_ignore_ascii_case("no") => false,
+                    _ => {
+                        return config_set_failed("rdb-fec", "argument must be 'yes' or 'no'");
+                    }
+                };
+                next_rdb_fec_enabled = Some(parsed);
+                static_override_updates.push((
+                    "rdb-fec".to_string(),
                     if parsed {
                         "yes".to_string()
                     } else {
@@ -47870,6 +47922,9 @@ impl Runtime {
         if let Some(stop) = next_stop_writes_on_bgsave_error {
             self.server.stop_writes_on_bgsave_error = stop;
         }
+        if let Some(fec) = next_rdb_fec_enabled {
+            self.server.rdb_fec_enabled = fec;
+        }
         if let Some(configured) = next_save_points_configured {
             self.server.rdb_save_points_configured = configured;
         }
@@ -49078,7 +49133,18 @@ impl Runtime {
             ("aof-base", "1"),
         ];
         let base_rdb = render_rdb_snapshot_bytes(&mut self.server.store, now_ms, &aux);
-        fr_persist::write_aof_manifest_dir(&dir, &basename, seq, &base_rdb, &[])?;
+        if self.server.rdb_fec_enabled {
+            fr_persist::write_aof_manifest_dir_with_sidecar(
+                &dir,
+                &basename,
+                seq,
+                &base_rdb,
+                &[],
+                now_ms,
+            )?;
+        } else {
+            fr_persist::write_aof_manifest_dir(&dir, &basename, seq, &base_rdb, &[])?;
+        }
         self.server.aof_current_seq = seq;
         // The base now fully represents current state; the incremental flush
         // must resume appending only records captured after this rewrite, so
@@ -49139,7 +49205,12 @@ impl Runtime {
             // falls back to the full encoder. Mirrors the AOF-base + in-memory
             // snapshot sites that already use this path.
             let encoded = render_rdb_snapshot_bytes(&mut self.server.store, now_ms, &aux);
-            if fr_persist::write_rdb_bytes(&path, &encoded).is_err() {
+            let write_res = if self.server.rdb_fec_enabled {
+                fr_persist::write_rdb_bytes_with_sidecar(&path, &encoded, now_ms)
+            } else {
+                fr_persist::write_rdb_bytes(&path, &encoded)
+            };
+            if write_res.is_err() {
                 return Err(RespFrame::Error(
                     "ERR error saving RDB snapshot to disk".to_string(),
                 ));
@@ -74884,6 +74955,38 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         );
     }
 
+    #[test]
+    fn config_get_and_set_rdb_fec() {
+        let mut rt = Runtime::default_strict();
+        assert!(rt.rdb_fec_enabled());
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"rdb-fec"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"rdb-fec".to_vec())),
+                RespFrame::BulkString(Some(b"yes".to_vec())),
+            ]))
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"rdb-fec", b"no"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.rdb_fec_enabled());
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"rdb-fec"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"rdb-fec".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+            ]))
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"rdb-fec", b"yes"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.rdb_fec_enabled());
+    }
+
     /// (frankenredis-vlh11) Upstream Redis resolves CONFIG GET dir to
     /// the absolute canonical path of the working directory (via
     /// chdir+getcwd at startup). Pre-fix fr returned the literal "."
@@ -79103,6 +79206,195 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
         );
 
         let _ = std::fs::remove_file(&rdb_path);
+    }
+
+    #[test]
+    fn save_rdb_generates_fec_sidecars_and_heals_corruption() {
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_rdb_fec_recovery_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let rdb_path = dir.join("fec_test_dump.rdb");
+        let envelope_path = dir.join("fec_test_dump.rdb.envelope.json");
+        let symbols_path = dir.join("fec_test_dump.rdb.symbols");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(rdb_path.clone());
+        assert!(rt.rdb_fec_enabled());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"mykey", b"myval"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"otherkey", b"12345"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // 1. SAVE generates RDB and RaptorQ sidecars
+        assert_eq!(
+            rt.execute_frame(command(&[b"SAVE"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert!(rdb_path.exists(), "rdb file must exist");
+        assert!(envelope_path.exists(), "envelope must exist");
+        assert!(symbols_path.exists(), "symbols must exist");
+
+        // 2. Corrupt the RDB file
+        let mut bytes = std::fs::read(&rdb_path).expect("read rdb");
+        assert!(bytes.len() > 20);
+        bytes[12] ^= 0x55;
+        bytes[13] ^= 0xaa;
+        std::fs::write(&rdb_path, &bytes).expect("write corrupted rdb");
+
+        // 3. Fresh runtime loads RDB - auto-heals using RaptorQ sidecar!
+        let mut rt2 = Runtime::default_strict();
+        rt2.set_rdb_path(rdb_path.clone());
+        let loaded = rt2
+            .load_rdb(100)
+            .expect("load_rdb should succeed by healing from sidecar");
+        assert_eq!(loaded, 2);
+
+        assert_eq!(
+            rt2.execute_frame(command(&[b"GET", b"mykey"]), 101),
+            RespFrame::BulkString(Some(b"myval".to_vec()))
+        );
+        assert_eq!(
+            rt2.execute_frame(command(&[b"GET", b"otherkey"]), 102),
+            RespFrame::BulkString(Some(b"12345".to_vec()))
+        );
+
+        // 4. Verify envelope records decode proof and recovered status
+        let env =
+            fr_fec::envelope_from_json(&std::fs::read_to_string(&envelope_path).expect("read env"))
+                .expect("parse env");
+        assert_eq!(env.scrub.status, "recovered");
+        assert_eq!(env.decode_proofs.len(), 1);
+
+        // 5. Truncate RDB to 0 bytes and verify recovery
+        std::fs::write(&rdb_path, b"").expect("truncate rdb");
+        let mut rt3 = Runtime::default_strict();
+        rt3.set_rdb_path(rdb_path.clone());
+        let loaded3 = rt3
+            .load_rdb(200)
+            .expect("load_rdb must heal 0-byte truncated rdb");
+        assert_eq!(loaded3, 2);
+        assert_eq!(
+            rt3.execute_frame(command(&[b"GET", b"mykey"]), 201),
+            RespFrame::BulkString(Some(b"myval".to_vec()))
+        );
+
+        // 6. When rdb-fec is set to no, sidecars are not written
+        let no_fec_rdb = dir.join("no_fec_dump.rdb");
+        let no_fec_env = dir.join("no_fec_dump.rdb.envelope.json");
+        let no_fec_sym = dir.join("no_fec_dump.rdb.symbols");
+        let mut rt_nofec = Runtime::default_strict();
+        rt_nofec.set_rdb_path(no_fec_rdb.clone());
+        assert_eq!(
+            rt_nofec.execute_frame(command(&[b"CONFIG", b"SET", b"rdb-fec", b"no"]), 300),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt_nofec.execute_frame(command(&[b"SET", b"k", b"v"]), 301),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt_nofec.execute_frame(command(&[b"SAVE"]), 302),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(no_fec_rdb.exists());
+        assert!(!no_fec_env.exists());
+        assert!(!no_fec_sym.exists());
+
+        let _ = std::fs::remove_file(&rdb_path);
+        let _ = std::fs::remove_file(&envelope_path);
+        let _ = std::fs::remove_file(&symbols_path);
+        let _ = std::fs::remove_file(&no_fec_rdb);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn bgrewriteaof_generates_fec_sidecars_and_heals_corruption() {
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_bgrewriteaof_fec_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let aof_path = dir.join("appendonly.aof");
+        let manifest_path = dir.join("appendonly.aof.manifest");
+        let manifest_env = dir.join("appendonly.aof.manifest.envelope.json");
+        let manifest_sym = dir.join("appendonly.aof.manifest.symbols");
+        let base_rdb_path = dir.join("appendonly.aof.1.base.rdb");
+        let base_env = dir.join("appendonly.aof.1.base.rdb.envelope.json");
+        let base_sym = dir.join("appendonly.aof.1.base.rdb.symbols");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(aof_path.clone());
+        assert!(rt.rdb_fec_enabled());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"aofkey", b"aofval"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // 1. BGREWRITEAOF generates appendonlydir files + RaptorQ sidecars for manifest and base RDB
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1),
+            RespFrame::SimpleString("Background append only file rewriting started".to_string())
+        );
+
+        assert!(manifest_path.exists(), "manifest must exist");
+        assert!(manifest_env.exists(), "manifest envelope must exist");
+        assert!(manifest_sym.exists(), "manifest symbols must exist");
+        assert!(base_rdb_path.exists(), "base rdb must exist");
+        assert!(base_env.exists(), "base rdb envelope must exist");
+        assert!(base_sym.exists(), "base rdb symbols must exist");
+
+        // 2. Corrupt base RDB on disk
+        let mut base_bytes = std::fs::read(&base_rdb_path).expect("read base rdb");
+        assert!(base_bytes.len() > 15);
+        base_bytes[10] ^= 0xff;
+        base_bytes[11] ^= 0xaa;
+        std::fs::write(&base_rdb_path, &base_bytes).expect("write corrupted base rdb");
+
+        // 3. New runtime loads AOF - auto-heals base RDB from sidecar!
+        let mut rt2 = Runtime::default_strict();
+        rt2.set_aof_path(aof_path.clone());
+        let loaded = rt2
+            .load_aof(100)
+            .expect("load_aof must heal base RDB from sidecar");
+        assert_eq!(loaded, 1);
+        assert_eq!(
+            rt2.execute_frame(command(&[b"GET", b"aofkey"]), 101),
+            RespFrame::BulkString(Some(b"aofval".to_vec()))
+        );
+
+        // Verify base envelope was updated to recovered
+        let b_env =
+            fr_fec::envelope_from_json(&std::fs::read_to_string(&base_env).expect("read base env"))
+                .expect("parse base env");
+        assert_eq!(b_env.scrub.status, "recovered");
+        assert_eq!(b_env.decode_proofs.len(), 1);
+
+        // 4. Corrupt manifest on disk and verify recovery
+        let mut m_bytes = std::fs::read(&manifest_path).expect("read manifest");
+        m_bytes[0] ^= 0xff;
+        std::fs::write(&manifest_path, &m_bytes).expect("write corrupted manifest");
+
+        let mut rt3 = Runtime::default_strict();
+        rt3.set_aof_path(aof_path.clone());
+        let loaded3 = rt3
+            .load_aof(200)
+            .expect("load_aof must heal manifest from sidecar");
+        assert_eq!(loaded3, 1);
+        assert_eq!(
+            rt3.execute_frame(command(&[b"GET", b"aofkey"]), 201),
+            RespFrame::BulkString(Some(b"aofval".to_vec()))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// (frankenredis-30hub) Mirror upstream server.c::initServerConfig

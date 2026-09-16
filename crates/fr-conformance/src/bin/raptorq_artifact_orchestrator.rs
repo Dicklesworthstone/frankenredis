@@ -57,7 +57,17 @@ fn run() -> Result<ExitCode, String> {
     println!("runner={}", cli.runner.as_str());
     println!("cmd={}", shell_join(&cmd));
 
-    let status = Command::new(&cmd[0])
+    let program = if cmd[0].starts_with("~/") {
+        if let Ok(home) = env::var("HOME") {
+            format!("{home}/{}", &cmd[0][2..])
+        } else {
+            cmd[0].clone()
+        }
+    } else {
+        cmd[0].clone()
+    };
+
+    let status = Command::new(&program)
         .args(&cmd[1..])
         .status()
         .map_err(|err| format!("failed to execute command: {err}"))?;

@@ -23798,6 +23798,7 @@ const CONFIG_STATIC_DEFAULTS: &[(&str, &str)] = &[
     ("stop-writes-on-bgsave-error", "yes"),
     ("rdbcompression", "yes"),
     ("rdbchecksum", "yes"),
+    ("rdb-fec", "yes"),
     ("dbfilename", "dump.rdb"),
     ("dir", "."),
     ("appendonly", "no"),

@@ -37,6 +37,7 @@ libc.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+fr-fec = { version = "0.1.0", path = "../fr-fec" }
 proptest.workspace = true
 
 
