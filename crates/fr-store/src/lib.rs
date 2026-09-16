@@ -38155,7 +38155,7 @@ impl Store {
                 )))
             }
             RDB_TYPE_LIST_ZIPLIST => {
-                let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (ziplist, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 let mut list = VecDeque::new();
                 decode_ziplist_each(&ziplist, |item| list.push_back(item))?;
@@ -38212,10 +38212,11 @@ impl Store {
                         }
                         2 => {
                             let (listpack, consumed) =
-                                decode_rdb_string(payload, cursor, data_end)?;
+                                decode_rdb_string_cow(payload, cursor, data_end)?;
                             cursor += consumed;
                             let entries = fr_persist::listpack::decode_value_spans(&listpack)
                                 .map_err(|_| StoreError::InvalidDumpPayload)?;
+                            let listpack = listpack.into_owned();
                             if let Some(nodes) = &mut fallback_nodes {
                                 nodes.push(QuicklistNode::Packed(listpack));
                             } else {
@@ -38279,7 +38280,7 @@ impl Store {
             }
             RDB_TYPE_HASH_LISTPACK => {
                 let raw_start = cursor;
-                let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (listpack, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 // (frankenredis-33832) Retain the on-disk listpack string UNDECODED when
                 // duplicate-free and within live limits, matching the RDB-load retention
@@ -38316,7 +38317,7 @@ impl Store {
                 }
             }
             RDB_TYPE_HASH_ZIPLIST => {
-                let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (ziplist, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 let hash = hash_from_ziplist(&ziplist)?;
                 if hash.is_empty() {
@@ -38325,7 +38326,7 @@ impl Store {
                 Value::Hash(Box::new(hash))
             }
             RDB_TYPE_HASH_ZIPMAP => {
-                let (zipmap, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (zipmap, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 let hash = decode_zipmap_pairs(&zipmap)?;
                 if hash.is_empty() {
@@ -38334,7 +38335,7 @@ impl Store {
                 Value::Hash(Box::new(hash))
             }
             RDB_TYPE_SET_INTSET => {
-                let (intset, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (intset, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 // (CrimsonHawk) decode_intset_ints returns the i64s directly and validates
                 // STRICTLY-INCREASING order, so the result is already sorted + unique —
@@ -38351,7 +38352,7 @@ impl Store {
             }
             RDB_TYPE_SET_LISTPACK => {
                 let raw_start = cursor;
-                let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (listpack, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 // (frankenredis-33832) Retain the on-disk listpack string UNDECODED when
                 // duplicate-free and within live limits, matching the RDB-load retention
@@ -38396,7 +38397,7 @@ impl Store {
             }
             RDB_TYPE_ZSET_LISTPACK => {
                 let raw_start = cursor;
-                let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (listpack, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 // (frankenredis-33832) Retain the on-disk listpack string UNDECODED when
                 // duplicate-free and within live limits, matching the RDB-load retention
@@ -38427,7 +38428,7 @@ impl Store {
                 }
             }
             RDB_TYPE_ZSET_ZIPLIST => {
-                let (ziplist, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                let (ziplist, consumed) = decode_rdb_string_cow(payload, cursor, data_end)?;
                 cursor += consumed;
                 let zs = zset_from_ziplist(&ziplist)?;
                 if zs.is_empty() {
@@ -39779,21 +39780,41 @@ fn decode_length(data: &[u8], offset: usize) -> Result<(usize, usize), StoreErro
     }
 }
 
-fn decode_rdb_string(
-    data: &[u8],
+fn decode_rdb_string_cow<'a>(
+    data: &'a [u8],
     offset: usize,
     data_end: usize,
-) -> Result<(Vec<u8>, usize), StoreError> {
+) -> Result<(Cow<'a, [u8]>, usize), StoreError> {
     if offset >= data_end {
         return Err(StoreError::InvalidDumpPayload);
     }
 
     let first = data[offset];
     if (first & RDB_ENCVAL) == RDB_ENCVAL {
-        return decode_encoded_rdb_string(data, offset, data_end);
+        let (vec, consumed) = decode_encoded_rdb_string(data, offset, data_end)?;
+        return Ok((Cow::Owned(vec), consumed));
     }
 
-    decode_dump_bulk(data, offset, data_end)
+    let (len, len_bytes) = decode_length(data, offset)?;
+    let start = offset
+        .checked_add(len_bytes)
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    let end = start
+        .checked_add(len)
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    if end > data_end {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    Ok((Cow::Borrowed(&data[start..end]), len_bytes + len))
+}
+
+fn decode_rdb_string(
+    data: &[u8],
+    offset: usize,
+    data_end: usize,
+) -> Result<(Vec<u8>, usize), StoreError> {
+    let (cow, consumed) = decode_rdb_string_cow(data, offset, data_end)?;
+    Ok((cow.into_owned(), consumed))
 }
 
 fn decode_encoded_rdb_string(
