@@ -24,7 +24,7 @@ pub use packed_set::PackedStreamLogBTreeReference;
 pub use packed_set::PackedZSet as BenchPackedZSet;
 use packed_set::{
     GenericSet, HashFieldMap, ListValue, PackedStreamLog, PackedZSet, PackedZSetInsertResult,
-    PackedZSetIter, RestoredListNode, RetainedListpackChunk,
+    PackedZSetIter, RestoredListNode, RetainedListpackChunk, packed_node_totals_from_value_spans,
 };
 
 use fr_expire::evaluate_expiry;
@@ -20092,14 +20092,28 @@ impl Store {
         // `decode_value_spans` output directly, so the SPAN CONVERSION
         // (`decode_retained_listpack_spans`, a second span vector plus a
         // rendered-integer side buffer) is skipped as well.
-        let mut packed: Vec<(Vec<u8>, Vec<fr_persist::listpack::ListpackValueSpan>)> =
-            Vec::with_capacity(nodes.len());
-        for blob in nodes {
-            let entries = fr_persist::listpack::decode_value_spans(&blob)
+        let mut raw_total = 0_u64;
+        let mut enc_total = 0_u64;
+        let mut total_len = 0_usize;
+        let mut non_empty_nodes = 0_usize;
+        for blob in &nodes {
+            let entries = fr_persist::listpack::decode_value_spans(blob)
                 .map_err(|_| StoreError::InvalidDumpPayload)?;
-            packed.push((blob, entries));
+            if !entries.is_empty() {
+                let (node_raw, node_enc) = packed_node_totals_from_value_spans(blob, &entries);
+                raw_total += node_raw;
+                enc_total += node_enc;
+                total_len += entries.len();
+                non_empty_nodes += 1;
+            }
         }
-        let Some(list) = ListValue::retained_quicklist2_from_spans(&packed, raw) else {
+        let Some(list) = ListValue::retained_quicklist2_from_totals(
+            raw_total,
+            enc_total,
+            total_len,
+            non_empty_nodes > 1,
+            raw,
+        ) else {
             return Err(StoreError::InvalidDumpPayload);
         };
         let len = list.len();
@@ -38173,31 +38187,18 @@ impl Store {
                 let body_start = cursor;
                 let (node_count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
-                enum QuicklistNode {
-                    Plain(Vec<u8>),
-                    Packed(Vec<u8>),
-                }
-                let mut packed: Vec<(Vec<u8>, Vec<fr_persist::listpack::ListpackValueSpan>)> =
-                    Vec::with_capacity(node_count);
-                let mut fallback_nodes: Option<Vec<QuicklistNode>> = None;
+                let mut raw_total = 0_u64;
+                let mut enc_total = 0_u64;
+                let mut total_len = 0_usize;
+                let mut non_empty_nodes = 0_usize;
+                let mut has_plain = false;
                 for _ in 0..node_count {
                     let (container, consumed) = decode_length(payload, cursor)?;
                     cursor += consumed;
                     match container {
                         1 => {
-                            let (item, consumed) = decode_rdb_string(payload, cursor, data_end)?;
-                            cursor += consumed;
-                            if item.is_empty() {
-                                return Err(StoreError::InvalidDumpPayload);
-                            }
-                            let nodes = fallback_nodes.get_or_insert_with(|| {
-                                let mut v = Vec::with_capacity(node_count);
-                                for (bytes, _) in packed.drain(..) {
-                                    v.push(QuicklistNode::Packed(bytes));
-                                }
-                                v
-                            });
-                            nodes.push(QuicklistNode::Plain(item));
+                            has_plain = true;
+                            break;
                         }
                         2 => {
                             let (listpack, consumed) =
@@ -38205,51 +38206,73 @@ impl Store {
                             cursor += consumed;
                             let entries = fr_persist::listpack::decode_value_spans(&listpack)
                                 .map_err(|_| StoreError::InvalidDumpPayload)?;
-                            let listpack = listpack.into_owned();
-                            if let Some(nodes) = &mut fallback_nodes {
-                                nodes.push(QuicklistNode::Packed(listpack));
-                            } else {
-                                packed.push((listpack, entries));
+                            if !entries.is_empty() {
+                                let (node_raw, node_enc) =
+                                    packed_node_totals_from_value_spans(&listpack, &entries);
+                                raw_total += node_raw;
+                                enc_total += node_enc;
+                                total_len += entries.len();
+                                non_empty_nodes += 1;
                             }
                         }
                         _ => return Err(StoreError::InvalidDumpPayload),
                     }
                 }
-                if let Some(nodes) = fallback_nodes {
-                    let mut restored = Vec::with_capacity(nodes.len());
-                    for node in nodes {
-                        match node {
-                            QuicklistNode::Plain(item) => {
+                if !has_plain {
+                    let body = payload
+                        .get(body_start..cursor)
+                        .ok_or(StoreError::InvalidDumpPayload)?
+                        .to_vec();
+                    let list = ListValue::retained_quicklist2_from_totals(
+                        raw_total,
+                        enc_total,
+                        total_len,
+                        non_empty_nodes > 1,
+                        body,
+                    )
+                    .ok_or(StoreError::InvalidDumpPayload)?;
+                    Value::List(Box::new(list))
+                } else {
+                    cursor = body_start;
+                    let (node_count, consumed) = decode_length(payload, cursor)?;
+                    cursor += consumed;
+                    let mut restored = Vec::with_capacity(node_count);
+                    for _ in 0..node_count {
+                        let (container, consumed) = decode_length(payload, cursor)?;
+                        cursor += consumed;
+                        match container {
+                            1 => {
+                                let (item, consumed) =
+                                    decode_rdb_string(payload, cursor, data_end)?;
+                                cursor += consumed;
+                                if item.is_empty() {
+                                    return Err(StoreError::InvalidDumpPayload);
+                                }
                                 restored.push(RestoredListNode::Plain(item));
                             }
-                            QuicklistNode::Packed(listpack) => {
+                            2 => {
+                                let (listpack, consumed) =
+                                    decode_rdb_string(payload, cursor, data_end)?;
+                                cursor += consumed;
                                 let spans =
                                     fr_persist::listpack::decode_retained_listpack_spans(&listpack)
                                         .map_err(|_| StoreError::InvalidDumpPayload)?;
-                                if spans.is_empty() {
-                                    continue;
+                                if !spans.is_empty() {
+                                    let (entries, integer_bytes) = spans.into_parts();
+                                    restored.push(RestoredListNode::Listpack {
+                                        bytes: listpack,
+                                        entries,
+                                        integer_bytes,
+                                    });
                                 }
-                                let (entries, integer_bytes) = spans.into_parts();
-                                restored.push(RestoredListNode::Listpack {
-                                    bytes: listpack,
-                                    entries,
-                                    integer_bytes,
-                                });
                             }
+                            _ => return Err(StoreError::InvalidDumpPayload),
                         }
                     }
                     let list = ListValue::from_restored_quicklist2_nodes(restored);
                     if list.is_empty() {
                         return Err(StoreError::InvalidDumpPayload);
                     }
-                    Value::List(Box::new(list))
-                } else {
-                    let body = payload
-                        .get(body_start..cursor)
-                        .ok_or(StoreError::InvalidDumpPayload)?
-                        .to_vec();
-                    let list = ListValue::retained_quicklist2_from_spans(&packed, body)
-                        .ok_or(StoreError::InvalidDumpPayload)?;
                     Value::List(Box::new(list))
                 }
             }

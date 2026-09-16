@@ -4550,6 +4550,13 @@ fn packed_node_totals<S: ListNodeSpan>(
     (raw_total, enc_total)
 }
 
+pub(crate) fn packed_node_totals_from_value_spans(
+    bytes: &[u8],
+    entries: &[ListpackValueSpan],
+) -> (u64, u64) {
+    packed_node_totals(bytes, entries, &[])
+}
+
 const LIST_CHUNK_TARGET: usize = 128;
 
 #[derive(Clone, Debug)]
@@ -6090,30 +6097,16 @@ impl ListValue {
     /// must take the eager route), and `raw` must be the record body those nodes were
     /// decoded from.
     #[must_use]
-    pub(crate) fn retained_quicklist2_from_spans(
-        nodes: &[(Vec<u8>, Vec<ListpackValueSpan>)],
+    pub(crate) fn retained_quicklist2_from_totals(
+        raw_total: u64,
+        enc_total: u64,
+        len: usize,
+        multi_node: bool,
         raw: Vec<u8>,
     ) -> Option<Self> {
-        let mut raw_total = 0_u64;
-        let mut enc_total = 0_u64;
-        let mut len = 0_usize;
-        for (bytes, entries) in nodes {
-            if entries.is_empty() {
-                continue;
-            }
-            let (node_raw, node_enc) = packed_node_totals(bytes, entries, &[]);
-            raw_total += node_raw;
-            enc_total += node_enc;
-            len += entries.len();
-        }
         if len == 0 {
             return None;
         }
-        // Exactly what `from_restored_quicklist2_nodes` writes for these totals,
-        // including the multi-node stickiness `frankenredis-10ovx` established: redis
-        // only emits >1 node once a list crossed list-max-listpack-size, and load
-        // PRESERVES that encoding rather than re-deriving a smaller one.
-        let multi_node = nodes.iter().filter(|(_, e)| !e.is_empty()).count() > 1;
         Some(Self {
             repr_state: ListReprState::Pending(Box::new(PendingQuicklist2 {
                 raw: raw.into_boxed_slice(),
