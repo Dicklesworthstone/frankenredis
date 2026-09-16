@@ -14241,8 +14241,7 @@ mod tests {
             .expect("write aof manifest dir with sidecars");
 
             let (manifest_env, manifest_sym) = fr_fec::sidecar_paths(&manifest_path);
-            let (base_env, base_sym) =
-                fr_fec::sidecar_paths(dir.join("appendonly.aof.1.base.rdb"));
+            let (base_env, base_sym) = fr_fec::sidecar_paths(dir.join("appendonly.aof.1.base.rdb"));
             assert!(manifest_env.exists(), "manifest envelope must exist");
             assert!(manifest_sym.exists(), "manifest symbols must exist");
             assert!(base_env.exists(), "base rdb envelope must exist");

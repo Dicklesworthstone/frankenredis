@@ -420,6 +420,7 @@ fn collect_artifact_targets(
     let seed_targets = [
         "baselines/round1_conformance_baseline.json",
         "baselines/round2_protocol_negative_baseline.json",
+        "crates/fr-conformance/fixtures/core_strings.json",
         "golden_outputs/core_strings.json",
         "crates/fr-persist/tests/golden/stream_type21_vendored_redis_724.dump",
     ];
@@ -428,6 +429,42 @@ fn collect_artifact_targets(
     for rel in seed_targets {
         if repo_root.join(rel).is_file() {
             seen.insert(rel.to_string());
+        }
+    }
+
+    // Dynamically include all benchmark baselines (*.json, excluding sidecars)
+    let baselines_dir = repo_root.join("baselines");
+    if baselines_dir.is_dir() {
+        let entries = fs::read_dir(&baselines_dir)
+            .map_err(|err| format!("failed to read {}: {err}", baselines_dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|err| format!("failed to read entry in baselines: {err}"))?;
+            let path = entry.path();
+            if path.is_file()
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.ends_with(".json")
+                && !name.ends_with(".envelope.json")
+            {
+                seen.insert(format!("baselines/{name}"));
+            }
+        }
+    }
+
+    // Dynamically include all conformance fixture suites (*.json, excluding sidecars)
+    let fixtures_dir = repo_root.join("crates/fr-conformance/fixtures");
+    if fixtures_dir.is_dir() {
+        let entries = fs::read_dir(&fixtures_dir)
+            .map_err(|err| format!("failed to read {}: {err}", fixtures_dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|err| format!("failed to read entry in fixtures: {err}"))?;
+            let path = entry.path();
+            if path.is_file()
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.ends_with(".json")
+                && !name.ends_with(".envelope.json")
+            {
+                seen.insert(format!("crates/fr-conformance/fixtures/{name}"));
+            }
         }
     }
 
@@ -599,5 +636,88 @@ mod tests {
         assert!(is_phase2c_target("baseline_profile.json"));
         assert!(is_phase2c_target("LEGAL.md"));
         assert!(!is_phase2c_target("notes.txt"));
+    }
+
+    #[test]
+    fn collect_artifact_targets_includes_all_baselines_and_fixtures() {
+        let repo = repo_root();
+        let targets = collect_artifact_targets(&repo, false).expect("collect targets");
+
+        let baseline_targets: Vec<_> = targets
+            .iter()
+            .filter(|t| t.starts_with("baselines/"))
+            .collect();
+        assert!(
+            baseline_targets.len() >= 13,
+            "expected at least 13 baselines, found {}: {:?}",
+            baseline_targets.len(),
+            baseline_targets
+        );
+
+        let fixture_targets: Vec<_> = targets
+            .iter()
+            .filter(|t| t.starts_with("crates/fr-conformance/fixtures/"))
+            .collect();
+        assert!(
+            fixture_targets.len() >= 51,
+            "expected at least 51 fixtures, found {}: {:?}",
+            fixture_targets.len(),
+            fixture_targets
+        );
+
+        assert!(targets.contains(
+            &"crates/fr-persist/tests/golden/stream_type21_vendored_redis_724.dump".to_string()
+        ));
+        assert!(targets.contains(&"crates/fr-conformance/fixtures/core_strings.json".to_string()));
+        assert!(
+            targets
+                .contains(&"crates/fr-conformance/fixtures/adversarial_corpus_v1.json".to_string())
+        );
+
+        for target in &targets {
+            assert!(
+                !target.ends_with(".envelope.json"),
+                "found envelope target: {target}"
+            );
+            assert!(
+                !target.ends_with(".symbols"),
+                "found symbols target: {target}"
+            );
+            assert!(
+                repo.join(target).is_file(),
+                "target does not exist on disk: {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_and_corruption_recovery_on_target() {
+        let repo = repo_root();
+        let target = repo.join("baselines/round1_conformance_baseline.json");
+        let source_bytes = fs::read(&target).expect("read baseline");
+        let encoded = encode_artifact(
+            "test_baseline",
+            "durability_evidence_bundle",
+            &source_bytes,
+            4,
+            256,
+            1_788_700_000_000,
+        )
+        .expect("encode artifact");
+
+        assert_eq!(encoded.envelope.raptorq.repair_symbols, 4);
+
+        let mut surviving = encoded.symbols.clone();
+        surviving.remove(0);
+        let (recovered, proof) = decode_artifact(
+            &encoded.envelope,
+            &surviving,
+            "test recovery",
+            1_788_700_000_100,
+        )
+        .expect("decode artifact");
+
+        assert_eq!(recovered, source_bytes);
+        assert_eq!(proof.recovered_blocks, encoded.envelope.raptorq.k);
     }
 }
