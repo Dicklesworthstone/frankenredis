@@ -38031,7 +38031,8 @@ impl Store {
                 // uniqueness, so the dedup-check preserves the per-element reject). Byte-
                 // identical: from_unique_pairs preserves insertion order and derives the
                 // same encoding (used for the byte-exact hset bulk-load path).
-                let mut pairs: Vec<(Cow<'_, [u8]>, Cow<'_, [u8]>)> = Vec::with_capacity(count);
+                type RestoredHashPair<'a> = (Cow<'a, [u8]>, Cow<'a, [u8]>);
+                let mut pairs: Vec<RestoredHashPair<'_>> = Vec::with_capacity(count);
                 let mut max_element_len = 0_usize;
                 let mut total_bytes = 0_usize;
                 for _ in 0..count {
@@ -39998,6 +39999,7 @@ fn lzf_decompress_string(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
     }
 }
 
+#[allow(dead_code)]
 fn decode_dump_bulk(
     data: &[u8],
     offset: usize,
