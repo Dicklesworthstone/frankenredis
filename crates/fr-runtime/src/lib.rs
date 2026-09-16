@@ -31343,15 +31343,12 @@ impl Runtime {
                 }
             };
             let count = i64::try_from(pairs.len()).unwrap_or(i64::MAX);
-            let dst_key = dst.to_vec();
             if pairs.is_empty() {
-                self.server
-                    .store
-                    .del(std::slice::from_ref(&dst_key), now_ms);
+                self.server.store.del_borrowed(&[dst], now_ms);
             } else {
                 self.server
                     .store
-                    .zstore_from_pairs(dst_key, pairs, true, now_ms);
+                    .zstore_from_pairs(dst, pairs, true, now_ms);
             }
             RespFrame::Integer(count)
         };
@@ -31447,16 +31444,13 @@ impl Runtime {
         let reply = match ranged {
             Ok(pairs) => {
                 let count = i64::try_from(pairs.len()).unwrap_or(i64::MAX);
-                let dst_key = dst.to_vec();
                 if pairs.is_empty() {
                     // Empty result DELETES dst — it does not leave a stale zset behind.
-                    self.server
-                        .store
-                        .del(std::slice::from_ref(&dst_key), now_ms);
+                    self.server.store.del_borrowed(&[dst], now_ms);
                 } else {
                     self.server
                         .store
-                        .zstore_from_pairs(dst_key, pairs, false, now_ms);
+                        .zstore_from_pairs(dst, pairs, false, now_ms);
                 }
                 RespFrame::Integer(count)
             }

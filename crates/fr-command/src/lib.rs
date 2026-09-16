@@ -13575,7 +13575,7 @@ fn zrangestore_cmd(
         // (frankenredis-t8rma) BYSCORE / BYLEX destinations are always created
         // skiplist-encoded upstream (zsetTypeCreate(-1, 0)); rank mode sizes by
         // the exact count and derives its encoding naturally.
-        store.zstore_from_pairs(dst.clone(), pairs, byscore || bylex, now_ms);
+        store.zstore_from_pairs(dst, pairs, byscore || bylex, now_ms);
     }
     Ok(RespFrame::Integer(count))
 }
@@ -32083,7 +32083,7 @@ fn sort_generic<const MOVE: bool>(
                     _ => Vec::new(),
                 })
                 .collect();
-            store.store_as_list(dest, list_elements);
+            store.store_as_list(&dest, list_elements);
         }
         Ok(RespFrame::Integer(result_count))
     } else {
@@ -80077,7 +80077,7 @@ mod tests {
                         if pairs.is_empty() {
                             refs.del(std::slice::from_ref(&dst_key), 0);
                         } else {
-                            refs.zstore_from_pairs(dst_key, pairs, true, 0);
+                            refs.zstore_from_pairs(&dst_key, pairs, true, 0);
                         }
 
                         let ctx = format!("rev={rev} a3={a3} a4={a4} off={offset} cnt={count}");

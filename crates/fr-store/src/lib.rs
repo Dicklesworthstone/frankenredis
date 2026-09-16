@@ -27648,7 +27648,7 @@ impl Store {
     /// Create or overwrite a sorted set from member-score pairs.
     pub fn zstore_from_pairs(
         &mut self,
-        key: Vec<u8>,
+        key: &[u8],
         pairs: Vec<(Vec<u8>, f64)>,
         force_skiplist: bool,
         now_ms: u64,
@@ -27660,8 +27660,8 @@ impl Store {
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
         let zs = SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
-        self.stream_groups.remove(key.as_slice());
-        self.stream_last_ids.remove(key.as_slice());
+        self.stream_groups.remove(key);
+        self.stream_last_ids.remove(key);
         let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
         // (frankenredis-t8rma) Upstream ZRANGESTORE pre-creates the destination
         // via zsetTypeCreate(length, 0). For BYSCORE / BYLEX the result count is
@@ -27680,7 +27680,7 @@ impl Store {
             // left an over-threshold rank result reporting listpack.
             Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
         }
-        self.internal_entries_insert(&key, entry);
+        self.internal_entries_insert(key, entry);
         // (frankenredis-bhd3u) Writing the destination set is a keyspace
         // mutation — bump dirty so ZRANGESTORE is persisted to RDB/AOF,
         // replicated, and surfaces keyspace notifications (all gate on the
@@ -35622,9 +35622,9 @@ impl Store {
 
     /// Replace the value at `key` with a list built from `elements`.
     /// Used by SORT ... STORE to write the sorted result.
-    pub fn store_as_list(&mut self, key: Vec<u8>, elements: Vec<Vec<u8>>) {
-        self.stream_groups.remove(key.as_slice());
-        self.stream_last_ids.remove(key.as_slice());
+    pub fn store_as_list(&mut self, key: &[u8], elements: Vec<Vec<u8>>) {
+        self.stream_groups.remove(key);
+        self.stream_last_ids.remove(key);
         // (frankenredis-sortstoredirty) Upstream sortCommand's STORE arm does
         // `server.dirty += outputlen` (one unit per stored element), not a
         // single increment — only the empty-result delete path is +1 (handled
@@ -35632,7 +35632,7 @@ impl Store {
         // passes a non-empty list here.
         let stored = elements.len() as u64;
         self.internal_entries_insert(
-            &key,
+            key,
             Entry::new(Value::List(Box::new(elements.into_iter().collect())), 0),
         );
         self.dirty = self.dirty.saturating_add(stored.max(1));
@@ -59420,7 +59420,7 @@ mod tests {
         // notifications (all gate on the dirty counter changing).
         let mut store = Store::new();
         let before = store.dirty;
-        store.zstore_from_pairs(b"d".to_vec(), vec![(b"a".to_vec(), 1.0)], false, 0);
+        store.zstore_from_pairs(b"d", vec![(b"a".to_vec(), 1.0)], false, 0);
         assert_eq!(store.dirty, before + 1);
         assert!(store.key_is_present(b"d"));
     }
@@ -59432,9 +59432,9 @@ mod tests {
         // result must therefore report OBJECT ENCODING skiplist, while rank-mode
         // (force_skiplist = false) derives listpack naturally.
         let mut store = Store::new();
-        store.zstore_from_pairs(b"byscore".to_vec(), vec![(b"a".to_vec(), 1.0)], true, 0);
+        store.zstore_from_pairs(b"byscore", vec![(b"a".to_vec(), 1.0)], true, 0);
         assert_eq!(store.object_encoding(b"byscore", 0), Some("skiplist"));
-        store.zstore_from_pairs(b"byrank".to_vec(), vec![(b"a".to_vec(), 1.0)], false, 0);
+        store.zstore_from_pairs(b"byrank", vec![(b"a".to_vec(), 1.0)], false, 0);
         assert_eq!(store.object_encoding(b"byrank", 0), Some("listpack"));
     }
 
@@ -77153,10 +77153,7 @@ mod tests {
         // `server.dirty += outputlen` (one unit per stored element).
         let mut store = Store::new();
         let before = store.dirty;
-        store.store_as_list(
-            b"d".to_vec(),
-            vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()],
-        );
+        store.store_as_list(b"d", vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]);
         assert_eq!(store.dirty, before + 3);
     }
 
