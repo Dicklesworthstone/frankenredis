@@ -47009,7 +47009,7 @@ mod tests {
         // Expired key reaped via pttl
         assert_eq!(store.pttl(b"no_ttl", 6_001), PttlValue::KeyMissing);
         assert_eq!(store.stat_keyspace_misses, 1);
-        assert_eq!(store.entries.contains_key(b"no_ttl".as_ref()), false);
+        assert!(!store.entries.contains_key(b"no_ttl".as_ref()));
 
         // LFU policy behavior: pttl does not touch frequency; getex bumps frequency
         store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
