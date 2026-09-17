@@ -44,9 +44,9 @@ fn workload(collapsed: bool) {
     for _ in 0..PASSES {
         for k in &ks {
             let r = if collapsed {
-                s.getset(black_box(k.to_vec()), black_box(b"n"), 1)
+                s.getset(black_box(k.as_slice()), black_box(b"n"), 1)
             } else {
-                s.getset_lfu_threeprobe_bench(black_box(k.to_vec()), black_box(b"n"), 1)
+                s.getset_lfu_threeprobe_bench(black_box(k.as_slice()), black_box(b"n"), 1)
             };
             acc = acc.wrapping_add(r.ok().flatten().map_or(0, |v| v.len()));
         }

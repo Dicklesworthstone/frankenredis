@@ -174,7 +174,7 @@ fn bench_get(c: &mut Criterion) {
             |mut s| {
                 let old = s
                     .getset(
-                        std::hint::black_box(b"gs".to_vec()),
+                        std::hint::black_box(b"gs"),
                         std::hint::black_box(getset_new_value.as_slice()),
                         2_000,
                     )

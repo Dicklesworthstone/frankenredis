@@ -208,7 +208,7 @@ proptest! {
         let mut store = fresh_store();
 
         store.set(key.clone(), old_value.clone(), None, 0);
-        let got_old = store.getset(key.clone(), &new_value, 0).unwrap();
+        let got_old = store.getset(&key, &new_value, 0).unwrap();
 
         prop_assert_eq!(got_old, Some(old_value));
         let got_new = store.get(&key, 0).unwrap();
