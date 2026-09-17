@@ -11626,7 +11626,7 @@ impl Store {
 
     pub fn getset(
         &mut self,
-        key: Vec<u8>,
+        key: &[u8],
         value: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
@@ -11639,7 +11639,7 @@ impl Store {
     #[doc(hidden)]
     pub fn getset_orig(
         &mut self,
-        key: Vec<u8>,
+        key: &[u8],
         value: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
@@ -11654,7 +11654,7 @@ impl Store {
     #[doc(hidden)]
     pub fn getset_lfu_threeprobe_bench(
         &mut self,
-        key: Vec<u8>,
+        key: &[u8],
         value: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
@@ -11685,98 +11685,115 @@ impl Store {
 
     fn getset_impl<const MOVE: bool, const COLLAPSE: bool>(
         &mut self,
-        key: Vec<u8>,
+        key: &[u8],
         value: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        // GETSET reads the old value (upstream getsetCommand → getGenericCommand →
-        // lookupKeyRead), so it bumps keyspace_hits on a present key /
-        // keyspace_misses on a missing one. (frankenredis-934ax)
-        // (CrimsonHawk) Non-LFU: fold the `record_keyspace_lookup` (drop_if_expired) + the
-        // separate `entries.get_mut` (old-value read) into ONE `lookup_live_for_read_mut`
-        // (peek expiry + hit/miss + return the live entry). The overwrite `insert` below
-        // stays a separate probe → triple lookup drops to double. Byte-identical: same key
-        // lazy-expiry, hit/miss, WRONGTYPE-without-overwrite, and no LFU state to preserve
-        // (LFU off). LFU path left verbatim (it copies the old entry's LFU counter).
-        if !self.lfu_tracking_enabled() {
-            let old = match self.lookup_live_for_read_mut(key.as_slice(), now_ms) {
-                Some(entry) => Some(Self::take_or_clone_old_string::<MOVE>(entry)?),
-                None => None,
-            };
-            let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-            self.internal_entries_insert(&key, new_entry);
-            self.dirty = self.dirty.saturating_add(1);
-            return Ok(old);
-        }
-        if COLLAPSE {
-            // (BlackThrush) LFU 3->1: fold `record_keyspace_lookup` + the `contains_key` rand-gate +
-            // the old-value `get_mut` into ONE `get_mut` (expiry peek + inline hit/miss + `rand_sample`
-            // on the disjoint `&mut self.rng_seed` field split). A present key is a hit that draws +
-            // bumps (a wrong-type key draws+bumps then WRONGTYPE with no overwrite, via `?`); an
-            // absent/expired key is a miss that draws nothing. Then the overwrite insert (unchanged).
+        if !COLLAPSE {
+            self.record_keyspace_lookup(key, now_ms);
+            let lfu_tracking_enabled = self.lfu_tracking_enabled();
             let lfu_decay = self.lfu_decay_time;
             let lfu_log_factor = self.lfu_log_factor;
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key.as_slice())).should_evict
-            {
-                self.drop_if_expired(key.as_slice(), now_ms);
-                self.record_keyspace_miss(&key);
-                let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-                self.internal_entries_insert(&key, new_entry);
-                self.dirty = self.dirty.saturating_add(1);
-                return Ok(None);
-            }
-            let (old, lfu_state) = match self.entries.get_mut(key.as_slice()) {
+            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+                self.next_rand()
+            } else {
+                0
+            };
+            let (old, lfu_state) = match self.entries.get_mut(key) {
                 Some(entry) => {
-                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
-                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    if lfu_tracking_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
                     let lfu = (entry.lfu_freq, entry.lfu_last_touch_min);
                     let v = Self::take_or_clone_old_string::<MOVE>(entry)?;
                     (Some(v), Some(lfu))
                 }
-                None => {
-                    self.record_keyspace_miss(&key);
-                    (None, None)
-                }
+                None => (None, None),
             };
             let mut new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
             if let Some((freq, last_touch)) = lfu_state {
                 new_entry.lfu_freq = freq;
                 new_entry.lfu_last_touch_min = last_touch;
             }
-            self.internal_entries_insert(&key, new_entry);
+            self.internal_entries_insert(key, new_entry);
             self.dirty = self.dirty.saturating_add(1);
             return Ok(old);
         }
-        self.record_keyspace_lookup(&key, now_ms);
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key.as_slice()) {
-            self.next_rand()
-        } else {
-            0
-        };
-        let (old, lfu_state) = match self.entries.get_mut(key.as_slice()) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                let lfu = (entry.lfu_freq, entry.lfu_last_touch_min);
-                let v = Self::take_or_clone_old_string::<MOVE>(entry)?;
-                (Some(v), Some(lfu))
-            }
-            None => (None, None),
-        };
-        let mut new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-        if let Some((freq, last_touch)) = lfu_state {
-            new_entry.lfu_freq = freq;
-            new_entry.lfu_last_touch_min = last_touch;
+
+        // Production single-probe path:
+        if self.expires_count != 0
+            && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+        {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
+            let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+            self.internal_entries_insert(key, new_entry);
+            self.dirty = self.dirty.saturating_add(1);
+            return Ok(None);
         }
-        self.internal_entries_insert(&key, new_entry);
-        self.dirty = self.dirty.saturating_add(1);
-        Ok(old)
+
+        let lookup = self.entries.lookup(key);
+        match lookup {
+            KeyLookup::Found(node_idx) => {
+                let lfu_enabled = self.lfu_tracking_enabled();
+                let lfu_decay = self.lfu_decay_time;
+                let lfu_log_factor = self.lfu_log_factor;
+                let rand_sample = if lfu_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                let old_val = {
+                    let entry = self.entries.node_value_mut(node_idx);
+                    if !entry.value.is_string_like() {
+                        return Err(StoreError::WrongType);
+                    }
+                    let old_str = Self::take_or_clone_old_string::<MOVE>(entry)?;
+                    if lfu_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
+                    entry.touch_write(now_ms, lfu_enabled);
+                    entry.value = canonical_string_value_from_slice(value);
+                    old_str
+                };
+
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                if self.expires_count != 0
+                    && let Some(old_exp) = self.expiry_deadlines.remove(key)
+                {
+                    self.expires_count = self.expires_count.saturating_sub(1);
+                    let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                    if db < self.database_count {
+                        self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
+                    }
+                    self.update_expiry_deadline(Some(old_exp.get()), None);
+                    self.forget_volatile_key(key);
+                }
+                self.invalidate_write_side_caches_scalar(key);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add(1);
+                Ok(Some(old_val))
+            }
+            KeyLookup::NotFound { hash, bucket } => {
+                self.record_keyspace_miss(key);
+                let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                self.invalidate_write_side_caches_scalar(key);
+                self.entries.insert_not_found(key, new_entry, hash, bucket);
+                self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
+                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                if db < self.database_count {
+                    self.db_key_counts[db] = self.db_key_counts[db].saturating_add(1);
+                }
+                let (event_db, logical_key) = match decode_db_key(key) {
+                    Some((decoded_db, logical)) => (decoded_db, logical),
+                    None => (db, key),
+                };
+                self.notify_keyspace_event(NOTIFY_NEW, "new", logical_key, event_db);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add(1);
+                Ok(None)
+            }
+        }
     }
 
     pub fn getset_with(
@@ -11786,55 +11803,84 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(Option<&[u8]>),
     ) -> Result<(), StoreError> {
-        if !self.lfu_tracking_enabled() {
-            match self.lookup_live_for_read_mut(key, now_ms) {
-                Some(entry) => match &entry.value {
-                    Value::String(bytes) => sink(Some(bytes.as_slice())),
-                    Value::Integer(value) => {
-                        let old = integer_decimal_bytes(*value);
-                        sink(Some(&old));
-                    }
-                    _ => return Err(StoreError::WrongType),
-                },
-                None => sink(None),
-            }
+        if self.expires_count != 0
+            && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+        {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
             self.internal_entries_insert(key, new_entry);
             self.dirty = self.dirty.saturating_add(1);
+            sink(None);
             return Ok(());
         }
 
-        self.record_keyspace_lookup(key, now_ms);
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let lfu_state = match self.entries.get_mut(key) {
-            Some(entry) => {
-                let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                let lfu = (entry.lfu_freq, entry.lfu_last_touch_min);
-                match &entry.value {
-                    Value::String(bytes) => sink(Some(bytes.as_slice())),
-                    Value::Integer(value) => {
-                        let old = integer_decimal_bytes(*value);
-                        sink(Some(&old));
+        let lookup = self.entries.lookup(key);
+        match lookup {
+            KeyLookup::Found(node_idx) => {
+                let lfu_enabled = self.lfu_tracking_enabled();
+                let lfu_decay = self.lfu_decay_time;
+                let lfu_log_factor = self.lfu_log_factor;
+                let rand_sample = if lfu_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                {
+                    let entry = self.entries.node_value_mut(node_idx);
+                    match &entry.value {
+                        Value::String(bytes) => sink(Some(bytes.as_slice())),
+                        Value::Integer(v) => {
+                            let old = integer_decimal_bytes(*v);
+                            sink(Some(&old));
+                        }
+                        _ => return Err(StoreError::WrongType),
                     }
-                    _ => return Err(StoreError::WrongType),
+                    if lfu_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
+                    entry.touch_write(now_ms, lfu_enabled);
+                    entry.value = canonical_string_value_from_slice(value);
                 }
-                Some(lfu)
+
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                if self.expires_count != 0
+                    && let Some(old_exp) = self.expiry_deadlines.remove(key)
+                {
+                    self.expires_count = self.expires_count.saturating_sub(1);
+                    let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                    if db < self.database_count {
+                        self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
+                    }
+                    self.update_expiry_deadline(Some(old_exp.get()), None);
+                    self.forget_volatile_key(key);
+                }
+                self.invalidate_write_side_caches_scalar(key);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add(1);
+                Ok(())
             }
-            None => {
+            KeyLookup::NotFound { hash, bucket } => {
                 sink(None);
-                None
+                self.record_keyspace_miss(key);
+                let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                self.invalidate_write_side_caches_scalar(key);
+                self.entries.insert_not_found(key, new_entry, hash, bucket);
+                self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
+                let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+                if db < self.database_count {
+                    self.db_key_counts[db] = self.db_key_counts[db].saturating_add(1);
+                }
+                let (event_db, logical_key) = match decode_db_key(key) {
+                    Some((decoded_db, logical)) => (decoded_db, logical),
+                    None => (db, key),
+                };
+                self.notify_keyspace_event(NOTIFY_NEW, "new", logical_key, event_db);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add(1);
+                Ok(())
             }
-        };
-        let mut new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-        if let Some((freq, last_touch)) = lfu_state {
-            new_entry.lfu_freq = freq;
-            new_entry.lfu_last_touch_min = last_touch;
         }
-        self.internal_entries_insert(key, new_entry);
-        self.dirty = self.dirty.saturating_add(1);
-        Ok(())
     }
 
     pub fn incrby(&mut self, key: &[u8], delta: i64, now_ms: u64) -> Result<i64, StoreError> {
@@ -51434,11 +51480,11 @@ mod tests {
         let (h0, m0) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
 
         // GETSET on present key → old value returned, new value set.
-        let r_present = s.getset(b"k".to_vec(), b"new", 2);
+        let r_present = s.getset(b"k", b"new", 2);
         // GETSET on missing key → None, new value set.
-        let r_missing = s.getset(b"fresh".to_vec(), b"v", 2);
+        let r_missing = s.getset(b"fresh", b"v", 2);
         // GETSET on wrong type → Err (no overwrite).
-        let r_wrong = s.getset(b"lst".to_vec(), b"z", 2);
+        let r_wrong = s.getset(b"lst", b"z", 2);
         // hits: k (present), lst (wrongtype) = 2; misses: fresh = 1.
         assert_eq!(s.stat_keyspace_hits, h0 + 2);
         assert_eq!(s.stat_keyspace_misses, m0 + 1);
@@ -51495,7 +51541,7 @@ mod tests {
         u.set(b"t".to_vec(), b"a".to_vec(), Some(50), 1); // deadline 51
         assert!(u.expires_count >= 1);
         assert_eq!(
-            u.getset(b"t".to_vec(), b"b", 10).unwrap(),
+            u.getset(b"t", b"b", 10).unwrap(),
             Some(b"a".to_vec())
         ); // at t=10, live
         assert_eq!(u.expires_count, 0, "GETSET cleared the TTL");
@@ -51509,7 +51555,7 @@ mod tests {
         let mut w = Store::new();
         w.set(b"e".to_vec(), b"gone".to_vec(), Some(50), 1);
         assert_eq!(
-            w.getset(b"e".to_vec(), b"fresh", 500).unwrap(),
+            w.getset(b"e", b"fresh", 500).unwrap(),
             None,
             "expired old → None"
         );
@@ -51520,12 +51566,12 @@ mod tests {
         b.set(b"gs:bench:key".to_vec(), b"v".to_vec(), None, 2);
         let k: &[u8] = b"gs:bench:key";
         for _ in 0..2000 {
-            std::hint::black_box(b.getset(k.to_vec(), b"v", 2)).ok();
+            std::hint::black_box(b.getset(k, b"v", 2)).ok();
         }
         let reps = 2_000_000u64;
         let t0 = std::time::Instant::now();
         for _ in 0..reps {
-            std::hint::black_box(b.getset(std::hint::black_box(k).to_vec(), b"v", 2)).ok();
+            std::hint::black_box(b.getset(std::hint::black_box(k), b"v", 2)).ok();
         }
         let full = t0.elapsed().as_nanos() as f64 / reps as f64;
         let inner = 20_000_000u64;
@@ -55604,9 +55650,9 @@ mod tests {
     #[test]
     fn getset_returns_old_and_sets_new() {
         let mut store = Store::new();
-        assert_eq!(store.getset(b"k".to_vec(), b"v1", 0).unwrap(), None);
+        assert_eq!(store.getset(b"k", b"v1", 0).unwrap(), None);
         assert_eq!(
-            store.getset(b"k".to_vec(), b"v2", 0).unwrap(),
+            store.getset(b"k", b"v2", 0).unwrap(),
             Some(b"v1".to_vec())
         );
         assert_eq!(store.get(b"k", 0).unwrap(), Some(b"v2".to_vec()));
@@ -55644,8 +55690,8 @@ mod tests {
             };
             let mut s_new = build();
             let mut s_orig = build();
-            let r_new = s_new.getset(key.to_vec(), b"NEWVAL", 2_000);
-            let r_orig = s_orig.getset_orig(key.to_vec(), b"NEWVAL", 2_000);
+            let r_new = s_new.getset(key, b"NEWVAL", 2_000);
+            let r_orig = s_orig.getset_orig(key, b"NEWVAL", 2_000);
             assert_eq!(
                 r_new,
                 r_orig,
@@ -55674,7 +55720,7 @@ mod tests {
         assert_eq!(store.pttl(b"k", 1_000), PttlValue::Remaining(5_000));
 
         assert_eq!(
-            store.getset(b"k".to_vec(), b"v2", 2_000).unwrap(),
+            store.getset(b"k", b"v2", 2_000).unwrap(),
             Some(b"v1".to_vec())
         );
         assert_eq!(store.get(b"k", 2_000).unwrap(), Some(b"v2".to_vec()));
@@ -61135,8 +61181,8 @@ mod tests {
             for &key in cases {
                 let mut a = build(lfu);
                 let mut b = build(lfu);
-                let ra = a.getset(key.to_vec(), b"NEW", now);
-                let rb = b.getset_lfu_threeprobe_bench(key.to_vec(), b"NEW", now);
+                let ra = a.getset(key, b"NEW", now);
+                let rb = b.getset_lfu_threeprobe_bench(key, b"NEW", now);
                 let tag = format!("lfu={lfu} key={key:?}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
@@ -63548,7 +63594,7 @@ mod tests {
             Some(LFU_INIT_VAL) => {}
             other => return Err(format!("new string LFU frequency mismatch: {other:?}")),
         }
-        let _old = store.getset(b"s".to_vec(), b"new", 1).unwrap();
+        let _old = store.getset(b"s", b"new", 1).unwrap();
         match store.object_freq(b"s", 1) {
             Some(6) => {}
             other => return Err(format!("GETSET LFU mismatch: {other:?}")),

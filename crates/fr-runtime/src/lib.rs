@@ -24708,7 +24708,7 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let result = self.server.store.getset(key.to_vec(), value, now_ms);
+        let result = self.server.store.getset(key, value, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(old) => RespFrame::BulkString(old),

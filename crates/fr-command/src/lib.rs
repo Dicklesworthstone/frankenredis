@@ -5175,7 +5175,7 @@ fn getset(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("GETSET"));
     }
-    let old = store.getset(argv[1].clone(), &argv[2], now_ms)?;
+    let old = store.getset(&argv[1], &argv[2], now_ms)?;
     Ok(RespFrame::BulkString(old))
 }
 

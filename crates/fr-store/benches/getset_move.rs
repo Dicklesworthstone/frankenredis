@@ -39,10 +39,10 @@ fn build_store() -> Store {
 }
 
 fn getset_orig(s: &mut Store, v: &[u8]) {
-    let _ = s.getset_orig(black_box(KEY).to_vec(), black_box(v), 2_000);
+    let _ = s.getset_orig(black_box(KEY), black_box(v), 2_000);
 }
 fn getset_new(s: &mut Store, v: &[u8]) {
-    let _ = s.getset(black_box(KEY).to_vec(), black_box(v), 2_000);
+    let _ = s.getset(black_box(KEY), black_box(v), 2_000);
 }
 
 fn timed(f: fn(&mut Store, &[u8]), s: &mut Store, v: &[u8], reps: usize) -> f64 {
