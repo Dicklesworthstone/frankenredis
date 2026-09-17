@@ -402,6 +402,15 @@ struct Node<V> {
     next: u32,
 }
 
+/// Result of a [`KeyDict::lookup`] operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyLookup {
+    /// The key exists at the given arena node index.
+    Found(u32),
+    /// The key does not exist; records its precomputed hash and candidate bucket.
+    NotFound { hash: u32, bucket: usize },
+}
+
 /// A chaining hash table keyed by raw bytes, sized to a power of two so the
 /// bucket index is `hash & mask` and the [`reverse-binary cursor`](KeyDict::scan)
 /// is well-defined.
@@ -787,44 +796,127 @@ impl<V> KeyDict<V> {
     ///
     /// `AsRef<[u8]>` rather than `&[u8]` so the existing owned-key callers in tests
     /// still compile unchanged; only the production path had an allocation to lose.
-    pub fn insert(&mut self, key: impl AsRef<[u8]>, value: V) -> Option<V> {
-        let key = key.as_ref();
+    /// Look up a key's location in the table.
+    ///
+    /// Returns [`KeyLookup::Found(node_idx)`] if the key is present, or
+    /// [`KeyLookup::NotFound { hash, bucket }`] with the computed hash and bucket
+    /// so subsequent insertion or in-place replacement avoids repeated hashing
+    /// and bucket traversal.
+    #[inline]
+    pub fn lookup(&self, key: &[u8]) -> KeyLookup {
         let h = self.hash_key(key);
         let b = self.bucket_of(h);
-        // Overwrite in place if present.
         let mut cur = self.buckets[b];
         while cur != NIL {
-            let node = self.nodes.get_mut(cur);
+            let node = self.nodes.get(cur);
             if node.hash == h && node.key.as_slice() == key {
-                return Some(std::mem::replace(&mut node.value, value));
+                return KeyLookup::Found(cur);
             }
             cur = node.next;
         }
-        // Grow before linking the new node when the insert would exceed load
-        // factor 1. That avoids writing a node into the old table only to
-        // immediately rebuild its chain in `grow`.
+        KeyLookup::NotFound { hash: h, bucket: b }
+    }
+
+    /// Access a live node's key slice by node index.
+    #[inline]
+    pub fn node_key(&self, idx: u32) -> &[u8] {
+        self.nodes.get(idx).key.as_slice()
+    }
+
+    /// Access a live node's value reference by node index.
+    #[inline]
+    pub fn node_value(&self, idx: u32) -> &V {
+        &self.nodes.get(idx).value
+    }
+
+    /// Access a live node's mutable value reference by node index.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn node_value_mut(&mut self, idx: u32) -> &mut V {
+        &mut self.nodes.get_mut(idx).value
+    }
+
+    /// Replace a live node's value by node index, returning the old value.
+    #[inline]
+    pub fn replace_node_value(&mut self, idx: u32, value: V) -> V {
+        std::mem::replace(&mut self.nodes.get_mut(idx).value, value)
+    }
+
+    fn link_new_node(&mut self, mut node: Node<V>, hash: u32, bucket: usize) {
         let b = if self.count == self.buckets.len() {
             self.grow();
-            self.bucket_of(h)
+            self.bucket_of(hash)
         } else {
-            b
+            bucket
         };
-        // Prepend a fresh node (head insertion; order within a bucket is not
-        // observable — SCAN emits whole buckets).
         let head = self.buckets[b];
-        let idx = self.alloc_node(Node {
-            hash: h,
-            key: NodeKey::from_slice(key),
-            value,
-            next: head,
-        });
+        node.next = head;
+        let idx = self.alloc_node(node);
         self.buckets[b] = idx;
         self.first_byte_bits[b] |= Self::first_byte_bit(self.nodes.get(idx).key.as_slice());
         self.count += 1;
         if self.count > self.buckets.len() {
             self.grow();
         }
-        None
+    }
+
+    /// Insert a new key/value when [`lookup`](Self::lookup) returned [`KeyLookup::NotFound`].
+    /// Bypasses duplicate checking and redundant hash computation.
+    #[inline]
+    pub fn insert_not_found(&mut self, key: &[u8], value: V, hash: u32, bucket: usize) {
+        self.link_new_node(
+            Node {
+                hash,
+                key: NodeKey::from_slice(key),
+                value,
+                next: NIL,
+            },
+            hash,
+            bucket,
+        );
+    }
+
+    /// Insert a new owned key/value when [`lookup`](Self::lookup) returned [`KeyLookup::NotFound`].
+    /// Bypasses duplicate checking and redundant hash computation while reusing
+    /// the vector's heap buffer for keys exceeding inline capacity.
+    #[inline]
+    pub fn insert_not_found_vec(&mut self, key: Vec<u8>, value: V, hash: u32, bucket: usize) {
+        self.link_new_node(
+            Node {
+                hash,
+                key: NodeKey::from_vec(key),
+                value,
+                next: NIL,
+            },
+            hash,
+            bucket,
+        );
+    }
+
+    /// Insert `key`/`value`, returning the previous value if the key existed.
+    /// The key bytes are owned once, inline in the node when short enough
+    /// ([`NodeKey`]), with no `Arc` header and no separate block.
+    ///
+    /// (frankenredis-uhthd) TAKES A BORROW, and that is load-bearing rather than
+    /// stylistic. This read `key: Box<[u8]>`, so the caller allocated a block and
+    /// handed it over; an inline key would then COPY out of that block and drop it,
+    /// paying for the allocation anyway and adding a copy. That is the exact shape
+    /// that made the earlier key-arena attempt measure a LOSS, and its retry predicate
+    /// says so: retry only with the caller-side allocation removed. `Store`'s single
+    /// insert site now passes a slice and `store_key_from_slice` is gone from it.
+    ///
+    /// `AsRef<[u8]>` rather than `&[u8]` so the existing owned-key callers in tests
+    /// still compile unchanged; only the production path had an allocation to lose.
+    #[allow(dead_code)]
+    pub fn insert(&mut self, key: impl AsRef<[u8]>, value: V) -> Option<V> {
+        let key = key.as_ref();
+        match self.lookup(key) {
+            KeyLookup::Found(idx) => Some(self.replace_node_value(idx, value)),
+            KeyLookup::NotFound { hash, bucket } => {
+                self.insert_not_found(key, value, hash, bucket);
+                None
+            }
+        }
     }
 
     /// Insert `key`/`value` when the caller already owns a `Vec<u8>`.
@@ -833,42 +925,13 @@ impl<V> KeyDict<V> {
     /// buffer directly via [`NodeKey::from_vec`] / [`Vec::into_boxed_slice`] instead
     /// of cloning the slice into a fresh heap box. (frankenredis-4f8vx)
     pub fn insert_vec(&mut self, key: Vec<u8>, value: V) -> Option<V> {
-        let h = self.hash_key(&key);
-        let b = self.bucket_of(h);
-        // Overwrite in place if present.
-        let mut cur = self.buckets[b];
-        while cur != NIL {
-            let node = self.nodes.get_mut(cur);
-            if node.hash == h && node.key.as_slice() == key.as_slice() {
-                return Some(std::mem::replace(&mut node.value, value));
+        match self.lookup(&key) {
+            KeyLookup::Found(idx) => Some(self.replace_node_value(idx, value)),
+            KeyLookup::NotFound { hash, bucket } => {
+                self.insert_not_found_vec(key, value, hash, bucket);
+                None
             }
-            cur = node.next;
         }
-        // Grow before linking the new node when the insert would exceed load
-        // factor 1. That avoids writing a node into the old table only to
-        // immediately rebuild its chain in `grow`.
-        let b = if self.count == self.buckets.len() {
-            self.grow();
-            self.bucket_of(h)
-        } else {
-            b
-        };
-        // Prepend a fresh node (head insertion; order within a bucket is not
-        // observable — SCAN emits whole buckets).
-        let head = self.buckets[b];
-        let idx = self.alloc_node(Node {
-            hash: h,
-            key: NodeKey::from_vec(key),
-            value,
-            next: head,
-        });
-        self.buckets[b] = idx;
-        self.first_byte_bits[b] |= Self::first_byte_bit(self.nodes.get(idx).key.as_slice());
-        self.count += 1;
-        if self.count > self.buckets.len() {
-            self.grow();
-        }
-        None
     }
 
     /// Remove `key`, returning its value if present.
@@ -2117,5 +2180,52 @@ mod tests {
         assert_eq!(d.remove(&short_key), Some(101));
         assert_eq!(d.remove(&long_key), Some(201));
         assert!(d.is_empty());
+    }
+
+    #[test]
+    fn test_lookup_and_not_found_insert() {
+        let mut d: KeyDict<u64> = KeyDict::new();
+        let key = b"my_test_key";
+
+        // Initial lookup -> NotFound
+        let lookup = d.lookup(key);
+        match lookup {
+            KeyLookup::NotFound { hash, bucket } => {
+                d.insert_not_found(key, 42, hash, bucket);
+            }
+            KeyLookup::Found(_) => panic!("expected NotFound"),
+        }
+
+        // Second lookup -> Found
+        let lookup = d.lookup(key);
+        let node_idx = match lookup {
+            KeyLookup::Found(idx) => idx,
+            KeyLookup::NotFound { .. } => panic!("expected Found"),
+        };
+
+        assert_eq!(d.node_key(node_idx), key);
+        assert_eq!(*d.node_value(node_idx), 42);
+
+        // Replace node value in place
+        let old = d.replace_node_value(node_idx, 99);
+        assert_eq!(old, 42);
+        assert_eq!(*d.node_value(node_idx), 99);
+        assert_eq!(*d.get(key).unwrap(), 99);
+
+        // Mutate in place via node_value_mut
+        *d.node_value_mut(node_idx) += 1;
+        assert_eq!(*d.get(key).unwrap(), 100);
+
+        // insert_not_found_vec with long key
+        let long_key = b"very_long_key_for_insert_not_found_vec".to_vec();
+        match d.lookup(&long_key) {
+            KeyLookup::NotFound { hash, bucket } => {
+                d.insert_not_found_vec(long_key.clone(), 500, hash, bucket);
+            }
+            KeyLookup::Found(_) => panic!("expected NotFound for long key"),
+        }
+
+        assert_eq!(*d.get(&long_key).unwrap(), 500);
+        assert_eq!(d.len(), 2);
     }
 }

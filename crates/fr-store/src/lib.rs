@@ -14,7 +14,7 @@ pub use fr_sentinel::consensus::{PeerAsk as SentinelPeerAsk, PeerReply as Sentin
 /// failover machine asks fr-server to perform; re-exported so fr-runtime and
 /// fr-server can name the type without depending on fr-sentinel directly.
 pub use fr_sentinel::failover::FailoverIo as SentinelFailoverIo;
-use keyspace_dict::KeyDict;
+use keyspace_dict::{KeyDict, KeyLookup};
 pub use packed_set::GenericSetIter;
 #[cfg(any(test, feature = "bench-reference"))]
 #[doc(hidden)]
@@ -14685,9 +14685,10 @@ impl Store {
         default_value: impl FnOnce() -> Value,
         now_ms: u64,
     ) -> &mut Entry {
-        if !self.entries.contains_key(key) {
-            self.internal_entries_insert(key, Entry::new(default_value(), now_ms));
+        if let Some(entry) = self.entries.get_mut(key) {
+            return entry;
         }
+        self.internal_entries_insert(key, Entry::new(default_value(), now_ms));
         self.entries
             .get_mut(key)
             .expect("entry must exist after internal insertion")
@@ -15060,12 +15061,14 @@ impl Store {
         expires_at_ms: Option<u64>,
     ) -> Option<Entry> {
         let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
-        let (is_new_key, old_expiry) = match self.entries.get(key) {
-            Some(old_entry) => {
+        let lookup = self.entries.lookup(key);
+        let (is_new_key, old_expiry) = match lookup {
+            KeyLookup::Found(node_idx) => {
+                let old_entry = self.entries.node_value(node_idx);
                 entry.modification_count = old_entry.modification_count.wrapping_add(1);
                 (false, self.expiry_ms(key))
             }
-            None => (true, None),
+            KeyLookup::NotFound { .. } => (true, None),
         };
         let new_expiry = expires_at_ms.and_then(std::num::NonZeroU64::new);
         let new_is_stream = matches!(&entry.value, Value::Stream(_));
@@ -15111,14 +15114,17 @@ impl Store {
             // (frankenredis-uhthd) `expiry_deadlines` is a separate map that still owns
             // its own boxed key, so THIS is now the only place on the path that may
             // allocate one -- and only when the write actually arms a TTL. A new key
-            // builds it from the argument; an overwrite still reads the dict's stored
-            // copy so the deadline map and the keyspace agree byte for byte.
+            // builds it from the argument; an overwrite reads the dict node's stored
+            // key slice via node_key directly, so the deadline map and the keyspace
+            // agree byte for byte without an extra keyspace probe.
             if is_new_key {
                 Some(store_key_from_slice(key))
             } else {
-                self.entries
-                    .get_key_value(key)
-                    .map(|(key, _)| store_key_from_slice(key))
+                let node_idx = match lookup {
+                    KeyLookup::Found(idx) => idx,
+                    KeyLookup::NotFound { .. } => unreachable!(),
+                };
+                Some(store_key_from_slice(self.entries.node_key(node_idx)))
             }
         } else {
             None
@@ -15160,15 +15166,19 @@ impl Store {
         } else {
             self.invalidate_write_side_caches_scalar(key);
         }
-        let old_entry = if is_new_key {
-            // New key: the dict owns the bytes, inline in its node when short enough.
-            self.entries.insert(key, entry)
-        } else {
-            // Overwrite: replace the value in place, reusing the node's existing key
-            // (no key allocation on the hot SET-existing path).
-            self.entries
-                .get_mut(key)
-                .map(|slot| std::mem::replace(slot, entry))
+        let old_entry = match lookup {
+            KeyLookup::Found(node_idx) => {
+                // Overwrite: replace the value in place, reusing the node's existing key
+                // by direct slot replacement (no key allocation on the hot SET-existing path,
+                // and no secondary dict lookup).
+                Some(self.entries.replace_node_value(node_idx, entry))
+            }
+            KeyLookup::NotFound { hash, bucket } => {
+                // New key: the dict owns the bytes, inline in its node when short enough,
+                // inserting directly into the pre-located bucket.
+                self.entries.insert_not_found(key, entry, hash, bucket);
+                None
+            }
         };
         // (frankenredis-keymiss-oqhbi sibling) Upstream fires `new` from dbAddInternal
         // (db.c:206), AFTER the key enters the dict and ONLY on creation -- the
