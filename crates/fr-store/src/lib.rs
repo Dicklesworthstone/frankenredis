@@ -10993,7 +10993,7 @@ impl Store {
             self.drop_if_expired(key, now_ms);
             return false;
         }
-        if !self.entries.contains_key(key) {
+        if peeked_expiry.is_none() && !self.entries.contains_key(key) {
             return false;
         }
         // (cc_fr) `logical_key` borrows `key` for the keyspace-notify (which is off by
@@ -11078,7 +11078,7 @@ impl Store {
             self.drop_if_expired(key, now_ms);
             return false;
         }
-        if !self.entries.contains_key(key) {
+        if peeked_expiry.is_none() && !self.entries.contains_key(key) {
             return false;
         }
 
@@ -11183,47 +11183,48 @@ impl Store {
 
     #[must_use]
     pub fn pttl(&mut self, key: &[u8], now_ms: u64) -> PttlValue {
-        // (frankenredis-cc get-ttl-lru-single-lookup) Cache-config single-lookup collapse.
-        // PTTL does not touch access time; `is_none()` consumes the helper's entry borrow
-        // so the expiry re-read below is unambiguous.
-        if !self.lfu_tracking_enabled() {
-            if self.lookup_live_for_read_mut(key, now_ms).is_none() {
-                return PttlValue::KeyMissing;
-            }
-            // (cc_fr) expires_count-guard the second expiry_deadlines probe: no TTL anywhere ⇒
-            // this key has none, so expiry_ms is None. Byte-identical (NoExpiry).
-            let expiry = if self.expires_count != 0 {
-                self.expiry_ms(key)
-            } else {
-                None
-            };
-            let decision = evaluate_expiry(now_ms, expiry);
-            return if decision.remaining_ms == -1 {
-                PttlValue::NoExpiry
-            } else {
-                PttlValue::Remaining(decision.remaining_ms)
-            };
-        }
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return PttlValue::KeyMissing;
-        };
+        // (frankenredis-cc incr-single-lookup) Read the deadline ONCE. A key with a live
+        // (future) expiry is by construction present in `entries`, so when the peeked
+        // deadline is `Some` and not yet due we answer Remaining without a second probe —
+        // collapsing record_keyspace_lookup's `drop_if_expired` probe + the redundant
+        // `expiry_ms`. Only an actually-due key falls to the full `drop_if_expired` (probe +
+        // remove + notify), and a no-expiry key still needs ONE `entries` probe to tell a
+        // present (NoExpiry) key from an absent (KeyMissing) one. Byte-identical hit/miss
+        // accounting and result vs the record_keyspace_lookup + expiry_ms pair.
         // (frankenredis-ttlnotouch) TTL/PTTL are metadata queries that do NOT
-        // update access time. Differential probe vs vendored 7.2.4 confirmed
-        // OBJECT IDLETIME remains unchanged after TTL/PTTL.
-        let Some(_entry) = self.entries.get(key) else {
-            return PttlValue::KeyMissing;
-        };
-        // (cc_fr) expires_count-guard the second expiry_deadlines probe (no TTL ⇒ None; NoExpiry).
-        let expiry = if self.expires_count != 0 {
+        // update access time (no RNG consumed, LFU-independent), so the collapse is exact.
+        // (cc_fr) expires_count-guard the expiry_deadlines foldhash: with no TTL-bearing key
+        // anywhere, this key can't have a deadline, so expiry_ms would return None. Byte-identical
+        // (every `deadline` reuse below is correct with None when expires_count==0).
+        let deadline = if self.expires_count != 0 {
             self.expiry_ms(key)
         } else {
             None
         };
-        let decision = evaluate_expiry(now_ms, expiry);
-        if decision.remaining_ms == -1 {
-            PttlValue::NoExpiry
-        } else {
-            PttlValue::Remaining(decision.remaining_ms)
+        let decision = evaluate_expiry(now_ms, deadline);
+        if decision.should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
+            return PttlValue::KeyMissing;
+        }
+        match deadline {
+            Some(_) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                if decision.remaining_ms == -1 {
+                    PttlValue::NoExpiry
+                } else {
+                    PttlValue::Remaining(decision.remaining_ms)
+                }
+            }
+            None => {
+                if self.entries.contains_key(key) {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    PttlValue::NoExpiry
+                } else {
+                    self.record_keyspace_miss(key);
+                    PttlValue::KeyMissing
+                }
+            }
         }
     }
 
@@ -33356,17 +33357,13 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         // Read the value (one LFU bump = the GETEX access) and capture the
         // current TTL state under a scoped borrow, then apply the expiry change
         // with disjoint &mut self helpers below.
         let value = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 // (frankenredis-getexint) Use string_bytes(), not a bare
@@ -46985,6 +46982,46 @@ mod tests {
             store.expiretime_value(b"k", 6_001),
             ExpireTimeValue::KeyMissing
         );
+    }
+
+    #[test]
+    fn pttl_and_getex_single_probe_reports_exact_state_and_stats() {
+        let mut store = Store::new();
+        // Missing key
+        assert_eq!(store.pttl(b"missing", 1_000), PttlValue::KeyMissing);
+        assert_eq!(store.stat_keyspace_misses, 1);
+        assert_eq!(store.stat_keyspace_hits, 0);
+
+        // Key without TTL
+        store.set(b"no_ttl".to_vec(), b"val".to_vec(), None, 1_000);
+        store.reset_info_stats();
+        assert_eq!(store.pttl(b"no_ttl", 1_000), PttlValue::NoExpiry);
+        assert_eq!(store.stat_keyspace_hits, 1);
+        assert_eq!(store.stat_keyspace_misses, 0);
+
+        // Key with TTL
+        assert!(store.expire_milliseconds(b"no_ttl", 5_000, 1_000));
+        store.reset_info_stats();
+        assert_eq!(store.pttl(b"no_ttl", 2_000), PttlValue::Remaining(4_000));
+        assert_eq!(store.stat_keyspace_hits, 1);
+        assert_eq!(store.stat_keyspace_misses, 0);
+
+        // Expired key reaped via pttl
+        assert_eq!(store.pttl(b"no_ttl", 6_001), PttlValue::KeyMissing);
+        assert_eq!(store.stat_keyspace_misses, 1);
+        assert_eq!(store.entries.contains_key(b"no_ttl".as_ref()), false);
+
+        // LFU policy behavior: pttl does not touch frequency; getex bumps frequency
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.set(b"lfu_key".to_vec(), b"hello".to_vec(), Some(10_000), 1_000);
+        let freq_before = store.object_freq(b"lfu_key", 1_000);
+        assert_eq!(store.pttl(b"lfu_key", 2_000), PttlValue::Remaining(9_000));
+        assert_eq!(store.object_freq(b"lfu_key", 2_000), freq_before);
+
+        // getex under LFU returns value and updates expiry
+        let got = store.getex(b"lfu_key", Some(Some(20_000)), 2_000).unwrap();
+        assert_eq!(got, Some(b"hello".to_vec()));
+        assert_eq!(store.pttl(b"lfu_key", 2_000), PttlValue::Remaining(18_000));
     }
 
     #[test]
