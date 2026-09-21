@@ -6,12 +6,7 @@
     "legacy_redis_code/redis/src/networking.c",
     "legacy_redis_code/redis/src/server.c"
   ],
-  "legacy_symbols": [
-    "authCommand",
-    "ACLSetUser",
-    "ACLCheckAllPerm",
-    "processCommand"
-  ],
+  "legacy_symbols": ["authCommand", "ACLSetUser", "ACLCheckAllPerm", "processCommand"],
   "state_machine_contract": [
     "auth_bootstrap_state_determinism",
     "hello_auth_early_fail_transition",
@@ -22,13 +17,8 @@
     "noauth_pre_dispatch_rejection_surface",
     "hello_auth_reply_shape_contract"
   ],
-  "command_acl_contract": [
-    "acl_selector_parse_reduce_determinism",
-    "acl_denial_log_contract"
-  ],
-  "persistence_replication_contract": [
-    "acl_file_transactional_load_and_atomic_save"
-  ],
+  "command_acl_contract": ["acl_selector_parse_reduce_determinism", "acl_denial_log_contract"],
+  "persistence_replication_contract": ["acl_file_transactional_load_and_atomic_save"],
   "error_contract": [
     "auth.noauth_gate_violation",
     "auth.acl_selector_parse_validation_mismatch",
@@ -42,10 +32,7 @@
     "bounded_parser_diagnostics_only",
     "reject_non_allowlisted_acl_deviation"
   ],
-  "excluded_scope": [
-    "acl_pubsub_selector_expansion",
-    "acl_external_identity_provider_integration"
-  ],
+  "excluded_scope": ["acl_pubsub_selector_expansion", "acl_external_identity_provider_integration"],
   "oracle_tests": [
     "fr_p2c_004_u005_noauth_gate_precedes_dispatch_and_logs",
     "fr_p2c_004_u007_acl_selector_parser_rejects_malformed_rules_and_logs",
@@ -65,8 +52,5 @@
     "acl_selector_reduce_drift",
     "hardened_nonallowlisted_deviation_leak"
   ],
-  "raptorq_artifacts": [
-    "parity_report.raptorq.json",
-    "parity_report.decode_proof.json"
-  ]
+  "raptorq_artifacts": ["parity_report.raptorq.json", "parity_report.decode_proof.json"]
 }

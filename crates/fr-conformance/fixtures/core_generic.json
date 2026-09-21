@@ -4,11 +4,7 @@
     {
       "name": "set_key_for_type",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "str1",
-        "hello"
-      ],
+      "argv": ["SET", "str1", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -17,10 +13,7 @@
     {
       "name": "type_string",
       "now_ms": 0,
-      "argv": [
-        "TYPE",
-        "str1"
-      ],
+      "argv": ["TYPE", "str1"],
       "expect": {
         "kind": "simple",
         "value": "string"
@@ -29,10 +22,7 @@
     {
       "name": "type_missing_key",
       "now_ms": 0,
-      "argv": [
-        "TYPE",
-        "nokey"
-      ],
+      "argv": ["TYPE", "nokey"],
       "expect": {
         "kind": "simple",
         "value": "none"
@@ -41,11 +31,7 @@
     {
       "name": "setup_list_for_type",
       "now_ms": 0,
-      "argv": [
-        "RPUSH",
-        "list1",
-        "a"
-      ],
+      "argv": ["RPUSH", "list1", "a"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -54,10 +40,7 @@
     {
       "name": "type_list",
       "now_ms": 0,
-      "argv": [
-        "TYPE",
-        "list1"
-      ],
+      "argv": ["TYPE", "list1"],
       "expect": {
         "kind": "simple",
         "value": "list"
@@ -66,11 +49,7 @@
     {
       "name": "setup_set_for_type",
       "now_ms": 0,
-      "argv": [
-        "SADD",
-        "set1",
-        "a"
-      ],
+      "argv": ["SADD", "set1", "a"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -79,10 +58,7 @@
     {
       "name": "type_set",
       "now_ms": 0,
-      "argv": [
-        "TYPE",
-        "set1"
-      ],
+      "argv": ["TYPE", "set1"],
       "expect": {
         "kind": "simple",
         "value": "set"
@@ -91,12 +67,7 @@
     {
       "name": "setup_hash_for_type",
       "now_ms": 0,
-      "argv": [
-        "HSET",
-        "hash1",
-        "f",
-        "v"
-      ],
+      "argv": ["HSET", "hash1", "f", "v"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -105,10 +76,7 @@
     {
       "name": "type_hash",
       "now_ms": 0,
-      "argv": [
-        "TYPE",
-        "hash1"
-      ],
+      "argv": ["TYPE", "hash1"],
       "expect": {
         "kind": "simple",
         "value": "hash"
@@ -117,12 +85,7 @@
     {
       "name": "setup_zset_for_type",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "zset1",
-        "1",
-        "a"
-      ],
+      "argv": ["ZADD", "zset1", "1", "a"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -131,10 +94,7 @@
     {
       "name": "type_zset",
       "now_ms": 0,
-      "argv": [
-        "TYPE",
-        "zset1"
-      ],
+      "argv": ["TYPE", "zset1"],
       "expect": {
         "kind": "simple",
         "value": "zset"
@@ -143,10 +103,7 @@
     {
       "name": "exists_present",
       "now_ms": 0,
-      "argv": [
-        "EXISTS",
-        "str1"
-      ],
+      "argv": ["EXISTS", "str1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -155,10 +112,7 @@
     {
       "name": "exists_missing",
       "now_ms": 0,
-      "argv": [
-        "EXISTS",
-        "nokey"
-      ],
+      "argv": ["EXISTS", "nokey"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -167,13 +121,7 @@
     {
       "name": "exists_multiple",
       "now_ms": 0,
-      "argv": [
-        "EXISTS",
-        "str1",
-        "list1",
-        "nokey",
-        "set1"
-      ],
+      "argv": ["EXISTS", "str1", "list1", "nokey", "set1"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -182,11 +130,7 @@
     {
       "name": "exists_duplicate_keys",
       "now_ms": 0,
-      "argv": [
-        "EXISTS",
-        "str1",
-        "str1"
-      ],
+      "argv": ["EXISTS", "str1", "str1"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -195,11 +139,7 @@
     {
       "name": "del_single",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "delme",
-        "v"
-      ],
+      "argv": ["SET", "delme", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -208,10 +148,7 @@
     {
       "name": "del_single_result",
       "now_ms": 0,
-      "argv": [
-        "DEL",
-        "delme"
-      ],
+      "argv": ["DEL", "delme"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -220,10 +157,7 @@
     {
       "name": "del_missing",
       "now_ms": 0,
-      "argv": [
-        "DEL",
-        "delme"
-      ],
+      "argv": ["DEL", "delme"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -232,11 +166,7 @@
     {
       "name": "unlink_setup",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "unlinkme",
-        "v"
-      ],
+      "argv": ["SET", "unlinkme", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -245,10 +175,7 @@
     {
       "name": "unlink_result",
       "now_ms": 0,
-      "argv": [
-        "UNLINK",
-        "unlinkme"
-      ],
+      "argv": ["UNLINK", "unlinkme"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -257,10 +184,7 @@
     {
       "name": "unlink_missing",
       "now_ms": 0,
-      "argv": [
-        "UNLINK",
-        "unlinkme"
-      ],
+      "argv": ["UNLINK", "unlinkme"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -269,12 +193,7 @@
     {
       "name": "del_multiple",
       "now_ms": 0,
-      "argv": [
-        "DEL",
-        "str1",
-        "list1",
-        "nokey"
-      ],
+      "argv": ["DEL", "str1", "list1", "nokey"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -283,11 +202,7 @@
     {
       "name": "rename_setup",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "rkey",
-        "rval"
-      ],
+      "argv": ["SET", "rkey", "rval"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -296,11 +211,7 @@
     {
       "name": "rename_ok",
       "now_ms": 0,
-      "argv": [
-        "RENAME",
-        "rkey",
-        "rkey2"
-      ],
+      "argv": ["RENAME", "rkey", "rkey2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -309,10 +220,7 @@
     {
       "name": "rename_verify_new",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "rkey2"
-      ],
+      "argv": ["GET", "rkey2"],
       "expect": {
         "kind": "bulk",
         "value": "rval"
@@ -321,10 +229,7 @@
     {
       "name": "rename_verify_old_gone",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "rkey"
-      ],
+      "argv": ["GET", "rkey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -333,11 +238,7 @@
     {
       "name": "rename_missing_key",
       "now_ms": 0,
-      "argv": [
-        "RENAME",
-        "nokey",
-        "dst"
-      ],
+      "argv": ["RENAME", "nokey", "dst"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -346,11 +247,7 @@
     {
       "name": "renamenx_setup",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "rnx1",
-        "v1"
-      ],
+      "argv": ["SET", "rnx1", "v1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -359,11 +256,7 @@
     {
       "name": "renamenx_no_conflict",
       "now_ms": 0,
-      "argv": [
-        "RENAMENX",
-        "rnx1",
-        "rnx2"
-      ],
+      "argv": ["RENAMENX", "rnx1", "rnx2"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -372,11 +265,7 @@
     {
       "name": "renamenx_with_conflict",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "rnx3",
-        "v3"
-      ],
+      "argv": ["SET", "rnx3", "v3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -385,11 +274,7 @@
     {
       "name": "renamenx_conflict_result",
       "now_ms": 0,
-      "argv": [
-        "RENAMENX",
-        "rnx2",
-        "rnx3"
-      ],
+      "argv": ["RENAMENX", "rnx2", "rnx3"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -398,11 +283,7 @@
     {
       "name": "copy_setup",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "csrc",
-        "cval"
-      ],
+      "argv": ["SET", "csrc", "cval"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -411,11 +292,7 @@
     {
       "name": "copy_success",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "csrc",
-        "cdst"
-      ],
+      "argv": ["COPY", "csrc", "cdst"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -424,10 +301,7 @@
     {
       "name": "copy_verify_src",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "csrc"
-      ],
+      "argv": ["GET", "csrc"],
       "expect": {
         "kind": "bulk",
         "value": "cval"
@@ -436,10 +310,7 @@
     {
       "name": "copy_verify_dst",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "cdst"
-      ],
+      "argv": ["GET", "cdst"],
       "expect": {
         "kind": "bulk",
         "value": "cval"
@@ -448,11 +319,7 @@
     {
       "name": "copy_no_replace",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "csrc",
-        "cdst"
-      ],
+      "argv": ["COPY", "csrc", "cdst"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -461,11 +328,7 @@
     {
       "name": "copy_with_replace",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "csrc",
-        "newval"
-      ],
+      "argv": ["SET", "csrc", "newval"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -474,12 +337,7 @@
     {
       "name": "copy_replace_result",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "csrc",
-        "cdst",
-        "REPLACE"
-      ],
+      "argv": ["COPY", "csrc", "cdst", "REPLACE"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -488,10 +346,7 @@
     {
       "name": "copy_replace_verify",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "cdst"
-      ],
+      "argv": ["GET", "cdst"],
       "expect": {
         "kind": "bulk",
         "value": "newval"
@@ -500,11 +355,7 @@
     {
       "name": "copy_missing_src",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "nokey",
-        "dst"
-      ],
+      "argv": ["COPY", "nokey", "dst"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -513,11 +364,7 @@
     {
       "name": "expire_setup",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "exkey",
-        "exval"
-      ],
+      "argv": ["SET", "exkey", "exval"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -526,11 +373,7 @@
     {
       "name": "expire_set",
       "now_ms": 1000,
-      "argv": [
-        "EXPIRE",
-        "exkey",
-        "10"
-      ],
+      "argv": ["EXPIRE", "exkey", "10"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -539,10 +382,7 @@
     {
       "name": "ttl_with_expiry",
       "now_ms": 1000,
-      "argv": [
-        "TTL",
-        "exkey"
-      ],
+      "argv": ["TTL", "exkey"],
       "expect": {
         "kind": "integer",
         "value": 10
@@ -551,10 +391,7 @@
     {
       "name": "pttl_with_expiry",
       "now_ms": 1000,
-      "argv": [
-        "PTTL",
-        "exkey"
-      ],
+      "argv": ["PTTL", "exkey"],
       "expect": {
         "kind": "integer",
         "value": 10000
@@ -563,10 +400,7 @@
     {
       "name": "ttl_after_time_passes",
       "now_ms": 3000,
-      "argv": [
-        "TTL",
-        "exkey"
-      ],
+      "argv": ["TTL", "exkey"],
       "expect": {
         "kind": "integer",
         "value": 8
@@ -575,10 +409,7 @@
     {
       "name": "persist_removes_expiry",
       "now_ms": 3000,
-      "argv": [
-        "PERSIST",
-        "exkey"
-      ],
+      "argv": ["PERSIST", "exkey"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -587,10 +418,7 @@
     {
       "name": "ttl_no_expiry",
       "now_ms": 3000,
-      "argv": [
-        "TTL",
-        "exkey"
-      ],
+      "argv": ["TTL", "exkey"],
       "expect": {
         "kind": "integer",
         "value": -1
@@ -599,10 +427,7 @@
     {
       "name": "ttl_missing_key",
       "now_ms": 0,
-      "argv": [
-        "TTL",
-        "nokey"
-      ],
+      "argv": ["TTL", "nokey"],
       "expect": {
         "kind": "integer",
         "value": -2
@@ -611,10 +436,7 @@
     {
       "name": "pttl_missing_key",
       "now_ms": 0,
-      "argv": [
-        "PTTL",
-        "nokey"
-      ],
+      "argv": ["PTTL", "nokey"],
       "expect": {
         "kind": "integer",
         "value": -2
@@ -623,10 +445,7 @@
     {
       "name": "persist_missing_key",
       "now_ms": 0,
-      "argv": [
-        "PERSIST",
-        "nokey"
-      ],
+      "argv": ["PERSIST", "nokey"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -635,10 +454,7 @@
     {
       "name": "persist_no_expiry",
       "now_ms": 0,
-      "argv": [
-        "PERSIST",
-        "exkey"
-      ],
+      "argv": ["PERSIST", "exkey"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -647,11 +463,7 @@
     {
       "name": "expire_missing_key",
       "now_ms": 0,
-      "argv": [
-        "EXPIRE",
-        "nokey",
-        "10"
-      ],
+      "argv": ["EXPIRE", "nokey", "10"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -660,11 +472,7 @@
     {
       "name": "pexpire_set",
       "now_ms": 1000,
-      "argv": [
-        "PEXPIRE",
-        "exkey",
-        "5000"
-      ],
+      "argv": ["PEXPIRE", "exkey", "5000"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -673,10 +481,7 @@
     {
       "name": "pttl_after_pexpire",
       "now_ms": 1000,
-      "argv": [
-        "PTTL",
-        "exkey"
-      ],
+      "argv": ["PTTL", "exkey"],
       "expect": {
         "kind": "integer",
         "value": 5000
@@ -685,10 +490,7 @@
     {
       "name": "key_expired_check",
       "now_ms": 20000,
-      "argv": [
-        "EXISTS",
-        "exkey"
-      ],
+      "argv": ["EXISTS", "exkey"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -697,11 +499,7 @@
     {
       "name": "expiretime_setup",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "etkey",
-        "v"
-      ],
+      "argv": ["SET", "etkey", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -710,10 +508,7 @@
     {
       "name": "expiretime_no_expiry",
       "now_ms": 0,
-      "argv": [
-        "EXPIRETIME",
-        "etkey"
-      ],
+      "argv": ["EXPIRETIME", "etkey"],
       "expect": {
         "kind": "integer",
         "value": -1
@@ -722,10 +517,7 @@
     {
       "name": "expiretime_missing",
       "now_ms": 0,
-      "argv": [
-        "EXPIRETIME",
-        "nokey"
-      ],
+      "argv": ["EXPIRETIME", "nokey"],
       "expect": {
         "kind": "integer",
         "value": -2
@@ -734,10 +526,7 @@
     {
       "name": "pexpiretime_no_expiry",
       "now_ms": 0,
-      "argv": [
-        "PEXPIRETIME",
-        "etkey"
-      ],
+      "argv": ["PEXPIRETIME", "etkey"],
       "expect": {
         "kind": "integer",
         "value": -1
@@ -746,10 +535,7 @@
     {
       "name": "pexpiretime_missing",
       "now_ms": 0,
-      "argv": [
-        "PEXPIRETIME",
-        "nokey"
-      ],
+      "argv": ["PEXPIRETIME", "nokey"],
       "expect": {
         "kind": "integer",
         "value": -2
@@ -758,11 +544,7 @@
     {
       "name": "pexpireat_set",
       "now_ms": 0,
-      "argv": [
-        "PEXPIREAT",
-        "etkey",
-        "30000"
-      ],
+      "argv": ["PEXPIREAT", "etkey", "30000"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -771,10 +553,7 @@
     {
       "name": "expiretime_with_expiry",
       "now_ms": 0,
-      "argv": [
-        "EXPIRETIME",
-        "etkey"
-      ],
+      "argv": ["EXPIRETIME", "etkey"],
       "expect": {
         "kind": "integer",
         "value": 30
@@ -783,10 +562,7 @@
     {
       "name": "pexpiretime_with_expiry",
       "now_ms": 0,
-      "argv": [
-        "PEXPIRETIME",
-        "etkey"
-      ],
+      "argv": ["PEXPIRETIME", "etkey"],
       "expect": {
         "kind": "integer",
         "value": 30000
@@ -795,11 +571,7 @@
     {
       "name": "append_new_key",
       "now_ms": 0,
-      "argv": [
-        "APPEND",
-        "appkey",
-        "hello"
-      ],
+      "argv": ["APPEND", "appkey", "hello"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -808,11 +580,7 @@
     {
       "name": "append_existing",
       "now_ms": 0,
-      "argv": [
-        "APPEND",
-        "appkey",
-        " world"
-      ],
+      "argv": ["APPEND", "appkey", " world"],
       "expect": {
         "kind": "integer",
         "value": 11
@@ -821,10 +589,7 @@
     {
       "name": "append_verify",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "appkey"
-      ],
+      "argv": ["GET", "appkey"],
       "expect": {
         "kind": "bulk",
         "value": "hello world"
@@ -833,11 +598,7 @@
     {
       "name": "getdel_setup",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "gdkey",
-        "gdval"
-      ],
+      "argv": ["SET", "gdkey", "gdval"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -846,10 +607,7 @@
     {
       "name": "getdel_returns_value",
       "now_ms": 0,
-      "argv": [
-        "GETDEL",
-        "gdkey"
-      ],
+      "argv": ["GETDEL", "gdkey"],
       "expect": {
         "kind": "bulk",
         "value": "gdval"
@@ -858,10 +616,7 @@
     {
       "name": "getdel_key_gone",
       "now_ms": 0,
-      "argv": [
-        "EXISTS",
-        "gdkey"
-      ],
+      "argv": ["EXISTS", "gdkey"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -870,10 +625,7 @@
     {
       "name": "getdel_missing",
       "now_ms": 0,
-      "argv": [
-        "GETDEL",
-        "nokey"
-      ],
+      "argv": ["GETDEL", "nokey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -882,11 +634,7 @@
     {
       "name": "getex_setup",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "gekey",
-        "geval"
-      ],
+      "argv": ["SET", "gekey", "geval"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -895,10 +643,7 @@
     {
       "name": "getex_no_options",
       "now_ms": 0,
-      "argv": [
-        "GETEX",
-        "gekey"
-      ],
+      "argv": ["GETEX", "gekey"],
       "expect": {
         "kind": "bulk",
         "value": "geval"
@@ -907,12 +652,7 @@
     {
       "name": "getex_with_ex",
       "now_ms": 1000,
-      "argv": [
-        "GETEX",
-        "gekey",
-        "EX",
-        "10"
-      ],
+      "argv": ["GETEX", "gekey", "EX", "10"],
       "expect": {
         "kind": "bulk",
         "value": "geval"
@@ -921,10 +661,7 @@
     {
       "name": "getex_verify_ttl",
       "now_ms": 1000,
-      "argv": [
-        "TTL",
-        "gekey"
-      ],
+      "argv": ["TTL", "gekey"],
       "expect": {
         "kind": "integer",
         "value": 10
@@ -933,11 +670,7 @@
     {
       "name": "getex_persist",
       "now_ms": 1000,
-      "argv": [
-        "GETEX",
-        "gekey",
-        "PERSIST"
-      ],
+      "argv": ["GETEX", "gekey", "PERSIST"],
       "expect": {
         "kind": "bulk",
         "value": "geval"
@@ -946,10 +679,7 @@
     {
       "name": "getex_verify_no_ttl",
       "now_ms": 1000,
-      "argv": [
-        "TTL",
-        "gekey"
-      ],
+      "argv": ["TTL", "gekey"],
       "expect": {
         "kind": "integer",
         "value": -1
@@ -958,10 +688,7 @@
     {
       "name": "getex_missing",
       "now_ms": 0,
-      "argv": [
-        "GETEX",
-        "nokey"
-      ],
+      "argv": ["GETEX", "nokey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -970,11 +697,7 @@
     {
       "name": "object_encoding_string_embstr",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "objstr",
-        "hello"
-      ],
+      "argv": ["SET", "objstr", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -983,11 +706,7 @@
     {
       "name": "object_encoding_embstr",
       "now_ms": 0,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "objstr"
-      ],
+      "argv": ["OBJECT", "ENCODING", "objstr"],
       "expect": {
         "kind": "bulk",
         "value": "embstr"
@@ -996,11 +715,7 @@
     {
       "name": "object_encoding_int",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "objint",
-        "12345"
-      ],
+      "argv": ["SET", "objint", "12345"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1009,11 +724,7 @@
     {
       "name": "object_encoding_int_result",
       "now_ms": 0,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "objint"
-      ],
+      "argv": ["OBJECT", "ENCODING", "objint"],
       "expect": {
         "kind": "bulk",
         "value": "int"
@@ -1022,11 +733,7 @@
     {
       "name": "object_refcount",
       "now_ms": 0,
-      "argv": [
-        "OBJECT",
-        "REFCOUNT",
-        "objstr"
-      ],
+      "argv": ["OBJECT", "REFCOUNT", "objstr"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1035,11 +742,7 @@
     {
       "name": "object_idletime",
       "now_ms": 0,
-      "argv": [
-        "OBJECT",
-        "IDLETIME",
-        "objstr"
-      ],
+      "argv": ["OBJECT", "IDLETIME", "objstr"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1048,11 +751,7 @@
     {
       "name": "object_encoding_hash",
       "now_ms": 0,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "hash1"
-      ],
+      "argv": ["OBJECT", "ENCODING", "hash1"],
       "expect": {
         "kind": "bulk",
         "value": "listpack"
@@ -1061,11 +760,7 @@
     {
       "name": "object_encoding_list",
       "now_ms": 0,
-      "argv": [
-        "RPUSH",
-        "objlist",
-        "a"
-      ],
+      "argv": ["RPUSH", "objlist", "a"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1074,11 +769,7 @@
     {
       "name": "object_encoding_list_result",
       "now_ms": 0,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "objlist"
-      ],
+      "argv": ["OBJECT", "ENCODING", "objlist"],
       "expect": {
         "kind": "bulk",
         "value": "listpack"
@@ -1087,11 +778,7 @@
     {
       "name": "object_encoding_set",
       "now_ms": 0,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "set1"
-      ],
+      "argv": ["OBJECT", "ENCODING", "set1"],
       "expect": {
         "kind": "bulk",
         "value": "listpack"
@@ -1100,11 +787,7 @@
     {
       "name": "object_encoding_zset",
       "now_ms": 0,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "zset1"
-      ],
+      "argv": ["OBJECT", "ENCODING", "zset1"],
       "expect": {
         "kind": "bulk",
         "value": "listpack"
@@ -1113,11 +796,7 @@
     {
       "name": "expire_nx_setup",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "enxkey",
-        "v"
-      ],
+      "argv": ["SET", "enxkey", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1126,12 +805,7 @@
     {
       "name": "expire_nx_no_existing_ttl",
       "now_ms": 1000,
-      "argv": [
-        "EXPIRE",
-        "enxkey",
-        "10",
-        "NX"
-      ],
+      "argv": ["EXPIRE", "enxkey", "10", "NX"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1140,12 +814,7 @@
     {
       "name": "expire_nx_has_existing_ttl",
       "now_ms": 1000,
-      "argv": [
-        "EXPIRE",
-        "enxkey",
-        "20",
-        "NX"
-      ],
+      "argv": ["EXPIRE", "enxkey", "20", "NX"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1154,11 +823,7 @@
     {
       "name": "expire_xx_setup",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "exxkey",
-        "v"
-      ],
+      "argv": ["SET", "exxkey", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1167,12 +832,7 @@
     {
       "name": "expire_xx_no_existing_ttl",
       "now_ms": 1000,
-      "argv": [
-        "EXPIRE",
-        "exxkey",
-        "10",
-        "XX"
-      ],
+      "argv": ["EXPIRE", "exxkey", "10", "XX"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1181,11 +841,7 @@
     {
       "name": "expire_xx_setup_ttl",
       "now_ms": 1000,
-      "argv": [
-        "EXPIRE",
-        "exxkey",
-        "10"
-      ],
+      "argv": ["EXPIRE", "exxkey", "10"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1194,12 +850,7 @@
     {
       "name": "expire_xx_with_existing_ttl",
       "now_ms": 1000,
-      "argv": [
-        "EXPIRE",
-        "exxkey",
-        "20",
-        "XX"
-      ],
+      "argv": ["EXPIRE", "exxkey", "20", "XX"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1208,10 +859,7 @@
     {
       "name": "expire_xx_verify",
       "now_ms": 1000,
-      "argv": [
-        "TTL",
-        "exxkey"
-      ],
+      "argv": ["TTL", "exxkey"],
       "expect": {
         "kind": "integer",
         "value": 20
@@ -1220,12 +868,7 @@
     {
       "name": "expire_gt_longer",
       "now_ms": 1000,
-      "argv": [
-        "EXPIRE",
-        "enxkey",
-        "30",
-        "GT"
-      ],
+      "argv": ["EXPIRE", "enxkey", "30", "GT"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1234,12 +877,7 @@
     {
       "name": "expire_gt_shorter",
       "now_ms": 1000,
-      "argv": [
-        "EXPIRE",
-        "enxkey",
-        "5",
-        "GT"
-      ],
+      "argv": ["EXPIRE", "enxkey", "5", "GT"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1248,10 +886,7 @@
     {
       "name": "expire_gt_verify",
       "now_ms": 1000,
-      "argv": [
-        "TTL",
-        "enxkey"
-      ],
+      "argv": ["TTL", "enxkey"],
       "expect": {
         "kind": "integer",
         "value": 30
@@ -1260,12 +895,7 @@
     {
       "name": "expire_lt_shorter",
       "now_ms": 1000,
-      "argv": [
-        "EXPIRE",
-        "enxkey",
-        "5",
-        "LT"
-      ],
+      "argv": ["EXPIRE", "enxkey", "5", "LT"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1274,12 +904,7 @@
     {
       "name": "expire_lt_longer",
       "now_ms": 1000,
-      "argv": [
-        "EXPIRE",
-        "enxkey",
-        "50",
-        "LT"
-      ],
+      "argv": ["EXPIRE", "enxkey", "50", "LT"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1288,10 +913,7 @@
     {
       "name": "expire_lt_verify",
       "now_ms": 1000,
-      "argv": [
-        "TTL",
-        "enxkey"
-      ],
+      "argv": ["TTL", "enxkey"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -1300,11 +922,7 @@
     {
       "name": "object_encoding_missing_key",
       "now_ms": 0,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "nokey"
-      ],
+      "argv": ["OBJECT", "ENCODING", "nokey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1313,11 +931,7 @@
     {
       "name": "object_refcount_missing_key",
       "now_ms": 0,
-      "argv": [
-        "OBJECT",
-        "REFCOUNT",
-        "nokey"
-      ],
+      "argv": ["OBJECT", "REFCOUNT", "nokey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1326,11 +940,7 @@
     {
       "name": "object_encoding_raw_setup",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "longstr",
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      ],
+      "argv": ["SET", "longstr", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1339,11 +949,7 @@
     {
       "name": "object_encoding_raw",
       "now_ms": 0,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "longstr"
-      ],
+      "argv": ["OBJECT", "ENCODING", "longstr"],
       "expect": {
         "kind": "bulk",
         "value": "raw"
@@ -1352,12 +958,7 @@
     {
       "name": "touch_existing",
       "now_ms": 0,
-      "argv": [
-        "TOUCH",
-        "objstr",
-        "objint",
-        "nokey"
-      ],
+      "argv": ["TOUCH", "objstr", "objint", "nokey"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1366,9 +967,7 @@
     {
       "name": "dbsize_count",
       "now_ms": 0,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 17
@@ -1377,10 +976,7 @@
     {
       "name": "object_help_returns_array",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "HELP"
-      ],
+      "argv": ["OBJECT", "HELP"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1450,11 +1046,7 @@
     {
       "name": "object_idletime_setup",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "idle_key",
-        "hello"
-      ],
+      "argv": ["SET", "idle_key", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1463,11 +1055,7 @@
     {
       "name": "object_idletime_returns_integer",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "IDLETIME",
-        "idle_key"
-      ],
+      "argv": ["OBJECT", "IDLETIME", "idle_key"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1476,11 +1064,7 @@
     {
       "name": "object_idletime_missing_key",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "IDLETIME",
-        "nosuchkey"
-      ],
+      "argv": ["OBJECT", "IDLETIME", "nosuchkey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1489,11 +1073,7 @@
     {
       "name": "object_refcount_existing",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "REFCOUNT",
-        "idle_key"
-      ],
+      "argv": ["OBJECT", "REFCOUNT", "idle_key"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1502,11 +1082,7 @@
     {
       "name": "object_refcount_missing",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "REFCOUNT",
-        "nosuchkey"
-      ],
+      "argv": ["OBJECT", "REFCOUNT", "nosuchkey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1515,11 +1091,7 @@
     {
       "name": "object_freq_returns_zero",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "FREQ",
-        "idle_key"
-      ],
+      "argv": ["OBJECT", "FREQ", "idle_key"],
       "expect": {
         "kind": "error",
         "value": "ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust."
@@ -1528,11 +1100,7 @@
     {
       "name": "object_freq_missing",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "FREQ",
-        "nosuchkey"
-      ],
+      "argv": ["OBJECT", "FREQ", "nosuchkey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1541,11 +1109,7 @@
     {
       "name": "object_encoding_lowercase",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "encoding",
-        "idle_key"
-      ],
+      "argv": ["OBJECT", "encoding", "idle_key"],
       "expect": {
         "kind": "bulk",
         "value": "embstr"
@@ -1554,11 +1118,7 @@
     {
       "name": "touch_setup_a",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "touch_a",
-        "1"
-      ],
+      "argv": ["SET", "touch_a", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1567,11 +1127,7 @@
     {
       "name": "touch_setup_b",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "touch_b",
-        "2"
-      ],
+      "argv": ["SET", "touch_b", "2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1580,11 +1136,7 @@
     {
       "name": "touch_multiple_existing",
       "now_ms": 100,
-      "argv": [
-        "TOUCH",
-        "touch_a",
-        "touch_b"
-      ],
+      "argv": ["TOUCH", "touch_a", "touch_b"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1593,12 +1145,7 @@
     {
       "name": "touch_mix_existing_missing",
       "now_ms": 100,
-      "argv": [
-        "TOUCH",
-        "touch_a",
-        "nosuchkey",
-        "touch_b"
-      ],
+      "argv": ["TOUCH", "touch_a", "nosuchkey", "touch_b"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1607,11 +1154,7 @@
     {
       "name": "touch_all_missing",
       "now_ms": 100,
-      "argv": [
-        "TOUCH",
-        "nosuch1",
-        "nosuch2"
-      ],
+      "argv": ["TOUCH", "nosuch1", "nosuch2"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1620,9 +1163,7 @@
     {
       "name": "touch_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "TOUCH"
-      ],
+      "argv": ["TOUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'touch' command"
@@ -1631,15 +1172,7 @@
     {
       "name": "unlink_setup_multi",
       "now_ms": 100,
-      "argv": [
-        "MSET",
-        "ul_a",
-        "1",
-        "ul_b",
-        "2",
-        "ul_c",
-        "3"
-      ],
+      "argv": ["MSET", "ul_a", "1", "ul_b", "2", "ul_c", "3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1648,12 +1181,7 @@
     {
       "name": "unlink_multiple",
       "now_ms": 100,
-      "argv": [
-        "UNLINK",
-        "ul_a",
-        "ul_b",
-        "nosuchkey"
-      ],
+      "argv": ["UNLINK", "ul_a", "ul_b", "nosuchkey"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1662,12 +1190,7 @@
     {
       "name": "unlink_verify_deleted",
       "now_ms": 100,
-      "argv": [
-        "EXISTS",
-        "ul_a",
-        "ul_b",
-        "ul_c"
-      ],
+      "argv": ["EXISTS", "ul_a", "ul_b", "ul_c"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1676,10 +1199,7 @@
     {
       "name": "randomkey_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "RANDOMKEY",
-        "extra"
-      ],
+      "argv": ["RANDOMKEY", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'randomkey' command"
@@ -1688,13 +1208,7 @@
     {
       "name": "type_stream_setup",
       "now_ms": 100,
-      "argv": [
-        "XADD",
-        "type_stream",
-        "1-0",
-        "f",
-        "v"
-      ],
+      "argv": ["XADD", "type_stream", "1-0", "f", "v"],
       "expect": {
         "kind": "bulk",
         "value": "1-0"
@@ -1703,10 +1217,7 @@
     {
       "name": "type_stream",
       "now_ms": 100,
-      "argv": [
-        "TYPE",
-        "type_stream"
-      ],
+      "argv": ["TYPE", "type_stream"],
       "expect": {
         "kind": "simple",
         "value": "stream"
@@ -1715,11 +1226,7 @@
     {
       "name": "rename_missing_source",
       "now_ms": 100,
-      "argv": [
-        "RENAME",
-        "nosuchkey",
-        "dest"
-      ],
+      "argv": ["RENAME", "nosuchkey", "dest"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -1728,11 +1235,7 @@
     {
       "name": "rename_self_setup",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "rename_self",
-        "val"
-      ],
+      "argv": ["SET", "rename_self", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1741,11 +1244,7 @@
     {
       "name": "rename_self_same_key",
       "now_ms": 100,
-      "argv": [
-        "RENAME",
-        "rename_self",
-        "rename_self"
-      ],
+      "argv": ["RENAME", "rename_self", "rename_self"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1754,10 +1253,7 @@
     {
       "name": "rename_self_verify",
       "now_ms": 100,
-      "argv": [
-        "GET",
-        "rename_self"
-      ],
+      "argv": ["GET", "rename_self"],
       "expect": {
         "kind": "bulk",
         "value": "val"
@@ -1766,11 +1262,7 @@
     {
       "name": "renamenx_missing_source",
       "now_ms": 100,
-      "argv": [
-        "RENAMENX",
-        "nosuchkey",
-        "dest"
-      ],
+      "argv": ["RENAMENX", "nosuchkey", "dest"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -1779,11 +1271,7 @@
     {
       "name": "renamenx_dest_exists_setup",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "rnx_dest",
-        "existing"
-      ],
+      "argv": ["SET", "rnx_dest", "existing"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1792,11 +1280,7 @@
     {
       "name": "renamenx_dest_exists",
       "now_ms": 100,
-      "argv": [
-        "RENAMENX",
-        "rename_self",
-        "rnx_dest"
-      ],
+      "argv": ["RENAMENX", "rename_self", "rnx_dest"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1805,13 +1289,7 @@
     {
       "name": "object_encoding_stream_setup",
       "now_ms": 100,
-      "argv": [
-        "XADD",
-        "enc_stream",
-        "1-1",
-        "f",
-        "v"
-      ],
+      "argv": ["XADD", "enc_stream", "1-1", "f", "v"],
       "expect": {
         "kind": "bulk",
         "value": "1-1"
@@ -1820,11 +1298,7 @@
     {
       "name": "object_encoding_stream",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "enc_stream"
-      ],
+      "argv": ["OBJECT", "ENCODING", "enc_stream"],
       "expect": {
         "kind": "bulk",
         "value": "stream"
@@ -1833,10 +1307,7 @@
     {
       "name": "sort_stream_wrongtype",
       "now_ms": 100,
-      "argv": [
-        "SORT",
-        "enc_stream"
-      ],
+      "argv": ["SORT", "enc_stream"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -1858,11 +1329,7 @@
     {
       "name": "object_encoding_raw_string",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "enc_raw"
-      ],
+      "argv": ["OBJECT", "ENCODING", "enc_raw"],
       "expect": {
         "kind": "bulk",
         "value": "raw"
@@ -1885,11 +1352,7 @@
     {
       "name": "object_encoding_hashtable",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "enc_big_hash"
-      ],
+      "argv": ["OBJECT", "ENCODING", "enc_big_hash"],
       "expect": {
         "kind": "bulk",
         "value": "hashtable"
@@ -1912,11 +1375,7 @@
     {
       "name": "object_encoding_skiplist",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "enc_big_zset"
-      ],
+      "argv": ["OBJECT", "ENCODING", "enc_big_zset"],
       "expect": {
         "kind": "bulk",
         "value": "skiplist"
@@ -1925,13 +1384,7 @@
     {
       "name": "object_encoding_intset_setup",
       "now_ms": 100,
-      "argv": [
-        "SADD",
-        "enc_intset",
-        "1",
-        "2",
-        "3"
-      ],
+      "argv": ["SADD", "enc_intset", "1", "2", "3"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -1940,11 +1393,7 @@
     {
       "name": "object_encoding_intset",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "enc_intset"
-      ],
+      "argv": ["OBJECT", "ENCODING", "enc_intset"],
       "expect": {
         "kind": "bulk",
         "value": "intset"
@@ -1953,10 +1402,7 @@
     {
       "name": "persist_nonexistent_key",
       "now_ms": 200,
-      "argv": [
-        "PERSIST",
-        "nosuch_persist"
-      ],
+      "argv": ["PERSIST", "nosuch_persist"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1965,11 +1411,7 @@
     {
       "name": "persist_no_ttl_key_setup",
       "now_ms": 200,
-      "argv": [
-        "SET",
-        "persist_nottl",
-        "val"
-      ],
+      "argv": ["SET", "persist_nottl", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1978,10 +1420,7 @@
     {
       "name": "persist_no_ttl_key",
       "now_ms": 200,
-      "argv": [
-        "PERSIST",
-        "persist_nottl"
-      ],
+      "argv": ["PERSIST", "persist_nottl"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1990,11 +1429,7 @@
     {
       "name": "rename_nonexistent",
       "now_ms": 200,
-      "argv": [
-        "RENAME",
-        "nosuch_rename_src",
-        "nosuch_rename_dst"
-      ],
+      "argv": ["RENAME", "nosuch_rename_src", "nosuch_rename_dst"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -2003,11 +1438,7 @@
     {
       "name": "rename_same_key_setup",
       "now_ms": 200,
-      "argv": [
-        "SET",
-        "rename_same",
-        "val"
-      ],
+      "argv": ["SET", "rename_same", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2016,11 +1447,7 @@
     {
       "name": "rename_same_key",
       "now_ms": 200,
-      "argv": [
-        "RENAME",
-        "rename_same",
-        "rename_same"
-      ],
+      "argv": ["RENAME", "rename_same", "rename_same"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2029,11 +1456,7 @@
     {
       "name": "renamenx_nonexistent_src",
       "now_ms": 200,
-      "argv": [
-        "RENAMENX",
-        "nosuch_rnx_src",
-        "nosuch_rnx_dst"
-      ],
+      "argv": ["RENAMENX", "nosuch_rnx_src", "nosuch_rnx_dst"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -2042,11 +1465,7 @@
     {
       "name": "touch_nonexistent",
       "now_ms": 200,
-      "argv": [
-        "TOUCH",
-        "nosuch_touch1",
-        "nosuch_touch2"
-      ],
+      "argv": ["TOUCH", "nosuch_touch1", "nosuch_touch2"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2055,11 +1474,7 @@
     {
       "name": "touch_mixed_setup",
       "now_ms": 200,
-      "argv": [
-        "SET",
-        "touch_exists",
-        "v"
-      ],
+      "argv": ["SET", "touch_exists", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2068,11 +1483,7 @@
     {
       "name": "touch_mixed",
       "now_ms": 200,
-      "argv": [
-        "TOUCH",
-        "touch_exists",
-        "nosuch_touch3"
-      ],
+      "argv": ["TOUCH", "touch_exists", "nosuch_touch3"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2081,11 +1492,7 @@
     {
       "name": "unlink_nonexistent",
       "now_ms": 200,
-      "argv": [
-        "UNLINK",
-        "nosuch_unlink1",
-        "nosuch_unlink2"
-      ],
+      "argv": ["UNLINK", "nosuch_unlink1", "nosuch_unlink2"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2094,11 +1501,7 @@
     {
       "name": "exists_multi_setup1",
       "now_ms": 200,
-      "argv": [
-        "SET",
-        "exi1",
-        "a"
-      ],
+      "argv": ["SET", "exi1", "a"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2107,11 +1510,7 @@
     {
       "name": "exists_multi_setup2",
       "now_ms": 200,
-      "argv": [
-        "SET",
-        "exi2",
-        "b"
-      ],
+      "argv": ["SET", "exi2", "b"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2120,12 +1519,7 @@
     {
       "name": "exists_multi",
       "now_ms": 200,
-      "argv": [
-        "EXISTS",
-        "exi1",
-        "exi2",
-        "nosuch_exi"
-      ],
+      "argv": ["EXISTS", "exi1", "exi2", "nosuch_exi"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -2134,11 +1528,7 @@
     {
       "name": "exists_duplicate_key",
       "now_ms": 200,
-      "argv": [
-        "EXISTS",
-        "exi1",
-        "exi1"
-      ],
+      "argv": ["EXISTS", "exi1", "exi1"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -2147,11 +1537,7 @@
     {
       "name": "object_encoding_nonexistent",
       "now_ms": 200,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "nosuch_obj"
-      ],
+      "argv": ["OBJECT", "ENCODING", "nosuch_obj"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2160,11 +1546,7 @@
     {
       "name": "object_refcount_nonexistent",
       "now_ms": 200,
-      "argv": [
-        "OBJECT",
-        "REFCOUNT",
-        "nosuch_obj"
-      ],
+      "argv": ["OBJECT", "REFCOUNT", "nosuch_obj"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2173,11 +1555,7 @@
     {
       "name": "object_idletime_nonexistent",
       "now_ms": 200,
-      "argv": [
-        "OBJECT",
-        "IDLETIME",
-        "nosuch_obj"
-      ],
+      "argv": ["OBJECT", "IDLETIME", "nosuch_obj"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2186,11 +1564,7 @@
     {
       "name": "object_freq_nonexistent",
       "now_ms": 200,
-      "argv": [
-        "OBJECT",
-        "FREQ",
-        "nosuch_obj"
-      ],
+      "argv": ["OBJECT", "FREQ", "nosuch_obj"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2199,11 +1573,7 @@
     {
       "name": "object_unknown_subcmd",
       "now_ms": 200,
-      "argv": [
-        "OBJECT",
-        "BLAH",
-        "key"
-      ],
+      "argv": ["OBJECT", "BLAH", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'BLAH'. Try OBJECT HELP."
@@ -2212,10 +1582,7 @@
     {
       "name": "type_none",
       "now_ms": 200,
-      "argv": [
-        "TYPE",
-        "nosuch_type"
-      ],
+      "argv": ["TYPE", "nosuch_type"],
       "expect": {
         "kind": "simple",
         "value": "none"
@@ -2224,11 +1591,7 @@
     {
       "name": "del_multi_setup1",
       "now_ms": 200,
-      "argv": [
-        "SET",
-        "delmulti1",
-        "a"
-      ],
+      "argv": ["SET", "delmulti1", "a"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2237,11 +1600,7 @@
     {
       "name": "del_multi_setup2",
       "now_ms": 200,
-      "argv": [
-        "SET",
-        "delmulti2",
-        "b"
-      ],
+      "argv": ["SET", "delmulti2", "b"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2250,12 +1609,7 @@
     {
       "name": "del_multi",
       "now_ms": 200,
-      "argv": [
-        "DEL",
-        "delmulti1",
-        "delmulti2",
-        "nosuch_del"
-      ],
+      "argv": ["DEL", "delmulti1", "delmulti2", "nosuch_del"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -2264,10 +1618,7 @@
     {
       "name": "rename_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "RENAME",
-        "k"
-      ],
+      "argv": ["RENAME", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'rename' command"
@@ -2276,10 +1627,7 @@
     {
       "name": "renamenx_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "RENAMENX",
-        "k"
-      ],
+      "argv": ["RENAMENX", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'renamenx' command"
@@ -2289,61 +1637,61 @@
       "name": "rename_ttl_setup",
       "now_ms": 210,
       "argv": ["SET", "rename_ttl_src", "ttlval"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "rename_ttl_set_expire",
       "now_ms": 210,
       "argv": ["PEXPIRE", "rename_ttl_src", "5000"],
-      "expect": {"kind": "integer", "value": 1}
+      "expect": { "kind": "integer", "value": 1 }
     },
     {
       "name": "rename_ttl_verify_before",
       "now_ms": 211,
       "argv": ["PTTL", "rename_ttl_src"],
-      "expect": {"kind": "integer", "value": 4999}
+      "expect": { "kind": "integer", "value": 4999 }
     },
     {
       "name": "rename_ttl_do_rename",
       "now_ms": 212,
       "argv": ["RENAME", "rename_ttl_src", "rename_ttl_dst"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "rename_ttl_verify_preserved",
       "now_ms": 213,
       "argv": ["PTTL", "rename_ttl_dst"],
-      "expect": {"kind": "integer", "value": 4997}
+      "expect": { "kind": "integer", "value": 4997 }
     },
     {
       "name": "rename_ttl_verify_value",
       "now_ms": 214,
       "argv": ["GET", "rename_ttl_dst"],
-      "expect": {"kind": "bulk", "value": "ttlval"}
+      "expect": { "kind": "bulk", "value": "ttlval" }
     },
     {
       "name": "rename_cross_type_list_setup",
       "now_ms": 220,
       "argv": ["RPUSH", "rename_list_src", "a", "b", "c"],
-      "expect": {"kind": "integer", "value": 3}
+      "expect": { "kind": "integer", "value": 3 }
     },
     {
       "name": "rename_cross_type_string_setup",
       "now_ms": 220,
       "argv": ["SET", "rename_string_dst", "will_be_overwritten"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "rename_cross_type_do",
       "now_ms": 221,
       "argv": ["RENAME", "rename_list_src", "rename_string_dst"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "rename_cross_type_verify_type",
       "now_ms": 222,
       "argv": ["TYPE", "rename_string_dst"],
-      "expect": {"kind": "simple", "value": "list"}
+      "expect": { "kind": "simple", "value": "list" }
     },
     {
       "name": "rename_cross_type_verify_contents",
@@ -2352,9 +1700,9 @@
       "expect": {
         "kind": "array",
         "value": [
-          {"kind": "bulk", "value": "a"},
-          {"kind": "bulk", "value": "b"},
-          {"kind": "bulk", "value": "c"}
+          { "kind": "bulk", "value": "a" },
+          { "kind": "bulk", "value": "b" },
+          { "kind": "bulk", "value": "c" }
         ]
       }
     },
@@ -2362,68 +1710,66 @@
       "name": "renamenx_expired_dst_setup_src",
       "now_ms": 230,
       "argv": ["SET", "renamenx_exp_src", "source_val"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "renamenx_expired_dst_setup_dst",
       "now_ms": 230,
       "argv": ["SET", "renamenx_exp_dst", "will_expire"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "renamenx_expired_dst_set_ttl",
       "now_ms": 230,
       "argv": ["PEXPIRE", "renamenx_exp_dst", "50"],
-      "expect": {"kind": "integer", "value": 1}
+      "expect": { "kind": "integer", "value": 1 }
     },
     {
       "name": "renamenx_expired_dst_succeeds",
       "now_ms": 300,
       "argv": ["RENAMENX", "renamenx_exp_src", "renamenx_exp_dst"],
-      "expect": {"kind": "integer", "value": 1}
+      "expect": { "kind": "integer", "value": 1 }
     },
     {
       "name": "renamenx_expired_dst_verify",
       "now_ms": 301,
       "argv": ["GET", "renamenx_exp_dst"],
-      "expect": {"kind": "bulk", "value": "source_val"}
+      "expect": { "kind": "bulk", "value": "source_val" }
     },
     {
       "name": "rename_hash_preserves_fields_setup",
       "now_ms": 310,
       "argv": ["HSET", "rename_hash_src", "f1", "v1", "f2", "v2"],
-      "expect": {"kind": "integer", "value": 2}
+      "expect": { "kind": "integer", "value": 2 }
     },
     {
       "name": "rename_hash_do",
       "now_ms": 311,
       "argv": ["RENAME", "rename_hash_src", "rename_hash_dst"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "rename_hash_verify_type",
       "now_ms": 312,
       "argv": ["TYPE", "rename_hash_dst"],
-      "expect": {"kind": "simple", "value": "hash"}
+      "expect": { "kind": "simple", "value": "hash" }
     },
     {
       "name": "rename_hash_verify_field",
       "now_ms": 312,
       "argv": ["HGET", "rename_hash_dst", "f1"],
-      "expect": {"kind": "bulk", "value": "v1"}
+      "expect": { "kind": "bulk", "value": "v1" }
     },
     {
       "name": "rename_hash_src_gone",
       "now_ms": 313,
       "argv": ["EXISTS", "rename_hash_src"],
-      "expect": {"kind": "integer", "value": 0}
+      "expect": { "kind": "integer", "value": 0 }
     },
     {
       "name": "type_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "TYPE"
-      ],
+      "argv": ["TYPE"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'type' command"
@@ -2432,9 +1778,7 @@
     {
       "name": "persist_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "PERSIST"
-      ],
+      "argv": ["PERSIST"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'persist' command"
@@ -2443,9 +1787,7 @@
     {
       "name": "del_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "DEL"
-      ],
+      "argv": ["DEL"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'del' command"
@@ -2454,9 +1796,7 @@
     {
       "name": "object_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "OBJECT"
-      ],
+      "argv": ["OBJECT"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'object' command"
@@ -2465,11 +1805,7 @@
     {
       "name": "keys_setup_a",
       "now_ms": 800,
-      "argv": [
-        "SET",
-        "key_a",
-        "1"
-      ],
+      "argv": ["SET", "key_a", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2478,11 +1814,7 @@
     {
       "name": "keys_setup_b",
       "now_ms": 800,
-      "argv": [
-        "SET",
-        "key_b",
-        "2"
-      ],
+      "argv": ["SET", "key_b", "2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2491,11 +1823,7 @@
     {
       "name": "keys_setup_c",
       "now_ms": 800,
-      "argv": [
-        "SET",
-        "other_c",
-        "3"
-      ],
+      "argv": ["SET", "other_c", "3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2504,10 +1832,7 @@
     {
       "name": "keys_no_match",
       "now_ms": 800,
-      "argv": [
-        "KEYS",
-        "zzz*"
-      ],
+      "argv": ["KEYS", "zzz*"],
       "expect": {
         "kind": "array",
         "value": []
@@ -2516,9 +1841,7 @@
     {
       "name": "keys_wrong_arity_zero",
       "now_ms": 800,
-      "argv": [
-        "KEYS"
-      ],
+      "argv": ["KEYS"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'keys' command"
@@ -2527,11 +1850,7 @@
     {
       "name": "keys_wrong_arity_extra",
       "now_ms": 800,
-      "argv": [
-        "KEYS",
-        "*",
-        "extra"
-      ],
+      "argv": ["KEYS", "*", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'keys' command"
@@ -2540,10 +1859,7 @@
     {
       "name": "keys_single_match",
       "now_ms": 800,
-      "argv": [
-        "KEYS",
-        "other_?"
-      ],
+      "argv": ["KEYS", "other_?"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2558,19 +1874,19 @@
       "name": "keys_setup_prefix_a",
       "now_ms": 801,
       "argv": ["SET", "prefix_alpha", "1"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "keys_setup_prefix_b",
       "now_ms": 801,
       "argv": ["SET", "prefix_beta", "2"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "keys_setup_suffix",
       "now_ms": 801,
       "argv": ["SET", "gamma_suffix", "3"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "keys_prefix_wildcard",
@@ -2586,26 +1902,26 @@
       "argv": ["KEYS", "*_suffix"],
       "expect": {
         "kind": "array",
-        "value": [{"kind": "bulk", "value": "gamma_suffix"}]
+        "value": [{ "kind": "bulk", "value": "gamma_suffix" }]
       }
     },
     {
       "name": "keys_char_class_setup_a",
       "now_ms": 803,
       "argv": ["SET", "cc_a", "1"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "keys_char_class_setup_b",
       "now_ms": 803,
       "argv": ["SET", "cc_b", "2"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "keys_char_class_setup_x",
       "now_ms": 803,
       "argv": ["SET", "cc_x", "3"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "keys_char_class_match",
@@ -2621,7 +1937,7 @@
       "argv": ["KEYS", "cc_[^ab]"],
       "expect": {
         "kind": "array",
-        "value": [{"kind": "bulk", "value": "cc_x"}]
+        "value": [{ "kind": "bulk", "value": "cc_x" }]
       }
     },
     {
@@ -2636,7 +1952,7 @@
       "name": "keys_escaped_star_setup",
       "now_ms": 806,
       "argv": ["SET", "key*star", "special"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "keys_escaped_star_match",
@@ -2644,14 +1960,14 @@
       "argv": ["KEYS", "key\\*star"],
       "expect": {
         "kind": "array",
-        "value": [{"kind": "bulk", "value": "key*star"}]
+        "value": [{ "kind": "bulk", "value": "key*star" }]
       }
     },
     {
       "name": "keys_escaped_question_setup",
       "now_ms": 808,
       "argv": ["SET", "key?question", "special"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "keys_escaped_question_match",
@@ -2659,7 +1975,7 @@
       "argv": ["KEYS", "key\\?question"],
       "expect": {
         "kind": "array",
-        "value": [{"kind": "bulk", "value": "key?question"}]
+        "value": [{ "kind": "bulk", "value": "key?question" }]
       }
     },
     {
@@ -2674,13 +1990,13 @@
       "name": "keys_expired_setup",
       "now_ms": 900,
       "argv": ["SET", "keys_will_expire", "temp"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "keys_expired_set_ttl",
       "now_ms": 900,
       "argv": ["PEXPIRE", "keys_will_expire", "50"],
-      "expect": {"kind": "integer", "value": 1}
+      "expect": { "kind": "integer", "value": 1 }
     },
     {
       "name": "keys_expired_not_found",
@@ -2695,7 +2011,7 @@
       "name": "keys_literal_brackets_setup",
       "now_ms": 1001,
       "argv": ["SET", "key[1]", "bracketed"],
-      "expect": {"kind": "simple", "value": "OK"}
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "keys_literal_brackets_match",
@@ -2703,16 +2019,13 @@
       "argv": ["KEYS", "key\\[1\\]"],
       "expect": {
         "kind": "array",
-        "value": [{"kind": "bulk", "value": "key[1]"}]
+        "value": [{ "kind": "bulk", "value": "key[1]" }]
       }
     },
     {
       "name": "dump_missing_key",
       "now_ms": 900,
-      "argv": [
-        "DUMP",
-        "nosuchdumpkey"
-      ],
+      "argv": ["DUMP", "nosuchdumpkey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2721,9 +2034,7 @@
     {
       "name": "dump_wrong_arity_no_args",
       "now_ms": 900,
-      "argv": [
-        "DUMP"
-      ],
+      "argv": ["DUMP"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'dump' command"
@@ -2732,11 +2043,7 @@
     {
       "name": "dump_wrong_arity_extra",
       "now_ms": 900,
-      "argv": [
-        "DUMP",
-        "a",
-        "b"
-      ],
+      "argv": ["DUMP", "a", "b"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'dump' command"
@@ -2745,10 +2052,7 @@
     {
       "name": "restore_wrong_arity",
       "now_ms": 900,
-      "argv": [
-        "RESTORE",
-        "key"
-      ],
+      "argv": ["RESTORE", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'restore' command"
@@ -2757,12 +2061,7 @@
     {
       "name": "restore_invalid_payload",
       "now_ms": 900,
-      "argv": [
-        "RESTORE",
-        "rkey",
-        "0",
-        "invalidpayload"
-      ],
+      "argv": ["RESTORE", "rkey", "0", "invalidpayload"],
       "expect": {
         "kind": "error",
         "value": "ERR DUMP payload version or checksum are wrong"

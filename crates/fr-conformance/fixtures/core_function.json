@@ -4,10 +4,7 @@
     {
       "name": "function_list_empty",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "LIST"
-      ],
+      "argv": ["FUNCTION", "LIST"],
       "expect": {
         "kind": "array",
         "value": []
@@ -16,10 +13,7 @@
     {
       "name": "function_stats_empty",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "STATS"
-      ],
+      "argv": ["FUNCTION", "STATS"],
       "expect": {
         "kind": "array",
         "value": [
@@ -84,10 +78,7 @@
     {
       "name": "function_list_after_load",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "LIST"
-      ],
+      "argv": ["FUNCTION", "LIST"],
       "expect": {
         "kind": "array",
         "value": [
@@ -156,10 +147,7 @@
     {
       "name": "function_stats_after_load",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "STATS"
-      ],
+      "argv": ["FUNCTION", "STATS"],
       "expect": {
         "kind": "array",
         "value": [
@@ -211,11 +199,7 @@
     {
       "name": "fcall_not_found",
       "now_ms": 0,
-      "argv": [
-        "FCALL",
-        "nosuchfunc",
-        "0"
-      ],
+      "argv": ["FCALL", "nosuchfunc", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR Function not found"
@@ -224,12 +208,7 @@
     {
       "name": "fcall_myfunc_returns_arg",
       "now_ms": 0,
-      "argv": [
-        "FCALL",
-        "myfunc",
-        "0",
-        "hello"
-      ],
+      "argv": ["FCALL", "myfunc", "0", "hello"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -238,11 +217,7 @@
     {
       "name": "fcall_myfunc_no_args_returns_nil",
       "now_ms": 0,
-      "argv": [
-        "FCALL",
-        "myfunc",
-        "0"
-      ],
+      "argv": ["FCALL", "myfunc", "0"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -264,11 +239,7 @@
     {
       "name": "fcall_add42_returns_integer",
       "now_ms": 0,
-      "argv": [
-        "FCALL",
-        "add42",
-        "0"
-      ],
+      "argv": ["FCALL", "add42", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -277,11 +248,7 @@
     {
       "name": "function_delete_numlib",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "DELETE",
-        "numlib"
-      ],
+      "argv": ["FUNCTION", "DELETE", "numlib"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -303,13 +270,7 @@
     {
       "name": "fcall_myset_sets_key",
       "now_ms": 0,
-      "argv": [
-        "FCALL",
-        "myset",
-        "1",
-        "fcall_key",
-        "fcall_value"
-      ],
+      "argv": ["FCALL", "myset", "1", "fcall_key", "fcall_value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -318,10 +279,7 @@
     {
       "name": "fcall_verify_key_was_set",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "fcall_key"
-      ],
+      "argv": ["GET", "fcall_key"],
       "expect": {
         "kind": "bulk",
         "value": "fcall_value"
@@ -330,11 +288,7 @@
     {
       "name": "function_delete_setlib",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "DELETE",
-        "setlib"
-      ],
+      "argv": ["FUNCTION", "DELETE", "setlib"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -370,11 +324,7 @@
     {
       "name": "function_delete",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "DELETE",
-        "mylib"
-      ],
+      "argv": ["FUNCTION", "DELETE", "mylib"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -383,11 +333,7 @@
     {
       "name": "function_delete_not_found",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "DELETE",
-        "nosuchlib"
-      ],
+      "argv": ["FUNCTION", "DELETE", "nosuchlib"],
       "expect": {
         "kind": "error",
         "value": "ERR Library not found"
@@ -396,10 +342,7 @@
     {
       "name": "function_list_after_delete",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "LIST"
-      ],
+      "argv": ["FUNCTION", "LIST"],
       "expect": {
         "kind": "array",
         "value": []
@@ -421,10 +364,7 @@
     {
       "name": "function_flush",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "FLUSH"
-      ],
+      "argv": ["FUNCTION", "FLUSH"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -433,10 +373,7 @@
     {
       "name": "function_list_after_flush",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "LIST"
-      ],
+      "argv": ["FUNCTION", "LIST"],
       "expect": {
         "kind": "array",
         "value": []
@@ -445,11 +382,7 @@
     {
       "name": "function_flush_async",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "FLUSH",
-        "ASYNC"
-      ],
+      "argv": ["FUNCTION", "FLUSH", "ASYNC"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -458,11 +391,7 @@
     {
       "name": "function_load_bad_header",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "LOAD",
-        "no header here"
-      ],
+      "argv": ["FUNCTION", "LOAD", "no header here"],
       "expect": {
         "kind": "error",
         "value": "ERR Missing library metadata"
@@ -471,9 +400,7 @@
     {
       "name": "function_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION"
-      ],
+      "argv": ["FUNCTION"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'function' command"
@@ -482,11 +409,7 @@
     {
       "name": "function_stats_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "STATS",
-        "extra"
-      ],
+      "argv": ["FUNCTION", "STATS", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'function|stats' command"
@@ -495,10 +418,7 @@
     {
       "name": "function_kill_notbusy",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "KILL"
-      ],
+      "argv": ["FUNCTION", "KILL"],
       "expect": {
         "kind": "error",
         "value": "NOTBUSY No scripts in execution right now."
@@ -507,11 +427,7 @@
     {
       "name": "function_kill_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "KILL",
-        "extra"
-      ],
+      "argv": ["FUNCTION", "KILL", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'function|kill' command"
@@ -520,9 +436,7 @@
     {
       "name": "fcall_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "FCALL"
-      ],
+      "argv": ["FCALL"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'fcall' command"
@@ -531,10 +445,7 @@
     {
       "name": "fcall_wrong_arity_no_numkeys",
       "now_ms": 0,
-      "argv": [
-        "FCALL",
-        "func"
-      ],
+      "argv": ["FCALL", "func"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'fcall' command"
@@ -543,11 +454,7 @@
     {
       "name": "script_load",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "LOAD",
-        "return 1"
-      ],
+      "argv": ["SCRIPT", "LOAD", "return 1"],
       "expect": {
         "kind": "bulk",
         "value": "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"
@@ -556,11 +463,7 @@
     {
       "name": "script_exists_yes",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "EXISTS",
-        "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"
-      ],
+      "argv": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"],
       "expect": {
         "kind": "array",
         "value": [
@@ -574,11 +477,7 @@
     {
       "name": "script_exists_no",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "EXISTS",
-        "0000000000000000000000000000000000000000"
-      ],
+      "argv": ["SCRIPT", "EXISTS", "0000000000000000000000000000000000000000"],
       "expect": {
         "kind": "array",
         "value": [
@@ -615,11 +514,7 @@
     {
       "name": "evalsha_loaded_script",
       "now_ms": 0,
-      "argv": [
-        "EVALSHA",
-        "e0e1f9fabfc9d4800c877a703b823ac0578ff8db",
-        "0"
-      ],
+      "argv": ["EVALSHA", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -628,10 +523,7 @@
     {
       "name": "script_flush",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "FLUSH"
-      ],
+      "argv": ["SCRIPT", "FLUSH"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -640,11 +532,7 @@
     {
       "name": "script_exists_after_flush",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "EXISTS",
-        "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"
-      ],
+      "argv": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"],
       "expect": {
         "kind": "array",
         "value": [
@@ -658,10 +546,7 @@
     {
       "name": "function_help",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "HELP"
-      ],
+      "argv": ["FUNCTION", "HELP"],
       "expect": {
         "kind": "array",
         "value": [
@@ -831,10 +716,7 @@
     {
       "name": "function_unknown_subcommand",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "NOSUCH"
-      ],
+      "argv": ["FUNCTION", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try FUNCTION HELP."
@@ -856,11 +738,7 @@
     {
       "name": "fcall_multi_func_a",
       "now_ms": 0,
-      "argv": [
-        "FCALL",
-        "func_a",
-        "0"
-      ],
+      "argv": ["FCALL", "func_a", "0"],
       "expect": {
         "kind": "bulk",
         "value": "A"
@@ -869,11 +747,7 @@
     {
       "name": "fcall_multi_func_b",
       "now_ms": 0,
-      "argv": [
-        "FCALL",
-        "func_b",
-        "0"
-      ],
+      "argv": ["FCALL", "func_b", "0"],
       "expect": {
         "kind": "bulk",
         "value": "B"
@@ -882,10 +756,7 @@
     {
       "name": "function_stats_multi_func",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "STATS"
-      ],
+      "argv": ["FUNCTION", "STATS"],
       "expect": {
         "kind": "array",
         "value": [
@@ -937,12 +808,7 @@
     {
       "name": "function_list_libraryname_filter_match",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "LIST",
-        "LIBRARYNAME",
-        "multilib"
-      ],
+      "argv": ["FUNCTION", "LIST", "LIBRARYNAME", "multilib"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1040,12 +906,7 @@
     {
       "name": "function_list_libraryname_filter_no_match",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "LIST",
-        "LIBRARYNAME",
-        "nosuchlib"
-      ],
+      "argv": ["FUNCTION", "LIST", "LIBRARYNAME", "nosuchlib"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1054,11 +915,7 @@
     {
       "name": "function_delete_multilib",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "DELETE",
-        "multilib"
-      ],
+      "argv": ["FUNCTION", "DELETE", "multilib"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1080,13 +937,7 @@
     {
       "name": "fcall_with_keys",
       "now_ms": 0,
-      "argv": [
-        "FCALL",
-        "setkey",
-        "1",
-        "fkey1",
-        "fval1"
-      ],
+      "argv": ["FCALL", "setkey", "1", "fkey1", "fval1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1095,10 +946,7 @@
     {
       "name": "fcall_verify_key_set",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "fkey1"
-      ],
+      "argv": ["GET", "fkey1"],
       "expect": {
         "kind": "bulk",
         "value": "fval1"
@@ -1107,11 +955,7 @@
     {
       "name": "function_delete_keylib",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "DELETE",
-        "keylib"
-      ],
+      "argv": ["FUNCTION", "DELETE", "keylib"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1133,12 +977,7 @@
     {
       "name": "fcall_ro_returns_arg",
       "now_ms": 0,
-      "argv": [
-        "FCALL_RO",
-        "echo_ro",
-        "0",
-        "readonly_val"
-      ],
+      "argv": ["FCALL_RO", "echo_ro", "0", "readonly_val"],
       "expect": {
         "kind": "error",
         "value": "ERR Can not execute a script with write flag using *_ro command."
@@ -1147,11 +986,7 @@
     {
       "name": "function_delete_rolib",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "DELETE",
-        "rolib"
-      ],
+      "argv": ["FUNCTION", "DELETE", "rolib"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1160,11 +995,7 @@
     {
       "name": "function_flush_sync",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "FLUSH",
-        "SYNC"
-      ],
+      "argv": ["FUNCTION", "FLUSH", "SYNC"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1173,10 +1004,7 @@
     {
       "name": "function_list_after_sync_flush",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "LIST"
-      ],
+      "argv": ["FUNCTION", "LIST"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1198,11 +1026,7 @@
     {
       "name": "fcall_not_found_after_flush",
       "now_ms": 0,
-      "argv": [
-        "FCALL",
-        "nosuchfunc",
-        "0"
-      ],
+      "argv": ["FCALL", "nosuchfunc", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR Function not found"
@@ -1211,9 +1035,7 @@
     {
       "name": "fcall_ro_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "FCALL_RO"
-      ],
+      "argv": ["FCALL_RO"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'fcall_ro' command"
@@ -1222,10 +1044,7 @@
     {
       "name": "fcall_ro_wrong_arity_no_numkeys",
       "now_ms": 0,
-      "argv": [
-        "FCALL_RO",
-        "func"
-      ],
+      "argv": ["FCALL_RO", "func"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'fcall_ro' command"
@@ -1234,9 +1053,7 @@
     {
       "name": "script_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT"
-      ],
+      "argv": ["SCRIPT"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'script' command"
@@ -1245,10 +1062,7 @@
     {
       "name": "script_unknown_subcommand",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "NOSUCH"
-      ],
+      "argv": ["SCRIPT", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try SCRIPT HELP."
@@ -1257,11 +1071,7 @@
     {
       "name": "script_flush_sync",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "FLUSH",
-        "SYNC"
-      ],
+      "argv": ["SCRIPT", "FLUSH", "SYNC"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1270,11 +1080,7 @@
     {
       "name": "script_flush_async",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "FLUSH",
-        "ASYNC"
-      ],
+      "argv": ["SCRIPT", "FLUSH", "ASYNC"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1283,11 +1089,7 @@
     {
       "name": "fcall_invalid_numkeys",
       "now_ms": 100,
-      "argv": [
-        "FCALL",
-        "myfunc",
-        "abc"
-      ],
+      "argv": ["FCALL", "myfunc", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR Function not found"
@@ -1296,11 +1098,7 @@
     {
       "name": "fcall_negative_numkeys",
       "now_ms": 100,
-      "argv": [
-        "FCALL",
-        "myfunc",
-        "-1"
-      ],
+      "argv": ["FCALL", "myfunc", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR Function not found"
@@ -1309,11 +1107,7 @@
     {
       "name": "fcall_ro_invalid_numkeys",
       "now_ms": 100,
-      "argv": [
-        "FCALL_RO",
-        "myfunc",
-        "abc"
-      ],
+      "argv": ["FCALL_RO", "myfunc", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR Function not found"
@@ -1322,11 +1116,7 @@
     {
       "name": "fcall_ro_negative_numkeys",
       "now_ms": 100,
-      "argv": [
-        "FCALL_RO",
-        "myfunc",
-        "-1"
-      ],
+      "argv": ["FCALL_RO", "myfunc", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR Function not found"
@@ -1335,10 +1125,7 @@
     {
       "name": "function_delete_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "FUNCTION",
-        "DELETE"
-      ],
+      "argv": ["FUNCTION", "DELETE"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'function|delete' command"
@@ -1347,10 +1134,7 @@
     {
       "name": "function_load_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "FUNCTION",
-        "LOAD"
-      ],
+      "argv": ["FUNCTION", "LOAD"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'function|load' command"
@@ -1359,10 +1143,7 @@
     {
       "name": "function_dump_empty",
       "now_ms": 100,
-      "argv": [
-        "FUNCTION",
-        "DUMP"
-      ],
+      "argv": ["FUNCTION", "DUMP"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -1370,10 +1151,7 @@
     {
       "name": "function_restore_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "FUNCTION",
-        "RESTORE"
-      ],
+      "argv": ["FUNCTION", "RESTORE"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'function|restore' command"
@@ -1382,12 +1160,7 @@
     {
       "name": "function_restore_wrong_policy",
       "now_ms": 100,
-      "argv": [
-        "FUNCTION",
-        "RESTORE",
-        "payload",
-        "BOGUS"
-      ],
+      "argv": ["FUNCTION", "RESTORE", "payload", "BOGUS"],
       "expect": {
         "kind": "error",
         "value": "ERR Wrong restore policy given, value should be either FLUSH, APPEND or REPLACE."
@@ -1396,13 +1169,7 @@
     {
       "name": "function_restore_extra_args",
       "now_ms": 100,
-      "argv": [
-        "FUNCTION",
-        "RESTORE",
-        "payload",
-        "FLUSH",
-        "EXTRA"
-      ],
+      "argv": ["FUNCTION", "RESTORE", "payload", "FLUSH", "EXTRA"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'RESTORE'. Try FUNCTION HELP."
@@ -1411,10 +1178,7 @@
     {
       "name": "script_exists_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "SCRIPT",
-        "EXISTS"
-      ],
+      "argv": ["SCRIPT", "EXISTS"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'script|exists' command"
@@ -1423,10 +1187,7 @@
     {
       "name": "script_load_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "SCRIPT",
-        "LOAD"
-      ],
+      "argv": ["SCRIPT", "LOAD"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'script|load' command"
@@ -1435,11 +1196,7 @@
     {
       "name": "fcall_numkeys_exceeds_args",
       "now_ms": 100,
-      "argv": [
-        "FCALL",
-        "myfunc",
-        "5"
-      ],
+      "argv": ["FCALL", "myfunc", "5"],
       "expect": {
         "kind": "error",
         "value": "ERR Function not found"
@@ -1448,11 +1205,7 @@
     {
       "name": "fcall_ro_numkeys_exceeds_args",
       "now_ms": 100,
-      "argv": [
-        "FCALL_RO",
-        "myfunc",
-        "5"
-      ],
+      "argv": ["FCALL_RO", "myfunc", "5"],
       "expect": {
         "kind": "error",
         "value": "ERR Function not found"
@@ -1461,11 +1214,7 @@
     {
       "name": "function_flush_invalid_arg",
       "now_ms": 100,
-      "argv": [
-        "FUNCTION",
-        "FLUSH",
-        "INVALID"
-      ],
+      "argv": ["FUNCTION", "FLUSH", "INVALID"],
       "expect": {
         "kind": "error",
         "value": "ERR FUNCTION FLUSH only supports SYNC|ASYNC option"
@@ -1474,11 +1223,7 @@
     {
       "name": "script_flush_invalid_arg",
       "now_ms": 100,
-      "argv": [
-        "SCRIPT",
-        "FLUSH",
-        "INVALID"
-      ],
+      "argv": ["SCRIPT", "FLUSH", "INVALID"],
       "expect": {
         "kind": "error",
         "value": "ERR SCRIPT FLUSH only support SYNC|ASYNC option"
@@ -1487,12 +1232,7 @@
     {
       "name": "function_delete_wrong_arity_extra",
       "now_ms": 100,
-      "argv": [
-        "FUNCTION",
-        "DELETE",
-        "lib1",
-        "lib2"
-      ],
+      "argv": ["FUNCTION", "DELETE", "lib1", "lib2"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'function|delete' command"
@@ -1514,11 +1254,7 @@
     {
       "name": "fcall_ro_call",
       "now_ms": 500,
-      "argv": [
-        "FCALL_RO",
-        "rofn",
-        "0"
-      ],
+      "argv": ["FCALL_RO", "rofn", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR Can not execute a script with write flag using *_ro command."
@@ -1541,13 +1277,7 @@
     {
       "name": "fcall_ro_with_keys_argv_call",
       "now_ms": 500,
-      "argv": [
-        "FCALL_RO",
-        "rofn2",
-        "1",
-        "mykey",
-        "myarg"
-      ],
+      "argv": ["FCALL_RO", "rofn2", "1", "mykey", "myarg"],
       "expect": {
         "kind": "error",
         "value": "ERR Can not execute a script with write flag using *_ro command."
@@ -1556,11 +1286,7 @@
     {
       "name": "fcall_ro_no_such_function",
       "now_ms": 500,
-      "argv": [
-        "FCALL_RO",
-        "nosuchfn",
-        "0"
-      ],
+      "argv": ["FCALL_RO", "nosuchfn", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR Function not found"
@@ -1569,9 +1295,7 @@
     {
       "name": "fcall_ro_wrong_arity",
       "now_ms": 500,
-      "argv": [
-        "FCALL_RO"
-      ],
+      "argv": ["FCALL_RO"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'fcall_ro' command"

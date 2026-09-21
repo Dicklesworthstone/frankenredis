@@ -6,9 +6,7 @@
     "k": 27,
     "repair_symbols": 7,
     "overhead_ratio": 0.259259,
-    "symbol_hashes": [
-      "sha256:6f8f794aecaf1fd0c2639d74fdecf5364017af4c19ae25c73c4528b76b185af0"
-    ]
+    "symbol_hashes": ["sha256:6f8f794aecaf1fd0c2639d74fdecf5364017af4c19ae25c73c4528b76b185af0"]
   },
   "scrub": {
     "last_ok_unix_ms": 1771367951824,

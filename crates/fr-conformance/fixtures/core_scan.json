@@ -4,10 +4,7 @@
     {
       "name": "scan_empty_store",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0"
-      ],
+      "argv": ["SCAN", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -25,11 +22,7 @@
     {
       "name": "setup_scan_keys",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "key:1",
-        "val1"
-      ],
+      "argv": ["SET", "key:1", "val1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -38,11 +31,7 @@
     {
       "name": "setup_scan_keys_2",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "key:2",
-        "val2"
-      ],
+      "argv": ["SET", "key:2", "val2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -51,11 +40,7 @@
     {
       "name": "setup_scan_keys_3",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "key:3",
-        "val3"
-      ],
+      "argv": ["SET", "key:3", "val3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -64,12 +49,7 @@
     {
       "name": "setup_scan_list",
       "now_ms": 0,
-      "argv": [
-        "RPUSH",
-        "mylist",
-        "a",
-        "b"
-      ],
+      "argv": ["RPUSH", "mylist", "a", "b"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -78,14 +58,7 @@
     {
       "name": "setup_scan_hash",
       "now_ms": 0,
-      "argv": [
-        "HSET",
-        "myhash",
-        "f1",
-        "v1",
-        "f2",
-        "v2"
-      ],
+      "argv": ["HSET", "myhash", "f1", "v1", "f2", "v2"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -94,13 +67,7 @@
     {
       "name": "setup_scan_set",
       "now_ms": 0,
-      "argv": [
-        "SADD",
-        "myset",
-        "x",
-        "y",
-        "z"
-      ],
+      "argv": ["SADD", "myset", "x", "y", "z"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -109,14 +76,7 @@
     {
       "name": "setup_scan_zset",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "myzset",
-        "1",
-        "a",
-        "2",
-        "b"
-      ],
+      "argv": ["ZADD", "myzset", "1", "a", "2", "b"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -125,12 +85,7 @@
     {
       "name": "scan_all_keys_full",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -177,14 +132,7 @@
     {
       "name": "scan_with_match_pattern",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "MATCH",
-        "key:*",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "MATCH", "key:*", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -215,14 +163,7 @@
     {
       "name": "scan_with_match_no_results",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "MATCH",
-        "nomatch*",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "MATCH", "nomatch*", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -240,14 +181,7 @@
     {
       "name": "scan_type_filter_string",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "TYPE",
-        "string",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "TYPE", "string", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -278,14 +212,7 @@
     {
       "name": "scan_type_filter_list",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "TYPE",
-        "list",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "TYPE", "list", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -308,14 +235,7 @@
     {
       "name": "scan_type_filter_hash",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "TYPE",
-        "hash",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "TYPE", "hash", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -338,14 +258,7 @@
     {
       "name": "scan_type_filter_set",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "TYPE",
-        "set",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "TYPE", "set", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -368,14 +281,7 @@
     {
       "name": "scan_type_filter_zset",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "TYPE",
-        "zset",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "TYPE", "zset", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -398,14 +304,7 @@
     {
       "name": "scan_type_filter_none_match",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "TYPE",
-        "stream",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "TYPE", "stream", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -423,9 +322,7 @@
     {
       "name": "scan_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "SCAN"
-      ],
+      "argv": ["SCAN"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'scan' command"
@@ -434,10 +331,7 @@
     {
       "name": "scan_invalid_cursor",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "abc"
-      ],
+      "argv": ["SCAN", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid cursor"
@@ -446,12 +340,7 @@
     {
       "name": "scan_count_noncanonical_plus",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "COUNT",
-        "+1"
-      ],
+      "argv": ["SCAN", "0", "COUNT", "+1"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -460,12 +349,7 @@
     {
       "name": "scan_count_noncanonical_leading_zero",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "COUNT",
-        "01"
-      ],
+      "argv": ["SCAN", "0", "COUNT", "01"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -474,12 +358,7 @@
     {
       "name": "scan_count_zero_rejected",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "COUNT",
-        "0"
-      ],
+      "argv": ["SCAN", "0", "COUNT", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -488,16 +367,7 @@
     {
       "name": "hscan_setup",
       "now_ms": 0,
-      "argv": [
-        "HSET",
-        "hs",
-        "field1",
-        "val1",
-        "field2",
-        "val2",
-        "field3",
-        "val3"
-      ],
+      "argv": ["HSET", "hs", "field1", "val1", "field2", "val2", "field3", "val3"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -506,13 +376,7 @@
     {
       "name": "hscan_all",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "hs",
-        "0",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["HSCAN", "hs", "0", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -555,15 +419,7 @@
     {
       "name": "hscan_match",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "hs",
-        "0",
-        "MATCH",
-        "field1",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["HSCAN", "hs", "0", "MATCH", "field1", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -590,11 +446,7 @@
     {
       "name": "hscan_missing_key",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "nokey",
-        "0"
-      ],
+      "argv": ["HSCAN", "nokey", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -612,13 +464,7 @@
     {
       "name": "sscan_all",
       "now_ms": 0,
-      "argv": [
-        "SSCAN",
-        "myset",
-        "0",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SSCAN", "myset", "0", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -649,11 +495,7 @@
     {
       "name": "sscan_missing_key",
       "now_ms": 0,
-      "argv": [
-        "SSCAN",
-        "nokey",
-        "0"
-      ],
+      "argv": ["SSCAN", "nokey", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -671,13 +513,7 @@
     {
       "name": "zscan_all",
       "now_ms": 0,
-      "argv": [
-        "ZSCAN",
-        "myzset",
-        "0",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["ZSCAN", "myzset", "0", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -712,11 +548,7 @@
     {
       "name": "zscan_missing_key",
       "now_ms": 0,
-      "argv": [
-        "ZSCAN",
-        "nokey",
-        "0"
-      ],
+      "argv": ["ZSCAN", "nokey", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -734,11 +566,7 @@
     {
       "name": "hscan_wrongtype",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "key:1",
-        "0"
-      ],
+      "argv": ["HSCAN", "key:1", "0"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -747,11 +575,7 @@
     {
       "name": "sscan_wrongtype",
       "now_ms": 0,
-      "argv": [
-        "SSCAN",
-        "key:1",
-        "0"
-      ],
+      "argv": ["SSCAN", "key:1", "0"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -760,11 +584,7 @@
     {
       "name": "zscan_wrongtype",
       "now_ms": 0,
-      "argv": [
-        "ZSCAN",
-        "key:1",
-        "0"
-      ],
+      "argv": ["ZSCAN", "key:1", "0"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -773,16 +593,7 @@
     {
       "name": "scan_match_and_type_combined",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "MATCH",
-        "key:*",
-        "TYPE",
-        "string",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "MATCH", "key:*", "TYPE", "string", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -813,16 +624,7 @@
     {
       "name": "scan_match_and_type_no_overlap",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "MATCH",
-        "my*",
-        "TYPE",
-        "string",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "MATCH", "my*", "TYPE", "string", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -840,14 +642,7 @@
     {
       "name": "scan_type_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "TYPE",
-        "STRING",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "TYPE", "STRING", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -878,14 +673,7 @@
     {
       "name": "scan_match_question_mark",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "MATCH",
-        "key:?",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "MATCH", "key:?", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -916,14 +704,7 @@
     {
       "name": "scan_match_char_class",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "MATCH",
-        "key:[12]",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "MATCH", "key:[12]", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -950,10 +731,7 @@
     {
       "name": "scan_cursor_0_returns_0_for_small_set",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0"
-      ],
+      "argv": ["SCAN", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1004,15 +782,7 @@
     {
       "name": "hscan_match_glob",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "hs",
-        "0",
-        "MATCH",
-        "field[12]",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["HSCAN", "hs", "0", "MATCH", "field[12]", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1047,15 +817,7 @@
     {
       "name": "hscan_match_no_results",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "hs",
-        "0",
-        "MATCH",
-        "nosuch*",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["HSCAN", "hs", "0", "MATCH", "nosuch*", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1073,10 +835,7 @@
     {
       "name": "hscan_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "hs"
-      ],
+      "argv": ["HSCAN", "hs"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hscan' command"
@@ -1085,11 +844,7 @@
     {
       "name": "hscan_invalid_cursor",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "hs",
-        "abc"
-      ],
+      "argv": ["HSCAN", "hs", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid cursor"
@@ -1098,13 +853,7 @@
     {
       "name": "hscan_count_noncanonical_plus",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "hs",
-        "0",
-        "COUNT",
-        "+1"
-      ],
+      "argv": ["HSCAN", "hs", "0", "COUNT", "+1"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1113,13 +862,7 @@
     {
       "name": "hscan_count_noncanonical_leading_zero",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "hs",
-        "0",
-        "COUNT",
-        "01"
-      ],
+      "argv": ["HSCAN", "hs", "0", "COUNT", "01"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1128,15 +871,7 @@
     {
       "name": "sscan_match_pattern",
       "now_ms": 0,
-      "argv": [
-        "SSCAN",
-        "myset",
-        "0",
-        "MATCH",
-        "[xy]",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SSCAN", "myset", "0", "MATCH", "[xy]", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1163,15 +898,7 @@
     {
       "name": "sscan_match_no_results",
       "now_ms": 0,
-      "argv": [
-        "SSCAN",
-        "myset",
-        "0",
-        "MATCH",
-        "a*",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SSCAN", "myset", "0", "MATCH", "a*", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1189,10 +916,7 @@
     {
       "name": "sscan_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "SSCAN",
-        "myset"
-      ],
+      "argv": ["SSCAN", "myset"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'sscan' command"
@@ -1201,11 +925,7 @@
     {
       "name": "sscan_invalid_cursor",
       "now_ms": 0,
-      "argv": [
-        "SSCAN",
-        "myset",
-        "abc"
-      ],
+      "argv": ["SSCAN", "myset", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid cursor"
@@ -1214,13 +934,7 @@
     {
       "name": "sscan_count_noncanonical_plus",
       "now_ms": 0,
-      "argv": [
-        "SSCAN",
-        "myset",
-        "0",
-        "COUNT",
-        "+1"
-      ],
+      "argv": ["SSCAN", "myset", "0", "COUNT", "+1"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1229,13 +943,7 @@
     {
       "name": "sscan_count_noncanonical_leading_zero",
       "now_ms": 0,
-      "argv": [
-        "SSCAN",
-        "myset",
-        "0",
-        "COUNT",
-        "01"
-      ],
+      "argv": ["SSCAN", "myset", "0", "COUNT", "01"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1244,15 +952,7 @@
     {
       "name": "zscan_match_pattern",
       "now_ms": 0,
-      "argv": [
-        "ZSCAN",
-        "myzset",
-        "0",
-        "MATCH",
-        "a",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["ZSCAN", "myzset", "0", "MATCH", "a", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1279,15 +979,7 @@
     {
       "name": "zscan_match_no_results",
       "now_ms": 0,
-      "argv": [
-        "ZSCAN",
-        "myzset",
-        "0",
-        "MATCH",
-        "c*",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["ZSCAN", "myzset", "0", "MATCH", "c*", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1305,10 +997,7 @@
     {
       "name": "zscan_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "ZSCAN",
-        "myzset"
-      ],
+      "argv": ["ZSCAN", "myzset"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zscan' command"
@@ -1317,11 +1006,7 @@
     {
       "name": "zscan_invalid_cursor",
       "now_ms": 0,
-      "argv": [
-        "ZSCAN",
-        "myzset",
-        "abc"
-      ],
+      "argv": ["ZSCAN", "myzset", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid cursor"
@@ -1330,13 +1015,7 @@
     {
       "name": "zscan_count_noncanonical_plus",
       "now_ms": 0,
-      "argv": [
-        "ZSCAN",
-        "myzset",
-        "0",
-        "COUNT",
-        "+1"
-      ],
+      "argv": ["ZSCAN", "myzset", "0", "COUNT", "+1"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1345,13 +1024,7 @@
     {
       "name": "zscan_count_noncanonical_leading_zero",
       "now_ms": 0,
-      "argv": [
-        "ZSCAN",
-        "myzset",
-        "0",
-        "COUNT",
-        "01"
-      ],
+      "argv": ["ZSCAN", "myzset", "0", "COUNT", "01"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1360,11 +1033,7 @@
     {
       "name": "hscan_large_cursor_returns_0",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "hs",
-        "999999"
-      ],
+      "argv": ["HSCAN", "hs", "999999"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1407,11 +1076,7 @@
     {
       "name": "sscan_large_cursor_returns_0",
       "now_ms": 0,
-      "argv": [
-        "SSCAN",
-        "myset",
-        "999999"
-      ],
+      "argv": ["SSCAN", "myset", "999999"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1442,11 +1107,7 @@
     {
       "name": "zscan_large_cursor_returns_0",
       "now_ms": 0,
-      "argv": [
-        "ZSCAN",
-        "myzset",
-        "999999"
-      ],
+      "argv": ["ZSCAN", "myzset", "999999"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1481,14 +1142,7 @@
     {
       "name": "scan_match_all_explicit",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "MATCH",
-        "*",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "MATCH", "*", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1539,11 +1193,7 @@
     {
       "name": "hscan_negative_cursor",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "hs",
-        "-1"
-      ],
+      "argv": ["HSCAN", "hs", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1586,11 +1236,7 @@
     {
       "name": "sscan_negative_cursor",
       "now_ms": 0,
-      "argv": [
-        "SSCAN",
-        "myset",
-        "-1"
-      ],
+      "argv": ["SSCAN", "myset", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1621,11 +1267,7 @@
     {
       "name": "zscan_negative_cursor",
       "now_ms": 0,
-      "argv": [
-        "ZSCAN",
-        "myzset",
-        "-1"
-      ],
+      "argv": ["ZSCAN", "myzset", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1660,15 +1302,7 @@
     {
       "name": "hscan_match_wildcard",
       "now_ms": 0,
-      "argv": [
-        "HSCAN",
-        "hs",
-        "0",
-        "MATCH",
-        "*",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["HSCAN", "hs", "0", "MATCH", "*", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1711,15 +1345,7 @@
     {
       "name": "sscan_match_wildcard",
       "now_ms": 0,
-      "argv": [
-        "SSCAN",
-        "myset",
-        "0",
-        "MATCH",
-        "*",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SSCAN", "myset", "0", "MATCH", "*", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1750,15 +1376,7 @@
     {
       "name": "zscan_match_wildcard",
       "now_ms": 0,
-      "argv": [
-        "ZSCAN",
-        "myzset",
-        "0",
-        "MATCH",
-        "*",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["ZSCAN", "myzset", "0", "MATCH", "*", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1793,16 +1411,7 @@
     {
       "name": "scan_type_and_match_list",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "MATCH",
-        "my*",
-        "TYPE",
-        "list",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "MATCH", "my*", "TYPE", "list", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1825,16 +1434,7 @@
     {
       "name": "scan_type_zset_by_name",
       "now_ms": 0,
-      "argv": [
-        "SCAN",
-        "0",
-        "TYPE",
-        "zset",
-        "MATCH",
-        "my*",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "TYPE", "zset", "MATCH", "my*", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1857,13 +1457,7 @@
     {
       "name": "hscan_count",
       "now_ms": 100,
-      "argv": [
-        "HSCAN",
-        "myhash",
-        "0",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["HSCAN", "myhash", "0", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1898,13 +1492,7 @@
     {
       "name": "sscan_count",
       "now_ms": 100,
-      "argv": [
-        "SSCAN",
-        "myset",
-        "0",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SSCAN", "myset", "0", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1935,13 +1523,7 @@
     {
       "name": "zscan_count",
       "now_ms": 100,
-      "argv": [
-        "ZSCAN",
-        "myzset",
-        "0",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["ZSCAN", "myzset", "0", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1976,14 +1558,7 @@
     {
       "name": "scan_count_and_match",
       "now_ms": 100,
-      "argv": [
-        "SCAN",
-        "0",
-        "MATCH",
-        "key:*",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "MATCH", "key:*", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2014,11 +1589,7 @@
     {
       "name": "setup_scan_del_key",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "scan_temp",
-        "val"
-      ],
+      "argv": ["SET", "scan_temp", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2027,10 +1598,7 @@
     {
       "name": "del_scan_temp",
       "now_ms": 100,
-      "argv": [
-        "DEL",
-        "scan_temp"
-      ],
+      "argv": ["DEL", "scan_temp"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2039,15 +1607,7 @@
     {
       "name": "hscan_match_and_count",
       "now_ms": 100,
-      "argv": [
-        "HSCAN",
-        "myhash",
-        "0",
-        "MATCH",
-        "f*",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["HSCAN", "myhash", "0", "MATCH", "f*", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2082,12 +1642,7 @@
     {
       "name": "setup_empty_hash_for_scan",
       "now_ms": 100,
-      "argv": [
-        "HSET",
-        "empty_hash",
-        "f",
-        "v"
-      ],
+      "argv": ["HSET", "empty_hash", "f", "v"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2096,11 +1651,7 @@
     {
       "name": "del_empty_hash_field",
       "now_ms": 100,
-      "argv": [
-        "HDEL",
-        "empty_hash",
-        "f"
-      ],
+      "argv": ["HDEL", "empty_hash", "f"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2109,14 +1660,7 @@
     {
       "name": "scan_type_nonexistent",
       "now_ms": 100,
-      "argv": [
-        "SCAN",
-        "0",
-        "TYPE",
-        "stream",
-        "COUNT",
-        "1000"
-      ],
+      "argv": ["SCAN", "0", "TYPE", "stream", "COUNT", "1000"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2134,13 +1678,7 @@
     {
       "name": "hscan_invalid_option",
       "now_ms": 100,
-      "argv": [
-        "HSCAN",
-        "myhash",
-        "0",
-        "BADOPT",
-        "val"
-      ],
+      "argv": ["HSCAN", "myhash", "0", "BADOPT", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -2149,13 +1687,7 @@
     {
       "name": "sscan_invalid_option",
       "now_ms": 100,
-      "argv": [
-        "SSCAN",
-        "myset",
-        "0",
-        "BADOPT",
-        "val"
-      ],
+      "argv": ["SSCAN", "myset", "0", "BADOPT", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -2164,13 +1696,7 @@
     {
       "name": "zscan_invalid_option",
       "now_ms": 100,
-      "argv": [
-        "ZSCAN",
-        "myzset",
-        "0",
-        "BADOPT",
-        "val"
-      ],
+      "argv": ["ZSCAN", "myzset", "0", "BADOPT", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -2179,12 +1705,7 @@
     {
       "name": "scan_invalid_option",
       "now_ms": 100,
-      "argv": [
-        "SCAN",
-        "0",
-        "BADOPT",
-        "val"
-      ],
+      "argv": ["SCAN", "0", "BADOPT", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -2193,9 +1714,7 @@
     {
       "name": "scan_edge_flush",
       "now_ms": 200,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2204,11 +1723,7 @@
     {
       "name": "scan_count_1_setup",
       "now_ms": 200,
-      "argv": [
-        "SET",
-        "scan_a",
-        "1"
-      ],
+      "argv": ["SET", "scan_a", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2217,11 +1732,7 @@
     {
       "name": "scan_count_1_setup2",
       "now_ms": 200,
-      "argv": [
-        "SET",
-        "scan_b",
-        "2"
-      ],
+      "argv": ["SET", "scan_b", "2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2230,11 +1741,7 @@
     {
       "name": "scan_count_1_setup3",
       "now_ms": 200,
-      "argv": [
-        "SET",
-        "scan_c",
-        "3"
-      ],
+      "argv": ["SET", "scan_c", "3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2243,12 +1750,7 @@
     {
       "name": "scan_count_large_returns_all",
       "now_ms": 200,
-      "argv": [
-        "SCAN",
-        "0",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["SCAN", "0", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2279,12 +1781,7 @@
     {
       "name": "hscan_empty_hash_setup",
       "now_ms": 300,
-      "argv": [
-        "HSET",
-        "hscan_temp",
-        "f1",
-        "v1"
-      ],
+      "argv": ["HSET", "hscan_temp", "f1", "v1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2293,11 +1790,7 @@
     {
       "name": "hscan_empty_hash_del_field",
       "now_ms": 300,
-      "argv": [
-        "HDEL",
-        "hscan_temp",
-        "f1"
-      ],
+      "argv": ["HDEL", "hscan_temp", "f1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2306,11 +1799,7 @@
     {
       "name": "hscan_empty_hash_returns_empty",
       "now_ms": 300,
-      "argv": [
-        "HSCAN",
-        "hscan_temp",
-        "0"
-      ],
+      "argv": ["HSCAN", "hscan_temp", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2328,11 +1817,7 @@
     {
       "name": "sscan_empty_set_setup",
       "now_ms": 300,
-      "argv": [
-        "SADD",
-        "sscan_temp",
-        "m1"
-      ],
+      "argv": ["SADD", "sscan_temp", "m1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2341,11 +1826,7 @@
     {
       "name": "sscan_empty_set_del_member",
       "now_ms": 300,
-      "argv": [
-        "SREM",
-        "sscan_temp",
-        "m1"
-      ],
+      "argv": ["SREM", "sscan_temp", "m1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2354,11 +1835,7 @@
     {
       "name": "sscan_empty_set_returns_empty",
       "now_ms": 300,
-      "argv": [
-        "SSCAN",
-        "sscan_temp",
-        "0"
-      ],
+      "argv": ["SSCAN", "sscan_temp", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2376,12 +1853,7 @@
     {
       "name": "zscan_empty_zset_setup",
       "now_ms": 300,
-      "argv": [
-        "ZADD",
-        "zscan_temp",
-        "1",
-        "m1"
-      ],
+      "argv": ["ZADD", "zscan_temp", "1", "m1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2390,11 +1862,7 @@
     {
       "name": "zscan_empty_zset_del_member",
       "now_ms": 300,
-      "argv": [
-        "ZREM",
-        "zscan_temp",
-        "m1"
-      ],
+      "argv": ["ZREM", "zscan_temp", "m1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2403,11 +1871,7 @@
     {
       "name": "zscan_empty_zset_returns_empty",
       "now_ms": 300,
-      "argv": [
-        "ZSCAN",
-        "zscan_temp",
-        "0"
-      ],
+      "argv": ["ZSCAN", "zscan_temp", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2425,12 +1889,7 @@
     {
       "name": "scan_type_case_insensitive",
       "now_ms": 200,
-      "argv": [
-        "SCAN",
-        "0",
-        "TYPE",
-        "STRING"
-      ],
+      "argv": ["SCAN", "0", "TYPE", "STRING"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2461,10 +1920,7 @@
     {
       "name": "hscan_wrong_arity_no_cursor",
       "now_ms": 300,
-      "argv": [
-        "HSCAN",
-        "key"
-      ],
+      "argv": ["HSCAN", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hscan' command"
@@ -2473,10 +1929,7 @@
     {
       "name": "sscan_wrong_arity_no_cursor",
       "now_ms": 300,
-      "argv": [
-        "SSCAN",
-        "key"
-      ],
+      "argv": ["SSCAN", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'sscan' command"
@@ -2485,10 +1938,7 @@
     {
       "name": "zscan_wrong_arity_no_cursor",
       "now_ms": 300,
-      "argv": [
-        "ZSCAN",
-        "key"
-      ],
+      "argv": ["ZSCAN", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zscan' command"
@@ -2497,16 +1947,7 @@
     {
       "name": "zscan_score_correctness_setup",
       "now_ms": 400,
-      "argv": [
-        "ZADD",
-        "zscan_scores",
-        "1.5",
-        "alpha",
-        "2.7",
-        "beta",
-        "3.14",
-        "gamma"
-      ],
+      "argv": ["ZADD", "zscan_scores", "1.5", "alpha", "2.7", "beta", "3.14", "gamma"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -2515,11 +1956,7 @@
     {
       "name": "zscan_score_correctness_verify",
       "now_ms": 400,
-      "argv": [
-        "ZSCAN",
-        "zscan_scores",
-        "0"
-      ],
+      "argv": ["ZSCAN", "zscan_scores", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2562,14 +1999,7 @@
     {
       "name": "hscan_novalues_setup",
       "now_ms": 450,
-      "argv": [
-        "HSET",
-        "h_novalues",
-        "field1",
-        "value1",
-        "field2",
-        "value2"
-      ],
+      "argv": ["HSET", "h_novalues", "field1", "value1", "field2", "value2"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -2579,12 +2009,7 @@
       "name": "hscan_novalues_rejected_as_syntax_error",
       "now_ms": 450,
       "comment": "Upstream Redis 7.2.4 rejects HSCAN NOVALUES as a syntax error; NOVALUES is a Redis 7.4-only HSCAN option. (frankenredis-wt3wh)",
-      "argv": [
-        "HSCAN",
-        "h_novalues",
-        "0",
-        "NOVALUES"
-      ],
+      "argv": ["HSCAN", "h_novalues", "0", "NOVALUES"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -2594,14 +2019,7 @@
       "name": "hscan_novalues_with_match_rejected_as_syntax_error",
       "now_ms": 450,
       "comment": "MATCH does not make the Redis 7.4-only NOVALUES token valid under the Redis 7.2.4 oracle. (frankenredis-wt3wh)",
-      "argv": [
-        "HSCAN",
-        "h_novalues",
-        "0",
-        "MATCH",
-        "field1",
-        "NOVALUES"
-      ],
+      "argv": ["HSCAN", "h_novalues", "0", "MATCH", "field1", "NOVALUES"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -2610,14 +2028,7 @@
     {
       "name": "zscan_novalues_setup",
       "now_ms": 460,
-      "argv": [
-        "ZADD",
-        "z_novalues",
-        "1.0",
-        "member1",
-        "2.0",
-        "member2"
-      ],
+      "argv": ["ZADD", "z_novalues", "1.0", "member1", "2.0", "member2"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -2627,12 +2038,7 @@
       "name": "zscan_novalues_rejected_as_syntax_error",
       "now_ms": 460,
       "comment": "Upstream Redis 7.2.4 ZSCAN does NOT accept NOVALUES \u2014 that flag is HSCAN-only and was added in 7.4. Verified vs vendored Redis 7.2.4. (frankenredis-uoe58)",
-      "argv": [
-        "ZSCAN",
-        "z_novalues",
-        "0",
-        "NOVALUES"
-      ],
+      "argv": ["ZSCAN", "z_novalues", "0", "NOVALUES"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -2642,14 +2048,7 @@
       "name": "zscan_novalues_with_match_also_rejected",
       "now_ms": 460,
       "comment": "Same as above \u2014 ZSCAN never accepts NOVALUES regardless of MATCH. (frankenredis-uoe58)",
-      "argv": [
-        "ZSCAN",
-        "z_novalues",
-        "0",
-        "MATCH",
-        "member1",
-        "NOVALUES"
-      ],
+      "argv": ["ZSCAN", "z_novalues", "0", "MATCH", "member1", "NOVALUES"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -2658,9 +2057,7 @@
     {
       "name": "scan_edge_cleanup",
       "now_ms": 500,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"

@@ -4,11 +4,7 @@
     {
       "name": "setup_string",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "src_str",
-        "hello"
-      ],
+      "argv": ["SET", "src_str", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -17,13 +13,7 @@
     {
       "name": "setup_list",
       "now_ms": 0,
-      "argv": [
-        "RPUSH",
-        "src_list",
-        "a",
-        "b",
-        "c"
-      ],
+      "argv": ["RPUSH", "src_list", "a", "b", "c"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -32,13 +22,7 @@
     {
       "name": "setup_set",
       "now_ms": 0,
-      "argv": [
-        "SADD",
-        "src_set",
-        "x",
-        "y",
-        "z"
-      ],
+      "argv": ["SADD", "src_set", "x", "y", "z"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -47,14 +31,7 @@
     {
       "name": "setup_hash",
       "now_ms": 0,
-      "argv": [
-        "HSET",
-        "src_hash",
-        "f1",
-        "v1",
-        "f2",
-        "v2"
-      ],
+      "argv": ["HSET", "src_hash", "f1", "v1", "f2", "v2"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -63,14 +40,7 @@
     {
       "name": "setup_zset",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "src_zset",
-        "1.5",
-        "alpha",
-        "2.5",
-        "beta"
-      ],
+      "argv": ["ZADD", "src_zset", "1.5", "alpha", "2.5", "beta"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -79,11 +49,7 @@
     {
       "name": "copy_string",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_str",
-        "dst_str"
-      ],
+      "argv": ["COPY", "src_str", "dst_str"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -92,10 +58,7 @@
     {
       "name": "verify_copy_string",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "dst_str"
-      ],
+      "argv": ["GET", "dst_str"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -104,10 +67,7 @@
     {
       "name": "verify_source_unchanged",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "src_str"
-      ],
+      "argv": ["GET", "src_str"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -116,11 +76,7 @@
     {
       "name": "copy_list",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_list",
-        "dst_list"
-      ],
+      "argv": ["COPY", "src_list", "dst_list"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -129,12 +85,7 @@
     {
       "name": "verify_copy_list",
       "now_ms": 0,
-      "argv": [
-        "LRANGE",
-        "dst_list",
-        "0",
-        "-1"
-      ],
+      "argv": ["LRANGE", "dst_list", "0", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -156,11 +107,7 @@
     {
       "name": "copy_set",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_set",
-        "dst_set"
-      ],
+      "argv": ["COPY", "src_set", "dst_set"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -169,10 +116,7 @@
     {
       "name": "verify_copy_set_card",
       "now_ms": 0,
-      "argv": [
-        "SCARD",
-        "dst_set"
-      ],
+      "argv": ["SCARD", "dst_set"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -181,11 +125,7 @@
     {
       "name": "copy_hash",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_hash",
-        "dst_hash"
-      ],
+      "argv": ["COPY", "src_hash", "dst_hash"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -194,11 +134,7 @@
     {
       "name": "verify_copy_hash",
       "now_ms": 0,
-      "argv": [
-        "HGET",
-        "dst_hash",
-        "f1"
-      ],
+      "argv": ["HGET", "dst_hash", "f1"],
       "expect": {
         "kind": "bulk",
         "value": "v1"
@@ -207,11 +143,7 @@
     {
       "name": "copy_zset",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_zset",
-        "dst_zset"
-      ],
+      "argv": ["COPY", "src_zset", "dst_zset"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -220,11 +152,7 @@
     {
       "name": "verify_copy_zset",
       "now_ms": 0,
-      "argv": [
-        "ZSCORE",
-        "dst_zset",
-        "alpha"
-      ],
+      "argv": ["ZSCORE", "dst_zset", "alpha"],
       "expect": {
         "kind": "bulk",
         "value": "1.5"
@@ -233,11 +161,7 @@
     {
       "name": "copy_nonexistent_source",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "no_such_key",
-        "dst_nothing"
-      ],
+      "argv": ["COPY", "no_such_key", "dst_nothing"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -246,11 +170,7 @@
     {
       "name": "copy_destination_exists_no_replace",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_str",
-        "dst_str"
-      ],
+      "argv": ["COPY", "src_str", "dst_str"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -259,10 +179,7 @@
     {
       "name": "verify_destination_unchanged",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "dst_str"
-      ],
+      "argv": ["GET", "dst_str"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -271,11 +188,7 @@
     {
       "name": "setup_overwrite_target",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "overwrite_dst",
-        "old_value"
-      ],
+      "argv": ["SET", "overwrite_dst", "old_value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -284,12 +197,7 @@
     {
       "name": "copy_with_replace",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_str",
-        "overwrite_dst",
-        "REPLACE"
-      ],
+      "argv": ["COPY", "src_str", "overwrite_dst", "REPLACE"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -298,10 +206,7 @@
     {
       "name": "verify_replace_worked",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "overwrite_dst"
-      ],
+      "argv": ["GET", "overwrite_dst"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -310,11 +215,7 @@
     {
       "name": "copy_with_replace_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "overwrite2",
-        "old"
-      ],
+      "argv": ["SET", "overwrite2", "old"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -323,12 +224,7 @@
     {
       "name": "copy_replace_lowercase",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_str",
-        "overwrite2",
-        "replace"
-      ],
+      "argv": ["COPY", "src_str", "overwrite2", "replace"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -337,13 +233,7 @@
     {
       "name": "copy_with_db_option",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_str",
-        "dst_db",
-        "DB",
-        "0"
-      ],
+      "argv": ["COPY", "src_str", "dst_db", "DB", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -352,14 +242,7 @@
     {
       "name": "copy_with_replace_and_db",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_str",
-        "dst_db",
-        "REPLACE",
-        "DB",
-        "0"
-      ],
+      "argv": ["COPY", "src_str", "dst_db", "REPLACE", "DB", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -368,11 +251,7 @@
     {
       "name": "copy_preserves_ttl",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "ttl_src",
-        "value"
-      ],
+      "argv": ["SET", "ttl_src", "value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -381,11 +260,7 @@
     {
       "name": "copy_set_ttl",
       "now_ms": 1000,
-      "argv": [
-        "PEXPIRE",
-        "ttl_src",
-        "60000"
-      ],
+      "argv": ["PEXPIRE", "ttl_src", "60000"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -394,11 +269,7 @@
     {
       "name": "copy_key_with_ttl",
       "now_ms": 1000,
-      "argv": [
-        "COPY",
-        "ttl_src",
-        "ttl_dst"
-      ],
+      "argv": ["COPY", "ttl_src", "ttl_dst"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -407,10 +278,7 @@
     {
       "name": "verify_ttl_preserved",
       "now_ms": 1000,
-      "argv": [
-        "PTTL",
-        "ttl_dst"
-      ],
+      "argv": ["PTTL", "ttl_dst"],
       "expect": {
         "kind": "integer",
         "value": 60000
@@ -419,11 +287,7 @@
     {
       "name": "copy_expired_source",
       "now_ms": 100000,
-      "argv": [
-        "COPY",
-        "ttl_src",
-        "dst_expired"
-      ],
+      "argv": ["COPY", "ttl_src", "dst_expired"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -432,9 +296,7 @@
     {
       "name": "copy_wrong_arity_no_args",
       "now_ms": 0,
-      "argv": [
-        "COPY"
-      ],
+      "argv": ["COPY"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'copy' command"
@@ -443,10 +305,7 @@
     {
       "name": "copy_wrong_arity_one_arg",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src"
-      ],
+      "argv": ["COPY", "src"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'copy' command"
@@ -455,12 +314,7 @@
     {
       "name": "copy_invalid_option",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_str",
-        "dst_bad",
-        "INVALID"
-      ],
+      "argv": ["COPY", "src_str", "dst_bad", "INVALID"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -469,10 +323,7 @@
     {
       "name": "dump_nonexistent_key",
       "now_ms": 0,
-      "argv": [
-        "DUMP",
-        "nonexistent"
-      ],
+      "argv": ["DUMP", "nonexistent"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -481,9 +332,7 @@
     {
       "name": "dump_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "DUMP"
-      ],
+      "argv": ["DUMP"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'dump' command"
@@ -492,11 +341,7 @@
     {
       "name": "dump_wrong_arity_extra",
       "now_ms": 0,
-      "argv": [
-        "DUMP",
-        "key1",
-        "key2"
-      ],
+      "argv": ["DUMP", "key1", "key2"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'dump' command"
@@ -505,10 +350,7 @@
     {
       "name": "dump_expired_key",
       "now_ms": 100000,
-      "argv": [
-        "DUMP",
-        "ttl_src"
-      ],
+      "argv": ["DUMP", "ttl_src"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -517,9 +359,7 @@
     {
       "name": "restore_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "RESTORE"
-      ],
+      "argv": ["RESTORE"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'restore' command"
@@ -528,10 +368,7 @@
     {
       "name": "restore_wrong_arity_two",
       "now_ms": 0,
-      "argv": [
-        "RESTORE",
-        "key"
-      ],
+      "argv": ["RESTORE", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'restore' command"
@@ -540,11 +377,7 @@
     {
       "name": "restore_wrong_arity_three",
       "now_ms": 0,
-      "argv": [
-        "RESTORE",
-        "key",
-        "0"
-      ],
+      "argv": ["RESTORE", "key", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'restore' command"
@@ -553,12 +386,7 @@
     {
       "name": "restore_bad_payload",
       "now_ms": 0,
-      "argv": [
-        "RESTORE",
-        "badkey",
-        "0",
-        "garbage"
-      ],
+      "argv": ["RESTORE", "badkey", "0", "garbage"],
       "expect": {
         "kind": "error",
         "value": "ERR DUMP payload version or checksum are wrong"
@@ -567,12 +395,7 @@
     {
       "name": "restore_bad_payload_existing_key",
       "now_ms": 0,
-      "argv": [
-        "RESTORE",
-        "src_str",
-        "0",
-        "some_payload_doesnt_matter"
-      ],
+      "argv": ["RESTORE", "src_str", "0", "some_payload_doesnt_matter"],
       "expect": {
         "kind": "error",
         "value": "BUSYKEY Target key name already exists."
@@ -581,11 +404,7 @@
     {
       "name": "copy_src_eq_dst_no_replace",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_str",
-        "src_str"
-      ],
+      "argv": ["COPY", "src_str", "src_str"],
       "expect": {
         "kind": "error",
         "value": "ERR source and destination objects are the same"
@@ -594,12 +413,7 @@
     {
       "name": "copy_src_eq_dst_with_replace",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_str",
-        "src_str",
-        "REPLACE"
-      ],
+      "argv": ["COPY", "src_str", "src_str", "REPLACE"],
       "expect": {
         "kind": "error",
         "value": "ERR source and destination objects are the same"
@@ -608,10 +422,7 @@
     {
       "name": "verify_src_str_after_self_copy",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "src_str"
-      ],
+      "argv": ["GET", "src_str"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -620,12 +431,7 @@
     {
       "name": "copy_replace_cross_type_setup",
       "now_ms": 0,
-      "argv": [
-        "RPUSH",
-        "cross_list",
-        "item1",
-        "item2"
-      ],
+      "argv": ["RPUSH", "cross_list", "item1", "item2"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -634,12 +440,7 @@
     {
       "name": "copy_string_over_list_with_replace",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_str",
-        "cross_list",
-        "REPLACE"
-      ],
+      "argv": ["COPY", "src_str", "cross_list", "REPLACE"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -648,10 +449,7 @@
     {
       "name": "verify_cross_list_is_now_string",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "cross_list"
-      ],
+      "argv": ["GET", "cross_list"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -660,10 +458,7 @@
     {
       "name": "verify_cross_list_type",
       "now_ms": 0,
-      "argv": [
-        "TYPE",
-        "cross_list"
-      ],
+      "argv": ["TYPE", "cross_list"],
       "expect": {
         "kind": "simple",
         "value": "string"
@@ -672,11 +467,7 @@
     {
       "name": "copy_list_preserves_type",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_list",
-        "list_copy"
-      ],
+      "argv": ["COPY", "src_list", "list_copy"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -685,10 +476,7 @@
     {
       "name": "verify_list_copy_type",
       "now_ms": 0,
-      "argv": [
-        "TYPE",
-        "list_copy"
-      ],
+      "argv": ["TYPE", "list_copy"],
       "expect": {
         "kind": "simple",
         "value": "list"
@@ -697,12 +485,7 @@
     {
       "name": "verify_list_copy_contents",
       "now_ms": 0,
-      "argv": [
-        "LRANGE",
-        "list_copy",
-        "0",
-        "-1"
-      ],
+      "argv": ["LRANGE", "list_copy", "0", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -724,11 +507,7 @@
     {
       "name": "copy_hash_preserves_type",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_hash",
-        "hash_copy"
-      ],
+      "argv": ["COPY", "src_hash", "hash_copy"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -737,10 +516,7 @@
     {
       "name": "verify_hash_copy_type",
       "now_ms": 0,
-      "argv": [
-        "TYPE",
-        "hash_copy"
-      ],
+      "argv": ["TYPE", "hash_copy"],
       "expect": {
         "kind": "simple",
         "value": "hash"
@@ -749,11 +525,7 @@
     {
       "name": "verify_hash_copy_field",
       "now_ms": 0,
-      "argv": [
-        "HGET",
-        "hash_copy",
-        "f2"
-      ],
+      "argv": ["HGET", "hash_copy", "f2"],
       "expect": {
         "kind": "bulk",
         "value": "v2"
@@ -762,11 +534,7 @@
     {
       "name": "copy_set_preserves_type",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_set",
-        "set_copy"
-      ],
+      "argv": ["COPY", "src_set", "set_copy"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -775,10 +543,7 @@
     {
       "name": "verify_set_copy_type",
       "now_ms": 0,
-      "argv": [
-        "TYPE",
-        "set_copy"
-      ],
+      "argv": ["TYPE", "set_copy"],
       "expect": {
         "kind": "simple",
         "value": "set"
@@ -787,10 +552,7 @@
     {
       "name": "verify_set_copy_card",
       "now_ms": 0,
-      "argv": [
-        "SCARD",
-        "set_copy"
-      ],
+      "argv": ["SCARD", "set_copy"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -799,11 +561,7 @@
     {
       "name": "copy_zset_preserves_type",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_zset",
-        "zset_copy"
-      ],
+      "argv": ["COPY", "src_zset", "zset_copy"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -812,10 +570,7 @@
     {
       "name": "verify_zset_copy_type",
       "now_ms": 0,
-      "argv": [
-        "TYPE",
-        "zset_copy"
-      ],
+      "argv": ["TYPE", "zset_copy"],
       "expect": {
         "kind": "simple",
         "value": "zset"
@@ -824,11 +579,7 @@
     {
       "name": "verify_zset_copy_score",
       "now_ms": 0,
-      "argv": [
-        "ZSCORE",
-        "zset_copy",
-        "beta"
-      ],
+      "argv": ["ZSCORE", "zset_copy", "beta"],
       "expect": {
         "kind": "bulk",
         "value": "2.5"
@@ -837,13 +588,7 @@
     {
       "name": "copy_with_db_nonzero",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_str",
-        "db_dst",
-        "DB",
-        "5"
-      ],
+      "argv": ["COPY", "src_str", "db_dst", "DB", "5"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -852,10 +597,7 @@
     {
       "name": "verify_db_copy",
       "now_ms": 0,
-      "argv": [
-        "SELECT",
-        "5"
-      ],
+      "argv": ["SELECT", "5"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -864,10 +606,7 @@
     {
       "name": "verify_db_copy_value",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "db_dst"
-      ],
+      "argv": ["GET", "db_dst"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -876,10 +615,7 @@
     {
       "name": "copy_with_db_and_replace",
       "now_ms": 0,
-      "argv": [
-        "SELECT",
-        "0"
-      ],
+      "argv": ["SELECT", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -888,14 +624,7 @@
     {
       "name": "copy_with_db_and_replace_value",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "src_str",
-        "db_dst",
-        "DB",
-        "0",
-        "REPLACE"
-      ],
+      "argv": ["COPY", "src_str", "db_dst", "DB", "0", "REPLACE"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -904,11 +633,7 @@
     {
       "name": "copy_independent_modification",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "mod_src",
-        "original"
-      ],
+      "argv": ["SET", "mod_src", "original"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -917,11 +642,7 @@
     {
       "name": "copy_for_independence",
       "now_ms": 0,
-      "argv": [
-        "COPY",
-        "mod_src",
-        "mod_dst"
-      ],
+      "argv": ["COPY", "mod_src", "mod_dst"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -930,11 +651,7 @@
     {
       "name": "modify_source_after_copy",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "mod_src",
-        "changed"
-      ],
+      "argv": ["SET", "mod_src", "changed"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -943,10 +660,7 @@
     {
       "name": "verify_copy_unaffected",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "mod_dst"
-      ],
+      "argv": ["GET", "mod_dst"],
       "expect": {
         "kind": "bulk",
         "value": "original"
@@ -955,11 +669,7 @@
     {
       "name": "copy_string_type_setup",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "cp_type_src",
-        "hello"
-      ],
+      "argv": ["SET", "cp_type_src", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -968,11 +678,7 @@
     {
       "name": "copy_string_type_copy",
       "now_ms": 100,
-      "argv": [
-        "COPY",
-        "cp_type_src",
-        "cp_type_dst"
-      ],
+      "argv": ["COPY", "cp_type_src", "cp_type_dst"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -981,10 +687,7 @@
     {
       "name": "copy_string_type_verify",
       "now_ms": 100,
-      "argv": [
-        "TYPE",
-        "cp_type_dst"
-      ],
+      "argv": ["TYPE", "cp_type_dst"],
       "expect": {
         "kind": "simple",
         "value": "string"
@@ -993,10 +696,7 @@
     {
       "name": "copy_string_value_verify",
       "now_ms": 100,
-      "argv": [
-        "GET",
-        "cp_type_dst"
-      ],
+      "argv": ["GET", "cp_type_dst"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -1005,11 +705,7 @@
     {
       "name": "copy_nonexistent_returns_zero",
       "now_ms": 100,
-      "argv": [
-        "COPY",
-        "nosuchkey",
-        "dst"
-      ],
+      "argv": ["COPY", "nosuchkey", "dst"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1018,12 +714,7 @@
     {
       "name": "copy_bad_option",
       "now_ms": 100,
-      "argv": [
-        "COPY",
-        "cp_type_src",
-        "dst",
-        "BADOPTION"
-      ],
+      "argv": ["COPY", "cp_type_src", "dst", "BADOPTION"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -1032,12 +723,7 @@
     {
       "name": "copy_replace_diff_type_setup",
       "now_ms": 100,
-      "argv": [
-        "RPUSH",
-        "cp_list_dst",
-        "a",
-        "b"
-      ],
+      "argv": ["RPUSH", "cp_list_dst", "a", "b"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1046,12 +732,7 @@
     {
       "name": "copy_replace_string_over_list",
       "now_ms": 100,
-      "argv": [
-        "COPY",
-        "cp_type_src",
-        "cp_list_dst",
-        "REPLACE"
-      ],
+      "argv": ["COPY", "cp_type_src", "cp_list_dst", "REPLACE"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1060,10 +741,7 @@
     {
       "name": "copy_replace_type_verify",
       "now_ms": 100,
-      "argv": [
-        "TYPE",
-        "cp_list_dst"
-      ],
+      "argv": ["TYPE", "cp_list_dst"],
       "expect": {
         "kind": "simple",
         "value": "string"
@@ -1072,10 +750,7 @@
     {
       "name": "copy_replace_value_verify",
       "now_ms": 100,
-      "argv": [
-        "GET",
-        "cp_list_dst"
-      ],
+      "argv": ["GET", "cp_list_dst"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -1084,13 +759,7 @@
     {
       "name": "copy_stream_setup_xadd",
       "now_ms": 100,
-      "argv": [
-        "XADD",
-        "cp_stream_src",
-        "1-1",
-        "field1",
-        "value1"
-      ],
+      "argv": ["XADD", "cp_stream_src", "1-1", "field1", "value1"],
       "expect": {
         "kind": "bulk",
         "value": "1-1"
@@ -1099,13 +768,7 @@
     {
       "name": "copy_stream_setup_xadd2",
       "now_ms": 100,
-      "argv": [
-        "XADD",
-        "cp_stream_src",
-        "2-1",
-        "field2",
-        "value2"
-      ],
+      "argv": ["XADD", "cp_stream_src", "2-1", "field2", "value2"],
       "expect": {
         "kind": "bulk",
         "value": "2-1"
@@ -1114,13 +777,7 @@
     {
       "name": "copy_stream_setup_group",
       "now_ms": 100,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "cp_stream_src",
-        "testgroup",
-        "0"
-      ],
+      "argv": ["XGROUP", "CREATE", "cp_stream_src", "testgroup", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1129,11 +786,7 @@
     {
       "name": "copy_stream",
       "now_ms": 100,
-      "argv": [
-        "COPY",
-        "cp_stream_src",
-        "cp_stream_dst"
-      ],
+      "argv": ["COPY", "cp_stream_src", "cp_stream_dst"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1142,10 +795,7 @@
     {
       "name": "copy_stream_type_verify",
       "now_ms": 100,
-      "argv": [
-        "TYPE",
-        "cp_stream_dst"
-      ],
+      "argv": ["TYPE", "cp_stream_dst"],
       "expect": {
         "kind": "simple",
         "value": "stream"
@@ -1154,10 +804,7 @@
     {
       "name": "copy_stream_len_verify",
       "now_ms": 100,
-      "argv": [
-        "XLEN",
-        "cp_stream_dst"
-      ],
+      "argv": ["XLEN", "cp_stream_dst"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1166,11 +813,7 @@
     {
       "name": "copy_stream_encoding_verify",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "cp_stream_dst"
-      ],
+      "argv": ["OBJECT", "ENCODING", "cp_stream_dst"],
       "expect": {
         "kind": "bulk",
         "value": "stream"
@@ -1179,12 +822,7 @@
     {
       "name": "copy_stream_data_verify",
       "now_ms": 100,
-      "argv": [
-        "XRANGE",
-        "cp_stream_dst",
-        "-",
-        "+"
-      ],
+      "argv": ["XRANGE", "cp_stream_dst", "-", "+"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1238,13 +876,7 @@
     {
       "name": "copy_stream_group_preserved_setid",
       "now_ms": 100,
-      "argv": [
-        "XGROUP",
-        "SETID",
-        "cp_stream_dst",
-        "testgroup",
-        "0"
-      ],
+      "argv": ["XGROUP", "SETID", "cp_stream_dst", "testgroup", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1253,13 +885,7 @@
     {
       "name": "copy_db_leading_plus",
       "now_ms": 100,
-      "argv": [
-        "COPY",
-        "src_str",
-        "dst_bad_db1",
-        "DB",
-        "+0"
-      ],
+      "argv": ["COPY", "src_str", "dst_bad_db1", "DB", "+0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1268,13 +894,7 @@
     {
       "name": "copy_db_leading_zeros",
       "now_ms": 100,
-      "argv": [
-        "COPY",
-        "src_str",
-        "dst_bad_db2",
-        "DB",
-        "00"
-      ],
+      "argv": ["COPY", "src_str", "dst_bad_db2", "DB", "00"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1283,13 +903,7 @@
     {
       "name": "copy_db_non_numeric",
       "now_ms": 100,
-      "argv": [
-        "COPY",
-        "src_str",
-        "dst_bad_db3",
-        "DB",
-        "abc"
-      ],
+      "argv": ["COPY", "src_str", "dst_bad_db3", "DB", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1298,13 +912,7 @@
     {
       "name": "copy_db_negative",
       "now_ms": 100,
-      "argv": [
-        "COPY",
-        "src_str",
-        "dst_bad_db4",
-        "DB",
-        "-1"
-      ],
+      "argv": ["COPY", "src_str", "dst_bad_db4", "DB", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR DB index is out of range"
@@ -1313,13 +921,7 @@
     {
       "name": "copy_db_float",
       "now_ms": 100,
-      "argv": [
-        "COPY",
-        "src_str",
-        "dst_bad_db5",
-        "DB",
-        "1.5"
-      ],
+      "argv": ["COPY", "src_str", "dst_bad_db5", "DB", "1.5"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1328,13 +930,7 @@
     {
       "name": "copy_db_empty",
       "now_ms": 100,
-      "argv": [
-        "COPY",
-        "src_str",
-        "dst_bad_db6",
-        "DB",
-        ""
-      ],
+      "argv": ["COPY", "src_str", "dst_bad_db6", "DB", ""],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1343,12 +939,7 @@
     {
       "name": "copy_db_missing_value",
       "now_ms": 100,
-      "argv": [
-        "COPY",
-        "src_str",
-        "dst_bad_db7",
-        "DB"
-      ],
+      "argv": ["COPY", "src_str", "dst_bad_db7", "DB"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -1357,12 +948,7 @@
     {
       "name": "restore_ttl_leading_plus",
       "now_ms": 100,
-      "argv": [
-        "RESTORE",
-        "restore_key",
-        "+0",
-        "garbage"
-      ],
+      "argv": ["RESTORE", "restore_key", "+0", "garbage"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1371,12 +957,7 @@
     {
       "name": "restore_ttl_leading_zeros",
       "now_ms": 100,
-      "argv": [
-        "RESTORE",
-        "restore_key",
-        "00",
-        "garbage"
-      ],
+      "argv": ["RESTORE", "restore_key", "00", "garbage"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1385,12 +966,7 @@
     {
       "name": "restore_ttl_non_numeric",
       "now_ms": 100,
-      "argv": [
-        "RESTORE",
-        "restore_key",
-        "abc",
-        "garbage"
-      ],
+      "argv": ["RESTORE", "restore_key", "abc", "garbage"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1399,12 +975,7 @@
     {
       "name": "restore_ttl_float",
       "now_ms": 100,
-      "argv": [
-        "RESTORE",
-        "restore_key",
-        "1.5",
-        "garbage"
-      ],
+      "argv": ["RESTORE", "restore_key", "1.5", "garbage"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1413,12 +984,7 @@
     {
       "name": "restore_ttl_empty",
       "now_ms": 100,
-      "argv": [
-        "RESTORE",
-        "restore_key",
-        "",
-        "garbage"
-      ],
+      "argv": ["RESTORE", "restore_key", "", "garbage"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"

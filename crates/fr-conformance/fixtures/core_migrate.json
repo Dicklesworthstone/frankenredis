@@ -274,7 +274,21 @@
     {
       "name": "migrate_all_options_combined_nokey",
       "now_ms": 30,
-      "argv": ["MIGRATE", "127.0.0.1", "6379", "", "0", "1000", "COPY", "REPLACE", "AUTH", "pw", "KEYS", "a", "b"],
+      "argv": [
+        "MIGRATE",
+        "127.0.0.1",
+        "6379",
+        "",
+        "0",
+        "1000",
+        "COPY",
+        "REPLACE",
+        "AUTH",
+        "pw",
+        "KEYS",
+        "a",
+        "b"
+      ],
       "expect": {
         "kind": "simple",
         "value": "NOKEY"
@@ -418,7 +432,20 @@
     {
       "name": "migrate_all_options_different_order",
       "now_ms": 46,
-      "argv": ["MIGRATE", "127.0.0.1", "6379", "", "0", "1000", "AUTH", "pw", "REPLACE", "COPY", "KEYS", "a"],
+      "argv": [
+        "MIGRATE",
+        "127.0.0.1",
+        "6379",
+        "",
+        "0",
+        "1000",
+        "AUTH",
+        "pw",
+        "REPLACE",
+        "COPY",
+        "KEYS",
+        "a"
+      ],
       "expect": {
         "kind": "simple",
         "value": "NOKEY"
@@ -427,7 +454,21 @@
     {
       "name": "migrate_auth2_then_replace_copy",
       "now_ms": 47,
-      "argv": ["MIGRATE", "127.0.0.1", "6379", "", "0", "1000", "AUTH2", "user", "pass", "REPLACE", "COPY", "KEYS", "k"],
+      "argv": [
+        "MIGRATE",
+        "127.0.0.1",
+        "6379",
+        "",
+        "0",
+        "1000",
+        "AUTH2",
+        "user",
+        "pass",
+        "REPLACE",
+        "COPY",
+        "KEYS",
+        "k"
+      ],
       "expect": {
         "kind": "simple",
         "value": "NOKEY"

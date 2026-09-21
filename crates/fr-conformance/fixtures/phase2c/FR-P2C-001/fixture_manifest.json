@@ -6,12 +6,7 @@
     "legacy_redis_code/redis/src/networking.c",
     "legacy_redis_code/redis/src/server.c"
   ],
-  "legacy_symbols": [
-    "aeProcessEvents",
-    "aeCreateFileEvent",
-    "beforeSleep",
-    "afterSleep"
-  ],
+  "legacy_symbols": ["aeProcessEvents", "aeCreateFileEvent", "beforeSleep", "afterSleep"],
   "state_machine_contract": [
     "eventloop_phase_order_determinism",
     "ae_barrier_callback_order_determinism",
@@ -22,12 +17,8 @@
     "read_querybuf_limit_disconnect_surface",
     "fatal_read_disconnect_surface"
   ],
-  "command_acl_contract": [
-    "eventloop_pre_dispatch_gate_preserved"
-  ],
-  "persistence_replication_contract": [
-    "pending_write_delivery_order_preserved"
-  ],
+  "command_acl_contract": ["eventloop_pre_dispatch_gate_preserved"],
+  "persistence_replication_contract": ["pending_write_delivery_order_preserved"],
   "error_contract": [
     "eventloop.ae_barrier_violation",
     "eventloop.accept.maxclients_reached",
@@ -61,8 +52,5 @@
     "accept_path_maxclients_drift",
     "hardened_nonallowlisted_deviation_leak"
   ],
-  "raptorq_artifacts": [
-    "parity_report.raptorq.json",
-    "parity_report.decode_proof.json"
-  ]
+  "raptorq_artifacts": ["parity_report.raptorq.json", "parity_report.decode_proof.json"]
 }

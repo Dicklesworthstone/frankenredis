@@ -4,12 +4,7 @@
     {
       "name": "hset_single_field",
       "now_ms": 0,
-      "argv": [
-        "HSET",
-        "h1",
-        "field1",
-        "value1"
-      ],
+      "argv": ["HSET", "h1", "field1", "value1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -18,11 +13,7 @@
     {
       "name": "hget_existing_field",
       "now_ms": 0,
-      "argv": [
-        "HGET",
-        "h1",
-        "field1"
-      ],
+      "argv": ["HGET", "h1", "field1"],
       "expect": {
         "kind": "bulk",
         "value": "value1"
@@ -31,11 +22,7 @@
     {
       "name": "hget_missing_field",
       "now_ms": 0,
-      "argv": [
-        "HGET",
-        "h1",
-        "nosuch"
-      ],
+      "argv": ["HGET", "h1", "nosuch"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -44,11 +31,7 @@
     {
       "name": "hget_missing_key",
       "now_ms": 0,
-      "argv": [
-        "HGET",
-        "nokey",
-        "f"
-      ],
+      "argv": ["HGET", "nokey", "f"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -57,14 +40,7 @@
     {
       "name": "hset_multiple_fields",
       "now_ms": 0,
-      "argv": [
-        "HSET",
-        "h1",
-        "field2",
-        "value2",
-        "field3",
-        "value3"
-      ],
+      "argv": ["HSET", "h1", "field2", "value2", "field3", "value3"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -73,12 +49,7 @@
     {
       "name": "hset_update_existing_field",
       "now_ms": 0,
-      "argv": [
-        "HSET",
-        "h1",
-        "field1",
-        "updated"
-      ],
+      "argv": ["HSET", "h1", "field1", "updated"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -87,11 +58,7 @@
     {
       "name": "hget_updated_field",
       "now_ms": 0,
-      "argv": [
-        "HGET",
-        "h1",
-        "field1"
-      ],
+      "argv": ["HGET", "h1", "field1"],
       "expect": {
         "kind": "bulk",
         "value": "updated"
@@ -100,11 +67,7 @@
     {
       "name": "hdel_existing_field",
       "now_ms": 0,
-      "argv": [
-        "HDEL",
-        "h1",
-        "field2"
-      ],
+      "argv": ["HDEL", "h1", "field2"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -113,11 +76,7 @@
     {
       "name": "hdel_missing_field",
       "now_ms": 0,
-      "argv": [
-        "HDEL",
-        "h1",
-        "nosuch"
-      ],
+      "argv": ["HDEL", "h1", "nosuch"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -126,11 +85,7 @@
     {
       "name": "hexists_present",
       "now_ms": 0,
-      "argv": [
-        "HEXISTS",
-        "h1",
-        "field1"
-      ],
+      "argv": ["HEXISTS", "h1", "field1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -139,11 +94,7 @@
     {
       "name": "hexists_absent",
       "now_ms": 0,
-      "argv": [
-        "HEXISTS",
-        "h1",
-        "field2"
-      ],
+      "argv": ["HEXISTS", "h1", "field2"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -152,10 +103,7 @@
     {
       "name": "hlen_hash",
       "now_ms": 0,
-      "argv": [
-        "HLEN",
-        "h1"
-      ],
+      "argv": ["HLEN", "h1"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -164,10 +112,7 @@
     {
       "name": "hlen_missing_key",
       "now_ms": 0,
-      "argv": [
-        "HLEN",
-        "nokey"
-      ],
+      "argv": ["HLEN", "nokey"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -176,14 +121,7 @@
     {
       "name": "hmset_ok",
       "now_ms": 0,
-      "argv": [
-        "HMSET",
-        "h2",
-        "a",
-        "1",
-        "b",
-        "2"
-      ],
+      "argv": ["HMSET", "h2", "a", "1", "b", "2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -192,13 +130,7 @@
     {
       "name": "hmget_fields",
       "now_ms": 0,
-      "argv": [
-        "HMGET",
-        "h2",
-        "a",
-        "b",
-        "c"
-      ],
+      "argv": ["HMGET", "h2", "a", "b", "c"],
       "expect": {
         "kind": "array",
         "value": [
@@ -220,12 +152,7 @@
     {
       "name": "hincrby_new_field",
       "now_ms": 0,
-      "argv": [
-        "HINCRBY",
-        "h2",
-        "counter",
-        "5"
-      ],
+      "argv": ["HINCRBY", "h2", "counter", "5"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -234,12 +161,7 @@
     {
       "name": "hincrby_existing_field",
       "now_ms": 0,
-      "argv": [
-        "HINCRBY",
-        "h2",
-        "counter",
-        "3"
-      ],
+      "argv": ["HINCRBY", "h2", "counter", "3"],
       "expect": {
         "kind": "integer",
         "value": 8
@@ -248,12 +170,7 @@
     {
       "name": "hsetnx_new_field",
       "now_ms": 0,
-      "argv": [
-        "HSETNX",
-        "h2",
-        "new",
-        "val"
-      ],
+      "argv": ["HSETNX", "h2", "new", "val"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -262,12 +179,7 @@
     {
       "name": "hsetnx_existing_field",
       "now_ms": 0,
-      "argv": [
-        "HSETNX",
-        "h2",
-        "new",
-        "other"
-      ],
+      "argv": ["HSETNX", "h2", "new", "other"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -276,11 +188,7 @@
     {
       "name": "hstrlen_existing",
       "now_ms": 0,
-      "argv": [
-        "HSTRLEN",
-        "h2",
-        "new"
-      ],
+      "argv": ["HSTRLEN", "h2", "new"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -289,11 +197,7 @@
     {
       "name": "hstrlen_missing",
       "now_ms": 0,
-      "argv": [
-        "HSTRLEN",
-        "h2",
-        "nosuch"
-      ],
+      "argv": ["HSTRLEN", "h2", "nosuch"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -302,14 +206,7 @@
     {
       "name": "hgetall_result",
       "now_ms": 0,
-      "argv": [
-        "HSET",
-        "hga",
-        "f1",
-        "v1",
-        "f2",
-        "v2"
-      ],
+      "argv": ["HSET", "hga", "f1", "v1", "f2", "v2"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -318,10 +215,7 @@
     {
       "name": "hgetall_missing_key",
       "now_ms": 0,
-      "argv": [
-        "HGETALL",
-        "nokey"
-      ],
+      "argv": ["HGETALL", "nokey"],
       "expect": {
         "kind": "array",
         "value": []
@@ -330,16 +224,7 @@
     {
       "name": "hkeys_result",
       "now_ms": 0,
-      "argv": [
-        "HSET",
-        "hk",
-        "a",
-        "1",
-        "b",
-        "2",
-        "c",
-        "3"
-      ],
+      "argv": ["HSET", "hk", "a", "1", "b", "2", "c", "3"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -348,10 +233,7 @@
     {
       "name": "hkeys_missing_key",
       "now_ms": 0,
-      "argv": [
-        "HKEYS",
-        "nokey"
-      ],
+      "argv": ["HKEYS", "nokey"],
       "expect": {
         "kind": "array",
         "value": []
@@ -360,10 +242,7 @@
     {
       "name": "hvals_missing_key",
       "now_ms": 0,
-      "argv": [
-        "HVALS",
-        "nokey"
-      ],
+      "argv": ["HVALS", "nokey"],
       "expect": {
         "kind": "array",
         "value": []
@@ -372,12 +251,7 @@
     {
       "name": "hincrbyfloat_new_field",
       "now_ms": 0,
-      "argv": [
-        "HINCRBYFLOAT",
-        "hf",
-        "price",
-        "10.5"
-      ],
+      "argv": ["HINCRBYFLOAT", "hf", "price", "10.5"],
       "expect": {
         "kind": "bulk",
         "value": "10.5"
@@ -386,12 +260,7 @@
     {
       "name": "hincrbyfloat_existing",
       "now_ms": 0,
-      "argv": [
-        "HINCRBYFLOAT",
-        "hf",
-        "price",
-        "0.3"
-      ],
+      "argv": ["HINCRBYFLOAT", "hf", "price", "0.3"],
       "expect": {
         "kind": "bulk",
         "value": "10.8"
@@ -400,12 +269,7 @@
     {
       "name": "hincrbyfloat_negative",
       "now_ms": 0,
-      "argv": [
-        "HINCRBYFLOAT",
-        "hf",
-        "price",
-        "-0.8"
-      ],
+      "argv": ["HINCRBYFLOAT", "hf", "price", "-0.8"],
       "expect": {
         "kind": "bulk",
         "value": "10"
@@ -414,12 +278,7 @@
     {
       "name": "hset_float_value",
       "now_ms": 0,
-      "argv": [
-        "HSET",
-        "hf",
-        "fval",
-        "3.14"
-      ],
+      "argv": ["HSET", "hf", "fval", "3.14"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -428,12 +287,7 @@
     {
       "name": "hincrby_on_non_integer",
       "now_ms": 0,
-      "argv": [
-        "HINCRBY",
-        "hf",
-        "fval",
-        "1"
-      ],
+      "argv": ["HINCRBY", "hf", "fval", "1"],
       "expect": {
         "kind": "error",
         "value": "ERR hash value is not an integer"
@@ -442,11 +296,7 @@
     {
       "name": "hset_wrongtype_on_string",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "strkey",
-        "val"
-      ],
+      "argv": ["SET", "strkey", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -455,12 +305,7 @@
     {
       "name": "hset_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "HSET",
-        "strkey",
-        "f",
-        "v"
-      ],
+      "argv": ["HSET", "strkey", "f", "v"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -469,11 +314,7 @@
     {
       "name": "hexists_missing_key",
       "now_ms": 100,
-      "argv": [
-        "HEXISTS",
-        "nokey",
-        "field"
-      ],
+      "argv": ["HEXISTS", "nokey", "field"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -482,11 +323,7 @@
     {
       "name": "hstrlen_missing_key",
       "now_ms": 101,
-      "argv": [
-        "HSTRLEN",
-        "nokey",
-        "field"
-      ],
+      "argv": ["HSTRLEN", "nokey", "field"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -495,12 +332,7 @@
     {
       "name": "hmget_missing_key",
       "now_ms": 102,
-      "argv": [
-        "HMGET",
-        "nokey",
-        "a",
-        "b"
-      ],
+      "argv": ["HMGET", "nokey", "a", "b"],
       "expect": {
         "kind": "array",
         "value": [
@@ -518,18 +350,7 @@
     {
       "name": "hdel_multiple_setup",
       "now_ms": 200,
-      "argv": [
-        "HSET",
-        "hdm",
-        "a",
-        "1",
-        "b",
-        "2",
-        "c",
-        "3",
-        "d",
-        "4"
-      ],
+      "argv": ["HSET", "hdm", "a", "1", "b", "2", "c", "3", "d", "4"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -538,13 +359,7 @@
     {
       "name": "hdel_multiple_fields",
       "now_ms": 201,
-      "argv": [
-        "HDEL",
-        "hdm",
-        "a",
-        "c",
-        "z"
-      ],
+      "argv": ["HDEL", "hdm", "a", "c", "z"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -553,10 +368,7 @@
     {
       "name": "hlen_after_hdel_multiple",
       "now_ms": 202,
-      "argv": [
-        "HLEN",
-        "hdm"
-      ],
+      "argv": ["HLEN", "hdm"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -565,11 +377,7 @@
     {
       "name": "hdel_missing_key",
       "now_ms": 203,
-      "argv": [
-        "HDEL",
-        "nokey",
-        "field"
-      ],
+      "argv": ["HDEL", "nokey", "field"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -578,14 +386,7 @@
     {
       "name": "hgetall_setup",
       "now_ms": 300,
-      "argv": [
-        "HSET",
-        "hga2",
-        "name",
-        "alice",
-        "age",
-        "30"
-      ],
+      "argv": ["HSET", "hga2", "name", "alice", "age", "30"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -594,10 +395,7 @@
     {
       "name": "hgetall_result",
       "now_ms": 301,
-      "argv": [
-        "HGETALL",
-        "hga2"
-      ],
+      "argv": ["HGETALL", "hga2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -623,16 +421,7 @@
     {
       "name": "hkeys_setup",
       "now_ms": 310,
-      "argv": [
-        "HSET",
-        "hk2",
-        "x",
-        "1",
-        "y",
-        "2",
-        "z",
-        "3"
-      ],
+      "argv": ["HSET", "hk2", "x", "1", "y", "2", "z", "3"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -641,10 +430,7 @@
     {
       "name": "hkeys_result",
       "now_ms": 311,
-      "argv": [
-        "HKEYS",
-        "hk2"
-      ],
+      "argv": ["HKEYS", "hk2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -666,10 +452,7 @@
     {
       "name": "hvals_result",
       "now_ms": 312,
-      "argv": [
-        "HVALS",
-        "hk2"
-      ],
+      "argv": ["HVALS", "hk2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -691,12 +474,7 @@
     {
       "name": "hrandfield_setup_single",
       "now_ms": 400,
-      "argv": [
-        "HSET",
-        "hrand1",
-        "only_field",
-        "only_value"
-      ],
+      "argv": ["HSET", "hrand1", "only_field", "only_value"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -705,10 +483,7 @@
     {
       "name": "hrandfield_single_element",
       "now_ms": 401,
-      "argv": [
-        "HRANDFIELD",
-        "hrand1"
-      ],
+      "argv": ["HRANDFIELD", "hrand1"],
       "expect": {
         "kind": "bulk",
         "value": "only_field"
@@ -717,10 +492,7 @@
     {
       "name": "hrandfield_missing_key",
       "now_ms": 402,
-      "argv": [
-        "HRANDFIELD",
-        "nokey"
-      ],
+      "argv": ["HRANDFIELD", "nokey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -729,11 +501,7 @@
     {
       "name": "hrandfield_count_positive",
       "now_ms": 403,
-      "argv": [
-        "HRANDFIELD",
-        "hrand1",
-        "5"
-      ],
+      "argv": ["HRANDFIELD", "hrand1", "5"],
       "expect": {
         "kind": "array",
         "value": [
@@ -747,11 +515,7 @@
     {
       "name": "hrandfield_count_zero",
       "now_ms": 404,
-      "argv": [
-        "HRANDFIELD",
-        "hrand1",
-        "0"
-      ],
+      "argv": ["HRANDFIELD", "hrand1", "0"],
       "expect": {
         "kind": "array",
         "value": []
@@ -760,11 +524,7 @@
     {
       "name": "hrandfield_count_negative",
       "now_ms": 405,
-      "argv": [
-        "HRANDFIELD",
-        "hrand1",
-        "-3"
-      ],
+      "argv": ["HRANDFIELD", "hrand1", "-3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -786,12 +546,7 @@
     {
       "name": "hrandfield_withvalues",
       "now_ms": 406,
-      "argv": [
-        "HRANDFIELD",
-        "hrand1",
-        "1",
-        "WITHVALUES"
-      ],
+      "argv": ["HRANDFIELD", "hrand1", "1", "WITHVALUES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -809,11 +564,7 @@
     {
       "name": "hrandfield_missing_key_with_count",
       "now_ms": 407,
-      "argv": [
-        "HRANDFIELD",
-        "nokey",
-        "5"
-      ],
+      "argv": ["HRANDFIELD", "nokey", "5"],
       "expect": {
         "kind": "array",
         "value": []
@@ -822,16 +573,7 @@
     {
       "name": "hscan_setup",
       "now_ms": 500,
-      "argv": [
-        "HSET",
-        "hscan_h",
-        "alpha",
-        "1",
-        "beta",
-        "2",
-        "gamma",
-        "3"
-      ],
+      "argv": ["HSET", "hscan_h", "alpha", "1", "beta", "2", "gamma", "3"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -840,11 +582,7 @@
     {
       "name": "hscan_full",
       "now_ms": 501,
-      "argv": [
-        "HSCAN",
-        "hscan_h",
-        "0"
-      ],
+      "argv": ["HSCAN", "hscan_h", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -887,11 +625,7 @@
     {
       "name": "hscan_missing_key",
       "now_ms": 502,
-      "argv": [
-        "HSCAN",
-        "nokey",
-        "0"
-      ],
+      "argv": ["HSCAN", "nokey", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -909,13 +643,7 @@
     {
       "name": "hscan_with_match",
       "now_ms": 503,
-      "argv": [
-        "HSCAN",
-        "hscan_h",
-        "0",
-        "MATCH",
-        "a*"
-      ],
+      "argv": ["HSCAN", "hscan_h", "0", "MATCH", "a*"],
       "expect": {
         "kind": "array",
         "value": [
@@ -942,12 +670,7 @@
     {
       "name": "hincrby_negative",
       "now_ms": 600,
-      "argv": [
-        "HINCRBY",
-        "h2",
-        "counter",
-        "-3"
-      ],
+      "argv": ["HINCRBY", "h2", "counter", "-3"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -956,12 +679,7 @@
     {
       "name": "hincrby_missing_key",
       "now_ms": 601,
-      "argv": [
-        "HINCRBY",
-        "nokey",
-        "field",
-        "10"
-      ],
+      "argv": ["HINCRBY", "nokey", "field", "10"],
       "expect": {
         "kind": "integer",
         "value": 10
@@ -970,12 +688,7 @@
     {
       "name": "hincrbyfloat_missing_key",
       "now_ms": 602,
-      "argv": [
-        "HINCRBYFLOAT",
-        "nokey2",
-        "field",
-        "1.5"
-      ],
+      "argv": ["HINCRBYFLOAT", "nokey2", "field", "1.5"],
       "expect": {
         "kind": "bulk",
         "value": "1.5"
@@ -984,10 +697,7 @@
     {
       "name": "hset_wrong_arity",
       "now_ms": 700,
-      "argv": [
-        "HSET",
-        "key"
-      ],
+      "argv": ["HSET", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hset' command"
@@ -996,9 +706,7 @@
     {
       "name": "hget_wrong_arity",
       "now_ms": 701,
-      "argv": [
-        "HGET"
-      ],
+      "argv": ["HGET"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hget' command"
@@ -1007,9 +715,7 @@
     {
       "name": "hdel_wrong_arity",
       "now_ms": 702,
-      "argv": [
-        "HDEL"
-      ],
+      "argv": ["HDEL"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hdel' command"
@@ -1018,9 +724,7 @@
     {
       "name": "hmget_wrong_arity",
       "now_ms": 703,
-      "argv": [
-        "HMGET"
-      ],
+      "argv": ["HMGET"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hmget' command"
@@ -1029,9 +733,7 @@
     {
       "name": "hrandfield_wrong_arity",
       "now_ms": 704,
-      "argv": [
-        "HRANDFIELD"
-      ],
+      "argv": ["HRANDFIELD"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hrandfield' command"
@@ -1040,12 +742,7 @@
     {
       "name": "hincrby_overflow_setup",
       "now_ms": 800,
-      "argv": [
-        "HSET",
-        "hovf",
-        "big",
-        "9223372036854775806"
-      ],
+      "argv": ["HSET", "hovf", "big", "9223372036854775806"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1054,12 +751,7 @@
     {
       "name": "hincrby_near_max",
       "now_ms": 801,
-      "argv": [
-        "HINCRBY",
-        "hovf",
-        "big",
-        "1"
-      ],
+      "argv": ["HINCRBY", "hovf", "big", "1"],
       "expect": {
         "kind": "integer",
         "value": 9223372036854775807
@@ -1068,12 +760,7 @@
     {
       "name": "hincrby_overflow_error",
       "now_ms": 802,
-      "argv": [
-        "HINCRBY",
-        "hovf",
-        "big",
-        "1"
-      ],
+      "argv": ["HINCRBY", "hovf", "big", "1"],
       "expect": {
         "kind": "error",
         "value": "ERR increment or decrement would overflow"
@@ -1082,12 +769,7 @@
     {
       "name": "hincrbyfloat_nan_error",
       "now_ms": 803,
-      "argv": [
-        "HINCRBYFLOAT",
-        "hovf",
-        "ff",
-        "nan"
-      ],
+      "argv": ["HINCRBYFLOAT", "hovf", "ff", "nan"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not a valid float"
@@ -1096,12 +778,7 @@
     {
       "name": "hincrbyfloat_inf_accepted",
       "now_ms": 804,
-      "argv": [
-        "HINCRBYFLOAT",
-        "hovf",
-        "ff",
-        "inf"
-      ],
+      "argv": ["HINCRBYFLOAT", "hovf", "ff", "inf"],
       "expect": {
         "kind": "error",
         "value": "ERR value is NaN or Infinity"
@@ -1110,11 +787,7 @@
     {
       "name": "wrongtype_setup_string_key",
       "now_ms": 808,
-      "argv": [
-        "SET",
-        "strkey",
-        "hello"
-      ],
+      "argv": ["SET", "strkey", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1123,12 +796,7 @@
     {
       "name": "hsetnx_wrongtype",
       "now_ms": 810,
-      "argv": [
-        "HSETNX",
-        "strkey",
-        "field",
-        "value"
-      ],
+      "argv": ["HSETNX", "strkey", "field", "value"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -1137,12 +805,7 @@
     {
       "name": "hgetall_empty_after_delete",
       "now_ms": 820,
-      "argv": [
-        "HSET",
-        "hempty",
-        "f1",
-        "v1"
-      ],
+      "argv": ["HSET", "hempty", "f1", "v1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1151,11 +814,7 @@
     {
       "name": "hgetall_empty_delete_field",
       "now_ms": 821,
-      "argv": [
-        "HDEL",
-        "hempty",
-        "f1"
-      ],
+      "argv": ["HDEL", "hempty", "f1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1164,10 +823,7 @@
     {
       "name": "hgetall_empty_hash_returns_empty",
       "now_ms": 822,
-      "argv": [
-        "HGETALL",
-        "hempty"
-      ],
+      "argv": ["HGETALL", "hempty"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1176,11 +832,7 @@
     {
       "name": "hmset_wrong_arity_odd",
       "now_ms": 830,
-      "argv": [
-        "HMSET",
-        "h",
-        "field"
-      ],
+      "argv": ["HMSET", "h", "field"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hmset' command"
@@ -1189,13 +841,7 @@
     {
       "name": "hset_wrong_arity_odd",
       "now_ms": 831,
-      "argv": [
-        "HSET",
-        "h",
-        "field",
-        "val",
-        "orphan"
-      ],
+      "argv": ["HSET", "h", "field", "val", "orphan"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hset' command"
@@ -1204,14 +850,7 @@
     {
       "name": "hset_returns_new_count_only",
       "now_ms": 840,
-      "argv": [
-        "HSET",
-        "h2",
-        "counter",
-        "newval",
-        "newfield",
-        "newval2"
-      ],
+      "argv": ["HSET", "h2", "counter", "newval", "newfield", "newval2"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1220,9 +859,7 @@
     {
       "name": "hexists_wrong_arity",
       "now_ms": 850,
-      "argv": [
-        "HEXISTS"
-      ],
+      "argv": ["HEXISTS"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hexists' command"
@@ -1231,9 +868,7 @@
     {
       "name": "hlen_wrong_arity",
       "now_ms": 851,
-      "argv": [
-        "HLEN"
-      ],
+      "argv": ["HLEN"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hlen' command"
@@ -1242,10 +877,7 @@
     {
       "name": "hincrby_wrong_arity",
       "now_ms": 852,
-      "argv": [
-        "HINCRBY",
-        "h"
-      ],
+      "argv": ["HINCRBY", "h"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hincrby' command"
@@ -1254,10 +886,7 @@
     {
       "name": "hincrbyfloat_wrong_arity",
       "now_ms": 853,
-      "argv": [
-        "HINCRBYFLOAT",
-        "h"
-      ],
+      "argv": ["HINCRBYFLOAT", "h"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hincrbyfloat' command"
@@ -1266,9 +895,7 @@
     {
       "name": "hsetnx_wrong_arity",
       "now_ms": 854,
-      "argv": [
-        "HSETNX"
-      ],
+      "argv": ["HSETNX"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hsetnx' command"
@@ -1277,9 +904,7 @@
     {
       "name": "hstrlen_wrong_arity",
       "now_ms": 855,
-      "argv": [
-        "HSTRLEN"
-      ],
+      "argv": ["HSTRLEN"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hstrlen' command"
@@ -1288,12 +913,7 @@
     {
       "name": "hincrby_non_integer_increment",
       "now_ms": 860,
-      "argv": [
-        "HINCRBY",
-        "h2",
-        "counter",
-        "abc"
-      ],
+      "argv": ["HINCRBY", "h2", "counter", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1302,11 +922,7 @@
     {
       "name": "hrandfield_count_larger_than_hash",
       "now_ms": 870,
-      "argv": [
-        "HRANDFIELD",
-        "hrand1",
-        "10"
-      ],
+      "argv": ["HRANDFIELD", "hrand1", "10"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1320,11 +936,7 @@
     {
       "name": "hrandfield_negative_with_duplicates",
       "now_ms": 871,
-      "argv": [
-        "HRANDFIELD",
-        "hrand1",
-        "-3"
-      ],
+      "argv": ["HRANDFIELD", "hrand1", "-3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1346,12 +958,7 @@
     {
       "name": "hrandfield_negative_withvalues",
       "now_ms": 872,
-      "argv": [
-        "HRANDFIELD",
-        "hrand1",
-        "-2",
-        "WITHVALUES"
-      ],
+      "argv": ["HRANDFIELD", "hrand1", "-2", "WITHVALUES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1377,11 +984,7 @@
     {
       "name": "hdel_wrongtype",
       "now_ms": 880,
-      "argv": [
-        "HDEL",
-        "strkey",
-        "field"
-      ],
+      "argv": ["HDEL", "strkey", "field"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -1390,10 +993,7 @@
     {
       "name": "hgetall_wrongtype",
       "now_ms": 881,
-      "argv": [
-        "HGETALL",
-        "strkey"
-      ],
+      "argv": ["HGETALL", "strkey"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -1402,10 +1002,7 @@
     {
       "name": "hkeys_wrongtype",
       "now_ms": 882,
-      "argv": [
-        "HKEYS",
-        "strkey"
-      ],
+      "argv": ["HKEYS", "strkey"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -1414,10 +1011,7 @@
     {
       "name": "hvals_wrongtype",
       "now_ms": 883,
-      "argv": [
-        "HVALS",
-        "strkey"
-      ],
+      "argv": ["HVALS", "strkey"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -1426,18 +1020,7 @@
     {
       "name": "hrandfield_setup_multi",
       "now_ms": 100,
-      "argv": [
-        "HSET",
-        "rhash",
-        "f1",
-        "v1",
-        "f2",
-        "v2",
-        "f3",
-        "v3",
-        "f4",
-        "v4"
-      ],
+      "argv": ["HSET", "rhash", "f1", "v1", "f2", "v2", "f3", "v3", "f4", "v4"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -1446,11 +1029,7 @@
     {
       "name": "hrandfield_count_zero",
       "now_ms": 100,
-      "argv": [
-        "HRANDFIELD",
-        "rhash",
-        "0"
-      ],
+      "argv": ["HRANDFIELD", "rhash", "0"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1459,12 +1038,7 @@
     {
       "name": "hrandfield_count_exceeds_setup",
       "now_ms": 100,
-      "argv": [
-        "HSET",
-        "hrand_single",
-        "only_field",
-        "val"
-      ],
+      "argv": ["HSET", "hrand_single", "only_field", "val"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1473,11 +1047,7 @@
     {
       "name": "hrandfield_count_exceeds_returns_all",
       "now_ms": 100,
-      "argv": [
-        "HRANDFIELD",
-        "hrand_single",
-        "10"
-      ],
+      "argv": ["HRANDFIELD", "hrand_single", "10"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1491,10 +1061,7 @@
     {
       "name": "hrandfield_missing_key_no_count",
       "now_ms": 100,
-      "argv": [
-        "HRANDFIELD",
-        "nosuchkey"
-      ],
+      "argv": ["HRANDFIELD", "nosuchkey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1503,11 +1070,7 @@
     {
       "name": "hrandfield_missing_key_with_count",
       "now_ms": 100,
-      "argv": [
-        "HRANDFIELD",
-        "nosuchkey",
-        "3"
-      ],
+      "argv": ["HRANDFIELD", "nosuchkey", "3"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1516,9 +1079,7 @@
     {
       "name": "hrandfield_wrong_arity_no_args",
       "now_ms": 100,
-      "argv": [
-        "HRANDFIELD"
-      ],
+      "argv": ["HRANDFIELD"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hrandfield' command"
@@ -1527,12 +1088,7 @@
     {
       "name": "hrandfield_withvalues_wrong_keyword",
       "now_ms": 100,
-      "argv": [
-        "HRANDFIELD",
-        "rhash",
-        "2",
-        "WRONG"
-      ],
+      "argv": ["HRANDFIELD", "rhash", "2", "WRONG"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -1541,13 +1097,7 @@
     {
       "name": "hrandfield_too_many_args",
       "now_ms": 100,
-      "argv": [
-        "HRANDFIELD",
-        "rhash",
-        "2",
-        "WITHVALUES",
-        "extra"
-      ],
+      "argv": ["HRANDFIELD", "rhash", "2", "WITHVALUES", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -1556,11 +1106,7 @@
     {
       "name": "hsetnx_wrongtype_setup",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "hsetnx_str",
-        "hello"
-      ],
+      "argv": ["SET", "hsetnx_str", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1569,12 +1115,7 @@
     {
       "name": "hsetnx_wrongtype",
       "now_ms": 100,
-      "argv": [
-        "HSETNX",
-        "hsetnx_str",
-        "field",
-        "value"
-      ],
+      "argv": ["HSETNX", "hsetnx_str", "field", "value"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -1583,12 +1124,7 @@
     {
       "name": "hincrby_overflow_setup",
       "now_ms": 100,
-      "argv": [
-        "HSET",
-        "hovf",
-        "counter",
-        "9223372036854775800"
-      ],
+      "argv": ["HSET", "hovf", "counter", "9223372036854775800"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1597,12 +1133,7 @@
     {
       "name": "hincrby_overflow",
       "now_ms": 100,
-      "argv": [
-        "HINCRBY",
-        "hovf",
-        "counter",
-        "100"
-      ],
+      "argv": ["HINCRBY", "hovf", "counter", "100"],
       "expect": {
         "kind": "error",
         "value": "ERR increment or decrement would overflow"
@@ -1611,12 +1142,7 @@
     {
       "name": "hincrbyfloat_nan_error",
       "now_ms": 100,
-      "argv": [
-        "HINCRBYFLOAT",
-        "hfloat",
-        "field",
-        "nan"
-      ],
+      "argv": ["HINCRBYFLOAT", "hfloat", "field", "nan"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not a valid float"
@@ -1625,12 +1151,7 @@
     {
       "name": "hincrbyfloat_inf_accepted",
       "now_ms": 100,
-      "argv": [
-        "HINCRBYFLOAT",
-        "hfloat",
-        "field",
-        "inf"
-      ],
+      "argv": ["HINCRBYFLOAT", "hfloat", "field", "inf"],
       "expect": {
         "kind": "error",
         "value": "ERR value is NaN or Infinity"
@@ -1639,12 +1160,7 @@
     {
       "name": "hempty_setup",
       "now_ms": 100,
-      "argv": [
-        "HSET",
-        "hempty",
-        "f1",
-        "v1"
-      ],
+      "argv": ["HSET", "hempty", "f1", "v1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1653,11 +1169,7 @@
     {
       "name": "hempty_delete_all",
       "now_ms": 100,
-      "argv": [
-        "HDEL",
-        "hempty",
-        "f1"
-      ],
+      "argv": ["HDEL", "hempty", "f1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1666,10 +1178,7 @@
     {
       "name": "hgetall_empty_hash",
       "now_ms": 100,
-      "argv": [
-        "HGETALL",
-        "hempty"
-      ],
+      "argv": ["HGETALL", "hempty"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1678,10 +1187,7 @@
     {
       "name": "hkeys_empty_hash",
       "now_ms": 100,
-      "argv": [
-        "HKEYS",
-        "hempty"
-      ],
+      "argv": ["HKEYS", "hempty"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1690,10 +1196,7 @@
     {
       "name": "hvals_empty_hash",
       "now_ms": 100,
-      "argv": [
-        "HVALS",
-        "hempty"
-      ],
+      "argv": ["HVALS", "hempty"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1702,13 +1205,7 @@
     {
       "name": "hset_odd_args_error",
       "now_ms": 100,
-      "argv": [
-        "HSET",
-        "hodd",
-        "f1",
-        "v1",
-        "f2"
-      ],
+      "argv": ["HSET", "hodd", "f1", "v1", "f2"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hset' command"
@@ -1717,10 +1214,7 @@
     {
       "name": "hset_no_fields_error",
       "now_ms": 100,
-      "argv": [
-        "HSET",
-        "hodd"
-      ],
+      "argv": ["HSET", "hodd"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hset' command"
@@ -1729,12 +1223,7 @@
     {
       "name": "hmget_wrongtype",
       "now_ms": 100,
-      "argv": [
-        "HMGET",
-        "hsetnx_str",
-        "f1",
-        "f2"
-      ],
+      "argv": ["HMGET", "hsetnx_str", "f1", "f2"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -1743,16 +1232,7 @@
     {
       "name": "hlen_after_delete_setup",
       "now_ms": 100,
-      "argv": [
-        "HSET",
-        "hlen_test",
-        "a",
-        "1",
-        "b",
-        "2",
-        "c",
-        "3"
-      ],
+      "argv": ["HSET", "hlen_test", "a", "1", "b", "2", "c", "3"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -1761,12 +1241,7 @@
     {
       "name": "hlen_after_delete_del",
       "now_ms": 100,
-      "argv": [
-        "HDEL",
-        "hlen_test",
-        "a",
-        "b"
-      ],
+      "argv": ["HDEL", "hlen_test", "a", "b"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1775,10 +1250,7 @@
     {
       "name": "hlen_after_delete_verify",
       "now_ms": 100,
-      "argv": [
-        "HLEN",
-        "hlen_test"
-      ],
+      "argv": ["HLEN", "hlen_test"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1787,12 +1259,7 @@
     {
       "name": "hincrby_missing_key_creates",
       "now_ms": 100,
-      "argv": [
-        "HINCRBY",
-        "hnew_incr",
-        "counter",
-        "5"
-      ],
+      "argv": ["HINCRBY", "hnew_incr", "counter", "5"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -1801,11 +1268,7 @@
     {
       "name": "hincrby_verify",
       "now_ms": 100,
-      "argv": [
-        "HGET",
-        "hnew_incr",
-        "counter"
-      ],
+      "argv": ["HGET", "hnew_incr", "counter"],
       "expect": {
         "kind": "bulk",
         "value": "5"
@@ -1814,12 +1277,7 @@
     {
       "name": "hincrbyfloat_missing_key_creates",
       "now_ms": 100,
-      "argv": [
-        "HINCRBYFLOAT",
-        "hnew_float",
-        "val",
-        "3.5"
-      ],
+      "argv": ["HINCRBYFLOAT", "hnew_float", "val", "3.5"],
       "expect": {
         "kind": "bulk",
         "value": "3.5"
@@ -1828,16 +1286,7 @@
     {
       "name": "hmset_basic",
       "now_ms": 200,
-      "argv": [
-        "HMSET",
-        "hms",
-        "f1",
-        "v1",
-        "f2",
-        "v2",
-        "f3",
-        "v3"
-      ],
+      "argv": ["HMSET", "hms", "f1", "v1", "f2", "v2", "f3", "v3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1846,11 +1295,7 @@
     {
       "name": "hmset_verify_f1",
       "now_ms": 200,
-      "argv": [
-        "HGET",
-        "hms",
-        "f1"
-      ],
+      "argv": ["HGET", "hms", "f1"],
       "expect": {
         "kind": "bulk",
         "value": "v1"
@@ -1859,11 +1304,7 @@
     {
       "name": "hmset_verify_f3",
       "now_ms": 200,
-      "argv": [
-        "HGET",
-        "hms",
-        "f3"
-      ],
+      "argv": ["HGET", "hms", "f3"],
       "expect": {
         "kind": "bulk",
         "value": "v3"
@@ -1872,12 +1313,7 @@
     {
       "name": "hmset_overwrite",
       "now_ms": 200,
-      "argv": [
-        "HMSET",
-        "hms",
-        "f1",
-        "updated"
-      ],
+      "argv": ["HMSET", "hms", "f1", "updated"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1886,11 +1322,7 @@
     {
       "name": "hmset_verify_overwrite",
       "now_ms": 200,
-      "argv": [
-        "HGET",
-        "hms",
-        "f1"
-      ],
+      "argv": ["HGET", "hms", "f1"],
       "expect": {
         "kind": "bulk",
         "value": "updated"
@@ -1899,10 +1331,7 @@
     {
       "name": "hmset_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "HMSET",
-        "k"
-      ],
+      "argv": ["HMSET", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hmset' command"
@@ -1911,13 +1340,7 @@
     {
       "name": "hmset_odd_fields",
       "now_ms": 200,
-      "argv": [
-        "HMSET",
-        "k",
-        "f1",
-        "v1",
-        "f2"
-      ],
+      "argv": ["HMSET", "k", "f1", "v1", "f2"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hmset' command"
@@ -1926,10 +1349,7 @@
     {
       "name": "hkeys_basic",
       "now_ms": 200,
-      "argv": [
-        "HKEYS",
-        "hms"
-      ],
+      "argv": ["HKEYS", "hms"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1951,10 +1371,7 @@
     {
       "name": "hkeys_nonexistent",
       "now_ms": 200,
-      "argv": [
-        "HKEYS",
-        "nosuchhash"
-      ],
+      "argv": ["HKEYS", "nosuchhash"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1963,9 +1380,7 @@
     {
       "name": "hkeys_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "HKEYS"
-      ],
+      "argv": ["HKEYS"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'hkeys' command"
@@ -1974,9 +1389,7 @@
     {
       "name": "hincrbyfloat_inf_setup",
       "now_ms": 1000,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1985,12 +1398,7 @@
     {
       "name": "hincrbyfloat_inf_on_new_field",
       "now_ms": 1000,
-      "argv": [
-        "HINCRBYFLOAT",
-        "hfinf",
-        "f1",
-        "inf"
-      ],
+      "argv": ["HINCRBYFLOAT", "hfinf", "f1", "inf"],
       "expect": {
         "kind": "error",
         "value": "ERR value is NaN or Infinity"
@@ -1999,11 +1407,7 @@
     {
       "name": "hincrbyfloat_inf_get_value",
       "now_ms": 1000,
-      "argv": [
-        "HGET",
-        "hfinf",
-        "f1"
-      ],
+      "argv": ["HGET", "hfinf", "f1"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2012,12 +1416,7 @@
     {
       "name": "hincrbyfloat_neg_inf",
       "now_ms": 1000,
-      "argv": [
-        "HINCRBYFLOAT",
-        "hfinf",
-        "f2",
-        "-inf"
-      ],
+      "argv": ["HINCRBYFLOAT", "hfinf", "f2", "-inf"],
       "expect": {
         "kind": "error",
         "value": "ERR value is NaN or Infinity"
@@ -2026,12 +1425,7 @@
     {
       "name": "hincrbyfloat_inf_minus_inf_error",
       "now_ms": 1000,
-      "argv": [
-        "HINCRBYFLOAT",
-        "hfinf",
-        "f1",
-        "-inf"
-      ],
+      "argv": ["HINCRBYFLOAT", "hfinf", "f1", "-inf"],
       "expect": {
         "kind": "error",
         "value": "ERR value is NaN or Infinity"
@@ -2040,9 +1434,7 @@
     {
       "name": "hincrbyfloat_inf_cleanup",
       "now_ms": 1000,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"

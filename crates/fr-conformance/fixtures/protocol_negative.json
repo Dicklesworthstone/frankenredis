@@ -34,7 +34,10 @@
       "name": "incomplete_bulk",
       "now_ms": 0,
       "raw_request": "$3\r\nab",
-      "expect": { "kind": "error", "value": "ERR Protocol error: unexpected EOF while reading request" },
+      "expect": {
+        "kind": "error",
+        "value": "ERR Protocol error: unexpected EOF while reading request"
+      },
       "expect_threat": {
         "threat_class": "parser_abuse",
         "severity": "s0",
@@ -48,7 +51,10 @@
       "name": "unsupported_resp3_prefix",
       "now_ms": 0,
       "raw_request": "~1\r\n",
-      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '~'" },
+      "expect": {
+        "kind": "error",
+        "value": "ERR Protocol error: unsupported RESP3 type prefix '~'"
+      },
       "expect_threat": {
         "threat_class": "parser_abuse",
         "severity": "s0",
@@ -62,7 +68,10 @@
       "name": "unsupported_resp3_map_prefix",
       "now_ms": 0,
       "raw_request": "%1\r\n",
-      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '%'" },
+      "expect": {
+        "kind": "error",
+        "value": "ERR Protocol error: unsupported RESP3 type prefix '%'"
+      },
       "expect_threat": {
         "threat_class": "parser_abuse",
         "severity": "s0",
@@ -118,7 +127,10 @@
       "name": "unsupported_resp3_attribute_prefix",
       "now_ms": 0,
       "raw_request": "|1\r\n",
-      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '|'" },
+      "expect": {
+        "kind": "error",
+        "value": "ERR Protocol error: unsupported RESP3 type prefix '|'"
+      },
       "expect_threat": {
         "threat_class": "parser_abuse",
         "severity": "s0",
@@ -174,7 +186,10 @@
       "name": "incomplete_array_tail_bulk",
       "now_ms": 0,
       "raw_request": "*2\r\n$4\r\nPING\r\n$3\r\nab",
-      "expect": { "kind": "error", "value": "ERR Protocol error: unexpected EOF while reading request" },
+      "expect": {
+        "kind": "error",
+        "value": "ERR Protocol error: unexpected EOF while reading request"
+      },
       "expect_threat": {
         "threat_class": "parser_abuse",
         "severity": "s0",
@@ -188,7 +203,10 @@
       "name": "incomplete_simple_string_line",
       "now_ms": 0,
       "raw_request": "+OK\r",
-      "expect": { "kind": "error", "value": "ERR Protocol error: unexpected EOF while reading request" },
+      "expect": {
+        "kind": "error",
+        "value": "ERR Protocol error: unexpected EOF while reading request"
+      },
       "expect_threat": {
         "threat_class": "parser_abuse",
         "severity": "s0",
@@ -202,7 +220,10 @@
       "name": "unsupported_resp3_boolean_prefix",
       "now_ms": 0,
       "raw_request": "#t\r\n",
-      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '#'" },
+      "expect": {
+        "kind": "error",
+        "value": "ERR Protocol error: unsupported RESP3 type prefix '#'"
+      },
       "expect_threat": {
         "threat_class": "parser_abuse",
         "severity": "s0",
@@ -216,7 +237,10 @@
       "name": "unsupported_resp3_push_prefix",
       "now_ms": 0,
       "raw_request": ">1\r\n",
-      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '>'" },
+      "expect": {
+        "kind": "error",
+        "value": "ERR Protocol error: unsupported RESP3 type prefix '>'"
+      },
       "expect_threat": {
         "threat_class": "parser_abuse",
         "severity": "s0",
@@ -230,7 +254,10 @@
       "name": "unsupported_resp3_blob_error_prefix",
       "now_ms": 0,
       "raw_request": "!\r\n",
-      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '!'" },
+      "expect": {
+        "kind": "error",
+        "value": "ERR Protocol error: unsupported RESP3 type prefix '!'"
+      },
       "expect_threat": {
         "threat_class": "parser_abuse",
         "severity": "s0",
@@ -244,7 +271,10 @@
       "name": "unsupported_resp3_nested_in_array",
       "now_ms": 0,
       "raw_request": "*2\r\n$4\r\nPING\r\n~1\r\n",
-      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '~'" },
+      "expect": {
+        "kind": "error",
+        "value": "ERR Protocol error: unsupported RESP3 type prefix '~'"
+      },
       "expect_threat": {
         "threat_class": "parser_abuse",
         "severity": "s0",

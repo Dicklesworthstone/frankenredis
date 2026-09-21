@@ -4,9 +4,7 @@
     {
       "name": "debug_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "DEBUG"
-      ],
+      "argv": ["DEBUG"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'debug' command"
@@ -15,11 +13,7 @@
     {
       "name": "debug_sleep_basic",
       "now_ms": 1,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "0"
-      ],
+      "argv": ["DEBUG", "SLEEP", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -28,10 +22,7 @@
     {
       "name": "debug_sleep_wrong_arity_no_seconds",
       "now_ms": 2,
-      "argv": [
-        "DEBUG",
-        "SLEEP"
-      ],
+      "argv": ["DEBUG", "SLEEP"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'SLEEP'. Try DEBUG HELP."
@@ -40,12 +31,7 @@
     {
       "name": "debug_sleep_wrong_arity_too_many",
       "now_ms": 3,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "1",
-        "extra"
-      ],
+      "argv": ["DEBUG", "SLEEP", "1", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'SLEEP'. Try DEBUG HELP."
@@ -54,11 +40,7 @@
     {
       "name": "debug_sleep_non_numeric",
       "now_ms": 4,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "abc"
-      ],
+      "argv": ["DEBUG", "SLEEP", "abc"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -67,11 +49,7 @@
     {
       "name": "debug_set_active_expire_on",
       "now_ms": 10,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "1"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -80,11 +58,7 @@
     {
       "name": "debug_set_active_expire_off",
       "now_ms": 11,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "0"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -93,10 +67,7 @@
     {
       "name": "debug_set_active_expire_wrong_arity",
       "now_ms": 12,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'SET-ACTIVE-EXPIRE'. Try DEBUG HELP."
@@ -105,11 +76,7 @@
     {
       "name": "debug_set_active_expire_invalid_value",
       "now_ms": 13,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "2"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -118,10 +85,7 @@
     {
       "name": "debug_jmap_ok",
       "now_ms": 20,
-      "argv": [
-        "DEBUG",
-        "JMAP"
-      ],
+      "argv": ["DEBUG", "JMAP"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
@@ -130,11 +94,7 @@
     {
       "name": "debug_jmap_wrong_arity",
       "now_ms": 21,
-      "argv": [
-        "DEBUG",
-        "JMAP",
-        "extra"
-      ],
+      "argv": ["DEBUG", "JMAP", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
@@ -143,10 +103,7 @@
     {
       "name": "debug_reload_no_persistence",
       "now_ms": 30,
-      "argv": [
-        "DEBUG",
-        "RELOAD"
-      ],
+      "argv": ["DEBUG", "RELOAD"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -155,11 +112,7 @@
     {
       "name": "debug_reload_wrong_arity",
       "now_ms": 31,
-      "argv": [
-        "DEBUG",
-        "RELOAD",
-        "extra"
-      ],
+      "argv": ["DEBUG", "RELOAD", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR DEBUG RELOAD only supports the MERGE, NOFLUSH and NOSAVE options."
@@ -168,11 +121,7 @@
     {
       "name": "debug_object_missing_key",
       "now_ms": 40,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "nonexistent"
-      ],
+      "argv": ["DEBUG", "OBJECT", "nonexistent"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -181,10 +130,7 @@
     {
       "name": "debug_object_wrong_arity_no_key",
       "now_ms": 41,
-      "argv": [
-        "DEBUG",
-        "OBJECT"
-      ],
+      "argv": ["DEBUG", "OBJECT"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'OBJECT'. Try DEBUG HELP."
@@ -193,11 +139,7 @@
     {
       "name": "debug_setup_string",
       "now_ms": 50,
-      "argv": [
-        "SET",
-        "strkey",
-        "hello"
-      ],
+      "argv": ["SET", "strkey", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -206,11 +148,7 @@
     {
       "name": "debug_object_string",
       "now_ms": 51,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "strkey"
-      ],
+      "argv": ["DEBUG", "OBJECT", "strkey"],
       "expect": {
         "kind": "any_simple"
       }
@@ -218,11 +156,7 @@
     {
       "name": "debug_unknown_subcommand",
       "now_ms": 60,
-      "argv": [
-        "DEBUG",
-        "BOGUS",
-        "arg"
-      ],
+      "argv": ["DEBUG", "BOGUS", "arg"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'BOGUS'. Try DEBUG HELP."
@@ -231,11 +165,7 @@
     {
       "name": "debug_case_insensitive_sleep",
       "now_ms": 70,
-      "argv": [
-        "DEBUG",
-        "sleep",
-        "0"
-      ],
+      "argv": ["DEBUG", "sleep", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -244,10 +174,7 @@
     {
       "name": "debug_case_insensitive_reload",
       "now_ms": 71,
-      "argv": [
-        "DEBUG",
-        "reload"
-      ],
+      "argv": ["DEBUG", "reload"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -256,10 +183,7 @@
     {
       "name": "debug_digest_empty_db",
       "now_ms": 80,
-      "argv": [
-        "DEBUG",
-        "DIGEST"
-      ],
+      "argv": ["DEBUG", "DIGEST"],
       "expect": {
         "kind": "any_simple"
       }
@@ -267,11 +191,7 @@
     {
       "name": "debug_digest_wrong_arity",
       "now_ms": 81,
-      "argv": [
-        "DEBUG",
-        "DIGEST",
-        "extra"
-      ],
+      "argv": ["DEBUG", "DIGEST", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'DIGEST'. Try DEBUG HELP."
@@ -280,11 +200,7 @@
     {
       "name": "debug_digest_value_missing_key",
       "now_ms": 82,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "missingkey"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "missingkey"],
       "expect": {
         "kind": "any_array"
       }
@@ -292,10 +208,7 @@
     {
       "name": "debug_digest_value_wrong_arity",
       "now_ms": 83,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE"],
       "expect": {
         "kind": "array",
         "value": []
@@ -304,15 +217,7 @@
     {
       "name": "debug_digest_setup_keys",
       "now_ms": 90,
-      "argv": [
-        "MSET",
-        "key1",
-        "val1",
-        "key2",
-        "val2",
-        "key3",
-        "val3"
-      ],
+      "argv": ["MSET", "key1", "val1", "key2", "val2", "key3", "val3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -321,10 +226,7 @@
     {
       "name": "debug_digest_with_data",
       "now_ms": 91,
-      "argv": [
-        "DEBUG",
-        "DIGEST"
-      ],
+      "argv": ["DEBUG", "DIGEST"],
       "expect": {
         "kind": "any_simple"
       }
@@ -332,11 +234,7 @@
     {
       "name": "debug_digest_value_single_key",
       "now_ms": 92,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "key1"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "key1"],
       "expect": {
         "kind": "any_array"
       }
@@ -344,13 +242,7 @@
     {
       "name": "debug_digest_value_multiple_keys",
       "now_ms": 93,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "key1",
-        "key2",
-        "key3"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "key1", "key2", "key3"],
       "expect": {
         "kind": "any_array"
       }
@@ -358,10 +250,7 @@
     {
       "name": "debug_case_insensitive_digest",
       "now_ms": 100,
-      "argv": [
-        "DEBUG",
-        "digest"
-      ],
+      "argv": ["DEBUG", "digest"],
       "expect": {
         "kind": "any_simple"
       }
@@ -369,11 +258,7 @@
     {
       "name": "debug_case_insensitive_digest_value",
       "now_ms": 101,
-      "argv": [
-        "DEBUG",
-        "digest-value",
-        "key1"
-      ],
+      "argv": ["DEBUG", "digest-value", "key1"],
       "expect": {
         "kind": "any_array"
       }
@@ -381,11 +266,7 @@
     {
       "name": "debug_sleep_zero_fast",
       "now_ms": 110,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "0.0"
-      ],
+      "argv": ["DEBUG", "SLEEP", "0.0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -394,11 +275,7 @@
     {
       "name": "debug_sleep_negative_ignored",
       "now_ms": 111,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "-1"
-      ],
+      "argv": ["DEBUG", "SLEEP", "-1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -407,11 +284,7 @@
     {
       "name": "debug_set_active_expire_case_insensitive",
       "now_ms": 120,
-      "argv": [
-        "DEBUG",
-        "set-active-expire",
-        "1"
-      ],
+      "argv": ["DEBUG", "set-active-expire", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -420,12 +293,7 @@
     {
       "name": "debug_digest_value_nonexistent_keys",
       "now_ms": 130,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "nosuch1",
-        "nosuch2"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "nosuch1", "nosuch2"],
       "expect": {
         "kind": "any_array"
       }
@@ -433,11 +301,7 @@
     {
       "name": "debug_object_case_insensitive",
       "now_ms": 140,
-      "argv": [
-        "DEBUG",
-        "object",
-        "strkey"
-      ],
+      "argv": ["DEBUG", "object", "strkey"],
       "expect": {
         "kind": "any_simple"
       }
@@ -445,10 +309,7 @@
     {
       "name": "debug_jmap_case_insensitive",
       "now_ms": 150,
-      "argv": [
-        "DEBUG",
-        "jmap"
-      ],
+      "argv": ["DEBUG", "jmap"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'jmap'. Try DEBUG HELP."
@@ -457,14 +318,7 @@
     {
       "name": "debug_setup_hash",
       "now_ms": 200,
-      "argv": [
-        "HSET",
-        "debughash",
-        "field1",
-        "value1",
-        "field2",
-        "value2"
-      ],
+      "argv": ["HSET", "debughash", "field1", "value1", "field2", "value2"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -473,11 +327,7 @@
     {
       "name": "debug_object_hash",
       "now_ms": 201,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debughash"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debughash"],
       "expect": {
         "kind": "any_simple"
       }
@@ -485,13 +335,7 @@
     {
       "name": "debug_setup_list",
       "now_ms": 210,
-      "argv": [
-        "RPUSH",
-        "debuglist",
-        "a",
-        "b",
-        "c"
-      ],
+      "argv": ["RPUSH", "debuglist", "a", "b", "c"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -500,11 +344,7 @@
     {
       "name": "debug_object_list",
       "now_ms": 211,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debuglist"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debuglist"],
       "expect": {
         "kind": "any_simple"
       }
@@ -512,13 +352,7 @@
     {
       "name": "debug_setup_set",
       "now_ms": 220,
-      "argv": [
-        "SADD",
-        "debugset",
-        "x",
-        "y",
-        "z"
-      ],
+      "argv": ["SADD", "debugset", "x", "y", "z"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -527,11 +361,7 @@
     {
       "name": "debug_object_set",
       "now_ms": 221,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debugset"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debugset"],
       "expect": {
         "kind": "any_simple"
       }
@@ -539,14 +369,7 @@
     {
       "name": "debug_setup_zset",
       "now_ms": 230,
-      "argv": [
-        "ZADD",
-        "debugzset",
-        "1.0",
-        "one",
-        "2.0",
-        "two"
-      ],
+      "argv": ["ZADD", "debugzset", "1.0", "one", "2.0", "two"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -555,11 +378,7 @@
     {
       "name": "debug_object_zset",
       "now_ms": 231,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debugzset"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debugzset"],
       "expect": {
         "kind": "any_simple"
       }
@@ -567,11 +386,7 @@
     {
       "name": "debug_digest_value_hash_key",
       "now_ms": 240,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "debughash"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "debughash"],
       "expect": {
         "kind": "any_array"
       }
@@ -579,11 +394,7 @@
     {
       "name": "debug_digest_value_list_key",
       "now_ms": 241,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "debuglist"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "debuglist"],
       "expect": {
         "kind": "any_array"
       }
@@ -591,14 +402,7 @@
     {
       "name": "debug_digest_value_mixed_types",
       "now_ms": 250,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "debughash",
-        "debuglist",
-        "debugset",
-        "debugzset"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "debughash", "debuglist", "debugset", "debugzset"],
       "expect": {
         "kind": "any_array"
       }
@@ -606,12 +410,7 @@
     {
       "name": "debug_object_extra_args_error",
       "now_ms": 260,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "strkey",
-        "extra"
-      ],
+      "argv": ["DEBUG", "OBJECT", "strkey", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'OBJECT'. Try DEBUG HELP."
@@ -620,11 +419,7 @@
     {
       "name": "debug_sleep_fractional",
       "now_ms": 270,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "0.001"
-      ],
+      "argv": ["DEBUG", "SLEEP", "0.001"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -633,11 +428,7 @@
     {
       "name": "debug_mixed_case_object",
       "now_ms": 280,
-      "argv": [
-        "DEBUG",
-        "ObJeCt",
-        "strkey"
-      ],
+      "argv": ["DEBUG", "ObJeCt", "strkey"],
       "expect": {
         "kind": "any_simple"
       }
@@ -645,11 +436,7 @@
     {
       "name": "debug_mixed_case_digest_value",
       "now_ms": 290,
-      "argv": [
-        "DEBUG",
-        "DiGeSt-VaLuE",
-        "key1"
-      ],
+      "argv": ["DEBUG", "DiGeSt-VaLuE", "key1"],
       "expect": {
         "kind": "any_array"
       }
@@ -657,13 +444,7 @@
     {
       "name": "debug_setup_stream",
       "now_ms": 300,
-      "argv": [
-        "XADD",
-        "debugstream",
-        "1-0",
-        "field",
-        "value"
-      ],
+      "argv": ["XADD", "debugstream", "1-0", "field", "value"],
       "expect": {
         "kind": "bulk",
         "value": "1-0"
@@ -672,11 +453,7 @@
     {
       "name": "debug_object_stream",
       "now_ms": 301,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debugstream"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debugstream"],
       "expect": {
         "kind": "any_simple"
       }
@@ -684,11 +461,7 @@
     {
       "name": "debug_digest_value_stream",
       "now_ms": 302,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "debugstream"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "debugstream"],
       "expect": {
         "kind": "any_array"
       }
@@ -696,13 +469,7 @@
     {
       "name": "debug_setup_hyperloglog",
       "now_ms": 310,
-      "argv": [
-        "PFADD",
-        "debughll",
-        "a",
-        "b",
-        "c"
-      ],
+      "argv": ["PFADD", "debughll", "a", "b", "c"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -711,11 +478,7 @@
     {
       "name": "debug_object_hyperloglog",
       "now_ms": 311,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debughll"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debughll"],
       "expect": {
         "kind": "any_simple"
       }
@@ -723,10 +486,7 @@
     {
       "name": "debug_digest_all_types",
       "now_ms": 320,
-      "argv": [
-        "DEBUG",
-        "DIGEST"
-      ],
+      "argv": ["DEBUG", "DIGEST"],
       "expect": {
         "kind": "any_simple"
       }
@@ -751,11 +511,7 @@
     {
       "name": "debug_sleep_very_small_decimal",
       "now_ms": 400,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "0.00001"
-      ],
+      "argv": ["DEBUG", "SLEEP", "0.00001"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -764,11 +520,7 @@
     {
       "name": "debug_sleep_scientific_notation",
       "now_ms": 401,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "1e-6"
-      ],
+      "argv": ["DEBUG", "SLEEP", "1e-6"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -777,11 +529,7 @@
     {
       "name": "debug_sleep_negative_scientific",
       "now_ms": 402,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "-1e-3"
-      ],
+      "argv": ["DEBUG", "SLEEP", "-1e-3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -790,11 +538,7 @@
     {
       "name": "debug_setup_int_encoded_string",
       "now_ms": 500,
-      "argv": [
-        "SET",
-        "debug_int_str",
-        "12345"
-      ],
+      "argv": ["SET", "debug_int_str", "12345"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -803,11 +547,7 @@
     {
       "name": "debug_object_int_encoded_string",
       "now_ms": 501,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debug_int_str"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debug_int_str"],
       "expect": {
         "kind": "any_simple"
       }
@@ -815,11 +555,7 @@
     {
       "name": "debug_setup_embstr_encoded",
       "now_ms": 510,
-      "argv": [
-        "SET",
-        "debug_embstr",
-        "short"
-      ],
+      "argv": ["SET", "debug_embstr", "short"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -828,11 +564,7 @@
     {
       "name": "debug_object_embstr_encoded",
       "now_ms": 511,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debug_embstr"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debug_embstr"],
       "expect": {
         "kind": "any_simple"
       }
@@ -853,11 +585,7 @@
     {
       "name": "debug_object_raw_encoded",
       "now_ms": 521,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debug_raw"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debug_raw"],
       "expect": {
         "kind": "any_simple"
       }
@@ -865,15 +593,7 @@
     {
       "name": "debug_setup_intset",
       "now_ms": 530,
-      "argv": [
-        "SADD",
-        "debug_intset",
-        "1",
-        "2",
-        "3",
-        "100",
-        "200"
-      ],
+      "argv": ["SADD", "debug_intset", "1", "2", "3", "100", "200"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -882,11 +602,7 @@
     {
       "name": "debug_object_intset",
       "now_ms": 531,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debug_intset"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debug_intset"],
       "expect": {
         "kind": "any_simple"
       }
@@ -894,11 +610,7 @@
     {
       "name": "debug_setup_key_for_expiry",
       "now_ms": 600,
-      "argv": [
-        "SET",
-        "debug_exp_key",
-        "value"
-      ],
+      "argv": ["SET", "debug_exp_key", "value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -907,11 +619,7 @@
     {
       "name": "debug_set_expiry",
       "now_ms": 601,
-      "argv": [
-        "PEXPIRE",
-        "debug_exp_key",
-        "100"
-      ],
+      "argv": ["PEXPIRE", "debug_exp_key", "100"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -920,11 +628,7 @@
     {
       "name": "debug_object_expired_key",
       "now_ms": 800,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debug_exp_key"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debug_exp_key"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -933,11 +637,7 @@
     {
       "name": "debug_digest_value_expired_key",
       "now_ms": 801,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "debug_exp_key"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "debug_exp_key"],
       "expect": {
         "kind": "any_array"
       }
@@ -945,11 +645,7 @@
     {
       "name": "debug_set_active_expire_multiple_toggles_on",
       "now_ms": 900,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "1"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -958,11 +654,7 @@
     {
       "name": "debug_set_active_expire_toggle_off",
       "now_ms": 901,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "0"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -971,11 +663,7 @@
     {
       "name": "debug_set_active_expire_toggle_on_again",
       "now_ms": 902,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "1"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -984,11 +672,7 @@
     {
       "name": "debug_set_active_expire_negative_value",
       "now_ms": 910,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "-1"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "-1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -997,11 +681,7 @@
     {
       "name": "debug_set_active_expire_large_value",
       "now_ms": 911,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "100"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "100"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1010,11 +690,7 @@
     {
       "name": "debug_set_active_expire_float_value",
       "now_ms": 912,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "0.5"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "0.5"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1023,11 +699,7 @@
     {
       "name": "debug_digest_value_single_nonexistent",
       "now_ms": 1000,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "definitely_not_a_key"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "definitely_not_a_key"],
       "expect": {
         "kind": "any_array"
       }
@@ -1035,13 +707,7 @@
     {
       "name": "debug_digest_value_mixed_exists_nonexists",
       "now_ms": 1001,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "debughash",
-        "no_key_here",
-        "debuglist"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "debughash", "no_key_here", "debuglist"],
       "expect": {
         "kind": "any_array"
       }
@@ -1049,11 +715,7 @@
     {
       "name": "debug_setup_empty_string",
       "now_ms": 1100,
-      "argv": [
-        "SET",
-        "debug_empty",
-        ""
-      ],
+      "argv": ["SET", "debug_empty", ""],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1062,11 +724,7 @@
     {
       "name": "debug_object_empty_string",
       "now_ms": 1101,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debug_empty"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debug_empty"],
       "expect": {
         "kind": "any_simple"
       }
@@ -1074,11 +732,7 @@
     {
       "name": "debug_digest_value_empty_string",
       "now_ms": 1102,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "debug_empty"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "debug_empty"],
       "expect": {
         "kind": "any_array"
       }
@@ -1086,11 +740,7 @@
     {
       "name": "debug_setup_empty_list",
       "now_ms": 1200,
-      "argv": [
-        "RPUSH",
-        "debug_list_del",
-        "a"
-      ],
+      "argv": ["RPUSH", "debug_list_del", "a"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1099,10 +749,7 @@
     {
       "name": "debug_delete_list_item",
       "now_ms": 1201,
-      "argv": [
-        "LPOP",
-        "debug_list_del"
-      ],
+      "argv": ["LPOP", "debug_list_del"],
       "expect": {
         "kind": "bulk",
         "value": "a"
@@ -1111,11 +758,7 @@
     {
       "name": "debug_object_deleted_list",
       "now_ms": 1202,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debug_list_del"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debug_list_del"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -1124,11 +767,7 @@
     {
       "name": "debug_setup_special_chars_key",
       "now_ms": 1300,
-      "argv": [
-        "SET",
-        "debug:special:key",
-        "special_name"
-      ],
+      "argv": ["SET", "debug:special:key", "special_name"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1137,11 +776,7 @@
     {
       "name": "debug_object_special_chars_key",
       "now_ms": 1301,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debug:special:key"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debug:special:key"],
       "expect": {
         "kind": "any_simple"
       }
@@ -1149,11 +784,7 @@
     {
       "name": "debug_digest_value_special_chars_key",
       "now_ms": 1302,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE",
-        "debug:special:key"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE", "debug:special:key"],
       "expect": {
         "kind": "any_array"
       }
@@ -1161,11 +792,7 @@
     {
       "name": "debug_setup_large_integer",
       "now_ms": 1400,
-      "argv": [
-        "SET",
-        "debug_big_int",
-        "9223372036854775807"
-      ],
+      "argv": ["SET", "debug_big_int", "9223372036854775807"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1174,11 +801,7 @@
     {
       "name": "debug_object_large_integer",
       "now_ms": 1401,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debug_big_int"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debug_big_int"],
       "expect": {
         "kind": "any_simple"
       }
@@ -1186,10 +809,7 @@
     {
       "name": "debug_object_wrong_arity_missing_key",
       "now_ms": 1500,
-      "argv": [
-        "DEBUG",
-        "OBJECT"
-      ],
+      "argv": ["DEBUG", "OBJECT"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'OBJECT'. Try DEBUG HELP."
@@ -1198,10 +818,7 @@
     {
       "name": "debug_digest_value_wrong_arity_no_keys",
       "now_ms": 1501,
-      "argv": [
-        "DEBUG",
-        "DIGEST-VALUE"
-      ],
+      "argv": ["DEBUG", "DIGEST-VALUE"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1210,12 +827,7 @@
     {
       "name": "debug_jmap_extra_args",
       "now_ms": 1502,
-      "argv": [
-        "DEBUG",
-        "JMAP",
-        "extra",
-        "args"
-      ],
+      "argv": ["DEBUG", "JMAP", "extra", "args"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
@@ -1224,10 +836,7 @@
     {
       "name": "debug_unknown_subcommand_empty",
       "now_ms": 1600,
-      "argv": [
-        "DEBUG",
-        ""
-      ],
+      "argv": ["DEBUG", ""],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for ''. Try DEBUG HELP."
@@ -1236,10 +845,7 @@
     {
       "name": "debug_unknown_subcommand_numeric",
       "now_ms": 1601,
-      "argv": [
-        "DEBUG",
-        "12345"
-      ],
+      "argv": ["DEBUG", "12345"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for '12345'. Try DEBUG HELP."

@@ -4,11 +4,7 @@
     {
       "name": "basic_replay_sequence",
       "now_ms": 1000,
-      "records": [
-        ["SET", "a", "1"],
-        ["INCR", "a"],
-        ["SET", "ttl", "x", "PX", "5"]
-      ],
+      "records": [["SET", "a", "1"], ["INCR", "a"], ["SET", "ttl", "x", "PX", "5"]],
       "assertions": [
         { "key": "a", "expect": "2" },
         { "key": "ttl", "expect": "x", "at_ms": 1002 },
@@ -18,13 +14,8 @@
     {
       "name": "delete_persists",
       "now_ms": 2000,
-      "records": [
-        ["SET", "k", "v"],
-        ["DEL", "k"]
-      ],
-      "assertions": [
-        { "key": "k", "expect": null }
-      ]
+      "records": [["SET", "k", "v"], ["DEL", "k"]],
+      "assertions": [{ "key": "k", "expect": null }]
     },
     {
       "name": "ttl_overwrite_and_persist_chain",
@@ -68,10 +59,7 @@
         ["INCR", "chain:a"],
         ["APPEND", "chain:b", "y"]
       ],
-      "assertions": [
-        { "key": "chain:a", "expect": "6" },
-        { "key": "chain:b", "expect": "xy" }
-      ]
+      "assertions": [{ "key": "chain:a", "expect": "6" }, { "key": "chain:b", "expect": "xy" }]
     },
     {
       "name": "expiration_boundary_and_recreate_order",
@@ -126,20 +114,13 @@
         ["DECRBY", "counter", "20"],
         ["INCR", "counter"]
       ],
-      "assertions": [
-        { "key": "counter", "expect": "51" }
-      ]
+      "assertions": [{ "key": "counter", "expect": "51" }]
     },
     {
       "name": "setrange_replay",
       "now_ms": 11000,
-      "records": [
-        ["SET", "buf", "Hello World"],
-        ["SETRANGE", "buf", "6", "Redis"]
-      ],
-      "assertions": [
-        { "key": "buf", "expect": "Hello Redis" }
-      ]
+      "records": [["SET", "buf", "Hello World"], ["SETRANGE", "buf", "6", "Redis"]],
+      "assertions": [{ "key": "buf", "expect": "Hello Redis" }]
     },
     {
       "name": "getdel_replay",
@@ -173,9 +154,7 @@
     {
       "name": "set_ex_seconds_ttl_replay",
       "now_ms": 14000,
-      "records": [
-        ["SET", "ex:key", "val", "EX", "1"]
-      ],
+      "records": [["SET", "ex:key", "val", "EX", "1"]],
       "assertions": [
         { "key": "ex:key", "expect": "val", "at_ms": 14500 },
         { "key": "ex:key", "expect": null, "at_ms": 15001 }
@@ -198,10 +177,7 @@
     {
       "name": "msetnx_atomicity_replay",
       "now_ms": 16000,
-      "records": [
-        ["SET", "mnx:exist", "old"],
-        ["MSETNX", "mnx:exist", "new", "mnx:fresh", "val"]
-      ],
+      "records": [["SET", "mnx:exist", "old"], ["MSETNX", "mnx:exist", "new", "mnx:fresh", "val"]],
       "assertions": [
         { "key": "mnx:exist", "expect": "old" },
         { "key": "mnx:fresh", "expect": null }
@@ -210,10 +186,7 @@
     {
       "name": "getex_with_persist_replay",
       "now_ms": 17000,
-      "records": [
-        ["SET", "gx:key", "data", "PX", "10"],
-        ["GETEX", "gx:key", "PERSIST"]
-      ],
+      "records": [["SET", "gx:key", "data", "PX", "10"], ["GETEX", "gx:key", "PERSIST"]],
       "assertions": [
         { "key": "gx:key", "expect": "data", "at_ms": 17005 },
         { "key": "gx:key", "expect": "data", "at_ms": 18000 }
@@ -227,9 +200,7 @@
         ["INCRBYFLOAT", "fl:key", "2.3"],
         ["INCRBYFLOAT", "fl:key", "-1"]
       ],
-      "assertions": [
-        { "key": "fl:key", "expect": "11.8" }
-      ]
+      "assertions": [{ "key": "fl:key", "expect": "11.8" }]
     },
     {
       "name": "copy_and_unlink_replay",
@@ -239,18 +210,12 @@
         ["COPY", "cp:src", "cp:dst"],
         ["UNLINK", "cp:src"]
       ],
-      "assertions": [
-        { "key": "cp:src", "expect": null },
-        { "key": "cp:dst", "expect": "original" }
-      ]
+      "assertions": [{ "key": "cp:src", "expect": null }, { "key": "cp:dst", "expect": "original" }]
     },
     {
       "name": "set_keepttl_replay",
       "now_ms": 20000,
-      "records": [
-        ["SET", "kt:key", "v1", "PX", "50"],
-        ["SET", "kt:key", "v2", "KEEPTTL"]
-      ],
+      "records": [["SET", "kt:key", "v1", "PX", "50"], ["SET", "kt:key", "v2", "KEEPTTL"]],
       "assertions": [
         { "key": "kt:key", "expect": "v2", "at_ms": 20030 },
         { "key": "kt:key", "expect": null, "at_ms": 20060 }
@@ -259,13 +224,8 @@
     {
       "name": "set_get_option_replay",
       "now_ms": 21000,
-      "records": [
-        ["SET", "sg:key", "first"],
-        ["SET", "sg:key", "second", "GET"]
-      ],
-      "assertions": [
-        { "key": "sg:key", "expect": "second" }
-      ]
+      "records": [["SET", "sg:key", "first"], ["SET", "sg:key", "second", "GET"]],
+      "assertions": [{ "key": "sg:key", "expect": "second" }]
     },
     {
       "name": "pexpireat_and_expireat_replay",

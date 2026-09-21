@@ -44,13 +44,25 @@
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "simple", "value": "MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:" },
+          {
+            "kind": "simple",
+            "value": "MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"
+          },
           { "kind": "simple", "value": "LIST" },
           { "kind": "simple", "value": "    Return a list of loaded modules." },
           { "kind": "simple", "value": "LOAD <path> [<arg> ...]" },
-          { "kind": "simple", "value": "    Load a module library from <path>, passing to it any optional arguments." },
-          { "kind": "simple", "value": "LOADEX <path> [[CONFIG NAME VALUE] [CONFIG NAME VALUE]] [ARGS ...]" },
-          { "kind": "simple", "value": "    Load a module library from <path>, while passing it module configurations and optional arguments." },
+          {
+            "kind": "simple",
+            "value": "    Load a module library from <path>, passing to it any optional arguments."
+          },
+          {
+            "kind": "simple",
+            "value": "LOADEX <path> [[CONFIG NAME VALUE] [CONFIG NAME VALUE]] [ARGS ...]"
+          },
+          {
+            "kind": "simple",
+            "value": "    Load a module library from <path>, while passing it module configurations and optional arguments."
+          },
           { "kind": "simple", "value": "UNLOAD <name>" },
           { "kind": "simple", "value": "    Unload a module." },
           { "kind": "simple", "value": "HELP" },
@@ -560,13 +572,25 @@
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "simple", "value": "MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:" },
+          {
+            "kind": "simple",
+            "value": "MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"
+          },
           { "kind": "simple", "value": "LIST" },
           { "kind": "simple", "value": "    Return a list of loaded modules." },
           { "kind": "simple", "value": "LOAD <path> [<arg> ...]" },
-          { "kind": "simple", "value": "    Load a module library from <path>, passing to it any optional arguments." },
-          { "kind": "simple", "value": "LOADEX <path> [[CONFIG NAME VALUE] [CONFIG NAME VALUE]] [ARGS ...]" },
-          { "kind": "simple", "value": "    Load a module library from <path>, while passing it module configurations and optional arguments." },
+          {
+            "kind": "simple",
+            "value": "    Load a module library from <path>, passing to it any optional arguments."
+          },
+          {
+            "kind": "simple",
+            "value": "LOADEX <path> [[CONFIG NAME VALUE] [CONFIG NAME VALUE]] [ARGS ...]"
+          },
+          {
+            "kind": "simple",
+            "value": "    Load a module library from <path>, while passing it module configurations and optional arguments."
+          },
           { "kind": "simple", "value": "UNLOAD <name>" },
           { "kind": "simple", "value": "    Unload a module." },
           { "kind": "simple", "value": "HELP" },

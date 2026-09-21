@@ -97,7 +97,7 @@
         "effect_ci_lower": 1.287600562
       }
     ],
-    "valid_competitive_ratio_range": [1.250499620, 1.306759798]
+    "valid_competitive_ratio_range": [1.25049962, 1.306759798]
   },
   "points": [
     {
@@ -107,8 +107,8 @@
       "bootstrap_ci95": [1.287321789, 1.301445295],
       "aa_null_median": 0.999775798,
       "aa_null_bootstrap_ci95": [0.993950871, 1.007873503],
-      "frankenredis_cpu_util_median_pct": 95.900,
-      "redis_cpu_util_median_pct": 95.110
+      "frankenredis_cpu_util_median_pct": 95.9,
+      "redis_cpu_util_median_pct": 95.11
     },
     {
       "client_driver_threads": 1,
@@ -135,10 +135,10 @@
       "workload": "mixed",
       "frankenredis_over_redis_median": 1.277687396,
       "bootstrap_ci95": [1.271606657, 1.283951015],
-      "aa_null_median": 0.998966770,
+      "aa_null_median": 0.99896677,
       "aa_null_bootstrap_ci95": [0.996848523, 1.003318748],
       "frankenredis_cpu_util_median_pct": 98.399,
-      "redis_cpu_util_median_pct": 97.100
+      "redis_cpu_util_median_pct": 97.1
     },
     {
       "client_driver_threads": 4,
@@ -146,8 +146,8 @@
       "frankenredis_over_redis_median": 1.306759798,
       "bootstrap_ci95": [1.303471907, 1.310421007],
       "aa_null_median": 0.999881236,
-      "aa_null_bootstrap_ci95": [0.997802880, 1.005269839],
-      "frankenredis_cpu_util_median_pct": 99.030,
+      "aa_null_bootstrap_ci95": [0.99780288, 1.005269839],
+      "frankenredis_cpu_util_median_pct": 99.03,
       "redis_cpu_util_median_pct": 98.306
     },
     {
@@ -155,7 +155,7 @@
       "workload": "mixed",
       "frankenredis_over_redis_median": 1.290232827,
       "bootstrap_ci95": [1.287600562, 1.292626178],
-      "aa_null_median": 0.997706060,
+      "aa_null_median": 0.99770606,
       "aa_null_bootstrap_ci95": [0.995417921, 0.999456789],
       "frankenredis_cpu_util_median_pct": 99.177,
       "redis_cpu_util_median_pct": 98.262
@@ -166,8 +166,8 @@
       "frankenredis_over_redis_median": 1.290861398,
       "bootstrap_ci95": [1.287865181, 1.292377774],
       "aa_null_median": 1.001812949,
-      "aa_null_bootstrap_ci95": [0.997716062, 1.004704900],
-      "frankenredis_cpu_util_median_pct": 99.270,
+      "aa_null_bootstrap_ci95": [0.997716062, 1.0047049],
+      "frankenredis_cpu_util_median_pct": 99.27,
       "redis_cpu_util_median_pct": 99.124
     },
     {
@@ -186,14 +186,14 @@
       "frankenredis_over_redis_median": 1.277677026,
       "bootstrap_ci95": [1.274459856, 1.278790176],
       "aa_null_median": 1.000193011,
-      "aa_null_bootstrap_ci95": [0.997619920, 1.003225049],
-      "frankenredis_cpu_util_median_pct": 99.210,
+      "aa_null_bootstrap_ci95": [0.99761992, 1.003225049],
+      "frankenredis_cpu_util_median_pct": 99.21,
       "redis_cpu_util_median_pct": 99.188
     },
     {
       "client_driver_threads": 16,
       "workload": "mixed",
-      "frankenredis_over_redis_median": 1.260449530,
+      "frankenredis_over_redis_median": 1.26044953,
       "bootstrap_ci95": [1.259329759, 1.262349948],
       "aa_null_median": 1.001430756,
       "aa_null_bootstrap_ci95": [0.998967664, 1.004061606],
@@ -213,12 +213,12 @@
     {
       "client_driver_threads": 32,
       "workload": "mixed",
-      "frankenredis_over_redis_median": 1.250499620,
-      "bootstrap_ci95": [1.249573766, 1.252585240],
+      "frankenredis_over_redis_median": 1.25049962,
+      "bootstrap_ci95": [1.249573766, 1.25258524],
       "aa_null_median": 1.001775207,
       "aa_null_bootstrap_ci95": [0.997995311, 1.003070669],
       "frankenredis_cpu_util_median_pct": 99.277,
-      "redis_cpu_util_median_pct": 99.270
+      "redis_cpu_util_median_pct": 99.27
     },
     {
       "client_driver_threads": 64,
@@ -226,9 +226,9 @@
       "frankenredis_over_redis_median": 1.269650192,
       "bootstrap_ci95": [1.265163567, 1.274736163],
       "aa_null_median": 0.999871939,
-      "aa_null_bootstrap_ci95": [0.997147768, 1.004139330],
+      "aa_null_bootstrap_ci95": [0.997147768, 1.00413933],
       "frankenredis_cpu_util_median_pct": 99.313,
-      "redis_cpu_util_median_pct": 99.220
+      "redis_cpu_util_median_pct": 99.22
     },
     {
       "client_driver_threads": 64,
@@ -246,7 +246,7 @@
       "frankenredis_over_redis_median": 1.292737747,
       "bootstrap_ci95": [1.286575647, 1.297444171],
       "aa_null_median": 1.002372495,
-      "aa_null_bootstrap_ci95": [0.994709320, 1.006861782],
+      "aa_null_bootstrap_ci95": [0.99470932, 1.006861782],
       "frankenredis_cpu_util_median_pct": 99.232,
       "redis_cpu_util_median_pct": 99.215
     },
@@ -262,10 +262,10 @@
     }
   ],
   "curve_adjudication": {
-    "set_t1_to_t128_pct": -0.024920,
+    "set_t1_to_t128_pct": -0.02492,
     "mixed_t1_to_t128_pct": -2.324977,
     "set_full_span_pct": 3.214974,
-    "mixed_full_span_pct": 2.936250,
+    "mixed_full_span_pct": 2.93625,
     "shape": "flat",
     "conclusion": "More client driver threads do not create a scaling gain because both server command paths remain single-threaded. A real multicore retry must execute commands on more than one server thread and use independently sharded keys."
   }

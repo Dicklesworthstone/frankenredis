@@ -4,11 +4,7 @@
     {
       "name": "config_get_exact_maxmemory",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory"],
       "expect": {
         "kind": "array",
         "value": [
@@ -26,11 +22,7 @@
     {
       "name": "config_get_exact_bind",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "bind"
-      ],
+      "argv": ["CONFIG", "GET", "bind"],
       "expect": {
         "kind": "array",
         "value": [
@@ -48,11 +40,7 @@
     {
       "name": "config_get_exact_port",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "port"
-      ],
+      "argv": ["CONFIG", "GET", "port"],
       "expect": {
         "kind": "array",
         "value": [
@@ -70,11 +58,7 @@
     {
       "name": "config_get_exact_databases",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "databases"
-      ],
+      "argv": ["CONFIG", "GET", "databases"],
       "expect": {
         "kind": "array",
         "value": [
@@ -92,11 +76,7 @@
     {
       "name": "config_get_exact_enable_protected_configs",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "enable-protected-configs"
-      ],
+      "argv": ["CONFIG", "GET", "enable-protected-configs"],
       "expect": {
         "kind": "array",
         "value": [
@@ -114,11 +94,7 @@
     {
       "name": "config_get_exact_hz",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "hz"
-      ],
+      "argv": ["CONFIG", "GET", "hz"],
       "expect": {
         "kind": "array",
         "value": [
@@ -136,11 +112,7 @@
     {
       "name": "config_get_exact_requirepass_default",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "requirepass"
-      ],
+      "argv": ["CONFIG", "GET", "requirepass"],
       "expect": {
         "kind": "array",
         "value": [
@@ -158,11 +130,7 @@
     {
       "name": "config_get_exact_acllog_max_len_default",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "acllog-max-len"
-      ],
+      "argv": ["CONFIG", "GET", "acllog-max-len"],
       "expect": {
         "kind": "array",
         "value": [
@@ -180,11 +148,7 @@
     {
       "name": "config_get_exact_appendonly",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "appendonly"
-      ],
+      "argv": ["CONFIG", "GET", "appendonly"],
       "expect": {
         "kind": "array",
         "value": [
@@ -202,11 +166,7 @@
     {
       "name": "config_get_exact_appendfsync",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "appendfsync"
-      ],
+      "argv": ["CONFIG", "GET", "appendfsync"],
       "expect": {
         "kind": "array",
         "value": [
@@ -224,11 +184,7 @@
     {
       "name": "config_get_exact_maxmemory_policy",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory-policy"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory-policy"],
       "expect": {
         "kind": "array",
         "value": [
@@ -246,11 +202,7 @@
     {
       "name": "config_get_exact_loglevel",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "loglevel"
-      ],
+      "argv": ["CONFIG", "GET", "loglevel"],
       "expect": {
         "kind": "array",
         "value": [
@@ -268,11 +220,7 @@
     {
       "name": "config_get_exact_slowlog_log_slower_than",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "slowlog-log-slower-than"
-      ],
+      "argv": ["CONFIG", "GET", "slowlog-log-slower-than"],
       "expect": {
         "kind": "array",
         "value": [
@@ -290,11 +238,7 @@
     {
       "name": "config_get_no_match",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "nonexistent-parameter"
-      ],
+      "argv": ["CONFIG", "GET", "nonexistent-parameter"],
       "expect": {
         "kind": "array",
         "value": []
@@ -303,11 +247,7 @@
     {
       "name": "config_get_prefix_pattern_maxmemory",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory*"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory*"],
       "expect": {
         "kind": "array",
         "value": [
@@ -357,11 +297,7 @@
     {
       "name": "config_get_prefix_pattern_cluster",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "cluster-enabled*"
-      ],
+      "argv": ["CONFIG", "GET", "cluster-enabled*"],
       "expect": {
         "kind": "array",
         "value": [
@@ -379,11 +315,7 @@
     {
       "name": "config_get_prefix_pattern_lazyfree",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "lazyfree*"
-      ],
+      "argv": ["CONFIG", "GET", "lazyfree*"],
       "expect": {
         "kind": "array",
         "value": [
@@ -433,12 +365,7 @@
     {
       "name": "config_set_maxmemory",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory",
-        "1048576"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory", "1048576"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -447,11 +374,7 @@
     {
       "name": "config_get_maxmemory_after_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory"],
       "expect": {
         "kind": "array",
         "value": [
@@ -469,12 +392,7 @@
     {
       "name": "config_set_maxmemory_zero",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory",
-        "0"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -483,11 +401,7 @@
     {
       "name": "config_get_maxmemory_after_reset",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory"],
       "expect": {
         "kind": "array",
         "value": [
@@ -505,12 +419,7 @@
     {
       "name": "config_set_acllog_max_len",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "acllog-max-len",
-        "256"
-      ],
+      "argv": ["CONFIG", "SET", "acllog-max-len", "256"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -519,11 +428,7 @@
     {
       "name": "config_get_acllog_max_len_after_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "acllog-max-len"
-      ],
+      "argv": ["CONFIG", "GET", "acllog-max-len"],
       "expect": {
         "kind": "array",
         "value": [
@@ -541,12 +446,7 @@
     {
       "name": "config_set_requirepass",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "requirepass",
-        "secret123"
-      ],
+      "argv": ["CONFIG", "SET", "requirepass", "secret123"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -555,11 +455,7 @@
     {
       "name": "config_get_requirepass_after_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "requirepass"
-      ],
+      "argv": ["CONFIG", "GET", "requirepass"],
       "expect": {
         "kind": "array",
         "value": [
@@ -577,12 +473,7 @@
     {
       "name": "config_set_requirepass_empty_clears",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "requirepass",
-        ""
-      ],
+      "argv": ["CONFIG", "SET", "requirepass", ""],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -591,11 +482,7 @@
     {
       "name": "config_get_requirepass_after_clear",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "requirepass"
-      ],
+      "argv": ["CONFIG", "GET", "requirepass"],
       "expect": {
         "kind": "array",
         "value": [
@@ -613,12 +500,7 @@
     {
       "name": "config_set_masterauth",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "masterauth",
-        "secret123"
-      ],
+      "argv": ["CONFIG", "SET", "masterauth", "secret123"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -627,11 +509,7 @@
     {
       "name": "config_get_masterauth_after_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "masterauth"
-      ],
+      "argv": ["CONFIG", "GET", "masterauth"],
       "expect": {
         "kind": "array",
         "value": [
@@ -649,12 +527,7 @@
     {
       "name": "config_set_masteruser",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "masteruser",
-        "replica-user"
-      ],
+      "argv": ["CONFIG", "SET", "masteruser", "replica-user"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -663,11 +536,7 @@
     {
       "name": "config_get_masteruser_after_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "masteruser"
-      ],
+      "argv": ["CONFIG", "GET", "masteruser"],
       "expect": {
         "kind": "array",
         "value": [
@@ -685,12 +554,7 @@
     {
       "name": "config_clear_masterauth",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "masterauth",
-        ""
-      ],
+      "argv": ["CONFIG", "SET", "masterauth", ""],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -699,12 +563,7 @@
     {
       "name": "config_clear_masteruser",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "masteruser",
-        ""
-      ],
+      "argv": ["CONFIG", "SET", "masteruser", ""],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -713,12 +572,7 @@
     {
       "name": "config_get_master_credentials_after_clear",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "masteruser",
-        "masterauth"
-      ],
+      "argv": ["CONFIG", "GET", "masteruser", "masterauth"],
       "expect": {
         "kind": "array",
         "value": [
@@ -744,14 +598,7 @@
     {
       "name": "config_set_multiple_params",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory",
-        "2097152",
-        "acllog-max-len",
-        "64"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory", "2097152", "acllog-max-len", "64"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -760,11 +607,7 @@
     {
       "name": "config_get_maxmemory_after_multi_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory"],
       "expect": {
         "kind": "array",
         "value": [
@@ -782,11 +625,7 @@
     {
       "name": "config_get_acllog_after_multi_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "acllog-max-len"
-      ],
+      "argv": ["CONFIG", "GET", "acllog-max-len"],
       "expect": {
         "kind": "array",
         "value": [
@@ -804,12 +643,7 @@
     {
       "name": "config_set_cluster_enabled_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "cluster-enabled",
-        "yes"
-      ],
+      "argv": ["CONFIG", "SET", "cluster-enabled", "yes"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'cluster-enabled') - can't set immutable config"
@@ -818,12 +652,7 @@
     {
       "name": "config_set_databases_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "databases",
-        "32"
-      ],
+      "argv": ["CONFIG", "SET", "databases", "32"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'databases') - can't set immutable config"
@@ -832,12 +661,7 @@
     {
       "name": "config_set_cluster_config_file_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "cluster-config-file",
-        "custom-nodes.conf"
-      ],
+      "argv": ["CONFIG", "SET", "cluster-config-file", "custom-nodes.conf"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'cluster-config-file') - can't set immutable config"
@@ -846,12 +670,7 @@
     {
       "name": "config_set_io_threads_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "io-threads",
-        "4"
-      ],
+      "argv": ["CONFIG", "SET", "io-threads", "4"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'io-threads') - can't set immutable config"
@@ -860,12 +679,7 @@
     {
       "name": "config_set_io_threads_do_reads_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "io-threads-do-reads",
-        "yes"
-      ],
+      "argv": ["CONFIG", "SET", "io-threads-do-reads", "yes"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'io-threads-do-reads') - can't set immutable config"
@@ -874,12 +688,7 @@
     {
       "name": "config_set_enable_debug_command_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "enable-debug-command",
-        "yes"
-      ],
+      "argv": ["CONFIG", "SET", "enable-debug-command", "yes"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'enable-debug-command') - can't set immutable config"
@@ -888,12 +697,7 @@
     {
       "name": "config_set_enable_protected_configs_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "enable-protected-configs",
-        "yes"
-      ],
+      "argv": ["CONFIG", "SET", "enable-protected-configs", "yes"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'enable-protected-configs') - can't set immutable config"
@@ -902,12 +706,7 @@
     {
       "name": "config_set_enable_module_command_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "enable-module-command",
-        "yes"
-      ],
+      "argv": ["CONFIG", "SET", "enable-module-command", "yes"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'enable-module-command') - can't set immutable config"
@@ -916,12 +715,7 @@
     {
       "name": "config_set_tcp_backlog_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "tcp-backlog",
-        "1024"
-      ],
+      "argv": ["CONFIG", "SET", "tcp-backlog", "1024"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'tcp-backlog') - can't set immutable config"
@@ -930,12 +724,7 @@
     {
       "name": "config_set_rdbchecksum_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "rdbchecksum",
-        "no"
-      ],
+      "argv": ["CONFIG", "SET", "rdbchecksum", "no"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'rdbchecksum') - can't set immutable config"
@@ -944,12 +733,7 @@
     {
       "name": "config_set_unixsocket_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "unixsocket",
-        "/tmp/redis.sock"
-      ],
+      "argv": ["CONFIG", "SET", "unixsocket", "/tmp/redis.sock"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'unixsocket') - can't set immutable config"
@@ -958,12 +742,7 @@
     {
       "name": "config_set_unixsocketperm_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "unixsocketperm",
-        "700"
-      ],
+      "argv": ["CONFIG", "SET", "unixsocketperm", "700"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'unixsocketperm') - can't set immutable config"
@@ -972,12 +751,7 @@
     {
       "name": "config_set_daemonize_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "daemonize",
-        "yes"
-      ],
+      "argv": ["CONFIG", "SET", "daemonize", "yes"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'daemonize') - can't set immutable config"
@@ -986,12 +760,7 @@
     {
       "name": "config_set_logfile_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "logfile",
-        "/tmp/redis.log"
-      ],
+      "argv": ["CONFIG", "SET", "logfile", "/tmp/redis.log"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'logfile') - can't set immutable config"
@@ -1000,12 +769,7 @@
     {
       "name": "config_set_pidfile_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "pidfile",
-        "/tmp/redis.pid"
-      ],
+      "argv": ["CONFIG", "SET", "pidfile", "/tmp/redis.pid"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'pidfile') - can't set immutable config"
@@ -1014,12 +778,7 @@
     {
       "name": "config_set_always_show_logo_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "always-show-logo",
-        "no"
-      ],
+      "argv": ["CONFIG", "SET", "always-show-logo", "no"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'always-show-logo') - can't set immutable config"
@@ -1028,12 +787,7 @@
     {
       "name": "config_set_set_proc_title_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "set-proc-title",
-        "no"
-      ],
+      "argv": ["CONFIG", "SET", "set-proc-title", "no"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'set-proc-title') - can't set immutable config"
@@ -1042,12 +796,7 @@
     {
       "name": "config_set_known_static_noop",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "hz",
-        "20"
-      ],
+      "argv": ["CONFIG", "SET", "hz", "20"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1056,12 +805,7 @@
     {
       "name": "config_set_list_compress_depth_integer",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "list-compress-depth",
-        "1"
-      ],
+      "argv": ["CONFIG", "SET", "list-compress-depth", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1070,11 +814,7 @@
     {
       "name": "config_get_list_compress_depth_after_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "list-compress-depth"
-      ],
+      "argv": ["CONFIG", "GET", "list-compress-depth"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1092,12 +832,7 @@
     {
       "name": "config_set_list_compress_depth_negative_error",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "list-compress-depth",
-        "-1"
-      ],
+      "argv": ["CONFIG", "SET", "list-compress-depth", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'list-compress-depth') - argument must be between 0 and 2147483647 inclusive"
@@ -1106,12 +841,7 @@
     {
       "name": "config_set_list_compress_depth_non_integer",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "list-compress-depth",
-        "abc"
-      ],
+      "argv": ["CONFIG", "SET", "list-compress-depth", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'list-compress-depth') - argument couldn't be parsed into an integer"
@@ -1120,12 +850,7 @@
     {
       "name": "config_set_list_compress_depth_over_max_error",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "list-compress-depth",
-        "2147483648"
-      ],
+      "argv": ["CONFIG", "SET", "list-compress-depth", "2147483648"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'list-compress-depth') - argument must be between 0 and 2147483647 inclusive"
@@ -1134,12 +859,7 @@
     {
       "name": "config_set_lfu_log_factor_over_max_error",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "lfu-log-factor",
-        "2147483648"
-      ],
+      "argv": ["CONFIG", "SET", "lfu-log-factor", "2147483648"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'lfu-log-factor') - argument must be between 0 and 2147483647 inclusive"
@@ -1148,12 +868,7 @@
     {
       "name": "config_set_tcp_keepalive_over_max_error",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "tcp-keepalive",
-        "2147483648"
-      ],
+      "argv": ["CONFIG", "SET", "tcp-keepalive", "2147483648"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'tcp-keepalive') - argument must be between 0 and 2147483647 inclusive"
@@ -1162,12 +877,7 @@
     {
       "name": "config_set_active_defrag_max_scan_fields_zero_error",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "active-defrag-max-scan-fields",
-        "0"
-      ],
+      "argv": ["CONFIG", "SET", "active-defrag-max-scan-fields", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'active-defrag-max-scan-fields') - argument must be between 1 and 9223372036854775807 inclusive"
@@ -1176,12 +886,7 @@
     {
       "name": "config_set_syslog_enabled_immutable",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "syslog-enabled",
-        "yes"
-      ],
+      "argv": ["CONFIG", "SET", "syslog-enabled", "yes"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'syslog-enabled') - can't set immutable config"
@@ -1190,12 +895,7 @@
     {
       "name": "config_set_cluster_announce_port_non_integer",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "cluster-announce-port",
-        "abc"
-      ],
+      "argv": ["CONFIG", "SET", "cluster-announce-port", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'cluster-announce-port') - argument couldn't be parsed into an integer"
@@ -1204,12 +904,7 @@
     {
       "name": "config_set_oom_score_adj_bad_enum",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "oom-score-adj",
-        "maybe"
-      ],
+      "argv": ["CONFIG", "SET", "oom-score-adj", "maybe"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'oom-score-adj') - argument(s) must be one of the following: no, yes, relative, absolute"
@@ -1218,12 +913,7 @@
     {
       "name": "config_set_unknown_param_error",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "totally-fake-param",
-        "value"
-      ],
+      "argv": ["CONFIG", "SET", "totally-fake-param", "value"],
       "expect": {
         "kind": "error",
         "value": "ERR Unknown option or number of arguments for CONFIG SET - 'totally-fake-param'"
@@ -1232,12 +922,7 @@
     {
       "name": "config_set_maxmemory_negative_error",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory",
-        "-1"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'maxmemory') - argument must be a memory value"
@@ -1246,12 +931,7 @@
     {
       "name": "config_set_acllog_negative_error",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "acllog-max-len",
-        "-5"
-      ],
+      "argv": ["CONFIG", "SET", "acllog-max-len", "-5"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'acllog-max-len') - argument must be between 0 and 9223372036854775807 inclusive"
@@ -1260,12 +940,7 @@
     {
       "name": "config_set_maxmemory_non_integer_error",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory",
-        "abc"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'maxmemory') - argument must be a memory value"
@@ -1274,10 +949,7 @@
     {
       "name": "config_resetstat",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "RESETSTAT"
-      ],
+      "argv": ["CONFIG", "RESETSTAT"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1286,10 +958,7 @@
     {
       "name": "config_rewrite",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "REWRITE"
-      ],
+      "argv": ["CONFIG", "REWRITE"],
       "expect": {
         "kind": "error",
         "value": "ERR The server is running without a config file"
@@ -1298,9 +967,7 @@
     {
       "name": "config_wrong_arity_no_subcommand",
       "now_ms": 0,
-      "argv": [
-        "CONFIG"
-      ],
+      "argv": ["CONFIG"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'config' command"
@@ -1309,10 +976,7 @@
     {
       "name": "config_get_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET"
-      ],
+      "argv": ["CONFIG", "GET"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'config|get' command"
@@ -1321,11 +985,7 @@
     {
       "name": "config_set_wrong_arity_odd",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'config|set' command"
@@ -1334,11 +994,7 @@
     {
       "name": "config_resetstat_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "RESETSTAT",
-        "extra"
-      ],
+      "argv": ["CONFIG", "RESETSTAT", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'config|resetstat' command"
@@ -1347,10 +1003,7 @@
     {
       "name": "config_unknown_subcommand",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "NOSUCH"
-      ],
+      "argv": ["CONFIG", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try CONFIG HELP."
@@ -1359,11 +1012,7 @@
     {
       "name": "config_get_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "get",
-        "MAXMEMORY"
-      ],
+      "argv": ["CONFIG", "get", "MAXMEMORY"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1381,11 +1030,7 @@
     {
       "name": "config_get_encoding_thresholds",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "set-max-intset-entries"
-      ],
+      "argv": ["CONFIG", "GET", "set-max-intset-entries"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1403,11 +1048,7 @@
     {
       "name": "config_get_list_max_listpack_size",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "list-max-listpack-size"
-      ],
+      "argv": ["CONFIG", "GET", "list-max-listpack-size"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1425,11 +1066,7 @@
     {
       "name": "config_get_hash_max_listpack_entries",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "hash-max-listpack-entries"
-      ],
+      "argv": ["CONFIG", "GET", "hash-max-listpack-entries"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1447,11 +1084,7 @@
     {
       "name": "config_get_proto_max_bulk_len",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "proto-max-bulk-len"
-      ],
+      "argv": ["CONFIG", "GET", "proto-max-bulk-len"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1469,11 +1102,7 @@
     {
       "name": "config_get_io_threads",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "io-threads"
-      ],
+      "argv": ["CONFIG", "GET", "io-threads"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1491,11 +1120,7 @@
     {
       "name": "config_get_repl_prefix",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "repl-backlog*"
-      ],
+      "argv": ["CONFIG", "GET", "repl-backlog*"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1521,12 +1146,7 @@
     {
       "name": "config_get_multi_pattern_two_exact",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory",
-        "hz"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory", "hz"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1552,13 +1172,7 @@
     {
       "name": "config_get_multi_pattern_mixed",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "bind",
-        "databases",
-        "port"
-      ],
+      "argv": ["CONFIG", "GET", "bind", "databases", "port"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1592,12 +1206,7 @@
     {
       "name": "config_get_multi_pattern_with_glob",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "bind",
-        "repl-backlog*"
-      ],
+      "argv": ["CONFIG", "GET", "bind", "repl-backlog*"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1631,12 +1240,7 @@
     {
       "name": "config_get_multi_pattern_no_match",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "nosuchparam1",
-        "nosuchparam2"
-      ],
+      "argv": ["CONFIG", "GET", "nosuchparam1", "nosuchparam2"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1645,11 +1249,7 @@
     {
       "name": "config_get_glob_question_mark_hz",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "h?"
-      ],
+      "argv": ["CONFIG", "GET", "h?"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1667,11 +1267,7 @@
     {
       "name": "config_get_glob_question_mark_port",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "por?"
-      ],
+      "argv": ["CONFIG", "GET", "por?"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1689,11 +1285,7 @@
     {
       "name": "config_get_glob_question_mark_no_match",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "hz?"
-      ],
+      "argv": ["CONFIG", "GET", "hz?"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1702,11 +1294,7 @@
     {
       "name": "config_get_glob_char_class_dir",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "di[r]"
-      ],
+      "argv": ["CONFIG", "GET", "di[r]"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1723,11 +1311,7 @@
     {
       "name": "config_get_glob_middle_star",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "repl-*-sync"
-      ],
+      "argv": ["CONFIG", "GET", "repl-*-sync"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1745,12 +1329,7 @@
     {
       "name": "config_set_slowlog_log_slower_than",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "slowlog-log-slower-than",
-        "5000"
-      ],
+      "argv": ["CONFIG", "SET", "slowlog-log-slower-than", "5000"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1759,11 +1338,7 @@
     {
       "name": "config_get_slowlog_log_slower_than_after_set",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "slowlog-log-slower-than"
-      ],
+      "argv": ["CONFIG", "GET", "slowlog-log-slower-than"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1781,12 +1356,7 @@
     {
       "name": "config_set_slowlog_max_len",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "slowlog-max-len",
-        "256"
-      ],
+      "argv": ["CONFIG", "SET", "slowlog-max-len", "256"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1795,11 +1365,7 @@
     {
       "name": "config_get_slowlog_max_len_after_set",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "slowlog-max-len"
-      ],
+      "argv": ["CONFIG", "GET", "slowlog-max-len"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1817,12 +1383,7 @@
     {
       "name": "config_set_slowlog_max_len_negative_error",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "slowlog-max-len",
-        "-1"
-      ],
+      "argv": ["CONFIG", "SET", "slowlog-max-len", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'slowlog-max-len') - argument must be between 0 and 9223372036854775807 inclusive"
@@ -1831,12 +1392,7 @@
     {
       "name": "config_set_maxmemory_large",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory",
-        "1073741824"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory", "1073741824"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1845,11 +1401,7 @@
     {
       "name": "config_get_maxmemory_large_verify",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1867,11 +1419,7 @@
     {
       "name": "config_rewrite_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "REWRITE",
-        "extra"
-      ],
+      "argv": ["CONFIG", "REWRITE", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'config|rewrite' command"
@@ -1880,12 +1428,7 @@
     {
       "name": "config_set_maxmemory_float_error",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory",
-        "1.5"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory", "1.5"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'maxmemory') - argument must be a memory value"
@@ -1894,12 +1437,7 @@
     {
       "name": "config_set_acllog_non_integer_error",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "acllog-max-len",
-        "abc"
-      ],
+      "argv": ["CONFIG", "SET", "acllog-max-len", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'acllog-max-len') - argument couldn't be parsed into an integer"
@@ -1908,11 +1446,7 @@
     {
       "name": "config_subcommand_case_insensitive_get",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "get",
-        "maxmemory"
-      ],
+      "argv": ["CONFIG", "get", "maxmemory"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1930,12 +1464,7 @@
     {
       "name": "config_subcommand_case_insensitive_set",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "set",
-        "maxmemory",
-        "0"
-      ],
+      "argv": ["CONFIG", "set", "maxmemory", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1944,10 +1473,7 @@
     {
       "name": "config_subcommand_case_insensitive_resetstat",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "resetstat"
-      ],
+      "argv": ["CONFIG", "resetstat"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1956,10 +1482,7 @@
     {
       "name": "config_subcommand_case_insensitive_rewrite",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "rewrite"
-      ],
+      "argv": ["CONFIG", "rewrite"],
       "expect": {
         "kind": "error",
         "value": "ERR The server is running without a config file"
@@ -1968,10 +1491,7 @@
     {
       "name": "config_unknown_subcommand_foobar",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "FOOBAR"
-      ],
+      "argv": ["CONFIG", "FOOBAR"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'FOOBAR'. Try CONFIG HELP."
@@ -1980,10 +1500,7 @@
     {
       "name": "config_unknown_subcommand_empty_like",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "NOSUCH"
-      ],
+      "argv": ["CONFIG", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try CONFIG HELP."
@@ -1992,11 +1509,7 @@
     {
       "name": "config_set_wrong_arity_three_values",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "foo"
-      ],
+      "argv": ["CONFIG", "SET", "foo"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'config|set' command"
@@ -2005,11 +1518,7 @@
     {
       "name": "config_get_star_returns_array",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "*memory*"
-      ],
+      "argv": ["CONFIG", "GET", "*memory*"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2075,12 +1584,7 @@
     {
       "name": "config_set_maxmemory_zero",
       "now_ms": 200,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory",
-        "0"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2089,11 +1593,7 @@
     {
       "name": "config_get_maxmemory_after_zero",
       "now_ms": 200,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2111,12 +1611,7 @@
     {
       "name": "config_set_hz_value",
       "now_ms": 200,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "hz",
-        "20"
-      ],
+      "argv": ["CONFIG", "SET", "hz", "20"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2125,11 +1620,7 @@
     {
       "name": "config_get_hz_after_set",
       "now_ms": 200,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "hz"
-      ],
+      "argv": ["CONFIG", "GET", "hz"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2147,12 +1638,7 @@
     {
       "name": "config_set_unknown_param",
       "now_ms": 200,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "totally-made-up-param",
-        "123"
-      ],
+      "argv": ["CONFIG", "SET", "totally-made-up-param", "123"],
       "expect": {
         "kind": "error",
         "value": "ERR Unknown option or number of arguments for CONFIG SET - 'totally-made-up-param'"
@@ -2161,11 +1647,7 @@
     {
       "name": "config_get_save",
       "now_ms": 200,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "save"
-      ],
+      "argv": ["CONFIG", "GET", "save"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2183,11 +1665,7 @@
     {
       "name": "config_get_loglevel",
       "now_ms": 200,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "loglevel"
-      ],
+      "argv": ["CONFIG", "GET", "loglevel"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2205,11 +1683,7 @@
     {
       "name": "config_get_appendonly",
       "now_ms": 200,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "appendonly"
-      ],
+      "argv": ["CONFIG", "GET", "appendonly"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2227,9 +1701,7 @@
     {
       "name": "config_wrong_arity_bare",
       "now_ms": 200,
-      "argv": [
-        "CONFIG"
-      ],
+      "argv": ["CONFIG"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'config' command"
@@ -2238,12 +1710,7 @@
     {
       "name": "config_set_hz_100",
       "now_ms": 300,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "hz",
-        "100"
-      ],
+      "argv": ["CONFIG", "SET", "hz", "100"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2252,11 +1719,7 @@
     {
       "name": "config_get_hz_after_100",
       "now_ms": 300,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "hz"
-      ],
+      "argv": ["CONFIG", "GET", "hz"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2274,12 +1737,7 @@
     {
       "name": "config_set_hz_1_min",
       "now_ms": 300,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "hz",
-        "1"
-      ],
+      "argv": ["CONFIG", "SET", "hz", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2288,11 +1746,7 @@
     {
       "name": "config_get_hz_after_1",
       "now_ms": 300,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "hz"
-      ],
+      "argv": ["CONFIG", "GET", "hz"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2310,12 +1764,7 @@
     {
       "name": "config_set_hz_500_max",
       "now_ms": 300,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "hz",
-        "500"
-      ],
+      "argv": ["CONFIG", "SET", "hz", "500"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2324,11 +1773,7 @@
     {
       "name": "config_get_hz_after_500",
       "now_ms": 300,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "hz"
-      ],
+      "argv": ["CONFIG", "GET", "hz"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2346,12 +1791,7 @@
     {
       "name": "config_set_hz_non_integer",
       "now_ms": 300,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "hz",
-        "abc"
-      ],
+      "argv": ["CONFIG", "SET", "hz", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'hz') - argument couldn't be parsed into an integer"
@@ -2360,12 +1800,7 @@
     {
       "name": "config_set_hz_zero_error",
       "now_ms": 300,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "hz",
-        "0"
-      ],
+      "argv": ["CONFIG", "SET", "hz", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2374,12 +1809,7 @@
     {
       "name": "config_set_hz_negative_error",
       "now_ms": 300,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "hz",
-        "-1"
-      ],
+      "argv": ["CONFIG", "SET", "hz", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'hz') - argument must be between 0 and 2147483647 inclusive"
@@ -2388,12 +1818,7 @@
     {
       "name": "config_set_hz_over_max_error",
       "now_ms": 300,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "hz",
-        "501"
-      ],
+      "argv": ["CONFIG", "SET", "hz", "501"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2402,11 +1827,7 @@
     {
       "name": "config_get_hz_unchanged_after_errors",
       "now_ms": 300,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "hz"
-      ],
+      "argv": ["CONFIG", "GET", "hz"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2424,12 +1845,7 @@
     {
       "name": "config_set_maxmemory_policy_allkeys_lru",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory-policy",
-        "allkeys-lru"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "allkeys-lru"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2438,11 +1854,7 @@
     {
       "name": "config_get_maxmemory_policy_after_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory-policy"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory-policy"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2460,12 +1872,7 @@
     {
       "name": "config_set_loglevel",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "loglevel",
-        "debug"
-      ],
+      "argv": ["CONFIG", "SET", "loglevel", "debug"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2474,11 +1881,7 @@
     {
       "name": "config_get_loglevel_after_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "loglevel"
-      ],
+      "argv": ["CONFIG", "GET", "loglevel"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2496,12 +1899,7 @@
     {
       "name": "config_set_timeout",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "timeout",
-        "300"
-      ],
+      "argv": ["CONFIG", "SET", "timeout", "300"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2510,11 +1908,7 @@
     {
       "name": "config_get_timeout_after_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "timeout"
-      ],
+      "argv": ["CONFIG", "GET", "timeout"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2532,12 +1926,7 @@
     {
       "name": "config_set_tcp_keepalive",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "tcp-keepalive",
-        "60"
-      ],
+      "argv": ["CONFIG", "SET", "tcp-keepalive", "60"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2546,11 +1935,7 @@
     {
       "name": "config_get_tcp_keepalive_after_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "tcp-keepalive"
-      ],
+      "argv": ["CONFIG", "GET", "tcp-keepalive"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2568,12 +1953,7 @@
     {
       "name": "config_set_notify_keyspace_events",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "notify-keyspace-events",
-        "KEA"
-      ],
+      "argv": ["CONFIG", "SET", "notify-keyspace-events", "KEA"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2582,11 +1962,7 @@
     {
       "name": "config_get_notify_keyspace_events_after_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "notify-keyspace-events"
-      ],
+      "argv": ["CONFIG", "GET", "notify-keyspace-events"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2604,12 +1980,7 @@
     {
       "name": "config_set_active_defrag_enabled",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "active-defrag-enabled",
-        "yes"
-      ],
+      "argv": ["CONFIG", "SET", "active-defrag-enabled", "yes"],
       "expect": {
         "kind": "error",
         "value": "ERR Unknown option or number of arguments for CONFIG SET - 'active-defrag-enabled'"
@@ -2618,11 +1989,7 @@
     {
       "name": "config_get_active_defrag_enabled_after_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "active-defrag-enabled"
-      ],
+      "argv": ["CONFIG", "GET", "active-defrag-enabled"],
       "expect": {
         "kind": "array",
         "value": []
@@ -2631,14 +1998,7 @@
     {
       "name": "config_set_multi_params",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "timeout",
-        "30",
-        "protected-mode",
-        "no"
-      ],
+      "argv": ["CONFIG", "SET", "timeout", "30", "protected-mode", "no"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2647,11 +2007,7 @@
     {
       "name": "config_get_timeout_after_multi_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "timeout"
-      ],
+      "argv": ["CONFIG", "GET", "timeout"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2669,11 +2025,7 @@
     {
       "name": "config_get_protected_mode_after_multi_set",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "protected-mode"
-      ],
+      "argv": ["CONFIG", "GET", "protected-mode"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2691,12 +2043,7 @@
     {
       "name": "config_set_unknown_param_error",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "completely-bogus-param",
-        "value"
-      ],
+      "argv": ["CONFIG", "SET", "completely-bogus-param", "value"],
       "expect": {
         "kind": "error",
         "value": "ERR Unknown option or number of arguments for CONFIG SET - 'completely-bogus-param'"
@@ -2705,12 +2052,7 @@
     {
       "name": "config_set_overwrite_previous",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory-policy",
-        "volatile-lfu"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "volatile-lfu"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2719,11 +2061,7 @@
     {
       "name": "config_get_maxmemory_policy_overwritten",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory-policy"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory-policy"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2741,10 +2079,7 @@
     {
       "name": "config_resetstat_ok",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "RESETSTAT"
-      ],
+      "argv": ["CONFIG", "RESETSTAT"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2753,10 +2088,7 @@
     {
       "name": "config_rewrite_ok",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "REWRITE"
-      ],
+      "argv": ["CONFIG", "REWRITE"],
       "expect": {
         "kind": "error",
         "value": "ERR The server is running without a config file"
@@ -2765,10 +2097,7 @@
     {
       "name": "config_unknown_subcommand",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "BOGUS"
-      ],
+      "argv": ["CONFIG", "BOGUS"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'BOGUS'. Try CONFIG HELP."
@@ -2777,12 +2106,7 @@
     {
       "name": "config_reset_maxmemory_policy_for_test",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory-policy",
-        "noeviction"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "noeviction"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2791,11 +2115,7 @@
     {
       "name": "config_get_maxmemory_policy_noeviction",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory-policy"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory-policy"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2813,12 +2133,7 @@
     {
       "name": "config_set_maxmemory_policy_allkeys_lru",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory-policy",
-        "allkeys-lru"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "allkeys-lru"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2827,11 +2142,7 @@
     {
       "name": "config_get_maxmemory_policy_allkeys_lru",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory-policy"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory-policy"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2849,12 +2160,7 @@
     {
       "name": "config_set_maxmemory_policy_volatile_ttl",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory-policy",
-        "volatile-ttl"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "volatile-ttl"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2863,11 +2169,7 @@
     {
       "name": "config_get_maxmemory_policy_volatile_ttl",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory-policy"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory-policy"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2885,12 +2187,7 @@
     {
       "name": "config_set_maxmemory_policy_invalid",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory-policy",
-        "bogus-policy"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "bogus-policy"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'maxmemory-policy') - argument(s) must be one of the following: volatile-lru, volatile-lfu, volatile-random, volatile-ttl, allkeys-lru, allkeys-lfu, allkeys-random, noeviction"
@@ -2899,12 +2196,7 @@
     {
       "name": "config_set_maxmemory_policy_noeviction_restore",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory-policy",
-        "noeviction"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "noeviction"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2913,11 +2205,7 @@
     {
       "name": "oom_setup_seed_data",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "oom_seed",
-        "this-is-some-data-to-consume-memory"
-      ],
+      "argv": ["SET", "oom_seed", "this-is-some-data-to-consume-memory"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2926,12 +2214,7 @@
     {
       "name": "oom_setup_maxmemory_tiny",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory",
-        "1"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2940,11 +2223,7 @@
     {
       "name": "oom_write_rejected_noeviction",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "oom_test",
-        "value"
-      ],
+      "argv": ["SET", "oom_test", "value"],
       "expect": {
         "kind": "error",
         "value": "OOM command not allowed when used memory > 'maxmemory'."
@@ -2961,10 +2240,7 @@
     {
       "name": "oom_read_allowed_noeviction",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "oom_test"
-      ],
+      "argv": ["GET", "oom_test"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2973,12 +2249,7 @@
     {
       "name": "oom_switch_to_allkeys_lru",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory-policy",
-        "allkeys-lru"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "allkeys-lru"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2987,11 +2258,7 @@
     {
       "name": "oom_write_succeeds_with_eviction",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "oom_test",
-        "value"
-      ],
+      "argv": ["SET", "oom_test", "value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3000,12 +2267,7 @@
     {
       "name": "oom_cleanup_maxmemory_off",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory",
-        "0"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3014,12 +2276,7 @@
     {
       "name": "oom_cleanup_policy_off",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory-policy",
-        "noeviction"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "noeviction"],
       "expect": {
         "kind": "simple",
         "value": "OK"

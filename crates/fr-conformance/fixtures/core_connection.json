@@ -4,9 +4,7 @@
     {
       "name": "ping_no_args_returns_pong",
       "now_ms": 0,
-      "argv": [
-        "PING"
-      ],
+      "argv": ["PING"],
       "expect": {
         "kind": "simple",
         "value": "PONG"
@@ -15,10 +13,7 @@
     {
       "name": "ping_with_message",
       "now_ms": 1,
-      "argv": [
-        "PING",
-        "hello"
-      ],
+      "argv": ["PING", "hello"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -27,11 +22,7 @@
     {
       "name": "ping_wrong_arity",
       "now_ms": 2,
-      "argv": [
-        "PING",
-        "a",
-        "b"
-      ],
+      "argv": ["PING", "a", "b"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'ping' command"
@@ -40,10 +31,7 @@
     {
       "name": "echo_returns_argument",
       "now_ms": 3,
-      "argv": [
-        "ECHO",
-        "test message"
-      ],
+      "argv": ["ECHO", "test message"],
       "expect": {
         "kind": "bulk",
         "value": "test message"
@@ -52,9 +40,7 @@
     {
       "name": "echo_wrong_arity_no_args",
       "now_ms": 4,
-      "argv": [
-        "ECHO"
-      ],
+      "argv": ["ECHO"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'echo' command"
@@ -63,11 +49,7 @@
     {
       "name": "echo_wrong_arity_too_many",
       "now_ms": 5,
-      "argv": [
-        "ECHO",
-        "a",
-        "b"
-      ],
+      "argv": ["ECHO", "a", "b"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'echo' command"
@@ -76,10 +58,7 @@
     {
       "name": "select_db0_ok",
       "now_ms": 10,
-      "argv": [
-        "SELECT",
-        "0"
-      ],
+      "argv": ["SELECT", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -88,10 +67,7 @@
     {
       "name": "select_db1_ok",
       "now_ms": 11,
-      "argv": [
-        "SELECT",
-        "1"
-      ],
+      "argv": ["SELECT", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -100,9 +76,7 @@
     {
       "name": "select_wrong_arity",
       "now_ms": 12,
-      "argv": [
-        "SELECT"
-      ],
+      "argv": ["SELECT"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'select' command"
@@ -111,10 +85,7 @@
     {
       "name": "select_invalid_db",
       "now_ms": 13,
-      "argv": [
-        "SELECT",
-        "notanumber"
-      ],
+      "argv": ["SELECT", "notanumber"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -123,10 +94,7 @@
     {
       "name": "select_noncanonical_plus",
       "now_ms": 14,
-      "argv": [
-        "SELECT",
-        "+1"
-      ],
+      "argv": ["SELECT", "+1"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -135,10 +103,7 @@
     {
       "name": "select_noncanonical_leading_zero",
       "now_ms": 15,
-      "argv": [
-        "SELECT",
-        "01"
-      ],
+      "argv": ["SELECT", "01"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -147,10 +112,7 @@
     {
       "name": "select_db15_ok",
       "now_ms": 16,
-      "argv": [
-        "SELECT",
-        "15"
-      ],
+      "argv": ["SELECT", "15"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -159,10 +121,7 @@
     {
       "name": "select_db0_after_db15",
       "now_ms": 17,
-      "argv": [
-        "SELECT",
-        "0"
-      ],
+      "argv": ["SELECT", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -171,9 +130,7 @@
     {
       "name": "dbsize_empty_returns_0",
       "now_ms": 20,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -182,11 +139,7 @@
     {
       "name": "set_for_dbsize_test",
       "now_ms": 21,
-      "argv": [
-        "SET",
-        "key1",
-        "val1"
-      ],
+      "argv": ["SET", "key1", "val1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -195,11 +148,7 @@
     {
       "name": "set_for_dbsize_test_2",
       "now_ms": 22,
-      "argv": [
-        "SET",
-        "key2",
-        "val2"
-      ],
+      "argv": ["SET", "key2", "val2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -208,9 +157,7 @@
     {
       "name": "dbsize_returns_2",
       "now_ms": 23,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -219,10 +166,7 @@
     {
       "name": "dbsize_wrong_arity",
       "now_ms": 24,
-      "argv": [
-        "DBSIZE",
-        "extra"
-      ],
+      "argv": ["DBSIZE", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'dbsize' command"
@@ -231,9 +175,7 @@
     {
       "name": "flushdb_returns_ok",
       "now_ms": 30,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -242,9 +184,7 @@
     {
       "name": "dbsize_after_flush_returns_0",
       "now_ms": 31,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -253,10 +193,7 @@
     {
       "name": "get_after_flush_returns_nil",
       "now_ms": 32,
-      "argv": [
-        "GET",
-        "key1"
-      ],
+      "argv": ["GET", "key1"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -265,9 +202,7 @@
     {
       "name": "time_returns_array",
       "now_ms": 5000,
-      "argv": [
-        "TIME"
-      ],
+      "argv": ["TIME"],
       "expect": {
         "kind": "array",
         "value": [
@@ -285,9 +220,7 @@
     {
       "name": "time_with_millis",
       "now_ms": 12345,
-      "argv": [
-        "TIME"
-      ],
+      "argv": ["TIME"],
       "expect": {
         "kind": "array",
         "value": [
@@ -305,10 +238,7 @@
     {
       "name": "time_wrong_arity",
       "now_ms": 50,
-      "argv": [
-        "TIME",
-        "extra"
-      ],
+      "argv": ["TIME", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'time' command"
@@ -317,9 +247,7 @@
     {
       "name": "unknown_command_error",
       "now_ms": 60,
-      "argv": [
-        "NOTAREALCOMMAND"
-      ],
+      "argv": ["NOTAREALCOMMAND"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown command 'NOTAREALCOMMAND', with args beginning with: "
@@ -328,11 +256,7 @@
     {
       "name": "unknown_command_with_args",
       "now_ms": 61,
-      "argv": [
-        "FAKECMD",
-        "arg1",
-        "arg2"
-      ],
+      "argv": ["FAKECMD", "arg1", "arg2"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown command 'FAKECMD', with args beginning with: 'arg1' 'arg2' "
@@ -341,11 +265,7 @@
     {
       "name": "set_after_flush_for_randomkey",
       "now_ms": 70,
-      "argv": [
-        "SET",
-        "onlykey",
-        "val"
-      ],
+      "argv": ["SET", "onlykey", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -354,9 +274,7 @@
     {
       "name": "randomkey_returns_existing_key",
       "now_ms": 71,
-      "argv": [
-        "RANDOMKEY"
-      ],
+      "argv": ["RANDOMKEY"],
       "expect": {
         "kind": "bulk",
         "value": "onlykey"
@@ -365,10 +283,7 @@
     {
       "name": "del_only_key",
       "now_ms": 72,
-      "argv": [
-        "DEL",
-        "onlykey"
-      ],
+      "argv": ["DEL", "onlykey"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -377,9 +292,7 @@
     {
       "name": "randomkey_empty_returns_nil",
       "now_ms": 73,
-      "argv": [
-        "RANDOMKEY"
-      ],
+      "argv": ["RANDOMKEY"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -388,10 +301,7 @@
     {
       "name": "flushdb_with_async_arg",
       "now_ms": 80,
-      "argv": [
-        "FLUSHDB",
-        "ASYNC"
-      ],
+      "argv": ["FLUSHDB", "ASYNC"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -400,11 +310,7 @@
     {
       "name": "flushdb_wrong_arity",
       "now_ms": 81,
-      "argv": [
-        "FLUSHDB",
-        "ASYNC",
-        "extra"
-      ],
+      "argv": ["FLUSHDB", "ASYNC", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -413,10 +319,7 @@
     {
       "name": "hello_resp2",
       "now_ms": 100,
-      "argv": [
-        "HELLO",
-        "2"
-      ],
+      "argv": ["HELLO", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -481,10 +384,7 @@
     {
       "name": "hello_resp3",
       "now_ms": 101,
-      "argv": [
-        "HELLO",
-        "3"
-      ],
+      "argv": ["HELLO", "3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -549,10 +449,7 @@
     {
       "name": "hello_unsupported_version",
       "now_ms": 102,
-      "argv": [
-        "HELLO",
-        "4"
-      ],
+      "argv": ["HELLO", "4"],
       "expect": {
         "kind": "error",
         "value": "NOPROTO unsupported protocol version"
@@ -561,10 +458,7 @@
     {
       "name": "hello_version_1_unsupported",
       "now_ms": 103,
-      "argv": [
-        "HELLO",
-        "1"
-      ],
+      "argv": ["HELLO", "1"],
       "expect": {
         "kind": "error",
         "value": "NOPROTO unsupported protocol version"
@@ -573,10 +467,7 @@
     {
       "name": "hello_reset_to_2",
       "now_ms": 103,
-      "argv": [
-        "HELLO",
-        "2"
-      ],
+      "argv": ["HELLO", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -641,9 +532,7 @@
     {
       "name": "hello_no_version_returns_info",
       "now_ms": 104,
-      "argv": [
-        "HELLO"
-      ],
+      "argv": ["HELLO"],
       "expect": {
         "kind": "array",
         "value": [
@@ -708,9 +597,7 @@
     {
       "name": "quit_returns_ok",
       "now_ms": 110,
-      "argv": [
-        "QUIT"
-      ],
+      "argv": ["QUIT"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -719,9 +606,7 @@
     {
       "name": "readonly_reports_cluster_disabled",
       "now_ms": 120,
-      "argv": [
-        "READONLY"
-      ],
+      "argv": ["READONLY"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -730,9 +615,7 @@
     {
       "name": "readwrite_reports_cluster_disabled",
       "now_ms": 121,
-      "argv": [
-        "READWRITE"
-      ],
+      "argv": ["READWRITE"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -741,10 +624,7 @@
     {
       "name": "select_negative_db",
       "now_ms": 130,
-      "argv": [
-        "SELECT",
-        "-1"
-      ],
+      "argv": ["SELECT", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR DB index is out of range"
@@ -753,10 +633,7 @@
     {
       "name": "select_large_db",
       "now_ms": 131,
-      "argv": [
-        "SELECT",
-        "16"
-      ],
+      "argv": ["SELECT", "16"],
       "expect": {
         "kind": "error",
         "value": "ERR DB index is out of range"
@@ -765,9 +642,7 @@
     {
       "name": "flushall_returns_ok",
       "now_ms": 140,
-      "argv": [
-        "FLUSHALL"
-      ],
+      "argv": ["FLUSHALL"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -776,10 +651,7 @@
     {
       "name": "flushall_async_returns_ok",
       "now_ms": 141,
-      "argv": [
-        "FLUSHALL",
-        "ASYNC"
-      ],
+      "argv": ["FLUSHALL", "ASYNC"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -788,11 +660,7 @@
     {
       "name": "flushall_setup_key",
       "now_ms": 142,
-      "argv": [
-        "SET",
-        "flushtest",
-        "value"
-      ],
+      "argv": ["SET", "flushtest", "value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -801,10 +669,7 @@
     {
       "name": "flushall_verify_setup",
       "now_ms": 143,
-      "argv": [
-        "GET",
-        "flushtest"
-      ],
+      "argv": ["GET", "flushtest"],
       "expect": {
         "kind": "bulk",
         "value": "value"
@@ -813,9 +678,7 @@
     {
       "name": "flushall_clears_data",
       "now_ms": 144,
-      "argv": [
-        "FLUSHALL"
-      ],
+      "argv": ["FLUSHALL"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -824,10 +687,7 @@
     {
       "name": "flushall_verify_cleared",
       "now_ms": 145,
-      "argv": [
-        "GET",
-        "flushtest"
-      ],
+      "argv": ["GET", "flushtest"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -836,9 +696,7 @@
     {
       "name": "dbsize_after_flushall",
       "now_ms": 146,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -847,11 +705,7 @@
     {
       "name": "flushall_wrong_arity",
       "now_ms": 147,
-      "argv": [
-        "FLUSHALL",
-        "ASYNC",
-        "extra"
-      ],
+      "argv": ["FLUSHALL", "ASYNC", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -860,10 +714,7 @@
     {
       "name": "flushall_sync_arg",
       "now_ms": 148,
-      "argv": [
-        "FLUSHALL",
-        "SYNC"
-      ],
+      "argv": ["FLUSHALL", "SYNC"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -872,9 +723,7 @@
     {
       "name": "time_large_millis",
       "now_ms": 1678901234567,
-      "argv": [
-        "TIME"
-      ],
+      "argv": ["TIME"],
       "expect": {
         "kind": "array",
         "value": [
@@ -892,10 +741,7 @@
     {
       "name": "randomkey_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "RANDOMKEY",
-        "extra"
-      ],
+      "argv": ["RANDOMKEY", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'randomkey' command"
@@ -904,10 +750,7 @@
     {
       "name": "echo_binary_safe",
       "now_ms": 210,
-      "argv": [
-        "ECHO",
-        "hello world 123!@#"
-      ],
+      "argv": ["ECHO", "hello world 123!@#"],
       "expect": {
         "kind": "bulk",
         "value": "hello world 123!@#"
@@ -916,10 +759,7 @@
     {
       "name": "ping_binary_message",
       "now_ms": 220,
-      "argv": [
-        "PING",
-        "test 123"
-      ],
+      "argv": ["PING", "test 123"],
       "expect": {
         "kind": "bulk",
         "value": "test 123"
@@ -928,11 +768,7 @@
     {
       "name": "swapdb_0_0_ok",
       "now_ms": 300,
-      "argv": [
-        "SWAPDB",
-        "0",
-        "0"
-      ],
+      "argv": ["SWAPDB", "0", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -941,11 +777,7 @@
     {
       "name": "swapdb_nonzero_ok",
       "now_ms": 301,
-      "argv": [
-        "SWAPDB",
-        "0",
-        "1"
-      ],
+      "argv": ["SWAPDB", "0", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -954,9 +786,7 @@
     {
       "name": "swapdb_wrong_arity",
       "now_ms": 302,
-      "argv": [
-        "SWAPDB"
-      ],
+      "argv": ["SWAPDB"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'swapdb' command"
@@ -966,11 +796,7 @@
       "name": "swapdb_non_integer",
       "now_ms": 303,
       "comment": "Upstream db.c::swapdbCommand emits a bespoke 'invalid first DB index' wording for unparseable argv[1], not the generic integer-range error used by GETSET/INCRBY/etc. Verified vs vendored Redis 7.2.4. (frankenredis-uoe58)",
-      "argv": [
-        "SWAPDB",
-        "abc",
-        "0"
-      ],
+      "argv": ["SWAPDB", "abc", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid first DB index"
@@ -979,11 +805,7 @@
     {
       "name": "select_too_many_args",
       "now_ms": 310,
-      "argv": [
-        "SELECT",
-        "0",
-        "extra"
-      ],
+      "argv": ["SELECT", "0", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'select' command"
@@ -992,10 +814,7 @@
     {
       "name": "echo_empty_string",
       "now_ms": 320,
-      "argv": [
-        "ECHO",
-        ""
-      ],
+      "argv": ["ECHO", ""],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -1004,10 +823,7 @@
     {
       "name": "flushdb_sync_arg",
       "now_ms": 330,
-      "argv": [
-        "FLUSHDB",
-        "SYNC"
-      ],
+      "argv": ["FLUSHDB", "SYNC"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1016,11 +832,7 @@
     {
       "name": "setup_for_flushdb_verify",
       "now_ms": 340,
-      "argv": [
-        "SET",
-        "ftest1",
-        "v1"
-      ],
+      "argv": ["SET", "ftest1", "v1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1029,11 +841,7 @@
     {
       "name": "setup_for_flushdb_verify_2",
       "now_ms": 340,
-      "argv": [
-        "SET",
-        "ftest2",
-        "v2"
-      ],
+      "argv": ["SET", "ftest2", "v2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1042,9 +850,7 @@
     {
       "name": "dbsize_before_flush",
       "now_ms": 341,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1053,9 +859,7 @@
     {
       "name": "flushdb_clears_all",
       "now_ms": 342,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1064,9 +868,7 @@
     {
       "name": "dbsize_after_flush_is_0",
       "now_ms": 343,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1075,9 +877,7 @@
     {
       "name": "unknown_command_empty_args",
       "now_ms": 350,
-      "argv": [
-        "XYZCOMMAND"
-      ],
+      "argv": ["XYZCOMMAND"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown command 'XYZCOMMAND', with args beginning with: "
@@ -1086,10 +886,7 @@
     {
       "name": "hello_wrong_type_version",
       "now_ms": 360,
-      "argv": [
-        "HELLO",
-        "abc"
-      ],
+      "argv": ["HELLO", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR Protocol version is not an integer or out of range"
@@ -1098,10 +895,7 @@
     {
       "name": "hello_version_0_unsupported",
       "now_ms": 361,
-      "argv": [
-        "HELLO",
-        "0"
-      ],
+      "argv": ["HELLO", "0"],
       "expect": {
         "kind": "error",
         "value": "NOPROTO unsupported protocol version"
@@ -1110,10 +904,7 @@
     {
       "name": "readonly_wrong_arity",
       "now_ms": 380,
-      "argv": [
-        "READONLY",
-        "extra"
-      ],
+      "argv": ["READONLY", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'readonly' command"
@@ -1122,10 +913,7 @@
     {
       "name": "readwrite_wrong_arity",
       "now_ms": 381,
-      "argv": [
-        "READWRITE",
-        "extra"
-      ],
+      "argv": ["READWRITE", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'readwrite' command"
@@ -1134,10 +922,7 @@
     {
       "name": "ping_with_custom_message",
       "now_ms": 100,
-      "argv": [
-        "PING",
-        "hello world"
-      ],
+      "argv": ["PING", "hello world"],
       "expect": {
         "kind": "bulk",
         "value": "hello world"
@@ -1146,9 +931,7 @@
     {
       "name": "reset_returns_reset",
       "now_ms": 100,
-      "argv": [
-        "RESET"
-      ],
+      "argv": ["RESET"],
       "expect": {
         "kind": "simple",
         "value": "RESET"
@@ -1157,10 +940,7 @@
     {
       "name": "select_db_negative",
       "now_ms": 100,
-      "argv": [
-        "SELECT",
-        "-1"
-      ],
+      "argv": ["SELECT", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR DB index is out of range"
@@ -1169,10 +949,7 @@
     {
       "name": "select_db_very_large",
       "now_ms": 100,
-      "argv": [
-        "SELECT",
-        "100"
-      ],
+      "argv": ["SELECT", "100"],
       "expect": {
         "kind": "error",
         "value": "ERR DB index is out of range"
@@ -1181,10 +958,7 @@
     {
       "name": "select_db_non_integer",
       "now_ms": 100,
-      "argv": [
-        "SELECT",
-        "abc"
-      ],
+      "argv": ["SELECT", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1193,10 +967,7 @@
     {
       "name": "auth_no_password_configured",
       "now_ms": 100,
-      "argv": [
-        "AUTH",
-        "somepass"
-      ],
+      "argv": ["AUTH", "somepass"],
       "expect": {
         "kind": "error",
         "value": "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?"
@@ -1205,9 +976,7 @@
     {
       "name": "flushall_ok",
       "now_ms": 100,
-      "argv": [
-        "FLUSHALL"
-      ],
+      "argv": ["FLUSHALL"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1216,10 +985,7 @@
     {
       "name": "echo_empty_string_returns_empty",
       "now_ms": 100,
-      "argv": [
-        "ECHO",
-        ""
-      ],
+      "argv": ["ECHO", ""],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -1228,9 +994,7 @@
     {
       "name": "dbsize_after_flushall",
       "now_ms": 100,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1239,10 +1003,7 @@
     {
       "name": "command_count_returns_integer",
       "now_ms": 100,
-      "argv": [
-        "COMMAND",
-        "COUNT"
-      ],
+      "argv": ["COMMAND", "COUNT"],
       "expect": {
         "kind": "any_integer"
       }
@@ -1250,11 +1011,7 @@
     {
       "name": "command_info_get",
       "now_ms": 100,
-      "argv": [
-        "COMMAND",
-        "INFO",
-        "GET"
-      ],
+      "argv": ["COMMAND", "INFO", "GET"],
       "expect": {
         "kind": "any_array"
       }
@@ -1262,11 +1019,7 @@
     {
       "name": "command_info_nonexistent",
       "now_ms": 100,
-      "argv": [
-        "COMMAND",
-        "INFO",
-        "NOSUCHCOMMAND"
-      ],
+      "argv": ["COMMAND", "INFO", "NOSUCHCOMMAND"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1280,10 +1033,7 @@
     {
       "name": "command_docs_returns_array",
       "now_ms": 100,
-      "argv": [
-        "COMMAND",
-        "DOCS"
-      ],
+      "argv": ["COMMAND", "DOCS"],
       "expect": {
         "kind": "any_array"
       }
@@ -1291,10 +1041,7 @@
     {
       "name": "command_unknown_subcommand",
       "now_ms": 100,
-      "argv": [
-        "COMMAND",
-        "NOSUCH"
-      ],
+      "argv": ["COMMAND", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try COMMAND HELP."
@@ -1303,11 +1050,7 @@
     {
       "name": "debug_sleep_returns_ok",
       "now_ms": 100,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "0"
-      ],
+      "argv": ["DEBUG", "SLEEP", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1316,11 +1059,7 @@
     {
       "name": "debug_set_active_expire_ok",
       "now_ms": 100,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "0"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1329,11 +1068,7 @@
     {
       "name": "debug_object_ok",
       "now_ms": 100,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "somekey"
-      ],
+      "argv": ["DEBUG", "OBJECT", "somekey"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -1342,10 +1077,7 @@
     {
       "name": "debug_unknown_subcommand",
       "now_ms": 100,
-      "argv": [
-        "DEBUG",
-        "NOSUCH"
-      ],
+      "argv": ["DEBUG", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'NOSUCH'. Try DEBUG HELP."
@@ -1354,9 +1086,7 @@
     {
       "name": "debug_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "DEBUG"
-      ],
+      "argv": ["DEBUG"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'debug' command"
@@ -1365,9 +1095,7 @@
     {
       "name": "lolwut_returns_string",
       "now_ms": 100,
-      "argv": [
-        "LOLWUT"
-      ],
+      "argv": ["LOLWUT"],
       "expect": {
         "kind": "bulk",
         "value": "Redis ver. 7.2.4\n"
@@ -1376,11 +1104,7 @@
     {
       "name": "lolwut_with_version",
       "now_ms": 100,
-      "argv": [
-        "LOLWUT",
-        "VERSION",
-        "6"
-      ],
+      "argv": ["LOLWUT", "VERSION", "6"],
       "expect": {
         "kind": "bulk",
         "value": "Redis ver. 7.2.4\n"
@@ -1389,11 +1113,7 @@
     {
       "name": "move_same_db_errors_even_when_key_is_missing",
       "now_ms": 100,
-      "argv": [
-        "MOVE",
-        "key",
-        "0"
-      ],
+      "argv": ["MOVE", "key", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR source and destination objects are the same"
@@ -1402,11 +1122,7 @@
     {
       "name": "move_other_db_error",
       "now_ms": 100,
-      "argv": [
-        "MOVE",
-        "key",
-        "1"
-      ],
+      "argv": ["MOVE", "key", "1"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1415,10 +1131,7 @@
     {
       "name": "move_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "MOVE",
-        "key"
-      ],
+      "argv": ["MOVE", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'move' command"
@@ -1427,10 +1140,7 @@
     {
       "name": "object_help_returns_array",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "HELP"
-      ],
+      "argv": ["OBJECT", "HELP"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1500,11 +1210,7 @@
     {
       "name": "object_unknown_subcommand",
       "now_ms": 100,
-      "argv": [
-        "OBJECT",
-        "NOSUCH",
-        "key"
-      ],
+      "argv": ["OBJECT", "NOSUCH", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try OBJECT HELP."
@@ -1513,9 +1219,7 @@
     {
       "name": "object_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "OBJECT"
-      ],
+      "argv": ["OBJECT"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'object' command"
@@ -1524,10 +1228,7 @@
     {
       "name": "latency_latest_empty",
       "now_ms": 100,
-      "argv": [
-        "LATENCY",
-        "LATEST"
-      ],
+      "argv": ["LATENCY", "LATEST"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1536,11 +1237,7 @@
     {
       "name": "latency_history_empty",
       "now_ms": 100,
-      "argv": [
-        "LATENCY",
-        "HISTORY",
-        "event"
-      ],
+      "argv": ["LATENCY", "HISTORY", "event"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1549,10 +1246,7 @@
     {
       "name": "latency_reset_ok",
       "now_ms": 100,
-      "argv": [
-        "LATENCY",
-        "RESET"
-      ],
+      "argv": ["LATENCY", "RESET"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1561,10 +1255,7 @@
     {
       "name": "touch_nonexistent_returns_0",
       "now_ms": 100,
-      "argv": [
-        "TOUCH",
-        "nonexistent"
-      ],
+      "argv": ["TOUCH", "nonexistent"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1573,11 +1264,7 @@
     {
       "name": "touch_setup",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "touch_key",
-        "val"
-      ],
+      "argv": ["SET", "touch_key", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1586,10 +1273,7 @@
     {
       "name": "touch_existing_returns_1",
       "now_ms": 100,
-      "argv": [
-        "TOUCH",
-        "touch_key"
-      ],
+      "argv": ["TOUCH", "touch_key"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1598,12 +1282,7 @@
     {
       "name": "touch_multiple_keys",
       "now_ms": 100,
-      "argv": [
-        "TOUCH",
-        "touch_key",
-        "nonexistent",
-        "touch_key"
-      ],
+      "argv": ["TOUCH", "touch_key", "nonexistent", "touch_key"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1612,10 +1291,7 @@
     {
       "name": "unlink_is_del",
       "now_ms": 100,
-      "argv": [
-        "UNLINK",
-        "touch_key"
-      ],
+      "argv": ["UNLINK", "touch_key"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1624,10 +1300,7 @@
     {
       "name": "unlink_verify_deleted",
       "now_ms": 100,
-      "argv": [
-        "EXISTS",
-        "touch_key"
-      ],
+      "argv": ["EXISTS", "touch_key"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1636,9 +1309,7 @@
     {
       "name": "dbsize_setup_flush",
       "now_ms": 500,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1647,9 +1318,7 @@
     {
       "name": "dbsize_empty_after_flush",
       "now_ms": 500,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1658,11 +1327,7 @@
     {
       "name": "dbsize_setup_string",
       "now_ms": 500,
-      "argv": [
-        "SET",
-        "dbsize_str",
-        "val"
-      ],
+      "argv": ["SET", "dbsize_str", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1671,12 +1336,7 @@
     {
       "name": "dbsize_setup_hash",
       "now_ms": 500,
-      "argv": [
-        "HSET",
-        "dbsize_hash",
-        "f1",
-        "v1"
-      ],
+      "argv": ["HSET", "dbsize_hash", "f1", "v1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1685,11 +1345,7 @@
     {
       "name": "dbsize_setup_list",
       "now_ms": 500,
-      "argv": [
-        "RPUSH",
-        "dbsize_list",
-        "a"
-      ],
+      "argv": ["RPUSH", "dbsize_list", "a"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1698,11 +1354,7 @@
     {
       "name": "dbsize_setup_set",
       "now_ms": 500,
-      "argv": [
-        "SADD",
-        "dbsize_set",
-        "m1"
-      ],
+      "argv": ["SADD", "dbsize_set", "m1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1711,12 +1363,7 @@
     {
       "name": "dbsize_setup_zset",
       "now_ms": 500,
-      "argv": [
-        "ZADD",
-        "dbsize_zset",
-        "1",
-        "m1"
-      ],
+      "argv": ["ZADD", "dbsize_zset", "1", "m1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1725,9 +1372,7 @@
     {
       "name": "dbsize_counts_all_types",
       "now_ms": 500,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -1736,10 +1381,7 @@
     {
       "name": "dbsize_after_del_one",
       "now_ms": 500,
-      "argv": [
-        "DEL",
-        "dbsize_str"
-      ],
+      "argv": ["DEL", "dbsize_str"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1748,9 +1390,7 @@
     {
       "name": "dbsize_after_del_is_4",
       "now_ms": 500,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -1759,9 +1399,7 @@
     {
       "name": "randomkey_setup_flush",
       "now_ms": 600,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1770,11 +1408,7 @@
     {
       "name": "randomkey_setup_single_key",
       "now_ms": 600,
-      "argv": [
-        "SET",
-        "thekey",
-        "val"
-      ],
+      "argv": ["SET", "thekey", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1783,9 +1417,7 @@
     {
       "name": "randomkey_returns_thekey",
       "now_ms": 600,
-      "argv": [
-        "RANDOMKEY"
-      ],
+      "argv": ["RANDOMKEY"],
       "expect": {
         "kind": "bulk",
         "value": "thekey"
@@ -1794,10 +1426,7 @@
     {
       "name": "object_help_returns_array",
       "now_ms": 700,
-      "argv": [
-        "OBJECT",
-        "HELP"
-      ],
+      "argv": ["OBJECT", "HELP"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1867,11 +1496,7 @@
     {
       "name": "object_encoding_string",
       "now_ms": 700,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "thekey"
-      ],
+      "argv": ["OBJECT", "ENCODING", "thekey"],
       "expect": {
         "kind": "bulk",
         "value": "embstr"
@@ -1880,11 +1505,7 @@
     {
       "name": "object_encoding_int",
       "now_ms": 700,
-      "argv": [
-        "SET",
-        "intkey",
-        "12345"
-      ],
+      "argv": ["SET", "intkey", "12345"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1893,11 +1514,7 @@
     {
       "name": "object_encoding_int_verify",
       "now_ms": 700,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "intkey"
-      ],
+      "argv": ["OBJECT", "ENCODING", "intkey"],
       "expect": {
         "kind": "bulk",
         "value": "int"
@@ -1906,11 +1523,7 @@
     {
       "name": "object_refcount_always_1",
       "now_ms": 700,
-      "argv": [
-        "OBJECT",
-        "REFCOUNT",
-        "thekey"
-      ],
+      "argv": ["OBJECT", "REFCOUNT", "thekey"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1919,11 +1532,7 @@
     {
       "name": "object_idletime_zero",
       "now_ms": 700,
-      "argv": [
-        "OBJECT",
-        "IDLETIME",
-        "thekey"
-      ],
+      "argv": ["OBJECT", "IDLETIME", "thekey"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1932,11 +1541,7 @@
     {
       "name": "object_freq_zero",
       "now_ms": 700,
-      "argv": [
-        "OBJECT",
-        "FREQ",
-        "thekey"
-      ],
+      "argv": ["OBJECT", "FREQ", "thekey"],
       "expect": {
         "kind": "error",
         "value": "ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust."
@@ -1945,11 +1550,7 @@
     {
       "name": "object_encoding_nonexistent",
       "now_ms": 700,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "nosuchkey"
-      ],
+      "argv": ["OBJECT", "ENCODING", "nosuchkey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1958,11 +1559,7 @@
     {
       "name": "object_unknown_subcommand",
       "now_ms": 700,
-      "argv": [
-        "OBJECT",
-        "NOPE",
-        "key"
-      ],
+      "argv": ["OBJECT", "NOPE", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOPE'. Try OBJECT HELP."
@@ -1971,10 +1568,7 @@
     {
       "name": "command_count_returns_integer",
       "now_ms": 800,
-      "argv": [
-        "COMMAND",
-        "COUNT"
-      ],
+      "argv": ["COMMAND", "COUNT"],
       "expect": {
         "kind": "any_integer"
       }
@@ -1982,11 +1576,7 @@
     {
       "name": "command_docs_unknown",
       "now_ms": 800,
-      "argv": [
-        "COMMAND",
-        "DOCS",
-        "NOSUCHCOMMAND"
-      ],
+      "argv": ["COMMAND", "DOCS", "NOSUCHCOMMAND"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1995,11 +1585,7 @@
     {
       "name": "debug_set_active_expire",
       "now_ms": 800,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "1"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2008,11 +1594,7 @@
     {
       "name": "debug_sleep_zero",
       "now_ms": 800,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "0"
-      ],
+      "argv": ["DEBUG", "SLEEP", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2021,10 +1603,7 @@
     {
       "name": "debug_jmap",
       "now_ms": 800,
-      "argv": [
-        "DEBUG",
-        "JMAP"
-      ],
+      "argv": ["DEBUG", "JMAP"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
@@ -2033,10 +1612,7 @@
     {
       "name": "debug_reload",
       "now_ms": 800,
-      "argv": [
-        "DEBUG",
-        "RELOAD"
-      ],
+      "argv": ["DEBUG", "RELOAD"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2045,10 +1621,7 @@
     {
       "name": "swapdb_stateful_select_db0",
       "now_ms": 850,
-      "argv": [
-        "SELECT",
-        "0"
-      ],
+      "argv": ["SELECT", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2057,11 +1630,7 @@
     {
       "name": "swapdb_stateful_seed_db0",
       "now_ms": 851,
-      "argv": [
-        "SET",
-        "swapdb_stateful_key",
-        "db0"
-      ],
+      "argv": ["SET", "swapdb_stateful_key", "db0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2070,10 +1639,7 @@
     {
       "name": "swapdb_stateful_select_db1",
       "now_ms": 852,
-      "argv": [
-        "SELECT",
-        "1"
-      ],
+      "argv": ["SELECT", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2082,11 +1648,7 @@
     {
       "name": "swapdb_stateful_seed_db1",
       "now_ms": 853,
-      "argv": [
-        "SET",
-        "swapdb_stateful_key",
-        "db1"
-      ],
+      "argv": ["SET", "swapdb_stateful_key", "db1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2095,11 +1657,7 @@
     {
       "name": "swapdb_stateful_execute",
       "now_ms": 854,
-      "argv": [
-        "SWAPDB",
-        "0",
-        "1"
-      ],
+      "argv": ["SWAPDB", "0", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2108,10 +1666,7 @@
     {
       "name": "swapdb_stateful_verify_db1",
       "now_ms": 855,
-      "argv": [
-        "GET",
-        "swapdb_stateful_key"
-      ],
+      "argv": ["GET", "swapdb_stateful_key"],
       "expect": {
         "kind": "bulk",
         "value": "db0"
@@ -2120,10 +1675,7 @@
     {
       "name": "swapdb_stateful_select_back_to_db0",
       "now_ms": 856,
-      "argv": [
-        "SELECT",
-        "0"
-      ],
+      "argv": ["SELECT", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2132,10 +1684,7 @@
     {
       "name": "swapdb_stateful_verify_db0",
       "now_ms": 857,
-      "argv": [
-        "GET",
-        "swapdb_stateful_key"
-      ],
+      "argv": ["GET", "swapdb_stateful_key"],
       "expect": {
         "kind": "bulk",
         "value": "db1"
@@ -2144,9 +1693,7 @@
     {
       "name": "connection_cleanup",
       "now_ms": 900,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"

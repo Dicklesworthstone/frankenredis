@@ -74,8 +74,5 @@
     "wait_waitaof_threshold_unblock_drift",
     "hardened_nonallowlisted_deviation_leak"
   ],
-  "raptorq_artifacts": [
-    "parity_report.raptorq.json",
-    "parity_report.decode_proof.json"
-  ]
+  "raptorq_artifacts": ["parity_report.raptorq.json", "parity_report.decode_proof.json"]
 }

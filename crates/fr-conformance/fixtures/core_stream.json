@@ -4,10 +4,7 @@
     {
       "name": "xlen_missing_key",
       "now_ms": 0,
-      "argv": [
-        "XLEN",
-        "stream"
-      ],
+      "argv": ["XLEN", "stream"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -16,13 +13,7 @@
     {
       "name": "xadd_auto_first",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "stream",
-        "*",
-        "field1",
-        "value1"
-      ],
+      "argv": ["XADD", "stream", "*", "field1", "value1"],
       "expect": {
         "kind": "bulk",
         "value": "1000-0"
@@ -31,13 +22,7 @@
     {
       "name": "xadd_auto_same_millisecond",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "stream",
-        "*",
-        "field2",
-        "value2"
-      ],
+      "argv": ["XADD", "stream", "*", "field2", "value2"],
       "expect": {
         "kind": "bulk",
         "value": "1000-1"
@@ -46,10 +31,7 @@
     {
       "name": "xlen_after_two_entries",
       "now_ms": 1000,
-      "argv": [
-        "XLEN",
-        "stream"
-      ],
+      "argv": ["XLEN", "stream"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -58,10 +40,7 @@
     {
       "name": "type_reports_stream",
       "now_ms": 1000,
-      "argv": [
-        "TYPE",
-        "stream"
-      ],
+      "argv": ["TYPE", "stream"],
       "expect": {
         "kind": "simple",
         "value": "stream"
@@ -70,13 +49,7 @@
     {
       "name": "xadd_explicit_higher_id",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "stream",
-        "1000-2",
-        "field3",
-        "value3"
-      ],
+      "argv": ["XADD", "stream", "1000-2", "field3", "value3"],
       "expect": {
         "kind": "bulk",
         "value": "1000-2"
@@ -85,12 +58,7 @@
     {
       "name": "xrange_all_entries",
       "now_ms": 1000,
-      "argv": [
-        "XRANGE",
-        "stream",
-        "-",
-        "+"
-      ],
+      "argv": ["XRANGE", "stream", "-", "+"],
       "expect": {
         "kind": "array",
         "value": [
@@ -166,14 +134,7 @@
     {
       "name": "xrange_with_count",
       "now_ms": 1000,
-      "argv": [
-        "XRANGE",
-        "stream",
-        "1000",
-        "+",
-        "COUNT",
-        "1"
-      ],
+      "argv": ["XRANGE", "stream", "1000", "+", "COUNT", "1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -205,12 +166,7 @@
     {
       "name": "xrange_single_id_window",
       "now_ms": 1000,
-      "argv": [
-        "XRANGE",
-        "stream",
-        "1000-1",
-        "1000-1"
-      ],
+      "argv": ["XRANGE", "stream", "1000-1", "1000-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -242,12 +198,7 @@
     {
       "name": "xrange_invalid_bound_error",
       "now_ms": 1000,
-      "argv": [
-        "XRANGE",
-        "stream",
-        "bad-id",
-        "+"
-      ],
+      "argv": ["XRANGE", "stream", "bad-id", "+"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid stream ID specified as stream command argument"
@@ -256,12 +207,7 @@
     {
       "name": "xrevrange_all_entries",
       "now_ms": 1000,
-      "argv": [
-        "XREVRANGE",
-        "stream",
-        "+",
-        "-"
-      ],
+      "argv": ["XREVRANGE", "stream", "+", "-"],
       "expect": {
         "kind": "array",
         "value": [
@@ -337,14 +283,7 @@
     {
       "name": "xrevrange_with_count",
       "now_ms": 1000,
-      "argv": [
-        "XREVRANGE",
-        "stream",
-        "1000-2",
-        "1000-0",
-        "COUNT",
-        "1"
-      ],
+      "argv": ["XREVRANGE", "stream", "1000-2", "1000-0", "COUNT", "1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -376,12 +315,7 @@
     {
       "name": "xrevrange_invalid_bound_error",
       "now_ms": 1000,
-      "argv": [
-        "XREVRANGE",
-        "stream",
-        "bad-id",
-        "-"
-      ],
+      "argv": ["XREVRANGE", "stream", "bad-id", "-"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid stream ID specified as stream command argument"
@@ -390,12 +324,7 @@
     {
       "name": "xdel_removes_existing_and_missing_ids",
       "now_ms": 1000,
-      "argv": [
-        "XDEL",
-        "stream",
-        "1000-1",
-        "9999-0"
-      ],
+      "argv": ["XDEL", "stream", "1000-1", "9999-0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -404,10 +333,7 @@
     {
       "name": "xlen_after_xdel",
       "now_ms": 1000,
-      "argv": [
-        "XLEN",
-        "stream"
-      ],
+      "argv": ["XLEN", "stream"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -416,12 +342,7 @@
     {
       "name": "xrange_after_xdel",
       "now_ms": 1000,
-      "argv": [
-        "XRANGE",
-        "stream",
-        "-",
-        "+"
-      ],
+      "argv": ["XRANGE", "stream", "-", "+"],
       "expect": {
         "kind": "array",
         "value": [
@@ -475,11 +396,7 @@
     {
       "name": "xdel_missing_key",
       "now_ms": 1000,
-      "argv": [
-        "XDEL",
-        "missing_stream",
-        "1-0"
-      ],
+      "argv": ["XDEL", "missing_stream", "1-0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -488,11 +405,7 @@
     {
       "name": "xdel_missing_key_invalid_id_zero",
       "now_ms": 1000,
-      "argv": [
-        "XDEL",
-        "missing_stream",
-        "bad-id"
-      ],
+      "argv": ["XDEL", "missing_stream", "bad-id"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -501,11 +414,7 @@
     {
       "name": "xdel_invalid_id_error",
       "now_ms": 1000,
-      "argv": [
-        "XDEL",
-        "stream",
-        "bad-id"
-      ],
+      "argv": ["XDEL", "stream", "bad-id"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid stream ID specified as stream command argument"
@@ -514,13 +423,7 @@
     {
       "name": "xadd_for_xtrim",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "stream",
-        "1001-1",
-        "field4",
-        "value4"
-      ],
+      "argv": ["XADD", "stream", "1001-1", "field4", "value4"],
       "expect": {
         "kind": "bulk",
         "value": "1001-1"
@@ -529,12 +432,7 @@
     {
       "name": "xtrim_maxlen_two",
       "now_ms": 1000,
-      "argv": [
-        "XTRIM",
-        "stream",
-        "MAXLEN",
-        "2"
-      ],
+      "argv": ["XTRIM", "stream", "MAXLEN", "2"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -543,12 +441,7 @@
     {
       "name": "xrange_after_xtrim_maxlen_two",
       "now_ms": 1000,
-      "argv": [
-        "XRANGE",
-        "stream",
-        "-",
-        "+"
-      ],
+      "argv": ["XRANGE", "stream", "-", "+"],
       "expect": {
         "kind": "array",
         "value": [
@@ -602,13 +495,7 @@
     {
       "name": "xtrim_maxlen_equals_one",
       "now_ms": 1000,
-      "argv": [
-        "XTRIM",
-        "stream",
-        "MAXLEN",
-        "=",
-        "1"
-      ],
+      "argv": ["XTRIM", "stream", "MAXLEN", "=", "1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -617,12 +504,7 @@
     {
       "name": "xrange_after_xtrim_maxlen_equals_one",
       "now_ms": 1000,
-      "argv": [
-        "XRANGE",
-        "stream",
-        "-",
-        "+"
-      ],
+      "argv": ["XRANGE", "stream", "-", "+"],
       "expect": {
         "kind": "array",
         "value": [
@@ -654,12 +536,7 @@
     {
       "name": "xtrim_invalid_mode_syntax_error",
       "now_ms": 1000,
-      "argv": [
-        "XTRIM",
-        "stream",
-        "BADMODE",
-        "1"
-      ],
+      "argv": ["XTRIM", "stream", "BADMODE", "1"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -668,12 +545,7 @@
     {
       "name": "xtrim_invalid_integer_error",
       "now_ms": 1000,
-      "argv": [
-        "XTRIM",
-        "stream",
-        "MAXLEN",
-        "-1"
-      ],
+      "argv": ["XTRIM", "stream", "MAXLEN", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR The MAXLEN argument must be >= 0."
@@ -682,13 +554,7 @@
     {
       "name": "xadd_read1_first",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "read1",
-        "2000-0",
-        "fieldA",
-        "valueA"
-      ],
+      "argv": ["XADD", "read1", "2000-0", "fieldA", "valueA"],
       "expect": {
         "kind": "bulk",
         "value": "2000-0"
@@ -697,13 +563,7 @@
     {
       "name": "xadd_read1_second",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "read1",
-        "2000-1",
-        "fieldB",
-        "valueB"
-      ],
+      "argv": ["XADD", "read1", "2000-1", "fieldB", "valueB"],
       "expect": {
         "kind": "bulk",
         "value": "2000-1"
@@ -712,13 +572,7 @@
     {
       "name": "xadd_read2_first",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "read2",
-        "3000-0",
-        "fieldC",
-        "valueC"
-      ],
+      "argv": ["XADD", "read2", "3000-0", "fieldC", "valueC"],
       "expect": {
         "kind": "bulk",
         "value": "3000-0"
@@ -727,12 +581,7 @@
     {
       "name": "xread_single_stream_after_id",
       "now_ms": 1000,
-      "argv": [
-        "XREAD",
-        "STREAMS",
-        "read1",
-        "2000-0"
-      ],
+      "argv": ["XREAD", "STREAMS", "read1", "2000-0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -778,14 +627,7 @@
     {
       "name": "xread_count_one",
       "now_ms": 1000,
-      "argv": [
-        "XREAD",
-        "COUNT",
-        "1",
-        "STREAMS",
-        "read1",
-        "0"
-      ],
+      "argv": ["XREAD", "COUNT", "1", "STREAMS", "read1", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -831,14 +673,7 @@
     {
       "name": "xread_multi_streams",
       "now_ms": 1000,
-      "argv": [
-        "XREAD",
-        "STREAMS",
-        "read1",
-        "read2",
-        "0",
-        "0"
-      ],
+      "argv": ["XREAD", "STREAMS", "read1", "read2", "0", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -942,14 +777,7 @@
     {
       "name": "xread_dollar_nil",
       "now_ms": 1000,
-      "argv": [
-        "XREAD",
-        "STREAMS",
-        "read1",
-        "read2",
-        "$",
-        "$"
-      ],
+      "argv": ["XREAD", "STREAMS", "read1", "read2", "$", "$"],
       "expect": {
         "kind": "null_array"
       }
@@ -957,12 +785,7 @@
     {
       "name": "xread_invalid_id_error",
       "now_ms": 1000,
-      "argv": [
-        "XREAD",
-        "STREAMS",
-        "read1",
-        "bad-id"
-      ],
+      "argv": ["XREAD", "STREAMS", "read1", "bad-id"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid stream ID specified as stream command argument"
@@ -971,14 +794,7 @@
     {
       "name": "xread_block_accepted_no_data",
       "now_ms": 1000,
-      "argv": [
-        "XREAD",
-        "BLOCK",
-        "0",
-        "STREAMS",
-        "xread_block_noexist",
-        "0"
-      ],
+      "argv": ["XREAD", "BLOCK", "0", "STREAMS", "xread_block_noexist", "0"],
       "expect": {
         "kind": "null_array",
         "value": null
@@ -987,11 +803,7 @@
     {
       "name": "xinfo_stream_read1",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "read1"
-      ],
+      "argv": ["XINFO", "STREAM", "read1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1117,11 +929,7 @@
     {
       "name": "xinfo_groups_read1_empty",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "read1"
-      ],
+      "argv": ["XINFO", "GROUPS", "read1"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1130,13 +938,7 @@
     {
       "name": "xgroup_create_read1_ok",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "read1",
-        "g1",
-        "$"
-      ],
+      "argv": ["XGROUP", "CREATE", "read1", "g1", "$"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1145,13 +947,7 @@
     {
       "name": "xgroup_setid_read1_ok",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "SETID",
-        "read1",
-        "g1",
-        "2000-0"
-      ],
+      "argv": ["XGROUP", "SETID", "read1", "g1", "2000-0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1160,11 +956,7 @@
     {
       "name": "xinfo_groups_read1_after_setid",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "read1"
-      ],
+      "argv": ["XINFO", "GROUPS", "read1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1227,13 +1019,7 @@
     {
       "name": "xgroup_setid_read1_dollar_ok",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "SETID",
-        "read1",
-        "g1",
-        "$"
-      ],
+      "argv": ["XGROUP", "SETID", "read1", "g1", "$"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1242,11 +1028,7 @@
     {
       "name": "xinfo_groups_read1_after_group_create",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "read1"
-      ],
+      "argv": ["XINFO", "GROUPS", "read1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1309,13 +1091,7 @@
     {
       "name": "xgroup_createconsumer_read1_c1_created",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATECONSUMER",
-        "read1",
-        "g1",
-        "c1"
-      ],
+      "argv": ["XGROUP", "CREATECONSUMER", "read1", "g1", "c1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1324,13 +1100,7 @@
     {
       "name": "xgroup_createconsumer_read1_c1_duplicate",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATECONSUMER",
-        "read1",
-        "g1",
-        "c1"
-      ],
+      "argv": ["XGROUP", "CREATECONSUMER", "read1", "g1", "c1"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1339,13 +1109,7 @@
     {
       "name": "xgroup_createconsumer_read1_c2_created",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATECONSUMER",
-        "read1",
-        "g1",
-        "c2"
-      ],
+      "argv": ["XGROUP", "CREATECONSUMER", "read1", "g1", "c2"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1354,11 +1118,7 @@
     {
       "name": "xinfo_groups_read1_after_createconsumer",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "read1"
-      ],
+      "argv": ["XINFO", "GROUPS", "read1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1421,12 +1181,7 @@
     {
       "name": "xinfo_consumers_read1_after_createconsumer",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "CONSUMERS",
-        "read1",
-        "g1"
-      ],
+      "argv": ["XINFO", "CONSUMERS", "read1", "g1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1510,13 +1265,7 @@
     {
       "name": "xgroup_delconsumer_read1_c1_zero",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "DELCONSUMER",
-        "read1",
-        "g1",
-        "c1"
-      ],
+      "argv": ["XGROUP", "DELCONSUMER", "read1", "g1", "c1"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1525,11 +1274,7 @@
     {
       "name": "xinfo_groups_read1_after_delconsumer",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "read1"
-      ],
+      "argv": ["XINFO", "GROUPS", "read1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1592,12 +1337,7 @@
     {
       "name": "xinfo_consumers_read1_after_delconsumer",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "CONSUMERS",
-        "read1",
-        "g1"
-      ],
+      "argv": ["XINFO", "CONSUMERS", "read1", "g1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1644,13 +1384,7 @@
     {
       "name": "xgroup_delconsumer_read1_missing_consumer_zero",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "DELCONSUMER",
-        "read1",
-        "g1",
-        "missing-consumer"
-      ],
+      "argv": ["XGROUP", "DELCONSUMER", "read1", "g1", "missing-consumer"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1659,13 +1393,7 @@
     {
       "name": "xgroup_create_duplicate_error",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "read1",
-        "g1",
-        "0"
-      ],
+      "argv": ["XGROUP", "CREATE", "read1", "g1", "0"],
       "expect": {
         "kind": "error",
         "value": "BUSYGROUP Consumer Group name already exists"
@@ -1674,12 +1402,7 @@
     {
       "name": "xgroup_destroy_read1_ok",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "DESTROY",
-        "read1",
-        "g1"
-      ],
+      "argv": ["XGROUP", "DESTROY", "read1", "g1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1688,11 +1411,7 @@
     {
       "name": "xinfo_groups_read1_after_group_destroy",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "read1"
-      ],
+      "argv": ["XINFO", "GROUPS", "read1"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1701,12 +1420,7 @@
     {
       "name": "xgroup_destroy_read1_missing_group_zero",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "DESTROY",
-        "read1",
-        "g1"
-      ],
+      "argv": ["XGROUP", "DESTROY", "read1", "g1"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1715,12 +1429,7 @@
     {
       "name": "xgroup_destroy_missing_key_zero",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "DESTROY",
-        "missing_stream",
-        "g1"
-      ],
+      "argv": ["XGROUP", "DESTROY", "missing_stream", "g1"],
       "expect": {
         "kind": "error",
         "value": "ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically."
@@ -1729,13 +1438,7 @@
     {
       "name": "xgroup_create_missing_key_error",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "missing_stream",
-        "g1",
-        "0"
-      ],
+      "argv": ["XGROUP", "CREATE", "missing_stream", "g1", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically."
@@ -1744,13 +1447,7 @@
     {
       "name": "xgroup_create_invalid_id_error",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "read1",
-        "g2",
-        "bad-id"
-      ],
+      "argv": ["XGROUP", "CREATE", "read1", "g2", "bad-id"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid stream ID specified as stream command argument"
@@ -1759,13 +1456,7 @@
     {
       "name": "xgroup_setid_missing_group_error",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "SETID",
-        "read1",
-        "missing_group",
-        "0"
-      ],
+      "argv": ["XGROUP", "SETID", "read1", "missing_group", "0"],
       "expect": {
         "kind": "error",
         "value": "NOGROUP No such consumer group 'missing_group' for key name 'read1'"
@@ -1774,12 +1465,7 @@
     {
       "name": "xinfo_consumers_missing_group_error",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "CONSUMERS",
-        "read1",
-        "missing_group"
-      ],
+      "argv": ["XINFO", "CONSUMERS", "read1", "missing_group"],
       "expect": {
         "kind": "error",
         "value": "NOGROUP No such consumer group 'missing_group' for key name 'read1'"
@@ -1788,12 +1474,7 @@
     {
       "name": "xinfo_consumers_missing_key_error",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "CONSUMERS",
-        "missing_stream",
-        "g1"
-      ],
+      "argv": ["XINFO", "CONSUMERS", "missing_stream", "g1"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -1802,13 +1483,7 @@
     {
       "name": "xgroup_createconsumer_missing_group_error",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATECONSUMER",
-        "read1",
-        "missing_group",
-        "c1"
-      ],
+      "argv": ["XGROUP", "CREATECONSUMER", "read1", "missing_group", "c1"],
       "expect": {
         "kind": "error",
         "value": "NOGROUP No such consumer group 'missing_group' for key name 'read1'"
@@ -1817,13 +1492,7 @@
     {
       "name": "xgroup_createconsumer_missing_key_error",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATECONSUMER",
-        "missing_stream",
-        "g1",
-        "c1"
-      ],
+      "argv": ["XGROUP", "CREATECONSUMER", "missing_stream", "g1", "c1"],
       "expect": {
         "kind": "error",
         "value": "ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically."
@@ -1832,13 +1501,7 @@
     {
       "name": "xgroup_delconsumer_missing_group_error",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "DELCONSUMER",
-        "read1",
-        "missing_group",
-        "c1"
-      ],
+      "argv": ["XGROUP", "DELCONSUMER", "read1", "missing_group", "c1"],
       "expect": {
         "kind": "error",
         "value": "NOGROUP No such consumer group 'missing_group' for key name 'read1'"
@@ -1847,13 +1510,7 @@
     {
       "name": "xgroup_delconsumer_missing_key_error",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "DELCONSUMER",
-        "missing_stream",
-        "g1",
-        "c1"
-      ],
+      "argv": ["XGROUP", "DELCONSUMER", "missing_stream", "g1", "c1"],
       "expect": {
         "kind": "error",
         "value": "ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically."
@@ -1862,13 +1519,7 @@
     {
       "name": "xgroup_setid_missing_key_error",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "SETID",
-        "missing_stream",
-        "g1",
-        "0"
-      ],
+      "argv": ["XGROUP", "SETID", "missing_stream", "g1", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically."
@@ -1878,13 +1529,7 @@
       "name": "xgroup_setid_invalid_id_error",
       "now_ms": 1000,
       "comment": "(frankenredis-b7jra) Group g1 is absent on read1 in this sequence; upstream XGROUP SETID resolves key+group BEFORE parsing the id, so it returns NOGROUP — not 'Invalid stream ID'. (Prior fixture value captured the pre-fix order.)",
-      "argv": [
-        "XGROUP",
-        "SETID",
-        "read1",
-        "g1",
-        "bad-id"
-      ],
+      "argv": ["XGROUP", "SETID", "read1", "g1", "bad-id"],
       "expect": {
         "kind": "error",
         "value": "NOGROUP No such consumer group 'g1' for key name 'read1'"
@@ -1893,14 +1538,7 @@
     {
       "name": "xgroup_create_mkstream_ok",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "mkstream_stream",
-        "g1",
-        "0",
-        "MKSTREAM"
-      ],
+      "argv": ["XGROUP", "CREATE", "mkstream_stream", "g1", "0", "MKSTREAM"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1909,11 +1547,7 @@
     {
       "name": "xinfo_groups_mkstream_stream",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "mkstream_stream"
-      ],
+      "argv": ["XINFO", "GROUPS", "mkstream_stream"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1976,13 +1610,7 @@
     {
       "name": "xgroup_invalid_subcommand_error",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "HELP",
-        "read1",
-        "g1",
-        "0"
-      ],
+      "argv": ["XGROUP", "HELP", "read1", "g1", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xgroup|help' command"
@@ -1991,13 +1619,7 @@
     {
       "name": "xadd_group_read_stream_first",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "group_read_stream",
-        "4000-0",
-        "field",
-        "v1"
-      ],
+      "argv": ["XADD", "group_read_stream", "4000-0", "field", "v1"],
       "expect": {
         "kind": "bulk",
         "value": "4000-0"
@@ -2006,13 +1628,7 @@
     {
       "name": "xadd_group_read_stream_second",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "group_read_stream",
-        "4000-1",
-        "field",
-        "v2"
-      ],
+      "argv": ["XADD", "group_read_stream", "4000-1", "field", "v2"],
       "expect": {
         "kind": "bulk",
         "value": "4000-1"
@@ -2021,13 +1637,7 @@
     {
       "name": "xgroup_create_group_read_stream",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "group_read_stream",
-        "g1",
-        "0"
-      ],
+      "argv": ["XGROUP", "CREATE", "group_read_stream", "g1", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2036,15 +1646,7 @@
     {
       "name": "xreadgroup_group_read_stream_first",
       "now_ms": 1000,
-      "argv": [
-        "XREADGROUP",
-        "GROUP",
-        "g1",
-        "c1",
-        "STREAMS",
-        "group_read_stream",
-        ">"
-      ],
+      "argv": ["XREADGROUP", "GROUP", "g1", "c1", "STREAMS", "group_read_stream", ">"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2112,15 +1714,7 @@
     {
       "name": "xreadgroup_group_read_stream_second_nil",
       "now_ms": 1000,
-      "argv": [
-        "XREADGROUP",
-        "GROUP",
-        "g1",
-        "c1",
-        "STREAMS",
-        "group_read_stream",
-        ">"
-      ],
+      "argv": ["XREADGROUP", "GROUP", "g1", "c1", "STREAMS", "group_read_stream", ">"],
       "expect": {
         "kind": "null_array"
       }
@@ -2128,13 +1722,7 @@
     {
       "name": "xadd_group_read_stream_third",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "group_read_stream",
-        "4000-2",
-        "field",
-        "v3"
-      ],
+      "argv": ["XADD", "group_read_stream", "4000-2", "field", "v3"],
       "expect": {
         "kind": "bulk",
         "value": "4000-2"
@@ -2199,15 +1787,7 @@
     {
       "name": "xreadgroup_group_read_stream_pending_replay_owner",
       "now_ms": 1000,
-      "argv": [
-        "XREADGROUP",
-        "GROUP",
-        "g1",
-        "c1",
-        "STREAMS",
-        "group_read_stream",
-        "0"
-      ],
+      "argv": ["XREADGROUP", "GROUP", "g1", "c1", "STREAMS", "group_read_stream", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2297,15 +1877,7 @@
     {
       "name": "xreadgroup_group_read_stream_pending_replay_other_consumer_nil",
       "now_ms": 1000,
-      "argv": [
-        "XREADGROUP",
-        "GROUP",
-        "g1",
-        "c2",
-        "STREAMS",
-        "group_read_stream",
-        "0"
-      ],
+      "argv": ["XREADGROUP", "GROUP", "g1", "c2", "STREAMS", "group_read_stream", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2322,11 +1894,7 @@
     {
       "name": "xinfo_groups_group_read_stream_after_pending_replay",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "group_read_stream"
-      ],
+      "argv": ["XINFO", "GROUPS", "group_read_stream"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2389,13 +1957,7 @@
     {
       "name": "xadd_group_noack_stream_first",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "group_noack_stream",
-        "5000-0",
-        "field",
-        "n1"
-      ],
+      "argv": ["XADD", "group_noack_stream", "5000-0", "field", "n1"],
       "expect": {
         "kind": "bulk",
         "value": "5000-0"
@@ -2404,13 +1966,7 @@
     {
       "name": "xadd_group_noack_stream_second",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "group_noack_stream",
-        "5000-1",
-        "field",
-        "n2"
-      ],
+      "argv": ["XADD", "group_noack_stream", "5000-1", "field", "n2"],
       "expect": {
         "kind": "bulk",
         "value": "5000-1"
@@ -2419,13 +1975,7 @@
     {
       "name": "xgroup_create_group_noack_stream",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "group_noack_stream",
-        "g1",
-        "0"
-      ],
+      "argv": ["XGROUP", "CREATE", "group_noack_stream", "g1", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2434,16 +1984,7 @@
     {
       "name": "xreadgroup_group_noack_stream_noack",
       "now_ms": 1000,
-      "argv": [
-        "XREADGROUP",
-        "GROUP",
-        "g1",
-        "c1",
-        "NOACK",
-        "STREAMS",
-        "group_noack_stream",
-        ">"
-      ],
+      "argv": ["XREADGROUP", "GROUP", "g1", "c1", "NOACK", "STREAMS", "group_noack_stream", ">"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2511,15 +2052,7 @@
     {
       "name": "xreadgroup_group_noack_stream_replay_after_noack_nil",
       "now_ms": 1000,
-      "argv": [
-        "XREADGROUP",
-        "GROUP",
-        "g1",
-        "c1",
-        "STREAMS",
-        "group_noack_stream",
-        "0"
-      ],
+      "argv": ["XREADGROUP", "GROUP", "g1", "c1", "STREAMS", "group_noack_stream", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2536,11 +2069,7 @@
     {
       "name": "xinfo_groups_group_noack_stream_after_noack",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "group_noack_stream"
-      ],
+      "argv": ["XINFO", "GROUPS", "group_noack_stream"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2603,15 +2132,7 @@
     {
       "name": "xreadgroup_missing_group_error",
       "now_ms": 1000,
-      "argv": [
-        "XREADGROUP",
-        "GROUP",
-        "missing_group",
-        "c1",
-        "STREAMS",
-        "group_read_stream",
-        ">"
-      ],
+      "argv": ["XREADGROUP", "GROUP", "missing_group", "c1", "STREAMS", "group_read_stream", ">"],
       "expect": {
         "kind": "error",
         "value": "NOGROUP No such key 'group_read_stream' or consumer group 'missing_group' in XREADGROUP with GROUP option"
@@ -2639,11 +2160,7 @@
     {
       "name": "xinfo_invalid_subcommand_error",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "HELP",
-        "read1"
-      ],
+      "argv": ["XINFO", "HELP", "read1"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xinfo|help' command"
@@ -2652,11 +2169,7 @@
     {
       "name": "xinfo_missing_key_error",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "missing_stream"
-      ],
+      "argv": ["XINFO", "STREAM", "missing_stream"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -2665,11 +2178,7 @@
     {
       "name": "xinfo_groups_missing_key_error",
       "now_ms": 1000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "missing_stream"
-      ],
+      "argv": ["XINFO", "GROUPS", "missing_stream"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -2678,13 +2187,7 @@
     {
       "name": "xadd_equal_or_lower_id_error",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "stream",
-        "1000-2",
-        "field4",
-        "value4"
-      ],
+      "argv": ["XADD", "stream", "1000-2", "field4", "value4"],
       "expect": {
         "kind": "error",
         "value": "ERR The ID specified in XADD is equal or smaller than the target stream top item"
@@ -2693,13 +2196,7 @@
     {
       "name": "xadd_zero_zero_error",
       "now_ms": 0,
-      "argv": [
-        "XADD",
-        "stream2",
-        "0-0",
-        "field",
-        "value"
-      ],
+      "argv": ["XADD", "stream2", "0-0", "field", "value"],
       "expect": {
         "kind": "error",
         "value": "ERR The ID specified in XADD must be greater than 0-0"
@@ -2708,13 +2205,7 @@
     {
       "name": "xadd_invalid_id_error",
       "now_ms": 0,
-      "argv": [
-        "XADD",
-        "stream2",
-        "bad-id",
-        "field",
-        "value"
-      ],
+      "argv": ["XADD", "stream2", "bad-id", "field", "value"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid stream ID specified as stream command argument"
@@ -2723,11 +2214,7 @@
     {
       "name": "xadd_wrongtype_seed",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "strkey_stream",
-        "v"
-      ],
+      "argv": ["SET", "strkey_stream", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2736,13 +2223,7 @@
     {
       "name": "xadd_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XADD",
-        "strkey_stream",
-        "*",
-        "field",
-        "value"
-      ],
+      "argv": ["XADD", "strkey_stream", "*", "field", "value"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2751,11 +2232,7 @@
     {
       "name": "xrange_wrongtype_seed",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "strkey_stream_range",
-        "v"
-      ],
+      "argv": ["SET", "strkey_stream_range", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2764,12 +2241,7 @@
     {
       "name": "xrange_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XRANGE",
-        "strkey_stream_range",
-        "-",
-        "+"
-      ],
+      "argv": ["XRANGE", "strkey_stream_range", "-", "+"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2778,12 +2250,7 @@
     {
       "name": "xrevrange_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XREVRANGE",
-        "strkey_stream_range",
-        "+",
-        "-"
-      ],
+      "argv": ["XREVRANGE", "strkey_stream_range", "+", "-"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2792,11 +2259,7 @@
     {
       "name": "xdel_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XDEL",
-        "strkey_stream_range",
-        "1-0"
-      ],
+      "argv": ["XDEL", "strkey_stream_range", "1-0"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2805,12 +2268,7 @@
     {
       "name": "xtrim_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XTRIM",
-        "strkey_stream_range",
-        "MAXLEN",
-        "1"
-      ],
+      "argv": ["XTRIM", "strkey_stream_range", "MAXLEN", "1"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2819,12 +2277,7 @@
     {
       "name": "xread_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XREAD",
-        "STREAMS",
-        "strkey_stream_range",
-        "0"
-      ],
+      "argv": ["XREAD", "STREAMS", "strkey_stream_range", "0"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2833,11 +2286,7 @@
     {
       "name": "xinfo_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "strkey_stream_range"
-      ],
+      "argv": ["XINFO", "STREAM", "strkey_stream_range"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2846,11 +2295,7 @@
     {
       "name": "xinfo_groups_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "strkey_stream_range"
-      ],
+      "argv": ["XINFO", "GROUPS", "strkey_stream_range"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2859,12 +2304,7 @@
     {
       "name": "xinfo_consumers_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XINFO",
-        "CONSUMERS",
-        "strkey_stream_range",
-        "g1"
-      ],
+      "argv": ["XINFO", "CONSUMERS", "strkey_stream_range", "g1"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2873,12 +2313,7 @@
     {
       "name": "xgroup_destroy_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XGROUP",
-        "DESTROY",
-        "strkey_stream_range",
-        "g1"
-      ],
+      "argv": ["XGROUP", "DESTROY", "strkey_stream_range", "g1"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2887,13 +2322,7 @@
     {
       "name": "xgroup_setid_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XGROUP",
-        "SETID",
-        "strkey_stream_range",
-        "g1",
-        "0"
-      ],
+      "argv": ["XGROUP", "SETID", "strkey_stream_range", "g1", "0"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2902,13 +2331,7 @@
     {
       "name": "xgroup_createconsumer_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XGROUP",
-        "CREATECONSUMER",
-        "strkey_stream_range",
-        "g1",
-        "c1"
-      ],
+      "argv": ["XGROUP", "CREATECONSUMER", "strkey_stream_range", "g1", "c1"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2917,13 +2340,7 @@
     {
       "name": "xgroup_delconsumer_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "XGROUP",
-        "DELCONSUMER",
-        "strkey_stream_range",
-        "g1",
-        "c1"
-      ],
+      "argv": ["XGROUP", "DELCONSUMER", "strkey_stream_range", "g1", "c1"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2932,13 +2349,7 @@
     {
       "name": "xadd_id_zero_error",
       "now_ms": 100,
-      "argv": [
-        "XADD",
-        "stream_err",
-        "0-0",
-        "f",
-        "v"
-      ],
+      "argv": ["XADD", "stream_err", "0-0", "f", "v"],
       "expect": {
         "kind": "error",
         "value": "ERR The ID specified in XADD must be greater than 0-0"
@@ -2947,13 +2358,7 @@
     {
       "name": "xadd_explicit_setup",
       "now_ms": 100,
-      "argv": [
-        "XADD",
-        "xadd_expl",
-        "5-0",
-        "name",
-        "alice"
-      ],
+      "argv": ["XADD", "xadd_expl", "5-0", "name", "alice"],
       "expect": {
         "kind": "bulk",
         "value": "5-0"
@@ -2962,13 +2367,7 @@
     {
       "name": "xadd_lower_id_error",
       "now_ms": 100,
-      "argv": [
-        "XADD",
-        "xadd_expl",
-        "3-0",
-        "name",
-        "bob"
-      ],
+      "argv": ["XADD", "xadd_expl", "3-0", "name", "bob"],
       "expect": {
         "kind": "error",
         "value": "ERR The ID specified in XADD is equal or smaller than the target stream top item"
@@ -2977,13 +2376,7 @@
     {
       "name": "xadd_equal_id_error",
       "now_ms": 100,
-      "argv": [
-        "XADD",
-        "xadd_expl",
-        "5-0",
-        "name",
-        "bob"
-      ],
+      "argv": ["XADD", "xadd_expl", "5-0", "name", "bob"],
       "expect": {
         "kind": "error",
         "value": "ERR The ID specified in XADD is equal or smaller than the target stream top item"
@@ -2992,11 +2385,7 @@
     {
       "name": "xadd_wrong_arity_no_fields",
       "now_ms": 100,
-      "argv": [
-        "XADD",
-        "key",
-        "*"
-      ],
+      "argv": ["XADD", "key", "*"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xadd' command"
@@ -3005,12 +2394,7 @@
     {
       "name": "xadd_wrong_arity_odd_fields",
       "now_ms": 100,
-      "argv": [
-        "XADD",
-        "key",
-        "*",
-        "f1"
-      ],
+      "argv": ["XADD", "key", "*", "f1"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xadd' command"
@@ -3019,9 +2403,7 @@
     {
       "name": "xlen_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "XLEN"
-      ],
+      "argv": ["XLEN"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xlen' command"
@@ -3030,10 +2412,7 @@
     {
       "name": "xdel_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "XDEL",
-        "key"
-      ],
+      "argv": ["XDEL", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xdel' command"
@@ -3042,14 +2421,7 @@
     {
       "name": "xrange_count_zero",
       "now_ms": 100,
-      "argv": [
-        "XRANGE",
-        "xadd_expl",
-        "-",
-        "+",
-        "COUNT",
-        "0"
-      ],
+      "argv": ["XRANGE", "xadd_expl", "-", "+", "COUNT", "0"],
       "expect": {
         "kind": "null_array"
       }
@@ -3057,12 +2429,7 @@
     {
       "name": "xrange_missing_key",
       "now_ms": 100,
-      "argv": [
-        "XRANGE",
-        "nosuchstream",
-        "-",
-        "+"
-      ],
+      "argv": ["XRANGE", "nosuchstream", "-", "+"],
       "expect": {
         "kind": "array",
         "value": []
@@ -3071,12 +2438,7 @@
     {
       "name": "xrevrange_missing_key",
       "now_ms": 100,
-      "argv": [
-        "XREVRANGE",
-        "nosuchstream",
-        "+",
-        "-"
-      ],
+      "argv": ["XREVRANGE", "nosuchstream", "+", "-"],
       "expect": {
         "kind": "array",
         "value": []
@@ -3085,14 +2447,7 @@
     {
       "name": "xrevrange_count_zero",
       "now_ms": 100,
-      "argv": [
-        "XREVRANGE",
-        "xadd_expl",
-        "+",
-        "-",
-        "COUNT",
-        "0"
-      ],
+      "argv": ["XREVRANGE", "xadd_expl", "+", "-", "COUNT", "0"],
       "expect": {
         "kind": "null_array"
       }
@@ -3100,13 +2455,7 @@
     {
       "name": "xtrim_setup",
       "now_ms": 100,
-      "argv": [
-        "XADD",
-        "xtrim_test",
-        "1-0",
-        "a",
-        "1"
-      ],
+      "argv": ["XADD", "xtrim_test", "1-0", "a", "1"],
       "expect": {
         "kind": "bulk",
         "value": "1-0"
@@ -3115,13 +2464,7 @@
     {
       "name": "xtrim_setup2",
       "now_ms": 100,
-      "argv": [
-        "XADD",
-        "xtrim_test",
-        "2-0",
-        "b",
-        "2"
-      ],
+      "argv": ["XADD", "xtrim_test", "2-0", "b", "2"],
       "expect": {
         "kind": "bulk",
         "value": "2-0"
@@ -3130,12 +2473,7 @@
     {
       "name": "xtrim_maxlen_zero",
       "now_ms": 100,
-      "argv": [
-        "XTRIM",
-        "xtrim_test",
-        "MAXLEN",
-        "0"
-      ],
+      "argv": ["XTRIM", "xtrim_test", "MAXLEN", "0"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -3144,10 +2482,7 @@
     {
       "name": "xtrim_verify_empty",
       "now_ms": 100,
-      "argv": [
-        "XLEN",
-        "xtrim_test"
-      ],
+      "argv": ["XLEN", "xtrim_test"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3156,11 +2491,7 @@
     {
       "name": "xack_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "XACK",
-        "key",
-        "group"
-      ],
+      "argv": ["XACK", "key", "group"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xack' command"
@@ -3169,9 +2500,7 @@
     {
       "name": "xinfo_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "XINFO"
-      ],
+      "argv": ["XINFO"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xinfo' command"
@@ -3180,9 +2509,7 @@
     {
       "name": "xgroup_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "XGROUP"
-      ],
+      "argv": ["XGROUP"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xgroup' command"
@@ -3191,9 +2518,7 @@
     {
       "name": "xread_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "XREAD"
-      ],
+      "argv": ["XREAD"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xread' command"
@@ -3202,9 +2527,7 @@
     {
       "name": "xreadgroup_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "XREADGROUP"
-      ],
+      "argv": ["XREADGROUP"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xreadgroup' command"
@@ -3213,13 +2536,7 @@
     {
       "name": "xsetid_setup_stream",
       "now_ms": 300,
-      "argv": [
-        "XADD",
-        "xsid1",
-        "1-1",
-        "f",
-        "v"
-      ],
+      "argv": ["XADD", "xsid1", "1-1", "f", "v"],
       "expect": {
         "kind": "bulk",
         "value": "1-1"
@@ -3228,11 +2545,7 @@
     {
       "name": "xsetid_set_higher",
       "now_ms": 300,
-      "argv": [
-        "XSETID",
-        "xsid1",
-        "5-0"
-      ],
+      "argv": ["XSETID", "xsid1", "5-0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3241,13 +2554,7 @@
     {
       "name": "xsetid_verify_auto_id",
       "now_ms": 300,
-      "argv": [
-        "XADD",
-        "xsid1",
-        "*",
-        "g",
-        "w"
-      ],
+      "argv": ["XADD", "xsid1", "*", "g", "w"],
       "expect": {
         "kind": "bulk",
         "value": "300-0"
@@ -3256,9 +2563,7 @@
     {
       "name": "xsetid_wrong_arity",
       "now_ms": 300,
-      "argv": [
-        "XSETID"
-      ],
+      "argv": ["XSETID"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xsetid' command"
@@ -3267,11 +2572,7 @@
     {
       "name": "xsetid_nonexistent_stream",
       "now_ms": 300,
-      "argv": [
-        "XSETID",
-        "nosuchxsid",
-        "1-1"
-      ],
+      "argv": ["XSETID", "nosuchxsid", "1-1"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -3280,13 +2581,7 @@
     {
       "name": "xpending_setup_add1",
       "now_ms": 400,
-      "argv": [
-        "XADD",
-        "xpend",
-        "1-1",
-        "msg",
-        "hello"
-      ],
+      "argv": ["XADD", "xpend", "1-1", "msg", "hello"],
       "expect": {
         "kind": "bulk",
         "value": "1-1"
@@ -3295,13 +2590,7 @@
     {
       "name": "xpending_setup_add2",
       "now_ms": 400,
-      "argv": [
-        "XADD",
-        "xpend",
-        "2-1",
-        "msg",
-        "world"
-      ],
+      "argv": ["XADD", "xpend", "2-1", "msg", "world"],
       "expect": {
         "kind": "bulk",
         "value": "2-1"
@@ -3310,13 +2599,7 @@
     {
       "name": "xpending_setup_add3",
       "now_ms": 400,
-      "argv": [
-        "XADD",
-        "xpend",
-        "3-1",
-        "msg",
-        "foo"
-      ],
+      "argv": ["XADD", "xpend", "3-1", "msg", "foo"],
       "expect": {
         "kind": "bulk",
         "value": "3-1"
@@ -3325,13 +2608,7 @@
     {
       "name": "xpending_setup_group",
       "now_ms": 400,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "xpend",
-        "grp1",
-        "0"
-      ],
+      "argv": ["XGROUP", "CREATE", "xpend", "grp1", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3340,17 +2617,7 @@
     {
       "name": "xpending_setup_read_alice",
       "now_ms": 400,
-      "argv": [
-        "XREADGROUP",
-        "GROUP",
-        "grp1",
-        "alice",
-        "COUNT",
-        "2",
-        "STREAMS",
-        "xpend",
-        ">"
-      ],
+      "argv": ["XREADGROUP", "GROUP", "grp1", "alice", "COUNT", "2", "STREAMS", "xpend", ">"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3418,17 +2685,7 @@
     {
       "name": "xpending_setup_read_bob",
       "now_ms": 401,
-      "argv": [
-        "XREADGROUP",
-        "GROUP",
-        "grp1",
-        "bob",
-        "COUNT",
-        "1",
-        "STREAMS",
-        "xpend",
-        ">"
-      ],
+      "argv": ["XREADGROUP", "GROUP", "grp1", "bob", "COUNT", "1", "STREAMS", "xpend", ">"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3474,11 +2731,7 @@
     {
       "name": "xpending_summary",
       "now_ms": 402,
-      "argv": [
-        "XPENDING",
-        "xpend",
-        "grp1"
-      ],
+      "argv": ["XPENDING", "xpend", "grp1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3531,14 +2784,7 @@
     {
       "name": "xpending_detail_all",
       "now_ms": 403,
-      "argv": [
-        "XPENDING",
-        "xpend",
-        "grp1",
-        "-",
-        "+",
-        "10"
-      ],
+      "argv": ["XPENDING", "xpend", "grp1", "-", "+", "10"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3611,14 +2857,7 @@
     {
       "name": "xpending_detail_limit",
       "now_ms": 403,
-      "argv": [
-        "XPENDING",
-        "xpend",
-        "grp1",
-        "-",
-        "+",
-        "1"
-      ],
+      "argv": ["XPENDING", "xpend", "grp1", "-", "+", "1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3649,15 +2888,7 @@
     {
       "name": "xpending_detail_consumer",
       "now_ms": 403,
-      "argv": [
-        "XPENDING",
-        "xpend",
-        "grp1",
-        "-",
-        "+",
-        "10",
-        "bob"
-      ],
+      "argv": ["XPENDING", "xpend", "grp1", "-", "+", "10", "bob"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3688,13 +2919,7 @@
     {
       "name": "xpending_nogroup_setup",
       "now_ms": 403,
-      "argv": [
-        "XADD",
-        "xpend_ng",
-        "1-1",
-        "a",
-        "b"
-      ],
+      "argv": ["XADD", "xpend_ng", "1-1", "a", "b"],
       "expect": {
         "kind": "bulk",
         "value": "1-1"
@@ -3703,11 +2928,7 @@
     {
       "name": "xpending_nogroup",
       "now_ms": 403,
-      "argv": [
-        "XPENDING",
-        "xpend_ng",
-        "nosuchgroup"
-      ],
+      "argv": ["XPENDING", "xpend_ng", "nosuchgroup"],
       "expect": {
         "kind": "error",
         "value": "NOGROUP No such key 'xpend_ng' or consumer group 'nosuchgroup'"
@@ -3716,12 +2937,7 @@
     {
       "name": "xack_one",
       "now_ms": 404,
-      "argv": [
-        "XACK",
-        "xpend",
-        "grp1",
-        "1-1"
-      ],
+      "argv": ["XACK", "xpend", "grp1", "1-1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -3730,11 +2946,7 @@
     {
       "name": "xack_verify_pending_reduced",
       "now_ms": 405,
-      "argv": [
-        "XPENDING",
-        "xpend",
-        "grp1"
-      ],
+      "argv": ["XPENDING", "xpend", "grp1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3787,12 +2999,7 @@
     {
       "name": "xack_already_acked",
       "now_ms": 405,
-      "argv": [
-        "XACK",
-        "xpend",
-        "grp1",
-        "1-1"
-      ],
+      "argv": ["XACK", "xpend", "grp1", "1-1"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3801,12 +3008,7 @@
     {
       "name": "xack_nonexistent_id",
       "now_ms": 405,
-      "argv": [
-        "XACK",
-        "xpend",
-        "grp1",
-        "999-999"
-      ],
+      "argv": ["XACK", "xpend", "grp1", "999-999"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3815,14 +3017,7 @@
     {
       "name": "xclaim_basic",
       "now_ms": 500,
-      "argv": [
-        "XCLAIM",
-        "xpend",
-        "grp1",
-        "charlie",
-        "0",
-        "2-1"
-      ],
+      "argv": ["XCLAIM", "xpend", "grp1", "charlie", "0", "2-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3854,14 +3049,7 @@
     {
       "name": "xclaim_verify_owner",
       "now_ms": 501,
-      "argv": [
-        "XPENDING",
-        "xpend",
-        "grp1",
-        "2-1",
-        "2-1",
-        "10"
-      ],
+      "argv": ["XPENDING", "xpend", "grp1", "2-1", "2-1", "10"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3892,15 +3080,7 @@
     {
       "name": "xclaim_justid",
       "now_ms": 502,
-      "argv": [
-        "XCLAIM",
-        "xpend",
-        "grp1",
-        "charlie",
-        "0",
-        "3-1",
-        "JUSTID"
-      ],
+      "argv": ["XCLAIM", "xpend", "grp1", "charlie", "0", "3-1", "JUSTID"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3914,13 +3094,7 @@
     {
       "name": "xclaim_force_setup",
       "now_ms": 503,
-      "argv": [
-        "XADD",
-        "xpend",
-        "4-1",
-        "msg",
-        "extra"
-      ],
+      "argv": ["XADD", "xpend", "4-1", "msg", "extra"],
       "expect": {
         "kind": "bulk",
         "value": "4-1"
@@ -3929,15 +3103,7 @@
     {
       "name": "xclaim_force",
       "now_ms": 503,
-      "argv": [
-        "XCLAIM",
-        "xpend",
-        "grp1",
-        "charlie",
-        "0",
-        "4-1",
-        "FORCE"
-      ],
+      "argv": ["XCLAIM", "xpend", "grp1", "charlie", "0", "4-1", "FORCE"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3969,12 +3135,7 @@
     {
       "name": "xclaim_wrong_arity",
       "now_ms": 504,
-      "argv": [
-        "XCLAIM",
-        "k",
-        "g",
-        "c"
-      ],
+      "argv": ["XCLAIM", "k", "g", "c"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xclaim' command"
@@ -3983,14 +3144,7 @@
     {
       "name": "xclaim_nogroup",
       "now_ms": 504,
-      "argv": [
-        "XCLAIM",
-        "xpend",
-        "nosuchgrp",
-        "c",
-        "0",
-        "1-1"
-      ],
+      "argv": ["XCLAIM", "xpend", "nosuchgrp", "c", "0", "1-1"],
       "expect": {
         "kind": "error",
         "value": "NOGROUP No such key 'xpend' or consumer group 'nosuchgrp'"
@@ -3999,13 +3153,7 @@
     {
       "name": "xautoclaim_setup_add1",
       "now_ms": 600,
-      "argv": [
-        "XADD",
-        "xac",
-        "1-1",
-        "k",
-        "v1"
-      ],
+      "argv": ["XADD", "xac", "1-1", "k", "v1"],
       "expect": {
         "kind": "bulk",
         "value": "1-1"
@@ -4014,13 +3162,7 @@
     {
       "name": "xautoclaim_setup_add2",
       "now_ms": 600,
-      "argv": [
-        "XADD",
-        "xac",
-        "2-1",
-        "k",
-        "v2"
-      ],
+      "argv": ["XADD", "xac", "2-1", "k", "v2"],
       "expect": {
         "kind": "bulk",
         "value": "2-1"
@@ -4029,13 +3171,7 @@
     {
       "name": "xautoclaim_setup_add3",
       "now_ms": 600,
-      "argv": [
-        "XADD",
-        "xac",
-        "3-1",
-        "k",
-        "v3"
-      ],
+      "argv": ["XADD", "xac", "3-1", "k", "v3"],
       "expect": {
         "kind": "bulk",
         "value": "3-1"
@@ -4044,13 +3180,7 @@
     {
       "name": "xautoclaim_setup_group",
       "now_ms": 600,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "xac",
-        "acgrp",
-        "0"
-      ],
+      "argv": ["XGROUP", "CREATE", "xac", "acgrp", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4059,17 +3189,7 @@
     {
       "name": "xautoclaim_setup_read",
       "now_ms": 600,
-      "argv": [
-        "XREADGROUP",
-        "GROUP",
-        "acgrp",
-        "old",
-        "COUNT",
-        "3",
-        "STREAMS",
-        "xac",
-        ">"
-      ],
+      "argv": ["XREADGROUP", "GROUP", "acgrp", "old", "COUNT", "3", "STREAMS", "xac", ">"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4159,16 +3279,7 @@
     {
       "name": "xautoclaim_basic",
       "now_ms": 700,
-      "argv": [
-        "XAUTOCLAIM",
-        "xac",
-        "acgrp",
-        "new",
-        "0",
-        "0-0",
-        "COUNT",
-        "2"
-      ],
+      "argv": ["XAUTOCLAIM", "xac", "acgrp", "new", "0", "0-0", "COUNT", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4235,17 +3346,7 @@
     {
       "name": "xautoclaim_justid",
       "now_ms": 701,
-      "argv": [
-        "XAUTOCLAIM",
-        "xac",
-        "acgrp",
-        "new2",
-        "0",
-        "0-0",
-        "COUNT",
-        "10",
-        "JUSTID"
-      ],
+      "argv": ["XAUTOCLAIM", "xac", "acgrp", "new2", "0", "0-0", "COUNT", "10", "JUSTID"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4280,12 +3381,7 @@
     {
       "name": "xautoclaim_wrong_arity",
       "now_ms": 702,
-      "argv": [
-        "XAUTOCLAIM",
-        "k",
-        "g",
-        "c"
-      ],
+      "argv": ["XAUTOCLAIM", "k", "g", "c"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'xautoclaim' command"
@@ -4294,14 +3390,7 @@
     {
       "name": "xautoclaim_nogroup",
       "now_ms": 702,
-      "argv": [
-        "XAUTOCLAIM",
-        "xac",
-        "nosuchgrp",
-        "c",
-        "0",
-        "0-0"
-      ],
+      "argv": ["XAUTOCLAIM", "xac", "nosuchgrp", "c", "0", "0-0"],
       "expect": {
         "kind": "error",
         "value": "NOGROUP No such key 'xac' or consumer group 'nosuchgrp'"
@@ -4310,13 +3399,7 @@
     {
       "name": "xread_block_setup",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "xblock_s",
-        "1-1",
-        "field",
-        "value1"
-      ],
+      "argv": ["XADD", "xblock_s", "1-1", "field", "value1"],
       "expect": {
         "kind": "bulk",
         "value": "1-1"
@@ -4325,14 +3408,7 @@
     {
       "name": "xread_block_zero_returns_data",
       "now_ms": 1000,
-      "argv": [
-        "XREAD",
-        "BLOCK",
-        "0",
-        "STREAMS",
-        "xblock_s",
-        "0"
-      ],
+      "argv": ["XREAD", "BLOCK", "0", "STREAMS", "xblock_s", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4378,14 +3454,7 @@
     {
       "name": "xread_block_no_data_returns_nil",
       "now_ms": 1000,
-      "argv": [
-        "XREAD",
-        "BLOCK",
-        "0",
-        "STREAMS",
-        "xblock_noexist",
-        "0"
-      ],
+      "argv": ["XREAD", "BLOCK", "0", "STREAMS", "xblock_noexist", "0"],
       "expect": {
         "kind": "null_array",
         "value": null
@@ -4394,16 +3463,7 @@
     {
       "name": "xread_block_with_count",
       "now_ms": 1000,
-      "argv": [
-        "XREAD",
-        "COUNT",
-        "10",
-        "BLOCK",
-        "100",
-        "STREAMS",
-        "xblock_s",
-        "0"
-      ],
+      "argv": ["XREAD", "COUNT", "10", "BLOCK", "100", "STREAMS", "xblock_s", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4449,14 +3509,7 @@
     {
       "name": "xread_block_negative_timeout",
       "now_ms": 1000,
-      "argv": [
-        "XREAD",
-        "BLOCK",
-        "-1",
-        "STREAMS",
-        "xblock_s",
-        "0"
-      ],
+      "argv": ["XREAD", "BLOCK", "-1", "STREAMS", "xblock_s", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR timeout is negative"
@@ -4465,14 +3518,7 @@
     {
       "name": "xread_block_invalid_timeout",
       "now_ms": 1000,
-      "argv": [
-        "XREAD",
-        "BLOCK",
-        "abc",
-        "STREAMS",
-        "xblock_s",
-        "0"
-      ],
+      "argv": ["XREAD", "BLOCK", "abc", "STREAMS", "xblock_s", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR timeout is not an integer or out of range"
@@ -4481,13 +3527,7 @@
     {
       "name": "xreadgroup_block_setup_group",
       "now_ms": 1000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "xblock_s",
-        "xbgrp",
-        "0"
-      ],
+      "argv": ["XGROUP", "CREATE", "xblock_s", "xbgrp", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4590,13 +3630,7 @@
     {
       "name": "xreadgroup_block_with_noack",
       "now_ms": 1000,
-      "argv": [
-        "XADD",
-        "xblock_s",
-        "2-1",
-        "f2",
-        "v2"
-      ],
+      "argv": ["XADD", "xblock_s", "2-1", "f2", "v2"],
       "expect": {
         "kind": "bulk",
         "value": "2-1"
@@ -4662,11 +3696,7 @@
     {
       "name": "xread_block_cleanup",
       "now_ms": 1000,
-      "argv": [
-        "DEL",
-        "xblock_s",
-        "xblock_noexist"
-      ],
+      "argv": ["DEL", "xblock_s", "xblock_noexist"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -4675,9 +3705,7 @@
     {
       "name": "xadd_maxlen_setup_flush",
       "now_ms": 90000,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4686,13 +3714,7 @@
     {
       "name": "xadd_maxlen_seed_1",
       "now_ms": 90000,
-      "argv": [
-        "XADD",
-        "trimstream",
-        "1-0",
-        "k",
-        "v1"
-      ],
+      "argv": ["XADD", "trimstream", "1-0", "k", "v1"],
       "expect": {
         "kind": "bulk",
         "value": "1-0"
@@ -4701,13 +3723,7 @@
     {
       "name": "xadd_maxlen_seed_2",
       "now_ms": 90000,
-      "argv": [
-        "XADD",
-        "trimstream",
-        "2-0",
-        "k",
-        "v2"
-      ],
+      "argv": ["XADD", "trimstream", "2-0", "k", "v2"],
       "expect": {
         "kind": "bulk",
         "value": "2-0"
@@ -4716,13 +3732,7 @@
     {
       "name": "xadd_maxlen_seed_3",
       "now_ms": 90000,
-      "argv": [
-        "XADD",
-        "trimstream",
-        "3-0",
-        "k",
-        "v3"
-      ],
+      "argv": ["XADD", "trimstream", "3-0", "k", "v3"],
       "expect": {
         "kind": "bulk",
         "value": "3-0"
@@ -4731,15 +3741,7 @@
     {
       "name": "xadd_with_maxlen_trims_to_2",
       "now_ms": 90000,
-      "argv": [
-        "XADD",
-        "trimstream",
-        "MAXLEN",
-        "2",
-        "4-0",
-        "k",
-        "v4"
-      ],
+      "argv": ["XADD", "trimstream", "MAXLEN", "2", "4-0", "k", "v4"],
       "expect": {
         "kind": "bulk",
         "value": "4-0"
@@ -4748,10 +3750,7 @@
     {
       "name": "xadd_maxlen_verify_length",
       "now_ms": 90000,
-      "argv": [
-        "XLEN",
-        "trimstream"
-      ],
+      "argv": ["XLEN", "trimstream"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -4760,12 +3759,7 @@
     {
       "name": "xadd_maxlen_verify_oldest_removed",
       "now_ms": 90000,
-      "argv": [
-        "XRANGE",
-        "trimstream",
-        "-",
-        "+"
-      ],
+      "argv": ["XRANGE", "trimstream", "-", "+"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4819,16 +3813,7 @@
     {
       "name": "xadd_maxlen_approx_trims",
       "now_ms": 90000,
-      "argv": [
-        "XADD",
-        "trimstream",
-        "MAXLEN",
-        "~",
-        "1",
-        "5-0",
-        "k",
-        "v5"
-      ],
+      "argv": ["XADD", "trimstream", "MAXLEN", "~", "1", "5-0", "k", "v5"],
       "expect": {
         "kind": "bulk",
         "value": "5-0"
@@ -4837,10 +3822,7 @@
     {
       "name": "xadd_maxlen_approx_verify_length",
       "now_ms": 90000,
-      "argv": [
-        "XLEN",
-        "trimstream"
-      ],
+      "argv": ["XLEN", "trimstream"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -4849,16 +3831,7 @@
     {
       "name": "xadd_maxlen_equals_modifier",
       "now_ms": 90000,
-      "argv": [
-        "XADD",
-        "trimstream",
-        "MAXLEN",
-        "=",
-        "1",
-        "6-0",
-        "k",
-        "v6"
-      ],
+      "argv": ["XADD", "trimstream", "MAXLEN", "=", "1", "6-0", "k", "v6"],
       "expect": {
         "kind": "bulk",
         "value": "6-0"
@@ -4867,10 +3840,7 @@
     {
       "name": "xadd_maxlen_equals_verify_length",
       "now_ms": 90000,
-      "argv": [
-        "XLEN",
-        "trimstream"
-      ],
+      "argv": ["XLEN", "trimstream"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -4879,9 +3849,7 @@
     {
       "name": "xadd_minid_flush",
       "now_ms": 91000,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4890,13 +3858,7 @@
     {
       "name": "xadd_minid_seed_1",
       "now_ms": 91000,
-      "argv": [
-        "XADD",
-        "minids",
-        "100-0",
-        "k",
-        "a"
-      ],
+      "argv": ["XADD", "minids", "100-0", "k", "a"],
       "expect": {
         "kind": "bulk",
         "value": "100-0"
@@ -4905,13 +3867,7 @@
     {
       "name": "xadd_minid_seed_2",
       "now_ms": 91000,
-      "argv": [
-        "XADD",
-        "minids",
-        "200-0",
-        "k",
-        "b"
-      ],
+      "argv": ["XADD", "minids", "200-0", "k", "b"],
       "expect": {
         "kind": "bulk",
         "value": "200-0"
@@ -4920,13 +3876,7 @@
     {
       "name": "xadd_minid_seed_3",
       "now_ms": 91000,
-      "argv": [
-        "XADD",
-        "minids",
-        "300-0",
-        "k",
-        "c"
-      ],
+      "argv": ["XADD", "minids", "300-0", "k", "c"],
       "expect": {
         "kind": "bulk",
         "value": "300-0"
@@ -4935,15 +3885,7 @@
     {
       "name": "xadd_with_minid_trims_old",
       "now_ms": 91000,
-      "argv": [
-        "XADD",
-        "minids",
-        "MINID",
-        "200-0",
-        "400-0",
-        "k",
-        "d"
-      ],
+      "argv": ["XADD", "minids", "MINID", "200-0", "400-0", "k", "d"],
       "expect": {
         "kind": "bulk",
         "value": "400-0"
@@ -4952,10 +3894,7 @@
     {
       "name": "xadd_minid_verify_length",
       "now_ms": 91000,
-      "argv": [
-        "XLEN",
-        "minids"
-      ],
+      "argv": ["XLEN", "minids"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -4964,12 +3903,7 @@
     {
       "name": "xadd_minid_verify_entries",
       "now_ms": 91000,
-      "argv": [
-        "XRANGE",
-        "minids",
-        "-",
-        "+"
-      ],
+      "argv": ["XRANGE", "minids", "-", "+"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5045,9 +3979,7 @@
     {
       "name": "xadd_nomkstream_flush",
       "now_ms": 92000,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5056,14 +3988,7 @@
     {
       "name": "xadd_nomkstream_nonexistent_returns_nil",
       "now_ms": 92000,
-      "argv": [
-        "XADD",
-        "noexist",
-        "NOMKSTREAM",
-        "*",
-        "k",
-        "v"
-      ],
+      "argv": ["XADD", "noexist", "NOMKSTREAM", "*", "k", "v"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -5072,10 +3997,7 @@
     {
       "name": "xadd_nomkstream_verify_not_created",
       "now_ms": 92000,
-      "argv": [
-        "EXISTS",
-        "noexist"
-      ],
+      "argv": ["EXISTS", "noexist"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -5084,13 +4006,7 @@
     {
       "name": "xadd_nomkstream_existing_stream_works",
       "now_ms": 92000,
-      "argv": [
-        "XADD",
-        "existing",
-        "1-0",
-        "k",
-        "v"
-      ],
+      "argv": ["XADD", "existing", "1-0", "k", "v"],
       "expect": {
         "kind": "bulk",
         "value": "1-0"
@@ -5099,14 +4015,7 @@
     {
       "name": "xadd_nomkstream_on_existing_succeeds",
       "now_ms": 92000,
-      "argv": [
-        "XADD",
-        "existing",
-        "NOMKSTREAM",
-        "2-0",
-        "k",
-        "v2"
-      ],
+      "argv": ["XADD", "existing", "NOMKSTREAM", "2-0", "k", "v2"],
       "expect": {
         "kind": "bulk",
         "value": "2-0"
@@ -5115,10 +4024,7 @@
     {
       "name": "xadd_nomkstream_verify_length",
       "now_ms": 92000,
-      "argv": [
-        "XLEN",
-        "existing"
-      ],
+      "argv": ["XLEN", "existing"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -5127,9 +4033,7 @@
     {
       "name": "xadd_partial_auto_id_flush",
       "now_ms": 94000,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5138,13 +4042,7 @@
     {
       "name": "xadd_partial_auto_first_entry",
       "now_ms": 94000,
-      "argv": [
-        "XADD",
-        "pstream",
-        "5000-*",
-        "k",
-        "v1"
-      ],
+      "argv": ["XADD", "pstream", "5000-*", "k", "v1"],
       "expect": {
         "kind": "bulk",
         "value": "5000-0"
@@ -5153,13 +4051,7 @@
     {
       "name": "xadd_partial_auto_same_ms_increments_seq",
       "now_ms": 94000,
-      "argv": [
-        "XADD",
-        "pstream",
-        "5000-*",
-        "k",
-        "v2"
-      ],
+      "argv": ["XADD", "pstream", "5000-*", "k", "v2"],
       "expect": {
         "kind": "bulk",
         "value": "5000-1"
@@ -5168,13 +4060,7 @@
     {
       "name": "xadd_partial_auto_same_ms_increments_again",
       "now_ms": 94000,
-      "argv": [
-        "XADD",
-        "pstream",
-        "5000-*",
-        "k",
-        "v3"
-      ],
+      "argv": ["XADD", "pstream", "5000-*", "k", "v3"],
       "expect": {
         "kind": "bulk",
         "value": "5000-2"
@@ -5183,13 +4069,7 @@
     {
       "name": "xadd_partial_auto_new_ms_resets_seq",
       "now_ms": 94000,
-      "argv": [
-        "XADD",
-        "pstream",
-        "6000-*",
-        "k",
-        "v4"
-      ],
+      "argv": ["XADD", "pstream", "6000-*", "k", "v4"],
       "expect": {
         "kind": "bulk",
         "value": "6000-0"
@@ -5198,10 +4078,7 @@
     {
       "name": "xadd_partial_auto_verify_length",
       "now_ms": 94000,
-      "argv": [
-        "XLEN",
-        "pstream"
-      ],
+      "argv": ["XLEN", "pstream"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -5210,13 +4087,7 @@
     {
       "name": "xadd_partial_auto_lower_ms_rejected",
       "now_ms": 94000,
-      "argv": [
-        "XADD",
-        "pstream",
-        "4000-*",
-        "k",
-        "v5"
-      ],
+      "argv": ["XADD", "pstream", "4000-*", "k", "v5"],
       "expect": {
         "kind": "error",
         "value": "ERR The ID specified in XADD is equal or smaller than the target stream top item"
@@ -5225,15 +4096,7 @@
     {
       "name": "xadd_partial_auto_with_maxlen",
       "now_ms": 94000,
-      "argv": [
-        "XADD",
-        "pstream",
-        "MAXLEN",
-        "2",
-        "7000-*",
-        "k",
-        "v6"
-      ],
+      "argv": ["XADD", "pstream", "MAXLEN", "2", "7000-*", "k", "v6"],
       "expect": {
         "kind": "bulk",
         "value": "7000-0"
@@ -5242,10 +4105,7 @@
     {
       "name": "xadd_partial_auto_maxlen_verify",
       "now_ms": 94000,
-      "argv": [
-        "XLEN",
-        "pstream"
-      ],
+      "argv": ["XLEN", "pstream"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -5254,9 +4114,7 @@
     {
       "name": "xtrim_minid_flush",
       "now_ms": 93000,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5265,13 +4123,7 @@
     {
       "name": "xtrim_minid_seed_1",
       "now_ms": 93000,
-      "argv": [
-        "XADD",
-        "ts",
-        "10-0",
-        "k",
-        "a"
-      ],
+      "argv": ["XADD", "ts", "10-0", "k", "a"],
       "expect": {
         "kind": "bulk",
         "value": "10-0"
@@ -5280,13 +4132,7 @@
     {
       "name": "xtrim_minid_seed_2",
       "now_ms": 93000,
-      "argv": [
-        "XADD",
-        "ts",
-        "20-0",
-        "k",
-        "b"
-      ],
+      "argv": ["XADD", "ts", "20-0", "k", "b"],
       "expect": {
         "kind": "bulk",
         "value": "20-0"
@@ -5295,13 +4141,7 @@
     {
       "name": "xtrim_minid_seed_3",
       "now_ms": 93000,
-      "argv": [
-        "XADD",
-        "ts",
-        "30-0",
-        "k",
-        "c"
-      ],
+      "argv": ["XADD", "ts", "30-0", "k", "c"],
       "expect": {
         "kind": "bulk",
         "value": "30-0"
@@ -5310,12 +4150,7 @@
     {
       "name": "xtrim_minid_removes_below_threshold",
       "now_ms": 93000,
-      "argv": [
-        "XTRIM",
-        "ts",
-        "MINID",
-        "20-0"
-      ],
+      "argv": ["XTRIM", "ts", "MINID", "20-0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -5324,10 +4159,7 @@
     {
       "name": "xtrim_minid_verify_length",
       "now_ms": 93000,
-      "argv": [
-        "XLEN",
-        "ts"
-      ],
+      "argv": ["XLEN", "ts"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -5336,13 +4168,7 @@
     {
       "name": "xtrim_minid_approx",
       "now_ms": 93000,
-      "argv": [
-        "XTRIM",
-        "ts",
-        "MINID",
-        "~",
-        "30-0"
-      ],
+      "argv": ["XTRIM", "ts", "MINID", "~", "30-0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -5351,10 +4177,7 @@
     {
       "name": "xtrim_minid_verify_final",
       "now_ms": 93000,
-      "argv": [
-        "XLEN",
-        "ts"
-      ],
+      "argv": ["XLEN", "ts"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -5363,10 +4186,7 @@
     {
       "name": "_comment_xinfo_stream_full",
       "now_ms": 95000,
-      "argv": [
-        "DEL",
-        "xifull"
-      ],
+      "argv": ["DEL", "xifull"],
       "expect": {
         "kind": "any_integer"
       }
@@ -5374,13 +4194,7 @@
     {
       "name": "xinfo_full_setup_add1",
       "now_ms": 95000,
-      "argv": [
-        "XADD",
-        "xifull",
-        "1-1",
-        "a",
-        "1"
-      ],
+      "argv": ["XADD", "xifull", "1-1", "a", "1"],
       "expect": {
         "kind": "bulk",
         "value": "1-1"
@@ -5389,13 +4203,7 @@
     {
       "name": "xinfo_full_setup_add2",
       "now_ms": 95000,
-      "argv": [
-        "XADD",
-        "xifull",
-        "2-1",
-        "b",
-        "2"
-      ],
+      "argv": ["XADD", "xifull", "2-1", "b", "2"],
       "expect": {
         "kind": "bulk",
         "value": "2-1"
@@ -5404,13 +4212,7 @@
     {
       "name": "xinfo_full_setup_add3",
       "now_ms": 95000,
-      "argv": [
-        "XADD",
-        "xifull",
-        "3-1",
-        "c",
-        "3"
-      ],
+      "argv": ["XADD", "xifull", "3-1", "c", "3"],
       "expect": {
         "kind": "bulk",
         "value": "3-1"
@@ -5419,12 +4221,7 @@
     {
       "name": "xinfo_full_no_groups",
       "now_ms": 95000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "xifull",
-        "FULL"
-      ],
+      "argv": ["XINFO", "STREAM", "xifull", "FULL"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5573,14 +4370,7 @@
     {
       "name": "xinfo_full_count_2_limits_entries",
       "now_ms": 95000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "xifull",
-        "FULL",
-        "COUNT",
-        "2"
-      ],
+      "argv": ["XINFO", "STREAM", "xifull", "FULL", "COUNT", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5707,12 +4497,7 @@
     {
       "name": "xinfo_full_nonexistent_key",
       "now_ms": 95000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "no_such_stream_xifull",
-        "FULL"
-      ],
+      "argv": ["XINFO", "STREAM", "no_such_stream_xifull", "FULL"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -5721,11 +4506,7 @@
     {
       "name": "xinfo_full_wrongtype_setup",
       "now_ms": 95000,
-      "argv": [
-        "SET",
-        "xifull_str",
-        "val"
-      ],
+      "argv": ["SET", "xifull_str", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5734,12 +4515,7 @@
     {
       "name": "xinfo_full_wrongtype_check",
       "now_ms": 95000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "xifull_str",
-        "FULL"
-      ],
+      "argv": ["XINFO", "STREAM", "xifull_str", "FULL"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -5748,13 +4524,7 @@
     {
       "name": "xinfo_full_bad_arity_missing_count_value",
       "now_ms": 95000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "xifull",
-        "FULL",
-        "COUNT"
-      ],
+      "argv": ["XINFO", "STREAM", "xifull", "FULL", "COUNT"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP."
@@ -5763,13 +4533,7 @@
     {
       "name": "xinfo_full_with_group_setup",
       "now_ms": 95000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "xifull",
-        "grp1",
-        "0"
-      ],
+      "argv": ["XGROUP", "CREATE", "xifull", "grp1", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5778,12 +4542,7 @@
     {
       "name": "xinfo_full_with_group",
       "now_ms": 95000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "xifull",
-        "FULL"
-      ],
+      "argv": ["XINFO", "STREAM", "xifull", "FULL"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5994,14 +4753,7 @@
     {
       "name": "xinfo_full_count_0_empty_entries",
       "now_ms": 95000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "xifull",
-        "FULL",
-        "COUNT",
-        "0"
-      ],
+      "argv": ["XINFO", "STREAM", "xifull", "FULL", "COUNT", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -6212,13 +4964,7 @@
     {
       "name": "xgroup_entriesread_setup_1",
       "now_ms": 96000,
-      "argv": [
-        "XADD",
-        "xientries",
-        "1-1",
-        "a",
-        "1"
-      ],
+      "argv": ["XADD", "xientries", "1-1", "a", "1"],
       "expect": {
         "kind": "bulk",
         "value": "1-1"
@@ -6227,13 +4973,7 @@
     {
       "name": "xgroup_entriesread_setup_2",
       "now_ms": 96000,
-      "argv": [
-        "XADD",
-        "xientries",
-        "2-1",
-        "b",
-        "2"
-      ],
+      "argv": ["XADD", "xientries", "2-1", "b", "2"],
       "expect": {
         "kind": "bulk",
         "value": "2-1"
@@ -6242,13 +4982,7 @@
     {
       "name": "xgroup_entriesread_setup_3",
       "now_ms": 96000,
-      "argv": [
-        "XADD",
-        "xientries",
-        "3-1",
-        "c",
-        "3"
-      ],
+      "argv": ["XADD", "xientries", "3-1", "c", "3"],
       "expect": {
         "kind": "bulk",
         "value": "3-1"
@@ -6257,15 +4991,7 @@
     {
       "name": "xgroup_create_entriesread_zero",
       "now_ms": 96000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "xientries",
-        "grp1",
-        "0",
-        "ENTRIESREAD",
-        "0"
-      ],
+      "argv": ["XGROUP", "CREATE", "xientries", "grp1", "0", "ENTRIESREAD", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -6274,11 +5000,7 @@
     {
       "name": "xinfo_groups_reports_entriesread_and_lag",
       "now_ms": 96000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "xientries"
-      ],
+      "argv": ["XINFO", "GROUPS", "xientries"],
       "expect": {
         "kind": "array",
         "value": [
@@ -6341,14 +5063,7 @@
     {
       "name": "xinfo_full_reports_group_entriesread_and_lag",
       "now_ms": 96000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "xientries",
-        "FULL",
-        "COUNT",
-        "0"
-      ],
+      "argv": ["XINFO", "STREAM", "xientries", "FULL", "COUNT", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -6559,15 +5274,7 @@
     {
       "name": "xgroup_setid_entriesread_two",
       "now_ms": 96000,
-      "argv": [
-        "XGROUP",
-        "SETID",
-        "xientries",
-        "grp1",
-        "2-1",
-        "ENTRIESREAD",
-        "2"
-      ],
+      "argv": ["XGROUP", "SETID", "xientries", "grp1", "2-1", "ENTRIESREAD", "2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -6576,11 +5283,7 @@
     {
       "name": "xinfo_groups_reports_setid_entriesread_lag",
       "now_ms": 96000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "xientries"
-      ],
+      "argv": ["XINFO", "GROUPS", "xientries"],
       "expect": {
         "kind": "array",
         "value": [
@@ -6643,13 +5346,7 @@
     {
       "name": "xsetid_entriesadded_setup_1",
       "now_ms": 97000,
-      "argv": [
-        "XADD",
-        "xiadded",
-        "1-1",
-        "a",
-        "1"
-      ],
+      "argv": ["XADD", "xiadded", "1-1", "a", "1"],
       "expect": {
         "kind": "bulk",
         "value": "1-1"
@@ -6658,13 +5355,7 @@
     {
       "name": "xsetid_entriesadded_setup_2",
       "now_ms": 97000,
-      "argv": [
-        "XADD",
-        "xiadded",
-        "2-1",
-        "b",
-        "2"
-      ],
+      "argv": ["XADD", "xiadded", "2-1", "b", "2"],
       "expect": {
         "kind": "bulk",
         "value": "2-1"
@@ -6673,15 +5364,7 @@
     {
       "name": "xsetid_entriesadded_create_group",
       "now_ms": 97000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "xiadded",
-        "grp1",
-        "0",
-        "ENTRIESREAD",
-        "0"
-      ],
+      "argv": ["XGROUP", "CREATE", "xiadded", "grp1", "0", "ENTRIESREAD", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -6690,13 +5373,7 @@
     {
       "name": "xsetid_entriesadded_ten",
       "now_ms": 97000,
-      "argv": [
-        "XSETID",
-        "xiadded",
-        "2-1",
-        "ENTRIESADDED",
-        "10"
-      ],
+      "argv": ["XSETID", "xiadded", "2-1", "ENTRIESADDED", "10"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -6705,11 +5382,7 @@
     {
       "name": "xinfo_groups_reports_xsetid_entriesadded_lag",
       "now_ms": 97000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "xiadded"
-      ],
+      "argv": ["XINFO", "GROUPS", "xiadded"],
       "expect": {
         "kind": "array",
         "value": [
@@ -6772,14 +5445,7 @@
     {
       "name": "xinfo_full_reports_xsetid_entriesadded_lag",
       "now_ms": 97000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "xiadded",
-        "FULL",
-        "COUNT",
-        "0"
-      ],
+      "argv": ["XINFO", "STREAM", "xiadded", "FULL", "COUNT", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -6968,13 +5634,7 @@
     {
       "name": "xinfo_lag_tombstone_behind_setup_1",
       "now_ms": 98000,
-      "argv": [
-        "XADD",
-        "xilagtomb",
-        "1-0",
-        "a",
-        "1"
-      ],
+      "argv": ["XADD", "xilagtomb", "1-0", "a", "1"],
       "expect": {
         "kind": "bulk",
         "value": "1-0"
@@ -6983,13 +5643,7 @@
     {
       "name": "xinfo_lag_tombstone_behind_setup_2",
       "now_ms": 98000,
-      "argv": [
-        "XADD",
-        "xilagtomb",
-        "2-0",
-        "b",
-        "2"
-      ],
+      "argv": ["XADD", "xilagtomb", "2-0", "b", "2"],
       "expect": {
         "kind": "bulk",
         "value": "2-0"
@@ -6998,13 +5652,7 @@
     {
       "name": "xinfo_lag_tombstone_behind_setup_3",
       "now_ms": 98000,
-      "argv": [
-        "XADD",
-        "xilagtomb",
-        "3-0",
-        "c",
-        "3"
-      ],
+      "argv": ["XADD", "xilagtomb", "3-0", "c", "3"],
       "expect": {
         "kind": "bulk",
         "value": "3-0"
@@ -7013,13 +5661,7 @@
     {
       "name": "xinfo_lag_tombstone_behind_setup_4",
       "now_ms": 98000,
-      "argv": [
-        "XADD",
-        "xilagtomb",
-        "4-0",
-        "d",
-        "4"
-      ],
+      "argv": ["XADD", "xilagtomb", "4-0", "d", "4"],
       "expect": {
         "kind": "bulk",
         "value": "4-0"
@@ -7028,11 +5670,7 @@
     {
       "name": "xinfo_lag_tombstone_behind_delete_first",
       "now_ms": 98000,
-      "argv": [
-        "XDEL",
-        "xilagtomb",
-        "1-0"
-      ],
+      "argv": ["XDEL", "xilagtomb", "1-0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -7041,15 +5679,7 @@
     {
       "name": "xinfo_lag_tombstone_behind_create_group",
       "now_ms": 98000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "xilagtomb",
-        "grp1",
-        "3-0",
-        "ENTRIESREAD",
-        "3"
-      ],
+      "argv": ["XGROUP", "CREATE", "xilagtomb", "grp1", "3-0", "ENTRIESREAD", "3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -7058,11 +5688,7 @@
     {
       "name": "xinfo_groups_reports_entriesread_lag_when_tombstone_behind_cursor",
       "now_ms": 98000,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "xilagtomb"
-      ],
+      "argv": ["XINFO", "GROUPS", "xilagtomb"],
       "expect": {
         "kind": "array",
         "value": [
@@ -7125,14 +5751,7 @@
     {
       "name": "xinfo_full_reports_entriesread_lag_when_tombstone_behind_cursor",
       "now_ms": 98000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "xilagtomb",
-        "FULL",
-        "COUNT",
-        "0"
-      ],
+      "argv": ["XINFO", "STREAM", "xilagtomb", "FULL", "COUNT", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -7343,13 +5962,7 @@
     {
       "name": "xinfo_rename_max_deleted_setup",
       "now_ms": 99000,
-      "argv": [
-        "XADD",
-        "ximaxdelrename",
-        "1-0",
-        "f",
-        "v"
-      ],
+      "argv": ["XADD", "ximaxdelrename", "1-0", "f", "v"],
       "expect": {
         "kind": "bulk",
         "value": "1-0"
@@ -7358,11 +5971,7 @@
     {
       "name": "xinfo_rename_max_deleted_delete",
       "now_ms": 99000,
-      "argv": [
-        "XDEL",
-        "ximaxdelrename",
-        "1-0"
-      ],
+      "argv": ["XDEL", "ximaxdelrename", "1-0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -7371,11 +5980,7 @@
     {
       "name": "xinfo_rename_max_deleted_rename",
       "now_ms": 99000,
-      "argv": [
-        "RENAME",
-        "ximaxdelrename",
-        "ximaxdelrenamed"
-      ],
+      "argv": ["RENAME", "ximaxdelrename", "ximaxdelrenamed"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -7384,11 +5989,7 @@
     {
       "name": "xinfo_stream_rename_preserves_max_deleted",
       "now_ms": 99000,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "ximaxdelrenamed"
-      ],
+      "argv": ["XINFO", "STREAM", "ximaxdelrenamed"],
       "expect": {
         "kind": "array",
         "value": [
@@ -7478,13 +6079,7 @@
     {
       "name": "xinfo_copy_max_deleted_setup",
       "now_ms": 99500,
-      "argv": [
-        "XADD",
-        "ximaxdelcopy",
-        "1-0",
-        "f",
-        "v"
-      ],
+      "argv": ["XADD", "ximaxdelcopy", "1-0", "f", "v"],
       "expect": {
         "kind": "bulk",
         "value": "1-0"
@@ -7493,11 +6088,7 @@
     {
       "name": "xinfo_copy_max_deleted_delete",
       "now_ms": 99500,
-      "argv": [
-        "XDEL",
-        "ximaxdelcopy",
-        "1-0"
-      ],
+      "argv": ["XDEL", "ximaxdelcopy", "1-0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -7506,11 +6097,7 @@
     {
       "name": "xinfo_copy_max_deleted_copy",
       "now_ms": 99500,
-      "argv": [
-        "COPY",
-        "ximaxdelcopy",
-        "ximaxdelcopied"
-      ],
+      "argv": ["COPY", "ximaxdelcopy", "ximaxdelcopied"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -7519,11 +6106,7 @@
     {
       "name": "xinfo_stream_copy_preserves_max_deleted",
       "now_ms": 99500,
-      "argv": [
-        "XINFO",
-        "STREAM",
-        "ximaxdelcopied"
-      ],
+      "argv": ["XINFO", "STREAM", "ximaxdelcopied"],
       "expect": {
         "kind": "array",
         "value": [
@@ -7613,13 +6196,7 @@
     {
       "name": "xreadgroup_entriesread_tombstone_behind_setup_1",
       "now_ms": 99800,
-      "argv": [
-        "XADD",
-        "xireadlag",
-        "1-0",
-        "f",
-        "v"
-      ],
+      "argv": ["XADD", "xireadlag", "1-0", "f", "v"],
       "expect": {
         "kind": "bulk",
         "value": "1-0"
@@ -7628,13 +6205,7 @@
     {
       "name": "xreadgroup_entriesread_tombstone_behind_setup_2",
       "now_ms": 99800,
-      "argv": [
-        "XADD",
-        "xireadlag",
-        "2-0",
-        "f",
-        "v"
-      ],
+      "argv": ["XADD", "xireadlag", "2-0", "f", "v"],
       "expect": {
         "kind": "bulk",
         "value": "2-0"
@@ -7643,13 +6214,7 @@
     {
       "name": "xreadgroup_entriesread_tombstone_behind_setup_3",
       "now_ms": 99800,
-      "argv": [
-        "XADD",
-        "xireadlag",
-        "3-0",
-        "f",
-        "v"
-      ],
+      "argv": ["XADD", "xireadlag", "3-0", "f", "v"],
       "expect": {
         "kind": "bulk",
         "value": "3-0"
@@ -7658,11 +6223,7 @@
     {
       "name": "xreadgroup_entriesread_tombstone_behind_delete_first",
       "now_ms": 99800,
-      "argv": [
-        "XDEL",
-        "xireadlag",
-        "1-0"
-      ],
+      "argv": ["XDEL", "xireadlag", "1-0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -7671,15 +6232,7 @@
     {
       "name": "xreadgroup_entriesread_tombstone_behind_create_group",
       "now_ms": 99800,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "xireadlag",
-        "grp1",
-        "1-0",
-        "ENTRIESREAD",
-        "1"
-      ],
+      "argv": ["XGROUP", "CREATE", "xireadlag", "grp1", "1-0", "ENTRIESREAD", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -7688,17 +6241,7 @@
     {
       "name": "xreadgroup_entriesread_tombstone_behind_read_one",
       "now_ms": 99800,
-      "argv": [
-        "XREADGROUP",
-        "GROUP",
-        "grp1",
-        "c1",
-        "COUNT",
-        "1",
-        "STREAMS",
-        "xireadlag",
-        ">"
-      ],
+      "argv": ["XREADGROUP", "GROUP", "grp1", "c1", "COUNT", "1", "STREAMS", "xireadlag", ">"],
       "expect": {
         "kind": "array",
         "value": [
@@ -7744,11 +6287,7 @@
     {
       "name": "xinfo_groups_preserves_entriesread_after_tombstone_behind_read",
       "now_ms": 99800,
-      "argv": [
-        "XINFO",
-        "GROUPS",
-        "xireadlag"
-      ],
+      "argv": ["XINFO", "GROUPS", "xireadlag"],
       "expect": {
         "kind": "array",
         "value": [
@@ -7811,14 +6350,7 @@
     {
       "name": "xsetid_entriesadded_zero_empty_stream_create",
       "now_ms": 100000,
-      "argv": [
-        "XGROUP",
-        "CREATE",
-        "xizero",
-        "grp1",
-        "$",
-        "MKSTREAM"
-      ],
+      "argv": ["XGROUP", "CREATE", "xizero", "grp1", "$", "MKSTREAM"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -7827,13 +6359,7 @@
     {
       "name": "xsetid_entriesadded_zero_empty_stream_ok",
       "now_ms": 100000,
-      "argv": [
-        "XSETID",
-        "xizero",
-        "0-0",
-        "ENTRIESADDED",
-        "0"
-      ],
+      "argv": ["XSETID", "xizero", "0-0", "ENTRIESADDED", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"

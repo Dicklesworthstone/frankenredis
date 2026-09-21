@@ -4,11 +4,7 @@
     {
       "name": "replconf_ack_ok",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "ACK",
-        "100"
-      ],
+      "argv": ["REPLCONF", "ACK", "100"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -17,11 +13,7 @@
     {
       "name": "replconf_ack_zero",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "ACK",
-        "0"
-      ],
+      "argv": ["REPLCONF", "ACK", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -30,11 +22,7 @@
     {
       "name": "replconf_ack_large_offset",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "ACK",
-        "999999999"
-      ],
+      "argv": ["REPLCONF", "ACK", "999999999"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -43,11 +31,7 @@
     {
       "name": "replconf_listening_port_ok",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "listening-port",
-        "6380"
-      ],
+      "argv": ["REPLCONF", "listening-port", "6380"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -56,11 +40,7 @@
     {
       "name": "replconf_listening_port_different",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "listening-port",
-        "12345"
-      ],
+      "argv": ["REPLCONF", "listening-port", "12345"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -69,11 +49,7 @@
     {
       "name": "replconf_capa_eof_ok",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "capa",
-        "eof"
-      ],
+      "argv": ["REPLCONF", "capa", "eof"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -82,11 +58,7 @@
     {
       "name": "replconf_capa_psync2_ok",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "capa",
-        "psync2"
-      ],
+      "argv": ["REPLCONF", "capa", "psync2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -95,11 +67,7 @@
     {
       "name": "replconf_capa_unknown",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "capa",
-        "unknown_capability"
-      ],
+      "argv": ["REPLCONF", "capa", "unknown_capability"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -108,11 +76,7 @@
     {
       "name": "replconf_ip_address_ok",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "ip-address",
-        "192.168.1.1"
-      ],
+      "argv": ["REPLCONF", "ip-address", "192.168.1.1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -121,11 +85,7 @@
     {
       "name": "replconf_ip_address_ipv6",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "ip-address",
-        "::1"
-      ],
+      "argv": ["REPLCONF", "ip-address", "::1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -134,11 +94,7 @@
     {
       "name": "replconf_ip_address_localhost",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "ip-address",
-        "127.0.0.1"
-      ],
+      "argv": ["REPLCONF", "ip-address", "127.0.0.1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -160,11 +116,7 @@
     {
       "name": "replconf_getack_returns_ack_array",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "GETACK",
-        "*"
-      ],
+      "argv": ["REPLCONF", "GETACK", "*"],
       "expect": {
         "kind": "array",
         "value": [
@@ -186,11 +138,7 @@
     {
       "name": "replconf_getack_lowercase",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "getack",
-        "*"
-      ],
+      "argv": ["REPLCONF", "getack", "*"],
       "expect": {
         "kind": "array",
         "value": [
@@ -212,11 +160,7 @@
     {
       "name": "replconf_unknown_subcommand_accepts",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "UNKNOWN",
-        "something"
-      ],
+      "argv": ["REPLCONF", "UNKNOWN", "something"],
       "expect": {
         "kind": "error",
         "value": "ERR Unrecognized REPLCONF option: UNKNOWN"
@@ -225,11 +169,7 @@
     {
       "name": "replconf_rdb_filter_only_malformed_keeps_err_prefix",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "rdb-filter-only",
-        "\""
-      ],
+      "argv": ["REPLCONF", "rdb-filter-only", "\""],
       "expect": {
         "kind": "error",
         "value": "ERR Missing rdb-filter-only values"
@@ -238,11 +178,7 @@
     {
       "name": "replconf_rdb_filter_only_unsupported_keeps_err_prefix",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "rdb-filter-only",
-        "bogus"
-      ],
+      "argv": ["REPLCONF", "rdb-filter-only", "bogus"],
       "expect": {
         "kind": "error",
         "value": "ERR Unsupported rdb-filter-only option: bogus"
@@ -251,11 +187,7 @@
     {
       "name": "replconf_rdb_filter_only_escaped_unsupported_keeps_err_prefix",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "rdb-filter-only",
-        "\"\\x62ogus\""
-      ],
+      "argv": ["REPLCONF", "rdb-filter-only", "\"\\x62ogus\""],
       "expect": {
         "kind": "error",
         "value": "ERR Unsupported rdb-filter-only option: bogus"
@@ -264,11 +196,7 @@
     {
       "name": "replconf_rdb_filter_only_nul_unsupported_keeps_err_prefix",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "rdb-filter-only",
-        "bogus\u0000ignored"
-      ],
+      "argv": ["REPLCONF", "rdb-filter-only", "bogus\u0000ignored"],
       "expect": {
         "kind": "error",
         "value": "ERR Unsupported rdb-filter-only option: bogus"
@@ -277,9 +205,7 @@
     {
       "name": "replconf_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF"
-      ],
+      "argv": ["REPLCONF"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -288,11 +214,7 @@
     {
       "name": "replconf_case_insensitive_ack",
       "now_ms": 0,
-      "argv": [
-        "replconf",
-        "ack",
-        "50"
-      ],
+      "argv": ["replconf", "ack", "50"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -301,11 +223,7 @@
     {
       "name": "replconf_case_insensitive_listening_port",
       "now_ms": 0,
-      "argv": [
-        "replconf",
-        "LISTENING-PORT",
-        "9999"
-      ],
+      "argv": ["replconf", "LISTENING-PORT", "9999"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -314,11 +232,7 @@
     {
       "name": "psync_returns_fullresync",
       "now_ms": 0,
-      "argv": [
-        "PSYNC",
-        "?",
-        "-1"
-      ],
+      "argv": ["PSYNC", "?", "-1"],
       "expect": {
         "kind": "simple_pattern",
         "value": "FULLRESYNC {hex40} 0"
@@ -327,11 +241,7 @@
     {
       "name": "psync_with_replid_returns_fullresync",
       "now_ms": 0,
-      "argv": [
-        "PSYNC",
-        "abc123",
-        "100"
-      ],
+      "argv": ["PSYNC", "abc123", "100"],
       "expect": {
         "kind": "simple_pattern",
         "value": "FULLRESYNC {hex40} 0"
@@ -340,11 +250,7 @@
     {
       "name": "psync_with_full_replid",
       "now_ms": 0,
-      "argv": [
-        "PSYNC",
-        "8371445ee590757f1e609db72c1e90dcaafc6e94",
-        "12345"
-      ],
+      "argv": ["PSYNC", "8371445ee590757f1e609db72c1e90dcaafc6e94", "12345"],
       "expect": {
         "kind": "simple_pattern",
         "value": "FULLRESYNC {hex40} 0"
@@ -353,11 +259,7 @@
     {
       "name": "psync_with_zero_offset",
       "now_ms": 0,
-      "argv": [
-        "PSYNC",
-        "?",
-        "0"
-      ],
+      "argv": ["PSYNC", "?", "0"],
       "expect": {
         "kind": "simple_pattern",
         "value": "FULLRESYNC {hex40} 0"
@@ -366,11 +268,7 @@
     {
       "name": "psync_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "psync",
-        "?",
-        "-1"
-      ],
+      "argv": ["psync", "?", "-1"],
       "expect": {
         "kind": "simple_pattern",
         "value": "FULLRESYNC {hex40} 0"
@@ -379,10 +277,7 @@
     {
       "name": "psync_wrong_arity_too_few",
       "now_ms": 0,
-      "argv": [
-        "PSYNC",
-        "?"
-      ],
+      "argv": ["PSYNC", "?"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'psync' command"
@@ -391,12 +286,7 @@
     {
       "name": "psync_wrong_arity_too_many",
       "now_ms": 0,
-      "argv": [
-        "PSYNC",
-        "?",
-        "-1",
-        "extra"
-      ],
+      "argv": ["PSYNC", "?", "-1", "extra"],
       "expect": {
         "kind": "simple_pattern",
         "value": "FULLRESYNC {hex40} 0"
@@ -405,9 +295,7 @@
     {
       "name": "psync_wrong_arity_no_args",
       "now_ms": 0,
-      "argv": [
-        "PSYNC"
-      ],
+      "argv": ["PSYNC"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'psync' command"
@@ -416,11 +304,7 @@
     {
       "name": "psync_rejects_invalid_offset",
       "now_ms": 0,
-      "argv": [
-        "PSYNC",
-        "?",
-        "nope"
-      ],
+      "argv": ["PSYNC", "?", "nope"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -429,11 +313,7 @@
     {
       "name": "replicaof_no_one",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "NO",
-        "ONE"
-      ],
+      "argv": ["REPLICAOF", "NO", "ONE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -442,11 +322,7 @@
     {
       "name": "replicaof_no_one_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "no",
-        "one"
-      ],
+      "argv": ["REPLICAOF", "no", "one"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -455,11 +331,7 @@
     {
       "name": "replicaof_no_one_mixed_case",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "No",
-        "One"
-      ],
+      "argv": ["REPLICAOF", "No", "One"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -468,11 +340,7 @@
     {
       "name": "replicaof_host_port",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "127.0.0.1",
-        "6379"
-      ],
+      "argv": ["REPLICAOF", "127.0.0.1", "6379"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -481,11 +349,7 @@
     {
       "name": "replicaof_host_port_different",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "localhost",
-        "6380"
-      ],
+      "argv": ["REPLICAOF", "localhost", "6380"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -494,11 +358,7 @@
     {
       "name": "replicaof_host_ipv6",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "::1",
-        "6379"
-      ],
+      "argv": ["REPLICAOF", "::1", "6379"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -507,11 +367,7 @@
     {
       "name": "replicaof_enters_replica_connect_state",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "127.0.0.1",
-        "6380"
-      ],
+      "argv": ["REPLICAOF", "127.0.0.1", "6380"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -520,9 +376,7 @@
     {
       "name": "role_reports_replica_connect_state",
       "now_ms": 0,
-      "argv": [
-        "ROLE"
-      ],
+      "argv": ["ROLE"],
       "expect": {
         "kind": "array",
         "value": [
@@ -552,12 +406,7 @@
     {
       "name": "config_set_replica_serve_stale_data_no_on_stale_replica",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "replica-serve-stale-data",
-        "no"
-      ],
+      "argv": ["CONFIG", "SET", "replica-serve-stale-data", "no"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -566,11 +415,7 @@
     {
       "name": "config_get_replica_serve_stale_data_no_on_stale_replica",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "replica-serve-stale-data"
-      ],
+      "argv": ["CONFIG", "GET", "replica-serve-stale-data"],
       "expect": {
         "kind": "array",
         "value": [
@@ -588,10 +433,7 @@
     {
       "name": "stale_replica_get_returns_masterdown_when_serving_stale_disabled",
       "now_ms": 0,
-      "argv": [
-        "GET",
-        "blocked"
-      ],
+      "argv": ["GET", "blocked"],
       "expect": {
         "kind": "error",
         "value": "MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'."
@@ -600,9 +442,7 @@
     {
       "name": "role_remains_allowed_while_stale_replica_reads_are_disabled",
       "now_ms": 0,
-      "argv": [
-        "ROLE"
-      ],
+      "argv": ["ROLE"],
       "expect": {
         "kind": "array",
         "value": [
@@ -632,11 +472,7 @@
     {
       "name": "replicaof_same_master_is_idempotent",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "127.0.0.1",
-        "6380"
-      ],
+      "argv": ["REPLICAOF", "127.0.0.1", "6380"],
       "expect": {
         "kind": "simple",
         "value": "OK Already connected to specified master"
@@ -645,12 +481,7 @@
     {
       "name": "waitaof_rejects_replica_instances",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "0",
-        "0"
-      ],
+      "argv": ["WAITAOF", "0", "0", "0"],
       "expect": {
         "kind": "error",
         "value": "MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'."
@@ -659,11 +490,7 @@
     {
       "name": "replicaof_no_one_promotes_back_to_master",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "NO",
-        "ONE"
-      ],
+      "argv": ["REPLICAOF", "NO", "ONE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -672,9 +499,7 @@
     {
       "name": "role_reports_master_after_promotion",
       "now_ms": 0,
-      "argv": [
-        "ROLE"
-      ],
+      "argv": ["ROLE"],
       "expect": {
         "kind": "array",
         "value": [
@@ -696,9 +521,7 @@
     {
       "name": "sync_alias_triggers_fullresync",
       "now_ms": 0,
-      "argv": [
-        "SYNC"
-      ],
+      "argv": ["SYNC"],
       "expect": {
         "kind": "simple_pattern",
         "value": "FULLRESYNC {hex40} 0"
@@ -707,11 +530,7 @@
     {
       "name": "slaveof_no_one",
       "now_ms": 0,
-      "argv": [
-        "SLAVEOF",
-        "NO",
-        "ONE"
-      ],
+      "argv": ["SLAVEOF", "NO", "ONE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -720,11 +539,7 @@
     {
       "name": "slaveof_no_one_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "SLAVEOF",
-        "no",
-        "one"
-      ],
+      "argv": ["SLAVEOF", "no", "one"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -733,11 +548,7 @@
     {
       "name": "slaveof_host_port",
       "now_ms": 0,
-      "argv": [
-        "SLAVEOF",
-        "127.0.0.1",
-        "6379"
-      ],
+      "argv": ["SLAVEOF", "127.0.0.1", "6379"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -746,10 +557,7 @@
     {
       "name": "replicaof_wrong_arity_one_arg",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "127.0.0.1"
-      ],
+      "argv": ["REPLICAOF", "127.0.0.1"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'replicaof' command"
@@ -758,9 +566,7 @@
     {
       "name": "replicaof_wrong_arity_no_args",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF"
-      ],
+      "argv": ["REPLICAOF"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'replicaof' command"
@@ -769,10 +575,7 @@
     {
       "name": "slaveof_wrong_arity_one_arg",
       "now_ms": 0,
-      "argv": [
-        "SLAVEOF",
-        "127.0.0.1"
-      ],
+      "argv": ["SLAVEOF", "127.0.0.1"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'slaveof' command"
@@ -781,9 +584,7 @@
     {
       "name": "slaveof_wrong_arity_no_args",
       "now_ms": 0,
-      "argv": [
-        "SLAVEOF"
-      ],
+      "argv": ["SLAVEOF"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'slaveof' command"
@@ -792,11 +593,7 @@
     {
       "name": "slaveof_case_insensitive_command",
       "now_ms": 0,
-      "argv": [
-        "slaveof",
-        "NO",
-        "ONE"
-      ],
+      "argv": ["slaveof", "NO", "ONE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -805,9 +602,7 @@
     {
       "name": "role_returns_master",
       "now_ms": 0,
-      "argv": [
-        "ROLE"
-      ],
+      "argv": ["ROLE"],
       "expect": {
         "kind": "array",
         "value": [
@@ -829,9 +624,7 @@
     {
       "name": "role_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "role"
-      ],
+      "argv": ["role"],
       "expect": {
         "kind": "array",
         "value": [
@@ -853,10 +646,7 @@
     {
       "name": "role_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "ROLE",
-        "extra"
-      ],
+      "argv": ["ROLE", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'role' command"
@@ -865,9 +655,7 @@
     {
       "name": "readonly_ok",
       "now_ms": 0,
-      "argv": [
-        "READONLY"
-      ],
+      "argv": ["READONLY"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -876,9 +664,7 @@
     {
       "name": "readwrite_ok",
       "now_ms": 0,
-      "argv": [
-        "READWRITE"
-      ],
+      "argv": ["READWRITE"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -887,10 +673,7 @@
     {
       "name": "readonly_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "READONLY",
-        "extra"
-      ],
+      "argv": ["READONLY", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'readonly' command"
@@ -899,10 +682,7 @@
     {
       "name": "readwrite_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "READWRITE",
-        "extra"
-      ],
+      "argv": ["READWRITE", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'readwrite' command"
@@ -911,9 +691,7 @@
     {
       "name": "readonly_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "readonly"
-      ],
+      "argv": ["readonly"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -922,9 +700,7 @@
     {
       "name": "readwrite_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "readwrite"
-      ],
+      "argv": ["readwrite"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -933,11 +709,7 @@
     {
       "name": "replicaof_after_slaveof_no_one",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "NO",
-        "ONE"
-      ],
+      "argv": ["REPLICAOF", "NO", "ONE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -946,11 +718,7 @@
     {
       "name": "replconf_ack_after_replicaof",
       "now_ms": 0,
-      "argv": [
-        "REPLCONF",
-        "ACK",
-        "200"
-      ],
+      "argv": ["REPLCONF", "ACK", "200"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -959,9 +727,7 @@
     {
       "name": "role_still_master_after_operations",
       "now_ms": 0,
-      "argv": [
-        "ROLE"
-      ],
+      "argv": ["ROLE"],
       "expect": {
         "kind": "array",
         "value": [
@@ -983,11 +749,7 @@
     {
       "name": "replicaof_rejects_leading_plus_port",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "127.0.0.1",
-        "+6379"
-      ],
+      "argv": ["REPLICAOF", "127.0.0.1", "+6379"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid master port"
@@ -996,11 +758,7 @@
     {
       "name": "replicaof_rejects_leading_zero_port",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "127.0.0.1",
-        "06379"
-      ],
+      "argv": ["REPLICAOF", "127.0.0.1", "06379"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid master port"
@@ -1009,11 +767,7 @@
     {
       "name": "replicaof_rejects_negative_port",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "127.0.0.1",
-        "-1"
-      ],
+      "argv": ["REPLICAOF", "127.0.0.1", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid master port"
@@ -1022,11 +776,7 @@
     {
       "name": "replicaof_rejects_port_too_large",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "127.0.0.1",
-        "65536"
-      ],
+      "argv": ["REPLICAOF", "127.0.0.1", "65536"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid master port"
@@ -1035,11 +785,7 @@
     {
       "name": "replicaof_rejects_non_numeric_port",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "127.0.0.1",
-        "abc"
-      ],
+      "argv": ["REPLICAOF", "127.0.0.1", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid master port"
@@ -1048,11 +794,7 @@
     {
       "name": "slaveof_rejects_leading_plus_port",
       "now_ms": 0,
-      "argv": [
-        "SLAVEOF",
-        "127.0.0.1",
-        "+6379"
-      ],
+      "argv": ["SLAVEOF", "127.0.0.1", "+6379"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid master port"
@@ -1061,11 +803,7 @@
     {
       "name": "slaveof_rejects_leading_zero_port",
       "now_ms": 0,
-      "argv": [
-        "SLAVEOF",
-        "127.0.0.1",
-        "06379"
-      ],
+      "argv": ["SLAVEOF", "127.0.0.1", "06379"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid master port"
@@ -1074,11 +812,7 @@
     {
       "name": "slaveof_rejects_negative_port",
       "now_ms": 0,
-      "argv": [
-        "SLAVEOF",
-        "127.0.0.1",
-        "-1"
-      ],
+      "argv": ["SLAVEOF", "127.0.0.1", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid master port"
@@ -1087,11 +821,7 @@
     {
       "name": "psync_rejects_leading_plus_offset",
       "now_ms": 0,
-      "argv": [
-        "PSYNC",
-        "?",
-        "+100"
-      ],
+      "argv": ["PSYNC", "?", "+100"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1100,11 +830,7 @@
     {
       "name": "psync_rejects_leading_zero_offset",
       "now_ms": 0,
-      "argv": [
-        "PSYNC",
-        "?",
-        "0100"
-      ],
+      "argv": ["PSYNC", "?", "0100"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1113,11 +839,7 @@
     {
       "name": "replicaof_accepts_port_65535",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "127.0.0.1",
-        "65535"
-      ],
+      "argv": ["REPLICAOF", "127.0.0.1", "65535"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1126,11 +848,7 @@
     {
       "name": "replicaof_accepts_port_1",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "127.0.0.1",
-        "1"
-      ],
+      "argv": ["REPLICAOF", "127.0.0.1", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1139,11 +857,7 @@
     {
       "name": "replicaof_back_to_master_after_port_tests",
       "now_ms": 0,
-      "argv": [
-        "REPLICAOF",
-        "NO",
-        "ONE"
-      ],
+      "argv": ["REPLICAOF", "NO", "ONE"],
       "expect": {
         "kind": "simple",
         "value": "OK"

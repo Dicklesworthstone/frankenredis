@@ -5,20 +5,7 @@
   "source_hash": "sha256:c5a68d60cd28ccfe93c55b60e18573ec582a801abbf68d7cf732b352c1366e40",
   "padding": 268,
   "symbol_size": 512,
-  "oti": [
-    0,
-    0,
-    0,
-    8,
-    0,
-    0,
-    2,
-    0,
-    1,
-    0,
-    1,
-    8
-  ],
+  "oti": [0, 0, 0, 8, 0, 0, 2, 0, 1, 0, 1, 8],
   "raptorq": {
     "k": 4,
     "repair_symbols": 8,

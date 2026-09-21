@@ -26,12 +26,8 @@
     "expire_immediate_delete_rewrite_contract",
     "ttl_pttl_persist_observable_reply_contract"
   ],
-  "command_acl_contract": [
-    "dispatch_lookup_utf8_deferral_isomorphic_contract"
-  ],
-  "persistence_replication_contract": [
-    "implicit_deletion_propagation_order_contract"
-  ],
+  "command_acl_contract": ["dispatch_lookup_utf8_deferral_isomorphic_contract"],
+  "persistence_replication_contract": ["implicit_deletion_propagation_order_contract"],
   "error_contract": [
     "expire.command_semantics_violation",
     "expire.lookup_guard_contract_violation",
@@ -69,8 +65,5 @@
     "ttl_pttl_persist_reply_drift",
     "hardened_nonallowlisted_deviation_leak"
   ],
-  "raptorq_artifacts": [
-    "parity_report.raptorq.json",
-    "parity_report.decode_proof.json"
-  ]
+  "raptorq_artifacts": ["parity_report.raptorq.json", "parity_report.decode_proof.json"]
 }

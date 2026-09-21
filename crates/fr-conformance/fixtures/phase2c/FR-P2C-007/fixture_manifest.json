@@ -6,12 +6,7 @@
     "legacy_redis_code/redis/src/cluster_legacy.c",
     "legacy_redis_code/redis/src/cluster_asm.c"
   ],
-  "legacy_symbols": [
-    "clusterCommand",
-    "getNodeByQuery",
-    "clusterCron",
-    "clusterBeforeSleep"
-  ],
+  "legacy_symbols": ["clusterCommand", "getNodeByQuery", "clusterCron", "clusterBeforeSleep"],
   "state_machine_contract": [
     "slot_owner_query_determinism",
     "client_mode_flag_transition",
@@ -22,12 +17,8 @@
     "cluster_unknown_subcommand_error_surface",
     "asking_readonly_readwrite_arity_contract"
   ],
-  "command_acl_contract": [
-    "readonly_asking_readwrite_transition_order"
-  ],
-  "persistence_replication_contract": [
-    "cluster_mode_toggle_does_not_mutate_store_ordering"
-  ],
+  "command_acl_contract": ["readonly_asking_readwrite_transition_order"],
+  "persistence_replication_contract": ["cluster_mode_toggle_does_not_mutate_store_ordering"],
   "error_contract": [
     "cluster.command_router_contract_violation",
     "cluster.client_mode_flag_transition_violation",
@@ -61,8 +52,5 @@
     "client_mode_flag_transition_drift",
     "hardened_nonallowlisted_deviation_leak"
   ],
-  "raptorq_artifacts": [
-    "parity_report.raptorq.json",
-    "parity_report.decode_proof.json"
-  ]
+  "raptorq_artifacts": ["parity_report.raptorq.json", "parity_report.decode_proof.json"]
 }

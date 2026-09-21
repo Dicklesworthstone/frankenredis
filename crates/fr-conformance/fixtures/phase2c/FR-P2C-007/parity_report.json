@@ -22,9 +22,7 @@
       "fr_p2c_007_f_metamorphic_cluster_help_is_idempotent_across_mode_toggles",
       "fr_p2c_007_f_adversarial_cluster_reason_codes_are_stable"
     ],
-    "e2e": [
-      "fr_p2c_007_e2e_contract_smoke"
-    ],
+    "e2e": ["fr_p2c_007_e2e_contract_smoke"],
     "optimization": [
       "fr_p2c_007_cluster_subcommand_classifier_matches_linear_reference",
       "fr_p2c_007_cluster_subcommand_route_profile_snapshot"

@@ -68,10 +68,7 @@
       "blocking_timeout_ms": 5000,
       "expect": {
         "kind": "array",
-        "value": [
-          { "kind": "bulk", "value": "brpop_key" },
-          { "kind": "bulk", "value": "third" }
-        ]
+        "value": [{ "kind": "bulk", "value": "brpop_key" }, { "kind": "bulk", "value": "third" }]
       }
     },
     {

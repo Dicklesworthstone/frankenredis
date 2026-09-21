@@ -4,10 +4,7 @@
     {
       "name": "slowlog_len_initially_zero",
       "now_ms": 1000,
-      "argv": [
-        "SLOWLOG",
-        "LEN"
-      ],
+      "argv": ["SLOWLOG", "LEN"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -16,10 +13,7 @@
     {
       "name": "slowlog_get_initially_empty",
       "now_ms": 1001,
-      "argv": [
-        "SLOWLOG",
-        "GET"
-      ],
+      "argv": ["SLOWLOG", "GET"],
       "expect": {
         "kind": "array",
         "value": []
@@ -28,11 +22,7 @@
     {
       "name": "slowlog_get_with_count",
       "now_ms": 1002,
-      "argv": [
-        "SLOWLOG",
-        "GET",
-        "10"
-      ],
+      "argv": ["SLOWLOG", "GET", "10"],
       "expect": {
         "kind": "array",
         "value": []
@@ -41,10 +31,7 @@
     {
       "name": "slowlog_reset_ok",
       "now_ms": 1003,
-      "argv": [
-        "SLOWLOG",
-        "RESET"
-      ],
+      "argv": ["SLOWLOG", "RESET"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -53,9 +40,7 @@
     {
       "name": "slowlog_wrong_arity",
       "now_ms": 1004,
-      "argv": [
-        "SLOWLOG"
-      ],
+      "argv": ["SLOWLOG"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'slowlog' command"
@@ -64,9 +49,7 @@
     {
       "name": "lastsave_initially_zero",
       "now_ms": 2000,
-      "argv": [
-        "LASTSAVE"
-      ],
+      "argv": ["LASTSAVE"],
       "expect": {
         "kind": "any_integer"
       }
@@ -74,14 +57,7 @@
     {
       "name": "config_set_rdb_target_before_save",
       "now_ms": 4999990,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "dir",
-        "/tmp",
-        "dbfilename",
-        "fr_core_server.rdb"
-      ],
+      "argv": ["CONFIG", "SET", "dir", "/tmp", "dbfilename", "fr_core_server.rdb"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'dir') - can't set protected config"
@@ -90,9 +66,7 @@
     {
       "name": "save_returns_ok",
       "now_ms": 5000000,
-      "argv": [
-        "SAVE"
-      ],
+      "argv": ["SAVE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -101,9 +75,7 @@
     {
       "name": "lastsave_after_save",
       "now_ms": 5001000,
-      "argv": [
-        "LASTSAVE"
-      ],
+      "argv": ["LASTSAVE"],
       "expect": {
         "kind": "integer",
         "value": 5000
@@ -112,9 +84,7 @@
     {
       "name": "bgsave_returns_message",
       "now_ms": 6000000,
-      "argv": [
-        "BGSAVE"
-      ],
+      "argv": ["BGSAVE"],
       "expect": {
         "kind": "simple",
         "value": "Background saving started"
@@ -123,9 +93,7 @@
     {
       "name": "lastsave_after_bgsave",
       "now_ms": 6001000,
-      "argv": [
-        "LASTSAVE"
-      ],
+      "argv": ["LASTSAVE"],
       "expect": {
         "kind": "integer",
         "value": 6000
@@ -134,10 +102,7 @@
     {
       "name": "bgsave_schedule",
       "now_ms": 7000000,
-      "argv": [
-        "BGSAVE",
-        "SCHEDULE"
-      ],
+      "argv": ["BGSAVE", "SCHEDULE"],
       "expect": {
         "kind": "simple",
         "value": "Background saving started"
@@ -146,9 +111,7 @@
     {
       "name": "bgrewriteaof_returns_message",
       "now_ms": 8000,
-      "argv": [
-        "BGREWRITEAOF"
-      ],
+      "argv": ["BGREWRITEAOF"],
       "expect": {
         "kind": "simple",
         "value": "Background append only file rewriting started"
@@ -157,12 +120,7 @@
     {
       "name": "config_set_appendonly_yes_before_bgrewriteaof",
       "now_ms": 8001,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "appendonly",
-        "yes"
-      ],
+      "argv": ["CONFIG", "SET", "appendonly", "yes"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -171,9 +129,7 @@
     {
       "name": "bgrewriteaof_writes_appendonlydir_manifest",
       "now_ms": 8002,
-      "argv": [
-        "BGREWRITEAOF"
-      ],
+      "argv": ["BGREWRITEAOF"],
       "expect": {
         "kind": "simple",
         "value": "Background append only file rewriting started"
@@ -182,10 +138,7 @@
     {
       "name": "shutdown_ok",
       "now_ms": 9000,
-      "argv": [
-        "SHUTDOWN",
-        "NOSAVE"
-      ],
+      "argv": ["SHUTDOWN", "NOSAVE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -194,10 +147,7 @@
     {
       "name": "shutdown_invalid_flag",
       "now_ms": 9001,
-      "argv": [
-        "SHUTDOWN",
-        "BADARG"
-      ],
+      "argv": ["SHUTDOWN", "BADARG"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -206,9 +156,7 @@
     {
       "name": "reset_returns_reset_string",
       "now_ms": 10000,
-      "argv": [
-        "RESET"
-      ],
+      "argv": ["RESET"],
       "expect": {
         "kind": "simple",
         "value": "RESET"
@@ -217,10 +165,7 @@
     {
       "name": "command_count_matches_table_size",
       "now_ms": 11000,
-      "argv": [
-        "COMMAND",
-        "COUNT"
-      ],
+      "argv": ["COMMAND", "COUNT"],
       "expect": {
         "kind": "any_integer"
       }
@@ -228,11 +173,7 @@
     {
       "name": "command_info_single_known_entry",
       "now_ms": 11001,
-      "argv": [
-        "COMMAND",
-        "INFO",
-        "COMMAND"
-      ],
+      "argv": ["COMMAND", "INFO", "COMMAND"],
       "expect": {
         "kind": "array",
         "value": [
@@ -767,11 +708,7 @@
     {
       "name": "command_info_unknown_yields_null_entry",
       "now_ms": 11002,
-      "argv": [
-        "COMMAND",
-        "INFO",
-        "NO_SUCH_COMMAND"
-      ],
+      "argv": ["COMMAND", "INFO", "NO_SUCH_COMMAND"],
       "expect": {
         "kind": "array",
         "value": [
@@ -785,10 +722,7 @@
     {
       "name": "command_getkeys_no_cmd_arg",
       "now_ms": 11003,
-      "argv": [
-        "COMMAND",
-        "GETKEYS"
-      ],
+      "argv": ["COMMAND", "GETKEYS"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'command|getkeys' command"
@@ -797,10 +731,7 @@
     {
       "name": "command_docs_returns_empty_array",
       "now_ms": 11004,
-      "argv": [
-        "COMMAND",
-        "DOCS"
-      ],
+      "argv": ["COMMAND", "DOCS"],
       "expect": {
         "kind": "any_array"
       }
@@ -808,10 +739,7 @@
     {
       "name": "command_unknown_subcommand_errors",
       "now_ms": 11005,
-      "argv": [
-        "COMMAND",
-        "BOGUS"
-      ],
+      "argv": ["COMMAND", "BOGUS"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'BOGUS'. Try COMMAND HELP."
@@ -820,11 +748,7 @@
     {
       "name": "config_get_maxmemory_default",
       "now_ms": 12000,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory"],
       "expect": {
         "kind": "array",
         "value": [
@@ -842,12 +766,7 @@
     {
       "name": "config_set_maxmemory_numeric",
       "now_ms": 12001,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory",
-        "104857600"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory", "104857600"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -856,11 +775,7 @@
     {
       "name": "config_get_maxmemory_after_set",
       "now_ms": 12002,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory"],
       "expect": {
         "kind": "array",
         "value": [
@@ -878,12 +793,7 @@
     {
       "name": "config_set_maxmemory_back_to_zero",
       "now_ms": 12003,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "maxmemory",
-        "0"
-      ],
+      "argv": ["CONFIG", "SET", "maxmemory", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -892,11 +802,7 @@
     {
       "name": "config_get_no_match",
       "now_ms": 12004,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "nonexistent_param_xyzzy"
-      ],
+      "argv": ["CONFIG", "GET", "nonexistent_param_xyzzy"],
       "expect": {
         "kind": "array",
         "value": []
@@ -905,10 +811,7 @@
     {
       "name": "config_resetstat_returns_ok",
       "now_ms": 12010,
-      "argv": [
-        "CONFIG",
-        "RESETSTAT"
-      ],
+      "argv": ["CONFIG", "RESETSTAT"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -917,10 +820,7 @@
     {
       "name": "config_rewrite_returns_ok",
       "now_ms": 12011,
-      "argv": [
-        "CONFIG",
-        "REWRITE"
-      ],
+      "argv": ["CONFIG", "REWRITE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -929,9 +829,7 @@
     {
       "name": "config_wrong_arity",
       "now_ms": 12012,
-      "argv": [
-        "CONFIG"
-      ],
+      "argv": ["CONFIG"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'config' command"
@@ -940,10 +838,7 @@
     {
       "name": "config_get_wrong_arity",
       "now_ms": 12013,
-      "argv": [
-        "CONFIG",
-        "GET"
-      ],
+      "argv": ["CONFIG", "GET"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'config|get' command"
@@ -952,10 +847,7 @@
     {
       "name": "config_unknown_subcommand",
       "now_ms": 12014,
-      "argv": [
-        "CONFIG",
-        "BOGUS"
-      ],
+      "argv": ["CONFIG", "BOGUS"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'BOGUS'. Try CONFIG HELP."
@@ -964,11 +856,7 @@
     {
       "name": "object_encoding_setup_string",
       "now_ms": 13000,
-      "argv": [
-        "SET",
-        "obj_str",
-        "hello"
-      ],
+      "argv": ["SET", "obj_str", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -977,11 +865,7 @@
     {
       "name": "object_encoding_string",
       "now_ms": 13001,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_str"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_str"],
       "expect": {
         "kind": "bulk",
         "value": "embstr"
@@ -990,11 +874,7 @@
     {
       "name": "object_encoding_setup_int",
       "now_ms": 13002,
-      "argv": [
-        "SET",
-        "obj_int",
-        "12345"
-      ],
+      "argv": ["SET", "obj_int", "12345"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1003,11 +883,7 @@
     {
       "name": "object_encoding_int",
       "now_ms": 13003,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_int"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_int"],
       "expect": {
         "kind": "bulk",
         "value": "int"
@@ -1016,13 +892,7 @@
     {
       "name": "object_encoding_setup_list",
       "now_ms": 13004,
-      "argv": [
-        "RPUSH",
-        "obj_list",
-        "a",
-        "b",
-        "c"
-      ],
+      "argv": ["RPUSH", "obj_list", "a", "b", "c"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -1031,11 +901,7 @@
     {
       "name": "object_encoding_list",
       "now_ms": 13005,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_list"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_list"],
       "expect": {
         "kind": "bulk",
         "value": "listpack"
@@ -1044,12 +910,7 @@
     {
       "name": "object_encoding_setup_hash",
       "now_ms": 13006,
-      "argv": [
-        "HSET",
-        "obj_hash",
-        "f1",
-        "v1"
-      ],
+      "argv": ["HSET", "obj_hash", "f1", "v1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1058,11 +919,7 @@
     {
       "name": "object_encoding_hash",
       "now_ms": 13007,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_hash"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_hash"],
       "expect": {
         "kind": "bulk",
         "value": "listpack"
@@ -1071,12 +928,7 @@
     {
       "name": "object_encoding_setup_set",
       "now_ms": 13008,
-      "argv": [
-        "SADD",
-        "obj_set",
-        "a",
-        "b"
-      ],
+      "argv": ["SADD", "obj_set", "a", "b"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1085,11 +937,7 @@
     {
       "name": "object_encoding_set",
       "now_ms": 13009,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_set"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_set"],
       "expect": {
         "kind": "bulk",
         "value": "listpack"
@@ -1098,14 +946,7 @@
     {
       "name": "object_encoding_setup_zset",
       "now_ms": 13010,
-      "argv": [
-        "ZADD",
-        "obj_zset",
-        "1",
-        "a",
-        "2",
-        "b"
-      ],
+      "argv": ["ZADD", "obj_zset", "1", "a", "2", "b"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1114,11 +955,7 @@
     {
       "name": "object_encoding_zset",
       "now_ms": 13011,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_zset"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_zset"],
       "expect": {
         "kind": "bulk",
         "value": "listpack"
@@ -1127,13 +964,7 @@
     {
       "name": "object_encoding_setup_stream",
       "now_ms": 13012,
-      "argv": [
-        "XADD",
-        "obj_stream",
-        "1-0",
-        "field",
-        "value"
-      ],
+      "argv": ["XADD", "obj_stream", "1-0", "field", "value"],
       "expect": {
         "kind": "bulk",
         "value": "1-0"
@@ -1142,11 +973,7 @@
     {
       "name": "object_encoding_stream",
       "now_ms": 13012,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_stream"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_stream"],
       "expect": {
         "kind": "bulk",
         "value": "stream"
@@ -1155,11 +982,7 @@
     {
       "name": "object_encoding_missing_key",
       "now_ms": 13013,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "nokey"
-      ],
+      "argv": ["OBJECT", "ENCODING", "nokey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1168,11 +991,7 @@
     {
       "name": "object_freq_existing",
       "now_ms": 13015,
-      "argv": [
-        "OBJECT",
-        "FREQ",
-        "obj_str"
-      ],
+      "argv": ["OBJECT", "FREQ", "obj_str"],
       "expect": {
         "kind": "error",
         "value": "ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust."
@@ -1181,11 +1000,7 @@
     {
       "name": "object_refcount_missing_key",
       "now_ms": 13014,
-      "argv": [
-        "OBJECT",
-        "REFCOUNT",
-        "nokey"
-      ],
+      "argv": ["OBJECT", "REFCOUNT", "nokey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1194,11 +1009,7 @@
     {
       "name": "object_freq_existing",
       "now_ms": 13015,
-      "argv": [
-        "OBJECT",
-        "FREQ",
-        "obj_str"
-      ],
+      "argv": ["OBJECT", "FREQ", "obj_str"],
       "expect": {
         "kind": "error",
         "value": "ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust."
@@ -1207,11 +1018,7 @@
     {
       "name": "object_freq_missing_key",
       "now_ms": 13016,
-      "argv": [
-        "OBJECT",
-        "FREQ",
-        "nokey"
-      ],
+      "argv": ["OBJECT", "FREQ", "nokey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1220,9 +1027,7 @@
     {
       "name": "object_wrong_arity",
       "now_ms": 13017,
-      "argv": [
-        "OBJECT"
-      ],
+      "argv": ["OBJECT"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'object' command"
@@ -1231,10 +1036,7 @@
     {
       "name": "object_encoding_wrong_arity",
       "now_ms": 13020,
-      "argv": [
-        "OBJECT",
-        "ENCODING"
-      ],
+      "argv": ["OBJECT", "ENCODING"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'object|encoding' command"
@@ -1243,11 +1045,7 @@
     {
       "name": "object_unknown_subcommand",
       "now_ms": 13019,
-      "argv": [
-        "OBJECT",
-        "BOGUS",
-        "key"
-      ],
+      "argv": ["OBJECT", "BOGUS", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'BOGUS'. Try OBJECT HELP."
@@ -1256,11 +1054,7 @@
     {
       "name": "memory_usage_setup",
       "now_ms": 14000,
-      "argv": [
-        "SET",
-        "mem_key",
-        "hello"
-      ],
+      "argv": ["SET", "mem_key", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1269,11 +1063,7 @@
     {
       "name": "memory_usage_existing_key",
       "now_ms": 14001,
-      "argv": [
-        "MEMORY",
-        "USAGE",
-        "mem_key"
-      ],
+      "argv": ["MEMORY", "USAGE", "mem_key"],
       "expect": {
         "kind": "integer",
         "value": 72
@@ -1282,11 +1072,7 @@
     {
       "name": "memory_usage_missing_key",
       "now_ms": 14002,
-      "argv": [
-        "MEMORY",
-        "USAGE",
-        "nokey"
-      ],
+      "argv": ["MEMORY", "USAGE", "nokey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1295,13 +1081,7 @@
     {
       "name": "memory_usage_with_samples",
       "now_ms": 14003,
-      "argv": [
-        "MEMORY",
-        "USAGE",
-        "mem_key",
-        "SAMPLES",
-        "5"
-      ],
+      "argv": ["MEMORY", "USAGE", "mem_key", "SAMPLES", "5"],
       "expect": {
         "kind": "integer",
         "value": 72
@@ -1310,10 +1090,7 @@
     {
       "name": "memory_doctor",
       "now_ms": 14004,
-      "argv": [
-        "MEMORY",
-        "DOCTOR"
-      ],
+      "argv": ["MEMORY", "DOCTOR"],
       "expect": {
         "kind": "bulk",
         "value": "Hi Sam, this instance is empty or is using very little memory, my issues detector can't be used in these conditions. Please, leave for your mission on Earth and fill it with some data. The new Sam and I will be back to our programming as soon as I finished rebooting.\n"
@@ -1322,10 +1099,7 @@
     {
       "name": "memory_purge",
       "now_ms": 14005,
-      "argv": [
-        "MEMORY",
-        "PURGE"
-      ],
+      "argv": ["MEMORY", "PURGE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1334,11 +1108,7 @@
     {
       "name": "memory_usage_setup",
       "now_ms": 14006,
-      "argv": [
-        "SET",
-        "mem_usage_key",
-        "hello"
-      ],
+      "argv": ["SET", "mem_usage_key", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1347,11 +1117,7 @@
     {
       "name": "memory_usage_existing_key",
       "now_ms": 14007,
-      "argv": [
-        "MEMORY",
-        "USAGE",
-        "mem_usage_key"
-      ],
+      "argv": ["MEMORY", "USAGE", "mem_usage_key"],
       "expect": {
         "kind": "any_integer"
       }
@@ -1359,11 +1125,7 @@
     {
       "name": "memory_usage_nonexistent_key",
       "now_ms": 14008,
-      "argv": [
-        "MEMORY",
-        "USAGE",
-        "no_such_key_mem"
-      ],
+      "argv": ["MEMORY", "USAGE", "no_such_key_mem"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1372,13 +1134,7 @@
     {
       "name": "memory_usage_with_samples",
       "now_ms": 14009,
-      "argv": [
-        "MEMORY",
-        "USAGE",
-        "mem_usage_key",
-        "SAMPLES",
-        "5"
-      ],
+      "argv": ["MEMORY", "USAGE", "mem_usage_key", "SAMPLES", "5"],
       "expect": {
         "kind": "any_integer"
       }
@@ -1386,10 +1142,7 @@
     {
       "name": "memory_usage_cleanup",
       "now_ms": 14010,
-      "argv": [
-        "DEL",
-        "mem_usage_key"
-      ],
+      "argv": ["DEL", "mem_usage_key"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1398,10 +1151,7 @@
     {
       "name": "memory_malloc_stats",
       "now_ms": 14011,
-      "argv": [
-        "MEMORY",
-        "MALLOC-STATS"
-      ],
+      "argv": ["MEMORY", "MALLOC-STATS"],
       "expect": {
         "kind": "bulk",
         "value": "Stats not supported for the current allocator"
@@ -1410,9 +1160,7 @@
     {
       "name": "memory_wrong_arity",
       "now_ms": 14012,
-      "argv": [
-        "MEMORY"
-      ],
+      "argv": ["MEMORY"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'memory' command"
@@ -1421,11 +1169,7 @@
     {
       "name": "wait_returns_zero_standalone",
       "now_ms": 15000,
-      "argv": [
-        "WAIT",
-        "1",
-        "0"
-      ],
+      "argv": ["WAIT", "1", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1434,9 +1178,7 @@
     {
       "name": "wait_wrong_arity",
       "now_ms": 15001,
-      "argv": [
-        "WAIT"
-      ],
+      "argv": ["WAIT"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'wait' command"
@@ -1445,12 +1187,7 @@
     {
       "name": "waitaof_without_appendonly_reports_no_local_ack",
       "now_ms": 15002,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "0",
-        "1"
-      ],
+      "argv": ["WAITAOF", "0", "0", "1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1468,12 +1205,7 @@
     {
       "name": "waitaof_min_replicas_unmet_without_appendonly",
       "now_ms": 15002,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "5",
-        "1"
-      ],
+      "argv": ["WAITAOF", "0", "5", "1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1491,10 +1223,7 @@
     {
       "name": "waitaof_wrong_arity",
       "now_ms": 15003,
-      "argv": [
-        "WAITAOF",
-        "0"
-      ],
+      "argv": ["WAITAOF", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'waitaof' command"
@@ -1503,9 +1232,7 @@
     {
       "name": "role_returns_master",
       "now_ms": 16000,
-      "argv": [
-        "ROLE"
-      ],
+      "argv": ["ROLE"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1526,10 +1253,7 @@
     {
       "name": "latency_latest_empty",
       "now_ms": 17000,
-      "argv": [
-        "LATENCY",
-        "LATEST"
-      ],
+      "argv": ["LATENCY", "LATEST"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1538,11 +1262,7 @@
     {
       "name": "latency_history_empty",
       "now_ms": 17001,
-      "argv": [
-        "LATENCY",
-        "HISTORY",
-        "command"
-      ],
+      "argv": ["LATENCY", "HISTORY", "command"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1551,10 +1271,7 @@
     {
       "name": "latency_reset_ok",
       "now_ms": 17002,
-      "argv": [
-        "LATENCY",
-        "RESET"
-      ],
+      "argv": ["LATENCY", "RESET"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1563,12 +1280,7 @@
     {
       "name": "latency_set_threshold_one",
       "now_ms": 17003,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "latency-monitor-threshold",
-        "1"
-      ],
+      "argv": ["CONFIG", "SET", "latency-monitor-threshold", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1577,11 +1289,7 @@
     {
       "name": "latency_trigger_debug_sleep",
       "now_ms": 17004,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "0.01"
-      ],
+      "argv": ["DEBUG", "SLEEP", "0.01"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1590,10 +1298,7 @@
     {
       "name": "latency_latest_after_sample",
       "now_ms": 17005,
-      "argv": [
-        "LATENCY",
-        "LATEST"
-      ],
+      "argv": ["LATENCY", "LATEST"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1621,11 +1326,7 @@
     {
       "name": "latency_history_after_sample",
       "now_ms": 17006,
-      "argv": [
-        "LATENCY",
-        "HISTORY",
-        "command"
-      ],
+      "argv": ["LATENCY", "HISTORY", "command"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1646,11 +1347,7 @@
     {
       "name": "latency_reset_after_sample",
       "now_ms": 17007,
-      "argv": [
-        "LATENCY",
-        "RESET",
-        "command"
-      ],
+      "argv": ["LATENCY", "RESET", "command"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1659,11 +1356,7 @@
     {
       "name": "latency_graph_no_samples",
       "now_ms": 17008,
-      "argv": [
-        "LATENCY",
-        "GRAPH",
-        "command"
-      ],
+      "argv": ["LATENCY", "GRAPH", "command"],
       "expect": {
         "kind": "error",
         "value": "ERR No samples available for event 'command'"
@@ -1672,9 +1365,7 @@
     {
       "name": "latency_wrong_arity",
       "now_ms": 17009,
-      "argv": [
-        "LATENCY"
-      ],
+      "argv": ["LATENCY"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'latency' command"
@@ -1683,10 +1374,7 @@
     {
       "name": "latency_unknown_subcommand",
       "now_ms": 17010,
-      "argv": [
-        "LATENCY",
-        "BOGUS"
-      ],
+      "argv": ["LATENCY", "BOGUS"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'BOGUS'. Try LATENCY HELP."
@@ -1695,11 +1383,7 @@
     {
       "name": "debug_sleep_ok",
       "now_ms": 18000,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "0"
-      ],
+      "argv": ["DEBUG", "SLEEP", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1708,11 +1392,7 @@
     {
       "name": "debug_set_active_expire_ok",
       "now_ms": 18001,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "1"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1721,9 +1401,7 @@
     {
       "name": "debug_wrong_arity",
       "now_ms": 18002,
-      "argv": [
-        "DEBUG"
-      ],
+      "argv": ["DEBUG"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'debug' command"
@@ -1732,10 +1410,7 @@
     {
       "name": "debug_unknown_subcommand_nosuch",
       "now_ms": 18003,
-      "argv": [
-        "DEBUG",
-        "BOGUS"
-      ],
+      "argv": ["DEBUG", "BOGUS"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'BOGUS'. Try DEBUG HELP."
@@ -1744,11 +1419,7 @@
     {
       "name": "swapdb_same_db_ok",
       "now_ms": 19000,
-      "argv": [
-        "SWAPDB",
-        "0",
-        "0"
-      ],
+      "argv": ["SWAPDB", "0", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1757,11 +1428,7 @@
     {
       "name": "swapdb_valid_db",
       "now_ms": 19001,
-      "argv": [
-        "SWAPDB",
-        "0",
-        "1"
-      ],
+      "argv": ["SWAPDB", "0", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1770,10 +1437,7 @@
     {
       "name": "swapdb_wrong_arity",
       "now_ms": 19002,
-      "argv": [
-        "SWAPDB",
-        "0"
-      ],
+      "argv": ["SWAPDB", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'swapdb' command"
@@ -1782,10 +1446,7 @@
     {
       "name": "shutdown_save_flag",
       "now_ms": 20000,
-      "argv": [
-        "SHUTDOWN",
-        "SAVE"
-      ],
+      "argv": ["SHUTDOWN", "SAVE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1794,10 +1455,7 @@
     {
       "name": "shutdown_now_flag",
       "now_ms": 20001,
-      "argv": [
-        "SHUTDOWN",
-        "NOW"
-      ],
+      "argv": ["SHUTDOWN", "NOW"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1806,10 +1464,7 @@
     {
       "name": "shutdown_force_flag",
       "now_ms": 20002,
-      "argv": [
-        "SHUTDOWN",
-        "FORCE"
-      ],
+      "argv": ["SHUTDOWN", "FORCE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1818,11 +1473,7 @@
     {
       "name": "move_same_db_errors_even_when_key_exists",
       "now_ms": 21000,
-      "argv": [
-        "MOVE",
-        "obj_str",
-        "0"
-      ],
+      "argv": ["MOVE", "obj_str", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR source and destination objects are the same"
@@ -1831,11 +1482,7 @@
     {
       "name": "move_other_db_error",
       "now_ms": 21001,
-      "argv": [
-        "MOVE",
-        "obj_str",
-        "1"
-      ],
+      "argv": ["MOVE", "obj_str", "1"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1844,10 +1491,7 @@
     {
       "name": "move_wrong_arity",
       "now_ms": 21002,
-      "argv": [
-        "MOVE",
-        "key"
-      ],
+      "argv": ["MOVE", "key"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'move' command"
@@ -1856,10 +1500,7 @@
     {
       "name": "slowlog_help_returns_array",
       "now_ms": 22000,
-      "argv": [
-        "SLOWLOG",
-        "HELP"
-      ],
+      "argv": ["SLOWLOG", "HELP"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1917,10 +1558,7 @@
     {
       "name": "slowlog_unknown_subcommand",
       "now_ms": 22001,
-      "argv": [
-        "SLOWLOG",
-        "BOGUS"
-      ],
+      "argv": ["SLOWLOG", "BOGUS"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'BOGUS'. Try SLOWLOG HELP."
@@ -1929,11 +1567,7 @@
     {
       "name": "config_get_wildcard",
       "now_ms": 23000,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "maxmemory-policy"
-      ],
+      "argv": ["CONFIG", "GET", "maxmemory-policy"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1951,12 +1585,7 @@
     {
       "name": "config_set_unsupported_param",
       "now_ms": 23001,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "totally_unknown_param",
-        "value"
-      ],
+      "argv": ["CONFIG", "SET", "totally_unknown_param", "value"],
       "expect": {
         "kind": "error",
         "value": "ERR Unknown option or number of arguments for CONFIG SET - 'totally_unknown_param'"
@@ -1965,10 +1594,7 @@
     {
       "name": "object_help",
       "now_ms": 24000,
-      "argv": [
-        "OBJECT",
-        "HELP"
-      ],
+      "argv": ["OBJECT", "HELP"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2038,10 +1664,7 @@
     {
       "name": "memory_help",
       "now_ms": 24000,
-      "argv": [
-        "MEMORY",
-        "HELP"
-      ],
+      "argv": ["MEMORY", "HELP"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2107,10 +1730,7 @@
     {
       "name": "memory_malloc_stats",
       "now_ms": 24000,
-      "argv": [
-        "MEMORY",
-        "MALLOC-STATS"
-      ],
+      "argv": ["MEMORY", "MALLOC-STATS"],
       "expect": {
         "kind": "bulk",
         "value": "Stats not supported for the current allocator"
@@ -2119,10 +1739,7 @@
     {
       "name": "memory_stats",
       "now_ms": 24000,
-      "argv": [
-        "MEMORY",
-        "STATS"
-      ],
+      "argv": ["MEMORY", "STATS"],
       "expect": {
         "kind": "any_array"
       }
@@ -2130,10 +1747,7 @@
     {
       "name": "latency_help",
       "now_ms": 24000,
-      "argv": [
-        "LATENCY",
-        "HELP"
-      ],
+      "argv": ["LATENCY", "HELP"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2211,10 +1825,7 @@
     {
       "name": "script_help",
       "now_ms": 24000,
-      "argv": [
-        "SCRIPT",
-        "HELP"
-      ],
+      "argv": ["SCRIPT", "HELP"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2292,10 +1903,7 @@
     {
       "name": "debug_jmap",
       "now_ms": 24000,
-      "argv": [
-        "DEBUG",
-        "JMAP"
-      ],
+      "argv": ["DEBUG", "JMAP"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
@@ -2304,10 +1912,7 @@
     {
       "name": "debug_reload",
       "now_ms": 24000,
-      "argv": [
-        "DEBUG",
-        "RELOAD"
-      ],
+      "argv": ["DEBUG", "RELOAD"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2316,11 +1921,7 @@
     {
       "name": "debug_object",
       "now_ms": 24000,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "somekey"
-      ],
+      "argv": ["DEBUG", "OBJECT", "somekey"],
       "expect": {
         "kind": "error",
         "value": "ERR no such key"
@@ -2329,11 +1930,7 @@
     {
       "name": "debug_object_setup_key",
       "now_ms": 24001,
-      "argv": [
-        "SET",
-        "debug_object_key",
-        "value"
-      ],
+      "argv": ["SET", "debug_object_key", "value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2342,28 +1939,16 @@
     {
       "name": "debug_object_reports_live_metadata",
       "now_ms": 24001,
-      "argv": [
-        "DEBUG",
-        "OBJECT",
-        "debug_object_key"
-      ],
+      "argv": ["DEBUG", "OBJECT", "debug_object_key"],
       "expect": {
         "kind": "simple_contains_all",
-        "value": [
-          "encoding:embstr",
-          "serializedlength:",
-          "lru_seconds_idle:"
-        ]
+        "value": ["encoding:embstr", "serializedlength:", "lru_seconds_idle:"]
       }
     },
     {
       "name": "debug_set_active_expire_off_ok",
       "now_ms": 24002,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "0"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2372,10 +1957,7 @@
     {
       "name": "debug_unknown_subcommand",
       "now_ms": 24000,
-      "argv": [
-        "DEBUG",
-        "NOSUCH"
-      ],
+      "argv": ["DEBUG", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'NOSUCH'. Try DEBUG HELP."
@@ -2384,10 +1966,7 @@
     {
       "name": "memory_unknown_subcmd_nosuch",
       "now_ms": 24000,
-      "argv": [
-        "MEMORY",
-        "NOSUCH"
-      ],
+      "argv": ["MEMORY", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try MEMORY HELP."
@@ -2396,10 +1975,7 @@
     {
       "name": "latency_unknown_subcommand_nosuch",
       "now_ms": 24000,
-      "argv": [
-        "LATENCY",
-        "NOSUCH"
-      ],
+      "argv": ["LATENCY", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try LATENCY HELP."
@@ -2408,10 +1984,7 @@
     {
       "name": "command_docs",
       "now_ms": 24000,
-      "argv": [
-        "COMMAND",
-        "DOCS"
-      ],
+      "argv": ["COMMAND", "DOCS"],
       "expect": {
         "kind": "any_array"
       }
@@ -2419,14 +1992,7 @@
     {
       "name": "command_getkeys_hset",
       "now_ms": 24000,
-      "argv": [
-        "COMMAND",
-        "GETKEYS",
-        "HSET",
-        "myhash",
-        "f1",
-        "v1"
-      ],
+      "argv": ["COMMAND", "GETKEYS", "HSET", "myhash", "f1", "v1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2440,10 +2006,7 @@
     {
       "name": "command_unknown_subcommand",
       "now_ms": 24000,
-      "argv": [
-        "COMMAND",
-        "NOSUCH"
-      ],
+      "argv": ["COMMAND", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try COMMAND HELP."
@@ -2452,10 +2015,7 @@
     {
       "name": "slowlog_reset_before_threshold_test",
       "now_ms": 24999,
-      "argv": [
-        "SLOWLOG",
-        "RESET"
-      ],
+      "argv": ["SLOWLOG", "RESET"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2464,12 +2024,7 @@
     {
       "name": "slowlog_config_set_threshold_zero",
       "now_ms": 25000,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "slowlog-log-slower-than",
-        "0"
-      ],
+      "argv": ["CONFIG", "SET", "slowlog-log-slower-than", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2478,11 +2033,7 @@
     {
       "name": "slowlog_trigger_set_command",
       "now_ms": 25000,
-      "argv": [
-        "SET",
-        "slowlog_key1",
-        "value1"
-      ],
+      "argv": ["SET", "slowlog_key1", "value1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2491,10 +2042,7 @@
     {
       "name": "slowlog_len_after_one_command",
       "now_ms": 25000,
-      "argv": [
-        "SLOWLOG",
-        "LEN"
-      ],
+      "argv": ["SLOWLOG", "LEN"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -2503,11 +2051,7 @@
     {
       "name": "slowlog_trigger_second_command",
       "now_ms": 25000,
-      "argv": [
-        "SET",
-        "slowlog_key2",
-        "value2"
-      ],
+      "argv": ["SET", "slowlog_key2", "value2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2516,10 +2060,7 @@
     {
       "name": "slowlog_len_after_two_commands",
       "now_ms": 25000,
-      "argv": [
-        "SLOWLOG",
-        "LEN"
-      ],
+      "argv": ["SLOWLOG", "LEN"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -2528,10 +2069,7 @@
     {
       "name": "slowlog_reset_clears",
       "now_ms": 25000,
-      "argv": [
-        "SLOWLOG",
-        "RESET"
-      ],
+      "argv": ["SLOWLOG", "RESET"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2540,10 +2078,7 @@
     {
       "name": "slowlog_len_after_reset",
       "now_ms": 25000,
-      "argv": [
-        "SLOWLOG",
-        "LEN"
-      ],
+      "argv": ["SLOWLOG", "LEN"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2552,12 +2087,7 @@
     {
       "name": "slowlog_config_set_max_len_2",
       "now_ms": 26000,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "slowlog-max-len",
-        "2"
-      ],
+      "argv": ["CONFIG", "SET", "slowlog-max-len", "2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2566,11 +2096,7 @@
     {
       "name": "slowlog_fill_a",
       "now_ms": 26000,
-      "argv": [
-        "SET",
-        "sl_a",
-        "1"
-      ],
+      "argv": ["SET", "sl_a", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2579,11 +2105,7 @@
     {
       "name": "slowlog_fill_b",
       "now_ms": 26000,
-      "argv": [
-        "SET",
-        "sl_b",
-        "2"
-      ],
+      "argv": ["SET", "sl_b", "2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2592,11 +2114,7 @@
     {
       "name": "slowlog_fill_c",
       "now_ms": 26000,
-      "argv": [
-        "SET",
-        "sl_c",
-        "3"
-      ],
+      "argv": ["SET", "sl_c", "3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2605,10 +2123,7 @@
     {
       "name": "slowlog_len_capped_at_max",
       "now_ms": 26000,
-      "argv": [
-        "SLOWLOG",
-        "LEN"
-      ],
+      "argv": ["SLOWLOG", "LEN"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -2617,11 +2132,7 @@
     {
       "name": "slowlog_config_get_threshold",
       "now_ms": 26000,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "slowlog-log-slower-than"
-      ],
+      "argv": ["CONFIG", "GET", "slowlog-log-slower-than"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2639,11 +2150,7 @@
     {
       "name": "slowlog_config_get_max_len",
       "now_ms": 26000,
-      "argv": [
-        "CONFIG",
-        "GET",
-        "slowlog-max-len"
-      ],
+      "argv": ["CONFIG", "GET", "slowlog-max-len"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2661,12 +2168,7 @@
     {
       "name": "slowlog_disable_with_negative_threshold",
       "now_ms": 27000,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "slowlog-log-slower-than",
-        "-1"
-      ],
+      "argv": ["CONFIG", "SET", "slowlog-log-slower-than", "-1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2675,10 +2177,7 @@
     {
       "name": "slowlog_reset_before_disable_test",
       "now_ms": 27000,
-      "argv": [
-        "SLOWLOG",
-        "RESET"
-      ],
+      "argv": ["SLOWLOG", "RESET"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2687,11 +2186,7 @@
     {
       "name": "slowlog_trigger_while_disabled",
       "now_ms": 27000,
-      "argv": [
-        "SET",
-        "sl_disabled",
-        "val"
-      ],
+      "argv": ["SET", "sl_disabled", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2700,10 +2195,7 @@
     {
       "name": "slowlog_len_stays_zero_when_disabled",
       "now_ms": 27000,
-      "argv": [
-        "SLOWLOG",
-        "LEN"
-      ],
+      "argv": ["SLOWLOG", "LEN"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2712,10 +2204,7 @@
     {
       "name": "slowlog_help_returns_array_duplicate_block",
       "now_ms": 100,
-      "argv": [
-        "SLOWLOG",
-        "HELP"
-      ],
+      "argv": ["SLOWLOG", "HELP"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2773,10 +2262,7 @@
     {
       "name": "slowlog_unknown_subcommand_nosuch",
       "now_ms": 100,
-      "argv": [
-        "SLOWLOG",
-        "NOSUCH"
-      ],
+      "argv": ["SLOWLOG", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try SLOWLOG HELP."
@@ -2785,10 +2271,7 @@
     {
       "name": "slowlog_len_lowercase",
       "now_ms": 100,
-      "argv": [
-        "SLOWLOG",
-        "len"
-      ],
+      "argv": ["SLOWLOG", "len"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2797,10 +2280,7 @@
     {
       "name": "memory_help_returns_array",
       "now_ms": 100,
-      "argv": [
-        "MEMORY",
-        "HELP"
-      ],
+      "argv": ["MEMORY", "HELP"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2866,10 +2346,7 @@
     {
       "name": "memory_doctor_duplicate_block",
       "now_ms": 100,
-      "argv": [
-        "MEMORY",
-        "DOCTOR"
-      ],
+      "argv": ["MEMORY", "DOCTOR"],
       "expect": {
         "kind": "bulk",
         "value": "Hi Sam, this instance is empty or is using very little memory, my issues detector can't be used in these conditions. Please, leave for your mission on Earth and fill it with some data. The new Sam and I will be back to our programming as soon as I finished rebooting.\n"
@@ -2878,10 +2355,7 @@
     {
       "name": "memory_purge_duplicate_block",
       "now_ms": 100,
-      "argv": [
-        "MEMORY",
-        "PURGE"
-      ],
+      "argv": ["MEMORY", "PURGE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2890,10 +2364,7 @@
     {
       "name": "memory_unknown_subcmd_duplicate_block",
       "now_ms": 100,
-      "argv": [
-        "MEMORY",
-        "NOSUCH"
-      ],
+      "argv": ["MEMORY", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try MEMORY HELP."
@@ -2902,9 +2373,7 @@
     {
       "name": "time_returns_two_elements",
       "now_ms": 1500,
-      "argv": [
-        "TIME"
-      ],
+      "argv": ["TIME"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2922,9 +2391,7 @@
     {
       "name": "time_zero",
       "now_ms": 0,
-      "argv": [
-        "TIME"
-      ],
+      "argv": ["TIME"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2942,10 +2409,7 @@
     {
       "name": "time_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "TIME",
-        "extra"
-      ],
+      "argv": ["TIME", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'time' command"
@@ -2954,11 +2418,7 @@
     {
       "name": "dbsize_setup",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "dbsize_key",
-        "val"
-      ],
+      "argv": ["SET", "dbsize_key", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2967,10 +2427,7 @@
     {
       "name": "command_unknown_subcommand_nosuch",
       "now_ms": 100,
-      "argv": [
-        "COMMAND",
-        "NOSUCH"
-      ],
+      "argv": ["COMMAND", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try COMMAND HELP."
@@ -2979,12 +2436,7 @@
     {
       "name": "config_set_appendonly_no_before_save_duplicate_block",
       "now_ms": 98,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "appendonly",
-        "no"
-      ],
+      "argv": ["CONFIG", "SET", "appendonly", "no"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2993,14 +2445,7 @@
     {
       "name": "config_set_rdb_target_before_save_duplicate_block",
       "now_ms": 99,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "dir",
-        "/tmp",
-        "dbfilename",
-        "fr_core_server_dup.rdb"
-      ],
+      "argv": ["CONFIG", "SET", "dir", "/tmp", "dbfilename", "fr_core_server_dup.rdb"],
       "expect": {
         "kind": "error",
         "value": "ERR CONFIG SET failed (possibly related to argument 'dir') - can't set protected config"
@@ -3009,9 +2454,7 @@
     {
       "name": "save_returns_ok_duplicate_block",
       "now_ms": 100,
-      "argv": [
-        "SAVE"
-      ],
+      "argv": ["SAVE"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3020,9 +2463,7 @@
     {
       "name": "bgsave_returns_ok",
       "now_ms": 100,
-      "argv": [
-        "BGSAVE"
-      ],
+      "argv": ["BGSAVE"],
       "expect": {
         "kind": "simple",
         "value": "Background saving started"
@@ -3031,12 +2472,7 @@
     {
       "name": "config_set_appendonly_no_before_bgrewriteaof_duplicate_block",
       "now_ms": 100,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "appendonly",
-        "no"
-      ],
+      "argv": ["CONFIG", "SET", "appendonly", "no"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3045,9 +2481,7 @@
     {
       "name": "bgrewriteaof_returns_ok",
       "now_ms": 100,
-      "argv": [
-        "BGREWRITEAOF"
-      ],
+      "argv": ["BGREWRITEAOF"],
       "expect": {
         "kind": "simple",
         "value": "Background append only file rewriting started"
@@ -3056,13 +2490,7 @@
     {
       "name": "command_getkeys_set",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYS",
-        "SET",
-        "mykey",
-        "myval"
-      ],
+      "argv": ["COMMAND", "GETKEYS", "SET", "mykey", "myval"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3076,12 +2504,7 @@
     {
       "name": "command_getkeys_get",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYS",
-        "GET",
-        "mykey"
-      ],
+      "argv": ["COMMAND", "GETKEYS", "GET", "mykey"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3095,14 +2518,7 @@
     {
       "name": "command_getkeys_mget",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYS",
-        "MGET",
-        "key1",
-        "key2",
-        "key3"
-      ],
+      "argv": ["COMMAND", "GETKEYS", "MGET", "key1", "key2", "key3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3124,15 +2540,7 @@
     {
       "name": "command_getkeys_mset",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYS",
-        "MSET",
-        "k1",
-        "v1",
-        "k2",
-        "v2"
-      ],
+      "argv": ["COMMAND", "GETKEYS", "MSET", "k1", "v1", "k2", "v2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3150,14 +2558,7 @@
     {
       "name": "command_getkeys_del",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYS",
-        "DEL",
-        "a",
-        "b",
-        "c"
-      ],
+      "argv": ["COMMAND", "GETKEYS", "DEL", "a", "b", "c"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3179,11 +2580,7 @@
     {
       "name": "command_getkeys_ping_no_keys",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYS",
-        "PING"
-      ],
+      "argv": ["COMMAND", "GETKEYS", "PING"],
       "expect": {
         "kind": "error",
         "value": "ERR The command has no key arguments"
@@ -3192,12 +2589,7 @@
     {
       "name": "command_getkeys_unknown_command",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYS",
-        "NOSUCHCMD",
-        "arg1"
-      ],
+      "argv": ["COMMAND", "GETKEYS", "NOSUCHCMD", "arg1"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid command specified"
@@ -3206,13 +2598,7 @@
     {
       "name": "command_getkeysandflags_set",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYSANDFLAGS",
-        "SET",
-        "alpha",
-        "1"
-      ],
+      "argv": ["COMMAND", "GETKEYSANDFLAGS", "SET", "alpha", "1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3244,14 +2630,7 @@
     {
       "name": "command_getkeysandflags_set_with_get",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYSANDFLAGS",
-        "SET",
-        "alpha",
-        "1",
-        "GET"
-      ],
+      "argv": ["COMMAND", "GETKEYSANDFLAGS", "SET", "alpha", "1", "GET"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3287,13 +2666,7 @@
     {
       "name": "command_getkeysandflags_del",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYSANDFLAGS",
-        "DEL",
-        "a",
-        "b"
-      ],
+      "argv": ["COMMAND", "GETKEYSANDFLAGS", "DEL", "a", "b"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3347,13 +2720,7 @@
     {
       "name": "command_getkeysandflags_rename",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYSANDFLAGS",
-        "RENAME",
-        "src",
-        "dst"
-      ],
+      "argv": ["COMMAND", "GETKEYSANDFLAGS", "RENAME", "src", "dst"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3411,11 +2778,7 @@
     {
       "name": "command_getkeysandflags_ping_no_keys",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYSANDFLAGS",
-        "PING"
-      ],
+      "argv": ["COMMAND", "GETKEYSANDFLAGS", "PING"],
       "expect": {
         "kind": "error",
         "value": "ERR The command has no key arguments"
@@ -3424,12 +2787,7 @@
     {
       "name": "command_getkeysandflags_unknown_command",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYSANDFLAGS",
-        "NOSUCHCMD",
-        "arg1"
-      ],
+      "argv": ["COMMAND", "GETKEYSANDFLAGS", "NOSUCHCMD", "arg1"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid command specified"
@@ -3438,10 +2796,7 @@
     {
       "name": "command_getkeysandflags_no_args",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYSANDFLAGS"
-      ],
+      "argv": ["COMMAND", "GETKEYSANDFLAGS"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'command|getkeysandflags' command"
@@ -3450,12 +2805,7 @@
     {
       "name": "command_getkeysandflags_invalid_number",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYSANDFLAGS",
-        "SET",
-        "onlykey"
-      ],
+      "argv": ["COMMAND", "GETKEYSANDFLAGS", "SET", "onlykey"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid number of arguments specified for command"
@@ -3464,10 +2814,7 @@
     {
       "name": "command_getkeys_no_args",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYS"
-      ],
+      "argv": ["COMMAND", "GETKEYS"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'command|getkeys' command"
@@ -3476,13 +2823,7 @@
     {
       "name": "command_getkeys_rename",
       "now_ms": 0,
-      "argv": [
-        "COMMAND",
-        "GETKEYS",
-        "RENAME",
-        "src",
-        "dst"
-      ],
+      "argv": ["COMMAND", "GETKEYS", "RENAME", "src", "dst"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3500,12 +2841,7 @@
     {
       "name": "latency_disable_monitor_before_duplicate_block",
       "now_ms": 0,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "latency-monitor-threshold",
-        "0"
-      ],
+      "argv": ["CONFIG", "SET", "latency-monitor-threshold", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3514,10 +2850,7 @@
     {
       "name": "latency_reset_before_duplicate_block",
       "now_ms": 0,
-      "argv": [
-        "LATENCY",
-        "RESET"
-      ],
+      "argv": ["LATENCY", "RESET"],
       "expect": {
         "kind": "any_integer"
       }
@@ -3525,10 +2858,7 @@
     {
       "name": "latency_latest_empty_after_reset",
       "now_ms": 0,
-      "argv": [
-        "LATENCY",
-        "LATEST"
-      ],
+      "argv": ["LATENCY", "LATEST"],
       "expect": {
         "kind": "array",
         "value": []
@@ -3537,11 +2867,7 @@
     {
       "name": "latency_history_empty_after_reset",
       "now_ms": 0,
-      "argv": [
-        "LATENCY",
-        "HISTORY",
-        "event"
-      ],
+      "argv": ["LATENCY", "HISTORY", "event"],
       "expect": {
         "kind": "array",
         "value": []
@@ -3550,10 +2876,7 @@
     {
       "name": "latency_reset_ok_after_reset",
       "now_ms": 0,
-      "argv": [
-        "LATENCY",
-        "RESET"
-      ],
+      "argv": ["LATENCY", "RESET"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3562,10 +2885,7 @@
     {
       "name": "info_cluster_section",
       "now_ms": 0,
-      "argv": [
-        "INFO",
-        "cluster"
-      ],
+      "argv": ["INFO", "cluster"],
       "expect": {
         "kind": "bulk",
         "value": "# Cluster\r\ncluster_enabled:0\r\n"
@@ -3574,10 +2894,7 @@
     {
       "name": "info_modules_section",
       "now_ms": 0,
-      "argv": [
-        "INFO",
-        "modules"
-      ],
+      "argv": ["INFO", "modules"],
       "expect": {
         "kind": "bulk",
         "value": "# Modules\r\n"
@@ -3586,10 +2903,7 @@
     {
       "name": "info_errorstats_section",
       "now_ms": 0,
-      "argv": [
-        "INFO",
-        "errorstats"
-      ],
+      "argv": ["INFO", "errorstats"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -3597,10 +2911,7 @@
     {
       "name": "info_replication_section",
       "now_ms": 0,
-      "argv": [
-        "INFO",
-        "replication"
-      ],
+      "argv": ["INFO", "replication"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -3608,10 +2919,7 @@
     {
       "name": "info_cpu_section",
       "now_ms": 0,
-      "argv": [
-        "INFO",
-        "cpu"
-      ],
+      "argv": ["INFO", "cpu"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -3619,10 +2927,7 @@
     {
       "name": "info_unknown_section_empty",
       "now_ms": 0,
-      "argv": [
-        "INFO",
-        "nosuchsection"
-      ],
+      "argv": ["INFO", "nosuchsection"],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -3631,10 +2936,7 @@
     {
       "name": "info_clients_section",
       "now_ms": 0,
-      "argv": [
-        "INFO",
-        "clients"
-      ],
+      "argv": ["INFO", "clients"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -3642,10 +2944,7 @@
     {
       "name": "info_memory_section",
       "now_ms": 0,
-      "argv": [
-        "INFO",
-        "memory"
-      ],
+      "argv": ["INFO", "memory"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -3666,11 +2965,7 @@
     {
       "name": "object_encoding_raw_string",
       "now_ms": 30000,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_raw"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_raw"],
       "expect": {
         "kind": "bulk",
         "value": "raw"
@@ -3679,11 +2974,7 @@
     {
       "name": "object_encoding_setup_embstr",
       "now_ms": 30000,
-      "argv": [
-        "SET",
-        "obj_emb",
-        "short"
-      ],
+      "argv": ["SET", "obj_emb", "short"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3692,11 +2983,7 @@
     {
       "name": "object_encoding_embstr",
       "now_ms": 30000,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_emb"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_emb"],
       "expect": {
         "kind": "bulk",
         "value": "embstr"
@@ -3705,13 +2992,7 @@
     {
       "name": "object_encoding_setup_intset",
       "now_ms": 30000,
-      "argv": [
-        "SADD",
-        "obj_intset",
-        "1",
-        "2",
-        "3"
-      ],
+      "argv": ["SADD", "obj_intset", "1", "2", "3"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -3720,11 +3001,7 @@
     {
       "name": "object_encoding_intset",
       "now_ms": 30000,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_intset"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_intset"],
       "expect": {
         "kind": "bulk",
         "value": "intset"
@@ -3733,13 +3010,7 @@
     {
       "name": "object_encoding_setup_set_listpack",
       "now_ms": 30000,
-      "argv": [
-        "SADD",
-        "obj_setlp",
-        "a",
-        "b",
-        "c"
-      ],
+      "argv": ["SADD", "obj_setlp", "a", "b", "c"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -3748,11 +3019,7 @@
     {
       "name": "object_encoding_set_listpack",
       "now_ms": 30000,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_setlp"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_setlp"],
       "expect": {
         "kind": "bulk",
         "value": "listpack"
@@ -3873,11 +3140,7 @@
     {
       "name": "object_encoding_quicklist",
       "now_ms": 30000,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_ql"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_ql"],
       "expect": {
         "kind": "bulk",
         "value": "quicklist"
@@ -4156,11 +3419,7 @@
     {
       "name": "object_encoding_skiplist",
       "now_ms": 30000,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_sl"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_sl"],
       "expect": {
         "kind": "bulk",
         "value": "skiplist"
@@ -4169,12 +3428,7 @@
     {
       "name": "object_encoding_setup_hashtable_hash_pin_threshold",
       "now_ms": 30000,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "hash-max-listpack-entries",
-        "128"
-      ],
+      "argv": ["CONFIG", "SET", "hash-max-listpack-entries", "128"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4453,11 +3707,7 @@
     {
       "name": "object_encoding_hashtable_hash",
       "now_ms": 30000,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "obj_ht"
-      ],
+      "argv": ["OBJECT", "ENCODING", "obj_ht"],
       "expect": {
         "kind": "bulk",
         "value": "hashtable"
@@ -4466,10 +3716,7 @@
     {
       "name": "info_server_section",
       "now_ms": 60000,
-      "argv": [
-        "INFO",
-        "server"
-      ],
+      "argv": ["INFO", "server"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -4477,10 +3724,7 @@
     {
       "name": "info_persistence_section",
       "now_ms": 60000,
-      "argv": [
-        "INFO",
-        "persistence"
-      ],
+      "argv": ["INFO", "persistence"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -4488,10 +3732,7 @@
     {
       "name": "info_stats_section",
       "now_ms": 60000,
-      "argv": [
-        "INFO",
-        "stats"
-      ],
+      "argv": ["INFO", "stats"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -4499,10 +3740,7 @@
     {
       "name": "info_stats_reset_for_live_counter_checks",
       "now_ms": 60001,
-      "argv": [
-        "CONFIG",
-        "RESETSTAT"
-      ],
+      "argv": ["CONFIG", "RESETSTAT"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4511,11 +3749,7 @@
     {
       "name": "info_stats_setup_hit_key",
       "now_ms": 60001,
-      "argv": [
-        "SET",
-        "info_stats_hit",
-        "value"
-      ],
+      "argv": ["SET", "info_stats_hit", "value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4524,10 +3758,7 @@
     {
       "name": "info_stats_hit_existing_key",
       "now_ms": 60002,
-      "argv": [
-        "GET",
-        "info_stats_hit"
-      ],
+      "argv": ["GET", "info_stats_hit"],
       "expect": {
         "kind": "bulk",
         "value": "value"
@@ -4536,10 +3767,7 @@
     {
       "name": "info_stats_miss_missing_key",
       "now_ms": 60002,
-      "argv": [
-        "GET",
-        "info_stats_missing"
-      ],
+      "argv": ["GET", "info_stats_missing"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -4548,13 +3776,7 @@
     {
       "name": "info_stats_setup_expiring_key",
       "now_ms": 60002,
-      "argv": [
-        "SET",
-        "info_stats_expired",
-        "gone",
-        "PX",
-        "1"
-      ],
+      "argv": ["SET", "info_stats_expired", "gone", "PX", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4563,10 +3785,7 @@
     {
       "name": "info_stats_expired_key_counts_as_miss",
       "now_ms": 60004,
-      "argv": [
-        "GET",
-        "info_stats_expired"
-      ],
+      "argv": ["GET", "info_stats_expired"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -4575,41 +3794,25 @@
     {
       "name": "info_stats_section_reports_live_counters",
       "now_ms": 60005,
-      "argv": [
-        "INFO",
-        "stats"
-      ],
+      "argv": ["INFO", "stats"],
       "expect": {
         "kind": "bulk_contains_all",
-        "value": [
-          "keyspace_hits:",
-          "keyspace_misses:",
-          "expired_keys:1\r\n"
-        ]
+        "value": ["keyspace_hits:", "keyspace_misses:", "expired_keys:1\r\n"]
       }
     },
     {
       "name": "info_stats_section_no_stub_zero_counters",
       "now_ms": 60005,
-      "argv": [
-        "INFO",
-        "stats"
-      ],
+      "argv": ["INFO", "stats"],
       "expect": {
         "kind": "bulk_not_contains_all",
-        "value": [
-          "keyspace_hits:0\r\n",
-          "keyspace_misses:0\r\n"
-        ]
+        "value": ["keyspace_hits:0\r\n", "keyspace_misses:0\r\n"]
       }
     },
     {
       "name": "info_unknown_section_returns_empty_bulk",
       "now_ms": 60000,
-      "argv": [
-        "INFO",
-        "nonexistent_section"
-      ],
+      "argv": ["INFO", "nonexistent_section"],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -4618,9 +3821,7 @@
     {
       "name": "info_keyspace_flush_for_test",
       "now_ms": 60000,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4629,10 +3830,7 @@
     {
       "name": "info_keyspace_section_empty_db",
       "now_ms": 60000,
-      "argv": [
-        "INFO",
-        "keyspace"
-      ],
+      "argv": ["INFO", "keyspace"],
       "expect": {
         "kind": "bulk",
         "value": "# Keyspace\r\ndb1:keys=8,expires=0,avg_ttl=0\r\n"
@@ -4641,11 +3839,7 @@
     {
       "name": "info_keyspace_setup",
       "now_ms": 60000,
-      "argv": [
-        "SET",
-        "info_test_key",
-        "value"
-      ],
+      "argv": ["SET", "info_test_key", "value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4654,10 +3848,7 @@
     {
       "name": "info_keyspace_section_with_key",
       "now_ms": 60000,
-      "argv": [
-        "INFO",
-        "keyspace"
-      ],
+      "argv": ["INFO", "keyspace"],
       "expect": {
         "kind": "bulk",
         "value": "# Keyspace\r\ndb0:keys=1,expires=0,avg_ttl=0\r\ndb1:keys=8,expires=0,avg_ttl=0\r\n"
@@ -4666,10 +3857,7 @@
     {
       "name": "info_keyspace_cleanup",
       "now_ms": 60000,
-      "argv": [
-        "DEL",
-        "info_test_key"
-      ],
+      "argv": ["DEL", "info_test_key"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -4678,10 +3866,7 @@
     {
       "name": "move_stateful_select_db0",
       "now_ms": 61000,
-      "argv": [
-        "SELECT",
-        "0"
-      ],
+      "argv": ["SELECT", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4690,11 +3875,7 @@
     {
       "name": "move_stateful_seed_source",
       "now_ms": 61001,
-      "argv": [
-        "SET",
-        "move_stateful_key",
-        "server-value"
-      ],
+      "argv": ["SET", "move_stateful_key", "server-value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4703,11 +3884,7 @@
     {
       "name": "move_stateful_execute",
       "now_ms": 61002,
-      "argv": [
-        "MOVE",
-        "move_stateful_key",
-        "1"
-      ],
+      "argv": ["MOVE", "move_stateful_key", "1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -4716,10 +3893,7 @@
     {
       "name": "move_stateful_source_missing_after_move",
       "now_ms": 61003,
-      "argv": [
-        "GET",
-        "move_stateful_key"
-      ],
+      "argv": ["GET", "move_stateful_key"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -4728,10 +3902,7 @@
     {
       "name": "move_stateful_select_db1",
       "now_ms": 61004,
-      "argv": [
-        "SELECT",
-        "1"
-      ],
+      "argv": ["SELECT", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4740,10 +3911,7 @@
     {
       "name": "move_stateful_destination_has_value",
       "now_ms": 61005,
-      "argv": [
-        "GET",
-        "move_stateful_key"
-      ],
+      "argv": ["GET", "move_stateful_key"],
       "expect": {
         "kind": "bulk",
         "value": "server-value"
@@ -4752,10 +3920,7 @@
     {
       "name": "move_stateful_cleanup_destination",
       "now_ms": 61006,
-      "argv": [
-        "DEL",
-        "move_stateful_key"
-      ],
+      "argv": ["DEL", "move_stateful_key"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -4764,11 +3929,7 @@
     {
       "name": "debug_sleep_accepts_negative",
       "now_ms": 62002,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "-1"
-      ],
+      "argv": ["DEBUG", "SLEEP", "-1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4777,11 +3938,7 @@
     {
       "name": "debug_sleep_float_accepted",
       "now_ms": 62003,
-      "argv": [
-        "DEBUG",
-        "SLEEP",
-        "1.5"
-      ],
+      "argv": ["DEBUG", "SLEEP", "1.5"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4790,11 +3947,7 @@
     {
       "name": "debug_set_active_expire_invalid_value_syntax_error",
       "now_ms": 62004,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE",
-        "99"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE", "99"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4803,10 +3956,7 @@
     {
       "name": "debug_set_active_expire_missing_arg",
       "now_ms": 62005,
-      "argv": [
-        "DEBUG",
-        "SET-ACTIVE-EXPIRE"
-      ],
+      "argv": ["DEBUG", "SET-ACTIVE-EXPIRE"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'SET-ACTIVE-EXPIRE'. Try DEBUG HELP."
@@ -4815,9 +3965,7 @@
     {
       "name": "command_returns_array",
       "now_ms": 63000,
-      "argv": [
-        "COMMAND"
-      ],
+      "argv": ["COMMAND"],
       "expect": {
         "kind": "any_array"
       }
@@ -4825,10 +3973,7 @@
     {
       "name": "command_count_returns_integer",
       "now_ms": 63001,
-      "argv": [
-        "COMMAND",
-        "COUNT"
-      ],
+      "argv": ["COMMAND", "COUNT"],
       "expect": {
         "kind": "any_integer"
       }
@@ -4836,11 +3981,7 @@
     {
       "name": "command_docs_get",
       "now_ms": 63002,
-      "argv": [
-        "COMMAND",
-        "DOCS",
-        "GET"
-      ],
+      "argv": ["COMMAND", "DOCS", "GET"],
       "expect": {
         "kind": "any_array"
       }
@@ -4848,13 +3989,7 @@
     {
       "name": "command_getkeys_set",
       "now_ms": 63003,
-      "argv": [
-        "COMMAND",
-        "GETKEYS",
-        "SET",
-        "foo",
-        "bar"
-      ],
+      "argv": ["COMMAND", "GETKEYS", "SET", "foo", "bar"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4868,11 +4003,7 @@
     {
       "name": "command_info_get",
       "now_ms": 63004,
-      "argv": [
-        "COMMAND",
-        "INFO",
-        "GET"
-      ],
+      "argv": ["COMMAND", "INFO", "GET"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5056,13 +4187,7 @@
     {
       "name": "command_list_filterby_module_unknown_returns_empty",
       "now_ms": 63005,
-      "argv": [
-        "COMMAND",
-        "LIST",
-        "FILTERBY",
-        "MODULE",
-        "nosuchmodule"
-      ],
+      "argv": ["COMMAND", "LIST", "FILTERBY", "MODULE", "nosuchmodule"],
       "expect": {
         "kind": "array",
         "value": []
@@ -5071,12 +4196,7 @@
     {
       "name": "command_list_filterby_module_missing_name_syntax_error",
       "now_ms": 63006,
-      "argv": [
-        "COMMAND",
-        "LIST",
-        "FILTERBY",
-        "MODULE"
-      ],
+      "argv": ["COMMAND", "LIST", "FILTERBY", "MODULE"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -5085,14 +4205,7 @@
     {
       "name": "command_list_filterby_module_extra_arg_syntax_error",
       "now_ms": 63007,
-      "argv": [
-        "COMMAND",
-        "LIST",
-        "FILTERBY",
-        "MODULE",
-        "nosuchmodule",
-        "extra"
-      ],
+      "argv": ["COMMAND", "LIST", "FILTERBY", "MODULE", "nosuchmodule", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -5101,9 +4214,7 @@
     {
       "name": "time_returns_array_of_two",
       "now_ms": 64000,
-      "argv": [
-        "TIME"
-      ],
+      "argv": ["TIME"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5119,10 +4230,7 @@
     {
       "name": "time_wrong_arity",
       "now_ms": 64001,
-      "argv": [
-        "TIME",
-        "extra"
-      ],
+      "argv": ["TIME", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'time' command"
@@ -5131,10 +4239,7 @@
     {
       "name": "info_default_section",
       "now_ms": 65000,
-      "argv": [
-        "INFO",
-        "default"
-      ],
+      "argv": ["INFO", "default"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -5142,10 +4247,7 @@
     {
       "name": "info_all_section",
       "now_ms": 65001,
-      "argv": [
-        "INFO",
-        "all"
-      ],
+      "argv": ["INFO", "all"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -5153,9 +4255,7 @@
     {
       "name": "info_no_args_returns_default",
       "now_ms": 65002,
-      "argv": [
-        "INFO"
-      ],
+      "argv": ["INFO"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -5163,10 +4263,7 @@
     {
       "name": "info_case_insensitive",
       "now_ms": 65003,
-      "argv": [
-        "info",
-        "SERVER"
-      ],
+      "argv": ["info", "SERVER"],
       "expect": {
         "kind": "any_bulk"
       }
@@ -5174,9 +4271,7 @@
     {
       "name": "dbsize_empty_db",
       "now_ms": 66000,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5185,9 +4280,7 @@
     {
       "name": "dbsize_returns_zero",
       "now_ms": 66001,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -5196,15 +4289,7 @@
     {
       "name": "dbsize_setup_keys",
       "now_ms": 66002,
-      "argv": [
-        "MSET",
-        "dbsize_k1",
-        "v1",
-        "dbsize_k2",
-        "v2",
-        "dbsize_k3",
-        "v3"
-      ],
+      "argv": ["MSET", "dbsize_k1", "v1", "dbsize_k2", "v2", "dbsize_k3", "v3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5213,9 +4298,7 @@
     {
       "name": "dbsize_returns_three",
       "now_ms": 66003,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -5224,10 +4307,7 @@
     {
       "name": "dbsize_wrong_arity",
       "now_ms": 66004,
-      "argv": [
-        "DBSIZE",
-        "extra"
-      ],
+      "argv": ["DBSIZE", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'dbsize' command"
@@ -5236,9 +4316,7 @@
     {
       "name": "lastsave_returns_integer",
       "now_ms": 67000,
-      "argv": [
-        "LASTSAVE"
-      ],
+      "argv": ["LASTSAVE"],
       "expect": {
         "kind": "any_integer"
       }
@@ -5246,10 +4324,7 @@
     {
       "name": "lastsave_wrong_arity",
       "now_ms": 67001,
-      "argv": [
-        "LASTSAVE",
-        "extra"
-      ],
+      "argv": ["LASTSAVE", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'lastsave' command"
@@ -5258,9 +4333,7 @@
     {
       "name": "lastsave_case_insensitive",
       "now_ms": 67002,
-      "argv": [
-        "lastsave"
-      ],
+      "argv": ["lastsave"],
       "expect": {
         "kind": "any_integer"
       }
@@ -5268,11 +4341,7 @@
     {
       "name": "touch_setup",
       "now_ms": 68000,
-      "argv": [
-        "SET",
-        "touch_key",
-        "value"
-      ],
+      "argv": ["SET", "touch_key", "value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5281,10 +4350,7 @@
     {
       "name": "touch_single_existing",
       "now_ms": 68001,
-      "argv": [
-        "TOUCH",
-        "touch_key"
-      ],
+      "argv": ["TOUCH", "touch_key"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -5293,10 +4359,7 @@
     {
       "name": "touch_single_missing",
       "now_ms": 68002,
-      "argv": [
-        "TOUCH",
-        "touch_nonexistent"
-      ],
+      "argv": ["TOUCH", "touch_nonexistent"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -5305,12 +4368,7 @@
     {
       "name": "touch_multiple_mixed",
       "now_ms": 68003,
-      "argv": [
-        "TOUCH",
-        "touch_key",
-        "touch_nonexistent",
-        "touch_key"
-      ],
+      "argv": ["TOUCH", "touch_key", "touch_nonexistent", "touch_key"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -5319,9 +4377,7 @@
     {
       "name": "touch_wrong_arity",
       "now_ms": 68004,
-      "argv": [
-        "TOUCH"
-      ],
+      "argv": ["TOUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'touch' command"
@@ -5330,13 +4386,7 @@
     {
       "name": "unlink_setup",
       "now_ms": 69000,
-      "argv": [
-        "MSET",
-        "unlink_k1",
-        "v1",
-        "unlink_k2",
-        "v2"
-      ],
+      "argv": ["MSET", "unlink_k1", "v1", "unlink_k2", "v2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5345,12 +4395,7 @@
     {
       "name": "unlink_multiple",
       "now_ms": 69001,
-      "argv": [
-        "UNLINK",
-        "unlink_k1",
-        "unlink_k2",
-        "unlink_nonexistent"
-      ],
+      "argv": ["UNLINK", "unlink_k1", "unlink_k2", "unlink_nonexistent"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -5359,11 +4404,7 @@
     {
       "name": "unlink_verify_gone",
       "now_ms": 69002,
-      "argv": [
-        "EXISTS",
-        "unlink_k1",
-        "unlink_k2"
-      ],
+      "argv": ["EXISTS", "unlink_k1", "unlink_k2"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -5372,9 +4413,7 @@
     {
       "name": "unlink_wrong_arity",
       "now_ms": 69003,
-      "argv": [
-        "UNLINK"
-      ],
+      "argv": ["UNLINK"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'unlink' command"
@@ -5383,10 +4422,7 @@
     {
       "name": "slowlog_len_returns_integer",
       "now_ms": 70000,
-      "argv": [
-        "SLOWLOG",
-        "LEN"
-      ],
+      "argv": ["SLOWLOG", "LEN"],
       "expect": {
         "kind": "any_integer"
       }
@@ -5394,10 +4430,7 @@
     {
       "name": "slowlog_reset_ok",
       "now_ms": 70001,
-      "argv": [
-        "SLOWLOG",
-        "RESET"
-      ],
+      "argv": ["SLOWLOG", "RESET"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5406,10 +4439,7 @@
     {
       "name": "slowlog_len_after_reset",
       "now_ms": 70002,
-      "argv": [
-        "SLOWLOG",
-        "LEN"
-      ],
+      "argv": ["SLOWLOG", "LEN"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -5418,10 +4448,7 @@
     {
       "name": "slowlog_get_empty",
       "now_ms": 70003,
-      "argv": [
-        "SLOWLOG",
-        "GET"
-      ],
+      "argv": ["SLOWLOG", "GET"],
       "expect": {
         "kind": "array",
         "value": []
@@ -5430,11 +4457,7 @@
     {
       "name": "slowlog_get_with_count",
       "now_ms": 70004,
-      "argv": [
-        "SLOWLOG",
-        "GET",
-        "10"
-      ],
+      "argv": ["SLOWLOG", "GET", "10"],
       "expect": {
         "kind": "array",
         "value": []
@@ -5443,10 +4466,7 @@
     {
       "name": "slowlog_unknown_subcommand",
       "now_ms": 70005,
-      "argv": [
-        "SLOWLOG",
-        "INVALID"
-      ],
+      "argv": ["SLOWLOG", "INVALID"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'INVALID'. Try SLOWLOG HELP."
@@ -5455,9 +4475,7 @@
     {
       "name": "slowlog_wrong_arity",
       "now_ms": 70006,
-      "argv": [
-        "SLOWLOG"
-      ],
+      "argv": ["SLOWLOG"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'slowlog' command"
@@ -5466,10 +4484,7 @@
     {
       "name": "slowlog_case_insensitive",
       "now_ms": 70007,
-      "argv": [
-        "slowlog",
-        "len"
-      ],
+      "argv": ["slowlog", "len"],
       "expect": {
         "kind": "any_integer"
       }
@@ -5477,9 +4492,7 @@
     {
       "name": "flushall_ok",
       "now_ms": 71000,
-      "argv": [
-        "FLUSHALL"
-      ],
+      "argv": ["FLUSHALL"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5488,10 +4501,7 @@
     {
       "name": "flushall_async",
       "now_ms": 71001,
-      "argv": [
-        "FLUSHALL",
-        "ASYNC"
-      ],
+      "argv": ["FLUSHALL", "ASYNC"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5500,10 +4510,7 @@
     {
       "name": "flushall_sync",
       "now_ms": 71002,
-      "argv": [
-        "FLUSHALL",
-        "SYNC"
-      ],
+      "argv": ["FLUSHALL", "SYNC"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5512,11 +4519,7 @@
     {
       "name": "flushall_wrong_arity",
       "now_ms": 71003,
-      "argv": [
-        "FLUSHALL",
-        "ASYNC",
-        "extra"
-      ],
+      "argv": ["FLUSHALL", "ASYNC", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -5525,10 +4528,7 @@
     {
       "name": "flushdb_async",
       "now_ms": 72000,
-      "argv": [
-        "FLUSHDB",
-        "ASYNC"
-      ],
+      "argv": ["FLUSHDB", "ASYNC"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5537,10 +4537,7 @@
     {
       "name": "flushdb_sync",
       "now_ms": 72001,
-      "argv": [
-        "FLUSHDB",
-        "SYNC"
-      ],
+      "argv": ["FLUSHDB", "SYNC"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5549,11 +4546,7 @@
     {
       "name": "flushdb_wrong_arity",
       "now_ms": 72002,
-      "argv": [
-        "FLUSHDB",
-        "ASYNC",
-        "extra"
-      ],
+      "argv": ["FLUSHDB", "ASYNC", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -5562,9 +4555,7 @@
     {
       "name": "debug_wrong_arity_no_subcommand",
       "now_ms": 73000,
-      "argv": [
-        "DEBUG"
-      ],
+      "argv": ["DEBUG"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'debug' command"
@@ -5573,11 +4564,7 @@
     {
       "name": "flushall_then_set_ghostkey_setup",
       "now_ms": 74000,
-      "argv": [
-        "SET",
-        "ghostkey",
-        "ghostvalue"
-      ],
+      "argv": ["SET", "ghostkey", "ghostvalue"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5586,9 +4573,7 @@
     {
       "name": "flushall_then_flushall",
       "now_ms": 74001,
-      "argv": [
-        "FLUSHALL"
-      ],
+      "argv": ["FLUSHALL"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5597,10 +4582,7 @@
     {
       "name": "flushall_then_keys_empty",
       "now_ms": 74002,
-      "argv": [
-        "KEYS",
-        "*"
-      ],
+      "argv": ["KEYS", "*"],
       "expect": {
         "kind": "array",
         "value": []
@@ -5609,9 +4591,7 @@
     {
       "name": "flushall_then_dbsize_zero",
       "now_ms": 74003,
-      "argv": [
-        "DBSIZE"
-      ],
+      "argv": ["DBSIZE"],
       "expect": {
         "kind": "integer",
         "value": 0

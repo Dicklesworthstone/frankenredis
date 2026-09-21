@@ -4,11 +4,7 @@
     {
       "name": "wait_standalone_zero_replicas",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "0",
-        "0"
-      ],
+      "argv": ["WAIT", "0", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -17,11 +13,7 @@
     {
       "name": "wait_standalone_one_replica",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "1",
-        "0"
-      ],
+      "argv": ["WAIT", "1", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -30,11 +22,7 @@
     {
       "name": "wait_standalone_many_replicas",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "100",
-        "0"
-      ],
+      "argv": ["WAIT", "100", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -43,11 +31,7 @@
     {
       "name": "wait_standalone_with_timeout",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "1",
-        "100"
-      ],
+      "argv": ["WAIT", "1", "100"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -56,11 +40,7 @@
     {
       "name": "wait_standalone_large_numreplicas",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "999999",
-        "0"
-      ],
+      "argv": ["WAIT", "999999", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -69,11 +49,7 @@
     {
       "name": "wait_standalone_large_timeout",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "0",
-        "999999"
-      ],
+      "argv": ["WAIT", "0", "999999"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -82,11 +58,7 @@
     {
       "name": "wait_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "wait",
-        "0",
-        "0"
-      ],
+      "argv": ["wait", "0", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -95,11 +67,7 @@
     {
       "name": "wait_after_set_still_zero",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "wait_key",
-        "value"
-      ],
+      "argv": ["SET", "wait_key", "value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -108,11 +76,7 @@
     {
       "name": "wait_after_write_standalone",
       "now_ms": 100,
-      "argv": [
-        "WAIT",
-        "1",
-        "0"
-      ],
+      "argv": ["WAIT", "1", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -121,9 +85,7 @@
     {
       "name": "wait_wrong_arity_no_args",
       "now_ms": 0,
-      "argv": [
-        "WAIT"
-      ],
+      "argv": ["WAIT"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'wait' command"
@@ -132,10 +94,7 @@
     {
       "name": "wait_wrong_arity_one_arg",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "1"
-      ],
+      "argv": ["WAIT", "1"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'wait' command"
@@ -144,12 +103,7 @@
     {
       "name": "wait_wrong_arity_extra_args",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "1",
-        "0",
-        "extra"
-      ],
+      "argv": ["WAIT", "1", "0", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'wait' command"
@@ -158,13 +112,7 @@
     {
       "name": "wait_wrong_arity_four_args",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "1",
-        "0",
-        "extra",
-        "more"
-      ],
+      "argv": ["WAIT", "1", "0", "extra", "more"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'wait' command"
@@ -173,11 +121,7 @@
     {
       "name": "wait_invalid_numreplicas",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "abc",
-        "0"
-      ],
+      "argv": ["WAIT", "abc", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -186,11 +130,7 @@
     {
       "name": "wait_negative_numreplicas",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "-1",
-        "0"
-      ],
+      "argv": ["WAIT", "-1", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -199,11 +139,7 @@
     {
       "name": "wait_negative_large_numreplicas",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "-100",
-        "0"
-      ],
+      "argv": ["WAIT", "-100", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -212,11 +148,7 @@
     {
       "name": "wait_invalid_timeout",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "0",
-        "abc"
-      ],
+      "argv": ["WAIT", "0", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR timeout is not an integer or out of range"
@@ -225,11 +157,7 @@
     {
       "name": "wait_negative_timeout",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "0",
-        "-1"
-      ],
+      "argv": ["WAIT", "0", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR timeout is negative"
@@ -238,11 +166,7 @@
     {
       "name": "wait_float_numreplicas",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "1.5",
-        "0"
-      ],
+      "argv": ["WAIT", "1.5", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -251,11 +175,7 @@
     {
       "name": "wait_float_timeout",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "0",
-        "1.5"
-      ],
+      "argv": ["WAIT", "0", "1.5"],
       "expect": {
         "kind": "error",
         "value": "ERR timeout is not an integer or out of range"
@@ -264,11 +184,7 @@
     {
       "name": "wait_empty_numreplicas",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "",
-        "0"
-      ],
+      "argv": ["WAIT", "", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -277,12 +193,7 @@
     {
       "name": "waitaof_standalone_zero_zero",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "0",
-        "0"
-      ],
+      "argv": ["WAITAOF", "0", "0", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -300,12 +211,7 @@
     {
       "name": "waitaof_standalone_one_zero",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "1",
-        "0",
-        "0"
-      ],
+      "argv": ["WAITAOF", "1", "0", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -323,12 +229,7 @@
     {
       "name": "waitaof_standalone_zero_one",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "1",
-        "0"
-      ],
+      "argv": ["WAITAOF", "0", "1", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -346,12 +247,7 @@
     {
       "name": "waitaof_standalone_one_one",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "1",
-        "1",
-        "0"
-      ],
+      "argv": ["WAITAOF", "1", "1", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -369,12 +265,7 @@
     {
       "name": "waitaof_standalone_with_timeout",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "0",
-        "100"
-      ],
+      "argv": ["WAITAOF", "0", "0", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -392,12 +283,7 @@
     {
       "name": "waitaof_standalone_large_local",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "100",
-        "0",
-        "0"
-      ],
+      "argv": ["WAITAOF", "100", "0", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is out of range, value must between 0 and 1"
@@ -406,12 +292,7 @@
     {
       "name": "waitaof_standalone_large_replicas",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "100",
-        "0"
-      ],
+      "argv": ["WAITAOF", "0", "100", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -429,12 +310,7 @@
     {
       "name": "waitaof_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "waitaof",
-        "0",
-        "0",
-        "0"
-      ],
+      "argv": ["waitaof", "0", "0", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -452,9 +328,7 @@
     {
       "name": "waitaof_wrong_arity_no_args",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF"
-      ],
+      "argv": ["WAITAOF"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'waitaof' command"
@@ -463,10 +337,7 @@
     {
       "name": "waitaof_wrong_arity_one_arg",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0"
-      ],
+      "argv": ["WAITAOF", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'waitaof' command"
@@ -475,11 +346,7 @@
     {
       "name": "waitaof_wrong_arity_two_args",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "0"
-      ],
+      "argv": ["WAITAOF", "0", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'waitaof' command"
@@ -488,13 +355,7 @@
     {
       "name": "waitaof_wrong_arity_extra_args",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "0",
-        "0",
-        "extra"
-      ],
+      "argv": ["WAITAOF", "0", "0", "0", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'waitaof' command"
@@ -503,12 +364,7 @@
     {
       "name": "waitaof_invalid_numlocal",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "abc",
-        "0",
-        "0"
-      ],
+      "argv": ["WAITAOF", "abc", "0", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -517,12 +373,7 @@
     {
       "name": "waitaof_negative_numlocal",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "-1",
-        "0",
-        "0"
-      ],
+      "argv": ["WAITAOF", "-1", "0", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is out of range, value must between 0 and 1"
@@ -531,12 +382,7 @@
     {
       "name": "waitaof_invalid_numreplicas",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "abc",
-        "0"
-      ],
+      "argv": ["WAITAOF", "0", "abc", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is out of range, must be positive"
@@ -545,12 +391,7 @@
     {
       "name": "waitaof_negative_numreplicas",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "-1",
-        "0"
-      ],
+      "argv": ["WAITAOF", "0", "-1", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is out of range, must be positive"
@@ -559,12 +400,7 @@
     {
       "name": "waitaof_invalid_timeout",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "0",
-        "abc"
-      ],
+      "argv": ["WAITAOF", "0", "0", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR timeout is not an integer or out of range"
@@ -573,12 +409,7 @@
     {
       "name": "waitaof_negative_timeout",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "0",
-        "-1"
-      ],
+      "argv": ["WAITAOF", "0", "0", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR timeout is negative"
@@ -587,12 +418,7 @@
     {
       "name": "waitaof_float_numlocal",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "1.5",
-        "0",
-        "0"
-      ],
+      "argv": ["WAITAOF", "1.5", "0", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -601,12 +427,7 @@
     {
       "name": "waitaof_float_numreplicas",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "1.5",
-        "0"
-      ],
+      "argv": ["WAITAOF", "0", "1.5", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is out of range, must be positive"
@@ -615,12 +436,7 @@
     {
       "name": "waitaof_float_timeout",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "0",
-        "1.5"
-      ],
+      "argv": ["WAITAOF", "0", "0", "1.5"],
       "expect": {
         "kind": "error",
         "value": "ERR timeout is not an integer or out of range"
@@ -629,12 +445,7 @@
     {
       "name": "waitaof_empty_numlocal",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "",
-        "0",
-        "0"
-      ],
+      "argv": ["WAITAOF", "", "0", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -643,11 +454,7 @@
     {
       "name": "wait_numreplicas_leading_plus",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "+1",
-        "0"
-      ],
+      "argv": ["WAIT", "+1", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -656,11 +463,7 @@
     {
       "name": "wait_numreplicas_leading_zeros",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "01",
-        "0"
-      ],
+      "argv": ["WAIT", "01", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -669,11 +472,7 @@
     {
       "name": "wait_timeout_leading_plus",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "0",
-        "+100"
-      ],
+      "argv": ["WAIT", "0", "+100"],
       "expect": {
         "kind": "error",
         "value": "ERR timeout is not an integer or out of range"
@@ -682,11 +481,7 @@
     {
       "name": "wait_timeout_leading_zeros",
       "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "0",
-        "0100"
-      ],
+      "argv": ["WAIT", "0", "0100"],
       "expect": {
         "kind": "error",
         "value": "ERR timeout is not an integer or out of range"
@@ -695,12 +490,7 @@
     {
       "name": "waitaof_numlocal_leading_plus",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "+1",
-        "0",
-        "0"
-      ],
+      "argv": ["WAITAOF", "+1", "0", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -709,12 +499,7 @@
     {
       "name": "waitaof_numlocal_leading_zeros",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "01",
-        "0",
-        "0"
-      ],
+      "argv": ["WAITAOF", "01", "0", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -723,12 +508,7 @@
     {
       "name": "waitaof_numreplicas_leading_plus",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "+1",
-        "0"
-      ],
+      "argv": ["WAITAOF", "0", "+1", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is out of range, must be positive"
@@ -737,12 +517,7 @@
     {
       "name": "waitaof_numreplicas_leading_zeros",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "01",
-        "0"
-      ],
+      "argv": ["WAITAOF", "0", "01", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR value is out of range, must be positive"
@@ -751,12 +526,7 @@
     {
       "name": "waitaof_timeout_leading_plus",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "0",
-        "+100"
-      ],
+      "argv": ["WAITAOF", "0", "0", "+100"],
       "expect": {
         "kind": "error",
         "value": "ERR timeout is not an integer or out of range"
@@ -765,12 +535,7 @@
     {
       "name": "waitaof_timeout_leading_zeros",
       "now_ms": 0,
-      "argv": [
-        "WAITAOF",
-        "0",
-        "0",
-        "0100"
-      ],
+      "argv": ["WAITAOF", "0", "0", "0100"],
       "expect": {
         "kind": "error",
         "value": "ERR timeout is not an integer or out of range"

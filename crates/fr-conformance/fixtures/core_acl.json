@@ -4,10 +4,7 @@
     {
       "name": "acl_whoami_returns_default",
       "now_ms": 0,
-      "argv": [
-        "ACL",
-        "WHOAMI"
-      ],
+      "argv": ["ACL", "WHOAMI"],
       "expect": {
         "kind": "bulk",
         "value": "default"
@@ -16,10 +13,7 @@
     {
       "name": "acl_users_returns_default",
       "now_ms": 1,
-      "argv": [
-        "ACL",
-        "USERS"
-      ],
+      "argv": ["ACL", "USERS"],
       "expect": {
         "kind": "array",
         "value": [
@@ -33,10 +27,7 @@
     {
       "name": "acl_list_returns_default_user_rule",
       "now_ms": 2,
-      "argv": [
-        "ACL",
-        "LIST"
-      ],
+      "argv": ["ACL", "LIST"],
       "expect": {
         "kind": "array",
         "value": [
@@ -50,13 +41,7 @@
     {
       "name": "acl_setuser_creates_new_user",
       "now_ms": 3,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "alice",
-        "on",
-        ">password123"
-      ],
+      "argv": ["ACL", "SETUSER", "alice", "on", ">password123"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -65,10 +50,7 @@
     {
       "name": "acl_users_includes_alice",
       "now_ms": 4,
-      "argv": [
-        "ACL",
-        "USERS"
-      ],
+      "argv": ["ACL", "USERS"],
       "expect": {
         "kind": "array",
         "value": [
@@ -86,11 +68,7 @@
     {
       "name": "acl_getuser_alice_returns_details",
       "now_ms": 5,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "alice"
-      ],
+      "argv": ["ACL", "GETUSER", "alice"],
       "expect": {
         "kind": "array",
         "value": [
@@ -162,11 +140,7 @@
     {
       "name": "acl_getuser_nonexistent_returns_nil",
       "now_ms": 6,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "bob"
-      ],
+      "argv": ["ACL", "GETUSER", "bob"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -175,11 +149,7 @@
     {
       "name": "acl_deluser_alice_returns_count",
       "now_ms": 7,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "alice"
-      ],
+      "argv": ["ACL", "DELUSER", "alice"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -188,11 +158,7 @@
     {
       "name": "acl_deluser_default_is_rejected",
       "now_ms": 8,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "default"
-      ],
+      "argv": ["ACL", "DELUSER", "default"],
       "expect": {
         "kind": "error",
         "value": "ERR The 'default' user cannot be removed"
@@ -201,11 +167,7 @@
     {
       "name": "acl_deluser_nonexistent_returns_zero",
       "now_ms": 9,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "nonexistent"
-      ],
+      "argv": ["ACL", "DELUSER", "nonexistent"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -214,10 +176,7 @@
     {
       "name": "acl_cat_returns_categories",
       "now_ms": 10,
-      "argv": [
-        "ACL",
-        "CAT"
-      ],
+      "argv": ["ACL", "CAT"],
       "expect": {
         "kind": "array",
         "value": [
@@ -311,11 +270,7 @@
     {
       "name": "acl_cat_unknown_category_is_rejected",
       "now_ms": 11,
-      "argv": [
-        "ACL",
-        "CAT",
-        "foobar"
-      ],
+      "argv": ["ACL", "CAT", "foobar"],
       "expect": {
         "kind": "error",
         "value": "ERR Unknown category 'foobar'"
@@ -324,10 +279,7 @@
     {
       "name": "acl_log_returns_empty_array",
       "now_ms": 12,
-      "argv": [
-        "ACL",
-        "LOG"
-      ],
+      "argv": ["ACL", "LOG"],
       "expect": {
         "kind": "array",
         "value": []
@@ -336,11 +288,7 @@
     {
       "name": "acl_log_reset_returns_ok",
       "now_ms": 13,
-      "argv": [
-        "ACL",
-        "LOG",
-        "RESET"
-      ],
+      "argv": ["ACL", "LOG", "RESET"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -349,10 +297,7 @@
     {
       "name": "acl_save_returns_ok",
       "now_ms": 14,
-      "argv": [
-        "ACL",
-        "SAVE"
-      ],
+      "argv": ["ACL", "SAVE"],
       "expect": {
         "kind": "error",
         "value": "ERR This Redis instance is not configured to use an ACL file. You may want to specify users via the ACL SETUSER command and then issue a CONFIG REWRITE (assuming you have a Redis configuration file set) in order to store users in the Redis configuration."
@@ -361,10 +306,7 @@
     {
       "name": "acl_load_returns_ok",
       "now_ms": 15,
-      "argv": [
-        "ACL",
-        "LOAD"
-      ],
+      "argv": ["ACL", "LOAD"],
       "expect": {
         "kind": "error",
         "value": "ERR This Redis instance is not configured to use an ACL file. You may want to specify users via the ACL SETUSER command and then issue a CONFIG REWRITE (assuming you have a Redis configuration file set) in order to store users in the Redis configuration."
@@ -373,10 +315,7 @@
     {
       "name": "acl_unknown_subcommand_is_rejected",
       "now_ms": 16,
-      "argv": [
-        "ACL",
-        "BADCMD"
-      ],
+      "argv": ["ACL", "BADCMD"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'BADCMD'. Try ACL HELP."
@@ -385,9 +324,7 @@
     {
       "name": "acl_no_subcommand_is_rejected",
       "now_ms": 17,
-      "argv": [
-        "ACL"
-      ],
+      "argv": ["ACL"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'acl' command"
@@ -396,12 +333,7 @@
     {
       "name": "acl_setuser_invalid_rule_is_rejected",
       "now_ms": 18,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "bob",
-        "invalidrule"
-      ],
+      "argv": ["ACL", "SETUSER", "bob", "invalidrule"],
       "expect": {
         "kind": "error",
         "value": "ERR Error in ACL SETUSER modifier 'invalidrule': Syntax error"
@@ -410,12 +342,7 @@
     {
       "name": "acl_setuser_disable_user",
       "now_ms": 19,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "carol",
-        "off"
-      ],
+      "argv": ["ACL", "SETUSER", "carol", "off"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -424,11 +351,7 @@
     {
       "name": "acl_getuser_carol_is_disabled",
       "now_ms": 20,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "carol"
-      ],
+      "argv": ["ACL", "GETUSER", "carol"],
       "expect": {
         "kind": "array",
         "value": [
@@ -495,13 +418,7 @@
     {
       "name": "acl_setuser_nopass",
       "now_ms": 21,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "dave",
-        "on",
-        "nopass"
-      ],
+      "argv": ["ACL", "SETUSER", "dave", "on", "nopass"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -510,11 +427,7 @@
     {
       "name": "acl_getuser_dave_nopass",
       "now_ms": 22,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "dave"
-      ],
+      "argv": ["ACL", "GETUSER", "dave"],
       "expect": {
         "kind": "array",
         "value": [
@@ -585,11 +498,7 @@
     {
       "name": "acl_whoami_extra_args_rejected",
       "now_ms": 23,
-      "argv": [
-        "ACL",
-        "WHOAMI",
-        "extra"
-      ],
+      "argv": ["ACL", "WHOAMI", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'acl|whoami' command"
@@ -598,11 +507,7 @@
     {
       "name": "acl_genpass_error_on_invalid_bits",
       "now_ms": 24,
-      "argv": [
-        "ACL",
-        "GENPASS",
-        "0"
-      ],
+      "argv": ["ACL", "GENPASS", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
@@ -611,11 +516,7 @@
     {
       "name": "acl_cat_hyperloglog_returns_commands",
       "now_ms": 25,
-      "argv": [
-        "ACL",
-        "CAT",
-        "hyperloglog"
-      ],
+      "argv": ["ACL", "CAT", "hyperloglog"],
       "expect": {
         "kind": "array",
         "value": [
@@ -645,11 +546,7 @@
     {
       "name": "acl_cat_transaction_returns_commands",
       "now_ms": 26,
-      "argv": [
-        "ACL",
-        "CAT",
-        "transaction"
-      ],
+      "argv": ["ACL", "CAT", "transaction"],
       "expect": {
         "kind": "array",
         "value": [
@@ -679,11 +576,7 @@
     {
       "name": "acl_cat_bitmap_returns_commands",
       "now_ms": 27,
-      "argv": [
-        "ACL",
-        "CAT",
-        "bitmap"
-      ],
+      "argv": ["ACL", "CAT", "bitmap"],
       "expect": {
         "kind": "array",
         "value": [
@@ -721,11 +614,7 @@
     {
       "name": "acl_log_with_count_returns_empty",
       "now_ms": 28,
-      "argv": [
-        "ACL",
-        "LOG",
-        "10"
-      ],
+      "argv": ["ACL", "LOG", "10"],
       "expect": {
         "kind": "array",
         "value": []
@@ -734,10 +623,7 @@
     {
       "name": "auth_without_password_configured",
       "now_ms": 30,
-      "argv": [
-        "AUTH",
-        "somepass"
-      ],
+      "argv": ["AUTH", "somepass"],
       "expect": {
         "kind": "error",
         "value": "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?"
@@ -746,9 +632,7 @@
     {
       "name": "auth_wrong_arity_no_args",
       "now_ms": 31,
-      "argv": [
-        "AUTH"
-      ],
+      "argv": ["AUTH"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'auth' command"
@@ -757,12 +641,7 @@
     {
       "name": "auth_wrong_arity_too_many",
       "now_ms": 32,
-      "argv": [
-        "AUTH",
-        "user",
-        "pass",
-        "extra"
-      ],
+      "argv": ["AUTH", "user", "pass", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -771,14 +650,7 @@
     {
       "name": "acl_setuser_with_password_for_auth",
       "now_ms": 40,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "testuser",
-        "on",
-        ">secret123",
-        "+@all"
-      ],
+      "argv": ["ACL", "SETUSER", "testuser", "on", ">secret123", "+@all"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -787,11 +659,7 @@
     {
       "name": "auth_correct_user_pass",
       "now_ms": 41,
-      "argv": [
-        "AUTH",
-        "testuser",
-        "secret123"
-      ],
+      "argv": ["AUTH", "testuser", "secret123"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -800,10 +668,7 @@
     {
       "name": "acl_whoami_after_auth",
       "now_ms": 42,
-      "argv": [
-        "ACL",
-        "WHOAMI"
-      ],
+      "argv": ["ACL", "WHOAMI"],
       "expect": {
         "kind": "bulk",
         "value": "testuser"
@@ -812,11 +677,7 @@
     {
       "name": "auth_wrong_password",
       "now_ms": 43,
-      "argv": [
-        "AUTH",
-        "testuser",
-        "wrongpass"
-      ],
+      "argv": ["AUTH", "testuser", "wrongpass"],
       "expect": {
         "kind": "error",
         "value": "WRONGPASS invalid username-password pair or user is disabled."
@@ -825,11 +686,7 @@
     {
       "name": "auth_nonexistent_user",
       "now_ms": 44,
-      "argv": [
-        "AUTH",
-        "nobody",
-        "pass"
-      ],
+      "argv": ["AUTH", "nobody", "pass"],
       "expect": {
         "kind": "error",
         "value": "WRONGPASS invalid username-password pair or user is disabled."
@@ -838,13 +695,7 @@
     {
       "name": "acl_setuser_disabled_user",
       "now_ms": 50,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "disabled_user",
-        "off",
-        ">pass456"
-      ],
+      "argv": ["ACL", "SETUSER", "disabled_user", "off", ">pass456"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -853,11 +704,7 @@
     {
       "name": "auth_disabled_user_rejected",
       "now_ms": 51,
-      "argv": [
-        "AUTH",
-        "disabled_user",
-        "pass456"
-      ],
+      "argv": ["AUTH", "disabled_user", "pass456"],
       "expect": {
         "kind": "error",
         "value": "WRONGPASS invalid username-password pair or user is disabled."
@@ -866,12 +713,7 @@
     {
       "name": "acl_deluser_multiple_setup_user2",
       "now_ms": 60,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "user2",
-        "on"
-      ],
+      "argv": ["ACL", "SETUSER", "user2", "on"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -880,12 +722,7 @@
     {
       "name": "acl_deluser_multiple_setup_user3",
       "now_ms": 61,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "user3",
-        "on"
-      ],
+      "argv": ["ACL", "SETUSER", "user3", "on"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -894,12 +731,7 @@
     {
       "name": "acl_deluser_multiple_at_once",
       "now_ms": 62,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "user2",
-        "user3"
-      ],
+      "argv": ["ACL", "DELUSER", "user2", "user3"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -908,11 +740,7 @@
     {
       "name": "acl_getuser_user2_gone",
       "now_ms": 63,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "user2"
-      ],
+      "argv": ["ACL", "GETUSER", "user2"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -921,11 +749,7 @@
     {
       "name": "acl_getuser_user3_gone",
       "now_ms": 64,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "user3"
-      ],
+      "argv": ["ACL", "GETUSER", "user3"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -934,12 +758,7 @@
     {
       "name": "acl_deluser_mix_existing_nonexistent",
       "now_ms": 65,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "user4",
-        "on"
-      ],
+      "argv": ["ACL", "SETUSER", "user4", "on"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -948,12 +767,7 @@
     {
       "name": "acl_deluser_mix_count",
       "now_ms": 66,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "user4",
-        "nonexist"
-      ],
+      "argv": ["ACL", "DELUSER", "user4", "nonexist"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -962,13 +776,7 @@
     {
       "name": "acl_setuser_resetpass",
       "now_ms": 70,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "rpuser",
-        "on",
-        ">mypass"
-      ],
+      "argv": ["ACL", "SETUSER", "rpuser", "on", ">mypass"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -977,12 +785,7 @@
     {
       "name": "acl_setuser_resetpass_apply",
       "now_ms": 71,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "rpuser",
-        "resetpass"
-      ],
+      "argv": ["ACL", "SETUSER", "rpuser", "resetpass"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -991,11 +794,7 @@
     {
       "name": "acl_getuser_after_resetpass",
       "now_ms": 72,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "rpuser"
-      ],
+      "argv": ["ACL", "GETUSER", "rpuser"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1062,11 +861,7 @@
     {
       "name": "acl_genpass_negative_error",
       "now_ms": 80,
-      "argv": [
-        "ACL",
-        "GENPASS",
-        "-1"
-      ],
+      "argv": ["ACL", "GENPASS", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
@@ -1075,11 +870,7 @@
     {
       "name": "acl_genpass_too_large_error",
       "now_ms": 81,
-      "argv": [
-        "ACL",
-        "GENPASS",
-        "4097"
-      ],
+      "argv": ["ACL", "GENPASS", "4097"],
       "expect": {
         "kind": "error",
         "value": "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
@@ -1088,12 +879,7 @@
     {
       "name": "acl_genpass_extra_args_error",
       "now_ms": 82,
-      "argv": [
-        "ACL",
-        "GENPASS",
-        "128",
-        "extra"
-      ],
+      "argv": ["ACL", "GENPASS", "128", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'GENPASS'. Try ACL HELP."
@@ -1102,10 +888,7 @@
     {
       "name": "acl_deluser_wrong_arity",
       "now_ms": 83,
-      "argv": [
-        "ACL",
-        "DELUSER"
-      ],
+      "argv": ["ACL", "DELUSER"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'acl|deluser' command"
@@ -1114,10 +897,7 @@
     {
       "name": "acl_getuser_wrong_arity",
       "now_ms": 84,
-      "argv": [
-        "ACL",
-        "GETUSER"
-      ],
+      "argv": ["ACL", "GETUSER"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'acl|getuser' command"
@@ -1126,10 +906,7 @@
     {
       "name": "acl_setuser_wrong_arity",
       "now_ms": 85,
-      "argv": [
-        "ACL",
-        "SETUSER"
-      ],
+      "argv": ["ACL", "SETUSER"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'acl|setuser' command"
@@ -1138,11 +915,7 @@
     {
       "name": "acl_save_wrong_arity",
       "now_ms": 86,
-      "argv": [
-        "ACL",
-        "SAVE",
-        "extra"
-      ],
+      "argv": ["ACL", "SAVE", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'acl|save' command"
@@ -1151,11 +924,7 @@
     {
       "name": "acl_load_wrong_arity",
       "now_ms": 87,
-      "argv": [
-        "ACL",
-        "LOAD",
-        "extra"
-      ],
+      "argv": ["ACL", "LOAD", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'acl|load' command"
@@ -1164,11 +933,7 @@
     {
       "name": "acl_log_invalid_subcommand",
       "now_ms": 88,
-      "argv": [
-        "ACL",
-        "LOG",
-        "BADCMD"
-      ],
+      "argv": ["ACL", "LOG", "BADCMD"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1177,11 +942,7 @@
     {
       "name": "acl_cat_string_returns_commands",
       "now_ms": 90,
-      "argv": [
-        "ACL",
-        "CAT",
-        "string"
-      ],
+      "argv": ["ACL", "CAT", "string"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1279,15 +1040,7 @@
     {
       "name": "acl_setuser_allcommands_allkeys",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "fulluser",
-        "on",
-        "nopass",
-        "allcommands",
-        "allkeys"
-      ],
+      "argv": ["ACL", "SETUSER", "fulluser", "on", "nopass", "allcommands", "allkeys"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1296,11 +1049,7 @@
     {
       "name": "acl_getuser_fulluser",
       "now_ms": 101,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "fulluser"
-      ],
+      "argv": ["ACL", "GETUSER", "fulluser"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1371,16 +1120,7 @@
     {
       "name": "acl_setuser_allkeys_then_resetkeys",
       "now_ms": 102,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "order1",
-        "on",
-        "nopass",
-        "allcommands",
-        "allkeys",
-        "resetkeys"
-      ],
+      "argv": ["ACL", "SETUSER", "order1", "on", "nopass", "allcommands", "allkeys", "resetkeys"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1389,11 +1129,7 @@
     {
       "name": "acl_getuser_after_allkeys_then_resetkeys",
       "now_ms": 103,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "order1"
-      ],
+      "argv": ["ACL", "GETUSER", "order1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1464,16 +1200,7 @@
     {
       "name": "acl_setuser_resetkeys_then_allkeys",
       "now_ms": 104,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "order2",
-        "on",
-        "nopass",
-        "allcommands",
-        "resetkeys",
-        "allkeys"
-      ],
+      "argv": ["ACL", "SETUSER", "order2", "on", "nopass", "allcommands", "resetkeys", "allkeys"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1482,11 +1209,7 @@
     {
       "name": "acl_getuser_after_resetkeys_then_allkeys",
       "now_ms": 105,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "order2"
-      ],
+      "argv": ["ACL", "GETUSER", "order2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1557,11 +1280,7 @@
     {
       "name": "acl_deluser_cleanup_testuser",
       "now_ms": 110,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "testuser"
-      ],
+      "argv": ["ACL", "DELUSER", "testuser"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1570,11 +1289,7 @@
     {
       "name": "acl_deluser_cleanup_order1",
       "now_ms": 112,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "order1"
-      ],
+      "argv": ["ACL", "DELUSER", "order1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1583,11 +1298,7 @@
     {
       "name": "acl_deluser_cleanup_order2",
       "now_ms": 113,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "order2"
-      ],
+      "argv": ["ACL", "DELUSER", "order2"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1596,11 +1307,7 @@
     {
       "name": "acl_deluser_cleanup_disabled_user",
       "now_ms": 111,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "disabled_user"
-      ],
+      "argv": ["ACL", "DELUSER", "disabled_user"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1609,11 +1316,7 @@
     {
       "name": "acl_deluser_cleanup_rpuser",
       "now_ms": 112,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "rpuser"
-      ],
+      "argv": ["ACL", "DELUSER", "rpuser"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1622,11 +1325,7 @@
     {
       "name": "acl_deluser_cleanup_fulluser",
       "now_ms": 113,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "fulluser"
-      ],
+      "argv": ["ACL", "DELUSER", "fulluser"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1635,11 +1334,7 @@
     {
       "name": "acl_deluser_cleanup_carol",
       "now_ms": 114,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "carol"
-      ],
+      "argv": ["ACL", "DELUSER", "carol"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1648,11 +1343,7 @@
     {
       "name": "acl_deluser_cleanup_dave",
       "now_ms": 115,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "dave"
-      ],
+      "argv": ["ACL", "DELUSER", "dave"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1661,11 +1352,7 @@
     {
       "name": "acl_deluser_cleanup_bob",
       "now_ms": 116,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "bob"
-      ],
+      "argv": ["ACL", "DELUSER", "bob"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1674,10 +1361,7 @@
     {
       "name": "acl_users_only_default_after_cleanup",
       "now_ms": 117,
-      "argv": [
-        "ACL",
-        "USERS"
-      ],
+      "argv": ["ACL", "USERS"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1691,10 +1375,7 @@
     {
       "name": "acl_log_shows_recent_failed_auth_attempts",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "LOG"
-      ],
+      "argv": ["ACL", "LOG"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1754,11 +1435,7 @@
               },
               {
                 "kind": "bulk_contains_all",
-                "value": [
-                  "cmd=auth",
-                  "user=testuser",
-                  "resp=2"
-                ]
+                "value": ["cmd=auth", "user=testuser", "resp=2"]
               },
               {
                 "kind": "bulk",
@@ -1839,11 +1516,7 @@
               },
               {
                 "kind": "bulk_contains_all",
-                "value": [
-                  "cmd=auth",
-                  "user=testuser",
-                  "resp=2"
-                ]
+                "value": ["cmd=auth", "user=testuser", "resp=2"]
               },
               {
                 "kind": "bulk",
@@ -1924,11 +1597,7 @@
               },
               {
                 "kind": "bulk_contains_all",
-                "value": [
-                  "cmd=auth",
-                  "user=testuser",
-                  "resp=2"
-                ]
+                "value": ["cmd=auth", "user=testuser", "resp=2"]
               },
               {
                 "kind": "bulk",
@@ -1959,10 +1628,7 @@
     {
       "name": "acl_whoami_lowercase",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "whoami"
-      ],
+      "argv": ["ACL", "whoami"],
       "expect": {
         "kind": "bulk",
         "value": "testuser"
@@ -1971,10 +1637,7 @@
     {
       "name": "acl_users_lowercase",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "users"
-      ],
+      "argv": ["ACL", "users"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1988,13 +1651,7 @@
     {
       "name": "acl_setuser_bob_on",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "bob",
-        "on",
-        ">bobpass"
-      ],
+      "argv": ["ACL", "SETUSER", "bob", "on", ">bobpass"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2003,12 +1660,7 @@
     {
       "name": "acl_setuser_bob_off",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "bob",
-        "off"
-      ],
+      "argv": ["ACL", "SETUSER", "bob", "off"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2017,11 +1669,7 @@
     {
       "name": "acl_deluser_bob",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "bob"
-      ],
+      "argv": ["ACL", "DELUSER", "bob"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2030,11 +1678,7 @@
     {
       "name": "acl_genpass_negative_bits",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "GENPASS",
-        "-1"
-      ],
+      "argv": ["ACL", "GENPASS", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
@@ -2043,11 +1687,7 @@
     {
       "name": "acl_genpass_too_large",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "GENPASS",
-        "5000"
-      ],
+      "argv": ["ACL", "GENPASS", "5000"],
       "expect": {
         "kind": "error",
         "value": "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
@@ -2056,11 +1696,7 @@
     {
       "name": "acl_cat_unknown_returns_error",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "CAT",
-        "nosuchcategory"
-      ],
+      "argv": ["ACL", "CAT", "nosuchcategory"],
       "expect": {
         "kind": "error",
         "value": "ERR Unknown category 'nosuchcategory'"
@@ -2069,12 +1705,7 @@
     {
       "name": "acl_deluser_setup_multi",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "user1",
-        "on"
-      ],
+      "argv": ["ACL", "SETUSER", "user1", "on"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2083,12 +1714,7 @@
     {
       "name": "acl_deluser_setup_multi2",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "user2",
-        "on"
-      ],
+      "argv": ["ACL", "SETUSER", "user2", "on"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2097,12 +1723,7 @@
     {
       "name": "acl_deluser_multiple",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "user1",
-        "user2"
-      ],
+      "argv": ["ACL", "DELUSER", "user1", "user2"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -2111,11 +1732,7 @@
     {
       "name": "acl_getuser_missing",
       "now_ms": 100,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "nosuchuser"
-      ],
+      "argv": ["ACL", "GETUSER", "nosuchuser"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2145,11 +1762,7 @@
     {
       "name": "acl_percmd_seed_key_before_auth",
       "now_ms": 201,
-      "argv": [
-        "SET",
-        "acl:test:key",
-        "hello"
-      ],
+      "argv": ["SET", "acl:test:key", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2158,11 +1771,7 @@
     {
       "name": "acl_percmd_auth_as_restricted",
       "now_ms": 202,
-      "argv": [
-        "AUTH",
-        "restricted",
-        "secret"
-      ],
+      "argv": ["AUTH", "restricted", "secret"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2171,10 +1780,7 @@
     {
       "name": "acl_percmd_get_allowed",
       "now_ms": 203,
-      "argv": [
-        "GET",
-        "acl:test:key"
-      ],
+      "argv": ["GET", "acl:test:key"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -2183,11 +1789,7 @@
     {
       "name": "acl_percmd_set_allowed",
       "now_ms": 204,
-      "argv": [
-        "SET",
-        "acl:test:key",
-        "updated"
-      ],
+      "argv": ["SET", "acl:test:key", "updated"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2196,10 +1798,7 @@
     {
       "name": "acl_percmd_del_denied",
       "now_ms": 205,
-      "argv": [
-        "DEL",
-        "acl:test:key"
-      ],
+      "argv": ["DEL", "acl:test:key"],
       "expect": {
         "kind": "error",
         "value": "NOPERM User restricted has no permissions to run the 'del' command"
@@ -2214,10 +1813,7 @@
     {
       "name": "acl_percmd_incr_denied",
       "now_ms": 206,
-      "argv": [
-        "INCR",
-        "acl:test:counter"
-      ],
+      "argv": ["INCR", "acl:test:counter"],
       "expect": {
         "kind": "error",
         "value": "NOPERM User restricted has no permissions to run the 'incr' command"
@@ -2232,10 +1828,7 @@
     {
       "name": "acl_percmd_keys_denied",
       "now_ms": 207,
-      "argv": [
-        "KEYS",
-        "*"
-      ],
+      "argv": ["KEYS", "*"],
       "expect": {
         "kind": "error",
         "value": "NOPERM User restricted has no permissions to run the 'keys' command"
@@ -2250,9 +1843,7 @@
     {
       "name": "acl_percmd_ping_allowed",
       "now_ms": 208,
-      "argv": [
-        "PING"
-      ],
+      "argv": ["PING"],
       "expect": {
         "kind": "simple",
         "value": "PONG"
@@ -2261,11 +1852,7 @@
     {
       "name": "acl_percmd_reauth_default",
       "now_ms": 209,
-      "argv": [
-        "AUTH",
-        "default",
-        ""
-      ],
+      "argv": ["AUTH", "default", ""],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2293,11 +1880,7 @@
     {
       "name": "acl_category_seed_key",
       "now_ms": 301,
-      "argv": [
-        "SET",
-        "acl:cat:key",
-        "catval"
-      ],
+      "argv": ["SET", "acl:cat:key", "catval"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2306,11 +1889,7 @@
     {
       "name": "acl_category_auth_reader",
       "now_ms": 302,
-      "argv": [
-        "AUTH",
-        "reader",
-        "rpass"
-      ],
+      "argv": ["AUTH", "reader", "rpass"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2319,10 +1898,7 @@
     {
       "name": "acl_category_get_allowed_via_read",
       "now_ms": 303,
-      "argv": [
-        "GET",
-        "acl:cat:key"
-      ],
+      "argv": ["GET", "acl:cat:key"],
       "expect": {
         "kind": "bulk",
         "value": "catval"
@@ -2331,11 +1907,7 @@
     {
       "name": "acl_category_set_denied_write_only",
       "now_ms": 304,
-      "argv": [
-        "SET",
-        "acl:cat:key",
-        "new"
-      ],
+      "argv": ["SET", "acl:cat:key", "new"],
       "expect": {
         "kind": "error",
         "value": "NOPERM User reader has no permissions to run the 'set' command"
@@ -2350,11 +1922,7 @@
     {
       "name": "acl_category_reauth_default2",
       "now_ms": 305,
-      "argv": [
-        "AUTH",
-        "default",
-        ""
-      ],
+      "argv": ["AUTH", "default", ""],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2382,11 +1950,7 @@
     {
       "name": "acl_deny_override_auth",
       "now_ms": 401,
-      "argv": [
-        "AUTH",
-        "nodanger",
-        "ndpass"
-      ],
+      "argv": ["AUTH", "nodanger", "ndpass"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2395,11 +1959,7 @@
     {
       "name": "acl_deny_override_set_allowed",
       "now_ms": 402,
-      "argv": [
-        "SET",
-        "acl:deny:k",
-        "v"
-      ],
+      "argv": ["SET", "acl:deny:k", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2408,10 +1968,7 @@
     {
       "name": "acl_deny_override_get_allowed",
       "now_ms": 403,
-      "argv": [
-        "GET",
-        "acl:deny:k"
-      ],
+      "argv": ["GET", "acl:deny:k"],
       "expect": {
         "kind": "bulk",
         "value": "v"
@@ -2420,9 +1977,7 @@
     {
       "name": "acl_deny_override_flushdb_denied",
       "now_ms": 404,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "error",
         "value": "NOPERM User nodanger has no permissions to run the 'flushdb' command"
@@ -2437,9 +1992,7 @@
     {
       "name": "acl_deny_override_flushall_denied",
       "now_ms": 405,
-      "argv": [
-        "FLUSHALL"
-      ],
+      "argv": ["FLUSHALL"],
       "expect": {
         "kind": "error",
         "value": "NOPERM User nodanger has no permissions to run the 'flushall' command"
@@ -2454,10 +2007,7 @@
     {
       "name": "acl_deny_override_del_allowed",
       "now_ms": 406,
-      "argv": [
-        "DEL",
-        "acl:deny:k"
-      ],
+      "argv": ["DEL", "acl:deny:k"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2466,11 +2016,7 @@
     {
       "name": "acl_deny_override_reauth_default3",
       "now_ms": 407,
-      "argv": [
-        "AUTH",
-        "default",
-        ""
-      ],
+      "argv": ["AUTH", "default", ""],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2479,13 +2025,7 @@
     {
       "name": "acl_dryrun_allowed_cmd",
       "now_ms": 500,
-      "argv": [
-        "ACL",
-        "DRYRUN",
-        "restricted",
-        "GET",
-        "k"
-      ],
+      "argv": ["ACL", "DRYRUN", "restricted", "GET", "k"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2494,13 +2034,7 @@
     {
       "name": "acl_dryrun_denied_cmd",
       "now_ms": 501,
-      "argv": [
-        "ACL",
-        "DRYRUN",
-        "restricted",
-        "DEL",
-        "k"
-      ],
+      "argv": ["ACL", "DRYRUN", "restricted", "DEL", "k"],
       "expect": {
         "kind": "bulk",
         "value": "User restricted has no permissions to run the 'del' command"
@@ -2509,13 +2043,7 @@
     {
       "name": "acl_dryrun_nonexistent_user",
       "now_ms": 502,
-      "argv": [
-        "ACL",
-        "DRYRUN",
-        "ghost",
-        "GET",
-        "k"
-      ],
+      "argv": ["ACL", "DRYRUN", "ghost", "GET", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR User 'ghost' not found"
@@ -2524,14 +2052,7 @@
     {
       "name": "acl_dryrun_category_deny",
       "now_ms": 503,
-      "argv": [
-        "ACL",
-        "DRYRUN",
-        "reader",
-        "SET",
-        "k",
-        "v"
-      ],
+      "argv": ["ACL", "DRYRUN", "reader", "SET", "k", "v"],
       "expect": {
         "kind": "bulk",
         "value": "User reader has no permissions to run the 'set' command"
@@ -2540,12 +2061,7 @@
     {
       "name": "acl_dryrun_explicit_deny_override",
       "now_ms": 504,
-      "argv": [
-        "ACL",
-        "DRYRUN",
-        "nodanger",
-        "FLUSHDB"
-      ],
+      "argv": ["ACL", "DRYRUN", "nodanger", "FLUSHDB"],
       "expect": {
         "kind": "bulk",
         "value": "User nodanger has no permissions to run the 'flushdb' command"
@@ -2554,14 +2070,7 @@
     {
       "name": "acl_reset_rule_setup",
       "now_ms": 600,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "resetme",
-        "on",
-        ">rpass2",
-        "+@all"
-      ],
+      "argv": ["ACL", "SETUSER", "resetme", "on", ">rpass2", "+@all"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2570,12 +2079,7 @@
     {
       "name": "acl_reset_rule_apply",
       "now_ms": 601,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "resetme",
-        "reset"
-      ],
+      "argv": ["ACL", "SETUSER", "resetme", "reset"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2584,13 +2088,7 @@
     {
       "name": "acl_reset_rule_dryrun_denied",
       "now_ms": 602,
-      "argv": [
-        "ACL",
-        "DRYRUN",
-        "resetme",
-        "GET",
-        "k"
-      ],
+      "argv": ["ACL", "DRYRUN", "resetme", "GET", "k"],
       "expect": {
         "kind": "bulk",
         "value": "User resetme has no permissions to run the 'get' command"
@@ -2599,16 +2097,7 @@
     {
       "name": "acl_allcommands_reset_granular",
       "now_ms": 700,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "granreset",
-        "on",
-        ">grpass",
-        "-@all",
-        "+get",
-        "allkeys"
-      ],
+      "argv": ["ACL", "SETUSER", "granreset", "on", ">grpass", "-@all", "+get", "allkeys"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2617,13 +2106,7 @@
     {
       "name": "acl_allcommands_before_dryrun_del_denied",
       "now_ms": 701,
-      "argv": [
-        "ACL",
-        "DRYRUN",
-        "granreset",
-        "DEL",
-        "k"
-      ],
+      "argv": ["ACL", "DRYRUN", "granreset", "DEL", "k"],
       "expect": {
         "kind": "bulk",
         "value": "User granreset has no permissions to run the 'del' command"
@@ -2632,12 +2115,7 @@
     {
       "name": "acl_allcommands_apply",
       "now_ms": 702,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "granreset",
-        "allcommands"
-      ],
+      "argv": ["ACL", "SETUSER", "granreset", "allcommands"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2646,13 +2124,7 @@
     {
       "name": "acl_allcommands_after_dryrun_del_allowed",
       "now_ms": 703,
-      "argv": [
-        "ACL",
-        "DRYRUN",
-        "granreset",
-        "DEL",
-        "k"
-      ],
+      "argv": ["ACL", "DRYRUN", "granreset", "DEL", "k"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2661,14 +2133,7 @@
     {
       "name": "acl_save_load_roundtrip_setuser",
       "now_ms": 800,
-      "argv": [
-        "ACL",
-        "SETUSER",
-        "persistme",
-        "on",
-        ">persistpass",
-        "+@all"
-      ],
+      "argv": ["ACL", "SETUSER", "persistme", "on", ">persistpass", "+@all"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2677,10 +2142,7 @@
     {
       "name": "acl_save_load_roundtrip_save",
       "now_ms": 801,
-      "argv": [
-        "ACL",
-        "SAVE"
-      ],
+      "argv": ["ACL", "SAVE"],
       "expect": {
         "kind": "error",
         "value": "ERR This Redis instance is not configured to use an ACL file. You may want to specify users via the ACL SETUSER command and then issue a CONFIG REWRITE (assuming you have a Redis configuration file set) in order to store users in the Redis configuration."
@@ -2689,11 +2151,7 @@
     {
       "name": "acl_save_load_roundtrip_deluser",
       "now_ms": 802,
-      "argv": [
-        "ACL",
-        "DELUSER",
-        "persistme"
-      ],
+      "argv": ["ACL", "DELUSER", "persistme"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2702,11 +2160,7 @@
     {
       "name": "acl_save_load_roundtrip_user_gone_before_load",
       "now_ms": 803,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "persistme"
-      ],
+      "argv": ["ACL", "GETUSER", "persistme"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2715,10 +2169,7 @@
     {
       "name": "acl_save_load_roundtrip_load",
       "now_ms": 804,
-      "argv": [
-        "ACL",
-        "LOAD"
-      ],
+      "argv": ["ACL", "LOAD"],
       "expect": {
         "kind": "error",
         "value": "ERR This Redis instance is not configured to use an ACL file. You may want to specify users via the ACL SETUSER command and then issue a CONFIG REWRITE (assuming you have a Redis configuration file set) in order to store users in the Redis configuration."
@@ -2727,11 +2178,7 @@
     {
       "name": "acl_save_load_roundtrip_user_restored",
       "now_ms": 805,
-      "argv": [
-        "ACL",
-        "GETUSER",
-        "persistme"
-      ],
+      "argv": ["ACL", "GETUSER", "persistme"],
       "expect": {
         "kind": "bulk",
         "value": null

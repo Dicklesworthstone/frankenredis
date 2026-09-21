@@ -4,11 +4,7 @@
     {
       "name": "eval_return_integer",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return 1",
-        "0"
-      ],
+      "argv": ["EVAL", "return 1", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -17,11 +13,7 @@
     {
       "name": "eval_return_string",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return 'hello'",
-        "0"
-      ],
+      "argv": ["EVAL", "return 'hello'", "0"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -30,11 +22,7 @@
     {
       "name": "eval_client_setname_rejected_from_script",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.call('CLIENT','SETNAME','lua-client')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.call('CLIENT','SETNAME','lua-client')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR This Redis command is not allowed from script script: 0b8ff5cbdb0f1df17a6ac8ec122d80436f8713cc, on @user_script:1."
@@ -43,11 +31,7 @@
     {
       "name": "eval_client_getname_rejected_from_script",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.call('CLIENT','GETNAME')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.call('CLIENT','GETNAME')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR This Redis command is not allowed from script script: 4e8de9ebb5324b557591f0abb672722ded422e4a, on @user_script:1."
@@ -56,11 +40,7 @@
     {
       "name": "eval_client_id_rejected_from_script",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.call('CLIENT','ID')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.call('CLIENT','ID')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR This Redis command is not allowed from script script: 14a340356663d6198502058227488df08c8f36d8, on @user_script:1."
@@ -69,12 +49,7 @@
     {
       "name": "eval_slowlog_threshold_zero",
       "now_ms": 1,
-      "argv": [
-        "CONFIG",
-        "SET",
-        "slowlog-log-slower-than",
-        "0"
-      ],
+      "argv": ["CONFIG", "SET", "slowlog-log-slower-than", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -83,10 +58,7 @@
     {
       "name": "eval_slowlog_reset_before_lua_check",
       "now_ms": 1,
-      "argv": [
-        "SLOWLOG",
-        "RESET"
-      ],
+      "argv": ["SLOWLOG", "RESET"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -95,11 +67,7 @@
     {
       "name": "eval_slowlog_seed_command",
       "now_ms": 1,
-      "argv": [
-        "SET",
-        "lua_slowlog_key",
-        "value"
-      ],
+      "argv": ["SET", "lua_slowlog_key", "value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -108,11 +76,7 @@
     {
       "name": "eval_slowlog_len_uses_store_backed_data",
       "now_ms": 1,
-      "argv": [
-        "EVAL",
-        "return redis.call('SLOWLOG','LEN')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.call('SLOWLOG','LEN')", "0"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -121,11 +85,7 @@
     {
       "name": "eval_return_nil",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return nil",
-        "0"
-      ],
+      "argv": ["EVAL", "return nil", "0"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -134,11 +94,7 @@
     {
       "name": "eval_return_true_as_integer_1",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return true",
-        "0"
-      ],
+      "argv": ["EVAL", "return true", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -147,11 +103,7 @@
     {
       "name": "eval_return_false_as_nil",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return false",
-        "0"
-      ],
+      "argv": ["EVAL", "return false", "0"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -160,11 +112,7 @@
     {
       "name": "eval_return_table_as_array",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return {1, 2, 3}",
-        "0"
-      ],
+      "argv": ["EVAL", "return {1, 2, 3}", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -186,11 +134,7 @@
     {
       "name": "eval_arithmetic",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return 2 + 3 * 4",
-        "0"
-      ],
+      "argv": ["EVAL", "return 2 + 3 * 4", "0"],
       "expect": {
         "kind": "integer",
         "value": 14
@@ -199,11 +143,7 @@
     {
       "name": "eval_string_concat",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return 'hello' .. ' ' .. 'world'",
-        "0"
-      ],
+      "argv": ["EVAL", "return 'hello' .. ' ' .. 'world'", "0"],
       "expect": {
         "kind": "bulk",
         "value": "hello world"
@@ -212,11 +152,7 @@
     {
       "name": "eval_local_variable",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local x = 42 return x",
-        "0"
-      ],
+      "argv": ["EVAL", "local x = 42 return x", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -225,11 +161,7 @@
     {
       "name": "eval_if_true_branch",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "if true then return 'yes' else return 'no' end",
-        "0"
-      ],
+      "argv": ["EVAL", "if true then return 'yes' else return 'no' end", "0"],
       "expect": {
         "kind": "bulk",
         "value": "yes"
@@ -238,11 +170,7 @@
     {
       "name": "eval_if_false_branch",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "if false then return 'yes' else return 'no' end",
-        "0"
-      ],
+      "argv": ["EVAL", "if false then return 'yes' else return 'no' end", "0"],
       "expect": {
         "kind": "bulk",
         "value": "no"
@@ -251,11 +179,7 @@
     {
       "name": "eval_numeric_for_loop",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local sum = 0 for i = 1, 5 do sum = sum + i end return sum",
-        "0"
-      ],
+      "argv": ["EVAL", "local sum = 0 for i = 1, 5 do sum = sum + i end return sum", "0"],
       "expect": {
         "kind": "integer",
         "value": 15
@@ -264,12 +188,7 @@
     {
       "name": "eval_keys_and_argv",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return KEYS[1]",
-        "1",
-        "mykey"
-      ],
+      "argv": ["EVAL", "return KEYS[1]", "1", "mykey"],
       "expect": {
         "kind": "bulk",
         "value": "mykey"
@@ -278,12 +197,7 @@
     {
       "name": "eval_argv_access",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return ARGV[1]",
-        "0",
-        "myarg"
-      ],
+      "argv": ["EVAL", "return ARGV[1]", "0", "myarg"],
       "expect": {
         "kind": "bulk",
         "value": "myarg"
@@ -292,13 +206,7 @@
     {
       "name": "eval_redis_call_set",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.call('SET', KEYS[1], ARGV[1])",
-        "1",
-        "skey",
-        "sval"
-      ],
+      "argv": ["EVAL", "return redis.call('SET', KEYS[1], ARGV[1])", "1", "skey", "sval"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -307,12 +215,7 @@
     {
       "name": "eval_redis_call_get",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.call('GET', KEYS[1])",
-        "1",
-        "skey"
-      ],
+      "argv": ["EVAL", "return redis.call('GET', KEYS[1])", "1", "skey"],
       "expect": {
         "kind": "bulk",
         "value": "sval"
@@ -335,11 +238,7 @@
     {
       "name": "eval_tonumber",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return tonumber('42')",
-        "0"
-      ],
+      "argv": ["EVAL", "return tonumber('42')", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -348,11 +247,7 @@
     {
       "name": "eval_tostring",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return tostring(42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return tostring(42)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "42"
@@ -361,11 +256,7 @@
     {
       "name": "eval_type_function",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return type(42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return type(42)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "number"
@@ -374,11 +265,7 @@
     {
       "name": "eval_string_len_operator",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return #'hello'",
-        "0"
-      ],
+      "argv": ["EVAL", "return #'hello'", "0"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -387,11 +274,7 @@
     {
       "name": "eval_table_len_operator",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {10, 20, 30} return #t",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {10, 20, 30} return #t", "0"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -400,11 +283,7 @@
     {
       "name": "eval_math_floor",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.floor(3.7)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.floor(3.7)", "0"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -413,11 +292,7 @@
     {
       "name": "eval_string_sub",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.sub('hello', 1, 3)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.sub('hello', 1, 3)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "hel"
@@ -426,11 +301,7 @@
     {
       "name": "eval_string_upper",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.upper('hello')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.upper('hello')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "HELLO"
@@ -452,10 +323,7 @@
     {
       "name": "eval_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return 1"
-      ],
+      "argv": ["EVAL", "return 1"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'eval' command"
@@ -464,11 +332,7 @@
     {
       "name": "eval_invalid_numkeys",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return 1",
-        "abc"
-      ],
+      "argv": ["EVAL", "return 1", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -477,11 +341,7 @@
     {
       "name": "script_load_and_exists",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "LOAD",
-        "return 1"
-      ],
+      "argv": ["SCRIPT", "LOAD", "return 1"],
       "expect": {
         "kind": "bulk",
         "value": "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"
@@ -490,11 +350,7 @@
     {
       "name": "script_load_repeat_same_hash",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "LOAD",
-        "return 1"
-      ],
+      "argv": ["SCRIPT", "LOAD", "return 1"],
       "expect": {
         "kind": "bulk",
         "value": "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"
@@ -503,11 +359,7 @@
     {
       "name": "script_load_newline_variant_hash",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "LOAD",
-        "return 1\n"
-      ],
+      "argv": ["SCRIPT", "LOAD", "return 1\n"],
       "expect": {
         "kind": "bulk",
         "value": "48df9b519ca145c867b895f740b37bd891e887af"
@@ -516,11 +368,7 @@
     {
       "name": "script_load_crlf_variant_hash",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "LOAD",
-        "return 1\r\n"
-      ],
+      "argv": ["SCRIPT", "LOAD", "return 1\r\n"],
       "expect": {
         "kind": "bulk",
         "value": "401a045800baceffe36d61556aacce1d0146ba27"
@@ -529,11 +377,7 @@
     {
       "name": "script_load_leading_space_variant_hash",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "LOAD",
-        " return 1"
-      ],
+      "argv": ["SCRIPT", "LOAD", " return 1"],
       "expect": {
         "kind": "bulk",
         "value": "375f62252042b7715db886c7d7fd682e04765f49"
@@ -542,11 +386,7 @@
     {
       "name": "script_load_trailing_space_variant_hash",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "LOAD",
-        "return 1 "
-      ],
+      "argv": ["SCRIPT", "LOAD", "return 1 "],
       "expect": {
         "kind": "bulk",
         "value": "90a2482bf05c35264ba010507ec8f88c2dd96f87"
@@ -593,11 +433,7 @@
     {
       "name": "script_exists_loaded",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "EXISTS",
-        "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"
-      ],
+      "argv": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"],
       "expect": {
         "kind": "array",
         "value": [
@@ -611,11 +447,7 @@
     {
       "name": "script_exists_not_loaded",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "EXISTS",
-        "0000000000000000000000000000000000000000"
-      ],
+      "argv": ["SCRIPT", "EXISTS", "0000000000000000000000000000000000000000"],
       "expect": {
         "kind": "array",
         "value": [
@@ -629,11 +461,7 @@
     {
       "name": "evalsha_run_cached",
       "now_ms": 0,
-      "argv": [
-        "EVALSHA",
-        "e0e1f9fabfc9d4800c877a703b823ac0578ff8db",
-        "0"
-      ],
+      "argv": ["EVALSHA", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -642,11 +470,7 @@
     {
       "name": "evalsha_noscript",
       "now_ms": 0,
-      "argv": [
-        "EVALSHA",
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "0"
-      ],
+      "argv": ["EVALSHA", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0"],
       "expect": {
         "kind": "error",
         "value": "NOSCRIPT No matching script. Please use EVAL."
@@ -655,10 +479,7 @@
     {
       "name": "script_flush_clears_cache",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "FLUSH"
-      ],
+      "argv": ["SCRIPT", "FLUSH"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -667,11 +488,7 @@
     {
       "name": "script_exists_after_flush",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "EXISTS",
-        "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"
-      ],
+      "argv": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"],
       "expect": {
         "kind": "array",
         "value": [
@@ -685,11 +502,7 @@
     {
       "name": "eval_while_loop",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local i = 0 while i < 5 do i = i + 1 end return i",
-        "0"
-      ],
+      "argv": ["EVAL", "local i = 0 while i < 5 do i = i + 1 end return i", "0"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -698,11 +511,7 @@
     {
       "name": "eval_repeat_until",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local i = 0 repeat i = i + 1 until i >= 3 return i",
-        "0"
-      ],
+      "argv": ["EVAL", "local i = 0 repeat i = i + 1 until i >= 3 return i", "0"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -711,11 +520,7 @@
     {
       "name": "eval_table_insert_and_return",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {} for i = 1, 3 do t[i] = i * 10 end return t",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {} for i = 1, 3 do t[i] = i * 10 end return t", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -737,11 +542,7 @@
     {
       "name": "eval_status_reply",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.status_reply('PONG')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.status_reply('PONG')", "0"],
       "expect": {
         "kind": "simple",
         "value": "PONG"
@@ -750,11 +551,7 @@
     {
       "name": "eval_error_reply",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.error_reply('custom error')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.error_reply('custom error')", "0"],
       "expect": {
         "kind": "error",
         "value": "custom error"
@@ -763,11 +560,7 @@
     {
       "name": "eval_error_reply_default_err_code",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.error_reply('err')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.error_reply('err')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR err"
@@ -776,11 +569,7 @@
     {
       "name": "eval_error_reply_no_dash_uses_first_word_as_code",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.error_reply('CUSTOM hi')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.error_reply('CUSTOM hi')", "0"],
       "expect": {
         "kind": "error",
         "value": "CUSTOM hi"
@@ -789,11 +578,7 @@
     {
       "name": "eval_error_reply_dash_uses_first_word_as_code",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.error_reply('-CUSTOM hi')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.error_reply('-CUSTOM hi')", "0"],
       "expect": {
         "kind": "error",
         "value": "CUSTOM hi"
@@ -802,11 +587,7 @@
     {
       "name": "eval_error_reply_dash_without_message_defaults_err_code",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.error_reply('-NOMSG')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.error_reply('-NOMSG')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR NOMSG"
@@ -815,10 +596,7 @@
     {
       "name": "function_flush_initial",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "FLUSH"
-      ],
+      "argv": ["FUNCTION", "FLUSH"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -827,10 +605,7 @@
     {
       "name": "function_list_empty",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "LIST"
-      ],
+      "argv": ["FUNCTION", "LIST"],
       "expect": {
         "kind": "array",
         "value": []
@@ -852,10 +627,7 @@
     {
       "name": "function_list_after_load",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "LIST"
-      ],
+      "argv": ["FUNCTION", "LIST"],
       "expect": {
         "kind": "array",
         "value": [
@@ -924,10 +696,7 @@
     {
       "name": "function_stats_after_load",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "STATS"
-      ],
+      "argv": ["FUNCTION", "STATS"],
       "expect": {
         "kind": "array",
         "value": [
@@ -979,11 +748,7 @@
     {
       "name": "function_delete_library",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "DELETE",
-        "mylib"
-      ],
+      "argv": ["FUNCTION", "DELETE", "mylib"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -992,10 +757,7 @@
     {
       "name": "function_list_after_delete",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "LIST"
-      ],
+      "argv": ["FUNCTION", "LIST"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1004,11 +766,7 @@
     {
       "name": "function_delete_nonexistent",
       "now_ms": 0,
-      "argv": [
-        "FUNCTION",
-        "DELETE",
-        "nolib"
-      ],
+      "argv": ["FUNCTION", "DELETE", "nolib"],
       "expect": {
         "kind": "error",
         "value": "ERR Library not found"
@@ -1017,11 +775,7 @@
     {
       "name": "eval_ro_basic",
       "now_ms": 0,
-      "argv": [
-        "EVAL_RO",
-        "return 42",
-        "0"
-      ],
+      "argv": ["EVAL_RO", "return 42", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -1030,11 +784,7 @@
     {
       "name": "eval_ro_string",
       "now_ms": 0,
-      "argv": [
-        "EVAL_RO",
-        "return 'readonly'",
-        "0"
-      ],
+      "argv": ["EVAL_RO", "return 'readonly'", "0"],
       "expect": {
         "kind": "bulk",
         "value": "readonly"
@@ -1043,11 +793,7 @@
     {
       "name": "evalsha_load_for_ro",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "LOAD",
-        "return 99"
-      ],
+      "argv": ["SCRIPT", "LOAD", "return 99"],
       "expect": {
         "kind": "bulk",
         "value": "a2eba4a6e7d6643bc4b14aa4f9e0eedd55dbae3d"
@@ -1056,11 +802,7 @@
     {
       "name": "evalsha_ro_cached",
       "now_ms": 0,
-      "argv": [
-        "EVALSHA_RO",
-        "a2eba4a6e7d6643bc4b14aa4f9e0eedd55dbae3d",
-        "0"
-      ],
+      "argv": ["EVALSHA_RO", "a2eba4a6e7d6643bc4b14aa4f9e0eedd55dbae3d", "0"],
       "expect": {
         "kind": "integer",
         "value": 99
@@ -1069,11 +811,7 @@
     {
       "name": "eval_negative_numkeys",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return 1",
-        "-1"
-      ],
+      "argv": ["EVAL", "return 1", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR Number of keys can't be negative"
@@ -1082,11 +820,7 @@
     {
       "name": "eval_numkeys_exceeds_args",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return 1",
-        "5"
-      ],
+      "argv": ["EVAL", "return 1", "5"],
       "expect": {
         "kind": "error",
         "value": "ERR Number of keys can't be greater than number of args"
@@ -1095,11 +829,7 @@
     {
       "name": "eval_comparison_less_than",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "if 3 < 5 then return 1 else return 0 end",
-        "0"
-      ],
+      "argv": ["EVAL", "if 3 < 5 then return 1 else return 0 end", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1108,11 +838,7 @@
     {
       "name": "eval_comparison_greater_equal",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "if 5 >= 5 then return 1 else return 0 end",
-        "0"
-      ],
+      "argv": ["EVAL", "if 5 >= 5 then return 1 else return 0 end", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1134,11 +860,7 @@
     {
       "name": "eval_function_definition",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local function double(n) return n * 2 end return double(21)",
-        "0"
-      ],
+      "argv": ["EVAL", "local function double(n) return n * 2 end return double(21)", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -1147,11 +869,7 @@
     {
       "name": "eval_nested_table",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return {1, {2, 3}}",
-        "0"
-      ],
+      "argv": ["EVAL", "return {1, {2, 3}}", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1178,11 +896,7 @@
     {
       "name": "eval_nested_table_assignment_writes_back",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = { a = { b = 1 } }\nt.a.b = 42\nreturn t.a.b",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = { a = { b = 1 } }\nt.a.b = 42\nreturn t.a.b", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -1191,11 +905,7 @@
     {
       "name": "eval_string_lower",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.lower('HELLO')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.lower('HELLO')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -1204,11 +914,7 @@
     {
       "name": "eval_string_rep",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.rep('ab', 3)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.rep('ab', 3)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "ababab"
@@ -1217,11 +923,7 @@
     {
       "name": "eval_string_reverse",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.reverse('hello')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.reverse('hello')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "olleh"
@@ -1230,11 +932,7 @@
     {
       "name": "eval_string_len",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.len('hello')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.len('hello')", "0"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -1243,11 +941,7 @@
     {
       "name": "eval_math_abs",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.abs(-42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.abs(-42)", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -1256,11 +950,7 @@
     {
       "name": "eval_math_ceil",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.ceil(3.2)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.ceil(3.2)", "0"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -1269,11 +959,7 @@
     {
       "name": "eval_math_max",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.max(1, 5, 3)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.max(1, 5, 3)", "0"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -1282,11 +968,7 @@
     {
       "name": "eval_math_min",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.min(1, 5, 3)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.min(1, 5, 3)", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1309,11 +991,7 @@
     {
       "name": "eval_redis_status_reply",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.status_reply('CUSTOM')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.status_reply('CUSTOM')", "0"],
       "expect": {
         "kind": "simple",
         "value": "CUSTOM"
@@ -1322,11 +1000,7 @@
     {
       "name": "eval_redis_error_reply",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.error_reply('my error')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.error_reply('my error')", "0"],
       "expect": {
         "kind": "error",
         "value": "my error"
@@ -1335,11 +1009,7 @@
     {
       "name": "eval_string_format_integer",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.format('%d items', 42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.format('%d items', 42)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "42 items"
@@ -1348,11 +1018,7 @@
     {
       "name": "eval_modulo",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return 17 % 5",
-        "0"
-      ],
+      "argv": ["EVAL", "return 17 % 5", "0"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1361,11 +1027,7 @@
     {
       "name": "eval_not_operator",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "if not false then return 1 else return 0 end",
-        "0"
-      ],
+      "argv": ["EVAL", "if not false then return 1 else return 0 end", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1374,11 +1036,7 @@
     {
       "name": "eval_and_operator",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return (true and 'yes') or 'no'",
-        "0"
-      ],
+      "argv": ["EVAL", "return (true and 'yes') or 'no'", "0"],
       "expect": {
         "kind": "bulk",
         "value": "yes"
@@ -1387,11 +1045,7 @@
     {
       "name": "eval_or_operator",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return (false or 'fallback')",
-        "0"
-      ],
+      "argv": ["EVAL", "return (false or 'fallback')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "fallback"
@@ -1400,14 +1054,7 @@
     {
       "name": "eval_multiple_keys_and_args",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return KEYS[1] .. ':' .. KEYS[2] .. ':' .. ARGV[1]",
-        "2",
-        "k1",
-        "k2",
-        "v1"
-      ],
+      "argv": ["EVAL", "return KEYS[1] .. ':' .. KEYS[2] .. ':' .. ARGV[1]", "2", "k1", "k2", "v1"],
       "expect": {
         "kind": "bulk",
         "value": "k1:k2:v1"
@@ -1416,11 +1063,7 @@
     {
       "name": "eval_empty_script",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "",
-        "0"
-      ],
+      "argv": ["EVAL", "", "0"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1429,10 +1072,7 @@
     {
       "name": "eval_ro_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "EVAL_RO",
-        "return 1"
-      ],
+      "argv": ["EVAL_RO", "return 1"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'eval_ro' command"
@@ -1441,9 +1081,7 @@
     {
       "name": "evalsha_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "EVALSHA"
-      ],
+      "argv": ["EVALSHA"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'evalsha' command"
@@ -1452,9 +1090,7 @@
     {
       "name": "evalsha_ro_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "EVALSHA_RO"
-      ],
+      "argv": ["EVALSHA_RO"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'evalsha_ro' command"
@@ -1478,11 +1114,7 @@
     {
       "name": "eval_string_concat_numbers",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return 10 .. 20",
-        "0"
-      ],
+      "argv": ["EVAL", "return 10 .. 20", "0"],
       "expect": {
         "kind": "bulk",
         "value": "1020"
@@ -1492,11 +1124,7 @@
       "name": "eval_pcall_catches_error",
       "now_ms": 100,
       "comment": "When pcall calls a C function (error) directly, the default level=1 resolves to the calling C frame which has no Lua source position — so error() emits the bare message with no 'user_script:1:' prefix. Probed against vendored Redis 7.2.4 (frankenredis-junab refresh).",
-      "argv": [
-        "EVAL",
-        "local ok, err = pcall(error, 'boom') return err",
-        "0"
-      ],
+      "argv": ["EVAL", "local ok, err = pcall(error, 'boom') return err", "0"],
       "expect": {
         "kind": "bulk",
         "value": "boom"
@@ -1505,11 +1133,7 @@
     {
       "name": "eval_cache_for_exists",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return 42",
-        "0"
-      ],
+      "argv": ["EVAL", "return 42", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -1541,11 +1165,7 @@
     {
       "name": "eval_nested_table_flat",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return {1, 'two', 3}",
-        "0"
-      ],
+      "argv": ["EVAL", "return {1, 'two', 3}", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1567,11 +1187,7 @@
     {
       "name": "eval_modulo_operator",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return 17 % 5",
-        "0"
-      ],
+      "argv": ["EVAL", "return 17 % 5", "0"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1580,11 +1196,7 @@
     {
       "name": "eval_string_find",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "local s, e = string.find('hello world', 'world') return s",
-        "0"
-      ],
+      "argv": ["EVAL", "local s, e = string.find('hello world', 'world') return s", "0"],
       "expect": {
         "kind": "integer",
         "value": 7
@@ -1593,11 +1205,7 @@
     {
       "name": "eval_string_byte",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return string.byte('A')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.byte('A')", "0"],
       "expect": {
         "kind": "integer",
         "value": 65
@@ -1606,11 +1214,7 @@
     {
       "name": "eval_string_char",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return string.char(72, 105)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.char(72, 105)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "Hi"
@@ -1619,11 +1223,7 @@
     {
       "name": "eval_table_concat",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return table.concat({'a','b','c'}, '-')",
-        "0"
-      ],
+      "argv": ["EVAL", "return table.concat({'a','b','c'}, '-')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "a-b-c"
@@ -1633,11 +1233,7 @@
       "name": "eval_table_concat_rejects_non_table_argument",
       "now_ms": 100,
       "comment": "Uncaught Lua errors get the 'user_script:1:' prefix from luaL_error/luaL_argerror. (frankenredis-junab refresh)",
-      "argv": [
-        "EVAL",
-        "return table.concat(42, '-')",
-        "0"
-      ],
+      "argv": ["EVAL", "return table.concat(42, '-')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #1 to 'concat' (table expected, got number) script: 414e1980611373ed68b7a9da71899208a1d90ffc, on @user_script:1."
@@ -1646,11 +1242,7 @@
     {
       "name": "eval_table_concat_rejects_non_numeric_start",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return table.concat({'a', 'b'}, ',', 'x')",
-        "0"
-      ],
+      "argv": ["EVAL", "return table.concat({'a', 'b'}, ',', 'x')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #3 to 'concat' (number expected, got string) script: 5de4a30753683595b9969964f40b39dbda6e67d6, on @user_script:1."
@@ -1659,11 +1251,7 @@
     {
       "name": "eval_table_concat_rejects_non_numeric_end",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return table.concat({'a', 'b'}, ',', 1, 'x')",
-        "0"
-      ],
+      "argv": ["EVAL", "return table.concat({'a', 'b'}, ',', 1, 'x')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #4 to 'concat' (number expected, got string) script: 8be0a210df5e2d4db781cbaac45ed2495f6ab3ac, on @user_script:1."
@@ -1672,11 +1260,7 @@
     {
       "name": "eval_select_function",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return select(2, 'a', 'b', 'c')",
-        "0"
-      ],
+      "argv": ["EVAL", "return select(2, 'a', 'b', 'c')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "b"
@@ -1685,11 +1269,7 @@
     {
       "name": "eval_select_negative_index",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return select(-1, 'a', 'b', 'c')",
-        "0"
-      ],
+      "argv": ["EVAL", "return select(-1, 'a', 'b', 'c')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "c"
@@ -1698,11 +1278,7 @@
     {
       "name": "eval_select_zero_index_errors",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return select(0, 'a', 'b', 'c')",
-        "0"
-      ],
+      "argv": ["EVAL", "return select(0, 'a', 'b', 'c')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #1 to 'select' (index out of range) script: 0484320ce867a23e621bb5c436db2841454ca75b, on @user_script:1."
@@ -1711,11 +1287,7 @@
     {
       "name": "eval_type_number",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return type(42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return type(42)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "number"
@@ -1724,11 +1296,7 @@
     {
       "name": "eval_type_string",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return type('hello')",
-        "0"
-      ],
+      "argv": ["EVAL", "return type('hello')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "string"
@@ -1737,11 +1305,7 @@
     {
       "name": "eval_type_table",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return type({})",
-        "0"
-      ],
+      "argv": ["EVAL", "return type({})", "0"],
       "expect": {
         "kind": "bulk",
         "value": "table"
@@ -1750,11 +1314,7 @@
     {
       "name": "eval_type_nil",
       "now_ms": 100,
-      "argv": [
-        "EVAL",
-        "return type(nil)",
-        "0"
-      ],
+      "argv": ["EVAL", "return type(nil)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "nil"
@@ -1776,9 +1336,7 @@
     {
       "name": "script_wrong_arity_no_subcommand",
       "now_ms": 100,
-      "argv": [
-        "SCRIPT"
-      ],
+      "argv": ["SCRIPT"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'script' command"
@@ -1787,11 +1345,7 @@
     {
       "name": "eval_table_sort_numbers",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {3, 1, 2}\ntable.sort(t)\nreturn t[1]",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {3, 1, 2}\ntable.sort(t)\nreturn t[1]", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1813,11 +1367,7 @@
     {
       "name": "eval_table_insert_append",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {10, 20}\ntable.insert(t, 30)\nreturn t[3]",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {10, 20}\ntable.insert(t, 30)\nreturn t[3]", "0"],
       "expect": {
         "kind": "integer",
         "value": 30
@@ -1839,11 +1389,7 @@
     {
       "name": "eval_table_insert_rejects_non_table_argument",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "table.insert(42, 'x')",
-        "0"
-      ],
+      "argv": ["EVAL", "table.insert(42, 'x')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #1 to 'insert' (table expected, got number) script: f63f37620c8e389bbb9417e340c1d45747ce6ddc, on @user_script:1."
@@ -1853,11 +1399,7 @@
       "name": "eval_table_insert_rejects_out_of_bounds_position",
       "now_ms": 0,
       "comment": "Redis's vendored Lua 5.1 ltablib.c::tinsert does NOT enforce the position-out-of-bounds luaL_argcheck — it silently no-ops on OOB positions and returns nil. fr matches this behavior. (frankenredis-junab refresh — fixture previously expected the upstream Lua 5.1.5 'position out of bounds' error which Redis's bundled copy skips.)",
-      "argv": [
-        "EVAL",
-        "local t = {1, 2}\ntable.insert(t, 4, 3)",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {1, 2}\ntable.insert(t, 4, 3)", "0"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1866,11 +1408,7 @@
     {
       "name": "eval_table_insert_rejects_non_numeric_position",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {1, 2}\ntable.insert(t, 'x', 3)",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {1, 2}\ntable.insert(t, 'x', 3)", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:2: bad argument #2 to 'insert' (number expected, got string) script: b71b73854945f5077dbdd612451df2fb07552230, on @user_script:2."
@@ -1879,11 +1417,7 @@
     {
       "name": "eval_table_remove_last",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {10, 20, 30}\nlocal v = table.remove(t)\nreturn v",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {10, 20, 30}\nlocal v = table.remove(t)\nreturn v", "0"],
       "expect": {
         "kind": "integer",
         "value": 30
@@ -1892,11 +1426,7 @@
     {
       "name": "eval_table_remove_rejects_non_table_argument",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return table.remove(42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return table.remove(42)", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #1 to 'remove' (table expected, got number) script: 8ae9ded7c617fcab18cb308ee4efcf5ceb46aea4, on @user_script:1."
@@ -1905,11 +1435,7 @@
     {
       "name": "eval_table_remove_rejects_non_numeric_position",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {1, 2}\nreturn table.remove(t, 'x')",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {1, 2}\nreturn table.remove(t, 'x')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:2: bad argument #2 to 'remove' (number expected, got string) script: ac450261d2f39b89d24700c1005f46df3ec72e32, on @user_script:2."
@@ -1918,11 +1444,7 @@
     {
       "name": "eval_table_remove_shrinks_table",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {10, 20, 30}\ntable.remove(t)\nreturn #t",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {10, 20, 30}\ntable.remove(t)\nreturn #t", "0"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1931,11 +1453,7 @@
     {
       "name": "eval_table_remove_at_position",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {1, 2, 3}\ntable.remove(t, 1)\nreturn t[1] * 10 + t[2]",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {1, 2, 3}\ntable.remove(t, 1)\nreturn t[1] * 10 + t[2]", "0"],
       "expect": {
         "kind": "integer",
         "value": 23
@@ -1997,11 +1515,7 @@
     {
       "name": "eval_string_match_literal",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.match('hello world', 'world')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.match('hello world', 'world')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "world"
@@ -2010,11 +1524,7 @@
     {
       "name": "eval_string_match_no_match",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.match('hello', 'xyz')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.match('hello', 'xyz')", "0"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2023,11 +1533,7 @@
     {
       "name": "eval_string_match_pattern_digit",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.match('abc123def', '%d+')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.match('abc123def', '%d+')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "123"
@@ -2036,11 +1542,7 @@
     {
       "name": "eval_string_match_capture",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.match('key:value', '(%a+):(%a+)')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.match('key:value', '(%a+):(%a+)')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "key"
@@ -2049,11 +1551,7 @@
     {
       "name": "eval_string_match_alpha_class",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.match('123abc456', '%a+')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.match('123abc456', '%a+')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "abc"
@@ -2062,11 +1560,7 @@
     {
       "name": "eval_string_find_pattern",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local s, e = string.find('hello123', '%d+')\nreturn s",
-        "0"
-      ],
+      "argv": ["EVAL", "local s, e = string.find('hello123', '%d+')\nreturn s", "0"],
       "expect": {
         "kind": "integer",
         "value": 6
@@ -2075,11 +1569,7 @@
     {
       "name": "eval_string_find_pattern_end",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local s, e = string.find('hello123', '%d+')\nreturn e",
-        "0"
-      ],
+      "argv": ["EVAL", "local s, e = string.find('hello123', '%d+')\nreturn e", "0"],
       "expect": {
         "kind": "integer",
         "value": 8
@@ -2088,11 +1578,7 @@
     {
       "name": "eval_string_find_anchored",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local s = string.find('hello', '^hel')\nreturn s",
-        "0"
-      ],
+      "argv": ["EVAL", "local s = string.find('hello', '^hel')\nreturn s", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2114,11 +1600,7 @@
     {
       "name": "eval_string_gsub_literal",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.gsub('hello world', 'world', 'lua')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.gsub('hello world', 'world', 'lua')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "hello lua"
@@ -2127,11 +1609,7 @@
     {
       "name": "eval_string_gsub_pattern",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.gsub('abc 123 def 456', '%d+', 'N')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.gsub('abc 123 def 456', '%d+', 'N')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "abc N def N"
@@ -2140,11 +1618,7 @@
     {
       "name": "eval_string_gsub_with_limit",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.gsub('aaa', 'a', 'b', 2)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.gsub('aaa', 'a', 'b', 2)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "bba"
@@ -2153,11 +1627,7 @@
     {
       "name": "eval_string_gsub_capture_ref",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.gsub('hello', '(h)', '%1%1')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.gsub('hello', '(h)', '%1%1')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "hhello"
@@ -2166,11 +1636,7 @@
     {
       "name": "eval_string_match_set",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.match('abc123', '[a-z]+')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.match('abc123', '[a-z]+')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "abc"
@@ -2179,11 +1645,7 @@
     {
       "name": "eval_string_match_negated_set",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.match('abc123', '[^a-z]+')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.match('abc123', '[^a-z]+')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "123"
@@ -2192,11 +1654,7 @@
     {
       "name": "eval_string_match_dot_star",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.match('hello', '.+')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.match('hello', '.+')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -2205,11 +1663,7 @@
     {
       "name": "eval_string_match_lazy",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.match('<b>text</b>', '<(.-)>')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.match('<b>text</b>', '<(.-)>')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "b"
@@ -2218,11 +1672,7 @@
     {
       "name": "eval_string_match_optional",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.match('colour', 'colou?r')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.match('colour', 'colou?r')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "colour"
@@ -2231,11 +1681,7 @@
     {
       "name": "eval_string_match_optional_absent",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.match('color', 'colou?r')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.match('color', 'colou?r')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "color"
@@ -2244,11 +1690,7 @@
     {
       "name": "eval_string_gsub_whitespace",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.gsub('hello  world', '%s+', '-')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.gsub('hello  world', '%s+', '-')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "hello-world"
@@ -2257,11 +1699,7 @@
     {
       "name": "eval_string_match_end_anchor",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.match('hello.lua', '%.lua$')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.match('hello.lua', '%.lua$')", "0"],
       "expect": {
         "kind": "bulk",
         "value": ".lua"
@@ -2296,11 +1734,7 @@
     {
       "name": "eval_rawset_sets_value",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {}\nrawset(t, 'x', 42)\nreturn t.x",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {}\nrawset(t, 'x', 42)\nreturn t.x", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -2309,11 +1743,7 @@
     {
       "name": "eval_rawget_rejects_non_table_argument",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return rawget(42, 'x')",
-        "0"
-      ],
+      "argv": ["EVAL", "return rawget(42, 'x')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #1 to 'rawget' (table expected, got number) script: 40396758d168e0bc50cceafcb5325cc40544a4a8, on @user_script:1."
@@ -2322,11 +1752,7 @@
     {
       "name": "eval_rawset_rejects_non_table_argument",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return rawset(42, 'x', 1)",
-        "0"
-      ],
+      "argv": ["EVAL", "return rawset(42, 'x', 1)", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #1 to 'rawset' (table expected, got number) script: 30e7df52429b46510d184a153a071e6d5f4eed64, on @user_script:1."
@@ -2361,11 +1787,7 @@
     {
       "name": "eval_string_gsub_escape_percent",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.gsub('hello', 'hello', '100%%')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.gsub('hello', 'hello', '100%%')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "100%"
@@ -2374,11 +1796,7 @@
     {
       "name": "eval_string_find_with_capture",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local s, e, cap = string.find('hello123', '(%d+)')\nreturn cap",
-        "0"
-      ],
+      "argv": ["EVAL", "local s, e, cap = string.find('hello123', '(%d+)')\nreturn cap", "0"],
       "expect": {
         "kind": "bulk",
         "value": "123"
@@ -2387,11 +1805,7 @@
     {
       "name": "eval_string_match_multi_capture_first",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local a, b = string.match('12-34', '(%d+)-(%d+)')\nreturn a",
-        "0"
-      ],
+      "argv": ["EVAL", "local a, b = string.match('12-34', '(%d+)-(%d+)')\nreturn a", "0"],
       "expect": {
         "kind": "bulk",
         "value": "12"
@@ -2400,11 +1814,7 @@
     {
       "name": "eval_string_gsub_returns_count",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local s, n = string.gsub('aaa', 'a', 'b')\nreturn n",
-        "0"
-      ],
+      "argv": ["EVAL", "local s, n = string.gsub('aaa', 'a', 'b')\nreturn n", "0"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -2426,11 +1836,7 @@
     {
       "name": "eval_string_format_width_string",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.format('%10s', 'hello')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.format('%10s', 'hello')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "     hello"
@@ -2439,11 +1845,7 @@
     {
       "name": "eval_string_format_left_align",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.format('%-10s', 'hello')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.format('%-10s', 'hello')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "hello     "
@@ -2452,11 +1854,7 @@
     {
       "name": "eval_string_format_zero_pad",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.format('%05d', 42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.format('%05d', 42)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "00042"
@@ -2465,11 +1863,7 @@
     {
       "name": "eval_string_format_precision_float",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.format('%.2f', 3.14159)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.format('%.2f', 3.14159)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "3.14"
@@ -2478,11 +1872,7 @@
     {
       "name": "eval_string_format_precision_string",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.format('%.3s', 'hello')",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.format('%.3s', 'hello')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "hel"
@@ -2491,11 +1881,7 @@
     {
       "name": "eval_string_format_hex",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.format('%x', 255)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.format('%x', 255)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "ff"
@@ -2504,11 +1890,7 @@
     {
       "name": "eval_string_format_hex_upper",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.format('%X', 255)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.format('%X', 255)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "FF"
@@ -2517,11 +1899,7 @@
     {
       "name": "eval_string_format_plus_sign",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.format('%+d', 42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.format('%+d', 42)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "+42"
@@ -2530,11 +1908,7 @@
     {
       "name": "eval_string_format_multiple_args",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.format('%s=%d', 'age', 30)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.format('%s=%d', 'age', 30)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "age=30"
@@ -2543,11 +1917,7 @@
     {
       "name": "eval_string_format_width_int",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.format('%8d', 42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.format('%8d', 42)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "      42"
@@ -2583,11 +1953,7 @@
     {
       "name": "eval_math_pi",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.floor(math.pi * 100)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.floor(math.pi * 100)", "0"],
       "expect": {
         "kind": "integer",
         "value": 314
@@ -2596,11 +1962,7 @@
     {
       "name": "eval_math_sin_zero",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.floor(math.sin(0) * 1000)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.floor(math.sin(0) * 1000)", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2609,11 +1971,7 @@
     {
       "name": "eval_math_cos_zero",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.floor(math.cos(0) * 1000)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.floor(math.cos(0) * 1000)", "0"],
       "expect": {
         "kind": "integer",
         "value": 1000
@@ -2622,11 +1980,7 @@
     {
       "name": "eval_math_abs_negative",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.abs(-42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.abs(-42)", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -2635,11 +1989,7 @@
     {
       "name": "eval_math_max",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.max(3, 7, 2, 9, 1)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.max(3, 7, 2, 9, 1)", "0"],
       "expect": {
         "kind": "integer",
         "value": 9
@@ -2648,11 +1998,7 @@
     {
       "name": "eval_math_min",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.min(3, 7, 2, 9, 1)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.min(3, 7, 2, 9, 1)", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2661,11 +2007,7 @@
     {
       "name": "eval_math_sqrt",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.sqrt(144)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.sqrt(144)", "0"],
       "expect": {
         "kind": "integer",
         "value": 12
@@ -2674,11 +2016,7 @@
     {
       "name": "eval_math_pow",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.pow(2, 10)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.pow(2, 10)", "0"],
       "expect": {
         "kind": "integer",
         "value": 1024
@@ -2687,11 +2025,7 @@
     {
       "name": "eval_math_log10_100",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.floor(math.log10(100))",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.floor(math.log10(100))", "0"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -2700,11 +2034,7 @@
     {
       "name": "eval_math_log10_1000",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.floor(math.log10(1000))",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.floor(math.log10(1000))", "0"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -2713,11 +2043,7 @@
     {
       "name": "eval_math_modf_positive",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local i, f = math.modf(3.75)\nreturn i",
-        "0"
-      ],
+      "argv": ["EVAL", "local i, f = math.modf(3.75)\nreturn i", "0"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -2726,11 +2052,7 @@
     {
       "name": "eval_math_modf_fractional",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local i, f = math.modf(3.75)\nreturn math.floor(f * 100)",
-        "0"
-      ],
+      "argv": ["EVAL", "local i, f = math.modf(3.75)\nreturn math.floor(f * 100)", "0"],
       "expect": {
         "kind": "integer",
         "value": 75
@@ -2739,11 +2061,7 @@
     {
       "name": "eval_math_modf_negative",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local i, f = math.modf(-2.5)\nreturn i",
-        "0"
-      ],
+      "argv": ["EVAL", "local i, f = math.modf(-2.5)\nreturn i", "0"],
       "expect": {
         "kind": "integer",
         "value": -2
@@ -2752,11 +2070,7 @@
     {
       "name": "eval_math_modf_whole",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local i, f = math.modf(7.0)\nreturn i",
-        "0"
-      ],
+      "argv": ["EVAL", "local i, f = math.modf(7.0)\nreturn i", "0"],
       "expect": {
         "kind": "integer",
         "value": 7
@@ -2765,11 +2079,7 @@
     {
       "name": "eval_math_frexp_basic",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local m, e = math.frexp(8)\nreturn e",
-        "0"
-      ],
+      "argv": ["EVAL", "local m, e = math.frexp(8)\nreturn e", "0"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -2778,11 +2088,7 @@
     {
       "name": "eval_math_frexp_mantissa",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local m, e = math.frexp(8)\nreturn math.floor(m * 1000)",
-        "0"
-      ],
+      "argv": ["EVAL", "local m, e = math.frexp(8)\nreturn math.floor(m * 1000)", "0"],
       "expect": {
         "kind": "integer",
         "value": 500
@@ -2791,11 +2097,7 @@
     {
       "name": "eval_math_frexp_zero",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local m, e = math.frexp(0)\nreturn m + e",
-        "0"
-      ],
+      "argv": ["EVAL", "local m, e = math.frexp(0)\nreturn m + e", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2804,11 +2106,7 @@
     {
       "name": "eval_math_ldexp_basic",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.ldexp(0.5, 4)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.ldexp(0.5, 4)", "0"],
       "expect": {
         "kind": "integer",
         "value": 8
@@ -2817,11 +2115,7 @@
     {
       "name": "eval_math_frexp_ldexp_roundtrip",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local m, e = math.frexp(42)\nreturn math.ldexp(m, e)",
-        "0"
-      ],
+      "argv": ["EVAL", "local m, e = math.frexp(42)\nreturn math.ldexp(m, e)", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -2831,11 +2125,7 @@
       "name": "eval_os_clock_returns_number",
       "now_ms": 0,
       "comment": "Redis sandboxes the Lua os stdlib — only os.time and os.clock-like helpers are exposed selectively. Vendored Redis 7.2.4 does NOT expose 'os' as a global, so any access errors with 'nonexistent global'. fr matches this. (frankenredis-junab refresh)",
-      "argv": [
-        "EVAL",
-        "return type(os.clock())",
-        "0"
-      ],
+      "argv": ["EVAL", "return type(os.clock())", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: Script attempted to access nonexistent global variable 'os' script: 9cb747080dced7677254b1b2a90673ffa0fd9ead, on @user_script:1."
@@ -2845,11 +2135,7 @@
       "name": "eval_os_clock_non_negative",
       "now_ms": 0,
       "comment": "See eval_os_clock_returns_number — os is sandboxed.",
-      "argv": [
-        "EVAL",
-        "if os.clock() >= 0 then return 1 else return 0 end",
-        "0"
-      ],
+      "argv": ["EVAL", "if os.clock() >= 0 then return 1 else return 0 end", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: Script attempted to access nonexistent global variable 'os' script: ad80871ad80acc57a333c9c4e07870db2114bf4a, on @user_script:1."
@@ -2858,11 +2144,7 @@
     {
       "name": "eval_redis_replicate_commands",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "redis.replicate_commands()\nreturn 'ok'",
-        "0"
-      ],
+      "argv": ["EVAL", "redis.replicate_commands()\nreturn 'ok'", "0"],
       "expect": {
         "kind": "bulk",
         "value": "ok"
@@ -2910,11 +2192,7 @@
     {
       "name": "eval_redis_breakpoint_no_error",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "redis.breakpoint()\nreturn 'ok'",
-        "0"
-      ],
+      "argv": ["EVAL", "redis.breakpoint()\nreturn 'ok'", "0"],
       "expect": {
         "kind": "bulk",
         "value": "ok"
@@ -2923,11 +2201,7 @@
     {
       "name": "eval_redis_debug_no_error",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "redis.debug('test message')\nreturn 'ok'",
-        "0"
-      ],
+      "argv": ["EVAL", "redis.debug('test message')\nreturn 'ok'", "0"],
       "expect": {
         "kind": "bulk",
         "value": "ok"
@@ -2936,11 +2210,7 @@
     {
       "name": "eval_math_log10_1",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.floor(math.log10(1))",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.floor(math.log10(1))", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2949,11 +2219,7 @@
     {
       "name": "eval_math_fmod_basic",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.fmod(10, 3)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.fmod(10, 3)", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2962,11 +2228,7 @@
     {
       "name": "eval_math_exp_zero",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.exp(0)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.exp(0)", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2975,11 +2237,7 @@
     {
       "name": "eval_math_log_e",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.floor(math.log(math.exp(1)) * 1000)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.floor(math.log(math.exp(1)) * 1000)", "0"],
       "expect": {
         "kind": "integer",
         "value": 1000
@@ -2988,11 +2246,7 @@
     {
       "name": "eval_table_getn",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return table.getn({10, 20, 30})",
-        "0"
-      ],
+      "argv": ["EVAL", "return table.getn({10, 20, 30})", "0"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -3001,11 +2255,7 @@
     {
       "name": "eval_table_maxn",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {}\nt[1] = 'a'\nt[5] = 'b'\nreturn table.maxn(t)",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {}\nt[1] = 'a'\nt[5] = 'b'\nreturn table.maxn(t)", "0"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -3014,11 +2264,7 @@
     {
       "name": "eval_math_huge",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "if math.huge > 999999999 then return 1 else return 0 end",
-        "0"
-      ],
+      "argv": ["EVAL", "if math.huge > 999999999 then return 1 else return 0 end", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -3027,11 +2273,7 @@
     {
       "name": "eval_cjson_encode_table",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return cjson.encode({1, 2, 3})",
-        "0"
-      ],
+      "argv": ["EVAL", "return cjson.encode({1, 2, 3})", "0"],
       "expect": {
         "kind": "bulk",
         "value": "[1,2,3]"
@@ -3040,11 +2282,7 @@
     {
       "name": "eval_cjson_decode_array",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = cjson.decode('[10,20,30]')\nreturn t[2]",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = cjson.decode('[10,20,30]')\nreturn t[2]", "0"],
       "expect": {
         "kind": "integer",
         "value": 20
@@ -3053,11 +2291,7 @@
     {
       "name": "eval_redis_sha1hex",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.sha1hex('hello')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.sha1hex('hello')", "0"],
       "expect": {
         "kind": "bulk",
         "value": "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
@@ -3066,11 +2300,7 @@
     {
       "name": "eval_rawget_existing",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {x = 42}\nreturn rawget(t, 'x')",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {x = 42}\nreturn rawget(t, 'x')", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -3080,11 +2310,7 @@
       "name": "eval_rawlen_table",
       "now_ms": 0,
       "comment": "Lua 5.2 introduced rawlen as a global builtin; Lua 5.1 (which Redis 7.2.4 ships) has no rawlen — use the # operator or table.maxn instead. fr matches vendored: rawlen is absent and accessing it errors. (frankenredis-junab refresh)",
-      "argv": [
-        "EVAL",
-        "return rawlen({10, 20, 30})",
-        "0"
-      ],
+      "argv": ["EVAL", "return rawlen({10, 20, 30})", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: Script attempted to access nonexistent global variable 'rawlen' script: 9c261073df64e1c1b0316ea515e3ee6361c6f32f, on @user_script:1."
@@ -3119,11 +2345,7 @@
     {
       "name": "eval_next_rejects_non_table_argument",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return next(42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return next(42)", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #1 to 'next' (table expected, got number) script: 249bb8e2e724e06c6bf1c329587ee3770cf15155, on @user_script:1."
@@ -3132,11 +2354,7 @@
     {
       "name": "eval_next_rejects_invalid_key",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {x = 1}\nreturn next(t, 'missing')",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {x = 1}\nreturn next(t, 'missing')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid key to 'next' script: 2de83d1cc48d6b4206fa5e10f6de650aabb44ac5, on @user_script:2."
@@ -3145,11 +2363,7 @@
     {
       "name": "eval_pairs_rejects_non_table_argument",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return pairs(42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return pairs(42)", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #1 to 'pairs' (table expected, got number) script: 080b001990b6f45d24083df12db11bb3c5bada39, on @user_script:1."
@@ -3158,11 +2372,7 @@
     {
       "name": "eval_ipairs_rejects_non_table_argument",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return ipairs(42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return ipairs(42)", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #1 to 'ipairs' (table expected, got number) script: 246849f8c1fe52e52ec68609b3f564718a0e155f, on @user_script:1."
@@ -3171,11 +2381,7 @@
     {
       "name": "eval_unpack_basic",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local a, b, c = unpack({10, 20, 30})\nreturn a + b + c",
-        "0"
-      ],
+      "argv": ["EVAL", "local a, b, c = unpack({10, 20, 30})\nreturn a + b + c", "0"],
       "expect": {
         "kind": "integer",
         "value": 60
@@ -3184,11 +2390,7 @@
     {
       "name": "eval_unpack_rejects_non_table_argument",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return unpack(42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return unpack(42)", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #1 to 'unpack' (table expected, got number) script: 2cb1f123953bf9391e8c808214cb3c4bdeaebd1d, on @user_script:1."
@@ -3197,11 +2399,7 @@
     {
       "name": "eval_unpack_rejects_non_numeric_start",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return unpack({10, 20}, 'x')",
-        "0"
-      ],
+      "argv": ["EVAL", "return unpack({10, 20}, 'x')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #2 to 'unpack' (number expected, got string) script: a1476faf81976e0f3252f015262bf1f0a948d8e6, on @user_script:1."
@@ -3210,11 +2408,7 @@
     {
       "name": "eval_unpack_rejects_non_numeric_end",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return unpack({10, 20}, 1, 'x')",
-        "0"
-      ],
+      "argv": ["EVAL", "return unpack({10, 20}, 1, 'x')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR user_script:1: bad argument #3 to 'unpack' (number expected, got string) script: 93096f5125abde5ef21b97a90c28c86a4f34e34e, on @user_script:1."
@@ -3223,11 +2417,7 @@
     {
       "name": "eval_assert_success",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return assert(42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return assert(42)", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -3236,11 +2426,7 @@
     {
       "name": "eval_math_tan_zero",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.floor(math.tan(0) * 1000)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.floor(math.tan(0) * 1000)", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3249,11 +2435,7 @@
     {
       "name": "eval_math_atan2_basic",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.floor(math.atan2(1, 1) * 1000)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.floor(math.atan2(1, 1) * 1000)", "0"],
       "expect": {
         "kind": "integer",
         "value": 785
@@ -3262,11 +2444,7 @@
     {
       "name": "eval_ro_return_number",
       "now_ms": 0,
-      "argv": [
-        "EVAL_RO",
-        "return 42",
-        "0"
-      ],
+      "argv": ["EVAL_RO", "return 42", "0"],
       "expect": {
         "kind": "integer",
         "value": 42
@@ -3275,11 +2453,7 @@
     {
       "name": "eval_ro_return_string",
       "now_ms": 0,
-      "argv": [
-        "EVAL_RO",
-        "return 'hello'",
-        "0"
-      ],
+      "argv": ["EVAL_RO", "return 'hello'", "0"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -3288,11 +2462,7 @@
     {
       "name": "eval_ro_return_table",
       "now_ms": 0,
-      "argv": [
-        "EVAL_RO",
-        "return {1,2,3}",
-        "0"
-      ],
+      "argv": ["EVAL_RO", "return {1,2,3}", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3314,13 +2484,7 @@
     {
       "name": "eval_ro_with_keys_and_argv",
       "now_ms": 0,
-      "argv": [
-        "EVAL_RO",
-        "return {KEYS[1], ARGV[1]}",
-        "1",
-        "mykey",
-        "myval"
-      ],
+      "argv": ["EVAL_RO", "return {KEYS[1], ARGV[1]}", "1", "mykey", "myval"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3351,9 +2515,7 @@
     {
       "name": "eval_ro_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "EVAL_RO"
-      ],
+      "argv": ["EVAL_RO"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'eval_ro' command"
@@ -3362,11 +2524,7 @@
     {
       "name": "evalsha_ro_setup_load",
       "now_ms": 0,
-      "argv": [
-        "SCRIPT",
-        "LOAD",
-        "return 99"
-      ],
+      "argv": ["SCRIPT", "LOAD", "return 99"],
       "expect": {
         "kind": "bulk",
         "value": "a2eba4a6e7d6643bc4b14aa4f9e0eedd55dbae3d"
@@ -3375,11 +2533,7 @@
     {
       "name": "evalsha_ro_execute",
       "now_ms": 0,
-      "argv": [
-        "EVALSHA_RO",
-        "a2eba4a6e7d6643bc4b14aa4f9e0eedd55dbae3d",
-        "0"
-      ],
+      "argv": ["EVALSHA_RO", "a2eba4a6e7d6643bc4b14aa4f9e0eedd55dbae3d", "0"],
       "expect": {
         "kind": "integer",
         "value": 99
@@ -3388,11 +2542,7 @@
     {
       "name": "evalsha_ro_noscript",
       "now_ms": 0,
-      "argv": [
-        "EVALSHA_RO",
-        "0000000000000000000000000000000000000000",
-        "0"
-      ],
+      "argv": ["EVALSHA_RO", "0000000000000000000000000000000000000000", "0"],
       "expect": {
         "kind": "error",
         "value": "NOSCRIPT No matching script. Please use EVAL."
@@ -3401,9 +2551,7 @@
     {
       "name": "evalsha_ro_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "EVALSHA_RO"
-      ],
+      "argv": ["EVALSHA_RO"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'evalsha_ro' command"
@@ -3425,11 +2573,7 @@
     {
       "name": "evalsha_ro_write_command_rejected",
       "now_ms": 0,
-      "argv": [
-        "EVALSHA_RO",
-        "33fc5847ff9db521f6e934c83a7212f6d14de6be",
-        "0"
-      ],
+      "argv": ["EVALSHA_RO", "33fc5847ff9db521f6e934c83a7212f6d14de6be", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -3438,11 +2582,7 @@
     {
       "name": "eval_closure_captures_upvalue",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local x = 10 local function f() return x end x = 20 return f()",
-        "0"
-      ],
+      "argv": ["EVAL", "local x = 10 local function f() return x end x = 20 return f()", "0"],
       "expect": {
         "kind": "integer",
         "value": 20
@@ -3542,11 +2682,7 @@
     {
       "name": "eval_for_loop_with_step",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local sum = 0 for i = 0, 10, 2 do sum = sum + i end return sum",
-        "0"
-      ],
+      "argv": ["EVAL", "local sum = 0 for i = 0, 10, 2 do sum = sum + i end return sum", "0"],
       "expect": {
         "kind": "integer",
         "value": 30
@@ -3555,11 +2691,7 @@
     {
       "name": "eval_for_loop_negative_step",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local sum = 0 for i = 5, 1, -1 do sum = sum + i end return sum",
-        "0"
-      ],
+      "argv": ["EVAL", "local sum = 0 for i = 5, 1, -1 do sum = sum + i end return sum", "0"],
       "expect": {
         "kind": "integer",
         "value": 15
@@ -3607,11 +2739,7 @@
     {
       "name": "eval_table_sort_basic",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {3, 1, 4, 1, 5, 9} table.sort(t) return t[1]",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {3, 1, 4, 1, 5, 9} table.sort(t) return t[1]", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -3633,11 +2761,7 @@
     {
       "name": "eval_multiple_return_values_first",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return 1, 2, 3",
-        "0"
-      ],
+      "argv": ["EVAL", "return 1, 2, 3", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -3688,11 +2812,7 @@
     {
       "name": "eval_string_format_basic",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return string.format('hello %s number %d', 'world', 42)",
-        "0"
-      ],
+      "argv": ["EVAL", "return string.format('hello %s number %d', 'world', 42)", "0"],
       "expect": {
         "kind": "bulk",
         "value": "hello world number 42"
@@ -3701,11 +2821,7 @@
     {
       "name": "eval_math_functions",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return math.floor(3.7)",
-        "0"
-      ],
+      "argv": ["EVAL", "return math.floor(3.7)", "0"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -3714,11 +2830,7 @@
     {
       "name": "eval_table_maxn",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local t = {} t[1] = 'a' t[5] = 'b' return table.maxn(t)",
-        "0"
-      ],
+      "argv": ["EVAL", "local t = {} t[1] = 'a' t[5] = 'b' return table.maxn(t)", "0"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -3741,11 +2853,7 @@
     {
       "name": "eval_redis_call_config_get_blocked_by_noscript",
       "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "return redis.call('CONFIG', 'GET', 'maxmemory-policy')",
-        "0"
-      ],
+      "argv": ["EVAL", "return redis.call('CONFIG', 'GET', 'maxmemory-policy')", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR This Redis command is not allowed from script script: 9c607d893a52610b325e988f6cef2674df6ed59e, on @user_script:1."

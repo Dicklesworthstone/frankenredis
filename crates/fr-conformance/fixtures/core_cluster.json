@@ -4,10 +4,7 @@
     {
       "name": "cluster_info",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "INFO"
-      ],
+      "argv": ["CLUSTER", "INFO"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -16,10 +13,7 @@
     {
       "name": "cluster_myid",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "MYID"
-      ],
+      "argv": ["CLUSTER", "MYID"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -28,10 +22,7 @@
     {
       "name": "cluster_slots_empty",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "SLOTS"
-      ],
+      "argv": ["CLUSTER", "SLOTS"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -40,10 +31,7 @@
     {
       "name": "cluster_shards_empty",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "SHARDS"
-      ],
+      "argv": ["CLUSTER", "SHARDS"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -52,10 +40,7 @@
     {
       "name": "cluster_nodes_empty",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "NODES"
-      ],
+      "argv": ["CLUSTER", "NODES"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -64,10 +49,7 @@
     {
       "name": "cluster_reset",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "RESET"
-      ],
+      "argv": ["CLUSTER", "RESET"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -76,11 +58,7 @@
     {
       "name": "cluster_keyslot_foo",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        "foo"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", "foo"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -89,11 +67,7 @@
     {
       "name": "cluster_keyslot_bar",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        "bar"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", "bar"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -102,11 +76,7 @@
     {
       "name": "cluster_keyslot_hello",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        "hello"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", "hello"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -115,11 +85,7 @@
     {
       "name": "cluster_keyslot_hash_tag",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        "{user}.following"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", "{user}.following"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -128,11 +94,7 @@
     {
       "name": "cluster_keyslot_hash_tag_same_as_inner",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        "user"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", "user"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -141,11 +103,7 @@
     {
       "name": "cluster_keyslot_empty_hash_tag_uses_full_key",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        "{}.foo"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", "{}.foo"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -154,11 +112,7 @@
     {
       "name": "setup_cluster_keys",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "foo",
-        "val1"
-      ],
+      "argv": ["SET", "foo", "val1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -167,11 +121,7 @@
     {
       "name": "setup_cluster_keys_2",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "bar",
-        "val2"
-      ],
+      "argv": ["SET", "bar", "val2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -180,11 +130,7 @@
     {
       "name": "cluster_countkeysinslot_with_key",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        "12182"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "12182"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -193,11 +139,7 @@
     {
       "name": "cluster_countkeysinslot_empty",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        "0"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -206,12 +148,7 @@
     {
       "name": "cluster_getkeysinslot_with_key",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "12182",
-        "10"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "12182", "10"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -220,12 +157,7 @@
     {
       "name": "cluster_getkeysinslot_empty",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "0",
-        "10"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "0", "10"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -234,12 +166,7 @@
     {
       "name": "cluster_getkeysinslot_count_zero",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "12182",
-        "0"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "12182", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -248,10 +175,7 @@
     {
       "name": "cluster_help",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "HELP"
-      ],
+      "argv": ["CLUSTER", "HELP"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -260,9 +184,7 @@
     {
       "name": "cluster_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER"
-      ],
+      "argv": ["CLUSTER"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'cluster' command"
@@ -271,10 +193,7 @@
     {
       "name": "cluster_unknown_subcommand",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "NOSUCH"
-      ],
+      "argv": ["CLUSTER", "NOSUCH"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCH'. Try CLUSTER HELP."
@@ -283,10 +202,7 @@
     {
       "name": "cluster_keyslot_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'cluster|keyslot' command"
@@ -295,10 +211,7 @@
     {
       "name": "cluster_countkeysinslot_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'cluster|countkeysinslot' command"
@@ -307,11 +220,7 @@
     {
       "name": "cluster_getkeysinslot_wrong_arity",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "0"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'cluster|getkeysinslot' command"
@@ -320,10 +229,7 @@
     {
       "name": "cluster_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "info"
-      ],
+      "argv": ["CLUSTER", "info"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -332,11 +238,7 @@
     {
       "name": "cluster_reset_hard",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "RESET",
-        "HARD"
-      ],
+      "argv": ["CLUSTER", "RESET", "HARD"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -345,11 +247,7 @@
     {
       "name": "cluster_reset_soft",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "RESET",
-        "SOFT"
-      ],
+      "argv": ["CLUSTER", "RESET", "SOFT"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -358,11 +256,7 @@
     {
       "name": "cluster_keyslot_empty_string",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        ""
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", ""],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -371,11 +265,7 @@
     {
       "name": "cluster_keyslot_hash_tag_same_slot",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        "{user}.followers"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", "{user}.followers"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -384,11 +274,7 @@
     {
       "name": "cluster_countkeysinslot_non_integer",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        "abc"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -397,11 +283,7 @@
     {
       "name": "cluster_countkeysinslot_out_of_range_error",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        "99999"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "99999"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -410,12 +292,7 @@
     {
       "name": "cluster_getkeysinslot_non_integer_slot",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "xyz",
-        "10"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "xyz", "10"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -424,12 +301,7 @@
     {
       "name": "cluster_getkeysinslot_non_integer_count",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "0",
-        "xyz"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "0", "xyz"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -438,12 +310,7 @@
     {
       "name": "cluster_getkeysinslot_negative_count",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "12182",
-        "-5"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "12182", "-5"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -452,11 +319,7 @@
     {
       "name": "setup_multiple_same_slot",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "{user}.name",
-        "alice"
-      ],
+      "argv": ["SET", "{user}.name", "alice"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -465,11 +328,7 @@
     {
       "name": "setup_multiple_same_slot_2",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "{user}.email",
-        "alice@example.com"
-      ],
+      "argv": ["SET", "{user}.email", "alice@example.com"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -478,11 +337,7 @@
     {
       "name": "cluster_countkeysinslot_multiple_keys",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        "5474"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "5474"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -491,12 +346,7 @@
     {
       "name": "cluster_getkeysinslot_out_of_range_error",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "99999",
-        "10"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "99999", "10"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -505,10 +355,7 @@
     {
       "name": "cluster_myid_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "myid"
-      ],
+      "argv": ["CLUSTER", "myid"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -517,10 +364,7 @@
     {
       "name": "cluster_slots_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "slots"
-      ],
+      "argv": ["CLUSTER", "slots"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -529,10 +373,7 @@
     {
       "name": "cluster_shards_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "shards"
-      ],
+      "argv": ["CLUSTER", "shards"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -541,10 +382,7 @@
     {
       "name": "cluster_nodes_case_insensitive",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "nodes"
-      ],
+      "argv": ["CLUSTER", "nodes"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -553,11 +391,7 @@
     {
       "name": "cluster_countkeysinslot_negative_error",
       "now_ms": 0,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        "-1"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -566,11 +400,7 @@
     {
       "name": "cluster_keyslot_nested_hash_tag",
       "now_ms": 100,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        "{foo}bar{baz}"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", "{foo}bar{baz}"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -579,11 +409,7 @@
     {
       "name": "cluster_keyslot_only_closing_brace",
       "now_ms": 100,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        "}foo"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", "}foo"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -592,11 +418,7 @@
     {
       "name": "cluster_keyslot_unclosed_hash_tag",
       "now_ms": 100,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        "{foo"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", "{foo"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -605,11 +427,7 @@
     {
       "name": "cluster_keyslot_space_in_key",
       "now_ms": 100,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        "hello world"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", "hello world"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -618,11 +436,7 @@
     {
       "name": "cluster_reset_invalid_arg",
       "now_ms": 100,
-      "argv": [
-        "CLUSTER",
-        "RESET",
-        "INVALID"
-      ],
+      "argv": ["CLUSTER", "RESET", "INVALID"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -631,12 +445,7 @@
     {
       "name": "cluster_reset_wrong_arity_extra",
       "now_ms": 100,
-      "argv": [
-        "CLUSTER",
-        "RESET",
-        "HARD",
-        "extra"
-      ],
+      "argv": ["CLUSTER", "RESET", "HARD", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -645,12 +454,7 @@
     {
       "name": "cluster_keyslot_wrong_arity_extra",
       "now_ms": 100,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        "foo",
-        "extra"
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", "foo", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'cluster|keyslot' command"
@@ -659,12 +463,7 @@
     {
       "name": "cluster_countkeysinslot_wrong_arity_extra",
       "now_ms": 100,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        "0",
-        "extra"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "0", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'cluster|countkeysinslot' command"
@@ -673,13 +472,7 @@
     {
       "name": "cluster_getkeysinslot_wrong_arity_extra",
       "now_ms": 100,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "0",
-        "10",
-        "extra"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "0", "10", "extra"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'cluster|getkeysinslot' command"
@@ -688,11 +481,7 @@
     {
       "name": "cluster_countkeysinslot_max_slot",
       "now_ms": 200,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        "16383"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "16383"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -701,11 +490,7 @@
     {
       "name": "cluster_countkeysinslot_slot_out_of_range",
       "now_ms": 200,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        "16384"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "16384"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -714,11 +499,7 @@
     {
       "name": "cluster_keyslot_empty_string_alt",
       "now_ms": 200,
-      "argv": [
-        "CLUSTER",
-        "KEYSLOT",
-        ""
-      ],
+      "argv": ["CLUSTER", "KEYSLOT", ""],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -727,12 +508,7 @@
     {
       "name": "cluster_getkeysinslot_empty_slot",
       "now_ms": 200,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "16383",
-        "100"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "16383", "100"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -741,12 +517,7 @@
     {
       "name": "cluster_getkeysinslot_slot_out_of_range",
       "now_ms": 200,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "16384",
-        "10"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "16384", "10"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -755,12 +526,7 @@
     {
       "name": "cluster_getkeysinslot_zero_count",
       "now_ms": 200,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "0",
-        "0"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "0", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -769,10 +535,7 @@
     {
       "name": "cluster_unknown_subcommand_nosuchsub",
       "now_ms": 200,
-      "argv": [
-        "CLUSTER",
-        "NOSUCHSUB"
-      ],
+      "argv": ["CLUSTER", "NOSUCHSUB"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand 'NOSUCHSUB'. Try CLUSTER HELP."
@@ -781,9 +544,7 @@
     {
       "name": "cluster_wrong_arity_bare",
       "now_ms": 200,
-      "argv": [
-        "CLUSTER"
-      ],
+      "argv": ["CLUSTER"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'cluster' command"
@@ -792,11 +553,7 @@
     {
       "name": "cluster_countkeysinslot_leading_plus",
       "now_ms": 300,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        "+100"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "+100"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -805,11 +562,7 @@
     {
       "name": "cluster_countkeysinslot_leading_zeros",
       "now_ms": 300,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        "0100"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "0100"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -818,11 +571,7 @@
     {
       "name": "cluster_countkeysinslot_float",
       "now_ms": 300,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        "100.5"
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "100.5"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -831,11 +580,7 @@
     {
       "name": "cluster_countkeysinslot_empty_string",
       "now_ms": 300,
-      "argv": [
-        "CLUSTER",
-        "COUNTKEYSINSLOT",
-        ""
-      ],
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", ""],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -844,12 +589,7 @@
     {
       "name": "cluster_getkeysinslot_slot_leading_plus",
       "now_ms": 300,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "+100",
-        "10"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "+100", "10"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -858,12 +598,7 @@
     {
       "name": "cluster_getkeysinslot_slot_leading_zeros",
       "now_ms": 300,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "0100",
-        "10"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "0100", "10"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -872,12 +607,7 @@
     {
       "name": "cluster_getkeysinslot_count_leading_plus",
       "now_ms": 300,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "0",
-        "+10"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "0", "+10"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -886,12 +616,7 @@
     {
       "name": "cluster_getkeysinslot_count_leading_zeros",
       "now_ms": 300,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "0",
-        "010"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "0", "010"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -900,12 +625,7 @@
     {
       "name": "cluster_getkeysinslot_slot_float",
       "now_ms": 300,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "100.5",
-        "10"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "100.5", "10"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -914,12 +634,7 @@
     {
       "name": "cluster_getkeysinslot_count_float",
       "now_ms": 300,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "0",
-        "10.5"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "0", "10.5"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"
@@ -928,12 +643,7 @@
     {
       "name": "cluster_getkeysinslot_negative_slot_error",
       "now_ms": 300,
-      "argv": [
-        "CLUSTER",
-        "GETKEYSINSLOT",
-        "-1",
-        "10"
-      ],
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "-1", "10"],
       "expect": {
         "kind": "error",
         "value": "ERR This instance has cluster support disabled"

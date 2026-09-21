@@ -4,9 +4,7 @@
     {
       "name": "ping",
       "now_ms": 0,
-      "argv": [
-        "PING"
-      ],
+      "argv": ["PING"],
       "expect": {
         "kind": "simple",
         "value": "PONG"
@@ -15,11 +13,7 @@
     {
       "name": "set_foo",
       "now_ms": 10,
-      "argv": [
-        "SET",
-        "foo",
-        "bar"
-      ],
+      "argv": ["SET", "foo", "bar"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -28,10 +22,7 @@
     {
       "name": "get_foo",
       "now_ms": 10,
-      "argv": [
-        "GET",
-        "foo"
-      ],
+      "argv": ["GET", "foo"],
       "expect": {
         "kind": "bulk",
         "value": "bar"
@@ -40,10 +31,7 @@
     {
       "name": "incr_counter_1",
       "now_ms": 20,
-      "argv": [
-        "INCR",
-        "counter"
-      ],
+      "argv": ["INCR", "counter"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -52,10 +40,7 @@
     {
       "name": "incr_counter_2",
       "now_ms": 20,
-      "argv": [
-        "INCR",
-        "counter"
-      ],
+      "argv": ["INCR", "counter"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -64,11 +49,7 @@
     {
       "name": "expire_foo",
       "now_ms": 1000,
-      "argv": [
-        "EXPIRE",
-        "foo",
-        "1"
-      ],
+      "argv": ["EXPIRE", "foo", "1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -77,10 +58,7 @@
     {
       "name": "pttl_foo_not_expired",
       "now_ms": 1000,
-      "argv": [
-        "PTTL",
-        "foo"
-      ],
+      "argv": ["PTTL", "foo"],
       "expect": {
         "kind": "integer",
         "value": 1000
@@ -89,10 +67,7 @@
     {
       "name": "foo_expires",
       "now_ms": 2001,
-      "argv": [
-        "GET",
-        "foo"
-      ],
+      "argv": ["GET", "foo"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -101,10 +76,7 @@
     {
       "name": "pttl_foo_missing",
       "now_ms": 2001,
-      "argv": [
-        "PTTL",
-        "foo"
-      ],
+      "argv": ["PTTL", "foo"],
       "expect": {
         "kind": "integer",
         "value": -2
@@ -113,13 +85,7 @@
     {
       "name": "set_px",
       "now_ms": 3000,
-      "argv": [
-        "SET",
-        "ephemeral",
-        "v",
-        "PX",
-        "20"
-      ],
+      "argv": ["SET", "ephemeral", "v", "PX", "20"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -128,10 +94,7 @@
     {
       "name": "pttl_ephemeral",
       "now_ms": 3000,
-      "argv": [
-        "PTTL",
-        "ephemeral"
-      ],
+      "argv": ["PTTL", "ephemeral"],
       "expect": {
         "kind": "integer",
         "value": 20
@@ -140,10 +103,7 @@
     {
       "name": "ephemeral_expired",
       "now_ms": 3021,
-      "argv": [
-        "GET",
-        "ephemeral"
-      ],
+      "argv": ["GET", "ephemeral"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -152,11 +112,7 @@
     {
       "name": "set_expire_options_key",
       "now_ms": 3100,
-      "argv": [
-        "SET",
-        "optkey",
-        "v"
-      ],
+      "argv": ["SET", "optkey", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -165,12 +121,7 @@
     {
       "name": "expire_nx_initial",
       "now_ms": 3100,
-      "argv": [
-        "EXPIRE",
-        "optkey",
-        "10",
-        "NX"
-      ],
+      "argv": ["EXPIRE", "optkey", "10", "NX"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -179,12 +130,7 @@
     {
       "name": "expire_nx_reject_existing_ttl",
       "now_ms": 3100,
-      "argv": [
-        "EXPIRE",
-        "optkey",
-        "20",
-        "NX"
-      ],
+      "argv": ["EXPIRE", "optkey", "20", "NX"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -193,12 +139,7 @@
     {
       "name": "expire_xx_accept_existing_ttl",
       "now_ms": 3100,
-      "argv": [
-        "EXPIRE",
-        "optkey",
-        "20",
-        "XX"
-      ],
+      "argv": ["EXPIRE", "optkey", "20", "XX"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -207,12 +148,7 @@
     {
       "name": "expire_gt_reject_smaller_deadline",
       "now_ms": 3100,
-      "argv": [
-        "EXPIRE",
-        "optkey",
-        "15",
-        "GT"
-      ],
+      "argv": ["EXPIRE", "optkey", "15", "GT"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -221,12 +157,7 @@
     {
       "name": "expire_gt_accept_larger_deadline",
       "now_ms": 3100,
-      "argv": [
-        "EXPIRE",
-        "optkey",
-        "25",
-        "GT"
-      ],
+      "argv": ["EXPIRE", "optkey", "25", "GT"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -235,12 +166,7 @@
     {
       "name": "expire_lt_reject_larger_deadline",
       "now_ms": 3100,
-      "argv": [
-        "EXPIRE",
-        "optkey",
-        "30",
-        "LT"
-      ],
+      "argv": ["EXPIRE", "optkey", "30", "LT"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -249,12 +175,7 @@
     {
       "name": "expire_lt_accept_smaller_deadline",
       "now_ms": 3100,
-      "argv": [
-        "EXPIRE",
-        "optkey",
-        "5",
-        "LT"
-      ],
+      "argv": ["EXPIRE", "optkey", "5", "LT"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -263,11 +184,7 @@
     {
       "name": "set_persistent_expire_options_key",
       "now_ms": 3200,
-      "argv": [
-        "SET",
-        "persistent",
-        "v"
-      ],
+      "argv": ["SET", "persistent", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -276,12 +193,7 @@
     {
       "name": "expire_xx_rejects_no_ttl",
       "now_ms": 3200,
-      "argv": [
-        "EXPIRE",
-        "persistent",
-        "5",
-        "XX"
-      ],
+      "argv": ["EXPIRE", "persistent", "5", "XX"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -290,12 +202,7 @@
     {
       "name": "expire_gt_rejects_no_ttl",
       "now_ms": 3200,
-      "argv": [
-        "EXPIRE",
-        "persistent",
-        "5",
-        "GT"
-      ],
+      "argv": ["EXPIRE", "persistent", "5", "GT"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -304,12 +211,7 @@
     {
       "name": "expire_lt_accepts_no_ttl",
       "now_ms": 3200,
-      "argv": [
-        "EXPIRE",
-        "persistent",
-        "5",
-        "LT"
-      ],
+      "argv": ["EXPIRE", "persistent", "5", "LT"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -318,11 +220,7 @@
     {
       "name": "set_abskey",
       "now_ms": 3300,
-      "argv": [
-        "SET",
-        "abskey",
-        "v"
-      ],
+      "argv": ["SET", "abskey", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -331,11 +229,7 @@
     {
       "name": "pexpire_abskey",
       "now_ms": 3300,
-      "argv": [
-        "PEXPIRE",
-        "abskey",
-        "250"
-      ],
+      "argv": ["PEXPIRE", "abskey", "250"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -344,10 +238,7 @@
     {
       "name": "pttl_abskey",
       "now_ms": 3300,
-      "argv": [
-        "PTTL",
-        "abskey"
-      ],
+      "argv": ["PTTL", "abskey"],
       "expect": {
         "kind": "integer",
         "value": 250
@@ -356,10 +247,7 @@
     {
       "name": "pexpiretime_abskey",
       "now_ms": 3300,
-      "argv": [
-        "PEXPIRETIME",
-        "abskey"
-      ],
+      "argv": ["PEXPIRETIME", "abskey"],
       "expect": {
         "kind": "integer",
         "value": 3550
@@ -368,10 +256,7 @@
     {
       "name": "expiretime_abskey",
       "now_ms": 3300,
-      "argv": [
-        "EXPIRETIME",
-        "abskey"
-      ],
+      "argv": ["EXPIRETIME", "abskey"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -380,10 +265,7 @@
     {
       "name": "abskey_expired",
       "now_ms": 3551,
-      "argv": [
-        "GET",
-        "abskey"
-      ],
+      "argv": ["GET", "abskey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -392,11 +274,7 @@
     {
       "name": "set_whenkey",
       "now_ms": 3600,
-      "argv": [
-        "SET",
-        "whenkey",
-        "v"
-      ],
+      "argv": ["SET", "whenkey", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -405,11 +283,7 @@
     {
       "name": "expireat_whenkey",
       "now_ms": 3600,
-      "argv": [
-        "EXPIREAT",
-        "whenkey",
-        "6"
-      ],
+      "argv": ["EXPIREAT", "whenkey", "6"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -418,10 +292,7 @@
     {
       "name": "pttl_whenkey_after_expireat",
       "now_ms": 3600,
-      "argv": [
-        "PTTL",
-        "whenkey"
-      ],
+      "argv": ["PTTL", "whenkey"],
       "expect": {
         "kind": "integer",
         "value": 2400
@@ -430,11 +301,7 @@
     {
       "name": "pexpireat_whenkey",
       "now_ms": 3600,
-      "argv": [
-        "PEXPIREAT",
-        "whenkey",
-        "7000"
-      ],
+      "argv": ["PEXPIREAT", "whenkey", "7000"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -443,10 +310,7 @@
     {
       "name": "pttl_whenkey_after_pexpireat",
       "now_ms": 3600,
-      "argv": [
-        "PTTL",
-        "whenkey"
-      ],
+      "argv": ["PTTL", "whenkey"],
       "expect": {
         "kind": "integer",
         "value": 3400
@@ -455,10 +319,7 @@
     {
       "name": "expiretime_whenkey",
       "now_ms": 3600,
-      "argv": [
-        "EXPIRETIME",
-        "whenkey"
-      ],
+      "argv": ["EXPIRETIME", "whenkey"],
       "expect": {
         "kind": "integer",
         "value": 7
@@ -467,11 +328,7 @@
     {
       "name": "set_poptkey",
       "now_ms": 3700,
-      "argv": [
-        "SET",
-        "poptkey",
-        "v"
-      ],
+      "argv": ["SET", "poptkey", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -480,12 +337,7 @@
     {
       "name": "pexpire_nx_poptkey",
       "now_ms": 3700,
-      "argv": [
-        "PEXPIRE",
-        "poptkey",
-        "1000",
-        "NX"
-      ],
+      "argv": ["PEXPIRE", "poptkey", "1000", "NX"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -494,12 +346,7 @@
     {
       "name": "pexpire_gt_accept_poptkey",
       "now_ms": 3700,
-      "argv": [
-        "PEXPIRE",
-        "poptkey",
-        "1500",
-        "GT"
-      ],
+      "argv": ["PEXPIRE", "poptkey", "1500", "GT"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -508,12 +355,7 @@
     {
       "name": "pexpire_gt_reject_poptkey",
       "now_ms": 3700,
-      "argv": [
-        "PEXPIRE",
-        "poptkey",
-        "1200",
-        "GT"
-      ],
+      "argv": ["PEXPIRE", "poptkey", "1200", "GT"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -522,13 +364,7 @@
     {
       "name": "pexpire_xx_gt_accept_poptkey",
       "now_ms": 3700,
-      "argv": [
-        "PEXPIRE",
-        "poptkey",
-        "2000",
-        "XX",
-        "GT"
-      ],
+      "argv": ["PEXPIRE", "poptkey", "2000", "XX", "GT"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -537,13 +373,7 @@
     {
       "name": "pexpire_xx_lt_accept_poptkey",
       "now_ms": 3700,
-      "argv": [
-        "PEXPIRE",
-        "poptkey",
-        "1000",
-        "XX",
-        "LT"
-      ],
+      "argv": ["PEXPIRE", "poptkey", "1000", "XX", "LT"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -552,13 +382,7 @@
     {
       "name": "pexpire_xx_lt_reject_poptkey",
       "now_ms": 3700,
-      "argv": [
-        "PEXPIRE",
-        "poptkey",
-        "1500",
-        "XX",
-        "LT"
-      ],
+      "argv": ["PEXPIRE", "poptkey", "1500", "XX", "LT"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -567,12 +391,7 @@
     {
       "name": "pexpire_lt_accept_poptkey",
       "now_ms": 3700,
-      "argv": [
-        "PEXPIRE",
-        "poptkey",
-        "500",
-        "LT"
-      ],
+      "argv": ["PEXPIRE", "poptkey", "500", "LT"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -581,12 +400,7 @@
     {
       "name": "set_nx_new_key",
       "now_ms": 4000,
-      "argv": [
-        "SET",
-        "nxkey",
-        "val",
-        "NX"
-      ],
+      "argv": ["SET", "nxkey", "val", "NX"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -595,12 +409,7 @@
     {
       "name": "set_nx_existing_key",
       "now_ms": 4000,
-      "argv": [
-        "SET",
-        "nxkey",
-        "other",
-        "NX"
-      ],
+      "argv": ["SET", "nxkey", "other", "NX"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -609,10 +418,7 @@
     {
       "name": "set_nx_verify_unchanged",
       "now_ms": 4000,
-      "argv": [
-        "GET",
-        "nxkey"
-      ],
+      "argv": ["GET", "nxkey"],
       "expect": {
         "kind": "bulk",
         "value": "val"
@@ -621,12 +427,7 @@
     {
       "name": "set_xx_existing",
       "now_ms": 4000,
-      "argv": [
-        "SET",
-        "nxkey",
-        "updated",
-        "XX"
-      ],
+      "argv": ["SET", "nxkey", "updated", "XX"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -635,12 +436,7 @@
     {
       "name": "set_xx_missing",
       "now_ms": 4000,
-      "argv": [
-        "SET",
-        "xxmissing",
-        "v",
-        "XX"
-      ],
+      "argv": ["SET", "xxmissing", "v", "XX"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -649,12 +445,7 @@
     {
       "name": "set_get_returns_old",
       "now_ms": 4000,
-      "argv": [
-        "SET",
-        "nxkey",
-        "final",
-        "GET"
-      ],
+      "argv": ["SET", "nxkey", "final", "GET"],
       "expect": {
         "kind": "bulk",
         "value": "updated"
@@ -663,10 +454,7 @@
     {
       "name": "set_get_verify",
       "now_ms": 4000,
-      "argv": [
-        "GET",
-        "nxkey"
-      ],
+      "argv": ["GET", "nxkey"],
       "expect": {
         "kind": "bulk",
         "value": "final"
@@ -675,12 +463,7 @@
     {
       "name": "set_get_missing_key",
       "now_ms": 4000,
-      "argv": [
-        "SET",
-        "sgmissing",
-        "v",
-        "GET"
-      ],
+      "argv": ["SET", "sgmissing", "v", "GET"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -689,13 +472,7 @@
     {
       "name": "set_keepttl_setup",
       "now_ms": 4000,
-      "argv": [
-        "SET",
-        "keepkey",
-        "v",
-        "EX",
-        "100"
-      ],
+      "argv": ["SET", "keepkey", "v", "EX", "100"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -704,12 +481,7 @@
     {
       "name": "set_keepttl",
       "now_ms": 4000,
-      "argv": [
-        "SET",
-        "keepkey",
-        "newv",
-        "KEEPTTL"
-      ],
+      "argv": ["SET", "keepkey", "newv", "KEEPTTL"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -718,10 +490,7 @@
     {
       "name": "set_keepttl_verify_value",
       "now_ms": 4000,
-      "argv": [
-        "GET",
-        "keepkey"
-      ],
+      "argv": ["GET", "keepkey"],
       "expect": {
         "kind": "bulk",
         "value": "newv"
@@ -730,10 +499,7 @@
     {
       "name": "set_keepttl_verify_ttl",
       "now_ms": 4000,
-      "argv": [
-        "TTL",
-        "keepkey"
-      ],
+      "argv": ["TTL", "keepkey"],
       "expect": {
         "kind": "integer",
         "value": 100
@@ -742,15 +508,7 @@
     {
       "name": "mset_multi",
       "now_ms": 4100,
-      "argv": [
-        "MSET",
-        "mk1",
-        "mv1",
-        "mk2",
-        "mv2",
-        "mk3",
-        "mv3"
-      ],
+      "argv": ["MSET", "mk1", "mv1", "mk2", "mv2", "mk3", "mv3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -759,13 +517,7 @@
     {
       "name": "mget_multi",
       "now_ms": 4100,
-      "argv": [
-        "MGET",
-        "mk1",
-        "mk2",
-        "nokey",
-        "mk3"
-      ],
+      "argv": ["MGET", "mk1", "mk2", "nokey", "mk3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -791,13 +543,7 @@
     {
       "name": "msetnx_all_new",
       "now_ms": 4100,
-      "argv": [
-        "MSETNX",
-        "mn1",
-        "v1",
-        "mn2",
-        "v2"
-      ],
+      "argv": ["MSETNX", "mn1", "v1", "mn2", "v2"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -806,13 +552,7 @@
     {
       "name": "msetnx_one_exists",
       "now_ms": 4100,
-      "argv": [
-        "MSETNX",
-        "mn1",
-        "other",
-        "mn3",
-        "v3"
-      ],
+      "argv": ["MSETNX", "mn1", "other", "mn3", "v3"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -821,10 +561,7 @@
     {
       "name": "msetnx_verify_unchanged",
       "now_ms": 4100,
-      "argv": [
-        "GET",
-        "mn1"
-      ],
+      "argv": ["GET", "mn1"],
       "expect": {
         "kind": "bulk",
         "value": "v1"
@@ -833,10 +570,7 @@
     {
       "name": "msetnx_verify_mn3_not_set",
       "now_ms": 4100,
-      "argv": [
-        "EXISTS",
-        "mn3"
-      ],
+      "argv": ["EXISTS", "mn3"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -845,11 +579,7 @@
     {
       "name": "incrbyfloat_new_key",
       "now_ms": 4200,
-      "argv": [
-        "INCRBYFLOAT",
-        "flt",
-        "3.14"
-      ],
+      "argv": ["INCRBYFLOAT", "flt", "3.14"],
       "expect": {
         "kind": "bulk",
         "value": "3.14"
@@ -858,11 +588,7 @@
     {
       "name": "incrbyfloat_add",
       "now_ms": 4200,
-      "argv": [
-        "INCRBYFLOAT",
-        "flt",
-        "0.86"
-      ],
+      "argv": ["INCRBYFLOAT", "flt", "0.86"],
       "expect": {
         "kind": "bulk",
         "value": "4"
@@ -871,11 +597,7 @@
     {
       "name": "incrbyfloat_negative",
       "now_ms": 4200,
-      "argv": [
-        "INCRBYFLOAT",
-        "flt",
-        "-1.5"
-      ],
+      "argv": ["INCRBYFLOAT", "flt", "-1.5"],
       "expect": {
         "kind": "bulk",
         "value": "2.5"
@@ -884,11 +606,7 @@
     {
       "name": "decrby_new_key",
       "now_ms": 4200,
-      "argv": [
-        "DECRBY",
-        "deckey",
-        "5"
-      ],
+      "argv": ["DECRBY", "deckey", "5"],
       "expect": {
         "kind": "integer",
         "value": -5
@@ -897,11 +615,7 @@
     {
       "name": "decrby_existing",
       "now_ms": 4200,
-      "argv": [
-        "DECRBY",
-        "deckey",
-        "3"
-      ],
+      "argv": ["DECRBY", "deckey", "3"],
       "expect": {
         "kind": "integer",
         "value": -8
@@ -910,10 +624,7 @@
     {
       "name": "strlen_existing",
       "now_ms": 4300,
-      "argv": [
-        "STRLEN",
-        "mk1"
-      ],
+      "argv": ["STRLEN", "mk1"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -922,10 +633,7 @@
     {
       "name": "strlen_missing",
       "now_ms": 4300,
-      "argv": [
-        "STRLEN",
-        "nokey"
-      ],
+      "argv": ["STRLEN", "nokey"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -934,12 +642,7 @@
     {
       "name": "setrange_extend",
       "now_ms": 4300,
-      "argv": [
-        "SETRANGE",
-        "srkey",
-        "6",
-        "Redis"
-      ],
+      "argv": ["SETRANGE", "srkey", "6", "Redis"],
       "expect": {
         "kind": "integer",
         "value": 11
@@ -948,12 +651,7 @@
     {
       "name": "getrange_result",
       "now_ms": 4300,
-      "argv": [
-        "GETRANGE",
-        "srkey",
-        "6",
-        "10"
-      ],
+      "argv": ["GETRANGE", "srkey", "6", "10"],
       "expect": {
         "kind": "bulk",
         "value": "Redis"
@@ -962,12 +660,7 @@
     {
       "name": "getrange_zero_prefix",
       "now_ms": 4300,
-      "argv": [
-        "GETRANGE",
-        "srkey",
-        "0",
-        "5"
-      ],
+      "argv": ["GETRANGE", "srkey", "0", "5"],
       "expect": {
         "kind": "bulk",
         "value": "\u0000\u0000\u0000\u0000\u0000\u0000"
@@ -976,11 +669,7 @@
     {
       "name": "setnx_new_key",
       "now_ms": 4400,
-      "argv": [
-        "SETNX",
-        "snxkey",
-        "hello"
-      ],
+      "argv": ["SETNX", "snxkey", "hello"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -989,11 +678,7 @@
     {
       "name": "setnx_existing",
       "now_ms": 4400,
-      "argv": [
-        "SETNX",
-        "snxkey",
-        "world"
-      ],
+      "argv": ["SETNX", "snxkey", "world"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1002,10 +687,7 @@
     {
       "name": "setnx_verify",
       "now_ms": 4400,
-      "argv": [
-        "GET",
-        "snxkey"
-      ],
+      "argv": ["GET", "snxkey"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -1014,12 +696,7 @@
     {
       "name": "setex_ok",
       "now_ms": 4500,
-      "argv": [
-        "SETEX",
-        "sexkey",
-        "10",
-        "val"
-      ],
+      "argv": ["SETEX", "sexkey", "10", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1028,10 +705,7 @@
     {
       "name": "setex_verify_value",
       "now_ms": 4500,
-      "argv": [
-        "GET",
-        "sexkey"
-      ],
+      "argv": ["GET", "sexkey"],
       "expect": {
         "kind": "bulk",
         "value": "val"
@@ -1040,10 +714,7 @@
     {
       "name": "setex_verify_ttl",
       "now_ms": 4500,
-      "argv": [
-        "TTL",
-        "sexkey"
-      ],
+      "argv": ["TTL", "sexkey"],
       "expect": {
         "kind": "integer",
         "value": 10
@@ -1052,11 +723,7 @@
     {
       "name": "getset_existing",
       "now_ms": 4600,
-      "argv": [
-        "GETSET",
-        "snxkey",
-        "newval"
-      ],
+      "argv": ["GETSET", "snxkey", "newval"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -1065,10 +732,7 @@
     {
       "name": "getset_verify",
       "now_ms": 4600,
-      "argv": [
-        "GET",
-        "snxkey"
-      ],
+      "argv": ["GET", "snxkey"],
       "expect": {
         "kind": "bulk",
         "value": "newval"
@@ -1077,11 +741,7 @@
     {
       "name": "getset_missing",
       "now_ms": 4600,
-      "argv": [
-        "GETSET",
-        "gsmissing",
-        "v"
-      ],
+      "argv": ["GETSET", "gsmissing", "v"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1090,10 +750,7 @@
     {
       "name": "incr_on_non_integer",
       "now_ms": 4700,
-      "argv": [
-        "INCR",
-        "mk1"
-      ],
+      "argv": ["INCR", "mk1"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -1102,9 +759,7 @@
     {
       "name": "unknown_command",
       "now_ms": 5000,
-      "argv": [
-        "NOPE"
-      ],
+      "argv": ["NOPE"],
       "expect": {
         "kind": "error",
         "value": "ERR unknown command 'NOPE', with args beginning with: "
@@ -1113,9 +768,7 @@
     {
       "name": "wrong_arity",
       "now_ms": 5001,
-      "argv": [
-        "GET"
-      ],
+      "argv": ["GET"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'get' command"
@@ -1124,11 +777,7 @@
     {
       "name": "append_new_key",
       "now_ms": 5100,
-      "argv": [
-        "APPEND",
-        "appkey",
-        "hello"
-      ],
+      "argv": ["APPEND", "appkey", "hello"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -1137,11 +786,7 @@
     {
       "name": "append_existing_key",
       "now_ms": 5101,
-      "argv": [
-        "APPEND",
-        "appkey",
-        " world"
-      ],
+      "argv": ["APPEND", "appkey", " world"],
       "expect": {
         "kind": "integer",
         "value": 11
@@ -1150,10 +795,7 @@
     {
       "name": "append_verify",
       "now_ms": 5102,
-      "argv": [
-        "GET",
-        "appkey"
-      ],
+      "argv": ["GET", "appkey"],
       "expect": {
         "kind": "bulk",
         "value": "hello world"
@@ -1162,10 +804,7 @@
     {
       "name": "decr_new_key",
       "now_ms": 5200,
-      "argv": [
-        "DECR",
-        "dcrkey"
-      ],
+      "argv": ["DECR", "dcrkey"],
       "expect": {
         "kind": "integer",
         "value": -1
@@ -1174,10 +813,7 @@
     {
       "name": "decr_existing",
       "now_ms": 5201,
-      "argv": [
-        "DECR",
-        "dcrkey"
-      ],
+      "argv": ["DECR", "dcrkey"],
       "expect": {
         "kind": "integer",
         "value": -2
@@ -1186,11 +822,7 @@
     {
       "name": "incrby_new_key",
       "now_ms": 5300,
-      "argv": [
-        "INCRBY",
-        "ibykey",
-        "10"
-      ],
+      "argv": ["INCRBY", "ibykey", "10"],
       "expect": {
         "kind": "integer",
         "value": 10
@@ -1199,11 +831,7 @@
     {
       "name": "incrby_existing",
       "now_ms": 5301,
-      "argv": [
-        "INCRBY",
-        "ibykey",
-        "5"
-      ],
+      "argv": ["INCRBY", "ibykey", "5"],
       "expect": {
         "kind": "integer",
         "value": 15
@@ -1212,11 +840,7 @@
     {
       "name": "incrby_negative",
       "now_ms": 5302,
-      "argv": [
-        "INCRBY",
-        "ibykey",
-        "-20"
-      ],
+      "argv": ["INCRBY", "ibykey", "-20"],
       "expect": {
         "kind": "integer",
         "value": -5
@@ -1225,12 +849,7 @@
     {
       "name": "psetex_ok",
       "now_ms": 5400,
-      "argv": [
-        "PSETEX",
-        "pskey",
-        "500",
-        "val"
-      ],
+      "argv": ["PSETEX", "pskey", "500", "val"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1239,10 +858,7 @@
     {
       "name": "psetex_verify_value",
       "now_ms": 5400,
-      "argv": [
-        "GET",
-        "pskey"
-      ],
+      "argv": ["GET", "pskey"],
       "expect": {
         "kind": "bulk",
         "value": "val"
@@ -1251,10 +867,7 @@
     {
       "name": "psetex_verify_pttl",
       "now_ms": 5400,
-      "argv": [
-        "PTTL",
-        "pskey"
-      ],
+      "argv": ["PTTL", "pskey"],
       "expect": {
         "kind": "integer",
         "value": 500
@@ -1263,10 +876,7 @@
     {
       "name": "psetex_expired",
       "now_ms": 5901,
-      "argv": [
-        "GET",
-        "pskey"
-      ],
+      "argv": ["GET", "pskey"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1275,12 +885,7 @@
     {
       "name": "psetex_zero_ms_error",
       "now_ms": 5400,
-      "argv": [
-        "PSETEX",
-        "pskey2",
-        "0",
-        "val"
-      ],
+      "argv": ["PSETEX", "pskey2", "0", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'psetex' command"
@@ -1289,12 +894,7 @@
     {
       "name": "psetex_negative_ms_error",
       "now_ms": 5400,
-      "argv": [
-        "PSETEX",
-        "pskey3",
-        "-1",
-        "val"
-      ],
+      "argv": ["PSETEX", "pskey3", "-1", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'psetex' command"
@@ -1303,11 +903,7 @@
     {
       "name": "getdel_setup",
       "now_ms": 5500,
-      "argv": [
-        "SET",
-        "gdkey",
-        "todelete"
-      ],
+      "argv": ["SET", "gdkey", "todelete"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1316,10 +912,7 @@
     {
       "name": "getdel_returns_value",
       "now_ms": 5501,
-      "argv": [
-        "GETDEL",
-        "gdkey"
-      ],
+      "argv": ["GETDEL", "gdkey"],
       "expect": {
         "kind": "bulk",
         "value": "todelete"
@@ -1328,10 +921,7 @@
     {
       "name": "getdel_key_gone",
       "now_ms": 5502,
-      "argv": [
-        "EXISTS",
-        "gdkey"
-      ],
+      "argv": ["EXISTS", "gdkey"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1340,10 +930,7 @@
     {
       "name": "getdel_missing_key",
       "now_ms": 5503,
-      "argv": [
-        "GETDEL",
-        "gdmissing"
-      ],
+      "argv": ["GETDEL", "gdmissing"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1352,11 +939,7 @@
     {
       "name": "getex_setup",
       "now_ms": 5600,
-      "argv": [
-        "SET",
-        "gxkey",
-        "hello"
-      ],
+      "argv": ["SET", "gxkey", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1365,10 +948,7 @@
     {
       "name": "getex_no_options",
       "now_ms": 5601,
-      "argv": [
-        "GETEX",
-        "gxkey"
-      ],
+      "argv": ["GETEX", "gxkey"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -1377,12 +957,7 @@
     {
       "name": "getex_with_ex",
       "now_ms": 5602,
-      "argv": [
-        "GETEX",
-        "gxkey",
-        "EX",
-        "10"
-      ],
+      "argv": ["GETEX", "gxkey", "EX", "10"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -1391,10 +966,7 @@
     {
       "name": "getex_verify_ttl_after_ex",
       "now_ms": 5602,
-      "argv": [
-        "TTL",
-        "gxkey"
-      ],
+      "argv": ["TTL", "gxkey"],
       "expect": {
         "kind": "integer",
         "value": 10
@@ -1403,12 +975,7 @@
     {
       "name": "getex_with_px",
       "now_ms": 5700,
-      "argv": [
-        "GETEX",
-        "gxkey",
-        "PX",
-        "2000"
-      ],
+      "argv": ["GETEX", "gxkey", "PX", "2000"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -1417,10 +984,7 @@
     {
       "name": "getex_verify_pttl_after_px",
       "now_ms": 5700,
-      "argv": [
-        "PTTL",
-        "gxkey"
-      ],
+      "argv": ["PTTL", "gxkey"],
       "expect": {
         "kind": "integer",
         "value": 2000
@@ -1429,12 +993,7 @@
     {
       "name": "getex_with_exat",
       "now_ms": 5800,
-      "argv": [
-        "GETEX",
-        "gxkey",
-        "EXAT",
-        "10"
-      ],
+      "argv": ["GETEX", "gxkey", "EXAT", "10"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -1443,10 +1002,7 @@
     {
       "name": "getex_verify_ttl_after_exat",
       "now_ms": 5800,
-      "argv": [
-        "TTL",
-        "gxkey"
-      ],
+      "argv": ["TTL", "gxkey"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -1455,12 +1011,7 @@
     {
       "name": "getex_with_pxat",
       "now_ms": 5900,
-      "argv": [
-        "GETEX",
-        "gxkey",
-        "PXAT",
-        "8000"
-      ],
+      "argv": ["GETEX", "gxkey", "PXAT", "8000"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -1469,10 +1020,7 @@
     {
       "name": "getex_verify_pttl_after_pxat",
       "now_ms": 5900,
-      "argv": [
-        "PTTL",
-        "gxkey"
-      ],
+      "argv": ["PTTL", "gxkey"],
       "expect": {
         "kind": "integer",
         "value": 2100
@@ -1481,11 +1029,7 @@
     {
       "name": "getex_with_persist",
       "now_ms": 6000,
-      "argv": [
-        "GETEX",
-        "gxkey",
-        "PERSIST"
-      ],
+      "argv": ["GETEX", "gxkey", "PERSIST"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -1494,10 +1038,7 @@
     {
       "name": "getex_verify_ttl_after_persist",
       "now_ms": 6000,
-      "argv": [
-        "TTL",
-        "gxkey"
-      ],
+      "argv": ["TTL", "gxkey"],
       "expect": {
         "kind": "integer",
         "value": -1
@@ -1506,10 +1047,7 @@
     {
       "name": "getex_missing_key",
       "now_ms": 6100,
-      "argv": [
-        "GETEX",
-        "gxmissing"
-      ],
+      "argv": ["GETEX", "gxmissing"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1518,11 +1056,7 @@
     {
       "name": "substr_alias_for_getrange",
       "now_ms": 6200,
-      "argv": [
-        "SET",
-        "subkey",
-        "Hello World"
-      ],
+      "argv": ["SET", "subkey", "Hello World"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1531,12 +1065,7 @@
     {
       "name": "substr_basic",
       "now_ms": 6201,
-      "argv": [
-        "SUBSTR",
-        "subkey",
-        "0",
-        "4"
-      ],
+      "argv": ["SUBSTR", "subkey", "0", "4"],
       "expect": {
         "kind": "bulk",
         "value": "Hello"
@@ -1545,12 +1074,7 @@
     {
       "name": "substr_negative_end",
       "now_ms": 6202,
-      "argv": [
-        "SUBSTR",
-        "subkey",
-        "6",
-        "-1"
-      ],
+      "argv": ["SUBSTR", "subkey", "6", "-1"],
       "expect": {
         "kind": "bulk",
         "value": "World"
@@ -1559,12 +1083,7 @@
     {
       "name": "getrange_negative_indices",
       "now_ms": 6300,
-      "argv": [
-        "GETRANGE",
-        "subkey",
-        "-5",
-        "-1"
-      ],
+      "argv": ["GETRANGE", "subkey", "-5", "-1"],
       "expect": {
         "kind": "bulk",
         "value": "World"
@@ -1573,12 +1092,7 @@
     {
       "name": "getrange_beyond_length",
       "now_ms": 6301,
-      "argv": [
-        "GETRANGE",
-        "subkey",
-        "0",
-        "100"
-      ],
+      "argv": ["GETRANGE", "subkey", "0", "100"],
       "expect": {
         "kind": "bulk",
         "value": "Hello World"
@@ -1587,12 +1101,7 @@
     {
       "name": "getrange_missing_key",
       "now_ms": 6302,
-      "argv": [
-        "GETRANGE",
-        "nokey",
-        "0",
-        "5"
-      ],
+      "argv": ["GETRANGE", "nokey", "0", "5"],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -1601,12 +1110,7 @@
     {
       "name": "getrange_reversed_indices",
       "now_ms": 6303,
-      "argv": [
-        "GETRANGE",
-        "subkey",
-        "5",
-        "0"
-      ],
+      "argv": ["GETRANGE", "subkey", "5", "0"],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -1615,13 +1119,7 @@
     {
       "name": "set_with_exat",
       "now_ms": 6400,
-      "argv": [
-        "SET",
-        "exatkey",
-        "v",
-        "EXAT",
-        "10"
-      ],
+      "argv": ["SET", "exatkey", "v", "EXAT", "10"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1630,10 +1128,7 @@
     {
       "name": "set_exat_verify_ttl",
       "now_ms": 6400,
-      "argv": [
-        "TTL",
-        "exatkey"
-      ],
+      "argv": ["TTL", "exatkey"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -1642,13 +1137,7 @@
     {
       "name": "set_with_pxat",
       "now_ms": 6500,
-      "argv": [
-        "SET",
-        "pxatkey",
-        "v",
-        "PXAT",
-        "8000"
-      ],
+      "argv": ["SET", "pxatkey", "v", "PXAT", "8000"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1657,10 +1146,7 @@
     {
       "name": "set_pxat_verify_pttl",
       "now_ms": 6500,
-      "argv": [
-        "PTTL",
-        "pxatkey"
-      ],
+      "argv": ["PTTL", "pxatkey"],
       "expect": {
         "kind": "integer",
         "value": 1500
@@ -1669,13 +1155,7 @@
     {
       "name": "set_ex_negative_error",
       "now_ms": 6601,
-      "argv": [
-        "SET",
-        "k",
-        "v",
-        "EX",
-        "-1"
-      ],
+      "argv": ["SET", "k", "v", "EX", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'set' command"
@@ -1684,12 +1164,7 @@
     {
       "name": "setex_zero_error",
       "now_ms": 6602,
-      "argv": [
-        "SETEX",
-        "k",
-        "0",
-        "v"
-      ],
+      "argv": ["SETEX", "k", "0", "v"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'setex' command"
@@ -1698,11 +1173,7 @@
     {
       "name": "lcs_setup_a",
       "now_ms": 6700,
-      "argv": [
-        "SET",
-        "lcsa",
-        "ohmytext"
-      ],
+      "argv": ["SET", "lcsa", "ohmytext"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1711,11 +1182,7 @@
     {
       "name": "lcs_setup_b",
       "now_ms": 6701,
-      "argv": [
-        "SET",
-        "lcsb",
-        "mynewtext"
-      ],
+      "argv": ["SET", "lcsb", "mynewtext"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1724,11 +1191,7 @@
     {
       "name": "lcs_basic",
       "now_ms": 6702,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcsb"
-      ],
+      "argv": ["LCS", "lcsa", "lcsb"],
       "expect": {
         "kind": "bulk",
         "value": "mytext"
@@ -1737,12 +1200,7 @@
     {
       "name": "lcs_len",
       "now_ms": 6703,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcsb",
-        "LEN"
-      ],
+      "argv": ["LCS", "lcsa", "lcsb", "LEN"],
       "expect": {
         "kind": "integer",
         "value": 6
@@ -1751,11 +1209,7 @@
     {
       "name": "lcs_missing_key",
       "now_ms": 6704,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "nokey"
-      ],
+      "argv": ["LCS", "lcsa", "nokey"],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -1764,12 +1218,7 @@
     {
       "name": "lcs_missing_key_len",
       "now_ms": 6705,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "nokey",
-        "LEN"
-      ],
+      "argv": ["LCS", "lcsa", "nokey", "LEN"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1778,12 +1227,7 @@
     {
       "name": "lcs_idx_mode",
       "now_ms": 6706,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcsb",
-        "IDX"
-      ],
+      "argv": ["LCS", "lcsa", "lcsb", "IDX"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1872,13 +1316,7 @@
     {
       "name": "lcs_idx_withmatchlen",
       "now_ms": 6707,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcsb",
-        "IDX",
-        "WITHMATCHLEN"
-      ],
+      "argv": ["LCS", "lcsa", "lcsb", "IDX", "WITHMATCHLEN"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1975,14 +1413,7 @@
     {
       "name": "lcs_idx_minmatchlen",
       "now_ms": 6708,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcsb",
-        "IDX",
-        "MINMATCHLEN",
-        "3"
-      ],
+      "argv": ["LCS", "lcsa", "lcsb", "IDX", "MINMATCHLEN", "3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2040,15 +1471,7 @@
     {
       "name": "lcs_idx_minmatchlen_withmatchlen",
       "now_ms": 6709,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcsb",
-        "IDX",
-        "MINMATCHLEN",
-        "3",
-        "WITHMATCHLEN"
-      ],
+      "argv": ["LCS", "lcsa", "lcsb", "IDX", "MINMATCHLEN", "3", "WITHMATCHLEN"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2110,11 +1533,7 @@
     {
       "name": "lcs_setup_empty",
       "now_ms": 6710,
-      "argv": [
-        "SET",
-        "lcs_empty",
-        ""
-      ],
+      "argv": ["SET", "lcs_empty", ""],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2123,11 +1542,7 @@
     {
       "name": "lcs_empty_string",
       "now_ms": 6711,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcs_empty"
-      ],
+      "argv": ["LCS", "lcsa", "lcs_empty"],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -2136,12 +1551,7 @@
     {
       "name": "lcs_empty_string_len",
       "now_ms": 6712,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcs_empty",
-        "LEN"
-      ],
+      "argv": ["LCS", "lcsa", "lcs_empty", "LEN"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2150,11 +1560,7 @@
     {
       "name": "lcs_setup_identical",
       "now_ms": 6713,
-      "argv": [
-        "SET",
-        "lcs_identical",
-        "ohmytext"
-      ],
+      "argv": ["SET", "lcs_identical", "ohmytext"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2163,11 +1569,7 @@
     {
       "name": "lcs_identical_strings",
       "now_ms": 6714,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcs_identical"
-      ],
+      "argv": ["LCS", "lcsa", "lcs_identical"],
       "expect": {
         "kind": "bulk",
         "value": "ohmytext"
@@ -2176,12 +1578,7 @@
     {
       "name": "lcs_identical_strings_len",
       "now_ms": 6715,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcs_identical",
-        "LEN"
-      ],
+      "argv": ["LCS", "lcsa", "lcs_identical", "LEN"],
       "expect": {
         "kind": "integer",
         "value": 8
@@ -2190,11 +1587,7 @@
     {
       "name": "lcs_setup_no_common",
       "now_ms": 6716,
-      "argv": [
-        "SET",
-        "lcs_nocommon",
-        "abc"
-      ],
+      "argv": ["SET", "lcs_nocommon", "abc"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2203,11 +1596,7 @@
     {
       "name": "lcs_no_common_subsequence",
       "now_ms": 6717,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcs_nocommon"
-      ],
+      "argv": ["LCS", "lcsa", "lcs_nocommon"],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -2216,12 +1605,7 @@
     {
       "name": "lcs_no_common_idx",
       "now_ms": 6718,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcs_nocommon",
-        "IDX"
-      ],
+      "argv": ["LCS", "lcsa", "lcs_nocommon", "IDX"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2247,12 +1631,7 @@
     {
       "name": "lcs_syntax_error_unknown_option",
       "now_ms": 6719,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcsb",
-        "UNKNOWN"
-      ],
+      "argv": ["LCS", "lcsa", "lcsb", "UNKNOWN"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -2261,12 +1640,7 @@
     {
       "name": "lcs_syntax_error_minmatchlen_missing",
       "now_ms": 6720,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcsb",
-        "MINMATCHLEN"
-      ],
+      "argv": ["LCS", "lcsa", "lcsb", "MINMATCHLEN"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -2275,14 +1649,7 @@
     {
       "name": "lcs_minmatchlen_negative",
       "now_ms": 6721,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcsb",
-        "IDX",
-        "MINMATCHLEN",
-        "-1"
-      ],
+      "argv": ["LCS", "lcsa", "lcsb", "IDX", "MINMATCHLEN", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2371,14 +1738,7 @@
     {
       "name": "lcs_minmatchlen_not_integer",
       "now_ms": 6722,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcsb",
-        "IDX",
-        "MINMATCHLEN",
-        "abc"
-      ],
+      "argv": ["LCS", "lcsa", "lcsb", "IDX", "MINMATCHLEN", "abc"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -2387,11 +1747,7 @@
     {
       "name": "lcs_setup_list",
       "now_ms": 6723,
-      "argv": [
-        "RPUSH",
-        "lcs_list",
-        "item"
-      ],
+      "argv": ["RPUSH", "lcs_list", "item"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2400,11 +1756,7 @@
     {
       "name": "lcs_wrongtype",
       "now_ms": 6724,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcs_list"
-      ],
+      "argv": ["LCS", "lcsa", "lcs_list"],
       "expect": {
         "kind": "error",
         "value": "ERR The specified keys must contain string values"
@@ -2413,11 +1765,7 @@
     {
       "name": "lcs_both_missing",
       "now_ms": 6725,
-      "argv": [
-        "LCS",
-        "nokey1",
-        "nokey2"
-      ],
+      "argv": ["LCS", "nokey1", "nokey2"],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -2426,13 +1774,7 @@
     {
       "name": "lcs_len_only_ignores_idx",
       "now_ms": 6726,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcsb",
-        "LEN",
-        "IDX"
-      ],
+      "argv": ["LCS", "lcsa", "lcsb", "LEN", "IDX"],
       "expect": {
         "kind": "error",
         "value": "ERR If you want both the length and indexes, please just use IDX."
@@ -2441,14 +1783,7 @@
     {
       "name": "lcs_minmatchlen_filters_all",
       "now_ms": 6727,
-      "argv": [
-        "LCS",
-        "lcsa",
-        "lcsb",
-        "IDX",
-        "MINMATCHLEN",
-        "100"
-      ],
+      "argv": ["LCS", "lcsa", "lcsb", "IDX", "MINMATCHLEN", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2474,11 +1809,7 @@
     {
       "name": "object_encoding_int",
       "now_ms": 6800,
-      "argv": [
-        "SET",
-        "intkey",
-        "12345"
-      ],
+      "argv": ["SET", "intkey", "12345"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2487,11 +1818,7 @@
     {
       "name": "object_encoding_int_verify",
       "now_ms": 6801,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "intkey"
-      ],
+      "argv": ["OBJECT", "ENCODING", "intkey"],
       "expect": {
         "kind": "bulk",
         "value": "int"
@@ -2500,11 +1827,7 @@
     {
       "name": "object_encoding_embstr",
       "now_ms": 6802,
-      "argv": [
-        "SET",
-        "embkey",
-        "hello"
-      ],
+      "argv": ["SET", "embkey", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2513,11 +1836,7 @@
     {
       "name": "object_encoding_embstr_verify",
       "now_ms": 6803,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "embkey"
-      ],
+      "argv": ["OBJECT", "ENCODING", "embkey"],
       "expect": {
         "kind": "bulk",
         "value": "embstr"
@@ -2539,11 +1858,7 @@
     {
       "name": "object_encoding_raw_verify",
       "now_ms": 6805,
-      "argv": [
-        "OBJECT",
-        "ENCODING",
-        "rawkey"
-      ],
+      "argv": ["OBJECT", "ENCODING", "rawkey"],
       "expect": {
         "kind": "bulk",
         "value": "raw"
@@ -2552,13 +1867,7 @@
     {
       "name": "set_overwrite_clears_ttl",
       "now_ms": 6900,
-      "argv": [
-        "SET",
-        "ttlclr",
-        "v",
-        "EX",
-        "100"
-      ],
+      "argv": ["SET", "ttlclr", "v", "EX", "100"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2567,10 +1876,7 @@
     {
       "name": "set_overwrite_clears_ttl_verify",
       "now_ms": 6900,
-      "argv": [
-        "TTL",
-        "ttlclr"
-      ],
+      "argv": ["TTL", "ttlclr"],
       "expect": {
         "kind": "integer",
         "value": 100
@@ -2579,11 +1885,7 @@
     {
       "name": "set_overwrite_clears_ttl_overwrite",
       "now_ms": 6901,
-      "argv": [
-        "SET",
-        "ttlclr",
-        "newval"
-      ],
+      "argv": ["SET", "ttlclr", "newval"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2592,10 +1894,7 @@
     {
       "name": "set_overwrite_clears_ttl_check",
       "now_ms": 6901,
-      "argv": [
-        "TTL",
-        "ttlclr"
-      ],
+      "argv": ["TTL", "ttlclr"],
       "expect": {
         "kind": "integer",
         "value": -1
@@ -2604,9 +1903,7 @@
     {
       "name": "append_wrong_arity",
       "now_ms": 7000,
-      "argv": [
-        "APPEND"
-      ],
+      "argv": ["APPEND"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'append' command"
@@ -2615,9 +1912,7 @@
     {
       "name": "getdel_wrong_arity",
       "now_ms": 7001,
-      "argv": [
-        "GETDEL"
-      ],
+      "argv": ["GETDEL"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'getdel' command"
@@ -2626,9 +1921,7 @@
     {
       "name": "getex_wrong_arity",
       "now_ms": 7002,
-      "argv": [
-        "GETEX"
-      ],
+      "argv": ["GETEX"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'getex' command"
@@ -2637,11 +1930,7 @@
     {
       "name": "psetex_wrong_arity",
       "now_ms": 7003,
-      "argv": [
-        "PSETEX",
-        "k",
-        "100"
-      ],
+      "argv": ["PSETEX", "k", "100"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'psetex' command"
@@ -2650,10 +1939,7 @@
     {
       "name": "setex_wrong_arity",
       "now_ms": 7004,
-      "argv": [
-        "SETEX",
-        "k"
-      ],
+      "argv": ["SETEX", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'setex' command"
@@ -2662,10 +1948,7 @@
     {
       "name": "lcs_wrong_arity",
       "now_ms": 7005,
-      "argv": [
-        "LCS",
-        "k"
-      ],
+      "argv": ["LCS", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'lcs' command"
@@ -2674,10 +1957,7 @@
     {
       "name": "substr_wrong_arity",
       "now_ms": 7006,
-      "argv": [
-        "SUBSTR",
-        "k"
-      ],
+      "argv": ["SUBSTR", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'substr' command"
@@ -2686,11 +1966,7 @@
     {
       "name": "getdel_wrongtype",
       "now_ms": 7100,
-      "argv": [
-        "LPUSH",
-        "gdlist",
-        "a"
-      ],
+      "argv": ["LPUSH", "gdlist", "a"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2699,10 +1975,7 @@
     {
       "name": "getdel_wrongtype_error",
       "now_ms": 7101,
-      "argv": [
-        "GETDEL",
-        "gdlist"
-      ],
+      "argv": ["GETDEL", "gdlist"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2711,11 +1984,7 @@
     {
       "name": "append_wrongtype",
       "now_ms": 7102,
-      "argv": [
-        "APPEND",
-        "gdlist",
-        "val"
-      ],
+      "argv": ["APPEND", "gdlist", "val"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2724,10 +1993,7 @@
     {
       "name": "getex_wrongtype",
       "now_ms": 7103,
-      "argv": [
-        "GETEX",
-        "gdlist"
-      ],
+      "argv": ["GETEX", "gdlist"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2736,11 +2002,7 @@
     {
       "name": "append_to_new_key",
       "now_ms": 8000,
-      "argv": [
-        "APPEND",
-        "appk1",
-        "hello"
-      ],
+      "argv": ["APPEND", "appk1", "hello"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -2749,11 +2011,7 @@
     {
       "name": "append_to_existing",
       "now_ms": 8000,
-      "argv": [
-        "APPEND",
-        "appk1",
-        " world"
-      ],
+      "argv": ["APPEND", "appk1", " world"],
       "expect": {
         "kind": "integer",
         "value": 11
@@ -2762,10 +2020,7 @@
     {
       "name": "append_verify",
       "now_ms": 8000,
-      "argv": [
-        "GET",
-        "appk1"
-      ],
+      "argv": ["GET", "appk1"],
       "expect": {
         "kind": "bulk",
         "value": "hello world"
@@ -2774,11 +2029,7 @@
     {
       "name": "append_empty_string",
       "now_ms": 8000,
-      "argv": [
-        "APPEND",
-        "appk1",
-        ""
-      ],
+      "argv": ["APPEND", "appk1", ""],
       "expect": {
         "kind": "integer",
         "value": 11
@@ -2787,11 +2038,7 @@
     {
       "name": "append_to_empty_key",
       "now_ms": 8000,
-      "argv": [
-        "APPEND",
-        "appk2",
-        ""
-      ],
+      "argv": ["APPEND", "appk2", ""],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2800,10 +2047,7 @@
     {
       "name": "append_wrong_arity",
       "now_ms": 8000,
-      "argv": [
-        "APPEND",
-        "k"
-      ],
+      "argv": ["APPEND", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'append' command"
@@ -2812,10 +2056,7 @@
     {
       "name": "strlen_existing",
       "now_ms": 8000,
-      "argv": [
-        "STRLEN",
-        "appk1"
-      ],
+      "argv": ["STRLEN", "appk1"],
       "expect": {
         "kind": "integer",
         "value": 11
@@ -2824,10 +2065,7 @@
     {
       "name": "strlen_nonexistent",
       "now_ms": 8000,
-      "argv": [
-        "STRLEN",
-        "nosuchstrlen"
-      ],
+      "argv": ["STRLEN", "nosuchstrlen"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2836,11 +2074,7 @@
     {
       "name": "strlen_empty_value_setup",
       "now_ms": 8000,
-      "argv": [
-        "SET",
-        "strlenempty",
-        ""
-      ],
+      "argv": ["SET", "strlenempty", ""],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2849,10 +2083,7 @@
     {
       "name": "strlen_empty_value",
       "now_ms": 8000,
-      "argv": [
-        "STRLEN",
-        "strlenempty"
-      ],
+      "argv": ["STRLEN", "strlenempty"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2861,9 +2092,7 @@
     {
       "name": "strlen_wrong_arity",
       "now_ms": 8000,
-      "argv": [
-        "STRLEN"
-      ],
+      "argv": ["STRLEN"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'strlen' command"
@@ -2872,11 +2101,7 @@
     {
       "name": "strlen_wrongtype_setup",
       "now_ms": 8000,
-      "argv": [
-        "LPUSH",
-        "strlen_list_key",
-        "a"
-      ],
+      "argv": ["LPUSH", "strlen_list_key", "a"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2885,10 +2110,7 @@
     {
       "name": "strlen_wrongtype",
       "now_ms": 8000,
-      "argv": [
-        "STRLEN",
-        "strlen_list_key"
-      ],
+      "argv": ["STRLEN", "strlen_list_key"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2897,11 +2119,7 @@
     {
       "name": "setrange_setup",
       "now_ms": 8000,
-      "argv": [
-        "SET",
-        "srk1",
-        "Hello World"
-      ],
+      "argv": ["SET", "srk1", "Hello World"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2910,12 +2128,7 @@
     {
       "name": "setrange_middle",
       "now_ms": 8000,
-      "argv": [
-        "SETRANGE",
-        "srk1",
-        "6",
-        "Redis"
-      ],
+      "argv": ["SETRANGE", "srk1", "6", "Redis"],
       "expect": {
         "kind": "integer",
         "value": 11
@@ -2924,10 +2137,7 @@
     {
       "name": "setrange_verify",
       "now_ms": 8000,
-      "argv": [
-        "GET",
-        "srk1"
-      ],
+      "argv": ["GET", "srk1"],
       "expect": {
         "kind": "bulk",
         "value": "Hello Redis"
@@ -2936,12 +2146,7 @@
     {
       "name": "setrange_extend",
       "now_ms": 8000,
-      "argv": [
-        "SETRANGE",
-        "srk1",
-        "11",
-        "!!!"
-      ],
+      "argv": ["SETRANGE", "srk1", "11", "!!!"],
       "expect": {
         "kind": "integer",
         "value": 14
@@ -2950,10 +2155,7 @@
     {
       "name": "setrange_extend_verify",
       "now_ms": 8000,
-      "argv": [
-        "GET",
-        "srk1"
-      ],
+      "argv": ["GET", "srk1"],
       "expect": {
         "kind": "bulk",
         "value": "Hello Redis!!!"
@@ -2962,12 +2164,7 @@
     {
       "name": "setrange_new_key",
       "now_ms": 8000,
-      "argv": [
-        "SETRANGE",
-        "srk_new",
-        "5",
-        "hello"
-      ],
+      "argv": ["SETRANGE", "srk_new", "5", "hello"],
       "expect": {
         "kind": "integer",
         "value": 10
@@ -2976,10 +2173,7 @@
     {
       "name": "setrange_new_key_verify",
       "now_ms": 8001,
-      "argv": [
-        "STRLEN",
-        "srk_new"
-      ],
+      "argv": ["STRLEN", "srk_new"],
       "expect": {
         "kind": "integer",
         "value": 10
@@ -2988,12 +2182,7 @@
     {
       "name": "setrange_zero_offset",
       "now_ms": 8001,
-      "argv": [
-        "SETRANGE",
-        "srk1",
-        "0",
-        "Hola!"
-      ],
+      "argv": ["SETRANGE", "srk1", "0", "Hola!"],
       "expect": {
         "kind": "integer",
         "value": 14
@@ -3002,10 +2191,7 @@
     {
       "name": "setrange_zero_verify",
       "now_ms": 8001,
-      "argv": [
-        "GET",
-        "srk1"
-      ],
+      "argv": ["GET", "srk1"],
       "expect": {
         "kind": "bulk",
         "value": "Hola! Redis!!!"
@@ -3014,11 +2200,7 @@
     {
       "name": "setrange_wrong_arity",
       "now_ms": 8001,
-      "argv": [
-        "SETRANGE",
-        "k",
-        "0"
-      ],
+      "argv": ["SETRANGE", "k", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'setrange' command"
@@ -3027,12 +2209,7 @@
     {
       "name": "setrange_negative_offset",
       "now_ms": 8002,
-      "argv": [
-        "SETRANGE",
-        "srk1",
-        "-1",
-        "test"
-      ],
+      "argv": ["SETRANGE", "srk1", "-1", "test"],
       "expect": {
         "kind": "error",
         "value": "ERR offset is out of range"
@@ -3041,12 +2218,7 @@
     {
       "name": "setrange_huge_offset",
       "now_ms": 8003,
-      "argv": [
-        "SETRANGE",
-        "srk1",
-        "536870912",
-        "x"
-      ],
+      "argv": ["SETRANGE", "srk1", "536870912", "x"],
       "expect": {
         "kind": "error",
         "value": "ERR string exceeds maximum allowed size (proto-max-bulk-len)"
@@ -3055,11 +2227,7 @@
     {
       "name": "getrange_setup",
       "now_ms": 8001,
-      "argv": [
-        "SET",
-        "grk1",
-        "Hello, World!"
-      ],
+      "argv": ["SET", "grk1", "Hello, World!"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3068,12 +2236,7 @@
     {
       "name": "getrange_full",
       "now_ms": 8001,
-      "argv": [
-        "GETRANGE",
-        "grk1",
-        "0",
-        "-1"
-      ],
+      "argv": ["GETRANGE", "grk1", "0", "-1"],
       "expect": {
         "kind": "bulk",
         "value": "Hello, World!"
@@ -3082,12 +2245,7 @@
     {
       "name": "getrange_substring",
       "now_ms": 8001,
-      "argv": [
-        "GETRANGE",
-        "grk1",
-        "0",
-        "4"
-      ],
+      "argv": ["GETRANGE", "grk1", "0", "4"],
       "expect": {
         "kind": "bulk",
         "value": "Hello"
@@ -3096,12 +2254,7 @@
     {
       "name": "getrange_negative_end",
       "now_ms": 8001,
-      "argv": [
-        "GETRANGE",
-        "grk1",
-        "7",
-        "-1"
-      ],
+      "argv": ["GETRANGE", "grk1", "7", "-1"],
       "expect": {
         "kind": "bulk",
         "value": "World!"
@@ -3110,12 +2263,7 @@
     {
       "name": "getrange_negative_start",
       "now_ms": 8001,
-      "argv": [
-        "GETRANGE",
-        "grk1",
-        "-6",
-        "-1"
-      ],
+      "argv": ["GETRANGE", "grk1", "-6", "-1"],
       "expect": {
         "kind": "bulk",
         "value": "World!"
@@ -3124,12 +2272,7 @@
     {
       "name": "getrange_out_of_bounds",
       "now_ms": 8001,
-      "argv": [
-        "GETRANGE",
-        "grk1",
-        "0",
-        "100"
-      ],
+      "argv": ["GETRANGE", "grk1", "0", "100"],
       "expect": {
         "kind": "bulk",
         "value": "Hello, World!"
@@ -3138,12 +2281,7 @@
     {
       "name": "getrange_reversed_indices",
       "now_ms": 8001,
-      "argv": [
-        "GETRANGE",
-        "grk1",
-        "5",
-        "2"
-      ],
+      "argv": ["GETRANGE", "grk1", "5", "2"],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -3152,12 +2290,7 @@
     {
       "name": "getrange_nonexistent_key",
       "now_ms": 8001,
-      "argv": [
-        "GETRANGE",
-        "nosuchgrk",
-        "0",
-        "10"
-      ],
+      "argv": ["GETRANGE", "nosuchgrk", "0", "10"],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -3166,10 +2299,7 @@
     {
       "name": "getrange_wrong_arity",
       "now_ms": 8001,
-      "argv": [
-        "GETRANGE",
-        "k"
-      ],
+      "argv": ["GETRANGE", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'getrange' command"
@@ -3178,11 +2308,7 @@
     {
       "name": "getdel_setup",
       "now_ms": 8002,
-      "argv": [
-        "SET",
-        "gdk1",
-        "myvalue"
-      ],
+      "argv": ["SET", "gdk1", "myvalue"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3191,10 +2317,7 @@
     {
       "name": "getdel_returns_value",
       "now_ms": 8002,
-      "argv": [
-        "GETDEL",
-        "gdk1"
-      ],
+      "argv": ["GETDEL", "gdk1"],
       "expect": {
         "kind": "bulk",
         "value": "myvalue"
@@ -3203,10 +2326,7 @@
     {
       "name": "getdel_key_gone",
       "now_ms": 8002,
-      "argv": [
-        "EXISTS",
-        "gdk1"
-      ],
+      "argv": ["EXISTS", "gdk1"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3215,10 +2335,7 @@
     {
       "name": "getdel_nonexistent",
       "now_ms": 8002,
-      "argv": [
-        "GETDEL",
-        "nosuchgdk"
-      ],
+      "argv": ["GETDEL", "nosuchgdk"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -3227,9 +2344,7 @@
     {
       "name": "getdel_wrong_arity",
       "now_ms": 8002,
-      "argv": [
-        "GETDEL"
-      ],
+      "argv": ["GETDEL"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'getdel' command"
@@ -3238,10 +2353,7 @@
     {
       "name": "incr_new_key",
       "now_ms": 8003,
-      "argv": [
-        "INCR",
-        "incrk_new"
-      ],
+      "argv": ["INCR", "incrk_new"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -3250,10 +2362,7 @@
     {
       "name": "decr_new_key",
       "now_ms": 8003,
-      "argv": [
-        "DECR",
-        "decrk_new"
-      ],
+      "argv": ["DECR", "decrk_new"],
       "expect": {
         "kind": "integer",
         "value": -1
@@ -3262,11 +2371,7 @@
     {
       "name": "incrby_new_key",
       "now_ms": 8003,
-      "argv": [
-        "INCRBY",
-        "incrbyk_new",
-        "100"
-      ],
+      "argv": ["INCRBY", "incrbyk_new", "100"],
       "expect": {
         "kind": "integer",
         "value": 100
@@ -3275,11 +2380,7 @@
     {
       "name": "decrby_new_key",
       "now_ms": 8003,
-      "argv": [
-        "DECRBY",
-        "decrbyk_new",
-        "50"
-      ],
+      "argv": ["DECRBY", "decrbyk_new", "50"],
       "expect": {
         "kind": "integer",
         "value": -50
@@ -3288,11 +2389,7 @@
     {
       "name": "incr_not_integer_setup",
       "now_ms": 8003,
-      "argv": [
-        "SET",
-        "incrk_str",
-        "not_a_number"
-      ],
+      "argv": ["SET", "incrk_str", "not_a_number"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3301,10 +2398,7 @@
     {
       "name": "incr_not_integer",
       "now_ms": 8003,
-      "argv": [
-        "INCR",
-        "incrk_str"
-      ],
+      "argv": ["INCR", "incrk_str"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -3313,11 +2407,7 @@
     {
       "name": "incrbyfloat_new_key",
       "now_ms": 8003,
-      "argv": [
-        "INCRBYFLOAT",
-        "incrbyfk_new",
-        "3.14"
-      ],
+      "argv": ["INCRBYFLOAT", "incrbyfk_new", "3.14"],
       "expect": {
         "kind": "bulk",
         "value": "3.14"
@@ -3326,11 +2416,7 @@
     {
       "name": "incrbyfloat_negative",
       "now_ms": 8003,
-      "argv": [
-        "INCRBYFLOAT",
-        "incrbyfk_new",
-        "-1.14"
-      ],
+      "argv": ["INCRBYFLOAT", "incrbyfk_new", "-1.14"],
       "expect": {
         "kind": "bulk",
         "value": "2"
@@ -3339,11 +2425,7 @@
     {
       "name": "getset_setup",
       "now_ms": 8004,
-      "argv": [
-        "SET",
-        "gsk1",
-        "old"
-      ],
+      "argv": ["SET", "gsk1", "old"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3352,11 +2434,7 @@
     {
       "name": "getset_returns_old",
       "now_ms": 8004,
-      "argv": [
-        "GETSET",
-        "gsk1",
-        "new"
-      ],
+      "argv": ["GETSET", "gsk1", "new"],
       "expect": {
         "kind": "bulk",
         "value": "old"
@@ -3365,10 +2443,7 @@
     {
       "name": "getset_verify_new",
       "now_ms": 8004,
-      "argv": [
-        "GET",
-        "gsk1"
-      ],
+      "argv": ["GET", "gsk1"],
       "expect": {
         "kind": "bulk",
         "value": "new"
@@ -3377,11 +2452,7 @@
     {
       "name": "getset_nonexistent_returns_nil",
       "now_ms": 8004,
-      "argv": [
-        "GETSET",
-        "gsk_nosuch",
-        "val"
-      ],
+      "argv": ["GETSET", "gsk_nosuch", "val"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -3390,10 +2461,7 @@
     {
       "name": "getset_nonexistent_creates_key",
       "now_ms": 8004,
-      "argv": [
-        "GET",
-        "gsk_nosuch"
-      ],
+      "argv": ["GET", "gsk_nosuch"],
       "expect": {
         "kind": "bulk",
         "value": "val"
@@ -3402,11 +2470,7 @@
     {
       "name": "setnx_new_key",
       "now_ms": 8005,
-      "argv": [
-        "SETNX",
-        "setnxk1",
-        "hello"
-      ],
+      "argv": ["SETNX", "setnxk1", "hello"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -3415,11 +2479,7 @@
     {
       "name": "setnx_existing_key",
       "now_ms": 8005,
-      "argv": [
-        "SETNX",
-        "setnxk1",
-        "world"
-      ],
+      "argv": ["SETNX", "setnxk1", "world"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3428,10 +2488,7 @@
     {
       "name": "setnx_verify_unchanged",
       "now_ms": 8005,
-      "argv": [
-        "GET",
-        "setnxk1"
-      ],
+      "argv": ["GET", "setnxk1"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -3440,15 +2497,7 @@
     {
       "name": "msetnx_all_new",
       "now_ms": 8006,
-      "argv": [
-        "MSETNX",
-        "mnx1",
-        "a",
-        "mnx2",
-        "b",
-        "mnx3",
-        "c"
-      ],
+      "argv": ["MSETNX", "mnx1", "a", "mnx2", "b", "mnx3", "c"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -3457,13 +2506,7 @@
     {
       "name": "msetnx_one_exists",
       "now_ms": 8006,
-      "argv": [
-        "MSETNX",
-        "mnx3",
-        "x",
-        "mnx4",
-        "d"
-      ],
+      "argv": ["MSETNX", "mnx3", "x", "mnx4", "d"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3472,10 +2515,7 @@
     {
       "name": "msetnx_verify_no_changes",
       "now_ms": 8006,
-      "argv": [
-        "GET",
-        "mnx4"
-      ],
+      "argv": ["GET", "mnx4"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -3484,10 +2524,7 @@
     {
       "name": "msetnx_verify_original",
       "now_ms": 8006,
-      "argv": [
-        "GET",
-        "mnx3"
-      ],
+      "argv": ["GET", "mnx3"],
       "expect": {
         "kind": "bulk",
         "value": "c"
@@ -3496,12 +2533,7 @@
     {
       "name": "substr_basic",
       "now_ms": 8007,
-      "argv": [
-        "SUBSTR",
-        "grk1",
-        "0",
-        "4"
-      ],
+      "argv": ["SUBSTR", "grk1", "0", "4"],
       "expect": {
         "kind": "bulk",
         "value": "Hello"
@@ -3510,13 +2542,7 @@
     {
       "name": "set_ex_zero_rejects",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "zeroex",
-        "val",
-        "EX",
-        "0"
-      ],
+      "argv": ["SET", "zeroex", "val", "EX", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'set' command"
@@ -3525,13 +2551,7 @@
     {
       "name": "set_px_zero_rejects",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "zeropx",
-        "val",
-        "PX",
-        "0"
-      ],
+      "argv": ["SET", "zeropx", "val", "PX", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'set' command"
@@ -3540,13 +2560,7 @@
     {
       "name": "set_exat_zero_rejects",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "zeroexat",
-        "val",
-        "EXAT",
-        "0"
-      ],
+      "argv": ["SET", "zeroexat", "val", "EXAT", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'set' command"
@@ -3555,13 +2569,7 @@
     {
       "name": "set_pxat_zero_rejects",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "zeropxat",
-        "val",
-        "PXAT",
-        "0"
-      ],
+      "argv": ["SET", "zeropxat", "val", "PXAT", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'set' command"
@@ -3570,13 +2578,7 @@
     {
       "name": "set_ex_negative_rejects",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "negex",
-        "val",
-        "EX",
-        "-1"
-      ],
+      "argv": ["SET", "negex", "val", "EX", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'set' command"
@@ -3585,13 +2587,7 @@
     {
       "name": "set_px_negative_rejects",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "negpx",
-        "val",
-        "PX",
-        "-1"
-      ],
+      "argv": ["SET", "negpx", "val", "PX", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'set' command"
@@ -3600,13 +2596,7 @@
     {
       "name": "set_ex_one_works",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "exone",
-        "val",
-        "EX",
-        "1"
-      ],
+      "argv": ["SET", "exone", "val", "EX", "1"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3615,11 +2605,7 @@
     {
       "name": "getex_setup_for_zero_test",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "getexzero",
-        "hello"
-      ],
+      "argv": ["SET", "getexzero", "hello"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3628,12 +2614,7 @@
     {
       "name": "getex_ex_zero_rejects",
       "now_ms": 1000,
-      "argv": [
-        "GETEX",
-        "getexzero",
-        "EX",
-        "0"
-      ],
+      "argv": ["GETEX", "getexzero", "EX", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'getex' command"
@@ -3642,12 +2623,7 @@
     {
       "name": "getex_px_zero_rejects",
       "now_ms": 1000,
-      "argv": [
-        "GETEX",
-        "getexzero",
-        "PX",
-        "0"
-      ],
+      "argv": ["GETEX", "getexzero", "PX", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'getex' command"
@@ -3656,12 +2632,7 @@
     {
       "name": "getex_exat_zero_rejects",
       "now_ms": 1000,
-      "argv": [
-        "GETEX",
-        "getexzero",
-        "EXAT",
-        "0"
-      ],
+      "argv": ["GETEX", "getexzero", "EXAT", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'getex' command"
@@ -3670,12 +2641,7 @@
     {
       "name": "getex_pxat_zero_rejects",
       "now_ms": 1000,
-      "argv": [
-        "GETEX",
-        "getexzero",
-        "PXAT",
-        "0"
-      ],
+      "argv": ["GETEX", "getexzero", "PXAT", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR invalid expire time in 'getex' command"
@@ -3684,12 +2650,7 @@
     {
       "name": "getex_ex_one_works",
       "now_ms": 1000,
-      "argv": [
-        "GETEX",
-        "getexzero",
-        "EX",
-        "1"
-      ],
+      "argv": ["GETEX", "getexzero", "EX", "1"],
       "expect": {
         "kind": "bulk",
         "value": "hello"
@@ -3698,9 +2659,7 @@
     {
       "name": "set_zero_expiry_cleanup",
       "now_ms": 1000,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3709,11 +2668,7 @@
     {
       "name": "incrbyfloat_inf_setup",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "floatinf",
-        "0"
-      ],
+      "argv": ["SET", "floatinf", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3722,11 +2677,7 @@
     {
       "name": "incrbyfloat_inf_returns_inf",
       "now_ms": 1000,
-      "argv": [
-        "INCRBYFLOAT",
-        "floatinf",
-        "inf"
-      ],
+      "argv": ["INCRBYFLOAT", "floatinf", "inf"],
       "expect": {
         "kind": "error",
         "value": "ERR increment would produce NaN or Infinity"
@@ -3735,10 +2686,7 @@
     {
       "name": "incrbyfloat_get_inf",
       "now_ms": 1000,
-      "argv": [
-        "GET",
-        "floatinf"
-      ],
+      "argv": ["GET", "floatinf"],
       "expect": {
         "kind": "bulk",
         "value": "0"
@@ -3747,11 +2695,7 @@
     {
       "name": "incrbyfloat_neg_inf_setup",
       "now_ms": 1000,
-      "argv": [
-        "SET",
-        "floatneginf",
-        "0"
-      ],
+      "argv": ["SET", "floatneginf", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3760,11 +2704,7 @@
     {
       "name": "incrbyfloat_neg_inf_returns_neg_inf",
       "now_ms": 1000,
-      "argv": [
-        "INCRBYFLOAT",
-        "floatneginf",
-        "-inf"
-      ],
+      "argv": ["INCRBYFLOAT", "floatneginf", "-inf"],
       "expect": {
         "kind": "error",
         "value": "ERR increment would produce NaN or Infinity"
@@ -3773,11 +2713,7 @@
     {
       "name": "incrbyfloat_inf_minus_inf_error",
       "now_ms": 1000,
-      "argv": [
-        "INCRBYFLOAT",
-        "floatinf",
-        "-inf"
-      ],
+      "argv": ["INCRBYFLOAT", "floatinf", "-inf"],
       "expect": {
         "kind": "error",
         "value": "ERR increment would produce NaN or Infinity"
@@ -3786,11 +2722,7 @@
     {
       "name": "incrbyfloat_nan_error",
       "now_ms": 1000,
-      "argv": [
-        "INCRBYFLOAT",
-        "floatinf",
-        "nan"
-      ],
+      "argv": ["INCRBYFLOAT", "floatinf", "nan"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not a valid float"
@@ -3799,11 +2731,7 @@
     {
       "name": "incrbyfloat_inf_plus_zero_stays_inf",
       "now_ms": 1000,
-      "argv": [
-        "INCRBYFLOAT",
-        "floatinf",
-        "0"
-      ],
+      "argv": ["INCRBYFLOAT", "floatinf", "0"],
       "expect": {
         "kind": "bulk",
         "value": "0"
@@ -3812,9 +2740,7 @@
     {
       "name": "incrbyfloat_inf_cleanup",
       "now_ms": 1000,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3823,9 +2749,7 @@
     {
       "name": "mget_setup",
       "now_ms": 100,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3834,15 +2758,7 @@
     {
       "name": "mget_setup_keys",
       "now_ms": 100,
-      "argv": [
-        "MSET",
-        "mk1",
-        "v1",
-        "mk2",
-        "v2",
-        "mk3",
-        "v3"
-      ],
+      "argv": ["MSET", "mk1", "v1", "mk2", "v2", "mk3", "v3"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3851,12 +2767,7 @@
     {
       "name": "mget_all_exist",
       "now_ms": 100,
-      "argv": [
-        "MGET",
-        "mk1",
-        "mk2",
-        "mk3"
-      ],
+      "argv": ["MGET", "mk1", "mk2", "mk3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3878,12 +2789,7 @@
     {
       "name": "mget_some_missing",
       "now_ms": 100,
-      "argv": [
-        "MGET",
-        "mk1",
-        "nokey",
-        "mk3"
-      ],
+      "argv": ["MGET", "mk1", "nokey", "mk3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3905,11 +2811,7 @@
     {
       "name": "mget_all_missing",
       "now_ms": 100,
-      "argv": [
-        "MGET",
-        "nokey1",
-        "nokey2"
-      ],
+      "argv": ["MGET", "nokey1", "nokey2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3927,10 +2829,7 @@
     {
       "name": "mget_single_key",
       "now_ms": 100,
-      "argv": [
-        "MGET",
-        "mk1"
-      ],
+      "argv": ["MGET", "mk1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3944,13 +2843,7 @@
     {
       "name": "mset_overwrite",
       "now_ms": 100,
-      "argv": [
-        "MSET",
-        "mk1",
-        "new1",
-        "mk2",
-        "new2"
-      ],
+      "argv": ["MSET", "mk1", "new1", "mk2", "new2"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -3959,11 +2852,7 @@
     {
       "name": "mset_verify",
       "now_ms": 100,
-      "argv": [
-        "MGET",
-        "mk1",
-        "mk2"
-      ],
+      "argv": ["MGET", "mk1", "mk2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3981,12 +2870,7 @@
     {
       "name": "mset_wrong_arity_odd",
       "now_ms": 100,
-      "argv": [
-        "MSET",
-        "k1",
-        "v1",
-        "k2"
-      ],
+      "argv": ["MSET", "k1", "v1", "k2"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'mset' command"
@@ -3995,13 +2879,7 @@
     {
       "name": "msetnx_all_new",
       "now_ms": 100,
-      "argv": [
-        "MSETNX",
-        "mnx1",
-        "v1",
-        "mnx2",
-        "v2"
-      ],
+      "argv": ["MSETNX", "mnx1", "v1", "mnx2", "v2"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -4010,13 +2888,7 @@
     {
       "name": "msetnx_one_exists",
       "now_ms": 100,
-      "argv": [
-        "MSETNX",
-        "mnx1",
-        "new",
-        "mnx3",
-        "v3"
-      ],
+      "argv": ["MSETNX", "mnx1", "new", "mnx3", "v3"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -4025,11 +2897,7 @@
     {
       "name": "msetnx_blocked_verify",
       "now_ms": 100,
-      "argv": [
-        "MGET",
-        "mnx1",
-        "mnx3"
-      ],
+      "argv": ["MGET", "mnx1", "mnx3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4047,11 +2915,7 @@
     {
       "name": "incrbyfloat_format_integer_result",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "ifmt",
-        "10.5"
-      ],
+      "argv": ["SET", "ifmt", "10.5"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4060,11 +2924,7 @@
     {
       "name": "incrbyfloat_format_add_half",
       "now_ms": 100,
-      "argv": [
-        "INCRBYFLOAT",
-        "ifmt",
-        "0.5"
-      ],
+      "argv": ["INCRBYFLOAT", "ifmt", "0.5"],
       "expect": {
         "kind": "bulk",
         "value": "11"
@@ -4073,11 +2933,7 @@
     {
       "name": "incrbyfloat_format_small_decimal",
       "now_ms": 100,
-      "argv": [
-        "SET",
-        "ifmt2",
-        "0"
-      ],
+      "argv": ["SET", "ifmt2", "0"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4086,11 +2942,7 @@
     {
       "name": "incrbyfloat_format_pi",
       "now_ms": 100,
-      "argv": [
-        "INCRBYFLOAT",
-        "ifmt2",
-        "3.14159"
-      ],
+      "argv": ["INCRBYFLOAT", "ifmt2", "3.14159"],
       "expect": {
         "kind": "bulk",
         "value": "3.14159"
@@ -4099,11 +2951,7 @@
     {
       "name": "getdel_setup",
       "now_ms": 200,
-      "argv": [
-        "SET",
-        "getdel_key",
-        "getdel_value"
-      ],
+      "argv": ["SET", "getdel_key", "getdel_value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4112,10 +2960,7 @@
     {
       "name": "getdel_returns_value",
       "now_ms": 201,
-      "argv": [
-        "GETDEL",
-        "getdel_key"
-      ],
+      "argv": ["GETDEL", "getdel_key"],
       "expect": {
         "kind": "bulk",
         "value": "getdel_value"
@@ -4124,10 +2969,7 @@
     {
       "name": "getdel_key_gone",
       "now_ms": 202,
-      "argv": [
-        "EXISTS",
-        "getdel_key"
-      ],
+      "argv": ["EXISTS", "getdel_key"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -4136,10 +2978,7 @@
     {
       "name": "getdel_nonexistent",
       "now_ms": 203,
-      "argv": [
-        "GETDEL",
-        "no_such_key_for_getdel"
-      ],
+      "argv": ["GETDEL", "no_such_key_for_getdel"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -4148,11 +2987,7 @@
     {
       "name": "getex_setup",
       "now_ms": 300,
-      "argv": [
-        "SET",
-        "getex_key",
-        "getex_value"
-      ],
+      "argv": ["SET", "getex_key", "getex_value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4161,10 +2996,7 @@
     {
       "name": "getex_plain_returns_value",
       "now_ms": 301,
-      "argv": [
-        "GETEX",
-        "getex_key"
-      ],
+      "argv": ["GETEX", "getex_key"],
       "expect": {
         "kind": "bulk",
         "value": "getex_value"
@@ -4173,12 +3005,7 @@
     {
       "name": "getex_set_ex",
       "now_ms": 302,
-      "argv": [
-        "GETEX",
-        "getex_key",
-        "EX",
-        "60"
-      ],
+      "argv": ["GETEX", "getex_key", "EX", "60"],
       "expect": {
         "kind": "bulk",
         "value": "getex_value"
@@ -4187,10 +3014,7 @@
     {
       "name": "getex_verify_ttl_set",
       "now_ms": 302,
-      "argv": [
-        "TTL",
-        "getex_key"
-      ],
+      "argv": ["TTL", "getex_key"],
       "expect": {
         "kind": "integer",
         "value": 60
@@ -4199,11 +3023,7 @@
     {
       "name": "getex_persist",
       "now_ms": 303,
-      "argv": [
-        "GETEX",
-        "getex_key",
-        "PERSIST"
-      ],
+      "argv": ["GETEX", "getex_key", "PERSIST"],
       "expect": {
         "kind": "bulk",
         "value": "getex_value"
@@ -4212,10 +3032,7 @@
     {
       "name": "getex_verify_ttl_removed",
       "now_ms": 303,
-      "argv": [
-        "TTL",
-        "getex_key"
-      ],
+      "argv": ["TTL", "getex_key"],
       "expect": {
         "kind": "integer",
         "value": -1
@@ -4224,10 +3041,7 @@
     {
       "name": "getex_nonexistent",
       "now_ms": 304,
-      "argv": [
-        "GETEX",
-        "no_such_key_for_getex"
-      ],
+      "argv": ["GETEX", "no_such_key_for_getex"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -4236,9 +3050,7 @@
     {
       "name": "mget_cleanup",
       "now_ms": 400,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4247,12 +3059,7 @@
     {
       "name": "setex_leading_plus_seconds",
       "now_ms": 500,
-      "argv": [
-        "SETEX",
-        "key",
-        "+10",
-        "val"
-      ],
+      "argv": ["SETEX", "key", "+10", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4261,12 +3068,7 @@
     {
       "name": "setex_leading_zero_seconds",
       "now_ms": 501,
-      "argv": [
-        "SETEX",
-        "key",
-        "010",
-        "val"
-      ],
+      "argv": ["SETEX", "key", "010", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4275,12 +3077,7 @@
     {
       "name": "setex_float_seconds",
       "now_ms": 502,
-      "argv": [
-        "SETEX",
-        "key",
-        "10.5",
-        "val"
-      ],
+      "argv": ["SETEX", "key", "10.5", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4289,12 +3086,7 @@
     {
       "name": "setex_empty_seconds",
       "now_ms": 503,
-      "argv": [
-        "SETEX",
-        "key",
-        "",
-        "val"
-      ],
+      "argv": ["SETEX", "key", "", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4303,12 +3095,7 @@
     {
       "name": "psetex_leading_plus_ms",
       "now_ms": 510,
-      "argv": [
-        "PSETEX",
-        "key",
-        "+1000",
-        "val"
-      ],
+      "argv": ["PSETEX", "key", "+1000", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4317,12 +3104,7 @@
     {
       "name": "psetex_leading_zero_ms",
       "now_ms": 511,
-      "argv": [
-        "PSETEX",
-        "key",
-        "01000",
-        "val"
-      ],
+      "argv": ["PSETEX", "key", "01000", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4331,12 +3113,7 @@
     {
       "name": "psetex_float_ms",
       "now_ms": 512,
-      "argv": [
-        "PSETEX",
-        "key",
-        "1000.5",
-        "val"
-      ],
+      "argv": ["PSETEX", "key", "1000.5", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4345,12 +3122,7 @@
     {
       "name": "psetex_empty_ms",
       "now_ms": 513,
-      "argv": [
-        "PSETEX",
-        "key",
-        "",
-        "val"
-      ],
+      "argv": ["PSETEX", "key", "", "val"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4359,11 +3131,7 @@
     {
       "name": "getex_setup_key",
       "now_ms": 520,
-      "argv": [
-        "SET",
-        "getex_nc_key",
-        "value"
-      ],
+      "argv": ["SET", "getex_nc_key", "value"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4372,12 +3140,7 @@
     {
       "name": "getex_ex_leading_plus",
       "now_ms": 521,
-      "argv": [
-        "GETEX",
-        "getex_nc_key",
-        "EX",
-        "+10"
-      ],
+      "argv": ["GETEX", "getex_nc_key", "EX", "+10"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4386,12 +3149,7 @@
     {
       "name": "getex_ex_leading_zero",
       "now_ms": 522,
-      "argv": [
-        "GETEX",
-        "getex_nc_key",
-        "EX",
-        "010"
-      ],
+      "argv": ["GETEX", "getex_nc_key", "EX", "010"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4400,12 +3158,7 @@
     {
       "name": "getex_ex_float",
       "now_ms": 523,
-      "argv": [
-        "GETEX",
-        "getex_nc_key",
-        "EX",
-        "10.5"
-      ],
+      "argv": ["GETEX", "getex_nc_key", "EX", "10.5"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4414,12 +3167,7 @@
     {
       "name": "getex_ex_empty",
       "now_ms": 524,
-      "argv": [
-        "GETEX",
-        "getex_nc_key",
-        "EX",
-        ""
-      ],
+      "argv": ["GETEX", "getex_nc_key", "EX", ""],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4428,12 +3176,7 @@
     {
       "name": "getex_px_leading_plus",
       "now_ms": 525,
-      "argv": [
-        "GETEX",
-        "getex_nc_key",
-        "PX",
-        "+10000"
-      ],
+      "argv": ["GETEX", "getex_nc_key", "PX", "+10000"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4442,12 +3185,7 @@
     {
       "name": "getex_px_leading_zero",
       "now_ms": 526,
-      "argv": [
-        "GETEX",
-        "getex_nc_key",
-        "PX",
-        "010000"
-      ],
+      "argv": ["GETEX", "getex_nc_key", "PX", "010000"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4456,12 +3194,7 @@
     {
       "name": "getex_exat_leading_plus",
       "now_ms": 527,
-      "argv": [
-        "GETEX",
-        "getex_nc_key",
-        "EXAT",
-        "+9999999999"
-      ],
+      "argv": ["GETEX", "getex_nc_key", "EXAT", "+9999999999"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4470,12 +3203,7 @@
     {
       "name": "getex_exat_leading_zero",
       "now_ms": 528,
-      "argv": [
-        "GETEX",
-        "getex_nc_key",
-        "EXAT",
-        "09999999999"
-      ],
+      "argv": ["GETEX", "getex_nc_key", "EXAT", "09999999999"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4484,12 +3212,7 @@
     {
       "name": "getex_pxat_leading_plus",
       "now_ms": 529,
-      "argv": [
-        "GETEX",
-        "getex_nc_key",
-        "PXAT",
-        "+9999999999999"
-      ],
+      "argv": ["GETEX", "getex_nc_key", "PXAT", "+9999999999999"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4498,12 +3221,7 @@
     {
       "name": "getex_pxat_leading_zero",
       "now_ms": 530,
-      "argv": [
-        "GETEX",
-        "getex_nc_key",
-        "PXAT",
-        "09999999999999"
-      ],
+      "argv": ["GETEX", "getex_nc_key", "PXAT", "09999999999999"],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"

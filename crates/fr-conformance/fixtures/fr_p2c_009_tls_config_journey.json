@@ -52,11 +52,7 @@
     {
       "name": "promote_runtime_epoch_key",
       "now_ms": 8,
-      "argv": [
-        "RENAME",
-        "fr:p2c:009:config:epoch",
-        "fr:p2c:009:config:epoch:active"
-      ],
+      "argv": ["RENAME", "fr:p2c:009:config:epoch", "fr:p2c:009:config:epoch:active"],
       "expect": { "kind": "simple", "value": "OK" }
     },
     {

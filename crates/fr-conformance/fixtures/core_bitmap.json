@@ -4,12 +4,7 @@
     {
       "name": "setbit_creates_key_returns_0",
       "now_ms": 0,
-      "argv": [
-        "SETBIT",
-        "bm1",
-        "7",
-        "1"
-      ],
+      "argv": ["SETBIT", "bm1", "7", "1"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -18,11 +13,7 @@
     {
       "name": "getbit_returns_set_bit",
       "now_ms": 1,
-      "argv": [
-        "GETBIT",
-        "bm1",
-        "7"
-      ],
+      "argv": ["GETBIT", "bm1", "7"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -31,11 +22,7 @@
     {
       "name": "getbit_returns_0_for_unset_bit",
       "now_ms": 2,
-      "argv": [
-        "GETBIT",
-        "bm1",
-        "0"
-      ],
+      "argv": ["GETBIT", "bm1", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -44,12 +31,7 @@
     {
       "name": "setbit_returns_old_value",
       "now_ms": 3,
-      "argv": [
-        "SETBIT",
-        "bm1",
-        "7",
-        "0"
-      ],
+      "argv": ["SETBIT", "bm1", "7", "0"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -58,11 +40,7 @@
     {
       "name": "getbit_after_clear_returns_0",
       "now_ms": 4,
-      "argv": [
-        "GETBIT",
-        "bm1",
-        "7"
-      ],
+      "argv": ["GETBIT", "bm1", "7"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -71,11 +49,7 @@
     {
       "name": "getbit_missing_key_returns_0",
       "now_ms": 5,
-      "argv": [
-        "GETBIT",
-        "nosuchkey",
-        "100"
-      ],
+      "argv": ["GETBIT", "nosuchkey", "100"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -84,12 +58,7 @@
     {
       "name": "setbit_high_offset",
       "now_ms": 6,
-      "argv": [
-        "SETBIT",
-        "bm2",
-        "100",
-        "1"
-      ],
+      "argv": ["SETBIT", "bm2", "100", "1"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -98,11 +67,7 @@
     {
       "name": "getbit_high_offset",
       "now_ms": 7,
-      "argv": [
-        "GETBIT",
-        "bm2",
-        "100"
-      ],
+      "argv": ["GETBIT", "bm2", "100"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -111,11 +76,7 @@
     {
       "name": "setup_bitcount_key",
       "now_ms": 10,
-      "argv": [
-        "SET",
-        "bckey",
-        "foobar"
-      ],
+      "argv": ["SET", "bckey", "foobar"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -124,10 +85,7 @@
     {
       "name": "bitcount_whole_string",
       "now_ms": 11,
-      "argv": [
-        "BITCOUNT",
-        "bckey"
-      ],
+      "argv": ["BITCOUNT", "bckey"],
       "expect": {
         "kind": "integer",
         "value": 26
@@ -136,12 +94,7 @@
     {
       "name": "bitcount_byte_range_0_0",
       "now_ms": 12,
-      "argv": [
-        "BITCOUNT",
-        "bckey",
-        "0",
-        "0"
-      ],
+      "argv": ["BITCOUNT", "bckey", "0", "0"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -150,12 +103,7 @@
     {
       "name": "bitcount_byte_range_1_1",
       "now_ms": 13,
-      "argv": [
-        "BITCOUNT",
-        "bckey",
-        "1",
-        "1"
-      ],
+      "argv": ["BITCOUNT", "bckey", "1", "1"],
       "expect": {
         "kind": "integer",
         "value": 6
@@ -164,10 +112,7 @@
     {
       "name": "bitcount_missing_key",
       "now_ms": 14,
-      "argv": [
-        "BITCOUNT",
-        "nosuchkey"
-      ],
+      "argv": ["BITCOUNT", "nosuchkey"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -176,12 +121,7 @@
     {
       "name": "bitcount_negative_range",
       "now_ms": 15,
-      "argv": [
-        "BITCOUNT",
-        "bckey",
-        "-2",
-        "-1"
-      ],
+      "argv": ["BITCOUNT", "bckey", "-2", "-1"],
       "expect": {
         "kind": "integer",
         "value": 7
@@ -190,13 +130,7 @@
     {
       "name": "bitcount_bit_range_10_14",
       "now_ms": 16,
-      "argv": [
-        "BITCOUNT",
-        "bckey",
-        "10",
-        "14",
-        "BIT"
-      ],
+      "argv": ["BITCOUNT", "bckey", "10", "14", "BIT"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -205,13 +139,7 @@
     {
       "name": "bitcount_bit_range_out_of_bounds",
       "now_ms": 17,
-      "argv": [
-        "BITCOUNT",
-        "bckey",
-        "32",
-        "87",
-        "BIT"
-      ],
+      "argv": ["BITCOUNT", "bckey", "32", "87", "BIT"],
       "expect": {
         "kind": "integer",
         "value": 7
@@ -220,13 +148,7 @@
     {
       "name": "bitcount_bit_negative_reverse",
       "now_ms": 18,
-      "argv": [
-        "BITCOUNT",
-        "bckey",
-        "-6",
-        "-15",
-        "BIT"
-      ],
+      "argv": ["BITCOUNT", "bckey", "-6", "-15", "BIT"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -235,11 +157,7 @@
     {
       "name": "bitcount_syntax_error_missing_end",
       "now_ms": 19,
-      "argv": [
-        "BITCOUNT",
-        "bckey",
-        "0"
-      ],
+      "argv": ["BITCOUNT", "bckey", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -248,11 +166,7 @@
     {
       "name": "bitpos_find_first_set_bit",
       "now_ms": 20,
-      "argv": [
-        "BITPOS",
-        "bckey",
-        "1"
-      ],
+      "argv": ["BITPOS", "bckey", "1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -261,11 +175,7 @@
     {
       "name": "bitpos_find_first_clear_bit",
       "now_ms": 21,
-      "argv": [
-        "BITPOS",
-        "bckey",
-        "0"
-      ],
+      "argv": ["BITPOS", "bckey", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -274,11 +184,7 @@
     {
       "name": "bitpos_missing_key_bit_0",
       "now_ms": 22,
-      "argv": [
-        "BITPOS",
-        "nosuchkey",
-        "0"
-      ],
+      "argv": ["BITPOS", "nosuchkey", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -287,11 +193,7 @@
     {
       "name": "bitpos_missing_key_bit_1",
       "now_ms": 23,
-      "argv": [
-        "BITPOS",
-        "nosuchkey",
-        "1"
-      ],
+      "argv": ["BITPOS", "nosuchkey", "1"],
       "expect": {
         "kind": "integer",
         "value": -1
@@ -300,11 +202,7 @@
     {
       "name": "bitop_and_setup_key1",
       "now_ms": 30,
-      "argv": [
-        "SET",
-        "bo1",
-        "abc"
-      ],
+      "argv": ["SET", "bo1", "abc"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -313,11 +211,7 @@
     {
       "name": "bitop_and_setup_key2",
       "now_ms": 31,
-      "argv": [
-        "SET",
-        "bo2",
-        "abc"
-      ],
+      "argv": ["SET", "bo2", "abc"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -326,13 +220,7 @@
     {
       "name": "bitop_and_same_keys",
       "now_ms": 32,
-      "argv": [
-        "BITOP",
-        "AND",
-        "bo_dest",
-        "bo1",
-        "bo2"
-      ],
+      "argv": ["BITOP", "AND", "bo_dest", "bo1", "bo2"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -341,10 +229,7 @@
     {
       "name": "bitop_and_result_check",
       "now_ms": 33,
-      "argv": [
-        "GET",
-        "bo_dest"
-      ],
+      "argv": ["GET", "bo_dest"],
       "expect": {
         "kind": "bulk",
         "value": "abc"
@@ -353,12 +238,7 @@
     {
       "name": "bitop_not",
       "now_ms": 34,
-      "argv": [
-        "BITOP",
-        "NOT",
-        "bo_not",
-        "bo1"
-      ],
+      "argv": ["BITOP", "NOT", "bo_not", "bo1"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -367,13 +247,7 @@
     {
       "name": "bitop_not_multiple_sources_error",
       "now_ms": 35,
-      "argv": [
-        "BITOP",
-        "NOT",
-        "bo_not2",
-        "bo1",
-        "bo2"
-      ],
+      "argv": ["BITOP", "NOT", "bo_not2", "bo1", "bo2"],
       "expect": {
         "kind": "error",
         "value": "ERR BITOP NOT must be called with a single source key."
@@ -382,13 +256,7 @@
     {
       "name": "bitop_or",
       "now_ms": 36,
-      "argv": [
-        "BITOP",
-        "OR",
-        "bo_or",
-        "bo1",
-        "bo2"
-      ],
+      "argv": ["BITOP", "OR", "bo_or", "bo1", "bo2"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -397,13 +265,7 @@
     {
       "name": "bitop_xor",
       "now_ms": 37,
-      "argv": [
-        "BITOP",
-        "XOR",
-        "bo_xor",
-        "bo1",
-        "bo2"
-      ],
+      "argv": ["BITOP", "XOR", "bo_xor", "bo1", "bo2"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -412,10 +274,7 @@
     {
       "name": "bitop_xor_same_key_zeroes",
       "now_ms": 38,
-      "argv": [
-        "BITCOUNT",
-        "bo_xor"
-      ],
+      "argv": ["BITCOUNT", "bo_xor"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -424,9 +283,7 @@
     {
       "name": "setbit_wrong_arity_no_args",
       "now_ms": 40,
-      "argv": [
-        "SETBIT"
-      ],
+      "argv": ["SETBIT"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'setbit' command"
@@ -435,9 +292,7 @@
     {
       "name": "getbit_wrong_arity",
       "now_ms": 41,
-      "argv": [
-        "GETBIT"
-      ],
+      "argv": ["GETBIT"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'getbit' command"
@@ -446,14 +301,7 @@
     {
       "name": "bitcount_wrong_arity_too_many",
       "now_ms": 42,
-      "argv": [
-        "BITCOUNT",
-        "k",
-        "0",
-        "1",
-        "BYTE",
-        "extra"
-      ],
+      "argv": ["BITCOUNT", "k", "0", "1", "BYTE", "extra"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -462,9 +310,7 @@
     {
       "name": "bitop_wrong_arity",
       "now_ms": 43,
-      "argv": [
-        "BITOP"
-      ],
+      "argv": ["BITOP"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'bitop' command"
@@ -473,12 +319,7 @@
     {
       "name": "setbit_invalid_bit_value",
       "now_ms": 44,
-      "argv": [
-        "SETBIT",
-        "bm_err",
-        "0",
-        "2"
-      ],
+      "argv": ["SETBIT", "bm_err", "0", "2"],
       "expect": {
         "kind": "error",
         "value": "ERR bit is not an integer or out of range"
@@ -487,11 +328,7 @@
     {
       "name": "setbit_wrongtype_on_list",
       "now_ms": 50,
-      "argv": [
-        "LPUSH",
-        "listkey2",
-        "val"
-      ],
+      "argv": ["LPUSH", "listkey2", "val"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -500,12 +337,7 @@
     {
       "name": "setbit_on_list_wrongtype",
       "now_ms": 51,
-      "argv": [
-        "SETBIT",
-        "listkey2",
-        "0",
-        "1"
-      ],
+      "argv": ["SETBIT", "listkey2", "0", "1"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -514,11 +346,7 @@
     {
       "name": "getbit_on_list_wrongtype",
       "now_ms": 52,
-      "argv": [
-        "GETBIT",
-        "listkey2",
-        "0"
-      ],
+      "argv": ["GETBIT", "listkey2", "0"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -527,10 +355,7 @@
     {
       "name": "bitcount_on_list_wrongtype",
       "now_ms": 53,
-      "argv": [
-        "BITCOUNT",
-        "listkey2"
-      ],
+      "argv": ["BITCOUNT", "listkey2"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -539,14 +364,7 @@
     {
       "name": "bitfield_set_u8",
       "now_ms": 100,
-      "argv": [
-        "BITFIELD",
-        "bf1",
-        "SET",
-        "u8",
-        "0",
-        "200"
-      ],
+      "argv": ["BITFIELD", "bf1", "SET", "u8", "0", "200"],
       "expect": {
         "kind": "array",
         "value": [
@@ -560,13 +378,7 @@
     {
       "name": "bitfield_get_u8",
       "now_ms": 101,
-      "argv": [
-        "BITFIELD",
-        "bf1",
-        "GET",
-        "u8",
-        "0"
-      ],
+      "argv": ["BITFIELD", "bf1", "GET", "u8", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -580,14 +392,7 @@
     {
       "name": "bitfield_set_i8",
       "now_ms": 102,
-      "argv": [
-        "BITFIELD",
-        "bf2",
-        "SET",
-        "i8",
-        "0",
-        "-100"
-      ],
+      "argv": ["BITFIELD", "bf2", "SET", "i8", "0", "-100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -601,13 +406,7 @@
     {
       "name": "bitfield_get_i8",
       "now_ms": 103,
-      "argv": [
-        "BITFIELD",
-        "bf2",
-        "GET",
-        "i8",
-        "0"
-      ],
+      "argv": ["BITFIELD", "bf2", "GET", "i8", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -621,14 +420,7 @@
     {
       "name": "bitfield_incrby",
       "now_ms": 104,
-      "argv": [
-        "BITFIELD",
-        "bf1",
-        "INCRBY",
-        "u8",
-        "0",
-        "10"
-      ],
+      "argv": ["BITFIELD", "bf1", "INCRBY", "u8", "0", "10"],
       "expect": {
         "kind": "array",
         "value": [
@@ -642,17 +434,7 @@
     {
       "name": "bitfield_multiple_ops",
       "now_ms": 105,
-      "argv": [
-        "BITFIELD",
-        "bf3",
-        "SET",
-        "u8",
-        "0",
-        "100",
-        "GET",
-        "u8",
-        "0"
-      ],
+      "argv": ["BITFIELD", "bf3", "SET", "u8", "0", "100", "GET", "u8", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -670,13 +452,7 @@
     {
       "name": "bitfield_get_missing_key",
       "now_ms": 106,
-      "argv": [
-        "BITFIELD",
-        "nokey",
-        "GET",
-        "u8",
-        "0"
-      ],
+      "argv": ["BITFIELD", "nokey", "GET", "u8", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -690,9 +466,7 @@
     {
       "name": "bitfield_wrong_arity",
       "now_ms": 107,
-      "argv": [
-        "BITFIELD"
-      ],
+      "argv": ["BITFIELD"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'bitfield' command"
@@ -701,12 +475,7 @@
     {
       "name": "bitpos_with_range",
       "now_ms": 200,
-      "argv": [
-        "BITPOS",
-        "bckey",
-        "1",
-        "1"
-      ],
+      "argv": ["BITPOS", "bckey", "1", "1"],
       "expect": {
         "kind": "integer",
         "value": 9
@@ -715,13 +484,7 @@
     {
       "name": "bitpos_with_range_start_end",
       "now_ms": 201,
-      "argv": [
-        "BITPOS",
-        "bckey",
-        "0",
-        "0",
-        "0"
-      ],
+      "argv": ["BITPOS", "bckey", "0", "0", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -730,9 +493,7 @@
     {
       "name": "bitpos_wrong_arity",
       "now_ms": 202,
-      "argv": [
-        "BITPOS"
-      ],
+      "argv": ["BITPOS"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'bitpos' command"
@@ -741,12 +502,7 @@
     {
       "name": "bitcount_range_entire",
       "now_ms": 300,
-      "argv": [
-        "BITCOUNT",
-        "bckey",
-        "0",
-        "-1"
-      ],
+      "argv": ["BITCOUNT", "bckey", "0", "-1"],
       "expect": {
         "kind": "integer",
         "value": 26
@@ -755,12 +511,7 @@
     {
       "name": "bitcount_range_out_of_bounds",
       "now_ms": 301,
-      "argv": [
-        "BITCOUNT",
-        "bckey",
-        "100",
-        "200"
-      ],
+      "argv": ["BITCOUNT", "bckey", "100", "200"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -769,13 +520,7 @@
     {
       "name": "bitop_and_missing_key",
       "now_ms": 400,
-      "argv": [
-        "BITOP",
-        "AND",
-        "bo_dest2",
-        "bo1",
-        "nokey"
-      ],
+      "argv": ["BITOP", "AND", "bo_dest2", "bo1", "nokey"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -784,10 +529,7 @@
     {
       "name": "bitop_and_missing_key_result",
       "now_ms": 401,
-      "argv": [
-        "BITCOUNT",
-        "bo_dest2"
-      ],
+      "argv": ["BITCOUNT", "bo_dest2"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -796,13 +538,7 @@
     {
       "name": "bitop_or_missing_key",
       "now_ms": 402,
-      "argv": [
-        "BITOP",
-        "OR",
-        "bo_dest3",
-        "bo1",
-        "nokey"
-      ],
+      "argv": ["BITOP", "OR", "bo_dest3", "bo1", "nokey"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -811,10 +547,7 @@
     {
       "name": "bitop_or_missing_key_result",
       "now_ms": 403,
-      "argv": [
-        "GET",
-        "bo_dest3"
-      ],
+      "argv": ["GET", "bo_dest3"],
       "expect": {
         "kind": "bulk",
         "value": "abc"
@@ -823,12 +556,7 @@
     {
       "name": "setbit_negative_offset_error",
       "now_ms": 500,
-      "argv": [
-        "SETBIT",
-        "bm_err2",
-        "-1",
-        "1"
-      ],
+      "argv": ["SETBIT", "bm_err2", "-1", "1"],
       "expect": {
         "kind": "error",
         "value": "ERR bit offset is not an integer or out of range"
@@ -837,11 +565,7 @@
     {
       "name": "getbit_negative_offset_error",
       "now_ms": 501,
-      "argv": [
-        "GETBIT",
-        "bm_err2",
-        "-1"
-      ],
+      "argv": ["GETBIT", "bm_err2", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR bit offset is not an integer or out of range"
@@ -850,12 +574,7 @@
     {
       "name": "setbit_non_integer_offset",
       "now_ms": 502,
-      "argv": [
-        "SETBIT",
-        "bm_err3",
-        "abc",
-        "1"
-      ],
+      "argv": ["SETBIT", "bm_err3", "abc", "1"],
       "expect": {
         "kind": "error",
         "value": "ERR bit offset is not an integer or out of range"
@@ -864,12 +583,7 @@
     {
       "name": "bitop_invalid_operation",
       "now_ms": 600,
-      "argv": [
-        "BITOP",
-        "NAND",
-        "dest",
-        "bo1"
-      ],
+      "argv": ["BITOP", "NAND", "dest", "bo1"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -878,14 +592,7 @@
     {
       "name": "bitfield_u16_set_and_get",
       "now_ms": 700,
-      "argv": [
-        "BITFIELD",
-        "bf16",
-        "SET",
-        "u16",
-        "0",
-        "1000"
-      ],
+      "argv": ["BITFIELD", "bf16", "SET", "u16", "0", "1000"],
       "expect": {
         "kind": "array",
         "value": [
@@ -899,13 +606,7 @@
     {
       "name": "bitfield_u16_get",
       "now_ms": 701,
-      "argv": [
-        "BITFIELD",
-        "bf16",
-        "GET",
-        "u16",
-        "0"
-      ],
+      "argv": ["BITFIELD", "bf16", "GET", "u16", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -919,14 +620,7 @@
     {
       "name": "bitfield_at_offset",
       "now_ms": 702,
-      "argv": [
-        "BITFIELD",
-        "bf_off",
-        "SET",
-        "u8",
-        "8",
-        "42"
-      ],
+      "argv": ["BITFIELD", "bf_off", "SET", "u8", "8", "42"],
       "expect": {
         "kind": "array",
         "value": [
@@ -940,13 +634,7 @@
     {
       "name": "bitfield_get_at_offset",
       "now_ms": 703,
-      "argv": [
-        "BITFIELD",
-        "bf_off",
-        "GET",
-        "u8",
-        "8"
-      ],
+      "argv": ["BITFIELD", "bf_off", "GET", "u8", "8"],
       "expect": {
         "kind": "array",
         "value": [
@@ -960,18 +648,7 @@
     {
       "name": "bitfield_incrby_u8",
       "now_ms": 710,
-      "argv": [
-        "BITFIELD",
-        "bf_incr",
-        "SET",
-        "u8",
-        "0",
-        "250",
-        "INCRBY",
-        "u8",
-        "0",
-        "10"
-      ],
+      "argv": ["BITFIELD", "bf_incr", "SET", "u8", "0", "250", "INCRBY", "u8", "0", "10"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1051,15 +728,7 @@
     {
       "name": "bitfield_overflow_invalid",
       "now_ms": 740,
-      "argv": [
-        "BITFIELD",
-        "bf_err",
-        "OVERFLOW",
-        "NOPE",
-        "GET",
-        "u8",
-        "0"
-      ],
+      "argv": ["BITFIELD", "bf_err", "OVERFLOW", "NOPE", "GET", "u8", "0"],
       "expect": {
         "kind": "error",
         "value": "ERR Invalid OVERFLOW type specified"
@@ -1068,14 +737,7 @@
     {
       "name": "bitfield_overflow_wrap_u8_setup",
       "now_ms": 741,
-      "argv": [
-        "BITFIELD",
-        "bf_wrap_u8",
-        "SET",
-        "u8",
-        "0",
-        "250"
-      ],
+      "argv": ["BITFIELD", "bf_wrap_u8", "SET", "u8", "0", "250"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1089,16 +751,7 @@
     {
       "name": "bitfield_overflow_wrap_u8_incrby",
       "now_ms": 742,
-      "argv": [
-        "BITFIELD",
-        "bf_wrap_u8",
-        "OVERFLOW",
-        "WRAP",
-        "INCRBY",
-        "u8",
-        "0",
-        "10"
-      ],
+      "argv": ["BITFIELD", "bf_wrap_u8", "OVERFLOW", "WRAP", "INCRBY", "u8", "0", "10"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1112,14 +765,7 @@
     {
       "name": "bitfield_overflow_wrap_i8_setup",
       "now_ms": 743,
-      "argv": [
-        "BITFIELD",
-        "bf_wrap_i8",
-        "SET",
-        "i8",
-        "0",
-        "100"
-      ],
+      "argv": ["BITFIELD", "bf_wrap_i8", "SET", "i8", "0", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1133,16 +779,7 @@
     {
       "name": "bitfield_overflow_wrap_i8_positive_to_negative",
       "now_ms": 744,
-      "argv": [
-        "BITFIELD",
-        "bf_wrap_i8",
-        "OVERFLOW",
-        "WRAP",
-        "INCRBY",
-        "i8",
-        "0",
-        "50"
-      ],
+      "argv": ["BITFIELD", "bf_wrap_i8", "OVERFLOW", "WRAP", "INCRBY", "i8", "0", "50"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1156,14 +793,7 @@
     {
       "name": "bitfield_overflow_wrap_i8_negative_setup",
       "now_ms": 745,
-      "argv": [
-        "BITFIELD",
-        "bf_wrap_i8_neg",
-        "SET",
-        "i8",
-        "0",
-        "-100"
-      ],
+      "argv": ["BITFIELD", "bf_wrap_i8_neg", "SET", "i8", "0", "-100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1177,16 +807,7 @@
     {
       "name": "bitfield_overflow_wrap_i8_negative_to_positive",
       "now_ms": 746,
-      "argv": [
-        "BITFIELD",
-        "bf_wrap_i8_neg",
-        "OVERFLOW",
-        "WRAP",
-        "INCRBY",
-        "i8",
-        "0",
-        "-50"
-      ],
+      "argv": ["BITFIELD", "bf_wrap_i8_neg", "OVERFLOW", "WRAP", "INCRBY", "i8", "0", "-50"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1200,14 +821,7 @@
     {
       "name": "bitfield_i16_signed",
       "now_ms": 750,
-      "argv": [
-        "BITFIELD",
-        "bf_i16",
-        "SET",
-        "i16",
-        "0",
-        "-500"
-      ],
+      "argv": ["BITFIELD", "bf_i16", "SET", "i16", "0", "-500"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1221,13 +835,7 @@
     {
       "name": "bitfield_i16_get",
       "now_ms": 751,
-      "argv": [
-        "BITFIELD",
-        "bf_i16",
-        "GET",
-        "i16",
-        "0"
-      ],
+      "argv": ["BITFIELD", "bf_i16", "GET", "i16", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1277,13 +885,7 @@
     {
       "name": "bitfield_wrongtype",
       "now_ms": 770,
-      "argv": [
-        "BITFIELD",
-        "listkey2",
-        "GET",
-        "u8",
-        "0"
-      ],
+      "argv": ["BITFIELD", "listkey2", "GET", "u8", "0"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -1292,11 +894,7 @@
     {
       "name": "bitpos_on_list_wrongtype",
       "now_ms": 800,
-      "argv": [
-        "BITPOS",
-        "listkey2",
-        "1"
-      ],
+      "argv": ["BITPOS", "listkey2", "1"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -1305,9 +903,7 @@
     {
       "name": "bitpos_wrong_arity_no_key",
       "now_ms": 801,
-      "argv": [
-        "BITPOS"
-      ],
+      "argv": ["BITPOS"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'bitpos' command"
@@ -1316,12 +912,7 @@
     {
       "name": "bitop_wrongtype_list",
       "now_ms": 810,
-      "argv": [
-        "BITOP",
-        "AND",
-        "bo_wt",
-        "listkey2"
-      ],
+      "argv": ["BITOP", "AND", "bo_wt", "listkey2"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -1330,11 +921,7 @@
     {
       "name": "setbit_returns_previous_on_string",
       "now_ms": 820,
-      "argv": [
-        "SET",
-        "bitstr",
-        "A"
-      ],
+      "argv": ["SET", "bitstr", "A"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1343,11 +930,7 @@
     {
       "name": "getbit_on_string_key",
       "now_ms": 821,
-      "argv": [
-        "GETBIT",
-        "bitstr",
-        "1"
-      ],
+      "argv": ["GETBIT", "bitstr", "1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1356,10 +939,7 @@
     {
       "name": "bitcount_on_string_key",
       "now_ms": 822,
-      "argv": [
-        "BITCOUNT",
-        "bitstr"
-      ],
+      "argv": ["BITCOUNT", "bitstr"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1368,12 +948,7 @@
     {
       "name": "bitop_and_self",
       "now_ms": 900,
-      "argv": [
-        "BITOP",
-        "AND",
-        "bo1",
-        "bo1"
-      ],
+      "argv": ["BITOP", "AND", "bo1", "bo1"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -1382,12 +957,7 @@
     {
       "name": "bitop_or_self",
       "now_ms": 901,
-      "argv": [
-        "BITOP",
-        "OR",
-        "bo1",
-        "bo1"
-      ],
+      "argv": ["BITOP", "OR", "bo1", "bo1"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -1396,13 +966,7 @@
     {
       "name": "bitop_and_missing_sources",
       "now_ms": 902,
-      "argv": [
-        "BITOP",
-        "AND",
-        "bo_empty_result",
-        "nosuch_bm1",
-        "nosuch_bm2"
-      ],
+      "argv": ["BITOP", "AND", "bo_empty_result", "nosuch_bm1", "nosuch_bm2"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1411,13 +975,7 @@
     {
       "name": "bitop_or_missing_sources",
       "now_ms": 903,
-      "argv": [
-        "BITOP",
-        "OR",
-        "bo_empty_result2",
-        "nosuch_bm3",
-        "nosuch_bm4"
-      ],
+      "argv": ["BITOP", "OR", "bo_empty_result2", "nosuch_bm3", "nosuch_bm4"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1426,12 +984,7 @@
     {
       "name": "bitcount_nonexistent_with_range",
       "now_ms": 904,
-      "argv": [
-        "BITCOUNT",
-        "nosuchbitmap",
-        "5",
-        "10"
-      ],
+      "argv": ["BITCOUNT", "nosuchbitmap", "5", "10"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1440,11 +993,7 @@
     {
       "name": "bitpos_setup_allzeros",
       "now_ms": 910,
-      "argv": [
-        "SET",
-        "allzeros",
-        "\u0000\u0000\u0000"
-      ],
+      "argv": ["SET", "allzeros", "\u0000\u0000\u0000"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -1453,11 +1002,7 @@
     {
       "name": "bitpos_allzeros_find_one",
       "now_ms": 911,
-      "argv": [
-        "BITPOS",
-        "allzeros",
-        "1"
-      ],
+      "argv": ["BITPOS", "allzeros", "1"],
       "expect": {
         "kind": "integer",
         "value": -1
@@ -1466,11 +1011,7 @@
     {
       "name": "bitpos_nonexistent_find_zero",
       "now_ms": 912,
-      "argv": [
-        "BITPOS",
-        "nosuchbitmap2",
-        "0"
-      ],
+      "argv": ["BITPOS", "nosuchbitmap2", "0"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1479,11 +1020,7 @@
     {
       "name": "bitpos_nonexistent_find_one",
       "now_ms": 913,
-      "argv": [
-        "BITPOS",
-        "nosuchbitmap3",
-        "1"
-      ],
+      "argv": ["BITPOS", "nosuchbitmap3", "1"],
       "expect": {
         "kind": "integer",
         "value": -1
@@ -1492,18 +1029,7 @@
     {
       "name": "bitfield_incrby_wrap_underflow",
       "now_ms": 920,
-      "argv": [
-        "BITFIELD",
-        "bf_wrap_test",
-        "SET",
-        "u8",
-        "0",
-        "5",
-        "INCRBY",
-        "u8",
-        "0",
-        "-10"
-      ],
+      "argv": ["BITFIELD", "bf_wrap_test", "SET", "u8", "0", "5", "INCRBY", "u8", "0", "-10"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1583,10 +1109,7 @@
     {
       "name": "setbit_wrong_arity",
       "now_ms": 930,
-      "argv": [
-        "SETBIT",
-        "k"
-      ],
+      "argv": ["SETBIT", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'setbit' command"
@@ -1595,10 +1118,7 @@
     {
       "name": "getbit_wrong_arity",
       "now_ms": 931,
-      "argv": [
-        "GETBIT",
-        "k"
-      ],
+      "argv": ["GETBIT", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'getbit' command"
@@ -1607,12 +1127,7 @@
     {
       "name": "setbit_bad_offset",
       "now_ms": 932,
-      "argv": [
-        "SETBIT",
-        "k",
-        "abc",
-        "1"
-      ],
+      "argv": ["SETBIT", "k", "abc", "1"],
       "expect": {
         "kind": "error",
         "value": "ERR bit offset is not an integer or out of range"
@@ -1621,12 +1136,7 @@
     {
       "name": "setbit_bad_value",
       "now_ms": 933,
-      "argv": [
-        "SETBIT",
-        "k",
-        "0",
-        "2"
-      ],
+      "argv": ["SETBIT", "k", "0", "2"],
       "expect": {
         "kind": "error",
         "value": "ERR bit is not an integer or out of range"
@@ -1635,14 +1145,7 @@
     {
       "name": "bitfield_ro_setup_field",
       "now_ms": 1000,
-      "argv": [
-        "BITFIELD",
-        "bfro_key",
-        "SET",
-        "u8",
-        "0",
-        "42"
-      ],
+      "argv": ["BITFIELD", "bfro_key", "SET", "u8", "0", "42"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1656,13 +1159,7 @@
     {
       "name": "bitfield_ro_get_u8",
       "now_ms": 1001,
-      "argv": [
-        "BITFIELD_RO",
-        "bfro_key",
-        "GET",
-        "u8",
-        "0"
-      ],
+      "argv": ["BITFIELD_RO", "bfro_key", "GET", "u8", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1676,14 +1173,7 @@
     {
       "name": "bitfield_ro_rejects_set",
       "now_ms": 1002,
-      "argv": [
-        "BITFIELD_RO",
-        "bfro_key",
-        "SET",
-        "u8",
-        "0",
-        "99"
-      ],
+      "argv": ["BITFIELD_RO", "bfro_key", "SET", "u8", "0", "99"],
       "expect": {
         "kind": "error",
         "value": "ERR BITFIELD_RO only supports the GET subcommand"
@@ -1692,14 +1182,7 @@
     {
       "name": "bitfield_ro_rejects_incrby",
       "now_ms": 1003,
-      "argv": [
-        "BITFIELD_RO",
-        "bfro_key",
-        "INCRBY",
-        "u8",
-        "0",
-        "1"
-      ],
+      "argv": ["BITFIELD_RO", "bfro_key", "INCRBY", "u8", "0", "1"],
       "expect": {
         "kind": "error",
         "value": "ERR BITFIELD_RO only supports the GET subcommand"
@@ -1708,14 +1191,7 @@
     {
       "name": "bitfield_ro_multiple_gets",
       "now_ms": 1004,
-      "argv": [
-        "BITFIELD",
-        "bfro_key",
-        "SET",
-        "u8",
-        "8",
-        "99"
-      ],
+      "argv": ["BITFIELD", "bfro_key", "SET", "u8", "8", "99"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1729,16 +1205,7 @@
     {
       "name": "bitfield_ro_read_two_fields",
       "now_ms": 1005,
-      "argv": [
-        "BITFIELD_RO",
-        "bfro_key",
-        "GET",
-        "u8",
-        "0",
-        "GET",
-        "u8",
-        "8"
-      ],
+      "argv": ["BITFIELD_RO", "bfro_key", "GET", "u8", "0", "GET", "u8", "8"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1756,13 +1223,7 @@
     {
       "name": "bitfield_ro_nonexistent_key",
       "now_ms": 1006,
-      "argv": [
-        "BITFIELD_RO",
-        "no_such_bf_key",
-        "GET",
-        "u8",
-        "0"
-      ],
+      "argv": ["BITFIELD_RO", "no_such_bf_key", "GET", "u8", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1776,14 +1237,7 @@
     {
       "name": "bitfield_ro_signed_get",
       "now_ms": 1007,
-      "argv": [
-        "BITFIELD",
-        "bfro_signed",
-        "SET",
-        "i8",
-        "0",
-        "-50"
-      ],
+      "argv": ["BITFIELD", "bfro_signed", "SET", "i8", "0", "-50"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1797,13 +1251,7 @@
     {
       "name": "bitfield_ro_read_signed",
       "now_ms": 1008,
-      "argv": [
-        "BITFIELD_RO",
-        "bfro_signed",
-        "GET",
-        "i8",
-        "0"
-      ],
+      "argv": ["BITFIELD_RO", "bfro_signed", "GET", "i8", "0"],
       "expect": {
         "kind": "array",
         "value": [

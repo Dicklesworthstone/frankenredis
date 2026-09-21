@@ -28,7 +28,11 @@
     {
       "name": "object_encoding_string_raw_setup",
       "now_ms": 4,
-      "argv": ["SET", "obj_raw", "this is a string that is longer than forty-four bytes exactly right now yes"],
+      "argv": [
+        "SET",
+        "obj_raw",
+        "this is a string that is longer than forty-four bytes exactly right now yes"
+      ],
       "expect": { "kind": "simple", "value": "OK" }
     },
     {
@@ -321,18 +325,36 @@
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "simple", "value": "OBJECT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:" },
+          {
+            "kind": "simple",
+            "value": "OBJECT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"
+          },
           { "kind": "simple", "value": "ENCODING <key>" },
-          { "kind": "simple", "value": "    Return the kind of internal representation used in order to store the value" },
+          {
+            "kind": "simple",
+            "value": "    Return the kind of internal representation used in order to store the value"
+          },
           { "kind": "simple", "value": "    associated with a <key>." },
           { "kind": "simple", "value": "FREQ <key>" },
-          { "kind": "simple", "value": "    Return the access frequency index of the <key>. The returned integer is" },
-          { "kind": "simple", "value": "    proportional to the logarithm of the recent access frequency of the key." },
+          {
+            "kind": "simple",
+            "value": "    Return the access frequency index of the <key>. The returned integer is"
+          },
+          {
+            "kind": "simple",
+            "value": "    proportional to the logarithm of the recent access frequency of the key."
+          },
           { "kind": "simple", "value": "IDLETIME <key>" },
-          { "kind": "simple", "value": "    Return the idle time of the <key>, that is the approximated number of" },
+          {
+            "kind": "simple",
+            "value": "    Return the idle time of the <key>, that is the approximated number of"
+          },
           { "kind": "simple", "value": "    seconds elapsed since the last access to the key." },
           { "kind": "simple", "value": "REFCOUNT <key>" },
-          { "kind": "simple", "value": "    Return the number of references of the value associated with the specified" },
+          {
+            "kind": "simple",
+            "value": "    Return the number of references of the value associated with the specified"
+          },
           { "kind": "simple", "value": "    <key>." },
           { "kind": "simple", "value": "HELP" },
           { "kind": "simple", "value": "    Print this help." }

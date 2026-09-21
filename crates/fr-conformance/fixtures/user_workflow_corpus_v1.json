@@ -18,9 +18,7 @@
       "differential_hook": {
         "status": "active",
         "hook_mode": "command",
-        "fixtures": [
-          "fr_p2c_001_eventloop_journey.json"
-        ],
+        "fixtures": ["fr_p2c_001_eventloop_journey.json"],
         "command": "rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- command fr_p2c_001_eventloop_journey.json 127.0.0.1 6379",
         "owner_bead": "bd-2wb.12.6",
         "notes": "Active via live oracle matrix coverage for the FR-P2C-001 eventloop journey."
@@ -31,10 +29,7 @@
         "replay_cmd": "FR_MODE=hardened FR_SEED=42 cargo test -p fr-conformance --test smoke -- --nocapture fr-p2c-001::e2e_contract_smoke",
         "owner_bead": "bd-2wb.12.7"
       },
-      "stable_reason_codes": [
-        "parity_ok",
-        "journey_ok"
-      ]
+      "stable_reason_codes": ["parity_ok", "journey_ok"]
     },
     {
       "journey_id": "FR-P2C-002-J001",
@@ -50,9 +45,7 @@
       "differential_hook": {
         "status": "active",
         "hook_mode": "protocol",
-        "fixtures": [
-          "protocol_negative.json"
-        ],
+        "fixtures": ["protocol_negative.json"],
         "command": "./scripts/run_live_oracle_diff.sh --host 127.0.0.1 --port 6379 --run-id fr-p2c-002",
         "owner_bead": "bd-2wb.13.6",
         "notes": "Active via live oracle protocol differential suite."
@@ -63,10 +56,7 @@
         "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_002_e2e_contract_smoke",
         "owner_bead": "bd-2wb.13.7"
       },
-      "stable_reason_codes": [
-        "parity_ok",
-        "journey_ok"
-      ]
+      "stable_reason_codes": ["parity_ok", "journey_ok"]
     },
     {
       "journey_id": "FR-P2C-003-J001",
@@ -82,9 +72,7 @@
       "differential_hook": {
         "status": "active",
         "hook_mode": "command",
-        "fixtures": [
-          "fr_p2c_003_dispatch_journey.json"
-        ],
+        "fixtures": ["fr_p2c_003_dispatch_journey.json"],
         "command": "rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- command fr_p2c_003_dispatch_journey.json 127.0.0.1 6379",
         "owner_bead": "bd-2wb.14.6",
         "notes": "Active via packet-specific FR-P2C-003 dispatch differential fixture."
@@ -95,10 +83,7 @@
         "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr-p2c-003::e2e_contract_smoke",
         "owner_bead": "bd-2wb.14.7"
       },
-      "stable_reason_codes": [
-        "parity_ok",
-        "journey_ok"
-      ]
+      "stable_reason_codes": ["parity_ok", "journey_ok"]
     },
     {
       "journey_id": "FR-P2C-004-J001",
@@ -129,10 +114,7 @@
         "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_004_e2e_contract_smoke",
         "owner_bead": "bd-2wb.15.7"
       },
-      "stable_reason_codes": [
-        "parity_ok",
-        "journey_ok"
-      ]
+      "stable_reason_codes": ["parity_ok", "journey_ok"]
     },
     {
       "journey_id": "FR-P2C-005-J001",
@@ -148,9 +130,7 @@
       "differential_hook": {
         "status": "active",
         "hook_mode": "replay",
-        "fixtures": [
-          "persist_replay.json"
-        ],
+        "fixtures": ["persist_replay.json"],
         "command": "rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_005_f_differential_replay_fixture_passes",
         "owner_bead": "bd-2wb.16.6",
         "notes": "Active packet-005 replay differential fixture with dedicated F-level conformance test."
@@ -161,10 +141,7 @@
         "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_005_e2e_contract_smoke",
         "owner_bead": "bd-2wb.16.7"
       },
-      "stable_reason_codes": [
-        "parity_ok",
-        "journey_ok"
-      ]
+      "stable_reason_codes": ["parity_ok", "journey_ok"]
     },
     {
       "journey_id": "FR-P2C-006-J001",
@@ -180,9 +157,7 @@
       "differential_hook": {
         "status": "active",
         "hook_mode": "command",
-        "fixtures": [
-          "fr_p2c_006_replication_journey.json"
-        ],
+        "fixtures": ["fr_p2c_006_replication_journey.json"],
         "command": "rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- command fr_p2c_006_replication_journey.json 127.0.0.1 6379",
         "owner_bead": "bd-2wb.17.6",
         "notes": "Active live-oracle differential hook for the stable replication journey fixture."
@@ -193,10 +168,7 @@
         "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_006_e2e_contract_smoke",
         "owner_bead": "bd-2wb.17.7"
       },
-      "stable_reason_codes": [
-        "parity_ok",
-        "journey_ok"
-      ]
+      "stable_reason_codes": ["parity_ok", "journey_ok"]
     },
     {
       "journey_id": "FR-P2C-007-J001",
@@ -228,10 +200,7 @@
         "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_007_e2e_contract_smoke",
         "owner_bead": "bd-2wb.18.7"
       },
-      "stable_reason_codes": [
-        "parity_ok",
-        "journey_ok"
-      ]
+      "stable_reason_codes": ["parity_ok", "journey_ok"]
     },
     {
       "journey_id": "FR-P2C-008-J001",
@@ -264,10 +233,7 @@
         "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_008_e2e_contract_smoke",
         "owner_bead": "bd-2wb.19.7"
       },
-      "stable_reason_codes": [
-        "parity_ok",
-        "journey_ok"
-      ]
+      "stable_reason_codes": ["parity_ok", "journey_ok"]
     },
     {
       "journey_id": "FR-P2C-009-J001",
@@ -283,9 +249,7 @@
       "differential_hook": {
         "status": "planned",
         "hook_mode": "command",
-        "fixtures": [
-          "fr_p2c_009_tls_config_journey.json"
-        ],
+        "fixtures": ["fr_p2c_009_tls_config_journey.json"],
         "command": "rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- command fr_p2c_009_tls_config_journey.json 127.0.0.1 6379",
         "owner_bead": "bd-2wb.20.6",
         "notes": "Mapped and tracked for packet differential harness expansion."
@@ -296,10 +260,7 @@
         "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_009_e2e_contract_smoke",
         "owner_bead": "bd-2wb.20.7"
       },
-      "stable_reason_codes": [
-        "parity_ok",
-        "journey_ok"
-      ]
+      "stable_reason_codes": ["parity_ok", "journey_ok"]
     }
   ]
 }

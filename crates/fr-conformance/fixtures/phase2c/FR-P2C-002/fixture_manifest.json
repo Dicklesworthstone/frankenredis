@@ -7,12 +7,7 @@
     "legacy_redis_code/redis/src/call_reply.c",
     "legacy_redis_code/redis/src/script_lua.c"
   ],
-  "legacy_symbols": [
-    "parseReply",
-    "parseReplyBulkString",
-    "parseReplyArray",
-    "freeCallReply"
-  ],
+  "legacy_symbols": ["parseReply", "parseReplyBulkString", "parseReplyArray", "freeCallReply"],
   "state_machine_contract": [
     "prefix_dispatch_determinism",
     "consumed_length_exactness",
@@ -23,9 +18,7 @@
     "invalid_length_and_prefix_rejection",
     "resp3_unimplemented_fail_closed_surface"
   ],
-  "command_acl_contract": [
-    "runtime_parse_error_surface_reason_code_stability"
-  ],
+  "command_acl_contract": ["runtime_parse_error_surface_reason_code_stability"],
   "persistence_replication_contract": [
     "parser_rejections_do_not_mutate_replay_or_replication_order"
   ],
@@ -66,8 +59,5 @@
     "attribute_cursor_alignment_drift",
     "hardened_nonallowlisted_deviation_leak"
   ],
-  "raptorq_artifacts": [
-    "parity_report.raptorq.json",
-    "parity_report.decode_proof.json"
-  ]
+  "raptorq_artifacts": ["parity_report.raptorq.json", "parity_report.decode_proof.json"]
 }

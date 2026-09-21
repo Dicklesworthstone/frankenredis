@@ -4,16 +4,7 @@
     {
       "name": "zadd_new_members",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "z1",
-        "1.0",
-        "a",
-        "2.0",
-        "b",
-        "3.0",
-        "c"
-      ],
+      "argv": ["ZADD", "z1", "1.0", "a", "2.0", "b", "3.0", "c"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -22,12 +13,7 @@
     {
       "name": "zadd_update_score",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "z1",
-        "1.5",
-        "a"
-      ],
+      "argv": ["ZADD", "z1", "1.5", "a"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -36,11 +22,7 @@
     {
       "name": "zscore_existing",
       "now_ms": 0,
-      "argv": [
-        "ZSCORE",
-        "z1",
-        "a"
-      ],
+      "argv": ["ZSCORE", "z1", "a"],
       "expect": {
         "kind": "bulk",
         "value": "1.5"
@@ -49,11 +31,7 @@
     {
       "name": "zscore_missing_member",
       "now_ms": 0,
-      "argv": [
-        "ZSCORE",
-        "z1",
-        "z"
-      ],
+      "argv": ["ZSCORE", "z1", "z"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -62,10 +40,7 @@
     {
       "name": "zcard",
       "now_ms": 0,
-      "argv": [
-        "ZCARD",
-        "z1"
-      ],
+      "argv": ["ZCARD", "z1"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -74,10 +49,7 @@
     {
       "name": "zcard_missing_key",
       "now_ms": 0,
-      "argv": [
-        "ZCARD",
-        "nokey"
-      ],
+      "argv": ["ZCARD", "nokey"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -86,11 +58,7 @@
     {
       "name": "zrank_first",
       "now_ms": 0,
-      "argv": [
-        "ZRANK",
-        "z1",
-        "a"
-      ],
+      "argv": ["ZRANK", "z1", "a"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -99,11 +67,7 @@
     {
       "name": "zrank_last",
       "now_ms": 0,
-      "argv": [
-        "ZRANK",
-        "z1",
-        "c"
-      ],
+      "argv": ["ZRANK", "z1", "c"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -112,11 +76,7 @@
     {
       "name": "zrank_missing",
       "now_ms": 0,
-      "argv": [
-        "ZRANK",
-        "z1",
-        "z"
-      ],
+      "argv": ["ZRANK", "z1", "z"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -125,11 +85,7 @@
     {
       "name": "zrevrank_last",
       "now_ms": 0,
-      "argv": [
-        "ZREVRANK",
-        "z1",
-        "a"
-      ],
+      "argv": ["ZREVRANK", "z1", "a"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -138,12 +94,7 @@
     {
       "name": "zrange_all",
       "now_ms": 0,
-      "argv": [
-        "ZRANGE",
-        "z1",
-        "0",
-        "-1"
-      ],
+      "argv": ["ZRANGE", "z1", "0", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -165,12 +116,7 @@
     {
       "name": "zrevrange_all",
       "now_ms": 0,
-      "argv": [
-        "ZREVRANGE",
-        "z1",
-        "0",
-        "-1"
-      ],
+      "argv": ["ZREVRANGE", "z1", "0", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -192,12 +138,7 @@
     {
       "name": "zrangebyscore_range",
       "now_ms": 0,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "z1",
-        "1",
-        "2"
-      ],
+      "argv": ["ZRANGEBYSCORE", "z1", "1", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -215,12 +156,7 @@
     {
       "name": "zcount_range",
       "now_ms": 0,
-      "argv": [
-        "ZCOUNT",
-        "z1",
-        "1",
-        "2"
-      ],
+      "argv": ["ZCOUNT", "z1", "1", "2"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -229,12 +165,7 @@
     {
       "name": "zincrby_existing",
       "now_ms": 0,
-      "argv": [
-        "ZINCRBY",
-        "z1",
-        "10",
-        "a"
-      ],
+      "argv": ["ZINCRBY", "z1", "10", "a"],
       "expect": {
         "kind": "bulk",
         "value": "11.5"
@@ -243,11 +174,7 @@
     {
       "name": "zrem_member",
       "now_ms": 0,
-      "argv": [
-        "ZREM",
-        "z1",
-        "a"
-      ],
+      "argv": ["ZREM", "z1", "a"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -256,11 +183,7 @@
     {
       "name": "zrem_missing",
       "now_ms": 0,
-      "argv": [
-        "ZREM",
-        "z1",
-        "z"
-      ],
+      "argv": ["ZREM", "z1", "z"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -269,13 +192,7 @@
     {
       "name": "zadd_nx_new_member",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "z1",
-        "NX",
-        "5.0",
-        "d"
-      ],
+      "argv": ["ZADD", "z1", "NX", "5.0", "d"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -284,13 +201,7 @@
     {
       "name": "zadd_nx_existing_member",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "z1",
-        "NX",
-        "99.0",
-        "b"
-      ],
+      "argv": ["ZADD", "z1", "NX", "99.0", "b"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -299,11 +210,7 @@
     {
       "name": "zscore_b_unchanged_by_nx",
       "now_ms": 0,
-      "argv": [
-        "ZSCORE",
-        "z1",
-        "b"
-      ],
+      "argv": ["ZSCORE", "z1", "b"],
       "expect": {
         "kind": "bulk",
         "value": "2"
@@ -312,13 +219,7 @@
     {
       "name": "zadd_xx_existing_member",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "z1",
-        "XX",
-        "7.0",
-        "d"
-      ],
+      "argv": ["ZADD", "z1", "XX", "7.0", "d"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -327,11 +228,7 @@
     {
       "name": "zscore_d_updated_by_xx",
       "now_ms": 0,
-      "argv": [
-        "ZSCORE",
-        "z1",
-        "d"
-      ],
+      "argv": ["ZSCORE", "z1", "d"],
       "expect": {
         "kind": "bulk",
         "value": "7"
@@ -340,13 +237,7 @@
     {
       "name": "zadd_xx_new_member_ignored",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "z1",
-        "XX",
-        "1.0",
-        "e"
-      ],
+      "argv": ["ZADD", "z1", "XX", "1.0", "e"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -355,11 +246,7 @@
     {
       "name": "zscore_e_not_added_by_xx",
       "now_ms": 0,
-      "argv": [
-        "ZSCORE",
-        "z1",
-        "e"
-      ],
+      "argv": ["ZSCORE", "z1", "e"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -368,13 +255,7 @@
     {
       "name": "zadd_gt_higher_score",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "z1",
-        "GT",
-        "10.0",
-        "d"
-      ],
+      "argv": ["ZADD", "z1", "GT", "10.0", "d"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -383,11 +264,7 @@
     {
       "name": "zscore_d_updated_by_gt",
       "now_ms": 0,
-      "argv": [
-        "ZSCORE",
-        "z1",
-        "d"
-      ],
+      "argv": ["ZSCORE", "z1", "d"],
       "expect": {
         "kind": "bulk",
         "value": "10"
@@ -396,13 +273,7 @@
     {
       "name": "zadd_gt_lower_score_rejected",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "z1",
-        "GT",
-        "3.0",
-        "d"
-      ],
+      "argv": ["ZADD", "z1", "GT", "3.0", "d"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -411,11 +282,7 @@
     {
       "name": "zscore_d_unchanged_by_gt",
       "now_ms": 0,
-      "argv": [
-        "ZSCORE",
-        "z1",
-        "d"
-      ],
+      "argv": ["ZSCORE", "z1", "d"],
       "expect": {
         "kind": "bulk",
         "value": "10"
@@ -424,13 +291,7 @@
     {
       "name": "zadd_lt_lower_score",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "z1",
-        "LT",
-        "1.0",
-        "d"
-      ],
+      "argv": ["ZADD", "z1", "LT", "1.0", "d"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -439,11 +300,7 @@
     {
       "name": "zscore_d_updated_by_lt",
       "now_ms": 0,
-      "argv": [
-        "ZSCORE",
-        "z1",
-        "d"
-      ],
+      "argv": ["ZSCORE", "z1", "d"],
       "expect": {
         "kind": "bulk",
         "value": "1"
@@ -452,13 +309,7 @@
     {
       "name": "zadd_lt_higher_score_rejected",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "z1",
-        "LT",
-        "50.0",
-        "d"
-      ],
+      "argv": ["ZADD", "z1", "LT", "50.0", "d"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -467,15 +318,7 @@
     {
       "name": "zadd_ch_returns_changed_count",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "z1",
-        "CH",
-        "99.0",
-        "d",
-        "1.0",
-        "newmem"
-      ],
+      "argv": ["ZADD", "z1", "CH", "99.0", "d", "1.0", "newmem"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -484,16 +327,7 @@
     {
       "name": "zpopmin_single",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "zpop",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c"
-      ],
+      "argv": ["ZADD", "zpop", "1", "a", "2", "b", "3", "c"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -502,10 +336,7 @@
     {
       "name": "zpopmin_result",
       "now_ms": 0,
-      "argv": [
-        "ZPOPMIN",
-        "zpop"
-      ],
+      "argv": ["ZPOPMIN", "zpop"],
       "expect": {
         "kind": "array",
         "value": [
@@ -523,10 +354,7 @@
     {
       "name": "zpopmax_result",
       "now_ms": 0,
-      "argv": [
-        "ZPOPMAX",
-        "zpop"
-      ],
+      "argv": ["ZPOPMAX", "zpop"],
       "expect": {
         "kind": "array",
         "value": [
@@ -544,10 +372,7 @@
     {
       "name": "zpopmin_empty",
       "now_ms": 0,
-      "argv": [
-        "ZPOPMIN",
-        "nokey"
-      ],
+      "argv": ["ZPOPMIN", "nokey"],
       "expect": {
         "kind": "array",
         "value": []
@@ -556,16 +381,7 @@
     {
       "name": "zmscore_setup",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "zms",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c"
-      ],
+      "argv": ["ZADD", "zms", "1", "a", "2", "b", "3", "c"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -574,13 +390,7 @@
     {
       "name": "zmscore_result",
       "now_ms": 0,
-      "argv": [
-        "ZMSCORE",
-        "zms",
-        "a",
-        "z",
-        "c"
-      ],
+      "argv": ["ZMSCORE", "zms", "a", "z", "c"],
       "expect": {
         "kind": "array",
         "value": [
@@ -602,14 +412,7 @@
     {
       "name": "zunionstore_setup1",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "zu1",
-        "1",
-        "a",
-        "2",
-        "b"
-      ],
+      "argv": ["ZADD", "zu1", "1", "a", "2", "b"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -618,14 +421,7 @@
     {
       "name": "zunionstore_setup2",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "zu2",
-        "3",
-        "b",
-        "4",
-        "c"
-      ],
+      "argv": ["ZADD", "zu2", "3", "b", "4", "c"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -634,13 +430,7 @@
     {
       "name": "zunionstore_result",
       "now_ms": 0,
-      "argv": [
-        "ZUNIONSTORE",
-        "zudst",
-        "2",
-        "zu1",
-        "zu2"
-      ],
+      "argv": ["ZUNIONSTORE", "zudst", "2", "zu1", "zu2"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -649,13 +439,7 @@
     {
       "name": "zinterstore_result",
       "now_ms": 0,
-      "argv": [
-        "ZINTERSTORE",
-        "zidst",
-        "2",
-        "zu1",
-        "zu2"
-      ],
+      "argv": ["ZINTERSTORE", "zidst", "2", "zu1", "zu2"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -664,11 +448,7 @@
     {
       "name": "zinterstore_verify_score",
       "now_ms": 0,
-      "argv": [
-        "ZSCORE",
-        "zidst",
-        "b"
-      ],
+      "argv": ["ZSCORE", "zidst", "b"],
       "expect": {
         "kind": "bulk",
         "value": "5"
@@ -677,11 +457,7 @@
     {
       "name": "zadd_wrongtype_on_string",
       "now_ms": 0,
-      "argv": [
-        "SET",
-        "strkey4",
-        "v"
-      ],
+      "argv": ["SET", "strkey4", "v"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -690,12 +466,7 @@
     {
       "name": "zadd_wrongtype_error",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "strkey4",
-        "1.0",
-        "a"
-      ],
+      "argv": ["ZADD", "strkey4", "1.0", "a"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -704,18 +475,7 @@
     {
       "name": "zadd_exclusive_setup",
       "now_ms": 0,
-      "argv": [
-        "ZADD",
-        "zex",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d"
-      ],
+      "argv": ["ZADD", "zex", "1", "a", "2", "b", "3", "c", "4", "d"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -724,12 +484,7 @@
     {
       "name": "zrangebyscore_exclusive_both",
       "now_ms": 0,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zex",
-        "(1",
-        "(4"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zex", "(1", "(4"],
       "expect": {
         "kind": "array",
         "value": [
@@ -747,12 +502,7 @@
     {
       "name": "zrangebyscore_exclusive_min",
       "now_ms": 0,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zex",
-        "(1",
-        "3"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zex", "(1", "3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -770,12 +520,7 @@
     {
       "name": "zrangebyscore_exclusive_max",
       "now_ms": 0,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zex",
-        "1",
-        "(3"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zex", "1", "(3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -793,12 +538,7 @@
     {
       "name": "zcount_exclusive_both",
       "now_ms": 0,
-      "argv": [
-        "ZCOUNT",
-        "zex",
-        "(1",
-        "(4"
-      ],
+      "argv": ["ZCOUNT", "zex", "(1", "(4"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -807,12 +547,7 @@
     {
       "name": "zcount_inclusive_all",
       "now_ms": 0,
-      "argv": [
-        "ZCOUNT",
-        "zex",
-        "-inf",
-        "+inf"
-      ],
+      "argv": ["ZCOUNT", "zex", "-inf", "+inf"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -821,12 +556,7 @@
     {
       "name": "zrangebyscore_inf_bounds",
       "now_ms": 0,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zex",
-        "-inf",
-        "+inf"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zex", "-inf", "+inf"],
       "expect": {
         "kind": "array",
         "value": [
@@ -852,12 +582,7 @@
     {
       "name": "zrevrangebyscore_exclusive",
       "now_ms": 0,
-      "argv": [
-        "ZREVRANGEBYSCORE",
-        "zex",
-        "(4",
-        "(1"
-      ],
+      "argv": ["ZREVRANGEBYSCORE", "zex", "(4", "(1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -875,12 +600,7 @@
     {
       "name": "zremrangebyscore_exclusive",
       "now_ms": 0,
-      "argv": [
-        "ZREMRANGEBYSCORE",
-        "zex",
-        "(1",
-        "(4"
-      ],
+      "argv": ["ZREMRANGEBYSCORE", "zex", "(1", "(4"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -889,10 +609,7 @@
     {
       "name": "zcard_after_remrangebyscore",
       "now_ms": 0,
-      "argv": [
-        "ZCARD",
-        "zex"
-      ],
+      "argv": ["ZCARD", "zex"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -901,12 +618,7 @@
     {
       "name": "zrange_after_remrangebyscore",
       "now_ms": 0,
-      "argv": [
-        "ZRANGE",
-        "zex",
-        "0",
-        "-1"
-      ],
+      "argv": ["ZRANGE", "zex", "0", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -924,11 +636,7 @@
     {
       "name": "zintercard_negative_numkeys",
       "now_ms": 100,
-      "argv": [
-        "ZINTERCARD",
-        "-1",
-        "z1"
-      ],
+      "argv": ["ZINTERCARD", "-1", "z1"],
       "expect": {
         "kind": "error",
         "value": "ERR at least 1 input key is needed for 'zintercard' command"
@@ -937,11 +645,7 @@
     {
       "name": "zintercard_zero_numkeys",
       "now_ms": 100,
-      "argv": [
-        "ZINTERCARD",
-        "0",
-        "z1"
-      ],
+      "argv": ["ZINTERCARD", "0", "z1"],
       "expect": {
         "kind": "error",
         "value": "ERR at least 1 input key is needed for 'zintercard' command"
@@ -950,12 +654,7 @@
     {
       "name": "zmpop_negative_numkeys",
       "now_ms": 100,
-      "argv": [
-        "ZMPOP",
-        "-1",
-        "z1",
-        "MIN"
-      ],
+      "argv": ["ZMPOP", "-1", "z1", "MIN"],
       "expect": {
         "kind": "error",
         "value": "ERR numkeys should be greater than 0"
@@ -964,13 +663,7 @@
     {
       "name": "bzmpop_negative_numkeys",
       "now_ms": 100,
-      "argv": [
-        "BZMPOP",
-        "0",
-        "-1",
-        "z1",
-        "MIN"
-      ],
+      "argv": ["BZMPOP", "0", "-1", "z1", "MIN"],
       "expect": {
         "kind": "error",
         "value": "ERR numkeys should be greater than 0"
@@ -979,14 +672,7 @@
     {
       "name": "zunionstore_weights_setup1",
       "now_ms": 200,
-      "argv": [
-        "ZADD",
-        "zw1",
-        "1",
-        "a",
-        "2",
-        "b"
-      ],
+      "argv": ["ZADD", "zw1", "1", "a", "2", "b"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -995,14 +681,7 @@
     {
       "name": "zunionstore_weights_setup2",
       "now_ms": 200,
-      "argv": [
-        "ZADD",
-        "zw2",
-        "3",
-        "b",
-        "4",
-        "c"
-      ],
+      "argv": ["ZADD", "zw2", "3", "b", "4", "c"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1011,16 +690,7 @@
     {
       "name": "zunionstore_with_weights",
       "now_ms": 200,
-      "argv": [
-        "ZUNIONSTORE",
-        "zw_dst",
-        "2",
-        "zw1",
-        "zw2",
-        "WEIGHTS",
-        "2",
-        "3"
-      ],
+      "argv": ["ZUNIONSTORE", "zw_dst", "2", "zw1", "zw2", "WEIGHTS", "2", "3"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -1029,11 +699,7 @@
     {
       "name": "zunionstore_weights_verify_a",
       "now_ms": 200,
-      "argv": [
-        "ZSCORE",
-        "zw_dst",
-        "a"
-      ],
+      "argv": ["ZSCORE", "zw_dst", "a"],
       "expect": {
         "kind": "bulk",
         "value": "2"
@@ -1042,11 +708,7 @@
     {
       "name": "zunionstore_weights_verify_b",
       "now_ms": 200,
-      "argv": [
-        "ZSCORE",
-        "zw_dst",
-        "b"
-      ],
+      "argv": ["ZSCORE", "zw_dst", "b"],
       "expect": {
         "kind": "bulk",
         "value": "13"
@@ -1055,11 +717,7 @@
     {
       "name": "zunionstore_weights_verify_c",
       "now_ms": 200,
-      "argv": [
-        "ZSCORE",
-        "zw_dst",
-        "c"
-      ],
+      "argv": ["ZSCORE", "zw_dst", "c"],
       "expect": {
         "kind": "bulk",
         "value": "12"
@@ -1068,16 +726,7 @@
     {
       "name": "zinterstore_with_weights",
       "now_ms": 300,
-      "argv": [
-        "ZINTERSTORE",
-        "ziw_dst",
-        "2",
-        "zw1",
-        "zw2",
-        "WEIGHTS",
-        "2",
-        "3"
-      ],
+      "argv": ["ZINTERSTORE", "ziw_dst", "2", "zw1", "zw2", "WEIGHTS", "2", "3"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1086,11 +735,7 @@
     {
       "name": "zinterstore_weights_verify_b",
       "now_ms": 300,
-      "argv": [
-        "ZSCORE",
-        "ziw_dst",
-        "b"
-      ],
+      "argv": ["ZSCORE", "ziw_dst", "b"],
       "expect": {
         "kind": "bulk",
         "value": "13"
@@ -1099,15 +744,7 @@
     {
       "name": "zunionstore_aggregate_min",
       "now_ms": 400,
-      "argv": [
-        "ZUNIONSTORE",
-        "za_min",
-        "2",
-        "zw1",
-        "zw2",
-        "AGGREGATE",
-        "MIN"
-      ],
+      "argv": ["ZUNIONSTORE", "za_min", "2", "zw1", "zw2", "AGGREGATE", "MIN"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -1116,11 +753,7 @@
     {
       "name": "zunionstore_aggregate_min_verify_b",
       "now_ms": 400,
-      "argv": [
-        "ZSCORE",
-        "za_min",
-        "b"
-      ],
+      "argv": ["ZSCORE", "za_min", "b"],
       "expect": {
         "kind": "bulk",
         "value": "2"
@@ -1129,15 +762,7 @@
     {
       "name": "zunionstore_aggregate_max",
       "now_ms": 400,
-      "argv": [
-        "ZUNIONSTORE",
-        "za_max",
-        "2",
-        "zw1",
-        "zw2",
-        "AGGREGATE",
-        "MAX"
-      ],
+      "argv": ["ZUNIONSTORE", "za_max", "2", "zw1", "zw2", "AGGREGATE", "MAX"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -1146,11 +771,7 @@
     {
       "name": "zunionstore_aggregate_max_verify_b",
       "now_ms": 400,
-      "argv": [
-        "ZSCORE",
-        "za_max",
-        "b"
-      ],
+      "argv": ["ZSCORE", "za_max", "b"],
       "expect": {
         "kind": "bulk",
         "value": "3"
@@ -1159,13 +780,7 @@
     {
       "name": "zunionstore_nonexistent_source",
       "now_ms": 500,
-      "argv": [
-        "ZUNIONSTORE",
-        "zu_ne",
-        "2",
-        "zw1",
-        "nokey"
-      ],
+      "argv": ["ZUNIONSTORE", "zu_ne", "2", "zw1", "nokey"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1174,13 +789,7 @@
     {
       "name": "zinterstore_nonexistent_source",
       "now_ms": 500,
-      "argv": [
-        "ZINTERSTORE",
-        "zi_ne",
-        "2",
-        "zw1",
-        "nokey"
-      ],
+      "argv": ["ZINTERSTORE", "zi_ne", "2", "zw1", "nokey"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -1189,12 +798,7 @@
     {
       "name": "zdiff_basic",
       "now_ms": 600,
-      "argv": [
-        "ZDIFF",
-        "2",
-        "zw1",
-        "zw2"
-      ],
+      "argv": ["ZDIFF", "2", "zw1", "zw2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1208,13 +812,7 @@
     {
       "name": "zdiff_withscores",
       "now_ms": 600,
-      "argv": [
-        "ZDIFF",
-        "2",
-        "zw1",
-        "zw2",
-        "WITHSCORES"
-      ],
+      "argv": ["ZDIFF", "2", "zw1", "zw2", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1232,12 +830,7 @@
     {
       "name": "zunion_basic",
       "now_ms": 700,
-      "argv": [
-        "ZUNION",
-        "2",
-        "zw1",
-        "zw2"
-      ],
+      "argv": ["ZUNION", "2", "zw1", "zw2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1259,12 +852,7 @@
     {
       "name": "zinter_basic",
       "now_ms": 800,
-      "argv": [
-        "ZINTER",
-        "2",
-        "zw1",
-        "zw2"
-      ],
+      "argv": ["ZINTER", "2", "zw1", "zw2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1278,13 +866,7 @@
     {
       "name": "zinter_withscores",
       "now_ms": 800,
-      "argv": [
-        "ZINTER",
-        "2",
-        "zw1",
-        "zw2",
-        "WITHSCORES"
-      ],
+      "argv": ["ZINTER", "2", "zw1", "zw2", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1302,16 +884,7 @@
     {
       "name": "zpopmin_with_count_setup",
       "now_ms": 900,
-      "argv": [
-        "ZADD",
-        "zpop2",
-        "1",
-        "x",
-        "2",
-        "y",
-        "3",
-        "z"
-      ],
+      "argv": ["ZADD", "zpop2", "1", "x", "2", "y", "3", "z"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -1320,11 +893,7 @@
     {
       "name": "zpopmin_with_count",
       "now_ms": 900,
-      "argv": [
-        "ZPOPMIN",
-        "zpop2",
-        "2"
-      ],
+      "argv": ["ZPOPMIN", "zpop2", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1350,11 +919,7 @@
     {
       "name": "zpopmax_with_count",
       "now_ms": 900,
-      "argv": [
-        "ZPOPMAX",
-        "zpop2",
-        "5"
-      ],
+      "argv": ["ZPOPMAX", "zpop2", "5"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1372,20 +937,7 @@
     {
       "name": "zrangestore_setup",
       "now_ms": 1000,
-      "argv": [
-        "ZADD",
-        "zrs",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d",
-        "5",
-        "e"
-      ],
+      "argv": ["ZADD", "zrs", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -1394,13 +946,7 @@
     {
       "name": "zrangestore_by_rank",
       "now_ms": 1000,
-      "argv": [
-        "ZRANGESTORE",
-        "zrs_dst",
-        "zrs",
-        "1",
-        "3"
-      ],
+      "argv": ["ZRANGESTORE", "zrs_dst", "zrs", "1", "3"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -1409,13 +955,7 @@
     {
       "name": "zrangestore_verify",
       "now_ms": 1000,
-      "argv": [
-        "ZRANGE",
-        "zrs_dst",
-        "0",
-        "-1",
-        "WITHSCORES"
-      ],
+      "argv": ["ZRANGE", "zrs_dst", "0", "-1", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1449,13 +989,7 @@
     {
       "name": "zrange_withscores",
       "now_ms": 1100,
-      "argv": [
-        "ZRANGE",
-        "zrs",
-        "0",
-        "2",
-        "WITHSCORES"
-      ],
+      "argv": ["ZRANGE", "zrs", "0", "2", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1489,13 +1023,7 @@
     {
       "name": "zrange_rev",
       "now_ms": 1100,
-      "argv": [
-        "ZRANGE",
-        "zrs",
-        "0",
-        "2",
-        "REV"
-      ],
+      "argv": ["ZRANGE", "zrs", "0", "2", "REV"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1517,13 +1045,7 @@
     {
       "name": "zrange_byscore",
       "now_ms": 1100,
-      "argv": [
-        "ZRANGE",
-        "zrs",
-        "2",
-        "4",
-        "BYSCORE"
-      ],
+      "argv": ["ZRANGE", "zrs", "2", "4", "BYSCORE"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1545,16 +1067,7 @@
     {
       "name": "zrange_byscore_limit",
       "now_ms": 1100,
-      "argv": [
-        "ZRANGE",
-        "zrs",
-        "1",
-        "+inf",
-        "BYSCORE",
-        "LIMIT",
-        "1",
-        "2"
-      ],
+      "argv": ["ZRANGE", "zrs", "1", "+inf", "BYSCORE", "LIMIT", "1", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1572,13 +1085,7 @@
     {
       "name": "zrangebyscore_withscores",
       "now_ms": 1200,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zrs",
-        "1",
-        "3",
-        "WITHSCORES"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zrs", "1", "3", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1612,15 +1119,7 @@
     {
       "name": "zrangebyscore_limit",
       "now_ms": 1200,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zrs",
-        "-inf",
-        "+inf",
-        "LIMIT",
-        "1",
-        "2"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zrs", "-inf", "+inf", "LIMIT", "1", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1638,16 +1137,7 @@
     {
       "name": "zscan_setup",
       "now_ms": 1300,
-      "argv": [
-        "ZADD",
-        "zscan_z",
-        "1",
-        "alpha",
-        "2",
-        "beta",
-        "3",
-        "gamma"
-      ],
+      "argv": ["ZADD", "zscan_z", "1", "alpha", "2", "beta", "3", "gamma"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -1656,11 +1146,7 @@
     {
       "name": "zscan_full",
       "now_ms": 1300,
-      "argv": [
-        "ZSCAN",
-        "zscan_z",
-        "0"
-      ],
+      "argv": ["ZSCAN", "zscan_z", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1703,11 +1189,7 @@
     {
       "name": "zscan_missing_key",
       "now_ms": 1300,
-      "argv": [
-        "ZSCAN",
-        "nokey",
-        "0"
-      ],
+      "argv": ["ZSCAN", "nokey", "0"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1725,18 +1207,7 @@
     {
       "name": "zrandmember_setup",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zrand",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d"
-      ],
+      "argv": ["ZADD", "zrand", "1", "a", "2", "b", "3", "c", "4", "d"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -1745,11 +1216,7 @@
     {
       "name": "zrandmember_count_zero",
       "now_ms": 100,
-      "argv": [
-        "ZRANDMEMBER",
-        "zrand",
-        "0"
-      ],
+      "argv": ["ZRANDMEMBER", "zrand", "0"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1758,12 +1225,7 @@
     {
       "name": "zrandmember_single_setup",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zrand_one",
-        "1",
-        "only"
-      ],
+      "argv": ["ZADD", "zrand_one", "1", "only"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1772,11 +1234,7 @@
     {
       "name": "zrandmember_count_exceeds_returns_all",
       "now_ms": 100,
-      "argv": [
-        "ZRANDMEMBER",
-        "zrand_one",
-        "10"
-      ],
+      "argv": ["ZRANDMEMBER", "zrand_one", "10"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1790,10 +1248,7 @@
     {
       "name": "zrandmember_missing_key",
       "now_ms": 100,
-      "argv": [
-        "ZRANDMEMBER",
-        "nosuchzset"
-      ],
+      "argv": ["ZRANDMEMBER", "nosuchzset"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -1802,11 +1257,7 @@
     {
       "name": "zrandmember_missing_key_with_count",
       "now_ms": 100,
-      "argv": [
-        "ZRANDMEMBER",
-        "nosuchzset",
-        "3"
-      ],
+      "argv": ["ZRANDMEMBER", "nosuchzset", "3"],
       "expect": {
         "kind": "array",
         "value": []
@@ -1815,9 +1266,7 @@
     {
       "name": "zrandmember_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "ZRANDMEMBER"
-      ],
+      "argv": ["ZRANDMEMBER"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zrandmember' command"
@@ -1826,12 +1275,7 @@
     {
       "name": "zrandmember_withscores_bad_keyword",
       "now_ms": 100,
-      "argv": [
-        "ZRANDMEMBER",
-        "zrand",
-        "2",
-        "WRONG"
-      ],
+      "argv": ["ZRANDMEMBER", "zrand", "2", "WRONG"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -1840,13 +1284,7 @@
     {
       "name": "zmscore_mixed",
       "now_ms": 100,
-      "argv": [
-        "ZMSCORE",
-        "zrand",
-        "a",
-        "missing",
-        "c"
-      ],
+      "argv": ["ZMSCORE", "zrand", "a", "missing", "c"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1868,12 +1306,7 @@
     {
       "name": "zmscore_missing_key",
       "now_ms": 100,
-      "argv": [
-        "ZMSCORE",
-        "nosuchzset",
-        "a",
-        "b"
-      ],
+      "argv": ["ZMSCORE", "nosuchzset", "a", "b"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1891,10 +1324,7 @@
     {
       "name": "zmscore_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "ZMSCORE",
-        "zrand"
-      ],
+      "argv": ["ZMSCORE", "zrand"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zmscore' command"
@@ -1903,16 +1333,7 @@
     {
       "name": "zdiffstore_setup_a",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zd_a",
-        "1",
-        "x",
-        "2",
-        "y",
-        "3",
-        "z"
-      ],
+      "argv": ["ZADD", "zd_a", "1", "x", "2", "y", "3", "z"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -1921,12 +1342,7 @@
     {
       "name": "zdiffstore_setup_b",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zd_b",
-        "1",
-        "y"
-      ],
+      "argv": ["ZADD", "zd_b", "1", "y"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -1935,13 +1351,7 @@
     {
       "name": "zdiffstore_result",
       "now_ms": 100,
-      "argv": [
-        "ZDIFFSTORE",
-        "zd_dest",
-        "2",
-        "zd_a",
-        "zd_b"
-      ],
+      "argv": ["ZDIFFSTORE", "zd_dest", "2", "zd_a", "zd_b"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -1950,13 +1360,7 @@
     {
       "name": "zdiffstore_verify",
       "now_ms": 100,
-      "argv": [
-        "ZRANGE",
-        "zd_dest",
-        "0",
-        "-1",
-        "WITHSCORES"
-      ],
+      "argv": ["ZRANGE", "zd_dest", "0", "-1", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -1982,18 +1386,7 @@
     {
       "name": "zintercard_setup_a",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zic_a",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d"
-      ],
+      "argv": ["ZADD", "zic_a", "1", "a", "2", "b", "3", "c", "4", "d"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -2002,18 +1395,7 @@
     {
       "name": "zintercard_setup_b",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zic_b",
-        "1",
-        "b",
-        "2",
-        "c",
-        "3",
-        "d",
-        "4",
-        "e"
-      ],
+      "argv": ["ZADD", "zic_b", "1", "b", "2", "c", "3", "d", "4", "e"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -2022,12 +1404,7 @@
     {
       "name": "zintercard_full",
       "now_ms": 100,
-      "argv": [
-        "ZINTERCARD",
-        "2",
-        "zic_a",
-        "zic_b"
-      ],
+      "argv": ["ZINTERCARD", "2", "zic_a", "zic_b"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -2036,14 +1413,7 @@
     {
       "name": "zintercard_limit_one",
       "now_ms": 100,
-      "argv": [
-        "ZINTERCARD",
-        "2",
-        "zic_a",
-        "zic_b",
-        "LIMIT",
-        "1"
-      ],
+      "argv": ["ZINTERCARD", "2", "zic_a", "zic_b", "LIMIT", "1"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2052,14 +1422,7 @@
     {
       "name": "zintercard_limit_zero",
       "now_ms": 100,
-      "argv": [
-        "ZINTERCARD",
-        "2",
-        "zic_a",
-        "zic_b",
-        "LIMIT",
-        "0"
-      ],
+      "argv": ["ZINTERCARD", "2", "zic_a", "zic_b", "LIMIT", "0"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -2068,12 +1431,7 @@
     {
       "name": "zintercard_nonexistent",
       "now_ms": 100,
-      "argv": [
-        "ZINTERCARD",
-        "2",
-        "zic_a",
-        "nosuchzset"
-      ],
+      "argv": ["ZINTERCARD", "2", "zic_a", "nosuchzset"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2082,13 +1440,7 @@
     {
       "name": "zunion_withscores",
       "now_ms": 100,
-      "argv": [
-        "ZUNION",
-        "2",
-        "zic_a",
-        "zic_b",
-        "WITHSCORES"
-      ],
+      "argv": ["ZUNION", "2", "zic_a", "zic_b", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2138,13 +1490,7 @@
     {
       "name": "zinter_withscores_sum",
       "now_ms": 100,
-      "argv": [
-        "ZINTER",
-        "2",
-        "zd_a",
-        "zd_b",
-        "WITHSCORES"
-      ],
+      "argv": ["ZINTER", "2", "zd_a", "zd_b", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2162,14 +1508,7 @@
     {
       "name": "zpopmin_count_exceeds_setup",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zpop_test",
-        "1",
-        "a",
-        "2",
-        "b"
-      ],
+      "argv": ["ZADD", "zpop_test", "1", "a", "2", "b"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -2178,11 +1517,7 @@
     {
       "name": "zpopmin_count_exceeds",
       "now_ms": 100,
-      "argv": [
-        "ZPOPMIN",
-        "zpop_test",
-        "10"
-      ],
+      "argv": ["ZPOPMIN", "zpop_test", "10"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2208,10 +1543,7 @@
     {
       "name": "zpopmin_empty_after",
       "now_ms": 100,
-      "argv": [
-        "ZCARD",
-        "zpop_test"
-      ],
+      "argv": ["ZCARD", "zpop_test"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2220,10 +1552,7 @@
     {
       "name": "zpopmax_empty",
       "now_ms": 100,
-      "argv": [
-        "ZPOPMAX",
-        "nosuchzset"
-      ],
+      "argv": ["ZPOPMAX", "nosuchzset"],
       "expect": {
         "kind": "array",
         "value": []
@@ -2232,12 +1561,7 @@
     {
       "name": "zadd_gt_setup",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zgt",
-        "5",
-        "member"
-      ],
+      "argv": ["ZADD", "zgt", "5", "member"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2246,13 +1570,7 @@
     {
       "name": "zadd_gt_higher_updates",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zgt",
-        "GT",
-        "10",
-        "member"
-      ],
+      "argv": ["ZADD", "zgt", "GT", "10", "member"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2261,11 +1579,7 @@
     {
       "name": "zadd_gt_verify_higher",
       "now_ms": 100,
-      "argv": [
-        "ZSCORE",
-        "zgt",
-        "member"
-      ],
+      "argv": ["ZSCORE", "zgt", "member"],
       "expect": {
         "kind": "bulk",
         "value": "10"
@@ -2274,13 +1588,7 @@
     {
       "name": "zadd_gt_lower_noop",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zgt",
-        "GT",
-        "3",
-        "member"
-      ],
+      "argv": ["ZADD", "zgt", "GT", "3", "member"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2289,11 +1597,7 @@
     {
       "name": "zadd_gt_verify_unchanged",
       "now_ms": 100,
-      "argv": [
-        "ZSCORE",
-        "zgt",
-        "member"
-      ],
+      "argv": ["ZSCORE", "zgt", "member"],
       "expect": {
         "kind": "bulk",
         "value": "10"
@@ -2302,13 +1606,7 @@
     {
       "name": "zadd_lt_lower_updates",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zgt",
-        "LT",
-        "2",
-        "member"
-      ],
+      "argv": ["ZADD", "zgt", "LT", "2", "member"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2317,11 +1615,7 @@
     {
       "name": "zadd_lt_verify_lower",
       "now_ms": 100,
-      "argv": [
-        "ZSCORE",
-        "zgt",
-        "member"
-      ],
+      "argv": ["ZSCORE", "zgt", "member"],
       "expect": {
         "kind": "bulk",
         "value": "2"
@@ -2330,13 +1624,7 @@
     {
       "name": "zadd_lt_higher_noop",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zgt",
-        "LT",
-        "100",
-        "member"
-      ],
+      "argv": ["ZADD", "zgt", "LT", "100", "member"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2345,11 +1633,7 @@
     {
       "name": "zadd_lt_verify_unchanged",
       "now_ms": 100,
-      "argv": [
-        "ZSCORE",
-        "zgt",
-        "member"
-      ],
+      "argv": ["ZSCORE", "zgt", "member"],
       "expect": {
         "kind": "bulk",
         "value": "2"
@@ -2358,14 +1642,7 @@
     {
       "name": "zadd_nx_xx_conflict",
       "now_ms": 110,
-      "argv": [
-        "ZADD",
-        "zconflict",
-        "NX",
-        "XX",
-        "1",
-        "member"
-      ],
+      "argv": ["ZADD", "zconflict", "NX", "XX", "1", "member"],
       "expect": {
         "kind": "error",
         "value": "ERR XX and NX options at the same time are not compatible"
@@ -2374,14 +1651,7 @@
     {
       "name": "zadd_gt_lt_conflict",
       "now_ms": 111,
-      "argv": [
-        "ZADD",
-        "zconflict",
-        "GT",
-        "LT",
-        "1",
-        "member"
-      ],
+      "argv": ["ZADD", "zconflict", "GT", "LT", "1", "member"],
       "expect": {
         "kind": "error",
         "value": "ERR GT, LT, and/or NX options at the same time are not compatible"
@@ -2390,14 +1660,7 @@
     {
       "name": "zadd_nx_gt_conflict",
       "now_ms": 112,
-      "argv": [
-        "ZADD",
-        "zconflict",
-        "NX",
-        "GT",
-        "1",
-        "member"
-      ],
+      "argv": ["ZADD", "zconflict", "NX", "GT", "1", "member"],
       "expect": {
         "kind": "error",
         "value": "ERR GT, LT, and/or NX options at the same time are not compatible"
@@ -2406,14 +1669,7 @@
     {
       "name": "zadd_nx_lt_conflict",
       "now_ms": 113,
-      "argv": [
-        "ZADD",
-        "zconflict",
-        "NX",
-        "LT",
-        "1",
-        "member"
-      ],
+      "argv": ["ZADD", "zconflict", "NX", "LT", "1", "member"],
       "expect": {
         "kind": "error",
         "value": "ERR GT, LT, and/or NX options at the same time are not compatible"
@@ -2422,12 +1678,7 @@
     {
       "name": "zadd_xx_gt_setup",
       "now_ms": 120,
-      "argv": [
-        "ZADD",
-        "zxxgt",
-        "5",
-        "member"
-      ],
+      "argv": ["ZADD", "zxxgt", "5", "member"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2436,14 +1687,7 @@
     {
       "name": "zadd_xx_gt_higher_updates",
       "now_ms": 121,
-      "argv": [
-        "ZADD",
-        "zxxgt",
-        "XX",
-        "GT",
-        "10",
-        "member"
-      ],
+      "argv": ["ZADD", "zxxgt", "XX", "GT", "10", "member"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2452,11 +1696,7 @@
     {
       "name": "zadd_xx_gt_verify_updated",
       "now_ms": 122,
-      "argv": [
-        "ZSCORE",
-        "zxxgt",
-        "member"
-      ],
+      "argv": ["ZSCORE", "zxxgt", "member"],
       "expect": {
         "kind": "bulk",
         "value": "10"
@@ -2465,14 +1705,7 @@
     {
       "name": "zadd_xx_gt_lower_noop",
       "now_ms": 123,
-      "argv": [
-        "ZADD",
-        "zxxgt",
-        "XX",
-        "GT",
-        "3",
-        "member"
-      ],
+      "argv": ["ZADD", "zxxgt", "XX", "GT", "3", "member"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2481,11 +1714,7 @@
     {
       "name": "zadd_xx_gt_verify_unchanged",
       "now_ms": 124,
-      "argv": [
-        "ZSCORE",
-        "zxxgt",
-        "member"
-      ],
+      "argv": ["ZSCORE", "zxxgt", "member"],
       "expect": {
         "kind": "bulk",
         "value": "10"
@@ -2494,14 +1723,7 @@
     {
       "name": "zadd_xx_gt_new_member_ignored",
       "now_ms": 125,
-      "argv": [
-        "ZADD",
-        "zxxgt",
-        "XX",
-        "GT",
-        "99",
-        "newmember"
-      ],
+      "argv": ["ZADD", "zxxgt", "XX", "GT", "99", "newmember"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2510,11 +1732,7 @@
     {
       "name": "zadd_xx_gt_verify_no_new_member",
       "now_ms": 126,
-      "argv": [
-        "ZSCORE",
-        "zxxgt",
-        "newmember"
-      ],
+      "argv": ["ZSCORE", "zxxgt", "newmember"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2523,12 +1741,7 @@
     {
       "name": "zadd_xx_lt_setup",
       "now_ms": 130,
-      "argv": [
-        "ZADD",
-        "zxxlt",
-        "10",
-        "member"
-      ],
+      "argv": ["ZADD", "zxxlt", "10", "member"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2537,14 +1750,7 @@
     {
       "name": "zadd_xx_lt_lower_updates",
       "now_ms": 131,
-      "argv": [
-        "ZADD",
-        "zxxlt",
-        "XX",
-        "LT",
-        "5",
-        "member"
-      ],
+      "argv": ["ZADD", "zxxlt", "XX", "LT", "5", "member"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2553,11 +1759,7 @@
     {
       "name": "zadd_xx_lt_verify_updated",
       "now_ms": 132,
-      "argv": [
-        "ZSCORE",
-        "zxxlt",
-        "member"
-      ],
+      "argv": ["ZSCORE", "zxxlt", "member"],
       "expect": {
         "kind": "bulk",
         "value": "5"
@@ -2566,14 +1768,7 @@
     {
       "name": "zadd_xx_lt_higher_noop",
       "now_ms": 133,
-      "argv": [
-        "ZADD",
-        "zxxlt",
-        "XX",
-        "LT",
-        "20",
-        "member"
-      ],
+      "argv": ["ZADD", "zxxlt", "XX", "LT", "20", "member"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2582,11 +1777,7 @@
     {
       "name": "zadd_xx_lt_verify_unchanged",
       "now_ms": 134,
-      "argv": [
-        "ZSCORE",
-        "zxxlt",
-        "member"
-      ],
+      "argv": ["ZSCORE", "zxxlt", "member"],
       "expect": {
         "kind": "bulk",
         "value": "5"
@@ -2595,12 +1786,7 @@
     {
       "name": "zadd_ch_nx_setup",
       "now_ms": 140,
-      "argv": [
-        "ZADD",
-        "zchnx",
-        "1",
-        "existing"
-      ],
+      "argv": ["ZADD", "zchnx", "1", "existing"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2609,14 +1795,7 @@
     {
       "name": "zadd_ch_nx_new_returns_1",
       "now_ms": 141,
-      "argv": [
-        "ZADD",
-        "zchnx",
-        "CH",
-        "NX",
-        "2",
-        "newmember"
-      ],
+      "argv": ["ZADD", "zchnx", "CH", "NX", "2", "newmember"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2625,14 +1804,7 @@
     {
       "name": "zadd_ch_nx_existing_returns_0",
       "now_ms": 142,
-      "argv": [
-        "ZADD",
-        "zchnx",
-        "CH",
-        "NX",
-        "99",
-        "existing"
-      ],
+      "argv": ["ZADD", "zchnx", "CH", "NX", "99", "existing"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2641,12 +1813,7 @@
     {
       "name": "zadd_ch_xx_setup",
       "now_ms": 150,
-      "argv": [
-        "ZADD",
-        "zchxx",
-        "1",
-        "member"
-      ],
+      "argv": ["ZADD", "zchxx", "1", "member"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2655,14 +1822,7 @@
     {
       "name": "zadd_ch_xx_update_returns_1",
       "now_ms": 151,
-      "argv": [
-        "ZADD",
-        "zchxx",
-        "CH",
-        "XX",
-        "5",
-        "member"
-      ],
+      "argv": ["ZADD", "zchxx", "CH", "XX", "5", "member"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2671,14 +1831,7 @@
     {
       "name": "zadd_ch_xx_same_score_returns_0",
       "now_ms": 152,
-      "argv": [
-        "ZADD",
-        "zchxx",
-        "CH",
-        "XX",
-        "5",
-        "member"
-      ],
+      "argv": ["ZADD", "zchxx", "CH", "XX", "5", "member"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2687,14 +1840,7 @@
     {
       "name": "zadd_ch_xx_nonexistent_returns_0",
       "now_ms": 153,
-      "argv": [
-        "ZADD",
-        "zchxx",
-        "CH",
-        "XX",
-        "10",
-        "nonexistent"
-      ],
+      "argv": ["ZADD", "zchxx", "CH", "XX", "10", "nonexistent"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2703,13 +1849,7 @@
     {
       "name": "zadd_incr_basic",
       "now_ms": 160,
-      "argv": [
-        "ZADD",
-        "zincr",
-        "INCR",
-        "5",
-        "member"
-      ],
+      "argv": ["ZADD", "zincr", "INCR", "5", "member"],
       "expect": {
         "kind": "bulk",
         "value": "5"
@@ -2718,13 +1858,7 @@
     {
       "name": "zadd_incr_existing",
       "now_ms": 161,
-      "argv": [
-        "ZADD",
-        "zincr",
-        "INCR",
-        "3",
-        "member"
-      ],
+      "argv": ["ZADD", "zincr", "INCR", "3", "member"],
       "expect": {
         "kind": "bulk",
         "value": "8"
@@ -2733,13 +1867,7 @@
     {
       "name": "zadd_incr_negative",
       "now_ms": 162,
-      "argv": [
-        "ZADD",
-        "zincr",
-        "INCR",
-        "-2",
-        "member"
-      ],
+      "argv": ["ZADD", "zincr", "INCR", "-2", "member"],
       "expect": {
         "kind": "bulk",
         "value": "6"
@@ -2748,14 +1876,7 @@
     {
       "name": "zadd_incr_nx_new",
       "now_ms": 163,
-      "argv": [
-        "ZADD",
-        "zincr",
-        "INCR",
-        "NX",
-        "10",
-        "newmember"
-      ],
+      "argv": ["ZADD", "zincr", "INCR", "NX", "10", "newmember"],
       "expect": {
         "kind": "bulk",
         "value": "10"
@@ -2764,14 +1885,7 @@
     {
       "name": "zadd_incr_nx_existing_returns_nil",
       "now_ms": 164,
-      "argv": [
-        "ZADD",
-        "zincr",
-        "INCR",
-        "NX",
-        "99",
-        "member"
-      ],
+      "argv": ["ZADD", "zincr", "INCR", "NX", "99", "member"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2780,14 +1894,7 @@
     {
       "name": "zadd_incr_xx_existing",
       "now_ms": 165,
-      "argv": [
-        "ZADD",
-        "zincr",
-        "INCR",
-        "XX",
-        "4",
-        "member"
-      ],
+      "argv": ["ZADD", "zincr", "INCR", "XX", "4", "member"],
       "expect": {
         "kind": "bulk",
         "value": "10"
@@ -2796,14 +1903,7 @@
     {
       "name": "zadd_incr_xx_nonexistent_returns_nil",
       "now_ms": 166,
-      "argv": [
-        "ZADD",
-        "zincr",
-        "INCR",
-        "XX",
-        "5",
-        "nosuchmember"
-      ],
+      "argv": ["ZADD", "zincr", "INCR", "XX", "5", "nosuchmember"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2812,14 +1912,7 @@
     {
       "name": "zadd_incr_gt_higher",
       "now_ms": 167,
-      "argv": [
-        "ZADD",
-        "zincr",
-        "INCR",
-        "GT",
-        "5",
-        "member"
-      ],
+      "argv": ["ZADD", "zincr", "INCR", "GT", "5", "member"],
       "expect": {
         "kind": "bulk",
         "value": "15"
@@ -2828,14 +1921,7 @@
     {
       "name": "zadd_incr_gt_lower_returns_nil",
       "now_ms": 168,
-      "argv": [
-        "ZADD",
-        "zincr",
-        "INCR",
-        "GT",
-        "-20",
-        "member"
-      ],
+      "argv": ["ZADD", "zincr", "INCR", "GT", "-20", "member"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -2844,15 +1930,7 @@
     {
       "name": "zadd_incr_multiple_members_error",
       "now_ms": 169,
-      "argv": [
-        "ZADD",
-        "zincr",
-        "INCR",
-        "1",
-        "a",
-        "2",
-        "b"
-      ],
+      "argv": ["ZADD", "zincr", "INCR", "1", "a", "2", "b"],
       "expect": {
         "kind": "error",
         "value": "ERR INCR option supports a single increment-element pair"
@@ -2861,14 +1939,7 @@
     {
       "name": "zadd_options_case_insensitive",
       "now_ms": 170,
-      "argv": [
-        "ZADD",
-        "zcase",
-        "nx",
-        "ch",
-        "1",
-        "member"
-      ],
+      "argv": ["ZADD", "zcase", "nx", "ch", "1", "member"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2877,20 +1948,7 @@
     {
       "name": "zrangestore_byscore_setup",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zrs2",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d",
-        "5",
-        "e"
-      ],
+      "argv": ["ZADD", "zrs2", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -2899,14 +1957,7 @@
     {
       "name": "zrangestore_byscore",
       "now_ms": 100,
-      "argv": [
-        "ZRANGESTORE",
-        "zrs2_dest",
-        "zrs2",
-        "2",
-        "4",
-        "BYSCORE"
-      ],
+      "argv": ["ZRANGESTORE", "zrs2_dest", "zrs2", "2", "4", "BYSCORE"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -2915,13 +1966,7 @@
     {
       "name": "zrangestore_byscore_verify",
       "now_ms": 100,
-      "argv": [
-        "ZRANGE",
-        "zrs2_dest",
-        "0",
-        "-1",
-        "WITHSCORES"
-      ],
+      "argv": ["ZRANGE", "zrs2_dest", "0", "-1", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -2981,12 +2026,7 @@
     {
       "name": "zrangebylex_all",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYLEX",
-        "zlex",
-        "-",
-        "+"
-      ],
+      "argv": ["ZRANGEBYLEX", "zlex", "-", "+"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3024,12 +2064,7 @@
     {
       "name": "zrangebylex_inclusive_range",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYLEX",
-        "zlex",
-        "[b",
-        "[e"
-      ],
+      "argv": ["ZRANGEBYLEX", "zlex", "[b", "[e"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3055,12 +2090,7 @@
     {
       "name": "zrangebylex_exclusive_range",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYLEX",
-        "zlex",
-        "(b",
-        "(e"
-      ],
+      "argv": ["ZRANGEBYLEX", "zlex", "(b", "(e"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3078,12 +2108,7 @@
     {
       "name": "zrangebylex_mixed_range",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYLEX",
-        "zlex",
-        "[b",
-        "(e"
-      ],
+      "argv": ["ZRANGEBYLEX", "zlex", "[b", "(e"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3105,15 +2130,7 @@
     {
       "name": "zrangebylex_with_limit",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYLEX",
-        "zlex",
-        "-",
-        "+",
-        "LIMIT",
-        "2",
-        "3"
-      ],
+      "argv": ["ZRANGEBYLEX", "zlex", "-", "+", "LIMIT", "2", "3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3135,12 +2152,7 @@
     {
       "name": "zrangebylex_empty_range",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYLEX",
-        "zlex",
-        "(f",
-        "(f"
-      ],
+      "argv": ["ZRANGEBYLEX", "zlex", "(f", "(f"],
       "expect": {
         "kind": "array",
         "value": []
@@ -3149,12 +2161,7 @@
     {
       "name": "zrangebylex_nonexistent_key",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYLEX",
-        "nosuchzlex",
-        "-",
-        "+"
-      ],
+      "argv": ["ZRANGEBYLEX", "nosuchzlex", "-", "+"],
       "expect": {
         "kind": "array",
         "value": []
@@ -3163,12 +2170,7 @@
     {
       "name": "zrevrangebylex_all",
       "now_ms": 200,
-      "argv": [
-        "ZREVRANGEBYLEX",
-        "zlex",
-        "+",
-        "-"
-      ],
+      "argv": ["ZREVRANGEBYLEX", "zlex", "+", "-"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3206,12 +2208,7 @@
     {
       "name": "zrevrangebylex_inclusive_range",
       "now_ms": 200,
-      "argv": [
-        "ZREVRANGEBYLEX",
-        "zlex",
-        "[e",
-        "[b"
-      ],
+      "argv": ["ZREVRANGEBYLEX", "zlex", "[e", "[b"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3237,12 +2234,7 @@
     {
       "name": "zrevrangebylex_exclusive_range",
       "now_ms": 200,
-      "argv": [
-        "ZREVRANGEBYLEX",
-        "zlex",
-        "(e",
-        "(b"
-      ],
+      "argv": ["ZREVRANGEBYLEX", "zlex", "(e", "(b"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3260,15 +2252,7 @@
     {
       "name": "zrevrangebylex_with_limit",
       "now_ms": 200,
-      "argv": [
-        "ZREVRANGEBYLEX",
-        "zlex",
-        "+",
-        "-",
-        "LIMIT",
-        "1",
-        "3"
-      ],
+      "argv": ["ZREVRANGEBYLEX", "zlex", "+", "-", "LIMIT", "1", "3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3290,12 +2274,7 @@
     {
       "name": "zrevrangebylex_nonexistent_key",
       "now_ms": 200,
-      "argv": [
-        "ZREVRANGEBYLEX",
-        "nosuchzlex",
-        "+",
-        "-"
-      ],
+      "argv": ["ZREVRANGEBYLEX", "nosuchzlex", "+", "-"],
       "expect": {
         "kind": "array",
         "value": []
@@ -3304,12 +2283,7 @@
     {
       "name": "zlexcount_all",
       "now_ms": 200,
-      "argv": [
-        "ZLEXCOUNT",
-        "zlex",
-        "-",
-        "+"
-      ],
+      "argv": ["ZLEXCOUNT", "zlex", "-", "+"],
       "expect": {
         "kind": "integer",
         "value": 7
@@ -3318,12 +2292,7 @@
     {
       "name": "zlexcount_inclusive_range",
       "now_ms": 200,
-      "argv": [
-        "ZLEXCOUNT",
-        "zlex",
-        "[b",
-        "[e"
-      ],
+      "argv": ["ZLEXCOUNT", "zlex", "[b", "[e"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -3332,12 +2301,7 @@
     {
       "name": "zlexcount_exclusive_range",
       "now_ms": 200,
-      "argv": [
-        "ZLEXCOUNT",
-        "zlex",
-        "(b",
-        "(e"
-      ],
+      "argv": ["ZLEXCOUNT", "zlex", "(b", "(e"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -3346,12 +2310,7 @@
     {
       "name": "zlexcount_mixed_range",
       "now_ms": 200,
-      "argv": [
-        "ZLEXCOUNT",
-        "zlex",
-        "[b",
-        "(e"
-      ],
+      "argv": ["ZLEXCOUNT", "zlex", "[b", "(e"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -3360,12 +2319,7 @@
     {
       "name": "zlexcount_nonexistent_key",
       "now_ms": 200,
-      "argv": [
-        "ZLEXCOUNT",
-        "nosuchzlex",
-        "-",
-        "+"
-      ],
+      "argv": ["ZLEXCOUNT", "nosuchzlex", "-", "+"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3374,20 +2328,7 @@
     {
       "name": "zremrangebyrank_setup",
       "now_ms": 200,
-      "argv": [
-        "ZADD",
-        "zrrr",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d",
-        "5",
-        "e"
-      ],
+      "argv": ["ZADD", "zrrr", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -3396,12 +2337,7 @@
     {
       "name": "zremrangebyrank_middle",
       "now_ms": 200,
-      "argv": [
-        "ZREMRANGEBYRANK",
-        "zrrr",
-        "1",
-        "3"
-      ],
+      "argv": ["ZREMRANGEBYRANK", "zrrr", "1", "3"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -3410,13 +2346,7 @@
     {
       "name": "zremrangebyrank_verify",
       "now_ms": 200,
-      "argv": [
-        "ZRANGE",
-        "zrrr",
-        "0",
-        "-1",
-        "WITHSCORES"
-      ],
+      "argv": ["ZRANGE", "zrrr", "0", "-1", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3442,18 +2372,7 @@
     {
       "name": "zremrangebyrank_negative_indices_setup",
       "now_ms": 200,
-      "argv": [
-        "ZADD",
-        "zrrr2",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d"
-      ],
+      "argv": ["ZADD", "zrrr2", "1", "a", "2", "b", "3", "c", "4", "d"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -3462,12 +2381,7 @@
     {
       "name": "zremrangebyrank_negative_indices",
       "now_ms": 200,
-      "argv": [
-        "ZREMRANGEBYRANK",
-        "zrrr2",
-        "-2",
-        "-1"
-      ],
+      "argv": ["ZREMRANGEBYRANK", "zrrr2", "-2", "-1"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -3476,12 +2390,7 @@
     {
       "name": "zremrangebyrank_negative_verify",
       "now_ms": 200,
-      "argv": [
-        "ZRANGE",
-        "zrrr2",
-        "0",
-        "-1"
-      ],
+      "argv": ["ZRANGE", "zrrr2", "0", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3499,12 +2408,7 @@
     {
       "name": "zremrangebyrank_nonexistent_key",
       "now_ms": 200,
-      "argv": [
-        "ZREMRANGEBYRANK",
-        "nosuchzrrr",
-        "0",
-        "1"
-      ],
+      "argv": ["ZREMRANGEBYRANK", "nosuchzrrr", "0", "1"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3513,14 +2417,7 @@
     {
       "name": "zremrangebyrank_all_setup",
       "now_ms": 200,
-      "argv": [
-        "ZADD",
-        "zrrr3",
-        "1",
-        "x",
-        "2",
-        "y"
-      ],
+      "argv": ["ZADD", "zrrr3", "1", "x", "2", "y"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -3529,12 +2426,7 @@
     {
       "name": "zremrangebyrank_all",
       "now_ms": 200,
-      "argv": [
-        "ZREMRANGEBYRANK",
-        "zrrr3",
-        "0",
-        "-1"
-      ],
+      "argv": ["ZREMRANGEBYRANK", "zrrr3", "0", "-1"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -3543,10 +2435,7 @@
     {
       "name": "zremrangebyrank_all_verify_empty",
       "now_ms": 200,
-      "argv": [
-        "ZCARD",
-        "zrrr3"
-      ],
+      "argv": ["ZCARD", "zrrr3"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3555,20 +2444,7 @@
     {
       "name": "zremrangebylex_setup",
       "now_ms": 200,
-      "argv": [
-        "ZADD",
-        "zrrl",
-        "0",
-        "a",
-        "0",
-        "b",
-        "0",
-        "c",
-        "0",
-        "d",
-        "0",
-        "e"
-      ],
+      "argv": ["ZADD", "zrrl", "0", "a", "0", "b", "0", "c", "0", "d", "0", "e"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -3577,12 +2453,7 @@
     {
       "name": "zremrangebylex_inclusive",
       "now_ms": 200,
-      "argv": [
-        "ZREMRANGEBYLEX",
-        "zrrl",
-        "[b",
-        "[d"
-      ],
+      "argv": ["ZREMRANGEBYLEX", "zrrl", "[b", "[d"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -3591,12 +2462,7 @@
     {
       "name": "zremrangebylex_verify",
       "now_ms": 200,
-      "argv": [
-        "ZRANGE",
-        "zrrl",
-        "0",
-        "-1"
-      ],
+      "argv": ["ZRANGE", "zrrl", "0", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3614,20 +2480,7 @@
     {
       "name": "zremrangebylex_exclusive_setup",
       "now_ms": 200,
-      "argv": [
-        "ZADD",
-        "zrrl2",
-        "0",
-        "a",
-        "0",
-        "b",
-        "0",
-        "c",
-        "0",
-        "d",
-        "0",
-        "e"
-      ],
+      "argv": ["ZADD", "zrrl2", "0", "a", "0", "b", "0", "c", "0", "d", "0", "e"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -3636,12 +2489,7 @@
     {
       "name": "zremrangebylex_exclusive",
       "now_ms": 200,
-      "argv": [
-        "ZREMRANGEBYLEX",
-        "zrrl2",
-        "(a",
-        "(e"
-      ],
+      "argv": ["ZREMRANGEBYLEX", "zrrl2", "(a", "(e"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -3650,12 +2498,7 @@
     {
       "name": "zremrangebylex_exclusive_verify",
       "now_ms": 200,
-      "argv": [
-        "ZRANGE",
-        "zrrl2",
-        "0",
-        "-1"
-      ],
+      "argv": ["ZRANGE", "zrrl2", "0", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3673,12 +2516,7 @@
     {
       "name": "zremrangebylex_nonexistent_key",
       "now_ms": 200,
-      "argv": [
-        "ZREMRANGEBYLEX",
-        "nosuchzrrl",
-        "[a",
-        "[z"
-      ],
+      "argv": ["ZREMRANGEBYLEX", "nosuchzrrl", "[a", "[z"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3687,14 +2525,7 @@
     {
       "name": "zremrangebylex_all_setup",
       "now_ms": 200,
-      "argv": [
-        "ZADD",
-        "zrrl3",
-        "0",
-        "m",
-        "0",
-        "n"
-      ],
+      "argv": ["ZADD", "zrrl3", "0", "m", "0", "n"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -3703,12 +2534,7 @@
     {
       "name": "zremrangebylex_all",
       "now_ms": 200,
-      "argv": [
-        "ZREMRANGEBYLEX",
-        "zrrl3",
-        "-",
-        "+"
-      ],
+      "argv": ["ZREMRANGEBYLEX", "zrrl3", "-", "+"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -3717,10 +2543,7 @@
     {
       "name": "zrangebylex_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYLEX",
-        "k"
-      ],
+      "argv": ["ZRANGEBYLEX", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zrangebylex' command"
@@ -3729,10 +2552,7 @@
     {
       "name": "zrevrangebylex_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "ZREVRANGEBYLEX",
-        "k"
-      ],
+      "argv": ["ZREVRANGEBYLEX", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zrevrangebylex' command"
@@ -3741,10 +2561,7 @@
     {
       "name": "zlexcount_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "ZLEXCOUNT",
-        "k"
-      ],
+      "argv": ["ZLEXCOUNT", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zlexcount' command"
@@ -3753,10 +2570,7 @@
     {
       "name": "zremrangebyrank_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "ZREMRANGEBYRANK",
-        "k"
-      ],
+      "argv": ["ZREMRANGEBYRANK", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zremrangebyrank' command"
@@ -3765,10 +2579,7 @@
     {
       "name": "zremrangebylex_wrong_arity",
       "now_ms": 200,
-      "argv": [
-        "ZREMRANGEBYLEX",
-        "k"
-      ],
+      "argv": ["ZREMRANGEBYLEX", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zremrangebylex' command"
@@ -3777,20 +2588,7 @@
     {
       "name": "zrev_setup",
       "now_ms": 900,
-      "argv": [
-        "ZADD",
-        "zrev",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d",
-        "5",
-        "e"
-      ],
+      "argv": ["ZADD", "zrev", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -3799,12 +2597,7 @@
     {
       "name": "zrevrange_all",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGE",
-        "zrev",
-        "0",
-        "-1"
-      ],
+      "argv": ["ZREVRANGE", "zrev", "0", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3834,12 +2627,7 @@
     {
       "name": "zrevrange_subset",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGE",
-        "zrev",
-        "1",
-        "3"
-      ],
+      "argv": ["ZREVRANGE", "zrev", "1", "3"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3861,13 +2649,7 @@
     {
       "name": "zrevrange_withscores",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGE",
-        "zrev",
-        "0",
-        "2",
-        "WITHSCORES"
-      ],
+      "argv": ["ZREVRANGE", "zrev", "0", "2", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -3901,12 +2683,7 @@
     {
       "name": "zrevrange_nonexistent",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGE",
-        "nosuchzrev",
-        "0",
-        "-1"
-      ],
+      "argv": ["ZREVRANGE", "nosuchzrev", "0", "-1"],
       "expect": {
         "kind": "array",
         "value": []
@@ -3915,12 +2692,7 @@
     {
       "name": "zrevrange_out_of_bounds",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGE",
-        "zrev",
-        "10",
-        "20"
-      ],
+      "argv": ["ZREVRANGE", "zrev", "10", "20"],
       "expect": {
         "kind": "array",
         "value": []
@@ -3929,10 +2701,7 @@
     {
       "name": "zrevrange_wrong_arity",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGE",
-        "k"
-      ],
+      "argv": ["ZREVRANGE", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zrevrange' command"
@@ -3941,11 +2710,7 @@
     {
       "name": "zrevrank_first",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANK",
-        "zrev",
-        "e"
-      ],
+      "argv": ["ZREVRANK", "zrev", "e"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -3954,11 +2719,7 @@
     {
       "name": "zrevrank_middle",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANK",
-        "zrev",
-        "c"
-      ],
+      "argv": ["ZREVRANK", "zrev", "c"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -3967,11 +2728,7 @@
     {
       "name": "zrevrank_last",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANK",
-        "zrev",
-        "a"
-      ],
+      "argv": ["ZREVRANK", "zrev", "a"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -3980,11 +2737,7 @@
     {
       "name": "zrevrank_nonexistent_member",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANK",
-        "zrev",
-        "z"
-      ],
+      "argv": ["ZREVRANK", "zrev", "z"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -3993,11 +2746,7 @@
     {
       "name": "zrevrank_nonexistent_key",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANK",
-        "nosuchzrev",
-        "a"
-      ],
+      "argv": ["ZREVRANK", "nosuchzrev", "a"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -4006,10 +2755,7 @@
     {
       "name": "zrevrank_wrong_arity",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANK",
-        "k"
-      ],
+      "argv": ["ZREVRANK", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zrevrank' command"
@@ -4018,12 +2764,7 @@
     {
       "name": "zrevrangebyscore_all",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGEBYSCORE",
-        "zrev",
-        "+inf",
-        "-inf"
-      ],
+      "argv": ["ZREVRANGEBYSCORE", "zrev", "+inf", "-inf"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4053,12 +2794,7 @@
     {
       "name": "zrevrangebyscore_range",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGEBYSCORE",
-        "zrev",
-        "4",
-        "2"
-      ],
+      "argv": ["ZREVRANGEBYSCORE", "zrev", "4", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4080,12 +2816,7 @@
     {
       "name": "zrevrangebyscore_exclusive",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGEBYSCORE",
-        "zrev",
-        "(5",
-        "(1"
-      ],
+      "argv": ["ZREVRANGEBYSCORE", "zrev", "(5", "(1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4107,15 +2838,7 @@
     {
       "name": "zrevrangebyscore_limit",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGEBYSCORE",
-        "zrev",
-        "+inf",
-        "-inf",
-        "LIMIT",
-        "1",
-        "2"
-      ],
+      "argv": ["ZREVRANGEBYSCORE", "zrev", "+inf", "-inf", "LIMIT", "1", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4133,13 +2856,7 @@
     {
       "name": "zrevrangebyscore_withscores",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGEBYSCORE",
-        "zrev",
-        "3",
-        "1",
-        "WITHSCORES"
-      ],
+      "argv": ["ZREVRANGEBYSCORE", "zrev", "3", "1", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4173,12 +2890,7 @@
     {
       "name": "zrevrangebyscore_nonexistent",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGEBYSCORE",
-        "nosuchzrev",
-        "+inf",
-        "-inf"
-      ],
+      "argv": ["ZREVRANGEBYSCORE", "nosuchzrev", "+inf", "-inf"],
       "expect": {
         "kind": "array",
         "value": []
@@ -4187,10 +2899,7 @@
     {
       "name": "zrevrangebyscore_wrong_arity",
       "now_ms": 900,
-      "argv": [
-        "ZREVRANGEBYSCORE",
-        "k"
-      ],
+      "argv": ["ZREVRANGEBYSCORE", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zrevrangebyscore' command"
@@ -4199,16 +2908,7 @@
     {
       "name": "zmop_setup_x",
       "now_ms": 950,
-      "argv": [
-        "ZADD",
-        "zmx",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c"
-      ],
+      "argv": ["ZADD", "zmx", "1", "a", "2", "b", "3", "c"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -4217,16 +2917,7 @@
     {
       "name": "zmop_setup_y",
       "now_ms": 950,
-      "argv": [
-        "ZADD",
-        "zmy",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d"
-      ],
+      "argv": ["ZADD", "zmy", "2", "b", "3", "c", "4", "d"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -4235,12 +2926,7 @@
     {
       "name": "zincrby_new_field",
       "now_ms": 950,
-      "argv": [
-        "ZINCRBY",
-        "zmx",
-        "10",
-        "newmember"
-      ],
+      "argv": ["ZINCRBY", "zmx", "10", "newmember"],
       "expect": {
         "kind": "bulk",
         "value": "10"
@@ -4249,12 +2935,7 @@
     {
       "name": "zincrby_existing",
       "now_ms": 950,
-      "argv": [
-        "ZINCRBY",
-        "zmx",
-        "5",
-        "a"
-      ],
+      "argv": ["ZINCRBY", "zmx", "5", "a"],
       "expect": {
         "kind": "bulk",
         "value": "6"
@@ -4263,12 +2944,7 @@
     {
       "name": "zincrby_negative",
       "now_ms": 950,
-      "argv": [
-        "ZINCRBY",
-        "zmx",
-        "-3",
-        "b"
-      ],
+      "argv": ["ZINCRBY", "zmx", "-3", "b"],
       "expect": {
         "kind": "bulk",
         "value": "-1"
@@ -4277,12 +2953,7 @@
     {
       "name": "zincrby_new_key",
       "now_ms": 950,
-      "argv": [
-        "ZINCRBY",
-        "zmnewkey",
-        "5",
-        "m"
-      ],
+      "argv": ["ZINCRBY", "zmnewkey", "5", "m"],
       "expect": {
         "kind": "bulk",
         "value": "5"
@@ -4291,10 +2962,7 @@
     {
       "name": "zincrby_wrong_arity",
       "now_ms": 950,
-      "argv": [
-        "ZINCRBY",
-        "k"
-      ],
+      "argv": ["ZINCRBY", "k"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zincrby' command"
@@ -4303,13 +2971,7 @@
     {
       "name": "zinterstore_basic",
       "now_ms": 960,
-      "argv": [
-        "ZINTERSTORE",
-        "zis_dest",
-        "2",
-        "zmx",
-        "zmy"
-      ],
+      "argv": ["ZINTERSTORE", "zis_dest", "2", "zmx", "zmy"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -4318,11 +2980,7 @@
     {
       "name": "zinterstore_verify_b",
       "now_ms": 960,
-      "argv": [
-        "ZSCORE",
-        "zis_dest",
-        "b"
-      ],
+      "argv": ["ZSCORE", "zis_dest", "b"],
       "expect": {
         "kind": "bulk",
         "value": "1"
@@ -4331,11 +2989,7 @@
     {
       "name": "zinterstore_verify_c",
       "now_ms": 960,
-      "argv": [
-        "ZSCORE",
-        "zis_dest",
-        "c"
-      ],
+      "argv": ["ZSCORE", "zis_dest", "c"],
       "expect": {
         "kind": "bulk",
         "value": "6"
@@ -4344,16 +2998,7 @@
     {
       "name": "zinterstore_weights",
       "now_ms": 960,
-      "argv": [
-        "ZINTERSTORE",
-        "zis_w",
-        "2",
-        "zmx",
-        "zmy",
-        "WEIGHTS",
-        "2",
-        "1"
-      ],
+      "argv": ["ZINTERSTORE", "zis_w", "2", "zmx", "zmy", "WEIGHTS", "2", "1"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -4362,11 +3007,7 @@
     {
       "name": "zinterstore_weights_verify",
       "now_ms": 960,
-      "argv": [
-        "ZSCORE",
-        "zis_w",
-        "c"
-      ],
+      "argv": ["ZSCORE", "zis_w", "c"],
       "expect": {
         "kind": "bulk",
         "value": "9"
@@ -4375,15 +3016,7 @@
     {
       "name": "zinterstore_aggregate_min",
       "now_ms": 960,
-      "argv": [
-        "ZINTERSTORE",
-        "zis_min",
-        "2",
-        "zmx",
-        "zmy",
-        "AGGREGATE",
-        "MIN"
-      ],
+      "argv": ["ZINTERSTORE", "zis_min", "2", "zmx", "zmy", "AGGREGATE", "MIN"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -4392,11 +3025,7 @@
     {
       "name": "zinterstore_aggregate_min_verify",
       "now_ms": 960,
-      "argv": [
-        "ZSCORE",
-        "zis_min",
-        "b"
-      ],
+      "argv": ["ZSCORE", "zis_min", "b"],
       "expect": {
         "kind": "bulk",
         "value": "-1"
@@ -4405,9 +3034,7 @@
     {
       "name": "zinterstore_wrong_arity",
       "now_ms": 960,
-      "argv": [
-        "ZINTERSTORE"
-      ],
+      "argv": ["ZINTERSTORE"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zinterstore' command"
@@ -4416,12 +3043,7 @@
     {
       "name": "zdiff_basic",
       "now_ms": 970,
-      "argv": [
-        "ZDIFF",
-        "2",
-        "zmx",
-        "zmy"
-      ],
+      "argv": ["ZDIFF", "2", "zmx", "zmy"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4439,13 +3061,7 @@
     {
       "name": "zdiff_withscores",
       "now_ms": 970,
-      "argv": [
-        "ZDIFF",
-        "2",
-        "zmx",
-        "zmy",
-        "WITHSCORES"
-      ],
+      "argv": ["ZDIFF", "2", "zmx", "zmy", "WITHSCORES"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4471,12 +3087,7 @@
     {
       "name": "zdiff_nonexistent",
       "now_ms": 970,
-      "argv": [
-        "ZDIFF",
-        "2",
-        "nosuchzd",
-        "zmx"
-      ],
+      "argv": ["ZDIFF", "2", "nosuchzd", "zmx"],
       "expect": {
         "kind": "array",
         "value": []
@@ -4485,9 +3096,7 @@
     {
       "name": "zdiff_wrong_arity",
       "now_ms": 970,
-      "argv": [
-        "ZDIFF"
-      ],
+      "argv": ["ZDIFF"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zdiff' command"
@@ -4496,13 +3105,7 @@
     {
       "name": "zdiffstore_basic",
       "now_ms": 970,
-      "argv": [
-        "ZDIFFSTORE",
-        "zds_dest",
-        "2",
-        "zmx",
-        "zmy"
-      ],
+      "argv": ["ZDIFFSTORE", "zds_dest", "2", "zmx", "zmy"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -4511,11 +3114,7 @@
     {
       "name": "zdiffstore_verify",
       "now_ms": 970,
-      "argv": [
-        "ZSCORE",
-        "zds_dest",
-        "a"
-      ],
+      "argv": ["ZSCORE", "zds_dest", "a"],
       "expect": {
         "kind": "bulk",
         "value": "6"
@@ -4524,9 +3123,7 @@
     {
       "name": "zdiffstore_wrong_arity",
       "now_ms": 970,
-      "argv": [
-        "ZDIFFSTORE"
-      ],
+      "argv": ["ZDIFFSTORE"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zdiffstore' command"
@@ -4535,20 +3132,7 @@
     {
       "name": "zrangestore_setup",
       "now_ms": 980,
-      "argv": [
-        "ZADD",
-        "zrs_src",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d",
-        "5",
-        "e"
-      ],
+      "argv": ["ZADD", "zrs_src", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -4557,13 +3141,7 @@
     {
       "name": "zrangestore_basic",
       "now_ms": 980,
-      "argv": [
-        "ZRANGESTORE",
-        "zrs_dest",
-        "zrs_src",
-        "1",
-        "3"
-      ],
+      "argv": ["ZRANGESTORE", "zrs_dest", "zrs_src", "1", "3"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -4572,12 +3150,7 @@
     {
       "name": "zrangestore_verify",
       "now_ms": 980,
-      "argv": [
-        "ZRANGE",
-        "zrs_dest",
-        "0",
-        "-1"
-      ],
+      "argv": ["ZRANGE", "zrs_dest", "0", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4599,14 +3172,7 @@
     {
       "name": "zrangestore_byscore",
       "now_ms": 980,
-      "argv": [
-        "ZRANGESTORE",
-        "zrs_dest2",
-        "zrs_src",
-        "2",
-        "4",
-        "BYSCORE"
-      ],
+      "argv": ["ZRANGESTORE", "zrs_dest2", "zrs_src", "2", "4", "BYSCORE"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -4615,13 +3181,7 @@
     {
       "name": "zrangestore_nonexistent",
       "now_ms": 980,
-      "argv": [
-        "ZRANGESTORE",
-        "zrs_dest3",
-        "nosuchzrs",
-        "0",
-        "-1"
-      ],
+      "argv": ["ZRANGESTORE", "zrs_dest3", "nosuchzrs", "0", "-1"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -4630,9 +3190,7 @@
     {
       "name": "zrangestore_wrong_arity",
       "now_ms": 980,
-      "argv": [
-        "ZRANGESTORE"
-      ],
+      "argv": ["ZRANGESTORE"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zrangestore' command"
@@ -4641,16 +3199,7 @@
     {
       "name": "zmpop_setup_a",
       "now_ms": 1000,
-      "argv": [
-        "ZADD",
-        "zmpop_a",
-        "1",
-        "one",
-        "2",
-        "two",
-        "3",
-        "three"
-      ],
+      "argv": ["ZADD", "zmpop_a", "1", "one", "2", "two", "3", "three"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -4659,12 +3208,7 @@
     {
       "name": "zmpop_min_single",
       "now_ms": 1000,
-      "argv": [
-        "ZMPOP",
-        "1",
-        "zmpop_a",
-        "MIN"
-      ],
+      "argv": ["ZMPOP", "1", "zmpop_a", "MIN"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4696,12 +3240,7 @@
     {
       "name": "zmpop_max_single",
       "now_ms": 1000,
-      "argv": [
-        "ZMPOP",
-        "1",
-        "zmpop_a",
-        "MAX"
-      ],
+      "argv": ["ZMPOP", "1", "zmpop_a", "MAX"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4733,10 +3272,7 @@
     {
       "name": "zmpop_verify_remaining",
       "now_ms": 1000,
-      "argv": [
-        "ZCARD",
-        "zmpop_a"
-      ],
+      "argv": ["ZCARD", "zmpop_a"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -4745,18 +3281,7 @@
     {
       "name": "zmpop_setup_b",
       "now_ms": 1010,
-      "argv": [
-        "ZADD",
-        "zmpop_b",
-        "10",
-        "alpha",
-        "20",
-        "beta",
-        "30",
-        "gamma",
-        "40",
-        "delta"
-      ],
+      "argv": ["ZADD", "zmpop_b", "10", "alpha", "20", "beta", "30", "gamma", "40", "delta"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -4765,14 +3290,7 @@
     {
       "name": "zmpop_min_count_2",
       "now_ms": 1010,
-      "argv": [
-        "ZMPOP",
-        "1",
-        "zmpop_b",
-        "MIN",
-        "COUNT",
-        "2"
-      ],
+      "argv": ["ZMPOP", "1", "zmpop_b", "MIN", "COUNT", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4817,14 +3335,7 @@
     {
       "name": "zmpop_max_count_2",
       "now_ms": 1010,
-      "argv": [
-        "ZMPOP",
-        "1",
-        "zmpop_b",
-        "MAX",
-        "COUNT",
-        "2"
-      ],
+      "argv": ["ZMPOP", "1", "zmpop_b", "MAX", "COUNT", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4869,10 +3380,7 @@
     {
       "name": "zmpop_verify_empty",
       "now_ms": 1010,
-      "argv": [
-        "ZCARD",
-        "zmpop_b"
-      ],
+      "argv": ["ZCARD", "zmpop_b"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -4881,12 +3389,7 @@
     {
       "name": "zmpop_nonexistent_key",
       "now_ms": 1020,
-      "argv": [
-        "ZMPOP",
-        "1",
-        "nosuchzmpop",
-        "MIN"
-      ],
+      "argv": ["ZMPOP", "1", "nosuchzmpop", "MIN"],
       "expect": {
         "kind": "null_array"
       }
@@ -4894,12 +3397,7 @@
     {
       "name": "zmpop_empty_set",
       "now_ms": 1020,
-      "argv": [
-        "ZMPOP",
-        "1",
-        "zmpop_b",
-        "MIN"
-      ],
+      "argv": ["ZMPOP", "1", "zmpop_b", "MIN"],
       "expect": {
         "kind": "null_array"
       }
@@ -4907,14 +3405,7 @@
     {
       "name": "zmpop_multi_key_setup",
       "now_ms": 1030,
-      "argv": [
-        "ZADD",
-        "zmpop_c",
-        "5",
-        "x",
-        "10",
-        "y"
-      ],
+      "argv": ["ZADD", "zmpop_c", "5", "x", "10", "y"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -4923,13 +3414,7 @@
     {
       "name": "zmpop_multi_key_first_empty",
       "now_ms": 1030,
-      "argv": [
-        "ZMPOP",
-        "2",
-        "zmpop_b",
-        "zmpop_c",
-        "MIN"
-      ],
+      "argv": ["ZMPOP", "2", "zmpop_b", "zmpop_c", "MIN"],
       "expect": {
         "kind": "array",
         "value": [
@@ -4961,12 +3446,7 @@
     {
       "name": "zmpop_zero_numkeys",
       "now_ms": 1040,
-      "argv": [
-        "ZMPOP",
-        "0",
-        "zmpop_c",
-        "MIN"
-      ],
+      "argv": ["ZMPOP", "0", "zmpop_c", "MIN"],
       "expect": {
         "kind": "error",
         "value": "ERR numkeys should be greater than 0"
@@ -4975,9 +3455,7 @@
     {
       "name": "zmpop_wrong_arity",
       "now_ms": 1040,
-      "argv": [
-        "ZMPOP"
-      ],
+      "argv": ["ZMPOP"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zmpop' command"
@@ -4986,12 +3464,7 @@
     {
       "name": "zmpop_bad_direction",
       "now_ms": 1040,
-      "argv": [
-        "ZMPOP",
-        "1",
-        "zmpop_c",
-        "MIDDLE"
-      ],
+      "argv": ["ZMPOP", "1", "zmpop_c", "MIDDLE"],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -5000,14 +3473,7 @@
     {
       "name": "zmpop_count_exceeds_size",
       "now_ms": 1050,
-      "argv": [
-        "ZMPOP",
-        "1",
-        "zmpop_c",
-        "MIN",
-        "COUNT",
-        "100"
-      ],
+      "argv": ["ZMPOP", "1", "zmpop_c", "MIN", "COUNT", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5039,9 +3505,7 @@
     {
       "name": "zremrangebyscore_setup",
       "now_ms": 100,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5050,20 +3514,7 @@
     {
       "name": "zremrangebyscore_populate",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zrbs",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d",
-        "5",
-        "e"
-      ],
+      "argv": ["ZADD", "zrbs", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -5072,12 +3523,7 @@
     {
       "name": "zremrangebyscore_range",
       "now_ms": 100,
-      "argv": [
-        "ZREMRANGEBYSCORE",
-        "zrbs",
-        "2",
-        "4"
-      ],
+      "argv": ["ZREMRANGEBYSCORE", "zrbs", "2", "4"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -5086,10 +3532,7 @@
     {
       "name": "zremrangebyscore_remaining",
       "now_ms": 100,
-      "argv": [
-        "ZCARD",
-        "zrbs"
-      ],
+      "argv": ["ZCARD", "zrbs"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -5098,18 +3541,7 @@
     {
       "name": "zremrangebyscore_exclusive",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zrbs2",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d"
-      ],
+      "argv": ["ZADD", "zrbs2", "1", "a", "2", "b", "3", "c", "4", "d"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -5118,12 +3550,7 @@
     {
       "name": "zremrangebyscore_exclusive_range",
       "now_ms": 100,
-      "argv": [
-        "ZREMRANGEBYSCORE",
-        "zrbs2",
-        "(1",
-        "(4"
-      ],
+      "argv": ["ZREMRANGEBYSCORE", "zrbs2", "(1", "(4"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -5132,10 +3559,7 @@
     {
       "name": "zremrangebyscore_exclusive_remaining",
       "now_ms": 100,
-      "argv": [
-        "ZCARD",
-        "zrbs2"
-      ],
+      "argv": ["ZCARD", "zrbs2"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -5144,16 +3568,7 @@
     {
       "name": "zremrangebyscore_inf",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zrbs3",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c"
-      ],
+      "argv": ["ZADD", "zrbs3", "1", "a", "2", "b", "3", "c"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -5162,12 +3577,7 @@
     {
       "name": "zremrangebyscore_neg_inf_to_plus_inf",
       "now_ms": 100,
-      "argv": [
-        "ZREMRANGEBYSCORE",
-        "zrbs3",
-        "-inf",
-        "+inf"
-      ],
+      "argv": ["ZREMRANGEBYSCORE", "zrbs3", "-inf", "+inf"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -5176,12 +3586,7 @@
     {
       "name": "zremrangebyscore_nonexistent_key",
       "now_ms": 100,
-      "argv": [
-        "ZREMRANGEBYSCORE",
-        "nokey999",
-        "0",
-        "100"
-      ],
+      "argv": ["ZREMRANGEBYSCORE", "nokey999", "0", "100"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -5190,10 +3595,7 @@
     {
       "name": "zremrangebyscore_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "ZREMRANGEBYSCORE",
-        "zrbs"
-      ],
+      "argv": ["ZREMRANGEBYSCORE", "zrbs"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zremrangebyscore' command"
@@ -5202,18 +3604,7 @@
     {
       "name": "zpopmin_count_setup",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zpop",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d"
-      ],
+      "argv": ["ZADD", "zpop", "1", "a", "2", "b", "3", "c", "4", "d"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -5222,11 +3613,7 @@
     {
       "name": "zpopmin_count_2",
       "now_ms": 100,
-      "argv": [
-        "ZPOPMIN",
-        "zpop",
-        "2"
-      ],
+      "argv": ["ZPOPMIN", "zpop", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5252,11 +3639,7 @@
     {
       "name": "zpopmax_count_2",
       "now_ms": 100,
-      "argv": [
-        "ZPOPMAX",
-        "zpop",
-        "2"
-      ],
+      "argv": ["ZPOPMAX", "zpop", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5282,10 +3665,7 @@
     {
       "name": "zpopmin_empty_key",
       "now_ms": 100,
-      "argv": [
-        "ZPOPMIN",
-        "nokey999"
-      ],
+      "argv": ["ZPOPMIN", "nokey999"],
       "expect": {
         "kind": "array",
         "value": []
@@ -5294,10 +3674,7 @@
     {
       "name": "zpopmax_empty_key",
       "now_ms": 100,
-      "argv": [
-        "ZPOPMAX",
-        "nokey999"
-      ],
+      "argv": ["ZPOPMAX", "nokey999"],
       "expect": {
         "kind": "array",
         "value": []
@@ -5306,14 +3683,7 @@
     {
       "name": "zpopmin_count_larger_setup",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zpop2",
-        "1",
-        "x",
-        "2",
-        "y"
-      ],
+      "argv": ["ZADD", "zpop2", "1", "x", "2", "y"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -5322,11 +3692,7 @@
     {
       "name": "zpopmin_count_100",
       "now_ms": 100,
-      "argv": [
-        "ZPOPMIN",
-        "zpop2",
-        "100"
-      ],
+      "argv": ["ZPOPMIN", "zpop2", "100"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5352,12 +3718,7 @@
     {
       "name": "zpopmin_count_zero_setup",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zpop3",
-        "1",
-        "a"
-      ],
+      "argv": ["ZADD", "zpop3", "1", "a"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -5366,11 +3727,7 @@
     {
       "name": "zpopmin_count_0_returns_empty",
       "now_ms": 100,
-      "argv": [
-        "ZPOPMIN",
-        "zpop3",
-        "0"
-      ],
+      "argv": ["ZPOPMIN", "zpop3", "0"],
       "expect": {
         "kind": "array",
         "value": []
@@ -5379,11 +3736,7 @@
     {
       "name": "zpopmax_count_0_returns_empty",
       "now_ms": 100,
-      "argv": [
-        "ZPOPMAX",
-        "zpop3",
-        "0"
-      ],
+      "argv": ["ZPOPMAX", "zpop3", "0"],
       "expect": {
         "kind": "array",
         "value": []
@@ -5392,11 +3745,7 @@
     {
       "name": "zpopmin_negative_count_errors",
       "now_ms": 100,
-      "argv": [
-        "ZPOPMIN",
-        "zpop3",
-        "-1"
-      ],
+      "argv": ["ZPOPMIN", "zpop3", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR value is out of range, must be positive"
@@ -5405,11 +3754,7 @@
     {
       "name": "zpopmax_negative_count_errors",
       "now_ms": 100,
-      "argv": [
-        "ZPOPMAX",
-        "zpop3",
-        "-1"
-      ],
+      "argv": ["ZPOPMAX", "zpop3", "-1"],
       "expect": {
         "kind": "error",
         "value": "ERR value is out of range, must be positive"
@@ -5418,20 +3763,7 @@
     {
       "name": "zcount_setup",
       "now_ms": 100,
-      "argv": [
-        "ZADD",
-        "zc",
-        "1",
-        "a",
-        "2",
-        "b",
-        "3",
-        "c",
-        "4",
-        "d",
-        "5",
-        "e"
-      ],
+      "argv": ["ZADD", "zc", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -5440,12 +3772,7 @@
     {
       "name": "zcount_all",
       "now_ms": 100,
-      "argv": [
-        "ZCOUNT",
-        "zc",
-        "-inf",
-        "+inf"
-      ],
+      "argv": ["ZCOUNT", "zc", "-inf", "+inf"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -5454,12 +3781,7 @@
     {
       "name": "zcount_range",
       "now_ms": 100,
-      "argv": [
-        "ZCOUNT",
-        "zc",
-        "2",
-        "4"
-      ],
+      "argv": ["ZCOUNT", "zc", "2", "4"],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -5468,12 +3790,7 @@
     {
       "name": "zcount_exclusive",
       "now_ms": 100,
-      "argv": [
-        "ZCOUNT",
-        "zc",
-        "(2",
-        "(4"
-      ],
+      "argv": ["ZCOUNT", "zc", "(2", "(4"],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -5482,12 +3799,7 @@
     {
       "name": "zcount_exclusive_left",
       "now_ms": 100,
-      "argv": [
-        "ZCOUNT",
-        "zc",
-        "(2",
-        "4"
-      ],
+      "argv": ["ZCOUNT", "zc", "(2", "4"],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -5496,12 +3808,7 @@
     {
       "name": "zcount_nonexistent",
       "now_ms": 100,
-      "argv": [
-        "ZCOUNT",
-        "nokey999",
-        "0",
-        "100"
-      ],
+      "argv": ["ZCOUNT", "nokey999", "0", "100"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -5510,12 +3817,7 @@
     {
       "name": "zcount_empty_range",
       "now_ms": 100,
-      "argv": [
-        "ZCOUNT",
-        "zc",
-        "100",
-        "200"
-      ],
+      "argv": ["ZCOUNT", "zc", "100", "200"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -5524,10 +3826,7 @@
     {
       "name": "zcount_wrong_arity",
       "now_ms": 100,
-      "argv": [
-        "ZCOUNT",
-        "zc"
-      ],
+      "argv": ["ZCOUNT", "zc"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'zcount' command"
@@ -5536,11 +3835,7 @@
     {
       "name": "zrank_existing",
       "now_ms": 100,
-      "argv": [
-        "ZRANK",
-        "zc",
-        "a"
-      ],
+      "argv": ["ZRANK", "zc", "a"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -5549,11 +3844,7 @@
     {
       "name": "zrank_last",
       "now_ms": 100,
-      "argv": [
-        "ZRANK",
-        "zc",
-        "e"
-      ],
+      "argv": ["ZRANK", "zc", "e"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -5562,11 +3853,7 @@
     {
       "name": "zrank_missing_member",
       "now_ms": 100,
-      "argv": [
-        "ZRANK",
-        "zc",
-        "nothere"
-      ],
+      "argv": ["ZRANK", "zc", "nothere"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -5575,11 +3862,7 @@
     {
       "name": "zrevrank_first",
       "now_ms": 100,
-      "argv": [
-        "ZREVRANK",
-        "zc",
-        "e"
-      ],
+      "argv": ["ZREVRANK", "zc", "e"],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -5588,11 +3871,7 @@
     {
       "name": "zrevrank_last",
       "now_ms": 100,
-      "argv": [
-        "ZREVRANK",
-        "zc",
-        "a"
-      ],
+      "argv": ["ZREVRANK", "zc", "a"],
       "expect": {
         "kind": "integer",
         "value": 4
@@ -5601,11 +3880,7 @@
     {
       "name": "zrank_nonexistent_key",
       "now_ms": 100,
-      "argv": [
-        "ZRANK",
-        "nokey999",
-        "a"
-      ],
+      "argv": ["ZRANK", "nokey999", "a"],
       "expect": {
         "kind": "bulk",
         "value": null
@@ -5614,9 +3889,7 @@
     {
       "name": "zset_edge_cleanup",
       "now_ms": 100,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -5625,20 +3898,7 @@
     {
       "name": "zrangebyscore_limit_setup",
       "now_ms": 200,
-      "argv": [
-        "ZADD",
-        "zlimit",
-        "1",
-        "one",
-        "2",
-        "two",
-        "3",
-        "three",
-        "4",
-        "four",
-        "5",
-        "five"
-      ],
+      "argv": ["ZADD", "zlimit", "1", "one", "2", "two", "3", "three", "4", "four", "5", "five"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -5647,15 +3907,7 @@
     {
       "name": "zrangebyscore_limit_offset_zero_count_all",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zlimit",
-        "-inf",
-        "+inf",
-        "LIMIT",
-        "0",
-        "-1"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zlimit", "-inf", "+inf", "LIMIT", "0", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5685,15 +3937,7 @@
     {
       "name": "zrangebyscore_limit_offset_2_count_2",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zlimit",
-        "-inf",
-        "+inf",
-        "LIMIT",
-        "2",
-        "2"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zlimit", "-inf", "+inf", "LIMIT", "2", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5711,15 +3955,7 @@
     {
       "name": "zrangebyscore_limit_offset_beyond_range",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zlimit",
-        "-inf",
-        "+inf",
-        "LIMIT",
-        "100",
-        "5"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zlimit", "-inf", "+inf", "LIMIT", "100", "5"],
       "expect": {
         "kind": "array",
         "value": []
@@ -5728,15 +3964,7 @@
     {
       "name": "zrangebyscore_limit_count_zero",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zlimit",
-        "-inf",
-        "+inf",
-        "LIMIT",
-        "0",
-        "0"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zlimit", "-inf", "+inf", "LIMIT", "0", "0"],
       "expect": {
         "kind": "array",
         "value": []
@@ -5745,15 +3973,7 @@
     {
       "name": "zrangebyscore_limit_negative_offset_error",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zlimit",
-        "-inf",
-        "+inf",
-        "LIMIT",
-        "-1",
-        "10"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zlimit", "-inf", "+inf", "LIMIT", "-1", "10"],
       "expect": {
         "kind": "array",
         "value": []
@@ -5762,15 +3982,7 @@
     {
       "name": "zrangebyscore_limit_offset_1_count_unlimited",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zlimit",
-        "-inf",
-        "+inf",
-        "LIMIT",
-        "1",
-        "-1"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zlimit", "-inf", "+inf", "LIMIT", "1", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5796,15 +4008,7 @@
     {
       "name": "zrevrangebyscore_limit_offset_1_count_2",
       "now_ms": 200,
-      "argv": [
-        "ZREVRANGEBYSCORE",
-        "zlimit",
-        "+inf",
-        "-inf",
-        "LIMIT",
-        "1",
-        "2"
-      ],
+      "argv": ["ZREVRANGEBYSCORE", "zlimit", "+inf", "-inf", "LIMIT", "1", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5822,20 +4026,7 @@
     {
       "name": "zrangebylex_limit_setup",
       "now_ms": 200,
-      "argv": [
-        "ZADD",
-        "zlex",
-        "0",
-        "a",
-        "0",
-        "b",
-        "0",
-        "c",
-        "0",
-        "d",
-        "0",
-        "e"
-      ],
+      "argv": ["ZADD", "zlex", "0", "a", "0", "b", "0", "c", "0", "d", "0", "e"],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -5844,15 +4035,7 @@
     {
       "name": "zrangebylex_limit_offset_1_count_2",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYLEX",
-        "zlex",
-        "-",
-        "+",
-        "LIMIT",
-        "1",
-        "2"
-      ],
+      "argv": ["ZRANGEBYLEX", "zlex", "-", "+", "LIMIT", "1", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5870,15 +4053,7 @@
     {
       "name": "zrangebylex_limit_count_unlimited",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYLEX",
-        "zlex",
-        "-",
-        "+",
-        "LIMIT",
-        "3",
-        "-1"
-      ],
+      "argv": ["ZRANGEBYLEX", "zlex", "-", "+", "LIMIT", "3", "-1"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5896,16 +4071,7 @@
     {
       "name": "zrangebyscore_limit_withscores",
       "now_ms": 200,
-      "argv": [
-        "ZRANGEBYSCORE",
-        "zlimit",
-        "1",
-        "5",
-        "WITHSCORES",
-        "LIMIT",
-        "1",
-        "2"
-      ],
+      "argv": ["ZRANGEBYSCORE", "zlimit", "1", "5", "WITHSCORES", "LIMIT", "1", "2"],
       "expect": {
         "kind": "array",
         "value": [
@@ -5931,9 +4097,7 @@
     {
       "name": "zrangebyscore_limit_cleanup",
       "now_ms": 200,
-      "argv": [
-        "FLUSHDB"
-      ],
+      "argv": ["FLUSHDB"],
       "expect": {
         "kind": "simple",
         "value": "OK"
