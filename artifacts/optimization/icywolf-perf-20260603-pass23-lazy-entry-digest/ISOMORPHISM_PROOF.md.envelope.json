@@ -43,7 +43,7 @@
     ]
   },
   "scrub": {
-    "last_ok_unix_ms": 1788744412312,
+    "last_ok_unix_ms": 1788700000000,
     "status": "ok"
   },
   "decode_proofs": []
