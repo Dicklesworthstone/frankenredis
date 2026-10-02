@@ -1,0 +1,320 @@
+Cleanup: may take some time... OK
+Starting test server at port 21079
+[ready]: 2842577
+Testing unit/type/list
+[skip]: reg node check compression with insert and pop
+[skip]: reg node check compression combined with trim
+[skip]: reg node check compression with lset
+[skip]: plain node check compression
+[skip]: plain node check compression with ltrim
+[skip]: plain node check compression using lset
+[skip]: Test LPUSH and LPOP on plain nodes
+[skip]: Test LINDEX and LINSERT on plain nodes
+[skip]: Test LTRIM on plain nodes
+[skip]: Test LREM on plain nodes
+[skip]: Test LPOS on plain nodes
+[skip]: Test LMOVE on plain nodes
+[skip]: Test LSET with packed / plain combinations
+[skip]: Test LSET with packed is split in the middle
+[skip]: Test LSET with packed consist only one item
+[skip]: Crash due to delete entry from a compress quicklist node
+[skip]: Crash due to split quicklist node wrongly
+[skip]: Test LPUSH and LPOP on plain nodes over 4GB
+[skip]: Test LINDEX and LINSERT on plain nodes over 4GB
+[skip]: Test LTRIM on plain nodes over 4GB
+[skip]: Test LREM on plain nodes over 4GB
+[skip]: Test LSET on plain nodes over 4GB
+[skip]: Test LMOVE on plain nodes over 4GB
+[skip]: LPOS basic usage - quicklist
+[skip]: LPOS RANK (positive, negative and zero rank) option
+[skip]: LPOS COUNT option
+[skip]: LPOS COUNT + RANK option
+[skip]: LPOS non existing key
+[skip]: LPOS no match
+[skip]: LPOS MAXLEN
+[skip]: LPOS when RANK is greater than matches
+[skip]: LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - quicklist
+[skip]: LPOP/RPOP with wrong number of arguments
+[skip]: RPOP/LPOP with the optional count argument - quicklist
+[skip]: LPOS basic usage - listpack
+[skip]: LPOS RANK (positive, negative and zero rank) option
+[skip]: LPOS COUNT option
+[skip]: LPOS COUNT + RANK option
+[skip]: LPOS non existing key
+[skip]: LPOS no match
+[skip]: LPOS MAXLEN
+[skip]: LPOS when RANK is greater than matches
+[skip]: LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - listpack
+[skip]: LPOP/RPOP with wrong number of arguments
+[skip]: RPOP/LPOP with the optional count argument - listpack
+[skip]: LPOP/RPOP with the count 0 returns an empty array in RESP3
+[skip]: LPOP/RPOP against non existing key in RESP3
+[skip]: LPOP/RPOP with <count> against non existing key in RESP3
+[skip]: LPOP/RPOP with the count 0 returns an empty array in RESP2
+[skip]: LPOP/RPOP against non existing key in RESP2
+[skip]: LPOP/RPOP with <count> against non existing key in RESP2
+[skip]: Variadic RPUSH/LPUSH
+[skip]: DEL a list
+[skip]: BLPOP: single existing list - quicklist
+[skip]: BLPOP: multiple existing lists - quicklist
+[skip]: BLPOP: second list has an entry - quicklist
+[skip]: BLMPOP_LEFT: single existing list - quicklist
+[skip]: BLMPOP_LEFT: multiple existing lists - quicklist
+[skip]: BLMPOP_LEFT: second list has an entry - quicklist
+[skip]: BRPOPLPUSH - quicklist
+[skip]: BLMOVE left left - quicklist
+[skip]: BLMOVE left right - quicklist
+[skip]: BLMOVE right left - quicklist
+[skip]: BLMOVE right right - quicklist
+[skip]: BLPOP: single existing list - listpack
+[skip]: BLPOP: multiple existing lists - listpack
+[skip]: BLPOP: second list has an entry - listpack
+[skip]: BLMPOP_LEFT: single existing list - listpack
+[skip]: BLMPOP_LEFT: multiple existing lists - listpack
+[skip]: BLMPOP_LEFT: second list has an entry - listpack
+[skip]: BRPOPLPUSH - listpack
+[skip]: BLMOVE left left - listpack
+[skip]: BLMOVE left right - listpack
+[skip]: BLMOVE right left - listpack
+[skip]: BLMOVE right right - listpack
+[skip]: BLPOP, LPUSH + DEL should not awake blocked client
+[skip]: BLPOP, LPUSH + DEL + SET should not awake blocked client
+[skip]: BLMPOP_LEFT, LPUSH + DEL should not awake blocked client
+[skip]: BLMPOP_LEFT, LPUSH + DEL + SET should not awake blocked client
+[skip]: BLPOP with same key multiple times should work (issue #801)
+[skip]: MULTI/EXEC is isolated from the point of view of BLPOP
+[skip]: BLPOP with variadic LPUSH
+[skip]: MULTI/EXEC is isolated from the point of view of BLMPOP_LEFT
+[skip]: BLMPOP_LEFT with variadic LPUSH
+[skip]: BRPOPLPUSH with zero timeout should block indefinitely
+[skip]: BLMOVE left left with zero timeout should block indefinitely
+[skip]: BLMOVE left right with zero timeout should block indefinitely
+[skip]: BLMOVE right left with zero timeout should block indefinitely
+[skip]: BLMOVE right right with zero timeout should block indefinitely
+[skip]: BLMOVE (left, left) with a client BLPOPing the target list
+[skip]: BLMOVE (left, right) with a client BLPOPing the target list
+[skip]: BLMOVE (right, left) with a client BLPOPing the target list
+[skip]: BLMOVE (right, right) with a client BLPOPing the target list
+[skip]: BRPOPLPUSH with wrong source type
+[skip]: BRPOPLPUSH with wrong destination type
+[skip]: BRPOPLPUSH maintains order of elements after failure
+[skip]: BRPOPLPUSH with multiple blocked clients
+[skip]: BLMPOP with multiple blocked clients
+[skip]: Linked LMOVEs
+[skip]: Circular BRPOPLPUSH
+[skip]: Self-referential BRPOPLPUSH
+[skip]: BRPOPLPUSH inside a transaction
+[skip]: PUSH resulting from BRPOPLPUSH affect WATCH
+[skip]: BRPOPLPUSH does not affect WATCH while still blocked
+[skip]: BRPOPLPUSH timeout
+[skip]: SWAPDB awakes blocked client
+[err]: SWAPDB wants to wake blocked client, but the key already expired in tests/unit/type/list.tcl
+Expected '{select 9} flushall {select 1} {select 1} {rpush k hello} {pexpireat k 1790973335764} {swapdb 1 9} {select 9} {select 9} {set somekey1 someval1} {del k}' to match '{select *} flushall {select 1} {rpush k hello} {pexpireat k *} {swapdb 1 9} {select 9} {set somekey1 someval1} {del k} {select 1} {set somekey2 someval2}' type eval line 30 cmd {assert_replication_stream $repl {
+            {select *}
+            {flushall}
+            {select 1}
+            {rpush k hello}
+            {pexpireat k *}
+            {swapdb 1 9}
+            {select 9}
+            {set somekey1 someval1}
+            {del k}
+            {select 1}
+            {set somekey2 someval2}
+        }} proc ::test 
+[skip]: MULTI + LPUSH + EXPIRE + DEBUG SLEEP on blocked client, key already expired
+[skip]: BLPOP when new key is moved into place
+[skip]: BLPOP when result key is created by SORT..STORE
+[skip]: BLMPOP_LEFT when new key is moved into place
+[skip]: BLMPOP_LEFT when result key is created by SORT..STORE
+[skip]: BLPOP: timeout value out of range
+[skip]: BLPOP: with single empty list argument
+[skip]: BLPOP: with negative timeout
+[skip]: BLPOP: with non-integer timeout
+[skip]: BLPOP: with zero timeout should block indefinitely
+[skip]: BLPOP: with 0.001 timeout should not block indefinitely
+[skip]: BLPOP: second argument is not a list
+[skip]: BLPOP: timeout
+[skip]: BLPOP: arguments are empty
+[skip]: BRPOP: with single empty list argument
+[skip]: BRPOP: with negative timeout
+[skip]: BRPOP: with non-integer timeout
+[skip]: BRPOP: with zero timeout should block indefinitely
+[skip]: BRPOP: with 0.001 timeout should not block indefinitely
+[skip]: BRPOP: second argument is not a list
+[skip]: BRPOP: timeout
+[skip]: BRPOP: arguments are empty
+[skip]: BLMPOP_LEFT: with single empty list argument
+[skip]: BLMPOP_LEFT: with negative timeout
+[skip]: BLMPOP_LEFT: with non-integer timeout
+[skip]: BLMPOP_LEFT: with zero timeout should block indefinitely
+[skip]: BLMPOP_LEFT: with 0.001 timeout should not block indefinitely
+[skip]: BLMPOP_LEFT: second argument is not a list
+[skip]: BLMPOP_LEFT: timeout
+[skip]: BLMPOP_LEFT: arguments are empty
+[skip]: BLMPOP_RIGHT: with single empty list argument
+[skip]: BLMPOP_RIGHT: with negative timeout
+[skip]: BLMPOP_RIGHT: with non-integer timeout
+[skip]: BLMPOP_RIGHT: with zero timeout should block indefinitely
+[skip]: BLMPOP_RIGHT: with 0.001 timeout should not block indefinitely
+[skip]: BLMPOP_RIGHT: second argument is not a list
+[skip]: BLMPOP_RIGHT: timeout
+[skip]: BLMPOP_RIGHT: arguments are empty
+[skip]: BLPOP inside a transaction
+[skip]: BLMPOP_LEFT inside a transaction
+[skip]: BLMPOP propagate as pop with count command to replica
+[skip]: LPUSHX, RPUSHX - generic
+[skip]: LPUSHX, RPUSHX - quicklist
+[skip]: LINSERT - quicklist
+[skip]: LPUSHX, RPUSHX - listpack
+[skip]: LINSERT - listpack
+[skip]: LINSERT raise error on bad syntax
+[skip]: LINSERT against non-list value error
+[skip]: LINSERT against non existing key
+[skip]: LINDEX consistency test - listpack
+[skip]: LINDEX random access - listpack
+[skip]: Check if list is still ok after a DEBUG RELOAD - listpack
+[skip]: LINDEX consistency test - listpack
+[skip]: LINDEX random access - listpack
+[skip]: Check if list is still ok after a DEBUG RELOAD - listpack
+[skip]: LINDEX consistency test - quicklist
+[skip]: LINDEX random access - quicklist
+[skip]: Check if list is still ok after a DEBUG RELOAD - quicklist
+[skip]: LINDEX consistency test - quicklist
+[skip]: LINDEX random access - quicklist
+[skip]: Check if list is still ok after a DEBUG RELOAD - quicklist
+[skip]: LLEN against non-list value error
+[skip]: LLEN against non existing key
+[skip]: LINDEX against non-list value error
+[skip]: LINDEX against non existing key
+[skip]: LPUSH against non-list value error
+[skip]: RPUSH against non-list value error
+[skip]: RPOPLPUSH base case - quicklist
+[skip]: LMOVE left left base case - quicklist
+[skip]: LMOVE left right base case - quicklist
+[skip]: LMOVE right left base case - quicklist
+[skip]: LMOVE right right base case - quicklist
+[skip]: RPOPLPUSH with the same list as src and dst - quicklist
+[skip]: LMOVE left left with the same list as src and dst - quicklist
+[skip]: LMOVE left right with the same list as src and dst - quicklist
+[skip]: LMOVE right left with the same list as src and dst - quicklist
+[skip]: LMOVE right right with the same list as src and dst - quicklist
+[skip]: RPOPLPUSH with quicklist source and existing target quicklist
+[skip]: LMOVE left left with quicklist source and existing target quicklist
+[skip]: LMOVE left right with quicklist source and existing target quicklist
+[skip]: LMOVE right left with quicklist source and existing target quicklist
+[skip]: LMOVE right right with quicklist source and existing target quicklist
+[skip]: RPOPLPUSH with quicklist source and existing target listpack
+[skip]: LMOVE left left with quicklist source and existing target listpack
+[skip]: LMOVE left right with quicklist source and existing target listpack
+[skip]: LMOVE right left with quicklist source and existing target listpack
+[skip]: LMOVE right right with quicklist source and existing target listpack
+[skip]: RPOPLPUSH base case - listpack
+[skip]: LMOVE left left base case - listpack
+[skip]: LMOVE left right base case - listpack
+[skip]: LMOVE right left base case - listpack
+[skip]: LMOVE right right base case - listpack
+[skip]: RPOPLPUSH with the same list as src and dst - listpack
+[skip]: LMOVE left left with the same list as src and dst - listpack
+[skip]: LMOVE left right with the same list as src and dst - listpack
+[skip]: LMOVE right left with the same list as src and dst - listpack
+[skip]: LMOVE right right with the same list as src and dst - listpack
+[skip]: RPOPLPUSH with listpack source and existing target quicklist
+[skip]: LMOVE left left with listpack source and existing target quicklist
+[skip]: LMOVE left right with listpack source and existing target quicklist
+[skip]: LMOVE right left with listpack source and existing target quicklist
+[skip]: LMOVE right right with listpack source and existing target quicklist
+[skip]: RPOPLPUSH with listpack source and existing target listpack
+[skip]: LMOVE left left with listpack source and existing target listpack
+[skip]: LMOVE left right with listpack source and existing target listpack
+[skip]: LMOVE right left with listpack source and existing target listpack
+[skip]: LMOVE right right with listpack source and existing target listpack
+[skip]: RPOPLPUSH against non existing key
+[skip]: RPOPLPUSH against non list src key
+[skip]: RPOPLPUSH against non list dst key - quicklist
+[skip]: RPOPLPUSH against non list dst key - listpack
+[skip]: RPOPLPUSH against non existing src key
+[skip]: Basic LPOP/RPOP/LMPOP - quicklist
+[skip]: Basic LPOP/RPOP/LMPOP - listpack
+[skip]: LPOP/RPOP/LMPOP against empty list
+[skip]: LPOP/RPOP/LMPOP NON-BLOCK or BLOCK against non list value
+[skip]: Mass RPOP/LPOP - listpack
+[skip]: Mass RPOP/LPOP - listpack
+[skip]: LMPOP with illegal argument
+[skip]: LMPOP single existing list - quicklist
+[skip]: LMPOP multiple existing lists - quicklist
+[skip]: LMPOP single existing list - listpack
+[skip]: LMPOP multiple existing lists - listpack
+[skip]: LMPOP propagate as pop with count command to replica
+[skip]: LRANGE basics - quicklist
+[skip]: LRANGE inverted indexes - quicklist
+[skip]: LRANGE out of range indexes including the full list - quicklist
+[skip]: LRANGE out of range negative end index - quicklist
+[skip]: LRANGE basics - listpack
+[skip]: LRANGE inverted indexes - listpack
+[skip]: LRANGE out of range indexes including the full list - listpack
+[skip]: LRANGE out of range negative end index - listpack
+[skip]: LRANGE against non existing key
+[skip]: LRANGE with start > end yields an empty array for backward compatibility
+[skip]: LTRIM basics - quicklist
+[skip]: LTRIM out of range negative end index - quicklist
+[skip]: LSET - quicklist
+[skip]: LSET out of range index - quicklist
+[skip]: LTRIM basics - listpack
+[skip]: LTRIM out of range negative end index - listpack
+[skip]: LSET - listpack
+[skip]: LSET out of range index - listpack
+[skip]: LSET against non existing key
+[skip]: LSET against non list value
+[skip]: LREM remove all the occurrences - quicklist
+[skip]: LREM remove the first occurrence - quicklist
+[skip]: LREM remove non existing element - quicklist
+[skip]: LREM starting from tail with negative count - quicklist
+[skip]: LREM starting from tail with negative count (2) - quicklist
+[skip]: LREM deleting objects that may be int encoded - quicklist
+[skip]: LREM remove all the occurrences - listpack
+[skip]: LREM remove the first occurrence - listpack
+[skip]: LREM remove non existing element - listpack
+[skip]: LREM starting from tail with negative count - listpack
+[skip]: LREM starting from tail with negative count (2) - listpack
+[skip]: LREM deleting objects that may be int encoded - listpack
+[skip]: Regression for bug 593 - chaining BRPOPLPUSH with other blocking cmds
+[skip]: BLPOP/BLMOVE should increase dirty
+[skip]: client unblock tests
+[skip]: client unblock tests
+[skip]: List listpack -> quicklist encoding conversion
+[skip]: List listpack -> quicklist encoding conversion
+[skip]: List quicklist -> listpack encoding conversion
+[skip]: List encoding conversion when RDB loading
+[skip]: List invalid list-max-listpack-size config
+[skip]: List of various encodings
+[skip]: List of various encodings - sanitize dump
+[skip]: Unblock fairness is kept while pipelining
+[skip]: Unblock fairness is kept during nested unblock
+[skip]: Blocking command accounted only once in commandstats
+[skip]: Blocking command accounted only once in commandstats after timeout
+[skip]: Command being unblocked cause another command to get unblocked execution order test
+[1/1 done]: unit/type/list (0 seconds)
+
+                   The End
+
+Execution time of different units:
+  0 seconds - unit/type/list
+
+!!! WARNING The following tests failed:
+
+*** [err]: SWAPDB wants to wake blocked client, but the key already expired in tests/unit/type/list.tcl
+Expected '{select 9} flushall {select 1} {select 1} {rpush k hello} {pexpireat k 1790973335764} {swapdb 1 9} {select 9} {select 9} {set somekey1 someval1} {del k}' to match '{select *} flushall {select 1} {rpush k hello} {pexpireat k *} {swapdb 1 9} {select 9} {set somekey1 someval1} {del k} {select 1} {set somekey2 someval2}' type eval line 30 cmd {assert_replication_stream $repl {
+            {select *}
+            {flushall}
+            {select 1}
+            {rpush k hello}
+            {pexpireat k *}
+            {swapdb 1 9}
+            {select 9}
+            {set somekey1 someval1}
+            {del k}
+            {select 1}
+            {set somekey2 someval2}
+        }} proc ::test 
+Cleanup: may take some time... OK

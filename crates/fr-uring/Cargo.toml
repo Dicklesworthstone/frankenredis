@@ -1,6 +1,6 @@
 [package]
 name = "fr-uring"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 # NOTE: this crate deliberately does NOT declare `#![forbid(unsafe_code)]`.

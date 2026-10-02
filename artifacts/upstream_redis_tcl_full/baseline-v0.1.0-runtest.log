@@ -1,0 +1,448 @@
+Cleanup: may take some time... OK
+Starting test server at port 21079
+[ready]: 2859183
+Testing unit/printver
+Testing Redis version 7.2.4 (00000000)
+[1/89 done]: unit/printver (0 seconds)
+Testing unit/dump
+[ok]: DUMP / RESTORE are able to serialize / unserialize a simple key (1 ms)
+[ok]: RESTORE can set an arbitrary expire to the materialized key (0 ms)
+[ok]: RESTORE can set an expire that overflows a 32 bit integer (1 ms)
+[ok]: RESTORE can set an absolute expire (0 ms)
+[ok]: RESTORE with ABSTTL in the past (1 ms)
+[ok]: RESTORE can set LRU (0 ms)
+[ok]: RESTORE can set LFU (1 ms)
+[ok]: RESTORE returns an error of the key already exists (0 ms)
+[ok]: RESTORE can overwrite an existing key with REPLACE (1 ms)
+[ok]: RESTORE can detect a syntax error for unrecognized options (0 ms)
+[ok]: RESTORE should not store key that are already expired, with REPLACE will propagate it as DEL or UNLINK (1 ms)
+[ok]: DUMP of non existing key returns nil (0 ms)
+[ignore]: MIGRATE is caching connections: Not supported on external server
+[ok]: MIGRATE cached connections are released after some time (15001 ms)
+[ignore]: MIGRATE is able to migrate a key between two instances: Not supported on external server
+[ignore]: MIGRATE is able to copy a key between two instances: Not supported on external server
+[ignore]: MIGRATE will not overwrite existing keys, unless REPLACE is used: Not supported on external server
+[ignore]: MIGRATE propagates TTL correctly: Not supported on external server
+[ignore]: MIGRATE can correctly transfer large values: Not supported on external server
+[ignore]: MIGRATE can correctly transfer hashes: Not supported on external server
+[ignore]: MIGRATE timeout actually works: Not supported on external server
+[ignore]: MIGRATE can migrate multiple keys at once: Not supported on external server
+[ignore]: MIGRATE with multiple keys must have empty key arg: Not supported on external server
+[ignore]: MIGRATE with multiple keys migrate just existing ones: Not supported on external server
+[ignore]: MIGRATE with multiple keys: stress command rewriting: Not supported on external server
+[ignore]: MIGRATE with multiple keys: delete just ack keys: Not supported on external server
+[ignore]: MIGRATE AUTH: correct and wrong password cases: Not supported on external server
+[2/89 done]: unit/dump (15 seconds)
+Testing unit/auth
+[ignore]: Not supported on external server
+[ignore]: Not supported on external server
+[ignore]: Not supported on external server
+[3/89 done]: unit/auth (1 seconds)
+Testing unit/protocol
+[ok]: Handle an empty query (41 ms)
+[ok]: Negative multibulk length (42 ms)
+[ok]: Out of range multibulk length (0 ms)
+[ok]: Wrong multibulk payload header (1 ms)
+[ok]: Negative multibulk payload length (0 ms)
+[ok]: Out of range multibulk payload length (1 ms)
+[ok]: Non-number multibulk payload length (0 ms)
+[ok]: Multi bulk request not followed by bulk arguments (1 ms)
+[ok]: Generic wrong number of args (0 ms)
+[ok]: Unbalanced number of quotes (1 ms)
+[ok]: Protocol desync regression test #1 (18 ms)
+[ok]: Protocol desync regression test #2 (18 ms)
+[ok]: Protocol desync regression test #3 (18 ms)
+[ok]: raw protocol response (0 ms)
+[ok]: raw protocol response - deferred (0 ms)
+[ok]: raw protocol response - multiline (0 ms)
+[ok]: RESP3 attributes (0 ms)
+[ok]: RESP3 attributes readraw (0 ms)
+[ok]: RESP3 attributes on RESP2 (0 ms)
+[ok]: test big number parsing (0 ms)
+[ok]: test bool parsing (1 ms)
+[ok]: test verbatim str parsing (0 ms)
+[ok]: test large number of args (6 ms)
+[ok]: test argument rewriting - issue 9598 (0 ms)
+[ok]: Regression for a crash with blocking ops and pipelining (1 ms)
+[4/89 done]: unit/protocol (0 seconds)
+Testing unit/keyspace
+[ok]: DEL against a single item (0 ms)
+[ok]: Vararg DEL (1 ms)
+[ok]: Untagged multi-key commands (0 ms)
+[ok]: KEYS with pattern (1 ms)
+[ok]: KEYS to get all keys (0 ms)
+[ok]: DBSIZE (0 ms)
+[ok]: DEL all keys (1 ms)
+[ok]: DEL against expired key (1100 ms)
+[ok]: EXISTS (0 ms)
+[ok]: Zero length value in key. SET/GET/EXISTS (1 ms)
+[ok]: Commands pipelining (0 ms)
+[ok]: Non existing command (0 ms)
+[ok]: RENAME basic usage (0 ms)
+[ok]: RENAME source key should no longer exist (0 ms)
+[ok]: RENAME against already existing key (1 ms)
+[ok]: RENAMENX basic usage (0 ms)
+[ok]: RENAMENX against already existing key (1 ms)
+[ok]: RENAMENX against already existing key (2) (0 ms)
+[ok]: RENAME against non existing source key (0 ms)
+[ok]: RENAME where source and dest key are the same (existing) (0 ms)
+[ok]: RENAMENX where source and dest key are the same (existing) (0 ms)
+[ok]: RENAME where source and dest key are the same (non existing) (0 ms)
+[ok]: RENAME with volatile key, should move the TTL as well (0 ms)
+[ok]: RENAME with volatile key, should not inherit TTL of target key (1 ms)
+[ok]: DEL all keys again (DB 0) (0 ms)
+[ok]: DEL all keys again (DB 1) (1 ms)
+[ok]: COPY basic usage for string (0 ms)
+[ok]: COPY for string does not replace an existing key without REPLACE option (0 ms)
+[ok]: COPY for string can replace an existing key with REPLACE option (0 ms)
+[ok]: COPY for string ensures that copied data is independent of copying data (1 ms)
+[ok]: COPY for string does not copy data to no-integer DB (0 ms)
+[ok]: COPY can copy key expire metadata as well (0 ms)
+[ok]: COPY does not create an expire if it does not exist (0 ms)
+[ok]: COPY basic usage for list - quicklist (41 ms)
+[ok]: COPY basic usage for list - listpack (1 ms)
+[ok]: COPY basic usage for $type set (0 ms)
+[ok]: COPY basic usage for $type set (0 ms)
+[ok]: COPY basic usage for $type set (8 ms)
+[ok]: COPY basic usage for listpack sorted set (0 ms)
+[ok]: COPY basic usage for skiplist sorted set (6 ms)
+[ok]: COPY basic usage for listpack hash (0 ms)
+[ok]: COPY basic usage for hashtable hash (5 ms)
+[ok]: COPY basic usage for stream (45 ms)
+[ok]: COPY basic usage for stream-cgroups (3 ms)
+[ok]: MOVE basic usage (0 ms)
+[ok]: MOVE against key existing in the target DB (0 ms)
+[ok]: MOVE against non-integer DB (#1428) (0 ms)
+[ok]: MOVE can move key expire metadata as well (0 ms)
+[ok]: MOVE does not create an expire if it does not exist (0 ms)
+[ok]: SET/GET keys in different DBs (0 ms)
+[ok]: RANDOMKEY (4 ms)
+[ok]: RANDOMKEY against empty DB (1 ms)
+[ok]: RANDOMKEY regression 1 (0 ms)
+[ok]: KEYS * two times with long key, Github issue #1208 (0 ms)
+[ok]: Regression for pattern matching long nested loops (0 ms)
+[5/89 done]: unit/keyspace (1 seconds)
+Testing unit/scan
+[ok]: SCAN basic (31 ms)
+[ok]: SCAN COUNT (33 ms)
+[ok]: SCAN MATCH (25 ms)
+[ok]: SCAN TYPE (40 ms)
+[ok]: SCAN unknown type (25 ms)
+[ok]: SCAN with expired keys (30 ms)
+[ok]: SCAN with expired keys with TYPE filter (31 ms)
+[ok]: SSCAN with encoding intset (1 ms)
+[ok]: SSCAN with encoding listpack (0 ms)
+[ok]: SSCAN with encoding hashtable (1 ms)
+[ok]: HSCAN with encoding listpack (1 ms)
+[ok]: HSCAN with encoding hashtable (53 ms)
+[ok]: ZSCAN with encoding listpack (0 ms)
+[ok]: ZSCAN with encoding skiplist (54 ms)
+[ok]: SCAN guarantees check under write load (9 ms)
+[ok]: SSCAN with integer encoded object (issue #1345) (0 ms)
+[ok]: SSCAN with PATTERN (0 ms)
+[ok]: HSCAN with PATTERN (0 ms)
+[ok]: ZSCAN with PATTERN (0 ms)
+[ok]: ZSCAN scores: regression test for issue #2175 (20 ms)
+[ok]: SCAN regression test for issue #4906 (5520 ms)
+[6/89 done]: unit/scan (6 seconds)
+Testing unit/info
+[ignore]: Not supported on external server
+[7/89 done]: unit/info (0 seconds)
+Testing unit/info-command
+[ok]: info command with at most one sub command (2 ms)
+[ok]: info command with one sub-section (1 ms)
+[ok]: info command with multiple sub-sections (1 ms)
+[8/89 done]: unit/info-command (0 seconds)
+Testing unit/type/string
+[ok]: SET and GET an item (0 ms)
+[ok]: SET and GET an empty item (0 ms)
+[ok]: Very big payload in GET/SET (68 ms)
+[ok]: Very big payload random access (3697 ms)
+[ok]: SET 10000 numeric keys and access all them in reverse order (832 ms)
+[ok]: DBSIZE should be 10000 now (0 ms)
+[ok]: SETNX target key missing (1 ms)
+[ok]: SETNX target key exists (0 ms)
+[ok]: SETNX against not-expired volatile key (0 ms)
+[ok]: SETNX against expired volatile key (2417 ms)
+[ok]: GETEX EX option (0 ms)
+[ok]: GETEX PX option (0 ms)
+[ok]: GETEX EXAT option (1 ms)
+[ok]: GETEX PXAT option (0 ms)
+[ok]: GETEX PERSIST option (1 ms)
+[ok]: GETEX no option (0 ms)
+[ok]: GETEX syntax errors (0 ms)
+[ok]: GETEX and GET expired key or not exist (5 ms)
+[ok]: GETEX no arguments (0 ms)
+[ok]: GETDEL command (0 ms)
+[ok]: GETDEL propagate as DEL command to replica (7 ms)
+[ok]: GETEX without argument does not propagate to replica (4 ms)
+[ok]: MGET (4 ms)
+[ok]: MGET against non existing key (0 ms)
+[ok]: MGET against non-string key (0 ms)
+[ok]: GETSET (set new value) (0 ms)
+[ok]: GETSET (replace old value) (0 ms)
+[ok]: MSET base case (0 ms)
+[ok]: MSET/MSETNX wrong number of args (0 ms)
+[ok]: MSET with already existing - same key twice (1 ms)
+[ok]: MSETNX with already existent key (0 ms)
+[ok]: MSETNX with not existing keys (0 ms)
+[ok]: MSETNX with not existing keys - same key twice (0 ms)
+[ok]: MSETNX with already existing keys - same key twice (0 ms)
+[ok]: STRLEN against non-existing key (0 ms)
+[ok]: STRLEN against integer-encoded value (0 ms)
+[ok]: STRLEN against plain string (0 ms)
+[ok]: SETBIT against non-existing key (0 ms)
+[ok]: SETBIT against string-encoded key (0 ms)
+[ok]: SETBIT against integer-encoded key (0 ms)
+[ok]: SETBIT against key with wrong type (1 ms)
+[ok]: SETBIT with out of range bit offset (0 ms)
+[ok]: SETBIT with non-bit argument (0 ms)
+[ok]: SETBIT fuzzing (212 ms)
+[ok]: GETBIT against non-existing key (0 ms)
+[ok]: GETBIT against string-encoded key (0 ms)
+[ok]: GETBIT against integer-encoded key (0 ms)
+[ok]: SETRANGE against non-existing key (1 ms)
+[ok]: SETRANGE against string-encoded key (0 ms)
+[ok]: SETRANGE against integer-encoded key (0 ms)
+[ok]: SETRANGE against key with wrong type (1 ms)
+[ok]: SETRANGE with out of range offset (0 ms)
+[ok]: GETRANGE against non-existing key (0 ms)
+[ok]: GETRANGE against wrong key type (0 ms)
+[ok]: GETRANGE against string value (0 ms)
+[ok]: GETRANGE against integer-encoded value (1 ms)
+[ok]: GETRANGE fuzzing (411 ms)
+[ok]: Coverage: SUBSTR (0 ms)
+[ok]: Extended SET can detect syntax errors (0 ms)
+[ok]: Extended SET NX option (0 ms)
+[ok]: Extended SET XX option (1 ms)
+[ok]: Extended SET GET option (0 ms)
+[ok]: Extended SET GET option with no previous value (1 ms)
+[ok]: Extended SET GET option with XX (0 ms)
+[ok]: Extended SET GET option with XX and no previous value (0 ms)
+[ok]: Extended SET GET option with NX (0 ms)
+[ok]: Extended SET GET option with NX and previous value (0 ms)
+[ok]: Extended SET GET with incorrect type should result in wrong type error (0 ms)
+[ok]: Extended SET EX option (0 ms)
+[ok]: Extended SET PX option (1 ms)
+[ok]: Extended SET EXAT option (0 ms)
+[ok]: Extended SET PXAT option (1 ms)
+[ok]: Extended SET using multiple options at once (0 ms)
+[ok]: GETRANGE with huge ranges, Github issue #1844 (0 ms)
+[ok]: LCS basic (0 ms)
+[ok]: LCS len (0 ms)
+[ok]: LCS indexes (1 ms)
+[ok]: LCS indexes with match len (0 ms)
+[ok]: LCS indexes with match len and minimum match len (0 ms)
+[ok]: SETRANGE with huge offset (0 ms)
+[ok]: APPEND modifies the encoding from int to raw (0 ms)
+[9/89 done]: unit/type/string (8 seconds)
+Testing unit/type/incr
+[ok]: INCR against non existing key (0 ms)
+[ok]: INCR against key created by incr itself (0 ms)
+[ok]: DECR against key created by incr (0 ms)
+[ok]: DECR against key is not exist and incr (0 ms)
+[ok]: INCR against key originally set with SET (0 ms)
+[ok]: INCR over 32bit value (0 ms)
+[ok]: INCRBY over 32bit value with over 32bit increment (0 ms)
+[ok]: INCR fails against key with spaces (left) (0 ms)
+[ok]: INCR fails against key with spaces (right) (0 ms)
+[ok]: INCR fails against key with spaces (both) (0 ms)
+[ok]: DECRBY negation overflow (1 ms)
+[ok]: INCR fails against a key holding a list (0 ms)
+[ok]: DECRBY over 32bit value with over 32bit increment, negative res (0 ms)
+[ok]: DECRBY against key is not exist (0 ms)
+[ok]: INCR uses shared objects in the 0-9999 range (0 ms)
+[ok]: INCR can modify objects in-place (0 ms)
+[ok]: INCRBYFLOAT against non existing key (0 ms)
+[ok]: INCRBYFLOAT against key originally set with SET (0 ms)
+[ok]: INCRBYFLOAT over 32bit value (0 ms)
+[ok]: INCRBYFLOAT over 32bit value with over 32bit increment (0 ms)
+[ok]: INCRBYFLOAT fails against key with spaces (left) (0 ms)
+[ok]: INCRBYFLOAT fails against key with spaces (right) (0 ms)
+[ok]: INCRBYFLOAT fails against key with spaces (both) (1 ms)
+[ok]: INCRBYFLOAT fails against a key holding a list (0 ms)
+[ok]: INCRBYFLOAT does not allow NaN or Infinity (0 ms)
+[ok]: INCRBYFLOAT decrement (0 ms)
+[ok]: string to double with null terminator (0 ms)
+[ok]: No negative zero (1 ms)
+[ok]: incr operation should update encoding from raw to int (0 ms)
+[ok]: decr operation should update encoding from raw to int (1 ms)
+[ok]: incrby operation should update encoding from raw to int (0 ms)
+[ok]: decrby operation should update encoding from raw to int (1 ms)
+[10/89 done]: unit/type/incr (0 seconds)
+Testing unit/type/list
+[ok]: reg node check compression with insert and pop (1 ms)
+[ok]: reg node check compression combined with trim (1 ms)
+[ok]: reg node check compression with lset (0 ms)
+[ok]: plain node check compression (1 ms)
+[ok]: plain node check compression with ltrim (0 ms)
+[ok]: plain node check compression using lset (0 ms)
+[ok]: Test LPUSH and LPOP on plain nodes (2 ms)
+[ok]: Test LINDEX and LINSERT on plain nodes (0 ms)
+[ok]: Test LTRIM on plain nodes (0 ms)
+[ok]: Test LREM on plain nodes (1 ms)
+[ok]: Test LPOS on plain nodes (1 ms)
+[ok]: Test LMOVE on plain nodes (1 ms)
+[ok]: Test LSET with packed / plain combinations (166 ms)
+[ok]: Test LSET with packed is split in the middle (0 ms)
+[ok]: Test LSET with packed consist only one item (168 ms)
+[ok]: Crash due to delete entry from a compress quicklist node (1 ms)
+[ok]: Crash due to split quicklist node wrongly (1 ms)
+[ignore]: Test LPUSH and LPOP on plain nodes over 4GB: large memory flag not provided
+[ignore]: Test LINDEX and LINSERT on plain nodes over 4GB: large memory flag not provided
+[ignore]: Test LTRIM on plain nodes over 4GB: large memory flag not provided
+[ignore]: Test LREM on plain nodes over 4GB: large memory flag not provided
+[ignore]: Test LSET on plain nodes over 4GB: large memory flag not provided
+[ignore]: Test LMOVE on plain nodes over 4GB: large memory flag not provided
+[ok]: LPOS basic usage - quicklist (42 ms)
+[ok]: LPOS RANK (positive, negative and zero rank) option (1 ms)
+[ok]: LPOS COUNT option (0 ms)
+[ok]: LPOS COUNT + RANK option (0 ms)
+[ok]: LPOS non existing key (0 ms)
+[ok]: LPOS no match (1 ms)
+[ok]: LPOS MAXLEN (0 ms)
+[ok]: LPOS when RANK is greater than matches (1 ms)
+[ok]: LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - quicklist (82 ms)
+[ok]: LPOP/RPOP with wrong number of arguments (0 ms)
+[ok]: RPOP/LPOP with the optional count argument - quicklist (41 ms)
+[ok]: LPOS basic usage - listpack (1 ms)
+[ok]: LPOS RANK (positive, negative and zero rank) option (0 ms)
+[ok]: LPOS COUNT option (0 ms)
+[ok]: LPOS COUNT + RANK option (0 ms)
+[ok]: LPOS non existing key (0 ms)
+[ok]: LPOS no match (0 ms)
+[ok]: LPOS MAXLEN (0 ms)
+[ok]: LPOS when RANK is greater than matches (1 ms)
+[ok]: LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - listpack (1 ms)
+[ok]: LPOP/RPOP with wrong number of arguments (0 ms)
+[ok]: RPOP/LPOP with the optional count argument - listpack (1 ms)
+[ok]: LPOP/RPOP with the count 0 returns an empty array in RESP3 (0 ms)
+[ok]: LPOP/RPOP against non existing key in RESP3 (0 ms)
+[ok]: LPOP/RPOP with <count> against non existing key in RESP3 (0 ms)
+[ok]: LPOP/RPOP with the count 0 returns an empty array in RESP2 (0 ms)
+[ok]: LPOP/RPOP against non existing key in RESP2 (0 ms)
+[ok]: LPOP/RPOP with <count> against non existing key in RESP2 (0 ms)
+[ok]: Variadic RPUSH/LPUSH (0 ms)
+[ok]: DEL a list (0 ms)
+[ok]: BLPOP: single existing list - quicklist (41 ms)
+[ok]: BLPOP: multiple existing lists - quicklist (82 ms)
+[ok]: BLPOP: second list has an entry - quicklist (42 ms)
+[ok]: BLMPOP_LEFT: single existing list - quicklist (42 ms)
+[ok]: BLMPOP_LEFT: multiple existing lists - quicklist (83 ms)
+[ok]: BLMPOP_LEFT: second list has an entry - quicklist (41 ms)
+[ok]: BRPOPLPUSH - quicklist (42 ms)
+[ok]: BLMOVE left left - quicklist (42 ms)
+[ok]: BLMOVE left right - quicklist (42 ms)
+[ok]: BLMOVE right left - quicklist (42 ms)
+[ok]: BLMOVE right right - quicklist (43 ms)
+[ok]: BLPOP: single existing list - listpack (1 ms)
+[ok]: BLPOP: multiple existing lists - listpack (1 ms)
+[ok]: BLPOP: second list has an entry - listpack (1 ms)
+[ok]: BLMPOP_LEFT: single existing list - listpack (1 ms)
+[ok]: BLMPOP_LEFT: multiple existing lists - listpack (1 ms)
+[ok]: BLMPOP_LEFT: second list has an entry - listpack (0 ms)
+[ok]: BRPOPLPUSH - listpack (1 ms)
+[ok]: BLMOVE left left - listpack (1 ms)
+[ok]: BLMOVE left right - listpack (1 ms)
+[ok]: BLMOVE right left - listpack (1 ms)
+[ok]: BLMOVE right right - listpack (1 ms)
+[ok]: BLPOP, LPUSH + DEL should not awake blocked client (1 ms)
+[ok]: BLPOP, LPUSH + DEL + SET should not awake blocked client (0 ms)
+[ok]: BLMPOP_LEFT, LPUSH + DEL should not awake blocked client (0 ms)
+[ok]: BLMPOP_LEFT, LPUSH + DEL + SET should not awake blocked client (0 ms)
+[ok]: BLPOP with same key multiple times should work (issue #801) (0 ms)
+[ok]: MULTI/EXEC is isolated from the point of view of BLPOP (0 ms)
+[ok]: BLPOP with variadic LPUSH (0 ms)
+[ok]: MULTI/EXEC is isolated from the point of view of BLMPOP_LEFT (1 ms)
+[ok]: BLMPOP_LEFT with variadic LPUSH (1 ms)
+[ok]: BRPOPLPUSH with zero timeout should block indefinitely (0 ms)
+[ok]: BLMOVE left left with zero timeout should block indefinitely (0 ms)
+[ok]: BLMOVE left right with zero timeout should block indefinitely (1 ms)
+[ok]: BLMOVE right left with zero timeout should block indefinitely (0 ms)
+[ok]: BLMOVE right right with zero timeout should block indefinitely (0 ms)
+[ok]: BLMOVE (left, left) with a client BLPOPing the target list (1 ms)
+[ok]: BLMOVE (left, right) with a client BLPOPing the target list (1 ms)
+[ok]: BLMOVE (right, left) with a client BLPOPing the target list (1 ms)
+[ok]: BLMOVE (right, right) with a client BLPOPing the target list (0 ms)
+[ok]: BRPOPLPUSH with wrong source type (0 ms)
+[ok]: BRPOPLPUSH with wrong destination type (1 ms)
+[ok]: BRPOPLPUSH maintains order of elements after failure (1 ms)
+[ok]: BRPOPLPUSH with multiple blocked clients (1 ms)
+[ok]: BLMPOP with multiple blocked clients (1 ms)
+[ok]: Linked LMOVEs (0 ms)
+[ok]: Circular BRPOPLPUSH (0 ms)
+[ok]: Self-referential BRPOPLPUSH (0 ms)
+[ok]: BRPOPLPUSH inside a transaction (1 ms)
+[ok]: PUSH resulting from BRPOPLPUSH affect WATCH (0 ms)
+[ok]: BRPOPLPUSH does not affect WATCH while still blocked (0 ms)
+[ok]: BRPOPLPUSH timeout (1017 ms)
+[ok]: SWAPDB awakes blocked client (1 ms)
+[err]: SWAPDB wants to wake blocked client, but the key already expired in tests/unit/type/list.tcl
+Expected '{select 9} flushall {select 1} {select 1} {rpush k hello} {pexpireat k 1790972124353} {swapdb 1 9} {select 9} {select 9} {set somekey1 someval1} {del k}' to match '{select *} flushall {select 1} {rpush k hello} {pexpireat k *} {swapdb 1 9} {select 9} {set somekey1 someval1} {del k} {select 1} {set somekey2 someval2}' type eval line 30 cmd {assert_replication_stream $repl {
+            {select *}
+            {flushall}
+            {select 1}
+            {rpush k hello}
+            {pexpireat k *}
+            {swapdb 1 9}
+            {select 9}
+            {set somekey1 someval1}
+            {del k}
+            {select 1}
+            {set somekey2 someval2}
+        }} proc ::test 
+[err]: MULTI + LPUSH + EXPIRE + DEBUG SLEEP on blocked client, key already expired in tests/unit/type/list.tcl
+Expected '{select 1} flushall multi {rpush k hello} {pexpireat k 1790972124456} exec {}' to match '{select *} flushall multi {rpush k hello} {pexpireat k *} exec {del k}' type eval line 28 cmd {assert_replication_stream $repl {
+            {select *}
+            {flushall}
+            {multi}
+            {rpush k hello}
+            {pexpireat k *}
+            {exec}
+            {del k}
+        }} proc ::test 
+[TIMEOUT]: clients state report follows.
+sock5c7ff989a2f0 => (IN PROGRESS) BLPOP when new key is moved into place
+
+                   The End
+
+Execution time of different units:
+  0 seconds - unit/printver
+  15 seconds - unit/dump
+  1 seconds - unit/auth
+  0 seconds - unit/protocol
+  1 seconds - unit/keyspace
+  6 seconds - unit/scan
+  0 seconds - unit/info
+  0 seconds - unit/info-command
+  8 seconds - unit/type/string
+  0 seconds - unit/type/incr
+
+!!! WARNING The following tests failed:
+
+*** [err]: SWAPDB wants to wake blocked client, but the key already expired in tests/unit/type/list.tcl
+Expected '{select 9} flushall {select 1} {select 1} {rpush k hello} {pexpireat k 1790972124353} {swapdb 1 9} {select 9} {select 9} {set somekey1 someval1} {del k}' to match '{select *} flushall {select 1} {rpush k hello} {pexpireat k *} {swapdb 1 9} {select 9} {set somekey1 someval1} {del k} {select 1} {set somekey2 someval2}' type eval line 30 cmd {assert_replication_stream $repl {
+            {select *}
+            {flushall}
+            {select 1}
+            {rpush k hello}
+            {pexpireat k *}
+            {swapdb 1 9}
+            {select 9}
+            {set somekey1 someval1}
+            {del k}
+            {select 1}
+            {set somekey2 someval2}
+        }} proc ::test 
+*** [err]: MULTI + LPUSH + EXPIRE + DEBUG SLEEP on blocked client, key already expired in tests/unit/type/list.tcl
+Expected '{select 1} flushall multi {rpush k hello} {pexpireat k 1790972124456} exec {}' to match '{select *} flushall multi {rpush k hello} {pexpireat k *} exec {del k}' type eval line 28 cmd {assert_replication_stream $repl {
+            {select *}
+            {flushall}
+            {multi}
+            {rpush k hello}
+            {pexpireat k *}
+            {exec}
+            {del k}
+        }} proc ::test 
+*** [TIMEOUT]: clients state report follows.
+Cleanup: may take some time... OK

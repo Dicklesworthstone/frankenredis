@@ -1,6 +1,6 @@
 [package]
 name = "fr-conformance"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 autobenches = false
 
@@ -8,13 +8,13 @@ autobenches = false
 bench-reference = []
 
 [dependencies]
-fr-config = { version = "0.1.0", path = "../fr-config" }
-fr-fec = { version = "0.1.0", path = "../fr-fec" }
-fr-persist = { version = "0.1.0", path = "../fr-persist" }
-fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
-fr-repl = { version = "0.1.0", path = "../fr-repl" }
-fr-runtime = { version = "0.1.0", path = "../fr-runtime" }
-fr-store = { version = "0.1.0", path = "../fr-store" }
+fr-config = { version = "0.1.1", path = "../fr-config" }
+fr-fec = { version = "0.1.1", path = "../fr-fec" }
+fr-persist = { version = "0.1.1", path = "../fr-persist" }
+fr-protocol = { version = "0.1.1", path = "../fr-protocol" }
+fr-repl = { version = "0.1.1", path = "../fr-repl" }
+fr-runtime = { version = "0.1.1", path = "../fr-runtime" }
+fr-store = { version = "0.1.1", path = "../fr-store" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

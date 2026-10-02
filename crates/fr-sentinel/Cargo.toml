@@ -1,13 +1,13 @@
 [package]
 name = "fr-sentinel"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [features]
 bench-reference = []
 
 [dependencies]
-fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
+fr-protocol = { version = "0.1.1", path = "../fr-protocol" }
 
 [dev-dependencies]
 proptest.workspace = true

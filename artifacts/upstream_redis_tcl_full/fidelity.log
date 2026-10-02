@@ -1,0 +1,11 @@
+upstream Tcl: unit/type/string (14 selected tests)
+  PASS: 14/14 selected assertions executed
+upstream Tcl: unit/type/incr (11 selected tests)
+  PASS: 11/11 selected assertions executed
+upstream Tcl: unit/keyspace (13 selected tests)
+  PASS: 13/13 selected assertions executed
+upstream Tcl: unit/multi (19 selected tests)
+  PASS: 19/19 selected assertions executed
+upstream Tcl: unit/protocol (15 selected tests)
+  PASS: 15/15 selected assertions executed
+UPSTREAM REDIS 7.2.4 TCL FIDELITY: 72/72 selected upstream assertions passed

@@ -1,6 +1,6 @@
 [package]
 name = "fr-fec"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "RaptorQ-Everywhere durability sidecar: systematic FEC encode/scrub/decode for FrankenRedis evidence artifacts (spec §9/§19)."
 

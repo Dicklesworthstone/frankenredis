@@ -1,0 +1,33 @@
+{
+  "evidence_class": "isolated_named_tests_not_full_suite",
+  "binary_sha256": "319d8dad58f4087885568aa3a80ca5f8765a876ec1a0adf27b0ff3f2351cc295",
+  "tests": [
+    {
+      "test": "SWAPDB wants to wake blocked client, but the key already expired",
+      "exit_code": 1,
+      "passed": [],
+      "errors": [
+        "SWAPDB wants to wake blocked client, but the key already expired in tests/unit/type/list.tcl"
+      ],
+      "early_exit": null
+    },
+    {
+      "test": "MULTI + LPUSH + EXPIRE + DEBUG SLEEP on blocked client, key already expired",
+      "exit_code": 0,
+      "passed": [
+        "MULTI + LPUSH + EXPIRE + DEBUG SLEEP on blocked client, key already expired"
+      ],
+      "errors": [],
+      "early_exit": null
+    },
+    {
+      "test": "BLPOP when new key is moved into place",
+      "exit_code": 0,
+      "passed": [
+        "BLPOP when new key is moved into place"
+      ],
+      "errors": [],
+      "early_exit": null
+    }
+  ]
+}

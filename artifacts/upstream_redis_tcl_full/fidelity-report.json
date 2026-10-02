@@ -1,0 +1,60 @@
+{
+  "schema_version": "fr_upstream_redis_tcl_fidelity/v1",
+  "redis_version": "7.2.4",
+  "redis_commit": "d2c8a4b91e8c0e6aefd1f5bc0bf582cddbe046b7",
+  "selected_count": 72,
+  "passed_count": 72,
+  "all_selected_executed_exactly_once": true,
+  "units": [
+    {
+      "unit": "unit/type/string",
+      "ok": true,
+      "exit_code": 0,
+      "expected_count": 14,
+      "passed_count": 14,
+      "missing": [],
+      "duplicates": [],
+      "unexpected": []
+    },
+    {
+      "unit": "unit/type/incr",
+      "ok": true,
+      "exit_code": 0,
+      "expected_count": 11,
+      "passed_count": 11,
+      "missing": [],
+      "duplicates": [],
+      "unexpected": []
+    },
+    {
+      "unit": "unit/keyspace",
+      "ok": true,
+      "exit_code": 0,
+      "expected_count": 13,
+      "passed_count": 13,
+      "missing": [],
+      "duplicates": [],
+      "unexpected": []
+    },
+    {
+      "unit": "unit/multi",
+      "ok": true,
+      "exit_code": 0,
+      "expected_count": 19,
+      "passed_count": 19,
+      "missing": [],
+      "duplicates": [],
+      "unexpected": []
+    },
+    {
+      "unit": "unit/protocol",
+      "ok": true,
+      "exit_code": 0,
+      "expected_count": 15,
+      "passed_count": 15,
+      "missing": [],
+      "duplicates": [],
+      "unexpected": []
+    }
+  ]
+}

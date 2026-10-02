@@ -1,0 +1,26 @@
+{
+  "schema_version": "fr_release_tcl_provenance/v1",
+  "redis_commit": "d2c8a4b91e8c0e6aefd1f5bc0bf582cddbe046b7",
+  "production_source_commit": "37fc9ccc88269baad16cc7cd0ec13c578661e619",
+  "candidate_binary_embedded_version": "0.1.0",
+  "candidate_binary_sha256": "319d8dad58f4087885568aa3a80ca5f8765a876ec1a0adf27b0ff3f2351cc295",
+  "baseline_release": "v0.1.0",
+  "baseline_archive_name": "frankenredis-v0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+  "baseline_archive_sha256": "b76b07f078c38f0e8c21d86c24a96ca5c2c9f82473d770552ebefb9ddd664f5f",
+  "baseline_binary_sha256": "7a2f9619f2200d23f0aaf42a69287221ff2fb33d53e886ac1a885055129605cb",
+  "full_harness_sha256": "aca57f8264e80aeb8f727cccf15eae8c94871b14d1168c3467008c6a1e281dc0",
+  "full_reports_exactly_equal": true,
+  "full_suite_passed": false,
+  "receipts_sha256": {
+    "baseline-v0.1.0-report.json": "c65b274f8ff814303fc645dda4d81928f9977bbc709171c064f1ed3208d03669",
+    "baseline-v0.1.0-runtest.log": "19125e70e76c873a30114dbbfdfd007ac861ff71da39a89db5b471abe2915801",
+    "fidelity-report.json": "1b292b161d8bf49b539cbf4611457857068b8272ac82aca82aaf12b35f0e1d03",
+    "fidelity.log": "59e578ffaaa2cd82d54fe6e01f0400847e358d4c0fca78604dc2dfeb61345178",
+    "focused-blpop.log": "a59fb35caca955d65d723f9273f4232ac8bcf01a80c28efeef2c31c218a1bdb3",
+    "focused-multi.log": "be06bc0c07e90d5c577908055005004839b22eaaef144b0b0b164ddb7daad265",
+    "focused-report.json": "63b1cfb2c53425bad71d7fa66cc8500258d978d496d055ae8e8a9b26b4ac385b",
+    "focused-swapdb.log": "f84dd096d5f3edbfd9738b4c2d10b89044ec400fde1f90fa8d2a889f56d1d8ed",
+    "report.json": "c65b274f8ff814303fc645dda4d81928f9977bbc709171c064f1ed3208d03669",
+    "runtest.log": "d8f41a48fb98146d05cbd81d3d5b44b3efad27c6ce671539b760dac436c818c1"
+  }
+}

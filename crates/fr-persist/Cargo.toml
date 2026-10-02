@@ -1,6 +1,6 @@
 [package]
 name = "fr-persist"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [features]
@@ -19,9 +19,9 @@ upstream-stream-rdb = []
 perf-ab-quicklist-node-capacity = []
 
 [dependencies]
-fr-fec = { version = "0.1.0", path = "../fr-fec" }
-fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
-fr-simd = { version = "0.1.0", path = "../fr-simd" }
+fr-fec = { version = "0.1.1", path = "../fr-fec" }
+fr-protocol = { version = "0.1.1", path = "../fr-protocol" }
+fr-simd = { version = "0.1.1", path = "../fr-simd" }
 
 [dev-dependencies]
 proptest.workspace = true

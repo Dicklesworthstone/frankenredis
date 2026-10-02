@@ -5,7 +5,7 @@ All notable changes to FrankenRedis are documented in this file.
 FrankenRedis is a clean-room Rust reimplementation of Redis targeting full drop-in replacement parity
 with deterministic latency, mathematical rigor, and memory safety. The first tagged release is
 **v0.1.0**; earlier development is organized into date-bounded phases derived from the linear commit
-history on `main`. Workspace version: **0.1.0**.
+history on `main`. Workspace version: **0.1.1**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenredis>
 
@@ -16,7 +16,7 @@ Representative commits in each phase are live-linked to GitHub.
 
 ---
 
-## [Unreleased] -- planned v0.1.1
+## [0.1.1] -- 2026-10-02
 
 ### Persistence safety
 
@@ -46,6 +46,20 @@ Representative commits in each phase are live-linked to GitHub.
 - Updated the optional jemalloc allocator to 0.7.0 and libfuzzer-sys to 0.4.13.
 - Retained RaptorQ 1.8.1 because 2.0 changes persisted repair-packet identifiers;
   existing sidecars need an explicit format migration before that upgrade.
+
+### Qualification limits
+
+- The unchanged complete Redis 7.2.4 Tcl invocation matches the published
+  v0.1.0 baseline exactly: 330 assertions pass, two list/replication assertions
+  fail, and the stock watchdog stops after 10 of 89 units. The remaining 79
+  units are unqualified; full-suite green is not claimed. Reports, raw logs,
+  executable hashes, and the baseline comparison are committed under
+  `artifacts/upstream_redis_tcl_full/`.
+- Fresh-instance checks identify the SWAPDB replication-stream assertion as
+  the first failure; the subsequent MULTI and BLPOP/RENAME cases pass alone.
+  The curated upstream fidelity lane passes all 72 selected assertions.
+  The existing complete-suite limitation is tracked in
+  [issue #3](https://github.com/Dicklesworthstone/frankenredis/issues/3).
 
 ## [Unreleased] -- 2026-08-20 through 2026-09-03
 
