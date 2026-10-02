@@ -49,6 +49,10 @@ Representative commits in each phase are live-linked to GitHub.
 
 ### Qualification limits
 
+- The complete Rust workspace gate reports 5,155 passed, one failed, and 58
+  ignored tests. The CLIENT PAUSE/replica REPLCONF ACK TCP test also fails on
+  v0.1.0; its unexpected connection close remains tracked in
+  [issue #4](https://github.com/Dicklesworthstone/frankenredis/issues/4).
 - The unchanged complete Redis 7.2.4 Tcl invocation matches the published
   v0.1.0 baseline exactly: 330 assertions pass, two list/replication assertions
   fail, and the stock watchdog stops after 10 of 89 units. The remaining 79
