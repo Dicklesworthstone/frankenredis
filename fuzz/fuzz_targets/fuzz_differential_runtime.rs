@@ -472,6 +472,7 @@ fn frame_sort_key(frame: &RespFrame) -> Vec<u8> {
         RespFrame::SimpleString(s) => s.as_bytes().to_vec(),
         RespFrame::Integer(n) => n.to_string().into_bytes(),
         RespFrame::Error(s) => s.as_bytes().to_vec(),
+        RespFrame::ErrorBytes(bytes) => bytes.clone(),
         // Composite frames (Array / Sequence / RESP3 Map / Set / Push /
         // Attribute) and the RESP3 scalar leaves (Double / Verbatim /
         // BigNumber / Bool) sort by their full-encoded byte form; that's

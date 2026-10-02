@@ -304,8 +304,7 @@ fn apply_stream_op(store: &mut Store, next_stream_id: &mut u64, op: StreamOp, no
                 &ids,
                 StreamClaimOptions {
                     min_idle_time_ms: u64::from(min_idle_ms % 16),
-                    idle_ms: None,
-                    time_ms: None,
+                    delivery_time_ms: None,
                     retry_count: None,
                     force: false,
                     justid,
@@ -428,8 +427,7 @@ fn apply_stream_op(store: &mut Store, next_stream_id: &mut u64, op: StreamOp, no
                         &[(0, 0)],
                         StreamClaimOptions {
                             min_idle_time_ms: 0,
-                            idle_ms: None,
-                            time_ms: None,
+                            delivery_time_ms: None,
                             retry_count: None,
                             force: false,
                             justid: false,

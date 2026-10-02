@@ -22,6 +22,7 @@ fuzz_target!(|data: &[u8]| {
         // production parser so the fuzzer exercises the
         // fail-closed prefix matrix on untrusted input.
         allow_resp3: false,
+        pre_auth: None,
     };
     let _ = parse_frame_with_config(data, &restrictive_config);
 
@@ -31,6 +32,7 @@ fuzz_target!(|data: &[u8]| {
         max_array_len: 1_000_000,
         max_recursion_depth: 32,
         allow_resp3: true,
+        pre_auth: None,
     };
     let _ = parse_frame_with_config(data, &permissive_config);
 });

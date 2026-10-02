@@ -11721,9 +11721,7 @@ impl Store {
         }
 
         // Production single-probe path:
-        if self.expires_count != 0
-            && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
-        {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
             self.record_keyspace_miss(key);
             let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
@@ -11744,20 +11742,18 @@ impl Store {
                     0
                 };
                 let old_val = {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                     let entry = self.entries.node_value_mut(node_idx);
-                    if !entry.value.is_string_like() {
-                        return Err(StoreError::WrongType);
-                    }
-                    let old_str = Self::take_or_clone_old_string::<MOVE>(entry)?;
                     if lfu_enabled {
                         entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
+                    let old_str = Self::take_or_clone_old_string::<MOVE>(entry)?;
                     entry.touch_write(now_ms, lfu_enabled);
+                    entry.clear_entry_flags();
                     entry.value = canonical_string_value_from_slice(value);
                     old_str
                 };
 
-                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                 if self.expires_count != 0
                     && let Some(old_exp) = self.expiry_deadlines.remove(key)
                 {
@@ -11803,9 +11799,7 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(Option<&[u8]>),
     ) -> Result<(), StoreError> {
-        if self.expires_count != 0
-            && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
-        {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
             self.drop_if_expired(key, now_ms);
             self.record_keyspace_miss(key);
             let new_entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
@@ -11827,7 +11821,11 @@ impl Store {
                     0
                 };
                 {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                     let entry = self.entries.node_value_mut(node_idx);
+                    if lfu_enabled {
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
                     match &entry.value {
                         Value::String(bytes) => sink(Some(bytes.as_slice())),
                         Value::Integer(v) => {
@@ -11836,14 +11834,11 @@ impl Store {
                         }
                         _ => return Err(StoreError::WrongType),
                     }
-                    if lfu_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                    }
                     entry.touch_write(now_ms, lfu_enabled);
+                    entry.clear_entry_flags();
                     entry.value = canonical_string_value_from_slice(value);
                 }
 
-                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                 if self.expires_count != 0
                     && let Some(old_exp) = self.expiry_deadlines.remove(key)
                 {
@@ -51540,10 +51535,7 @@ mod tests {
         let mut u = Store::new();
         u.set(b"t".to_vec(), b"a".to_vec(), Some(50), 1); // deadline 51
         assert!(u.expires_count >= 1);
-        assert_eq!(
-            u.getset(b"t", b"b", 10).unwrap(),
-            Some(b"a".to_vec())
-        ); // at t=10, live
+        assert_eq!(u.getset(b"t", b"b", 10).unwrap(), Some(b"a".to_vec())); // at t=10, live
         assert_eq!(u.expires_count, 0, "GETSET cleared the TTL");
         assert_eq!(
             u.get(b"t", 1000).unwrap(),
@@ -55651,10 +55643,7 @@ mod tests {
     fn getset_returns_old_and_sets_new() {
         let mut store = Store::new();
         assert_eq!(store.getset(b"k", b"v1", 0).unwrap(), None);
-        assert_eq!(
-            store.getset(b"k", b"v2", 0).unwrap(),
-            Some(b"v1".to_vec())
-        );
+        assert_eq!(store.getset(b"k", b"v2", 0).unwrap(), Some(b"v1".to_vec()));
         assert_eq!(store.get(b"k", 0).unwrap(), Some(b"v2".to_vec()));
     }
 
@@ -61154,6 +61143,37 @@ mod tests {
                     assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn getset_replacement_resets_encoding_flags() {
+        for borrowed in [false, true] {
+            let mut store = Store::new();
+            store.set(b"key".to_vec(), b"a".to_vec(), None, 0);
+            store
+                .append(b"key", b"b", 1)
+                .expect("force raw string encoding");
+            assert_eq!(store.object_encoding(b"key", 1), Some("raw"));
+            if borrowed {
+                let mut previous = None;
+                store
+                    .getset_with(b"key", b"c", 2, |value| {
+                        previous = value.map(<[u8]>::to_vec);
+                    })
+                    .expect("borrowed GETSET");
+                assert_eq!(previous, Some(b"ab".to_vec()));
+            } else {
+                assert_eq!(
+                    store.getset(b"key", b"c", 2).expect("GETSET"),
+                    Some(b"ab".to_vec())
+                );
+            }
+            assert_eq!(store.object_encoding(b"key", 2), Some("embstr"));
+            assert_eq!(
+                store.get(b"key", 2).expect("new value"),
+                Some(b"c".to_vec())
+            );
         }
     }
 

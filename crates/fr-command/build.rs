@@ -62,9 +62,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "CARGO_MANIFEST_DIR is not set for build.rs",
         )
     })?);
-    let commands_dir = manifest_dir
-        .join("../..")
-        .join("legacy_redis_code/redis/src/commands");
+    let commands_dir = manifest_dir.join("redis-7.2.4/commands");
 
     println!("cargo:rerun-if-changed={}", commands_dir.display());
 
@@ -101,10 +99,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // the JSON. Embedded as a single JSON blob; lib.rs parses once
     // (OnceLock) and converts to RespFrame on demand.
     let mut docs_arg_trees = BTreeMap::<String, serde_json::Value>::new();
-    // (CrimsonHawk) The Redis command JSON (legacy_redis_code/redis/src/commands) is
-    // gitignored (clean-room/licensing boundary) and not synced to remote rch workers, so
-    // fr-command — hence fr-runtime/fr-server — cannot build remotely, blocking per-crate
-    // benching of those crates. With FR_ALLOW_STUB_COMMANDS set, fall back to EMPTY ACL-CAT
+    // Production builds read the tracked, revision-pinned command specifications.
+    // With FR_ALLOW_STUB_COMMANDS set, fall back to EMPTY ACL-CAT
     // / COMMAND-DOCS tables so the crate COMPILES for REMOTE-BUILD/BENCH ONLY (ACL CAT and
     // COMMAND DOCS are degraded to empty — NOT for production binaries). The DEFAULT (env
     // unset) preserves the hard-fail, so a production build with the JSON dir missing still

@@ -1930,7 +1930,7 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("stop-writes-on-bgsave-error", "yes"),
     ("rdbcompression", "yes"),
     ("rdbchecksum", "yes"),
-    ("rdb-fec", "yes"),
+    ("rdb-fec", "no"),
     ("dbfilename", "dump.rdb"),
     ("rdb-del-sync-files", "no"),
     ("dir", "."),
@@ -5069,7 +5069,7 @@ impl Default for ServerState {
             // Upstream's CONFIG_DEFAULT_SAVE_PARAMS ("3600 1 300 100 60 10000") is non-empty, and
             // fr's own default `save` string matches it, so the default is "configured".
             rdb_save_points_configured: true,
-            rdb_fec_enabled: true,
+            rdb_fec_enabled: false,
             masteruser: None,
             masterauth: None,
             replica_serve_stale_data: true,
@@ -67876,6 +67876,64 @@ mod tests {
     }
 
     #[test]
+    fn aof_rewrite_sidecar_failure_preserves_post_rewrite_writes() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fr-runtime-fec-rewrite-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create retained test scratch");
+        let path = dir.join("appendonly.aof");
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(path.clone());
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"aof-disable-auto-gc", b"yes"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.execute_frame(command(&[b"SET", b"before", b"first"]), 1);
+        rt.flush_aof_to_disk(2);
+        rt.execute_frame(command(&[b"SET", b"cached", b"second"]), 3);
+        rt.flush_aof_to_disk(4);
+        assert_eq!(rt.server.aof_current_seq, 1);
+        assert!(matches!(rt.server.aof_incr_file, Some((1, _))));
+
+        rt.set_rdb_fec(true);
+        let manifest = dir.join("appendonly.aof.manifest");
+        let (envelope, _) = fr_fec::sidecar_paths(&manifest);
+        std::fs::create_dir(&envelope).expect("block manifest sidecar write");
+        assert_eq!(rt.rewrite_aof_manifest(5).expect("rewrite must succeed"), 2);
+        assert_eq!(rt.server.aof_current_seq, 2);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"after", b"third"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.flush_aof_to_disk(7);
+        assert!(matches!(rt.server.aof_incr_file, Some((2, _))));
+
+        let mut reloaded = Runtime::default_strict();
+        reloaded.set_aof_path(path);
+        reloaded
+            .load_aof(8)
+            .expect("reload complete AOF generation");
+        for (key, value) in [
+            (b"before".as_slice(), b"first".as_slice()),
+            (b"cached".as_slice(), b"second".as_slice()),
+            (b"after".as_slice(), b"third".as_slice()),
+        ] {
+            assert_eq!(
+                reloaded.execute_frame(command(&[b"GET", key]), 9),
+                RespFrame::BulkString(Some(value.to_vec()))
+            );
+        }
+    }
+
+    #[test]
     fn incremental_aof_flush_persists_writes_between_rewrites() {
         // (frankenredis-ol9tz / frankenredis-oe6qt) Writes made between full
         // rewrites must be durable across a restart. fr now emits the redis-7
@@ -74952,12 +75010,12 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
     #[test]
     fn config_get_and_set_rdb_fec() {
         let mut rt = Runtime::default_strict();
-        assert!(rt.rdb_fec_enabled());
+        assert!(!rt.rdb_fec_enabled());
         assert_eq!(
             rt.execute_frame(command(&[b"CONFIG", b"GET", b"rdb-fec"]), 0),
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"rdb-fec".to_vec())),
-                RespFrame::BulkString(Some(b"yes".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
             ]))
         );
 
@@ -79215,6 +79273,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
         let mut rt = Runtime::default_strict();
         rt.set_rdb_path(rdb_path.clone());
+        rt.set_rdb_fec(true);
         assert!(rt.rdb_fec_enabled());
 
         assert_eq!(
@@ -79326,6 +79385,7 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
 
         let mut rt = Runtime::default_strict();
         rt.set_aof_path(aof_path.clone());
+        rt.set_rdb_fec(true);
         assert!(rt.rdb_fec_enabled());
 
         assert_eq!(

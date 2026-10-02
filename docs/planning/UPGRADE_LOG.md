@@ -1,5 +1,26 @@
 # Dependency Upgrade Log
 
+## 2026-10-02 release-wave qualification
+
+- Updated optional `tikv-jemallocator` 0.6.1 to 0.7.0, resolving
+  `tikv-jemalloc-sys` 0.7.1 with native jemalloc 5.3.1. The ordinary GlobalAlloc
+  API is unchanged. Its qualification uses `--no-default-features --features
+  jemalloc`; a default mimalloc build does not exercise this dependency.
+- Updated both libfuzzer-sys declarations from 0.4.12 to 0.4.13 and refreshed
+  the separate fuzz workspace lockfile. The upstream patch changes documentation
+  and version metadata; its standalone build is a separate release gate.
+- Retained RaptorQ 1.8.1. The [upstream 2.0.0 release](https://github.com/cberner/raptorq/releases/tag/v2.0.0)
+  changes repair-packet payload identifiers from extended symbol count `K'` to
+  source symbol count `K`. Existing sidecars lack a codec generation marker;
+  a decoder upgrade would interpret legacy repair equations incorrectly when
+  `K != K'`. An intact source-symbol round trip cannot establish compatibility.
+  Migration is tracked with the persistence redesign in
+  [issue #1](https://github.com/Dicklesworthstone/frankenredis/issues/1).
+- Registry and official upstream source review found the other locked direct
+  dependencies current. Full workspace tests, optional allocator tests, and the
+  standalone fuzz build provide the execution evidence recorded by the release
+  worker; source review alone is not runtime qualification.
+
 **Date:** 2026-04-21, 2026-04-22  |  **Project:** frankenredis  |  **Language:** Rust
 **Agents:** Clawdstein-libupdater-frankenredis, codex-frankenredis
 

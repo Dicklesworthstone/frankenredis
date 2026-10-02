@@ -153,6 +153,7 @@ fn default_runtime_parser_config() -> ParserConfig {
         // prefixes from untrusted input (matches the production
         // parser default).
         allow_resp3: false,
+        pre_auth: None,
     }
 }
 

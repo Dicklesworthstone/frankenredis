@@ -332,16 +332,7 @@ pub fn read_aof_manifest_file(path: &Path) -> Result<AofManifest, PersistError> 
                 }
             }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(recovered_bytes) = try_recover_rdb_from_sidecar(path)
-                && let Ok(recovered_str) = std::str::from_utf8(&recovered_bytes)
-                && let Ok(manifest) = parse_aof_manifest(recovered_str)
-            {
-                Ok(manifest)
-            } else {
-                Ok(AofManifest::default())
-            }
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AofManifest::default()),
         Err(error) => Err(PersistError::Io(error)),
     }
 }
@@ -374,13 +365,6 @@ pub fn read_aof_manifest_dir(manifest_path: &Path) -> Result<MultipartAofLoad, P
         let entry_path = dir.join(&entry.file_name);
         let data = match std::fs::read(&entry_path) {
             Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                if let Some(recovered) = try_recover_rdb_from_sidecar(&entry_path) {
-                    recovered
-                } else {
-                    return Err(PersistError::Io(e));
-                }
-            }
             Err(e) => return Err(PersistError::Io(e)),
         };
         if data.is_empty() {
@@ -476,7 +460,7 @@ pub fn write_aof_manifest_dir_with_sidecar(
     let incr_file = format!("{basename}.{seq}.incr.aof");
     let base_path = dir.join(&base_file);
 
-    write_rdb_bytes_with_sidecar(&base_path, base_rdb, now_unix_ms)?;
+    write_rdb_bytes_atomically(&base_path, base_rdb)?;
     let empty_slice: &[u8] = &[];
     let incr_bytes = if incr_records.is_empty() {
         empty_slice
@@ -503,7 +487,12 @@ pub fn write_aof_manifest_dir_with_sidecar(
     };
     let manifest_path = dir.join(format!("{basename}.manifest"));
     let manifest_bytes = format_aof_manifest(&manifest);
-    write_rdb_bytes_with_sidecar(&manifest_path, manifest_bytes.as_bytes(), now_unix_ms)
+    write_rdb_bytes_atomically(&manifest_path, manifest_bytes.as_bytes())?;
+    // Commit the complete AOF generation before attempting auxiliary writes.
+    // Sidecar failures must not prevent the runtime advancing its current sequence.
+    write_sidecar_best_effort(&base_path, base_rdb, now_unix_ms);
+    write_sidecar_best_effort(&manifest_path, manifest_bytes.as_bytes(), now_unix_ms);
+    Ok(())
 }
 
 #[must_use]
@@ -7200,6 +7189,8 @@ pub fn write_rdb_bytes(path: &Path, bytes: &[u8]) -> Result<(), PersistError> {
 
 /// Durably write already-encoded RDB bytes to `path` and generate RFC 6330
 /// RaptorQ forward-error-correction sidecars (`.envelope.json` and `.symbols`).
+/// Sidecar I/O is best-effort after the primary file is durably committed;
+/// an auxiliary write failure must not turn a successful save into an error.
 ///
 /// Implements the spec §9/§19 systematic durability drill contract for
 /// long-lived state artifacts: source symbols plus repair packets allow
@@ -7210,14 +7201,17 @@ pub fn write_rdb_bytes_with_sidecar(
     now_unix_ms: u64,
 ) -> Result<(), PersistError> {
     write_rdb_bytes_atomically(path, bytes)?;
+    write_sidecar_best_effort(path, bytes, now_unix_ms);
+    Ok(())
+}
+
+fn write_sidecar_best_effort(path: &Path, bytes: &[u8], now_unix_ms: u64) {
     if !bytes.is_empty() {
         let symbol_size = 512_u16;
         let k = bytes.len().div_ceil(symbol_size as usize);
         let repair_symbols = (k / 8).clamp(8, 128);
-        fr_fec::write_sidecar(path, "state", repair_symbols, symbol_size, now_unix_ms)
-            .map_err(|e| PersistError::Io(std::io::Error::other(e)))?;
+        let _ = fr_fec::write_sidecar(path, "state", repair_symbols, symbol_size, now_unix_ms);
     }
-    Ok(())
 }
 
 /// Durably write bytes to `path` via a temp file + rename, WITHOUT syncing the parent directory.
@@ -7276,12 +7270,6 @@ pub fn read_rdb_file_with_functions(
             Err(PersistError::InvalidFrame)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(recovered) = try_recover_rdb_from_sidecar(path)
-                && let Ok(decoded) = decode_rdb_prefix(&recovered)
-                && decoded.consumed == recovered.len()
-            {
-                return Ok((decoded.entries, decoded.aux, decoded.functions));
-            }
             Ok((Vec::new(), BTreeMap::new(), Vec::new()))
         }
         Err(e) => Err(PersistError::Io(e)),
@@ -12425,6 +12413,113 @@ mod tests {
         let path = std::path::Path::new("/tmp/fr_persist_nonexistent_test_file.rdb");
         let (entries, _) = super::read_rdb_file(path).expect("read missing");
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn missing_rdb_is_not_resurrected_from_sidecars() {
+        let dir = fec_mitigation_test_dir("missing-rdb");
+        let path = dir.join("dump.rdb");
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"old-key".to_vec(),
+            value: RdbValue::String(b"old-value".to_vec()),
+            expire_ms: None,
+        }];
+        super::write_rdb_file_with_sidecar(&path, &entries, &[], 0).expect("write snapshot");
+        let (envelope, symbols) = fr_fec::sidecar_paths(&path);
+        assert!(
+            envelope.is_file() && symbols.is_file(),
+            "require actual sidecars"
+        );
+        std::fs::rename(&path, dir.join("preserved.rdb")).expect("move snapshot aside");
+
+        let (loaded, aux, functions) =
+            super::read_rdb_file_with_functions(&path).expect("missing snapshot starts empty");
+        assert!(loaded.is_empty());
+        assert!(aux.is_empty());
+        assert!(functions.is_empty());
+        assert!(
+            !path.exists(),
+            "loading must not recreate a missing snapshot"
+        );
+    }
+
+    #[test]
+    fn missing_aof_files_are_not_resurrected_from_sidecars() {
+        let dir = fec_mitigation_test_dir("missing-aof");
+        let manifest = dir.join("appendonly.aof.manifest");
+        let base = dir.join("appendonly.aof.1.base.rdb");
+        let base_rdb = encode_rdb(&[], &[]);
+        super::write_aof_manifest_dir_with_sidecar(&dir, "appendonly.aof", 1, &base_rdb, &[], 0)
+            .expect("write AOF generation");
+        for primary in [&base, &manifest] {
+            let (envelope, symbols) = fr_fec::sidecar_paths(primary);
+            assert!(
+                envelope.is_file() && symbols.is_file(),
+                "require actual sidecars"
+            );
+        }
+        std::fs::rename(&base, dir.join("preserved-base.rdb")).expect("move base aside");
+        assert!(matches!(
+            super::read_aof_manifest_dir(&manifest),
+            Err(PersistError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(!base.exists());
+
+        std::fs::rename(&manifest, dir.join("preserved.manifest")).expect("move manifest aside");
+        let loaded =
+            super::read_aof_manifest_file(&manifest).expect("missing manifest starts empty");
+        assert!(loaded.base.is_none());
+        assert!(loaded.incremental.is_empty());
+        assert!(!manifest.exists());
+    }
+
+    #[test]
+    fn sidecar_io_failure_does_not_fail_committed_rdb_or_aof() {
+        let dir = fec_mitigation_test_dir("sidecar-io");
+        let path = dir.join("dump.rdb");
+        let (envelope, _) = fr_fec::sidecar_paths(&path);
+        std::fs::create_dir(&envelope).expect("block envelope file writes");
+        let bytes = encode_rdb(&[], &[]);
+        super::write_rdb_bytes_with_sidecar(&path, &bytes, 0)
+            .expect("primary RDB commit must succeed despite sidecar failure");
+        assert_eq!(std::fs::read(&path).expect("read committed RDB"), bytes);
+
+        let base = dir.join("appendonly.aof.1.base.rdb");
+        let manifest = dir.join("appendonly.aof.manifest");
+        for primary in [&base, &manifest] {
+            let (envelope, _) = fr_fec::sidecar_paths(primary);
+            std::fs::create_dir(&envelope).expect("block AOF sidecar file writes");
+        }
+        let incremental = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"new-key".to_vec(), b"new-value".to_vec()],
+        }];
+        super::write_aof_manifest_dir_with_sidecar(
+            &dir,
+            "appendonly.aof",
+            1,
+            &bytes,
+            &incremental,
+            0,
+        )
+        .expect("complete AOF generation must commit despite sidecar failure");
+        let loaded =
+            super::read_aof_manifest_dir(&manifest).expect("load committed AOF generation");
+        assert_eq!(loaded.records, incremental);
+        assert_eq!(std::fs::read(&base).expect("read committed base"), bytes);
+    }
+
+    fn fec_mitigation_test_dir(label: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fr-fec-mitigation-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create retained test scratch");
+        dir
     }
 
     #[test]

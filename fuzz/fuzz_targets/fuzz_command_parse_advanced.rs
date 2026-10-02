@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use fr_command::{parse_client_tracking_state, parse_migrate_request};
 use libfuzzer_sys::fuzz_target;
 

@@ -184,9 +184,10 @@ fn encode_frames(frames: &[RespFrame]) -> Vec<u8> {
 
 fn profile_for_frame(frame: &RespFrame) -> FrameProfile {
     match frame {
-        RespFrame::SimpleString(_) | RespFrame::Error(_) | RespFrame::Integer(_) => {
-            FrameProfile::default()
-        }
+        RespFrame::SimpleString(_)
+        | RespFrame::Error(_)
+        | RespFrame::ErrorBytes(_)
+        | RespFrame::Integer(_) => FrameProfile::default(),
         RespFrame::BulkString(None) => FrameProfile::default(),
         RespFrame::BulkString(Some(bytes)) => FrameProfile {
             max_bulk_len: bytes.len(),
@@ -264,6 +265,7 @@ fn loose_config(profile: FrameProfile) -> ParserConfig {
         // the documented RESP3-downgrade path when frames include
         // Map/Push variants.
         allow_resp3: true,
+        pre_auth: None,
     }
 }
 

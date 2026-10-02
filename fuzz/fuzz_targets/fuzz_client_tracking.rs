@@ -236,6 +236,7 @@ fn expected_state(
                 caching: None,
                 noloop,
                 prefixes,
+                has_activity: true,
             }
         }
         TrackingFlavor::Bcast => {
@@ -257,6 +258,7 @@ fn expected_state(
                 caching: None,
                 noloop,
                 prefixes,
+                has_activity: true,
             }
         }
         TrackingFlavor::Optin => {
@@ -270,6 +272,7 @@ fn expected_state(
                 caching: None,
                 noloop,
                 prefixes,
+                has_activity: true,
             }
         }
         TrackingFlavor::Optout => {
@@ -283,6 +286,7 @@ fn expected_state(
                 caching: None,
                 noloop,
                 prefixes,
+                has_activity: true,
             }
         }
     }

@@ -3,10 +3,9 @@
 All notable changes to FrankenRedis are documented in this file.
 
 FrankenRedis is a clean-room Rust reimplementation of Redis targeting full drop-in replacement parity
-with deterministic latency, mathematical rigor, and memory safety. This project has no tagged releases
-or GitHub Releases (`git for-each-ref refs/tags` and `gh release list -R Dicklesworthstone/frankenredis`
-are both empty as of 2026-08-19); the changelog is organized by date-bounded development phases derived
-from the linear commit history on `main`. Workspace version: **0.1.0**.
+with deterministic latency, mathematical rigor, and memory safety. The first tagged release is
+**v0.1.0**; earlier development is organized into date-bounded phases derived from the linear commit
+history on `main`. Workspace version: **0.1.0**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenredis>
 
@@ -16,6 +15,37 @@ This 2026-08-19 refresh covers the previously undocumented window **2026-05-17 t
 Representative commits in each phase are live-linked to GitHub.
 
 ---
+
+## [Unreleased] -- planned v0.1.1
+
+### Persistence safety
+
+- RaptorQ snapshot sidecars are now opt-in (`rdb-fec no` by default). Enabling
+  `rdb-fec yes` writes `.envelope.json` and `.symbols` beside RDB snapshots and
+  AOF manifests/base snapshots. Existing sidecars can still recover corrupt
+  files, so operators should treat this as an experimental durability feature.
+- Missing RDB files and AOF manifests are no longer recreated from retained
+  sidecars. A missing AOF data file fails to load instead of restoring stale data.
+- Sidecar I/O failures no longer report failure after the primary snapshot has
+  committed. AOF rewrites commit the entire base/incremental/manifest generation
+  before auxiliary writes, preserving the sequence used for subsequent writes.
+- Sidecar generation binding, handling stale sidecars, large-input chunking, and
+  preserving corrupt primary files during repair remain follow-up work.
+
+### Command compatibility
+
+- Strict release builds use tracked Redis 7.2.4 command specifications with
+  recorded upstream revision, checksums, and license, instead of ignored oracle
+  files.
+- GETSET replacements reset the previous value's encoding flags. Wrong-type
+  GETSET calls also preserve Redis's key-hit and LFU accounting in both dispatch
+  paths.
+
+### Dependencies
+
+- Updated the optional jemalloc allocator to 0.7.0 and libfuzzer-sys to 0.4.13.
+- Retained RaptorQ 1.8.1 because 2.0 changes persisted repair-packet identifiers;
+  existing sidecars need an explicit format migration before that upgrade.
 
 ## [Unreleased] -- 2026-08-20 through 2026-09-03
 
