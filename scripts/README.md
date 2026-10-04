@@ -86,6 +86,35 @@ A green run is strong evidence for the surfaces it exercises, especially bidirec
 RDB/AOF/replication interoperability, but it is not by itself proof of every behavior in the
 upstream Redis test suite.
 
+## Prebuilt release restart and upgrade gate
+
+`published_binary_persistence_gate.py` exercises supplied, hash-pinned current and
+previous FrankenRedis executables through real loopback RESP sockets. It verifies
+large string, list, hash, set, transaction, and TTL behavior; fresh RDB persistence;
+restart; previous-writer upgrade; and a second restart. The default `rdb-fec=no`
+contract and absence of default sidecars are explicit checks. The previous dataset
+is copied into a fresh directory and its original RDB hash must remain unchanged.
+
+Verify the downloaded release signatures and unpack the binaries first. Supply
+their independently verified **executable** hashes, rather than archive hashes:
+
+```sh
+python3 scripts/published_binary_persistence_gate.py \
+  --binary /path/to/current/frankenredis --sha256 <current-binary-sha256> \
+  --version 0.1.1 \
+  --previous-binary /path/to/previous/frankenredis \
+  --previous-sha256 <previous-binary-sha256> --previous-version 0.1.0 \
+  --output /path/to/new-retained-evidence-directory
+```
+
+The output directory must not already exist. Logs, datasets, check events, and a
+JSON receipt are retained on success and failure. Missing binaries, hash mismatch,
+startup failure, protocol errors, or any failed check return nonzero; there is no
+skip-success path. No builds or downloads occur, and only child servers launched
+by this invocation are stopped. This gate qualifies the supplied artifacts. It
+does not replace signature verification, a current-source build, Redis differential
+tests, or the complete upstream Tcl lane.
+
 ## Live-oracle fixture matrix
 
 `crates/fr-conformance/fixtures/live_oracle_matrix.json` is the manifest for the Rust
