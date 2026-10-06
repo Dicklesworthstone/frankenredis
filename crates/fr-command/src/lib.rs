@@ -303,15 +303,24 @@ pub fn rewrite_effect_command_for_propagation(
         if members.is_empty() {
             return None;
         }
+        // Upstream t_set.c: a count-less SPOP always propagates `SREM key member`
+        // (spopCommand, even when it empties the set); `SPOP key count` that takes
+        // the whole set propagates DEL, or UNLINK under lazyfree-lazy-server-del
+        // (spopWithCountCommand case 1); a partial count propagates SREM.
         let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
-        return if store.key_is_present(&encoded) {
+        return if argv.len() == 2 || store.key_is_present(&encoded) {
             let mut out = Vec::with_capacity(2 + members.len());
             out.push(b"SREM".to_vec());
             out.push(key.clone());
             out.extend(members);
             Some(out)
         } else {
-            Some(vec![b"DEL".to_vec(), key.clone()])
+            let op: &[u8] = if store.lazyfree_lazy_server_del {
+                b"UNLINK"
+            } else {
+                b"DEL"
+            };
+            Some(vec![op.to_vec(), key.clone()])
         };
     }
     // (B)LMPOP / (B)ZMPOP -> LPOP/RPOP/ZPOPMIN/ZPOPMAX <served-key> <count>.
@@ -9393,6 +9402,14 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     if nomkstream && !stream_exists {
         return Ok(RespFrame::BulkString(None));
     }
+    // Upstream xaddCommand returns ASAP, whatever id was requested, once the
+    // stream's last id is the last possible one.
+    if last_id == Some((u64::MAX, u64::MAX)) {
+        return Ok(RespFrame::Error(
+            "ERR The stream has exhausted the last possible ID, unable to add more items"
+                .to_string(),
+        ));
+    }
     let id = if eq_ascii_command(&argv[id_idx], b"*") {
         match next_auto_stream_id(last_id, now_ms) {
             Some(id) => id,
@@ -9406,13 +9423,17 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     } else if let Some(partial_ms) = parse_partial_auto_id(&argv[id_idx]) {
         // "ms-*" format: explicit timestamp, auto-generate sequence
         let seq = match last_id {
+            // Upstream streamAppendItem: a sequence that would overflow under the
+            // same ms fails with EDOM, which xaddCommand reports as the
+            // "equal or smaller" error (the "exhausted" wording is reserved for a
+            // stream whose last id is already UINT64_MAX-UINT64_MAX).
             Some((last_ms, last_seq)) if partial_ms == last_ms => match last_seq.checked_add(1) {
                 Some(next_seq) => next_seq,
                 None => {
                     return Ok(RespFrame::Error(
-                            "ERR The stream has exhausted the last possible ID, unable to add more items"
-                                .to_string(),
-                        ));
+                        "ERR The ID specified in XADD is equal or smaller than the target stream top item"
+                            .to_string(),
+                    ));
                 }
             },
             Some((last_ms, _)) if partial_ms < last_ms => {
@@ -64392,6 +64413,28 @@ mod tests {
                 0,
             ),
             Some(vec![v(b"DEL"), v(b"gone")])
+        );
+        // ... or UNLINK under lazyfree-lazy-server-del (upstream spopWithCountCommand).
+        store.lazyfree_lazy_server_del = true;
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"SPOP"), v(b"gone"), v(b"1")],
+                &drain_reply,
+                &store,
+                0,
+            ),
+            Some(vec![v(b"UNLINK"), v(b"gone")])
+        );
+        store.lazyfree_lazy_server_del = false;
+        // A count-less SPOP that drained the set still propagates SREM, never DEL.
+        assert_eq!(
+            super::rewrite_effect_command_for_propagation(
+                &[v(b"SPOP"), v(b"gone")],
+                &b(b"x"),
+                &store,
+                0,
+            ),
+            Some(vec![v(b"SREM"), v(b"gone"), v(b"x")])
         );
         // HINCRBYFLOAT -> HSET <value> (no KEEPTTL; HSET preserves the key TTL).
         assert_eq!(

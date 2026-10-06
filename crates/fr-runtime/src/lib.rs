@@ -4702,6 +4702,9 @@ pub struct ServerState {
     /// append to `<basename>.<seq>.incr.aof`. Loaded from an existing manifest
     /// so post-load rewrites continue the sequence. (frankenredis-oe6qt)
     aof_current_seq: u64,
+    /// The db the shared AOF/replication stream is selected on. `usize::MAX`
+    /// means "unknown" (upstream `slaveseldb = -1`): set at every FULLRESYNC so
+    /// the next propagated write emits a SELECT whatever its db.
     aof_selected_db: usize,
     replication_runtime_state: ReplicationRuntimeState,
     evidence: EvidenceLedger,
@@ -7052,6 +7055,7 @@ fn copy_encoding_thresholds(replacement: &mut Store, original: &Store) {
     replacement.zset_max_listpack_entries = original.zset_max_listpack_entries;
     replacement.zset_max_listpack_value = original.zset_max_listpack_value;
     replacement.hll_sparse_max_bytes = original.hll_sparse_max_bytes;
+    replacement.lazyfree_lazy_server_del = original.lazyfree_lazy_server_del;
 }
 
 /// (frankenredis-2j9wz) Snapshot the store's LIVE encoding thresholds so the RDB
@@ -8093,7 +8097,12 @@ impl Runtime {
                 // New records will be indexed from 0, but they correspond to
                 // absolute offset starting at this value.
                 self.server.aof_base_offset = offset.0;
-                self.server.aof_selected_db = 0;
+                // The primary invalidated its stream db when it answered
+                // FULLRESYNC (upstream `slaveseldb = -1`), so its next record
+                // is preceded by a SELECT. Mirror that here: the replica's own
+                // re-captured stream (its offset and its sub-replicas' feed)
+                // must carry the same SELECT bytes or the offsets drift apart.
+                self.server.aof_selected_db = usize::MAX;
                 self.session.selected_db = 0;
                 self.server
                     .replication_runtime_state
@@ -8334,7 +8343,16 @@ impl Runtime {
     /// Resolve the current tail ID for a stream key, used by blocking XREAD
     /// callers that must freeze `$` cursors at block time.
     pub fn xread_block_resume_id(&mut self, key: &[u8], now_ms: u64) -> Option<(u64, u64)> {
-        self.server.store.xlast_id(key, now_ms).ok().flatten()
+        // The blocking client's session is swapped in; resolve `$` in ITS db. The
+        // raw key only addresses db 0, so `XREAD BLOCK .. $` on any other db froze
+        // the cursor at 0-0 and returned the stream's existing entries at once.
+        // No-stat: the command's own lookups already counted this key's hit/miss.
+        let namespaced = fr_store::encode_db_key(self.session.selected_db, key);
+        self.server
+            .store
+            .xlast_id_no_stat(&namespaced, now_ms)
+            .ok()
+            .flatten()
     }
 
     /// Update or insert a session snapshot used by multi-client CLIENT LIST.
@@ -41577,20 +41595,16 @@ impl Runtime {
                         }
                     } else if special_command.is_none() && !handled_migrate {
                         // (frankenredis-xmix2) Upstream replicationFeedSlaves
-                        // emits `SELECT <db>` PER REPLICA whenever the writing
-                        // client's db differs from that replica's repldb; the
-                        // per-replica frame is prepended by the feed path
-                        // (replica_fed_db in fr-server) and lives OUTSIDE this
-                        // buffer. But `aof_records` doubles as the AOF
-                        // pre-flush buffer, and upstream aof.c writes the SELECT
-                        // into the FILE at every db change — replay selects the
-                        // db BEFORE applying the record. Without the shared
-                        // boundary record, a restart replays every non-zero-db
-                        // write into db 0 (verified: multi-db AOF restart lost
-                        // db4 keys, 2026-09-05). A fresh raw-SYNC attach is not
-                        // double-SELECTed by this: the record appears only on an
-                        // actual db CHANGE, and the per-replica prepend covers
-                        // the first-feed case.
+                        // writes `SELECT <db>` into the shared backlog whenever
+                        // the writing client's db differs from `slaveseldb`,
+                        // and aof.c writes it into the FILE at every db change
+                        // — replay selects the db BEFORE applying the record.
+                        // `aof_records` is both, so one boundary record serves
+                        // replicas and the AOF. Without it, a restart replays
+                        // every non-zero-db write into db 0 (verified: multi-db
+                        // AOF restart lost db4 keys, 2026-09-05). A fresh
+                        // FULLRESYNC invalidates `aof_selected_db`, so the first
+                        // write after an attach always carries its SELECT.
                         let session_db = self.session.selected_db;
                         if self.server.aof_selected_db != session_db {
                             self.capture_aof_record(&[
@@ -42496,14 +42510,6 @@ impl Runtime {
     /// Return and clear the set of keys that were modified in the current tick.
     pub fn drain_ready_keys(&mut self) -> HashSet<Vec<u8>> {
         std::mem::take(&mut self.server.ready_keys)
-    }
-
-    /// The db the shared replication/AOF stream is currently selected on —
-    /// the value a freshly-attached replica needs in its leading SELECT
-    /// frame. (frankenredis-xmix2)
-    #[must_use]
-    pub fn replication_stream_selected_db(&self) -> usize {
-        self.server.aof_selected_db
     }
 
     /// Read-only, no-stat type peeks for the blocked-client serve path: only a
@@ -48010,6 +48016,7 @@ impl Runtime {
         for (param, value) in static_override_updates {
             self.server.config_overrides.insert(param, value);
         }
+        self.server.store.lazyfree_lazy_server_del = self.server.lazyfree_lazy_server_del_enabled();
         if let Some(path) = next_threat_ledger_path {
             self.server.threat_ledger_path = path;
         }
@@ -51517,6 +51524,14 @@ replica_announced:1\r\n",
                 self.server.store.stat_sync_partial_err += 1;
             }
             self.server.store.stat_sync_full += 1;
+            // Upstream replicationSetupSlaveForFullResync sets
+            // `server.slaveseldb = -1`, forcing the NEXT propagated write to
+            // carry a SELECT inside the shared backlog. The snapshot the new
+            // replica loads says nothing about which db the stream is on, so
+            // without it the first records land in the replica's db 0. The
+            // forced SELECT is emitted lazily by the next write (never here),
+            // so the FULLRESYNC offset stays exactly what upstream answers.
+            self.server.aof_selected_db = usize::MAX;
             RespFrame::SimpleString(format!(
                 "FULLRESYNC {} {}",
                 backlog.replid, primary_offset.0
@@ -51541,9 +51556,9 @@ replica_announced:1\r\n",
         // advances primary_offset, so a bare PSYNC on a fresh runtime answered
         // `FULLRESYNC <replid> 23/46` instead of `... 0`, breaking
         // conformance_core_replication (fixtures pin the upstream observable).
-        // The lazy per-write SELECT in the generic capture path covers the
-        // upstream tcl scenarios; the mid-stream-attach case needs the
-        // per-replica repldb design documented in the bead.
+        // The full-resync arm above instead invalidates `aof_selected_db`, so
+        // the next write emits the SELECT lazily, exactly like upstream's
+        // `slaveseldb = -1`.
         self.server.refresh_replica_ack_snapshots();
         response
     }

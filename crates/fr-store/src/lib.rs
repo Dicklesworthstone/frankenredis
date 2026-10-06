@@ -7321,6 +7321,10 @@ pub struct Store {
     ///     the new limit. That one costs data on a config change alone.
     pub must_obey_client: bool,
     pub hll_sparse_max_bytes: usize,
+    /// `lazyfree-lazy-server-del`, synced from the server config on CONFIG SET. Commands whose
+    /// propagated form is an implicit server-side delete (upstream `SPOP key count` emptying the
+    /// set) replicate as UNLINK instead of DEL when it is on.
+    pub lazyfree_lazy_server_del: bool,
 
     /// Seed for deterministic pseudo-random operations (HRANDFIELD, RANDOMKEY, etc.).
     pub rng_seed: u64,
@@ -7899,6 +7903,7 @@ impl Default for Store {
             proto_max_bulk_len: 512 * 1024 * 1024, // (frankenredis-uwhyl) redis 7.2 default
             must_obey_client: false,
             hll_sparse_max_bytes: HLL_REDIS_SPARSE_MAX_BYTES,
+            lazyfree_lazy_server_del: false,
             rng_seed: 0xDEADBEEF_C0FFEE11,
             dirty: 0,
             dirty_at_last_save: 0,

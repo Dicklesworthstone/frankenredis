@@ -547,15 +547,6 @@ struct ClientConnection {
     blocked: Option<BlockedState>,
     /// If set, this client is a replica and this is the last offset sent to it.
     replication_sent_offset: Option<ReplOffset>,
-    /// (frankenredis-xmix2) This replica's db context for the shared backlog:
-    /// `None` = the replica has not been fed any tail bytes yet (fresh
-    /// FULLRESYNC), `Some(db)` = the last db announced to it. Upstream tracks
-    /// `repldb` per replica inside replicationFeedSlaves and writes the SELECT
-    /// straight to that slave's socket; fr mirrors that by prepending the
-    /// frame to THIS replica's payload at feed time WITHOUT counting it in
-    /// primary_offset (upstream's per-slave SELECT is likewise outside the
-    /// shared backlog).
-    replica_fed_db: Option<usize>,
     /// Reply sequencing for the opt-in key-sharded command execution bus.
     ///
     /// Shards execute independently, so completions may arrive out of order.
@@ -887,7 +878,6 @@ impl ClientConnection {
             closing: false,
             blocked: None,
             replication_sent_offset: None,
-            replica_fed_db: None,
             sharded_replies: ShardedReplyOrder::default(),
             shared_nothing_route_tag: Vec::new(),
             shared_nothing_partition: None,
@@ -37868,12 +37858,15 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
             ));
             let response = runtime.execute_frame(frame, now_ms);
             // A serve-time WRONGTYPE means an awaited key was overwritten with a
-            // non-stream value (e.g. SET); upstream never signals such a key as
-            // stream-ready, so the client stays blocked (→ nil on timeout). Other
-            // errors (e.g. NOGROUP from a destroyed consumer group) still
-            // propagate, matching upstream. (frankenredis blocking-serve type gate)
+            // non-stream value (e.g. SET). A plain XREAD stays blocked (→ nil on
+            // timeout): upstream never signals such a key as stream-ready for it.
+            // XREADGROUP blocks with `unblock_on_nokey`, so upstream
+            // handleClientsBlockedOnKey re-runs it on ANY type change or delete
+            // and the client receives the WRONGTYPE / NOGROUP error. Other errors
+            // (e.g. NOGROUP from a destroyed consumer group) always propagate.
+            // (frankenredis blocking-serve type gate)
             if let RespFrame::Error(msg) = &response {
-                if msg.starts_with("WRONGTYPE") {
+                if msg.starts_with("WRONGTYPE") && matches!(op, BlockingOp::BXread { .. }) {
                     return None;
                 }
                 return Some(response);
@@ -37944,29 +37937,6 @@ fn propagate_writes_to_replicas(
             // stream) to ship one record to a caught-up replica; this is byte-
             // identical and O(records in the tail). (frankenredis-cc aoftail)
             let bytes = runtime.encoded_aof_stream_from_offset(sent_offset.0);
-            // (frankenredis-xmix2) Per-replica db context, upstream
-            // replicationFeedSlaves style: a replica whose tail feed has not
-            // started yet (fresh FULLRESYNC — fed_db None) gets a leading
-            // SELECT of the stream's current db, written straight to THAT
-            // replica's payload outside the shared backlog and offset
-            // accounting; afterwards only db CHANGES re-emit it.
-            let bytes = if bytes.is_empty() {
-                bytes
-            } else {
-                let feed_db = runtime.replication_stream_selected_db();
-                match conn.replica_fed_db {
-                    Some(fed) if fed == feed_db => bytes,
-                    _fed => {
-                        let db_str = feed_db.to_string();
-                        let mut select_frame =
-                            format!("*2\r\n$6\r\nSELECT\r\n${}\r\n{}\r\n", db_str.len(), db_str)
-                                .into_bytes();
-                        select_frame.extend_from_slice(&bytes);
-                        conn.replica_fed_db = Some(feed_db);
-                        select_frame
-                    }
-                }
-            };
             if !bytes.is_empty() {
                 conn.write_buf.extend_from_slice(&bytes);
                 drive_client_output(
@@ -38184,12 +38154,25 @@ fn suppress_client_network_reply(
     response: &RespFrame,
 ) -> bool {
     if runtime.suppress_current_network_reply() {
-        return true;
+        // RESP3 pushes (the subscribe/unsubscribe confirmations) bypass CLIENT
+        // REPLY OFF|SKIP: upstream writes them under CLIENT_PUSHING, which
+        // prepareClientToWrite lets through even when replies are off.
+        return !is_push_reply(response);
     }
     if matches!(response, RespFrame::Error(_)) {
         return false;
     }
     frame_matches_suppressed_replication_reply(argv)
+}
+
+fn is_push_reply(response: &RespFrame) -> bool {
+    match response {
+        RespFrame::Push(_) => true,
+        RespFrame::Sequence(frames) => {
+            !frames.is_empty() && frames.iter().all(|f| matches!(f, RespFrame::Push(_)))
+        }
+        _ => false,
+    }
 }
 
 fn frame_matches_suppressed_replication_reply(argv: &[Vec<u8>]) -> bool {
@@ -49349,15 +49332,24 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ),
             RespFrame::SimpleString("OK".to_string())
         );
-        // Calculate the byte offset after the first SET command.
-        // SET alpha 1 encodes as: *3\r\n$3\r\nSET\r\n$5\r\nalpha\r\n$1\r\n1\r\n = 31 bytes
-        let first_cmd_bytes = RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(b"SET".to_vec())),
-            RespFrame::BulkString(Some(b"alpha".to_vec())),
-            RespFrame::BulkString(Some(b"1".to_vec())),
+        // Calculate the byte offset after the first SET command. The FULLRESYNC
+        // above invalidated the stream db (upstream `slaveseldb = -1`), so the
+        // stream opens with `SELECT 0` (23 bytes) before
+        // SET alpha 1: *3\r\n$3\r\nSET\r\n$5\r\nalpha\r\n$1\r\n1\r\n (31 bytes).
+        let select_bytes = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"SELECT".to_vec())),
+            RespFrame::BulkString(Some(b"0".to_vec())),
         ]))
         .to_bytes()
         .len();
+        let first_cmd_bytes = select_bytes
+            + RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"SET".to_vec())),
+                RespFrame::BulkString(Some(b"alpha".to_vec())),
+                RespFrame::BulkString(Some(b"1".to_vec())),
+            ]))
+            .to_bytes()
+            .len();
         let frame = RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"PSYNC".to_vec())),
             RespFrame::BulkString(Some(b"0000000000000000000000000000000000000000".to_vec())),
@@ -49916,9 +49908,16 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         let fullresync_offset = primary.replication_primary_offset().0;
         let fullresync_offset_text = fullresync_offset.to_string();
         let snapshot = primary.encoded_rdb_snapshot(1);
-        let beta_bytes = fr_persist::encode_aof_stream(&[fr_persist::AofRecord {
-            argv: vec![b"SET".to_vec(), b"beta".to_vec(), b"2".to_vec()],
-        }]);
+        // A primary that just answered FULLRESYNC opens the stream with a SELECT
+        // (upstream `slaveseldb = -1`); the replica's offset counts it too.
+        let beta_bytes = fr_persist::encode_aof_stream(&[
+            fr_persist::AofRecord {
+                argv: vec![b"SELECT".to_vec(), b"0".to_vec()],
+            },
+            fr_persist::AofRecord {
+                argv: vec![b"SET".to_vec(), b"beta".to_vec(), b"2".to_vec()],
+            },
+        ]);
         let continue_offset_text = fullresync_offset
             .saturating_add(u64::try_from(beta_bytes.len()).unwrap_or(u64::MAX))
             .to_string();
@@ -49963,6 +49962,9 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                     .unwrap();
                 stream1
                     .write_all(&encode_replication_snapshot(snapshot.as_slice()))
+                    .unwrap();
+                stream1
+                    .write_all(&replica_handshake_frame(&[b"SELECT", b"0"]).to_bytes())
                     .unwrap();
                 stream1
                     .write_all(&replica_handshake_frame(&[b"SET", b"beta", b"2"]).to_bytes())
@@ -54625,6 +54627,43 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
     }
 
     #[test]
+    fn xreadgroup_block_unblocks_with_wrongtype_when_key_changes_type() {
+        let mut runtime = Runtime::new(RuntimePolicy::hardened());
+        let now_ms = 1_000;
+        let _ = runtime.execute_frame(
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"SET".to_vec())),
+                RespFrame::BulkString(Some(b"stream".to_vec())),
+                RespFrame::BulkString(Some(b"value".to_vec())),
+            ])),
+            now_ms,
+        );
+        let op = BlockingOp::BXreadgroup {
+            argv: [
+                &b"XREADGROUP"[..],
+                b"GROUP",
+                b"g",
+                b"c",
+                b"BLOCK",
+                b"0",
+                b"STREAMS",
+                b"stream",
+                b">",
+            ]
+            .iter()
+            .map(|a| a.to_vec())
+            .collect(),
+        };
+        // Upstream blocks XREADGROUP with unblock_on_nokey: a type change wakes
+        // the client with the WRONGTYPE error (tests/unit/type/stream-cgroups.tcl
+        // "Blocking XREADGROUP: key type changed with SET").
+        match try_fulfill_blocked(&op, &mut runtime, now_ms + 1) {
+            Some(RespFrame::Error(msg)) => assert!(msg.starts_with("WRONGTYPE"), "{msg}"),
+            other => panic!("expected a WRONGTYPE unblock, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn resolve_xread_block_argv_freezes_dollar_at_block_time() {
         let mut runtime = Runtime::new(RuntimePolicy::hardened());
         let now_ms = 1_000;
@@ -54689,6 +54728,41 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 ]))])),
             ]))])))
         );
+    }
+
+    #[test]
+    fn resolve_xread_block_argv_resolves_dollar_in_the_selected_db() {
+        let mut runtime = Runtime::new(RuntimePolicy::hardened());
+        let now_ms = 1_000;
+        let frame = |args: &[&[u8]]| {
+            RespFrame::Array(Some(
+                args.iter()
+                    .map(|a| RespFrame::BulkString(Some(a.to_vec())))
+                    .collect(),
+            ))
+        };
+        // Same key on db 0 and db 9 with different last ids: `$` must freeze at
+        // the blocking client's own db, not db 0 (or 0-0 when db 0 lacks it).
+        runtime.execute_frame(frame(&[b"XADD", b"s", b"5-0", b"f", b"db0"]), now_ms);
+        runtime.execute_frame(frame(&[b"SELECT", b"9"]), now_ms);
+        assert_eq!(
+            runtime.execute_frame(frame(&[b"XADD", b"s", b"1000-0", b"f", b"db9"]), now_ms),
+            RespFrame::BulkString(Some(b"1000-0".to_vec()))
+        );
+        let resolved = resolve_xread_block_argv(
+            &[
+                b"XREAD".to_vec(),
+                b"BLOCK".to_vec(),
+                b"0".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b"$".to_vec(),
+            ],
+            &mut runtime,
+            now_ms,
+        )
+        .expect("resolve xread argv");
+        assert_eq!(resolved.last(), Some(&b"1000-0".to_vec()));
     }
 
     // (frankenredis) Over-limit connections must receive the upstream
