@@ -4955,6 +4955,11 @@ pub struct ServerState {
     pubsub_shard_subs: HashMap<Vec<u8>, HashSet<u64>>,
     /// Per-client outbox: client_id → pending messages for delivery.
     pubsub_outbox: HashMap<u64, Vec<fr_store::PubSubMessage>, foldhash::quality::RandomState>,
+    /// Pending BCAST tracking invalidations: target client -> prefix -> keys. Upstream keeps
+    /// a per-prefix key table and sends each subscribed client ONE message per prefix when it
+    /// flushes (trackingBroadcastInvalidationMessages), so keys under two prefixes arrive as
+    /// two messages. Moved into `pubsub_outbox` by `flush_tracking_bcast_pending` at drain time.
+    tracking_bcast_pending: BTreeMap<u64, BTreeMap<Vec<u8>, Vec<Vec<u8>>>>,
     /// Key → client IDs that should receive client-tracking invalidations.
     client_tracking_observed_keys: HashMap<
         Vec<u8>,
@@ -5127,6 +5132,7 @@ impl Default for ServerState {
             pubsub_pattern_subs: HashMap::new(),
             pubsub_shard_subs: HashMap::new(),
             pubsub_outbox: HashMap::default(),
+            tracking_bcast_pending: BTreeMap::new(),
             client_tracking_observed_keys: HashMap::default(),
             client_tracking_bcast_clients: BTreeSet::new(),
             pubsub_client_channels: HashMap::new(),
@@ -5151,6 +5157,54 @@ impl Default for ServerState {
 }
 
 impl ServerState {
+    /// Queue a BCAST invalidation of `key` for `target_id` under each of the owner's
+    /// `prefixes` it matches, or under the empty prefix when the owner tracks every key.
+    fn queue_tracking_bcast_key(
+        pending: &mut BTreeMap<u64, BTreeMap<Vec<u8>, Vec<Vec<u8>>>>,
+        target_id: u64,
+        prefixes: &BTreeSet<Vec<u8>>,
+        key: &[u8],
+    ) {
+        if prefixes.is_empty() {
+            pending
+                .entry(target_id)
+                .or_default()
+                .entry(Vec::new())
+                .or_default()
+                .push(key.to_vec());
+            return;
+        }
+        for prefix in prefixes {
+            if key.starts_with(prefix) {
+                pending
+                    .entry(target_id)
+                    .or_default()
+                    .entry(prefix.clone())
+                    .or_default()
+                    .push(key.to_vec());
+            }
+        }
+    }
+
+    /// Move pending BCAST invalidations into the pub/sub outbox: one message per (target,
+    /// prefix), prefixes in lexicographic order like upstream's prefix rax walk.
+    fn flush_tracking_bcast_pending(&mut self) {
+        if self.tracking_bcast_pending.is_empty() {
+            return;
+        }
+        for (target_id, by_prefix) in std::mem::take(&mut self.tracking_bcast_pending) {
+            for (_prefix, keys) in by_prefix {
+                let keys = dedup_keys_preserve_order(keys);
+                if !keys.is_empty() {
+                    self.pubsub_outbox
+                        .entry(target_id)
+                        .or_default()
+                        .push(fr_store::PubSubMessage::Invalidate { keys });
+                }
+            }
+        }
+    }
+
     /// Where the AOF lives when nothing configured a path: upstream always
     /// keeps it in `<appenddirname>/<appendfilename>` under `dir`
     /// (`appendonlydir/appendonly.aof` by default), whether AOF is on or not.
@@ -5517,7 +5571,6 @@ impl ServerState {
 
         // Bcast clients: one batched invalidate per target for the keys that
         // match the client's tracked prefixes.
-        let mut bcast: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
         if !self.client_tracking_bcast_clients.is_empty() {
             let bcast_ids: Vec<u64> = self.client_tracking_bcast_clients.iter().copied().collect();
             for owner_id in bcast_ids {
@@ -5532,28 +5585,16 @@ impl ServerState {
                 if !self.client_sessions.contains_key(&target_id) {
                     continue;
                 }
+                // (frankenredis-b8z6y) Push unconditionally; dedup once (O(K)) at the
+                // flush instead of an O(K) rescan per push.
                 for key in keys {
-                    let matches = tracking.prefixes.is_empty()
-                        || tracking
-                            .prefixes
-                            .iter()
-                            .any(|prefix| key.starts_with(prefix));
-                    if matches {
-                        // (frankenredis-b8z6y) Push unconditionally; dedup once
-                        // (O(K)) at the consume below instead of an O(K) linear
-                        // rescan per push (which made a K-key write O(K^2)).
-                        bcast.entry(target_id).or_default().push(key.clone());
-                    }
+                    Self::queue_tracking_bcast_key(
+                        &mut self.tracking_bcast_pending,
+                        target_id,
+                        &tracking.prefixes,
+                        key,
+                    );
                 }
-            }
-        }
-        for (target_id, ks) in bcast {
-            let ks = dedup_keys_preserve_order(ks);
-            if !ks.is_empty() {
-                self.pubsub_outbox
-                    .entry(target_id)
-                    .or_default()
-                    .push(fr_store::PubSubMessage::Invalidate { keys: ks });
             }
         }
 
@@ -8984,10 +9025,13 @@ impl Runtime {
     #[must_use]
     #[inline]
     pub fn has_pending_pubsub(&self) -> bool {
-        self.server.store.has_pending_pubsub() || !self.server.pubsub_outbox.is_empty()
+        self.server.store.has_pending_pubsub()
+            || !self.server.pubsub_outbox.is_empty()
+            || !self.server.tracking_bcast_pending.is_empty()
     }
 
     pub fn drain_pending_pubsub(&mut self) -> Vec<fr_store::PubSubMessage> {
+        self.server.flush_tracking_bcast_pending();
         // First drain any messages from the per-client Store (legacy path for
         // single-session tests), then drain from the global outbox.
         let mut msgs = self.server.store.drain_pending_pubsub();
@@ -9011,6 +9055,7 @@ impl Runtime {
     /// Drain pending pub/sub messages for a specific client by ID.
     /// Used by the server event loop to deliver messages to non-active clients.
     pub fn drain_pubsub_for_client(&mut self, client_id: u64) -> Vec<fr_store::PubSubMessage> {
+        self.server.flush_tracking_bcast_pending();
         self.server
             .pubsub_outbox
             .remove(&client_id)
@@ -9034,6 +9079,7 @@ impl Runtime {
         // no items and has nothing to clear, so both the return value and the map's
         // state are the same either way. `drain_pubsub_outboxes_unguarded_reference`
         // keeps that claim honest.
+        self.server.flush_tracking_bcast_pending();
         if self.server.pubsub_outbox.is_empty() {
             return Vec::new();
         }
@@ -9528,28 +9574,6 @@ impl Runtime {
         ])
     }
 
-    fn tracking_key_matches_prefixes(key: &[u8], tracking: &ClientTrackingState) -> bool {
-        tracking.prefixes.is_empty()
-            || tracking
-                .prefixes
-                .iter()
-                .any(|prefix| key.starts_with(prefix))
-    }
-
-    fn add_tracking_invalidation(
-        invalidations: &mut BTreeMap<u64, Vec<Vec<u8>>>,
-        target_id: u64,
-        key: &[u8],
-    ) {
-        // (frankenredis-b8z6y) Push unconditionally; the caller dedups once
-        // (O(K)) at flush time. The old per-add `iter().any(== key)` rescan made
-        // building a K-key invalidation list O(K^2).
-        invalidations
-            .entry(target_id)
-            .or_default()
-            .push(key.to_vec());
-    }
-
     fn refresh_client_tracking_bcast_membership(
         &mut self,
         client_id: u64,
@@ -9584,7 +9608,8 @@ impl Runtime {
         // BCAST clients: upstream batches every matching key modified by the
         // command into a SINGLE invalidate message per target (one flush per
         // command via trackingHandlePendingKeyInvalidations).
-        let mut bcast_invalidations: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
+        let mut bcast_invalidations: BTreeMap<u64, BTreeMap<Vec<u8>, Vec<Vec<u8>>>> =
+            BTreeMap::new();
         if !self.server.client_tracking_bcast_clients.is_empty() {
             let bcast_owner_ids: Vec<u64> = self
                 .server
@@ -9612,20 +9637,23 @@ impl Runtime {
                 }
 
                 for key in keys {
-                    if Self::tracking_key_matches_prefixes(key, tracking) {
-                        Self::add_tracking_invalidation(&mut bcast_invalidations, target_id, key);
-                    }
+                    ServerState::queue_tracking_bcast_key(
+                        &mut bcast_invalidations,
+                        target_id,
+                        &tracking.prefixes,
+                        key,
+                    );
                 }
             }
         }
-        for (target_id, keys) in bcast_invalidations {
-            let keys = dedup_keys_preserve_order(keys);
-            if !keys.is_empty() {
-                self.server
-                    .pubsub_outbox
-                    .entry(target_id)
-                    .or_default()
-                    .push(fr_store::PubSubMessage::Invalidate { keys });
+        for (target_id, by_prefix) in bcast_invalidations {
+            let pending = self
+                .server
+                .tracking_bcast_pending
+                .entry(target_id)
+                .or_default();
+            for (prefix, keys) in by_prefix {
+                pending.entry(prefix).or_default().extend(keys);
             }
         }
 
@@ -34469,8 +34497,7 @@ impl Runtime {
     }
 
     /// (BlackThrush) Borrowed fast path for `PUBSUB NUMPAT` (the *2 form). NUMPAT is
-    /// a pure global read: the total pattern-subscription count
-    /// (sum of subscriber-set sizes over all patterns), identical to
+    /// a pure global read: the number of unique subscribed patterns, identical to
     /// handle_pubsub_command. Only NUMPAT is claimed; any other *2 subcommand
     /// (CHANNELS/SHARDCHANNELS/unknown) defers to the generic. Container cmdstat row
     /// is `pubsub|numpat`.
@@ -34495,8 +34522,8 @@ impl Runtime {
             .server
             .pubsub_pattern_subs
             .values()
-            .map(|clients| clients.len())
-            .sum::<usize>();
+            .filter(|clients| !clients.is_empty())
+            .count();
         let elapsed_us = self.finish_chained_command(st);
         let reply = RespFrame::Integer(i64::try_from(numpat).unwrap_or(i64::MAX));
         self.record_plain_zremrange_borrowed_metrics(
@@ -42637,6 +42664,10 @@ impl Runtime {
 
     fn feed_monitors_with_addr(&mut self, argv: &[Vec<u8>], now_ms: u64, db: usize, addr: &str) {
         use std::io::Write as _;
+        // Upstream feeds monitors the redacted `original_argv`: credentials never
+        // reach a MONITOR client.
+        let redacted = fr_store::redact_sensitive_argv(argv);
+        let argv = redacted.as_deref().unwrap_or(argv);
         let secs = now_ms / 1000;
         let usecs = (now_ms % 1000) * 1000;
         // Build directly into a Vec<u8>. The buffer is consumed as
@@ -49720,12 +49751,14 @@ impl Runtime {
                 }
                 .to_resp();
             }
+            // Upstream pubsubCommand NUMPAT: dictSize(server.pubsub_patterns),
+            // the number of UNIQUE patterns, not of pattern subscriptions.
             return RespFrame::Integer(
                 self.server
                     .pubsub_pattern_subs
                     .values()
-                    .map(|clients| clients.len())
-                    .sum::<usize>() as i64,
+                    .filter(|clients| !clients.is_empty())
+                    .count() as i64,
             );
         }
 
@@ -51808,19 +51841,35 @@ replica_announced:1\r\n",
             // treated as a write only if it dirtied BEYOND those evictions.
             let lazy_evicted = self.server.store.take_lazy_expired_propagation();
             let lazy_count = lazy_evicted.len() as u64;
-            if exec_is_master {
+            if exec_is_master && !lazy_evicted.is_empty() {
+                let mut expired_logical = Vec::with_capacity(lazy_evicted.len());
                 for ekey in &lazy_evicted {
                     let logical = fr_store::decode_db_key(ekey)
                         .map(|(_, l)| l.to_vec())
                         .unwrap_or_else(|| ekey.clone());
                     transaction_dirty = true;
-                    transaction_aof.push(vec![expiry_op.to_vec(), logical]);
+                    transaction_aof.push(vec![expiry_op.to_vec(), logical.clone()]);
+                    expired_logical.push(logical);
                 }
+                // A tracked key that expires inside the transaction invalidates
+                // exactly like one expiring outside it.
+                self.server
+                    .invalidate_tracking_for_expired_keys(&expired_logical);
             }
 
             match result {
                 Ok(mut reply) => {
                     if dirty_after.saturating_sub(dirty_before) > lazy_count {
+                        // Upstream signalModifiedKey fires for every key a queued
+                        // command writes, so client tracking invalidates inside
+                        // MULTI/EXEC too (it never did: a tracked key written in a
+                        // transaction left every client cache stale).
+                        if !self.server.client_tracking_observed_keys.is_empty()
+                            || !self.server.client_tracking_bcast_clients.is_empty()
+                        {
+                            let write_keys = fr_command::command_write_keys(argv);
+                            self.queue_client_tracking_invalidations(&write_keys);
+                        }
                         if let Some(script_commands) =
                             self.take_script_propagation_commands_for_capture(argv)
                         {
@@ -64901,6 +64950,46 @@ mod tests {
     }
 
     #[test]
+    fn bcast_tracking_sends_one_push_per_matched_prefix() {
+        // tests/unit/tracking.tcl "Clients can enable the BCAST mode with prefixes":
+        // upstream flushes its per-prefix tables, so a transaction touching keys
+        // under `a:` and `b:` yields TWO invalidations, and `c:` keys none.
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CLIENT",
+                    b"TRACKING",
+                    b"ON",
+                    b"BCAST",
+                    b"PREFIX",
+                    b"b:",
+                    b"PREFIX",
+                    b"a:",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.execute_frame(command(&[b"MULTI"]), 1);
+        for key in [&b"a:1"[..], b"b:1", b"a:2", b"c:1", b"b:2"] {
+            rt.execute_frame(command(&[b"INCR", key]), 2);
+        }
+        rt.execute_frame(command(&[b"EXEC"]), 3);
+        assert_eq!(
+            rt.drain_pending_pubsub(),
+            vec![
+                fr_store::PubSubMessage::Invalidate {
+                    keys: vec![b"a:1".to_vec(), b"a:2".to_vec()],
+                },
+                fr_store::PubSubMessage::Invalidate {
+                    keys: vec![b"b:1".to_vec(), b"b:2".to_vec()],
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn live_pubsub_introspection_uses_runtime_subscription_state() {
         let mut rt = Runtime::default_strict();
         let first_client = rt.new_session();
@@ -68268,6 +68357,35 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(dir.join(name));
         }
+    }
+
+    #[test]
+    fn fcall_keys_resolve_in_the_selected_db() {
+        // A function must see the LOGICAL key: on db 9 `redis.call('get', keys[1])`
+        // used to double-namespace the already-namespaced FCALL key and read nil.
+        let mut rt = Runtime::default_strict();
+        let bulk = |v: &[u8]| RespFrame::BulkString(Some(v.to_vec()));
+        rt.execute_frame(command(&[b"SELECT", b"9"]), 0);
+        rt.execute_frame(command(&[b"SET", b"mykey", b"myval"]), 0);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"FUNCTION",
+                    b"LOAD",
+                    b"#!lua name=dbkeys\nredis.register_function('g', function(keys, args) return redis.call('get', keys[1]) end)\nredis.register_function('k', function(keys, args) return keys[1] end)",
+                ]),
+                1
+            ),
+            bulk(b"dbkeys")
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL", b"g", b"1", b"mykey"]), 2),
+            bulk(b"myval")
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL", b"k", b"1", b"mykey"]), 3),
+            bulk(b"mykey")
+        );
     }
 
     #[test]

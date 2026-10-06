@@ -35574,7 +35574,9 @@ fn process_argv_frame(
         reject.encode_into(&mut conn.write_buf);
         return ProcessArgvAction::Continue;
     }
-    runtime.set_blocked_clients_count_for_info(blocked_tokens.len());
+    // A client parked by CLIENT PAUSE counts as blocked, like upstream's
+    // blockPostponeClient (BLOCKED_POSTPONE bumps server.blocked_clients).
+    runtime.set_blocked_clients_count_for_info(blocked_tokens.len() + paused_tokens.len());
     // CLIENT PAUSE gate: delay command processing while paused.
     // Fast path: `is_client_paused` is an O(1) deadline check that is
     // false on the overwhelmingly common no-pause path. Guarding the
@@ -35635,10 +35637,14 @@ fn process_argv_frame(
     // blocked clients after the swap; fr re-signals ALL blocked keys and lets
     // the type-checked serve path decide (try_fulfill re-validates the live
     // type, so over-signaling is behaviorally inert).
-    if argv
-        .first()
-        .is_some_and(|c| c.eq_ignore_ascii_case(b"SWAPDB"))
-        && matches!(&response, RespFrame::SimpleString(s) if s == "OK")
+    // FLUSHALL / FLUSHDB delete keys with blocked clients just as wholesale;
+    // upstream signalFlushedDb -> scanDatabaseForDeletedKeys wakes the
+    // unblock_on_nokey waiters (XREADGROUP gets its NOGROUP error).
+    if argv.first().is_some_and(|c| {
+        c.eq_ignore_ascii_case(b"SWAPDB")
+            || c.eq_ignore_ascii_case(b"FLUSHALL")
+            || c.eq_ignore_ascii_case(b"FLUSHDB")
+    }) && matches!(&response, RespFrame::SimpleString(s) if s == "OK")
         && !blocked_tokens.is_empty()
     {
         // The wake index already holds EVERY blocked key (by_key), so re-signal
@@ -38154,15 +38160,31 @@ fn suppress_client_network_reply(
     response: &RespFrame,
 ) -> bool {
     if runtime.suppress_current_network_reply() {
-        // RESP3 pushes (the subscribe/unsubscribe confirmations) bypass CLIENT
-        // REPLY OFF|SKIP: upstream writes them under CLIENT_PUSHING, which
-        // prepareClientToWrite lets through even when replies are off.
-        return !is_push_reply(response);
+        // Pub/sub confirmations bypass CLIENT REPLY OFF|SKIP in BOTH protocols:
+        // upstream addReplyPubsub(Un)Subscribed writes them under CLIENT_PUSHING
+        // (a RESP2 array or a RESP3 push), which prepareClientToWrite lets through
+        // even when replies are off.
+        return !(is_push_reply(response) || is_pubsub_subscription_command(argv));
     }
     if matches!(response, RespFrame::Error(_)) {
         return false;
     }
     frame_matches_suppressed_replication_reply(argv)
+}
+
+fn is_pubsub_subscription_command(argv: &[Vec<u8>]) -> bool {
+    argv.first().is_some_and(|cmd| {
+        [
+            &b"SUBSCRIBE"[..],
+            b"UNSUBSCRIBE",
+            b"PSUBSCRIBE",
+            b"PUNSUBSCRIBE",
+            b"SSUBSCRIBE",
+            b"SUNSUBSCRIBE",
+        ]
+        .iter()
+        .any(|name| cmd.eq_ignore_ascii_case(name))
+    })
 }
 
 fn is_push_reply(response: &RespFrame) -> bool {

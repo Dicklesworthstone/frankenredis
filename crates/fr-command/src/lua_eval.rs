@@ -5483,6 +5483,21 @@ pub(crate) fn function_call_registered(
     //
     // It is also the CORRECT sandbox: `register_function` is a load-time builtin, and upstream
     // does not expose it to a running function either.
+    // (frankenredis-ekwyb) Same rule as EVAL's KEYS: the runtime namespaced FCALL's key
+    // arguments for the selected db before dispatch, and the function must see the LOGICAL
+    // key. Handing it the storage-encoded one made every `redis.call(..., keys[1])` on a
+    // non-zero db double-prefix the key and miss (`FCALL f 1 k` read nil on db 9).
+    let selected_db = store.dispatch_client_ctx.db_index;
+    let keys: Vec<Vec<u8>> = if selected_db == 0 {
+        keys
+    } else {
+        keys.into_iter()
+            .map(|k| match fr_store::decode_db_key(&k) {
+                Some((db, logical)) if db == selected_db => logical.to_vec(),
+                _ => k,
+            })
+            .collect()
+    };
     let mut state = LuaState::new(store, now_ms);
     // (frankenredis-kbyhy) THE SANDBOX LOCK IS NOT INHERITED FROM THE LOAD, and forgetting it is
     // the one way this cache could turn a perf lever into a hole. `execute_compiled` sets

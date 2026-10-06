@@ -8383,18 +8383,23 @@ fn georadiusbymember(
     // not decode requested zset member' when the source key exists
     // but the member is missing. A missing source key returns an
     // empty array. (br-frankenredis-geofromnonexistent)
+    //
+    // Upstream georadiusGeneric still parses every argument for a missing source
+    // key (`(flags & RADIUS_MEMBER) && !zobj`) and only then "returns ASAP": with
+    // STORE it deletes the destination and replies 0, otherwise an empty array.
     let score = store.zscore(&argv[1], &argv[2], now_ms)?;
-    let Some(score) = score else {
+    let center = match score {
+        Some(score) => match geo_decode_score(score) {
+            Some(center) => Some(center),
+            None => return Ok(RespFrame::Array(Some(Vec::new()))),
+        },
         // zscore already touched the key if it exists; this is just for error selection.
-        if !store.exists_no_touch(&argv[1], now_ms) {
-            return Ok(RespFrame::Array(Some(Vec::new())));
+        None if store.exists_no_touch(&argv[1], now_ms) => {
+            return Ok(RespFrame::Error(
+                "ERR could not decode requested zset member".to_string(),
+            ));
         }
-        return Ok(RespFrame::Error(
-            "ERR could not decode requested zset member".to_string(),
-        ));
-    };
-    let Some((center_lon, center_lat)) = geo_decode_score(score) else {
-        return Ok(RespFrame::Array(Some(Vec::new())));
+        None => None,
     };
     // (frankenredis-geostorearg) Upstream geo.c::georadiusGeneric
     // routes the radius parse through extractDistanceOrReply with
@@ -8428,6 +8433,15 @@ fn georadiusbymember(
             "ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options".to_string(),
         ));
     }
+    let Some((center_lon, center_lat)) = center else {
+        return match store_key {
+            Some(dest) => {
+                store.del(&[dest], now_ms);
+                Ok(RespFrame::Integer(0))
+            }
+            None => Ok(RespFrame::Array(Some(Vec::new()))),
+        };
+    };
     let results = geo_search_core(
         store, &argv[1], center_lon, center_lat, radius_m, count, sort, any, now_ms,
     )?;
@@ -26464,6 +26478,9 @@ pub fn pubsub_message_to_frame(msg: PubSubMessage) -> RespFrame {
     }
 }
 
+/// The pub/sub channel RESP2 tracking redirection delivers invalidations on.
+const TRACKING_INVALIDATE_CHANNEL: &[u8] = b"__redis__:invalidate";
+
 /// Convert a `PubSubMessage` to the wire shape for the negotiated RESP protocol.
 /// RESP2 clients receive Array frames; RESP3 clients receive Push frames.
 pub fn pubsub_message_to_frame_for_protocol(
@@ -26477,7 +26494,21 @@ pub fn pubsub_message_to_frame_for_protocol(
             other => other,
         }
     } else {
-        frame
+        match frame {
+            // RESP2 tracking redirection: `message __redis__:invalidate <keys>`.
+            RespFrame::Array(Some(mut items))
+                if items.len() == 2
+                    && items[0] == RespFrame::BulkString(Some(b"invalidate".to_vec())) =>
+            {
+                let payload = items.pop().unwrap_or(RespFrame::BulkString(None));
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"message".to_vec())),
+                    RespFrame::BulkString(Some(TRACKING_INVALIDATE_CHANNEL.to_vec())),
+                    payload,
+                ]))
+            }
+            other => other,
+        }
     }
 }
 
@@ -26514,8 +26545,17 @@ pub fn encode_pubsub_message_for_protocol_into(
             encode_bulk_string_slice(Some(&data), false, out);
         }
         PubSubMessage::Invalidate { keys } => {
-            out.extend_from_slice(if resp3 { b">2\r\n" } else { b"*2\r\n" });
-            encode_bulk_string_slice(Some(b"invalidate"), false, out);
+            // RESP3: `>2 invalidate <keys>` push. RESP2 (a REDIRECT target in
+            // pub/sub mode): upstream sendTrackingMessage wraps it as a pub/sub
+            // `message` on `__redis__:invalidate`, the keys array as the payload.
+            if resp3 {
+                out.extend_from_slice(b">2\r\n");
+                encode_bulk_string_slice(Some(b"invalidate"), false, out);
+            } else {
+                out.extend_from_slice(b"*3\r\n");
+                encode_bulk_string_slice(Some(b"message"), false, out);
+                encode_bulk_string_slice(Some(TRACKING_INVALIDATE_CHANNEL), false, out);
+            }
             if keys.is_empty() {
                 encode_bulk_string_slice(None, resp3, out);
             } else {
@@ -30648,10 +30688,13 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     // unparseable and non-positive COUNT values.
     let bad_count = || RespFrame::Error("ERR count should be greater than 0".to_string());
     let mut count: usize = 1;
+    // Upstream mpopGenericCommand accepts COUNT once (`count == -1 && ...`); a
+    // repeated COUNT is a syntax error.
+    let mut count_seen = false;
     let mut idx = direction_idx + 1;
     while idx < argv.len() {
         let opt = std::str::from_utf8(&argv[idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if opt.eq_ignore_ascii_case("COUNT") {
+        if !count_seen && opt.eq_ignore_ascii_case("COUNT") {
             idx += 1;
             if idx >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
@@ -30664,6 +30707,7 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                 return Ok(bad_count());
             }
             count = usize::try_from(count_val).map_err(|_| CommandError::InvalidInteger)?;
+            count_seen = true;
         } else {
             return Ok(RespFrame::Error("ERR syntax error".to_string()));
         }
@@ -30934,10 +30978,13 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     };
     let bad_count = || RespFrame::Error("ERR count should be greater than 0".to_string());
     let mut count: usize = 1;
+    // Upstream mpopGenericCommand accepts COUNT once (`count == -1 && ...`); a
+    // repeated COUNT is a syntax error.
+    let mut count_seen = false;
     let mut idx = direction_idx + 1;
     while idx < argv.len() {
         let opt = std::str::from_utf8(&argv[idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if opt.eq_ignore_ascii_case("COUNT") {
+        if !count_seen && opt.eq_ignore_ascii_case("COUNT") {
             idx += 1;
             if idx >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
@@ -30950,6 +30997,7 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                 return Ok(bad_count());
             }
             count = usize::try_from(count_val).map_err(|_| CommandError::InvalidInteger)?;
+            count_seen = true;
         } else {
             return Ok(RespFrame::Error("ERR syntax error".to_string()));
         }

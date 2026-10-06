@@ -551,7 +551,94 @@ pub const SLOWLOG_ENTRY_MAX_STRING: usize = 128;
 /// retained slot becomes a `... (N more arguments)` summary) and trim any single
 /// argument longer than `SLOWLOG_ENTRY_MAX_STRING` bytes to a
 /// `<128 bytes>... (M more bytes)` form.
+/// The placeholder upstream writes over a redacted argument (`shared.redacted`).
+pub const REDACTED_ARGUMENT: &[u8] = b"(redacted)";
+
+/// The argument positions upstream hides from SLOWLOG and MONITOR via
+/// `redactClientCommandArgument`: AUTH's credentials (acl.c authCommand), HELLO
+/// `AUTH user pass` (networking.c helloCommand), every argument of `ACL SETUSER`
+/// after the subcommand (acl.c aclCommand), MIGRATE `AUTH pass` / `AUTH2 user
+/// pass` (cluster.c migrateCommand) and the value of a SENSITIVE_CONFIG in
+/// `CONFIG SET` (masterauth, masteruser, requirepass). Returns `None` when the
+/// command carries nothing to hide, so the common path stays allocation-free.
+#[must_use]
+pub fn redact_sensitive_argv(argv: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
+    let cmd = argv.first()?;
+    let mut hidden: Vec<usize> = Vec::new();
+    if cmd.eq_ignore_ascii_case(b"AUTH") {
+        if argv.len() == 2 || argv.len() == 3 {
+            hidden.extend(1..argv.len());
+        }
+    } else if cmd.eq_ignore_ascii_case(b"HELLO") {
+        let mut j = 2;
+        while j < argv.len() {
+            let more = argv.len() - 1 - j;
+            if argv[j].eq_ignore_ascii_case(b"AUTH") && more >= 2 {
+                hidden.extend([j + 1, j + 2]);
+                j += 3;
+            } else if argv[j].eq_ignore_ascii_case(b"SETNAME") && more >= 1 {
+                j += 2;
+            } else {
+                break;
+            }
+        }
+    } else if cmd.eq_ignore_ascii_case(b"ACL") {
+        if argv.len() >= 3 && argv[1].eq_ignore_ascii_case(b"SETUSER") {
+            hidden.extend(2..argv.len());
+        }
+    } else if cmd.eq_ignore_ascii_case(b"MIGRATE") {
+        let mut j = 6;
+        while j < argv.len() {
+            let more = argv.len() - 1 - j;
+            if argv[j].eq_ignore_ascii_case(b"AUTH") {
+                if more < 1 {
+                    break;
+                }
+                hidden.push(j + 1);
+                j += 2;
+            } else if argv[j].eq_ignore_ascii_case(b"AUTH2") {
+                if more < 2 {
+                    break;
+                }
+                hidden.extend([j + 1, j + 2]);
+                j += 3;
+            } else if argv[j].eq_ignore_ascii_case(b"COPY")
+                || argv[j].eq_ignore_ascii_case(b"REPLACE")
+            {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+    } else if cmd.eq_ignore_ascii_case(b"CONFIG")
+        && argv.len() >= 4
+        && argv[1].eq_ignore_ascii_case(b"SET")
+    {
+        let mut i = 2;
+        while i + 1 < argv.len() {
+            let param = &argv[i];
+            if param.eq_ignore_ascii_case(b"masterauth")
+                || param.eq_ignore_ascii_case(b"masteruser")
+                || param.eq_ignore_ascii_case(b"requirepass")
+            {
+                hidden.push(i + 1);
+            }
+            i += 2;
+        }
+    }
+    if hidden.is_empty() {
+        return None;
+    }
+    let mut out = argv.to_vec();
+    for idx in hidden {
+        out[idx] = REDACTED_ARGUMENT.to_vec();
+    }
+    Some(out)
+}
+
 fn slowlog_build_argv(argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let redacted = redact_sensitive_argv(argv);
+    let argv = redacted.as_deref().unwrap_or(argv);
     let argc = argv.len();
     let slargc = argc.min(SLOWLOG_ENTRY_MAX_ARGC);
     let mut out = Vec::with_capacity(slargc);
@@ -46609,6 +46696,79 @@ mod tests {
         store.record_slowlog(&[b"SET".to_vec(), b"d".to_vec(), b"4".to_vec()], 80, 5_000);
         let after = store.get_slowlog(1);
         assert_eq!(after[0].id, 3);
+    }
+
+    #[test]
+    fn slowlog_redacts_credentials_like_upstream() {
+        let v = |args: &[&str]| -> Vec<Vec<u8>> {
+            args.iter().map(|a| a.as_bytes().to_vec()).collect()
+        };
+        let r = |args: &[&str]| crate::redact_sensitive_argv(&v(args));
+        assert_eq!(r(&["GET", "k"]), None);
+        assert_eq!(r(&["AUTH", "pw"]), Some(v(&["AUTH", "(redacted)"])));
+        assert_eq!(
+            r(&["auth", "u", "pw"]),
+            Some(v(&["auth", "(redacted)", "(redacted)"]))
+        );
+        assert_eq!(
+            r(&["HELLO", "3", "AUTH", "u", "pw", "SETNAME", "n"]),
+            Some(v(&[
+                "HELLO",
+                "3",
+                "AUTH",
+                "(redacted)",
+                "(redacted)",
+                "SETNAME",
+                "n"
+            ]))
+        );
+        assert_eq!(
+            r(&["acl", "setuser", "bob", "on", ">secret"]),
+            Some(v(&[
+                "acl",
+                "setuser",
+                "(redacted)",
+                "(redacted)",
+                "(redacted)"
+            ]))
+        );
+        assert_eq!(r(&["ACL", "SETUSER"]), None);
+        assert_eq!(
+            r(&[
+                "MIGRATE", "h", "1", "key", "9", "5000", "COPY", "AUTH2", "u", "pw"
+            ]),
+            Some(v(&[
+                "MIGRATE",
+                "h",
+                "1",
+                "key",
+                "9",
+                "5000",
+                "COPY",
+                "AUTH2",
+                "(redacted)",
+                "(redacted)"
+            ]))
+        );
+        assert_eq!(
+            r(&["CONFIG", "SET", "maxmemory", "1", "MasterAuth", "pw"]),
+            Some(v(&[
+                "CONFIG",
+                "SET",
+                "maxmemory",
+                "1",
+                "MasterAuth",
+                "(redacted)"
+            ]))
+        );
+
+        let mut store = Store::new();
+        store.slowlog_log_slower_than_us = 0;
+        store.record_slowlog(&v(&["CONFIG", "SET", "requirepass", "pw"]), 1, 1_000);
+        assert_eq!(
+            store.get_slowlog(1)[0].argv,
+            v(&["CONFIG", "SET", "requirepass", "(redacted)"])
+        );
     }
 
     #[test]
