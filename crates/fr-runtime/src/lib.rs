@@ -4893,6 +4893,9 @@ pub struct ServerState {
     pub aof_rewrite_start_time_sec: Option<u64>,
     /// Whether an AOF rewrite is pending because another background child is active.
     pub aof_rewrite_scheduled: bool,
+    /// Set when `CONFIG SET appendonly yes` turns AOF on: the next flush must
+    /// write a fresh base (upstream startAppendOnly's rewrite) before appending.
+    aof_base_pending: bool,
     /// Upstream `server.rdb_bgsave_scheduled` (rdb.c:3660) -- the RDB twin of
     /// [`Self::aof_rewrite_scheduled`], honoured from the same place by
     /// [`Self::maybe_run_scheduled_bgsave`].
@@ -5024,6 +5027,7 @@ impl Default for ServerState {
             aof_disk_flushed_records: 0,
             aof_last_fsync_ms: 0,
             aof_current_seq: 0,
+            aof_base_pending: false,
             aof_selected_db: 0,
             evidence: EvidenceLedger::default(),
             threat_ledger_path: None,
@@ -5147,6 +5151,21 @@ impl Default for ServerState {
 }
 
 impl ServerState {
+    /// Where the AOF lives when nothing configured a path: upstream always
+    /// keeps it in `<appenddirname>/<appendfilename>` under `dir`
+    /// (`appendonlydir/appendonly.aof` by default), whether AOF is on or not.
+    fn default_aof_config_path(&self) -> std::path::PathBuf {
+        let dirname = self
+            .config_overrides
+            .get("appenddirname")
+            .map_or("appendonlydir", String::as_str);
+        let filename = self
+            .config_overrides
+            .get("appendfilename")
+            .map_or("appendonly.aof", String::as_str);
+        std::path::PathBuf::from(dirname).join(filename)
+    }
+
     pub fn set_aof_path(&mut self, path: std::path::PathBuf) {
         self.aof_config_path = Some(path.clone());
         self.aof_path = Some(path);
@@ -47955,9 +47974,18 @@ impl Runtime {
         self.server.acl_file_path = next_acl_file_path;
         if let Some(appendonly) = next_appendonly {
             if appendonly {
-                let configured_path = self.server.aof_config_path.clone().unwrap_or_else(|| {
-                    std::path::PathBuf::from("appendonlydir").join("appendonly.aof")
-                });
+                let configured_path = self
+                    .server
+                    .aof_config_path
+                    .clone()
+                    .unwrap_or_else(|| self.server.default_aof_config_path());
+                // Upstream startAppendOnly: turning AOF on (from off) always
+                // rewrites a fresh base. Without it the next flush appended to
+                // the incr file of whatever base an earlier BGREWRITEAOF left
+                // (possibly elsewhere), failed, and every write then hit MISCONF.
+                if !self.server.store.aof_enabled {
+                    self.server.aof_base_pending = true;
+                }
                 self.server.aof_config_path = Some(configured_path.clone());
                 self.server.aof_path = Some(configured_path);
                 self.server.aof_rewrite_scheduled =
@@ -49103,7 +49131,7 @@ impl Runtime {
             .aof_path
             .clone()
             .or_else(|| self.server.aof_config_path.clone())
-            .unwrap_or_else(|| std::path::PathBuf::from("appendonly.aof"));
+            .unwrap_or_else(|| self.server.default_aof_config_path());
         let (dir, basename) = aof_manifest_target(&path);
         let seq = self.server.aof_current_seq.saturating_add(1);
         // (frankenredis-rc-info-persistence-aof-fields-2qwr3) The AOF BASE file
@@ -49147,6 +49175,7 @@ impl Runtime {
             fr_persist::write_aof_manifest_dir(&dir, &basename, seq, &base_rdb, &[])?;
         }
         self.server.aof_current_seq = seq;
+        self.server.aof_base_pending = false;
         // The base now fully represents current state; the incremental flush
         // must resume appending only records captured after this rewrite, so
         // anchor the cursor at the current buffer length.
@@ -49257,9 +49286,11 @@ impl Runtime {
         // AOF is enabled (or after a legacy single-file load) writes the initial
         // manifest from the full current dataset; that anchors the cursor at the
         // buffer tail, so there is nothing left to append on this same call.
-        if self.server.aof_current_seq == 0 {
+        if self.server.aof_current_seq == 0 || self.server.aof_base_pending {
             if self.rewrite_aof_manifest(now_ms).is_err() {
                 self.server.store.record_aof_write_status(false);
+            } else {
+                self.server.store.record_aof_write_status(true);
             }
             return;
         }
@@ -68237,6 +68268,107 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(dir.join(name));
         }
+    }
+
+    #[test]
+    fn sort_by_and_get_patterns_resolve_in_the_selected_db() {
+        // tests/unit/sort.tcl runs on db 9: BY/GET pattern keys used to be looked
+        // up in db 0, so SORT ... BY weight_* fell back to sorting the elements.
+        let mut rt = Runtime::default_strict();
+        let bulk = |v: &[u8]| RespFrame::BulkString(Some(v.to_vec()));
+        rt.execute_frame(command(&[b"SELECT", b"9"]), 0);
+        rt.execute_frame(command(&[b"RPUSH", b"tosort", b"a", b"b", b"c"]), 0);
+        rt.execute_frame(
+            command(&[b"MSET", b"w_a", b"3", b"w_b", b"1", b"w_c", b"2"]),
+            0,
+        );
+        rt.execute_frame(command(&[b"HSET", b"h_b", b"f", b"hb"]), 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SORT", b"tosort", b"BY", b"w_*"]), 1),
+            RespFrame::Array(Some(vec![bulk(b"b"), bulk(b"c"), bulk(b"a")]))
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"SORT", b"tosort", b"BY", b"w_*", b"LIMIT", b"0", b"1", b"GET", b"w_*",
+                    b"GET", b"h_*->f",
+                ]),
+                2
+            ),
+            RespFrame::Array(Some(vec![bulk(b"1"), bulk(b"hb")]))
+        );
+        // Only the LAST STORE names a key (upstream sortGetKeys).
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"COMMAND",
+                    b"GETKEYS",
+                    b"SORT",
+                    b"abc",
+                    b"STORE",
+                    b"invalid",
+                    b"STORE",
+                    b"stillbad",
+                    b"STORE",
+                    b"def",
+                ]),
+                3
+            ),
+            RespFrame::Array(Some(vec![bulk(b"abc"), bulk(b"def")]))
+        );
+    }
+
+    #[test]
+    fn config_set_appendonly_yes_after_bgrewriteaof_writes_a_fresh_base() {
+        // Upstream startAppendOnly rewrites a fresh base whenever AOF is turned on.
+        // fr used to keep appending to the incr of the base an earlier
+        // BGREWRITEAOF (run with AOF off) had left, so the flush could fail and
+        // every later write hit MISCONF (tests/unit/other.tcl "EXPIRES after AOF
+        // reload (without rewrite)").
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_appendonly_after_bgrewrite_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut rt = Runtime::default_strict();
+        rt.server.aof_config_path = Some(dir.join("appendonly.aof"));
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"a", b"1"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1),
+            RespFrame::SimpleString("Background append only file rewriting started".to_string())
+        );
+        assert!(dir.join("appendonly.aof.1.base.rdb").exists());
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"yes"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.flush_aof_to_disk(3);
+        assert!(
+            dir.join("appendonly.aof.2.base.rdb").exists(),
+            "enabling AOF must rewrite a new base"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"x", b"y"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.flush_aof_to_disk(5);
+        let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 6);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            unreachable!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("aof_last_write_status:ok\r\n"), "{info}");
+        let incr = std::fs::read(dir.join("appendonly.aof.2.incr.aof")).expect("incr exists");
+        assert!(
+            incr.windows(b"$1\r\nx\r\n".len())
+                .any(|w| w == b"$1\r\nx\r\n"),
+            "post-enable write must land in the new incr"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -7714,6 +7714,16 @@ pub fn encode_db_key(db: usize, key: &[u8]) -> Vec<u8> {
     encoded
 }
 
+/// Append the physical namespace prefix of `db` to `out` (nothing for db 0), so a
+/// caller assembling a key in a reusable buffer gets `encode_db_key`'s bytes once
+/// it appends the logical key.
+pub fn push_db_key_prefix(db: usize, out: &mut Vec<u8>) {
+    if db != 0 {
+        out.extend_from_slice(DB_NAMESPACE_PREFIX);
+        out.extend_from_slice(&(db as u64).to_be_bytes());
+    }
+}
+
 #[must_use]
 pub fn decode_db_key(key: &[u8]) -> Option<(usize, &[u8])> {
     const DB_LEN: usize = std::mem::size_of::<u64>();

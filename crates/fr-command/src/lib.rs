@@ -136,6 +136,27 @@ fn migrate_connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream
 }
 
 /// Return the list of key names referenced by the command.
+/// The argv index of SORT's destination key, scanned exactly like upstream
+/// db.c::sortGetKeys: LIMIT skips two arguments and GET/BY one, and only the
+/// LAST `STORE <key>` counts (SORT itself honours the last one too), so
+/// `SORT k STORE a STORE b` names keys `k b`, never `a`.
+fn sort_store_key_index(argv: &[Vec<u8>]) -> Option<usize> {
+    let mut found = None;
+    let mut i = 2;
+    while i < argv.len() {
+        let arg = &argv[i];
+        if arg.eq_ignore_ascii_case(b"LIMIT") {
+            i += 2;
+        } else if arg.eq_ignore_ascii_case(b"GET") || arg.eq_ignore_ascii_case(b"BY") {
+            i += 1;
+        } else if arg.eq_ignore_ascii_case(b"STORE") && i + 1 < argv.len() {
+            found = Some(i + 1);
+        }
+        i += 1;
+    }
+    found
+}
+
 pub fn command_keys(argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
     command_key_indexes(argv)
         .into_iter()
@@ -663,17 +684,10 @@ pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
             return Vec::new();
         }
         let mut keys = vec![1];
-        let mut i = 2;
-        while i < argv.len() {
-            if let Ok(s) = std::str::from_utf8(&argv[i])
-                && s.eq_ignore_ascii_case("STORE")
-                && i + 1 < argv.len()
-            {
-                keys.push(i + 1);
-                i += 2;
-                continue;
-            }
-            i += 1;
+        if cmd_name.eq_ignore_ascii_case("SORT")
+            && let Some(store_idx) = sort_store_key_index(argv)
+        {
+            keys.push(store_idx);
         }
         return keys;
     }
@@ -1587,19 +1601,13 @@ fn command_key_references_with_exact_flags(
             index: 1,
             flags: KEY_FLAGS_RO_ACCESS,
         }];
-        if cmd_name.eq_ignore_ascii_case("SORT") {
-            let mut i = 2;
-            while i < argv.len() {
-                if argv[i].eq_ignore_ascii_case(b"STORE") && i + 1 < argv.len() {
-                    refs.push(CommandKeyReference {
-                        index: i + 1,
-                        flags: KEY_FLAGS_OW_UPDATE,
-                    });
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
+        if cmd_name.eq_ignore_ascii_case("SORT")
+            && let Some(store_idx) = sort_store_key_index(argv)
+        {
+            refs.push(CommandKeyReference {
+                index: store_idx,
+                flags: KEY_FLAGS_OW_UPDATE,
+            });
         }
         return Ok(Some(refs));
     }
@@ -31840,8 +31848,10 @@ fn sort_generic<const MOVE: bool>(
             // Reuse one key buffer across elements — the substituted lookup key
             // is rebuilt in place rather than allocating a fresh Vec per element.
             let mut k: Vec<u8> = Vec::with_capacity(pat.len() + 16);
+            let db = store.dispatch_client_ctx.db_index;
             for (idx, el) in elements.iter().enumerate() {
                 k.clear();
+                fr_store::push_db_key_prefix(db, &mut k);
                 k.extend_from_slice(&pat[..star]);
                 k.extend_from_slice(el);
                 k.extend_from_slice(&pat[star + 1..]);
@@ -32204,11 +32214,16 @@ fn resolve_sort_pattern(
     now_ms: u64,
     keybuf: &mut Vec<u8>,
 ) -> Option<Vec<u8>> {
+    // Pattern-derived keys live in the client's selected db, like the sorted key
+    // itself; without the namespace prefix every BY/GET lookup on db >= 1 read
+    // db 0 and SORT fell back to sorting by the elements.
+    let db = store.dispatch_client_ctx.db_index;
     match plan {
         SortPattern::NoStar => None,
         SortPattern::StringKey { prefix, suffix } => {
             keybuf.clear();
             keybuf.reserve(prefix.len() + element.len() + suffix.len());
+            fr_store::push_db_key_prefix(db, keybuf);
             keybuf.extend_from_slice(prefix);
             keybuf.extend_from_slice(element);
             keybuf.extend_from_slice(suffix);
@@ -32217,6 +32232,7 @@ fn resolve_sort_pattern(
         SortPattern::HashKey { prefix, mid, field } => {
             keybuf.clear();
             keybuf.reserve(prefix.len() + element.len() + mid.len());
+            fr_store::push_db_key_prefix(db, keybuf);
             keybuf.extend_from_slice(prefix);
             keybuf.extend_from_slice(element);
             keybuf.extend_from_slice(mid);
