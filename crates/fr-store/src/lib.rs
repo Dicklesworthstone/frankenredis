@@ -7755,7 +7755,7 @@ pub struct Store {
     /// Controls whether runtime active-expire cycles are allowed to run.
     pub active_expire_enabled: bool,
     /// Set by DEBUG RELOAD; runtime consumes it after command dispatch.
-    pub debug_reload_requested: bool,
+    pub debug_reload_requested: Option<DebugReloadOptions>,
     /// Set by BGREWRITEAOF in delegated dispatch paths; runtime consumes it after dispatch.
     pub bgrewriteaof_requested: bool,
     /// Most recent sampled resident set size (RSS) in bytes.
@@ -7811,6 +7811,26 @@ pub fn encode_db_key(db: usize, key: &[u8]) -> Vec<u8> {
     encoded.extend_from_slice(&(db as u64).to_be_bytes());
     encoded.extend_from_slice(key);
     encoded
+}
+
+/// `DEBUG RELOAD [MERGE] [NOFLUSH] [NOSAVE]` (debug.c): `save` writes the snapshot first,
+/// `flush` empties the dataset before loading it, `merge` lets the load replace keys and
+/// libraries that already exist instead of failing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebugReloadOptions {
+    pub save: bool,
+    pub flush: bool,
+    pub merge: bool,
+}
+
+impl Default for DebugReloadOptions {
+    fn default() -> Self {
+        Self {
+            save: true,
+            flush: true,
+            merge: false,
+        }
+    }
 }
 
 /// What a long-running ("busy") script tells the server's busy hook, and what the hook
@@ -8166,7 +8186,7 @@ impl Default for Store {
             dispatch_client_ctx: DispatchClientContext::default(),
             pending_acl_log_events: Vec::new(),
             active_expire_enabled: true,
-            debug_reload_requested: false,
+            debug_reload_requested: None,
             bgrewriteaof_requested: false,
             stat_used_memory_rss: 0,
             stat_used_memory_peak: 0,
@@ -36103,13 +36123,13 @@ impl Store {
         fixed.saturating_add(bytes)
     }
 
-    pub fn request_debug_reload(&mut self) {
-        self.debug_reload_requested = true;
+    pub fn request_debug_reload(&mut self, options: DebugReloadOptions) {
+        self.debug_reload_requested = Some(options);
     }
 
     #[must_use]
-    pub fn take_debug_reload_requested(&mut self) -> bool {
-        std::mem::take(&mut self.debug_reload_requested)
+    pub fn take_debug_reload_requested(&mut self) -> Option<DebugReloadOptions> {
+        self.debug_reload_requested.take()
     }
 
     pub fn request_bgrewriteaof(&mut self) {
@@ -37183,6 +37203,13 @@ impl Store {
     /// Upstream cannot arbitrate the choice: `functionListCommand` walks `li->functions` with
     /// dictGetIterator/dictNext, so 7.2.4 emits hash-bucket order, neither sorted nor
     /// registration order. Consistency between fr's own paths is what decided it.
+    /// Whether the library `code` declares in its `#!<engine> name=` header is already loaded.
+    #[must_use]
+    pub fn function_library_loaded_for_code(&self, code: &[u8]) -> bool {
+        Self::extract_lib_metadata(&String::from_utf8_lossy(code))
+            .is_ok_and(|(name, _)| self.function_libraries.contains_key(&name))
+    }
+
     pub fn function_load_with_registrations(
         &mut self,
         code: &[u8],
@@ -37467,9 +37494,12 @@ impl Store {
         }
 
         let restored_libraries = incoming.function_libraries;
-        if append {
+        if !flush {
+            // functions.c libraryJoin: a library that already exists fails APPEND and is
+            // displaced by REPLACE; then no restored FUNCTION may collide with one in a
+            // library that stays.
             for name in restored_libraries.keys() {
-                if self.function_libraries.contains_key(name) {
+                if !replace && self.function_libraries.contains_key(name) {
                     // (frankenredis-exdkr) UNQUOTED here, unlike FUNCTION LOAD.
                     // Upstream really does word these two paths differently:
                     // functions.c's load path formats the library name with
@@ -37483,13 +37513,32 @@ impl Store {
                     )));
                 }
             }
+            for library in restored_libraries.values() {
+                for function in &library.functions {
+                    let collides = self.function_libraries.iter().any(|(name, existing)| {
+                        !restored_libraries.contains_key(name)
+                            && existing
+                                .functions
+                                .iter()
+                                .any(|other| other.name.eq_ignore_ascii_case(&function.name))
+                    });
+                    if collides {
+                        return Err(StoreError::GenericError(format!(
+                            "ERR Function {} already exists",
+                            function.name
+                        )));
+                    }
+                }
+            }
         }
 
         if flush {
             self.function_libraries.clear();
-            self.bump_function_generation();
         }
         self.function_libraries.extend(restored_libraries);
+        // A REPLACE swaps a library's callbacks under the same name: FCALL's per-library
+        // cache must not keep serving the old ones.
+        self.bump_function_generation();
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
     }

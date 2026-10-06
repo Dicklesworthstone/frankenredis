@@ -5589,6 +5589,9 @@ fn lua_function_load_globals() -> LuaGlobals {
         LuaValue::Str(b"register_function".to_vec()),
         LuaValue::RustFunction(std::rc::Rc::from("redis.register_function")),
     );
+    // luaSetTableProtectionRecursively covers the load run's `redis` too, and a callback
+    // that captured it (`local lib = redis`) still meets a readonly table at FCALL time.
+    redis_table.mark_readonly_recursive();
     map.insert("redis".to_string(), LuaValue::Table(redis_table));
     LuaGlobals::from_flat_map(map)
 }
@@ -9977,6 +9980,15 @@ impl<'a> LuaState<'a> {
             // this once claimed -- the PHRASES are decidable from the incumbent's source and are
             // taken from it; only the surrounding envelope needs a live 7.2.4 to confirm.
             "redis.register_function" => {
+                // A callback that captured the load-time `redis` table can reach this at
+                // FCALL time; only a FUNCTION LOAD run (the state with a load deadline) may
+                // register (function_lua.c luaRegisterFunction checks its load context).
+                if self.load_deadline.is_none() {
+                    return Err(
+                        "ERR redis.register_function can only be called on FUNCTION LOAD command"
+                            .to_string(),
+                    );
+                }
                 // (frankenredis-o500d) Upstream's own phrase, not a placeholder. The
                 // envelope FUNCTION LOAD wraps around it is unchanged and still unadjudicated.
                 let spec = parse_register_function_args(args)

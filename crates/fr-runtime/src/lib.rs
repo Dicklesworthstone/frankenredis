@@ -4706,6 +4706,9 @@ pub struct ServerState {
     /// means "unknown" (upstream `slaveseldb = -1`): set at every FULLRESYNC so
     /// the next propagated write emits a SELECT whatever its db.
     aof_selected_db: usize,
+    /// The last DEBUG RELOAD snapshot when no RDB file is configured: what a later
+    /// `DEBUG RELOAD NOSAVE` loads, as upstream loads the dump file it last wrote.
+    debug_reload_snapshot: Option<Vec<u8>>,
     replication_runtime_state: ReplicationRuntimeState,
     evidence: EvidenceLedger,
     /// (frankenredis-rc-threat-ledger-persist) Where `flush_threat_ledger`
@@ -5040,6 +5043,7 @@ impl Default for ServerState {
             aof_current_seq: 0,
             aof_base_pending: false,
             aof_selected_db: 0,
+            debug_reload_snapshot: None,
             evidence: EvidenceLedger::default(),
             threat_ledger_path: None,
             threat_ledger_write_failures: 0,
@@ -7778,9 +7782,18 @@ impl Runtime {
         Ok(counts.loaded)
     }
 
-    fn handle_debug_reload_requested(&mut self, now_ms: u64) -> RespFrame {
-        if let Err(reply) = self.persist_snapshot_to_disk(now_ms, false, true) {
+    fn handle_debug_reload_requested(
+        &mut self,
+        now_ms: u64,
+        options: fr_store::DebugReloadOptions,
+    ) -> RespFrame {
+        if options.save
+            && let Err(reply) = self.persist_snapshot_to_disk(now_ms, false, true)
+        {
             return reply;
+        }
+        if !options.flush || !options.save {
+            return self.debug_reload_with_options(now_ms, options);
         }
         if self.server.aof_path.is_some() {
             return match self.load_aof(now_ms.saturating_add(1)) {
@@ -7865,6 +7878,7 @@ impl Runtime {
                 );
             }
         };
+        self.server.debug_reload_snapshot = Some(bytes);
         let mut store = Store::new();
         // (frankenredis-63p1s) live encoding thresholds before rebuild.
         copy_encoding_thresholds(&mut store, &self.server.store);
@@ -7891,6 +7905,80 @@ impl Runtime {
         // (frankenredis-n01zc) Same rule as the rdb-path branch: the client keeps
         // its selected db across DEBUG RELOAD. The old `selected_db = 0` reset
         // silently teleported the calling client to db 0.
+        RespFrame::SimpleString("OK".to_string())
+    }
+
+    /// `DEBUG RELOAD` with NOSAVE and/or NOFLUSH (debug.c). NOSAVE loads the snapshot the
+    /// server last wrote -- the RDB file, or without one the last in-memory reload snapshot.
+    /// NOFLUSH loads it over the live dataset, where (as in rdbLoad without
+    /// RDBFLAGS_ALLOW_DUP) a key or library that already exists fails the load unless MERGE
+    /// lets the loaded copy replace it.
+    fn debug_reload_with_options(
+        &mut self,
+        now_ms: u64,
+        options: fr_store::DebugReloadOptions,
+    ) -> RespFrame {
+        let load_failed =
+            || RespFrame::Error("ERR Error trying to load the RDB dump, check server logs.".into());
+        let (entries, functions) = if let Some(path) = self.server.rdb_path.clone() {
+            match read_rdb_file_with_functions(&path) {
+                Ok((entries, _aux, functions)) => (entries, functions),
+                Err(_) => return load_failed(),
+            }
+        } else {
+            let bytes = if options.save {
+                let bytes = render_rdb_snapshot_bytes(&mut self.server.store, now_ms, &[]);
+                self.server.debug_reload_snapshot = Some(bytes.clone());
+                bytes
+            } else if let Some(bytes) = self.server.debug_reload_snapshot.clone() {
+                bytes
+            } else {
+                return load_failed();
+            };
+            match fr_persist::decode_rdb_prefix(&bytes) {
+                Ok(out) if out.consumed == bytes.len() => (out.entries, out.functions),
+                _ => return load_failed(),
+            }
+        };
+        let load_ms = now_ms.saturating_add(1);
+        if options.flush {
+            let mut store = Store::new();
+            copy_encoding_thresholds(&mut store, &self.server.store);
+            let Ok(counts) = apply_rdb_entries_to_store(&mut store, entries, load_ms) else {
+                return load_failed();
+            };
+            for code in &functions {
+                reload_function_library(&mut store, now_ms, code);
+            }
+            store.stat_rdb_last_load_keys_expired =
+                u64::try_from(counts.expired).unwrap_or(u64::MAX);
+            store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
+            preserve_store_load_context(&mut store, &self.server.store);
+            self.server.store = store;
+            return RespFrame::SimpleString("OK".to_string());
+        }
+        let store = &mut self.server.store;
+        if options.merge {
+            let existing: Vec<Vec<u8>> = entries
+                .iter()
+                .map(|entry| encode_db_key(entry.db, &entry.key))
+                .collect();
+            store.del(&existing, load_ms);
+        } else if entries
+            .iter()
+            .any(|entry| store.exists(&encode_db_key(entry.db, &entry.key), load_ms))
+            || functions
+                .iter()
+                .any(|code| store.function_library_loaded_for_code(code))
+        {
+            return load_failed();
+        }
+        if apply_rdb_entries_to_store(store, entries, load_ms).is_err() {
+            return load_failed();
+        }
+        for code in &functions {
+            reload_function_library(store, now_ms, code);
+        }
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -43921,8 +44009,8 @@ impl Runtime {
         for event in self.server.store.drain_pending_acl_log_events() {
             self.record_deferred_acl_log_event(event, now_ms);
         }
-        if self.server.store.take_debug_reload_requested() {
-            return Some(self.handle_debug_reload_requested(now_ms));
+        if let Some(options) = self.server.store.take_debug_reload_requested() {
+            return Some(self.handle_debug_reload_requested(now_ms, options));
         }
         if self.server.store.take_bgrewriteaof_requested() {
             return Some(self.handle_bgrewriteaof_requested(now_ms));
@@ -76918,6 +77006,94 @@ redis.register_function{function_name='allowstalefn', callback=function(keys, ar
                 "{name} 42 should be accepted"
             );
         }
+    }
+
+    #[test]
+    fn debug_reload_honours_nosave_noflush_and_merge() {
+        // tests/unit/functions.tcl "test debug reload different options" and "with nosave
+        // and noflush": NOFLUSH loads over the live dataset and refuses a library that is
+        // already there unless MERGE; NOSAVE loads the snapshot written by the last reload.
+        let mut rt = Runtime::default_strict();
+        rt.set_enable_debug_command("yes");
+        let lib1 =
+            b"#!lua name=test1\nredis.register_function('test1', function() return 'hello' end)";
+        let lib2 =
+            b"#!lua name=test2\nredis.register_function('test2', function() return 'hello' end)";
+        rt.execute_frame(command(&[b"FUNCTION", b"LOAD", lib1]), 0);
+        rt.execute_frame(command(&[b"SET", b"x", b"1"]), 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"RELOAD"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"RELOAD", b"NOFLUSH"]), 2),
+            RespFrame::Error(
+                "ERR Error trying to load the RDB dump, check server logs.".to_string()
+            )
+        );
+        rt.execute_frame(command(&[b"FUNCTION", b"LOAD", lib2]), 3);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"DEBUG", b"RELOAD", b"NOSAVE", b"NOFLUSH", b"MERGE"]),
+                4
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for name in [b"test1".as_slice(), b"test2"] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"FCALL", name, b"0"]), 5),
+                RespFrame::BulkString(Some(b"hello".to_vec()))
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"x"]), 5),
+            RespFrame::BulkString(Some(b"1".to_vec()))
+        );
+    }
+
+    #[test]
+    fn function_restore_replace_swaps_callbacks_and_refuses_function_collisions() {
+        // tests/unit/functions.tcl "dump and restore with replace argument" and "restore with
+        // function name collision".
+        let mut rt = Runtime::default_strict();
+        let hello =
+            b"#!lua name=test\nredis.register_function('test', function() return 'hello' end)";
+        let hello1 =
+            b"#!lua name=test\nredis.register_function('test', function() return 'hello1' end)";
+        rt.execute_frame(command(&[b"FUNCTION", b"LOAD", hello]), 0);
+        let RespFrame::BulkString(Some(dump)) =
+            rt.execute_frame(command(&[b"FUNCTION", b"DUMP"]), 0)
+        else {
+            panic!("FUNCTION DUMP must return a payload");
+        };
+        rt.execute_frame(command(&[b"FUNCTION", b"FLUSH"]), 1);
+        rt.execute_frame(command(&[b"FUNCTION", b"LOAD", hello1]), 1);
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL", b"test", b"0"]), 1),
+            RespFrame::BulkString(Some(b"hello1".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FUNCTION", b"RESTORE", &dump, b"REPLACE"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL", b"test", b"0"]), 2),
+            RespFrame::BulkString(Some(b"hello".to_vec()))
+        );
+
+        // A function of the restored library already lives in ANOTHER library.
+        rt.execute_frame(command(&[b"FUNCTION", b"FLUSH"]), 3);
+        let other =
+            b"#!lua name=other\nredis.register_function('test', function() return 'other' end)";
+        rt.execute_frame(command(&[b"FUNCTION", b"LOAD", other]), 3);
+        assert_eq!(
+            rt.execute_frame(command(&[b"FUNCTION", b"RESTORE", &dump, b"REPLACE"]), 4),
+            RespFrame::Error("ERR Function test already exists".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL", b"test", b"0"]), 4),
+            RespFrame::BulkString(Some(b"other".to_vec()))
+        );
     }
 
     #[test]

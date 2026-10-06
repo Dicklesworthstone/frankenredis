@@ -13754,8 +13754,33 @@ fn function_library_first_undeclared_global(code: &[u8]) -> Option<(u32, String)
             let mut found = None;
             match stmt {
                 Stmt::Assign(targets, values) => {
-                    for expr in targets.iter().chain(values) {
+                    // Lua evaluates the values first; then writing a global, or a field of
+                    // the protected `redis` table, is "Attempt to modify a readonly table"
+                    // -- a WRITE, not the nonexistent-global READ error.
+                    for expr in values {
                         scan_expr(expr, &mut found);
+                    }
+                    for target in targets {
+                        if found.is_some() {
+                            break;
+                        }
+                        match target {
+                            Expr::Name(_) => {
+                                return Some((*line, READONLY_TABLE_ERROR.to_string()));
+                            }
+                            Expr::Field(base, _) if matches!(base.as_ref(), Expr::Name(name) if name.as_ref() == "redis") =>
+                            {
+                                return Some((*line, READONLY_TABLE_ERROR.to_string()));
+                            }
+                            Expr::Index(base, key) if matches!(base.as_ref(), Expr::Name(name) if name.as_ref() == "redis") =>
+                            {
+                                scan_expr(key, &mut found);
+                                if found.is_none() {
+                                    return Some((*line, READONLY_TABLE_ERROR.to_string()));
+                                }
+                            }
+                            other => scan_expr(other, &mut found),
+                        }
                     }
                 }
                 Stmt::LocalAssign(_, values) | Stmt::Return(values) => {
@@ -13827,12 +13852,16 @@ fn function_library_first_undeclared_global(code: &[u8]) -> Option<(u32, String)
                 | Stmt::Break => {}
             }
             if let Some(name) = found {
-                return Some((*line, name));
+                return Some((
+                    *line,
+                    format!("Script attempted to access nonexistent global variable '{name}'"),
+                ));
             }
         }
         None
     }
 
+    const READONLY_TABLE_ERROR: &str = "Attempt to modify a readonly table";
     let chunk = lua_eval::compile_lua_chunk_cached(code).ok()?;
     scan_block(chunk.top_level())
 }
@@ -13949,9 +13978,9 @@ fn function_cmd(
         // Gate it on `scripts/function_load_differ.py`, which already discriminates (both
         // controls agree) and already passes on rows 1-3. Do not attempt a static
         // approximation of row 4: a partial static rule would reject valid libraries.
-        if let Some((line, name)) = function_library_first_undeclared_global(&argv[code_idx]) {
+        if let Some((line, message)) = function_library_first_undeclared_global(&argv[code_idx]) {
             return Err(CommandError::Custom(format!(
-                "ERR Error registering functions: ERR user_function:{line}: Script attempted to access nonexistent global variable '{name}'"
+                "ERR Error registering functions: ERR user_function:{line}: {message}"
             )));
         }
         // (frankenredis-o500d) EXECUTE the body, which is what upstream does and what the
@@ -14026,7 +14055,9 @@ fn function_cmd(
             // arm below, which has to ECHO the raw token, and the LIBRARYNAME arm, where
             // an undecodable pattern is a glob that simply matches nothing.
             let arg = std::str::from_utf8(&argv[i]).unwrap_or("");
-            if arg.eq_ignore_ascii_case("LIBRARYNAME") {
+            // Each option is accepted once; a repeat falls through to "Unknown argument"
+            // (functionListCommand tests `!library_name` / `!with_code` first).
+            if pattern.is_none() && arg.eq_ignore_ascii_case("LIBRARYNAME") {
                 i += 1;
                 if i >= argv.len() {
                     // Upstream functions.c::functionListCommand emits
@@ -14043,7 +14074,7 @@ fn function_cmd(
                 // carrying U+FFFD cannot match any real library name, which yields the
                 // same empty reply, and valid UTF-8 is unaffected.
                 pattern = Some(String::from_utf8_lossy(&argv[i]).into_owned());
-            } else if arg.eq_ignore_ascii_case("WITHCODE") {
+            } else if !with_code && arg.eq_ignore_ascii_case("WITHCODE") {
                 with_code = true;
             } else {
                 // Upstream functions.c::functionListCommand emits
@@ -28275,24 +28306,26 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // [NOSAVE] [NOFLUSH] [MERGE] keyword args after DEBUG RELOAD
         // (each may be repeated; upstream parses them in any order via
         // a per-arg loop). Unknown tokens surface the dedicated
-        // wording. fr-command honours request_debug_reload() for the
-        // persistence side and accepts the keywords for arity parity
-        // — the flag-driven side effects (NOSAVE skips snapshot,
-        // NOFLUSH preserves keys, MERGE merges loaded keys) are not
-        // modelled by the MVP runtime. (frankenredis-ehnk)
+        // wording. The runtime performs the reload with the options:
+        // NOSAVE skips the snapshot, NOFLUSH loads over the live dataset,
+        // MERGE lets that load replace what already exists. (frankenredis-ehnk)
+        let mut options = fr_store::DebugReloadOptions::default();
         for arg in &argv[2..] {
             let token = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
-            if !token.eq_ignore_ascii_case("MERGE")
-                && !token.eq_ignore_ascii_case("NOFLUSH")
-                && !token.eq_ignore_ascii_case("NOSAVE")
-            {
+            if token.eq_ignore_ascii_case("MERGE") {
+                options.merge = true;
+            } else if token.eq_ignore_ascii_case("NOFLUSH") {
+                options.flush = false;
+            } else if token.eq_ignore_ascii_case("NOSAVE") {
+                options.save = false;
+            } else {
                 return Ok(RespFrame::Error(
                     "ERR DEBUG RELOAD only supports the MERGE, NOFLUSH and NOSAVE options."
                         .to_string(),
                 ));
             }
         }
-        store.request_debug_reload();
+        store.request_debug_reload(options);
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("LOADAOF") {
         // (frankenredis-x0rb0) Upstream debug.c::debugCommand handles
@@ -62739,7 +62772,10 @@ mod tests {
         let out = dispatch_argv(&[b"DEBUG".to_vec(), b"RELOAD".to_vec()], &mut store, 0)
             .expect("debug reload");
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
-        assert!(store.take_debug_reload_requested());
+        assert_eq!(
+            store.take_debug_reload_requested(),
+            Some(fr_store::DebugReloadOptions::default())
+        );
     }
 
     #[test]
@@ -62774,7 +62810,7 @@ mod tests {
                 "argv={argv_in:?}"
             );
             assert!(
-                store.take_debug_reload_requested(),
+                store.take_debug_reload_requested().is_some(),
                 "reload flag should be set for argv={argv_in:?}"
             );
         }
@@ -62794,7 +62830,7 @@ mod tests {
             )
         );
         assert!(
-            !store.take_debug_reload_requested(),
+            store.take_debug_reload_requested().is_none(),
             "reload flag must NOT be set when an unknown option is rejected"
         );
     }
