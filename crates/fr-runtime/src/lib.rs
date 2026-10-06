@@ -6692,11 +6692,69 @@ impl Default for ClientSession {
     }
 }
 
+/// What the server's busy-script hook did to a client's transaction while a script ran.
+/// Upstream runs MULTI, DISCARD, UNWATCH and its `-BUSY` rejection against the client in
+/// place (processEventsWhileBlocked); the hook cannot reach the session then, so the event
+/// loop applies these afterwards, before the client's next command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusyScriptTransactionOp {
+    /// MULTI was accepted.
+    Multi,
+    /// A command was rejected (`flagTransaction`): a pending EXEC must abort.
+    FlagAbort,
+    /// DISCARD, or the EXEC that `-BUSY` aborted (`discardTransaction`).
+    Discard,
+    /// UNWATCH.
+    Unwatch,
+}
+
 impl ClientSession {
     pub fn new_for_server(server: &ServerState) -> Self {
         let mut session = Self::default();
         session.refresh_authentication_for_server(&server.auth_state, false);
         session
+    }
+
+    /// Can the server's busy-script hook answer this client while a script runs? The hook
+    /// replies without the runtime, so it only takes a client whose reply cannot depend on
+    /// state it does not see: authenticated (upstream's NOAUTH precedes `-BUSY`) and with
+    /// replies on (`CLIENT REPLY OFF|SKIP` would swallow them).
+    #[must_use]
+    pub fn busy_script_answerable(&self) -> bool {
+        self.is_authenticated() && !self.client_reply.off && !self.client_reply.skip_next
+    }
+
+    #[must_use]
+    pub fn in_transaction(&self) -> bool {
+        self.transaction_state.in_transaction
+    }
+
+    pub fn apply_busy_script_transaction_op(&mut self, op: BusyScriptTransactionOp) {
+        let state = &mut self.transaction_state;
+        match op {
+            BusyScriptTransactionOp::Multi => {
+                state.in_transaction = true;
+                state.exec_abort = false;
+                state.command_queue.clear();
+            }
+            BusyScriptTransactionOp::FlagAbort => {
+                if state.in_transaction {
+                    state.exec_abort = true;
+                }
+            }
+            BusyScriptTransactionOp::Discard => {
+                state.in_transaction = false;
+                state.exec_abort = false;
+                state.command_queue.clear();
+                state.watched_keys.clear();
+                state.watch_dirty = false;
+            }
+            BusyScriptTransactionOp::Unwatch => {
+                state.watched_keys.clear();
+                state.watch_dirty = false;
+            }
+        }
+        state.refresh_activity();
     }
 
     pub(crate) fn refresh_dispatch_peer_addr_cache(
@@ -7124,6 +7182,7 @@ fn copy_encoding_thresholds(replacement: &mut Store, original: &Store) {
     replacement.zset_max_listpack_value = original.zset_max_listpack_value;
     replacement.hll_sparse_max_bytes = original.hll_sparse_max_bytes;
     replacement.lazyfree_lazy_server_del = original.lazyfree_lazy_server_del;
+    replacement.busy_reply_threshold_ms = original.busy_reply_threshold_ms;
 }
 
 /// (frankenredis-2j9wz) Snapshot the store's LIVE encoding thresholds so the RDB
@@ -40685,7 +40744,31 @@ impl Runtime {
     ///
     /// Takes the reply through rather than being called for its effect, so a rejection site
     /// cannot taint and then forget to return, or return without tainting.
-    fn reject_and_flag_transaction(&mut self, reply: RespFrame) -> RespFrame {
+    ///
+    /// A rejected EXEC is upstream's `execCommandAbort`: the transaction is discarded and the
+    /// error comes back as `EXECABORT Transaction discarded because of: <error>` -- e.g. a
+    /// queued write meeting `min-replicas-to-write` answers `EXECABORT ... NOREPLICAS ...`.
+    fn reject_and_flag_transaction(
+        &mut self,
+        special_command: Option<RuntimeSpecialCommand>,
+        reply: RespFrame,
+    ) -> RespFrame {
+        if matches!(special_command, Some(RuntimeSpecialCommand::Exec)) {
+            let state = &mut self.session.transaction_state;
+            state.in_transaction = false;
+            state.exec_abort = false;
+            state.command_queue.clear();
+            state.watched_keys.clear();
+            state.watch_dirty = false;
+            state.refresh_activity();
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
+            return match reply {
+                RespFrame::Error(error) => RespFrame::Error(format!(
+                    "EXECABORT Transaction discarded because of: {error}"
+                )),
+                other => other,
+            };
+        }
         if self.session.transaction_state.in_transaction {
             self.session.transaction_state.exec_abort = true;
         }
@@ -40832,8 +40915,23 @@ impl Runtime {
         // Reading the flag also fixes a case the parent-keyed list could not express at all --
         // `object|help` is stale while `object|encoding` is not, and the same split applies to
         // function, memory, module, xgroup, xinfo, sentinel and script|load.
-        let command_is_stale = fr_command::script_effective_command_flags(argv, &self.server.store)
-            .map_or_else(|| fr_command::command_is_stale(argv), |flags| flags.stale);
+        let flag_is_stale = |argv: &[Vec<u8>]| {
+            fr_command::script_effective_command_flags(argv, &self.server.store)
+                .map_or_else(|| fr_command::command_is_stale(argv), |flags| flags.stale)
+        };
+        // EXEC is refused when any queued command lacks the flag
+        // (`c->mstate.cmd_inv_flags & CMD_STALE`): a replica that went stale after a GET was
+        // queued must not serve it.
+        let command_is_stale =
+            if eq_ascii_token(&argv[0], b"EXEC") && self.session.transaction_state.in_transaction {
+                self.session
+                    .transaction_state
+                    .command_queue
+                    .iter()
+                    .all(|queued| queued.is_empty() || flag_is_stale(queued))
+            } else {
+                flag_is_stale(argv)
+            };
         if command_is_stale {
             return None;
         }
@@ -41021,7 +41119,7 @@ impl Runtime {
             });
             // (frankenredis-multitaint-8kq2r) upstream raises NOAUTH via rejectCommand(c, shared.noautherr), which flags the
             // transaction first (server.c:3700-3701).
-            return self.reject_and_flag_transaction(reply);
+            return self.reject_and_flag_transaction(special_command, reply);
         }
 
         if let Some(permission_error) = self.acl_permission_error(argv, resolved_parent_arity_ok) {
@@ -41109,7 +41207,7 @@ impl Runtime {
             });
             // (frankenredis-multitaint-8kq2r) upstream raises NOPERM via rejectCommandFormat, which flags the transaction first
             // (server.c:3712-3713).
-            return self.reject_and_flag_transaction(reply);
+            return self.reject_and_flag_transaction(special_command, reply);
         }
 
         // (frankenredis-7tpx0) Full arity = parent arity AND, for container
@@ -41156,9 +41254,10 @@ impl Runtime {
             // ("Can't execute '%s': only (P|S)SUBSCRIBE / ... allowed in this context"), which
             // flags the transaction. reject_and_flag_transaction also performs the reply
             // suppression this site did inline.
-            return self.reject_and_flag_transaction(Self::pubsub_context_error(
-                &Self::pubsub_blocked_command_name(argv),
-            ));
+            return self.reject_and_flag_transaction(
+                special_command,
+                Self::pubsub_context_error(&Self::pubsub_blocked_command_name(argv)),
+            );
         }
         // Upstream networking.c::pingCommand emits a 2-element array
         // ["pong", optional-msg] when the client is in subscribe mode
@@ -41190,27 +41289,32 @@ impl Runtime {
             ]));
         }
         if command_arity_ok
+            && let Some(reply) = self.reject_exec_over_maxmemory(special_command, now_ms)
+        {
+            return self.reject_and_flag_transaction(special_command, reply);
+        }
+        if command_arity_ok
             && let Some(reply) =
                 self.reject_due_to_disk_write_error(argv, special_command, now_ms, packet_id)
         {
-            return self.reject_and_flag_transaction(reply);
+            return self.reject_and_flag_transaction(special_command, reply);
         }
         if command_arity_ok
             && let Some(reply) =
                 self.reject_due_to_replica_write_quorum(argv, special_command, now_ms)
         {
-            return self.reject_and_flag_transaction(reply);
+            return self.reject_and_flag_transaction(special_command, reply);
         }
 
         if command_arity_ok && let Some(reply) = self.reject_write_on_readonly_replica(argv) {
-            return self.reject_and_flag_transaction(reply);
+            return self.reject_and_flag_transaction(special_command, reply);
         }
 
         // processCommand checks the command's effective WRITE bit before its effective STALE bit.
         // That order is observable for a stale read-only replica: a flagless FCALL is READONLY,
         // while a no-writes FCALL has WRITE cleared and therefore reaches MASTERDOWN instead.
         if let Some(reply) = self.reject_stale_replica_read_request(argv) {
-            return self.reject_and_flag_transaction(reply);
+            return self.reject_and_flag_transaction(special_command, reply);
         }
 
         // When inside MULTI, queue commands that can be deferred to EXEC.
@@ -41696,13 +41800,6 @@ impl Runtime {
                         // FULLRESYNC invalidates `aof_selected_db`, so the first
                         // write after an attach always carries its SELECT.
                         let session_db = self.session.selected_db;
-                        if self.server.aof_selected_db != session_db {
-                            self.capture_aof_record(&[
-                                b"SELECT".to_vec(),
-                                session_db.to_string().into_bytes(),
-                            ]);
-                            self.server.aof_selected_db = session_db;
-                        }
                         if let Some(script_commands) =
                             self.take_script_propagation_commands_for_capture(argv)
                         {
@@ -41711,16 +41808,17 @@ impl Runtime {
                             // command propagates, so the replica and AOF apply the
                             // script's writes atomically; a single-effect script
                             // propagates bare. Mirror that threshold (same rule as
-                            // the MULTI/EXEC transaction path).
+                            // the MULTI/EXEC transaction path). The MULTI is db-less,
+                            // so a needed SELECT lands inside it.
                             if script_commands.len() >= 2 {
-                                self.capture_aof_record(&[b"MULTI".to_vec()]);
+                                self.capture_aof_transaction_marker(b"MULTI");
                                 for script_argv in &script_commands {
-                                    self.capture_aof_record(script_argv);
+                                    self.capture_aof_record_in_db(session_db, script_argv);
                                 }
-                                self.capture_aof_record(&[b"EXEC".to_vec()]);
+                                self.capture_aof_transaction_marker(b"EXEC");
                             } else {
                                 for script_argv in &script_commands {
-                                    self.capture_aof_record(script_argv);
+                                    self.capture_aof_record_in_db(session_db, script_argv);
                                 }
                             }
                         } else if let Some(rewritten) =
@@ -42957,6 +43055,51 @@ impl Runtime {
         loop_result
     }
 
+    /// processCommand's OOM gate for EXEC: `is_denyoom_command` is true for EXEC when any
+    /// queued command is denyoom (`c->mstate.cmd_flags & CMD_DENYOOM`), so over maxmemory the
+    /// whole transaction is refused -- `EXECABORT ... OOM` -- before anything in it runs.
+    fn reject_exec_over_maxmemory(
+        &mut self,
+        special_command: Option<RuntimeSpecialCommand>,
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !matches!(special_command, Some(RuntimeSpecialCommand::Exec))
+            || !self.session.transaction_state.in_transaction
+            || self.server.maxmemory_bytes == 0
+        {
+            return None;
+        }
+        if matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Replica { .. }
+        ) && self.server.replica_ignore_maxmemory_enabled()
+        {
+            return None;
+        }
+        let store = &self.server.store;
+        let any_denyoom = self
+            .session
+            .transaction_state
+            .command_queue
+            .iter()
+            .filter(|queued| !queued.is_empty())
+            .any(|queued| {
+                fr_command::script_effective_command_flags(queued, store).map_or_else(
+                    || {
+                        fr_command::effective_command_flags(queued)
+                            .is_some_and(|flags| flags.split(' ').any(|flag| flag == "denyoom"))
+                    },
+                    |flags| flags.denyoom,
+                )
+            });
+        if !any_denyoom || self.refresh_over_maxmemory(now_ms).status == EvictionLoopStatus::Ok {
+            return None;
+        }
+        Some(RespFrame::Error(
+            "OOM command not allowed when used memory > 'maxmemory'.".to_string(),
+        ))
+    }
+
     fn enforce_maxmemory_before_dispatch(
         &mut self,
         argv: &[Vec<u8>],
@@ -43880,6 +44023,11 @@ impl Runtime {
         // db-namespaced, so this stays above the namespacing (like CLIENT above).
         if eq_ascii_token(command, b"REPLICAOF") || eq_ascii_token(command, b"SLAVEOF") {
             return Ok(self.handle_replicaof_command(argv));
+        }
+        // A queued SELECT must move the session, or every later queued command runs in the
+        // db the transaction started in (upstream execCommand call()s selectCommand).
+        if eq_ascii_token(command, b"SELECT") {
+            return Ok(self.handle_select_command(argv));
         }
         // (frankenredis-execslaveof, same class) CONFIG and ACL carry server-side
         // side effects (CONFIG SET mutates the config; ACL SETUSER/DELUSER mutate
@@ -48088,6 +48236,7 @@ impl Runtime {
         }
         if let Some(budget) = next_command_time_budget {
             self.server.command_time_budget_ms = budget;
+            self.server.store.busy_reply_threshold_ms = budget;
         }
         if let Some(flags) = next_keyspace_events {
             self.server.store.notify_keyspace_events = flags;
@@ -51972,11 +52121,14 @@ replica_announced:1\r\n",
             if exec_is_master && !lazy_evicted.is_empty() {
                 let mut expired_logical = Vec::with_capacity(lazy_evicted.len());
                 for ekey in &lazy_evicted {
-                    let logical = fr_store::decode_db_key(ekey)
-                        .map(|(_, l)| l.to_vec())
-                        .unwrap_or_else(|| ekey.clone());
+                    let (key_db, logical) = fr_store::decode_db_key(ekey)
+                        .map_or_else(|| (0, ekey.clone()), |(db, l)| (db, l.to_vec()));
                     transaction_dirty = true;
-                    transaction_aof.push(vec![expiry_op.to_vec(), logical.clone()]);
+                    transaction_aof.push((
+                        key_db,
+                        vec![expiry_op.to_vec(), logical.clone()],
+                        false,
+                    ));
                     expired_logical.push(logical);
                 }
                 // A tracked key that expires inside the transaction invalidates
@@ -52003,10 +52155,12 @@ replica_announced:1\r\n",
                         {
                             if !script_commands.is_empty() {
                                 transaction_dirty = true;
-                                transaction_aof.extend(script_commands);
+                                let db = self.session.selected_db;
+                                transaction_aof.extend(
+                                    script_commands.into_iter().map(|argv| (db, argv, false)),
+                                );
                             }
                         } else {
-                            transaction_dirty = true;
                             // (frankenredis-n66hv) Apply the same propagation
                             // determinism rewrites the non-transactional path uses,
                             // so XADD `*` / SPOP / INCRBYFLOAT (etc.) inside a
@@ -52021,7 +52175,15 @@ replica_announced:1\r\n",
                                 now_ms,
                             )
                             .unwrap_or_else(|| argv.clone());
-                            transaction_aof.push(effect);
+                            // Only what the stream would carry counts toward the
+                            // MULTI/EXEC wrap: SCRIPT LOAD / SCRIPT FLUSH dirty the
+                            // server but propagate nothing.
+                            if Runtime::command_advances_replication_offset(&effect)
+                                || command_is_may_replicate_read(&effect)
+                            {
+                                transaction_dirty = true;
+                                transaction_aof.push((self.session.selected_db, effect, false));
+                            }
                         }
 
                         // Both blocking-wakeup tracking and keyspace
@@ -52050,6 +52212,16 @@ replica_announced:1\r\n",
                                 self.deliver_keyspace_notifications();
                             }
                         }
+                    } else if !matches!(reply, RespFrame::Error(_))
+                        && argv.first().is_some_and(|command| {
+                            eq_ascii_token(command, b"PUBLISH")
+                                || eq_ascii_token(command, b"SPUBLISH")
+                        })
+                    {
+                        // publishCommand's forceCommandPropagation(c, PROPAGATE_REPL):
+                        // a subscriber may sit on a replica.
+                        transaction_dirty = true;
+                        transaction_aof.push((self.session.selected_db, argv.clone(), true));
                     }
                     self.strip_db_prefixes_from_frame(&mut reply);
                     results.push(reply);
@@ -52069,18 +52241,65 @@ replica_announced:1\r\n",
             // Mirror that threshold: a 1-write MULTI/EXEC must NOT emit a
             // spurious MULTI/EXEC frame on the replica / AOF, which would drift
             // the replication offset and the on-disk AOF bytes off upstream.
-            if transaction_aof.len() == 1 {
-                self.capture_aof_record(&transaction_aof[0]);
-            } else {
-                self.capture_aof_record(&[b"MULTI".to_vec()]);
-                for argv in &transaction_aof {
-                    self.capture_aof_record(argv);
+            // Each effect carries the db it ran in: a queued SELECT moves the
+            // rest of the transaction, and the stream must follow it.
+            let wrap = transaction_aof.len() > 1;
+            if wrap {
+                self.capture_aof_transaction_marker(b"MULTI");
+            }
+            for (db, argv, replication_only) in &transaction_aof {
+                if *replication_only {
+                    self.capture_replication_record_in_db(*db, argv);
+                } else {
+                    self.capture_aof_record_in_db(*db, argv);
                 }
-                self.capture_aof_record(&[b"EXEC".to_vec()]);
+            }
+            if wrap {
+                self.capture_aof_transaction_marker(b"EXEC");
             }
         }
 
         RespFrame::Array(Some(results))
+    }
+
+    /// Capture `argv` as executed in `db`, preceded by `SELECT db` when the stream is in
+    /// another db (upstream replicationFeedSlaves / feedAppendOnlyFile).
+    fn capture_aof_record_in_db(&mut self, db: usize, argv: &[Vec<u8>]) {
+        if self.suppress_propagation_capture {
+            return;
+        }
+        if self.server.aof_selected_db != db
+            && (Runtime::command_advances_replication_offset(argv)
+                || command_is_may_replicate_read(argv))
+        {
+            self.server
+                .capture_aof_record(&[b"SELECT".to_vec(), db.to_string().into_bytes()]);
+            self.server.aof_selected_db = db;
+        }
+        self.server.capture_aof_record(argv);
+    }
+
+    /// `capture_aof_record_in_db` for a replication-only record (PUBLISH).
+    fn capture_replication_record_in_db(&mut self, db: usize, argv: &[Vec<u8>]) {
+        if self.suppress_propagation_capture {
+            return;
+        }
+        if self.server.aof_selected_db != db {
+            self.server
+                .capture_aof_record(&[b"SELECT".to_vec(), db.to_string().into_bytes()]);
+            self.server.aof_selected_db = db;
+        }
+        self.server.capture_replication_only_record(argv);
+    }
+
+    /// The MULTI / EXEC that wraps a propagated transaction or script. Upstream propagates
+    /// them with dbid -1 ("we do not want to replicate SELECT. It'll be inserted together
+    /// with the next command (inside the multi)"), so the SELECT lands inside the MULTI.
+    fn capture_aof_transaction_marker(&mut self, marker: &[u8]) {
+        if self.suppress_propagation_capture {
+            return;
+        }
+        self.server.capture_aof_record(&[marker.to_vec()]);
     }
 
     fn handle_discard_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -65078,6 +65297,23 @@ mod tests {
     }
 
     #[test]
+    fn eval_write_is_refused_on_the_first_call_after_maxmemory_drops() {
+        // tests/unit/scripting.tcl "Script - disallow write on OOM": the first EVAL after
+        // `CONFIG SET maxmemory 1` must already see the OOM verdict.
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"filler", b"value"]), 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"maxmemory", b"1"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let reply = rt.execute_frame(command(&[b"EVAL", b"redis.call('set', 'x', 1)", b"0"]), 2);
+        assert!(
+            matches!(&reply, RespFrame::Error(e) if e.contains("command not allowed when used memory")),
+            "{reply:?}"
+        );
+    }
+
+    #[test]
     fn tracking_remembers_keys_a_script_reads_not_its_declared_keys() {
         // tests/unit/tracking.tcl "Tracking only occurs for scripts when a command
         // calls a read-only command": only the keys of READONLY inner commands count.
@@ -67468,6 +67704,90 @@ mod tests {
             rt.aof_records().len(),
             b2,
             "an effect-free MULTI/EXEC must propagate nothing"
+        );
+    }
+
+    #[test]
+    fn select_inside_multi_moves_the_rest_of_the_transaction_and_its_stream() {
+        // tests/unit/multi.tcl "MULTI / EXEC is propagated correctly (multiple commands with
+        // SELECT)": a queued SELECT moves the later queued commands -- both where they write
+        // and the SELECTs the stream carries, which land INSIDE the db-less MULTI.
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+        rt.execute_frame(command(&[b"SELECT", b"9"]), 0);
+        let from = rt.aof_records().len();
+        rt.execute_frame(command(&[b"MULTI"]), 1);
+        rt.execute_frame(command(&[b"SELECT", b"1"]), 1);
+        rt.execute_frame(command(&[b"SET", b"k1", b"v"]), 1);
+        rt.execute_frame(command(&[b"SELECT", b"2"]), 1);
+        rt.execute_frame(command(&[b"SET", b"k2", b"v"]), 1);
+        rt.execute_frame(command(&[b"EXEC"]), 1);
+        let stream: Vec<Vec<Vec<u8>>> = rt.aof_records()[from..]
+            .iter()
+            .map(|record| record.argv.clone())
+            .collect();
+        let expected: Vec<Vec<Vec<u8>>> = vec![
+            vec![b"MULTI".to_vec()],
+            vec![b"SELECT".to_vec(), b"1".to_vec()],
+            vec![b"SET".to_vec(), b"k1".to_vec(), b"v".to_vec()],
+            vec![b"SELECT".to_vec(), b"2".to_vec()],
+            vec![b"SET".to_vec(), b"k2".to_vec(), b"v".to_vec()],
+            vec![b"EXEC".to_vec()],
+        ];
+        assert_eq!(stream, expected);
+        // The session stays in the last SELECTed db, and each key is where it was written.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k2"]), 2),
+            RespFrame::BulkString(Some(b"v".to_vec()))
+        );
+        rt.execute_frame(command(&[b"SELECT", b"1"]), 2);
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k1"]), 2),
+            RespFrame::BulkString(Some(b"v".to_vec()))
+        );
+        rt.execute_frame(command(&[b"SELECT", b"9"]), 2);
+        assert_eq!(
+            rt.execute_frame(command(&[b"DBSIZE"]), 2),
+            RespFrame::Integer(0)
+        );
+    }
+
+    #[test]
+    fn a_rejected_exec_aborts_and_discards_the_transaction() {
+        // tests/unit/multi.tcl "exec with write commands and state change": rejectCommand on
+        // EXEC is execCommandAbort -- EXECABORT wrapping the reason, transaction discarded.
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"xx", b"1"]), 0);
+        rt.execute_frame(command(&[b"MULTI"]), 1);
+        rt.execute_frame(command(&[b"INCR", b"xx"]), 1);
+        // Another client changes the server state after the INCR was queued.
+        let other = rt.new_session();
+        let in_multi = rt.swap_session(other);
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"min-replicas-to-write", b"2"]),
+            1,
+        );
+        let other = rt.swap_session(in_multi);
+        rt.record_client_session(&other);
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 2),
+            RespFrame::Error(
+                "EXECABORT Transaction discarded because of: NOREPLICAS Not enough good replicas \
+                 to write."
+                    .to_string()
+            )
+        );
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"min-replicas-to-write", b"0"]),
+            3,
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"xx"]), 3),
+            RespFrame::BulkString(Some(b"1".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 3),
+            RespFrame::Error("ERR EXEC without MULTI".to_string())
         );
     }
 

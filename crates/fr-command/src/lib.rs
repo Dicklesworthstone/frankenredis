@@ -2513,8 +2513,11 @@ pub fn dispatch_argv(
     // lookup, and arity is then resolved only for the commands actually about to be refused.
     // That matters here specifically: the per-inner-call cost of the script path is what
     // frankenredis-kbyhy is measuring.
+    // `DEBUG SET-DISABLE-DENY-SCRIPTS 1` lifts it (script.c:529 tests
+    // `server.script_disable_deny_script` first).
     if store.script_nesting_level >= 1
         && command_is_noscript(argv)
+        && !store.script_disable_deny_scripts
         && check_full_command_arity(argv).is_ok()
     {
         return Err(script_noscript_command_error());
@@ -10370,9 +10373,11 @@ fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                 return Err(CommandError::WrongArity("XREAD"));
             }
             if store.script_nesting_level >= 1 {
-                return Err(CommandError::Custom(
-                    "XREAD command is not allowed with BLOCK option from scripts".to_string(),
-                ));
+                // Upstream formats the name as the script spelled it (argv[0]).
+                return Err(CommandError::Custom(format!(
+                    "{} command is not allowed with BLOCK option from scripts",
+                    String::from_utf8_lossy(&argv[0])
+                )));
             }
             // Validate the timeout but ignore it (non-blocking only)
             let _deadline_ms = parse_blocking_deadline_milliseconds(&argv[idx + 1], now_ms)?;
@@ -10538,9 +10543,10 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
                 return Err(CommandError::WrongArity("XREADGROUP"));
             }
             if store.script_nesting_level >= 1 {
-                return Err(CommandError::Custom(
-                    "XREADGROUP command is not allowed with BLOCK option from scripts".to_string(),
-                ));
+                return Err(CommandError::Custom(format!(
+                    "{} command is not allowed with BLOCK option from scripts",
+                    String::from_utf8_lossy(&argv[0])
+                )));
             }
             // Validate the timeout but ignore it (non-blocking only)
             let _deadline_ms = parse_blocking_deadline_milliseconds(&argv[idx + 1], now_ms)?;
@@ -14631,6 +14637,7 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                 store,
                 now_ms,
                 &callbacks,
+                argv,
                 func_name.as_bytes(),
                 keys_vec,
                 args_vec,
@@ -20229,6 +20236,21 @@ pub fn check_full_command_arity(argv: &[Vec<u8>]) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// The rejection upstream `processCommand` gives an unknown command or a wrong arity, which it
+/// checks before the busy-script gate; `None` when the command exists with a valid arity.
+/// The server's busy-script hook answers with this before it considers `-BUSY`.
+#[must_use]
+pub fn unknown_or_arity_rejection(argv: &[Vec<u8>]) -> Option<RespFrame> {
+    if argv.is_empty() {
+        return None;
+    }
+    match check_full_command_arity(argv) {
+        Ok(()) => None,
+        Err("") => Some(unknown_command_error_from_argv(argv).to_resp()),
+        Err(name) => Some(CommandError::WrongArity(name).to_resp()),
+    }
+}
+
 /// Return the flags string for a given command name.
 #[must_use]
 pub fn get_command_flags(name: &[u8]) -> Option<&'static str> {
@@ -21015,6 +21037,18 @@ fn dispatch_acl_channel_permission_error_for_argv(
     }
 
     None
+}
+
+/// `redis.acl_check_cmd`: may the calling client's user run `argv` (command, subcommand and
+/// keys)? Upstream asks ACLCheckAllUserCommandPerm for the script's original client.
+pub(crate) fn dispatch_acl_allows_argv(argv: &[Vec<u8>], store: &Store) -> bool {
+    store
+        .dispatch_client_ctx
+        .acl_permissions
+        .as_ref()
+        .is_none_or(|permissions| {
+            dispatch_acl_permission_error_for_argv(argv, permissions).is_none()
+        })
 }
 
 fn dispatch_acl_permission_error_for_argv(

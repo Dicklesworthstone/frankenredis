@@ -7455,6 +7455,9 @@ pub struct Store {
     pub script_nesting_level: usize,
     /// `DEBUG SET-DISABLE-DENY-SCRIPTS`: lets NOSCRIPT commands (DEBUG) run from scripts.
     pub script_disable_deny_scripts: bool,
+    /// `busy-reply-threshold` (alias `lua-time-limit`) in ms, synced from the server config:
+    /// how long a script runs before the busy hook starts serving other clients.
+    pub busy_reply_threshold_ms: u64,
     /// Whether the current script/function execution context forbids writes.
     pub script_read_only: bool,
     /// Does the running script or function carry upstream's `allow-oom` flag?
@@ -7810,6 +7813,49 @@ pub fn encode_db_key(db: usize, key: &[u8]) -> Vec<u8> {
     encoded
 }
 
+/// What a long-running ("busy") script tells the server's busy hook, and what the hook
+/// answers. Upstream re-enters the event loop from the Lua count hook once a script runs past
+/// `busy-reply-threshold` (script.c scriptInterrupt -> processEventsWhileBlocked): other
+/// clients get `-BUSY`, and `SCRIPT KILL` / `FUNCTION KILL` / `SHUTDOWN NOSAVE` are served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BusyScriptState<'a> {
+    /// EVAL-family script (`SCRIPT KILL`) rather than a FUNCTION (`FUNCTION KILL`).
+    pub is_eval: bool,
+    /// The script already ran a write: upstream refuses to kill it (`-UNKILLABLE`).
+    pub wrote: bool,
+    /// The client running the script, which the hook must leave alone.
+    pub client_id: u64,
+    /// Set by the hook when a matching KILL was accepted.
+    pub killed: bool,
+    /// The running FUNCTION's name (empty for EVAL), for `FUNCTION STATS`.
+    pub function_name: &'a [u8],
+    /// The caller's command as it was dispatched (key arguments still db-namespaced), for
+    /// `FUNCTION STATS`.
+    pub command: &'a [Vec<u8>],
+    /// How long the script has run, for `FUNCTION STATS`.
+    pub duration_ms: u64,
+    /// Loaded libraries and functions, for `FUNCTION STATS`.
+    pub libraries_count: usize,
+    pub functions_count: usize,
+}
+
+/// The server's busy-script hook. Plain `fn` so it can live in a process-wide slot: it is
+/// called from inside the interpreter, where nothing of the server's own state is reachable.
+pub type BusyScriptHook = fn(&mut BusyScriptState<'_>);
+
+static BUSY_SCRIPT_HOOK: std::sync::OnceLock<BusyScriptHook> = std::sync::OnceLock::new();
+
+/// Install the busy-script hook (the server binary does this once at startup). Without one,
+/// scripts keep the interpreter's iteration cap as their only bound.
+pub fn register_busy_script_hook(hook: BusyScriptHook) {
+    let _ = BUSY_SCRIPT_HOOK.set(hook);
+}
+
+#[must_use]
+pub fn busy_script_hook() -> Option<BusyScriptHook> {
+    BUSY_SCRIPT_HOOK.get().copied()
+}
+
 /// Append the physical namespace prefix of `db` to `out` (nothing for db 0), so a
 /// caller assembling a key in a reusable buffer gets `encode_db_key`'s bytes once
 /// it appends the logical key.
@@ -8035,6 +8081,7 @@ impl Default for Store {
             aof_enabled: false,
             script_nesting_level: 0,
             script_disable_deny_scripts: false,
+            busy_reply_threshold_ms: 5000,
             script_read_only: false,
             script_allow_oom: false,
             is_read_only_replica: false,

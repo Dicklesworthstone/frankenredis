@@ -3573,6 +3573,10 @@ const MAX_CALL_DEPTH: usize = 768;
 /// the interpreter heap without bound.
 const MAX_HEAP_CALL_CONTINUATIONS: usize = 19_998;
 const MAX_ITERATIONS: u64 = 1_000_000;
+/// Statements between two runs of `LuaState::script_must_stop`.
+const SCRIPT_STOP_CHECK_INTERVAL: u64 = 1024;
+/// function_lua.c LOAD_TIMEOUT_MS.
+const FUNCTION_LOAD_TIMEOUT_MS: u64 = 500;
 const LUA_EXACT_INTEGER_LIMIT: i128 = 1_i128 << 53;
 const LUA_YIELD_SENTINEL: &str = "__frankenredis_lua_coroutine_yield__";
 /// Sentinel error string emitted by `error()` when the argument is a
@@ -3732,6 +3736,31 @@ pub struct LuaState<'a> {
     /// `lua_frame_kinds[len - N].1`.
     lua_frame_kinds: Vec<(bool, u32)>,
     iterations: u64,
+    /// The `iterations` value at which the next stop check runs (`script_must_stop`).
+    /// Checking every 1024 statements keeps the clock off the per-statement path.
+    next_check_at: u64,
+    /// Without a server busy hook (library use, unit tests) a script stays bounded by
+    /// `MAX_ITERATIONS`; under the server it is unbounded like upstream, which never ends a
+    /// script on its own and instead serves `SCRIPT KILL` / `SHUTDOWN NOSAVE` while it runs.
+    iteration_limit: u64,
+    /// Read lazily at the first check, so a script shorter than one check interval never
+    /// touches the clock.
+    busy_started_at: Option<Instant>,
+    busy_last_hook_at: Option<Instant>,
+    /// A KILL was accepted. Every later statement fails, so `pcall` cannot swallow the kill
+    /// (upstream re-arms its count hook to fire on every line for the same reason).
+    killed: bool,
+    /// What the failing stop check reports.
+    stop_error: String,
+    /// EVAL-family script (killable by SCRIPT KILL) vs FUNCTION (FUNCTION KILL).
+    is_eval_script: bool,
+    /// The FUNCTION being run and the FCALL that called it, which `FUNCTION STATS` reports
+    /// while the function is busy. Empty for EVAL.
+    busy_function_name: &'a [u8],
+    busy_command: &'a [Vec<u8>],
+    /// FUNCTION LOAD runs the library body under a hard 500 ms limit (function_lua.c
+    /// luaEngineLoadHook, "FUNCTION LOAD timeout"), with no busy handling.
+    load_deadline: Option<Instant>,
     rng_seed: u64,
     /// (frankenredis-lwj8o) Lua math.random must produce values
     /// bit-compatible with vendored Redis 7.2.4. Vendored Redis overrides
@@ -5437,6 +5466,7 @@ pub(crate) fn function_call_registered(
     store: &mut Store,
     now_ms: u64,
     callbacks: &RegisteredCallbacks,
+    command: &[Vec<u8>],
     function_name: &[u8],
     keys: Vec<Vec<u8>>,
     args: Vec<Vec<u8>>,
@@ -5474,7 +5504,7 @@ pub(crate) fn function_call_registered(
     // and the common call, which uses the registered casing, settles on the cheap compare.
     // The insensitive test alone measured +93.5 instr/op on fcall_lib1_pad and +113.2 on
     // fcall_lib32 against exact bytes, both far outside their A/A bands.
-    let Some((_, callback)) = callbacks.iter().find(|(name, _)| {
+    let Some((registered_name, callback)) = callbacks.iter().find(|(name, _)| {
         name.as_slice() == function_name || name.eq_ignore_ascii_case(function_name)
     }) else {
         // Upstream functions.c:630 replies "Function not found"; fr's FCALL surface already
@@ -5509,6 +5539,7 @@ pub(crate) fn function_call_registered(
             .collect()
     };
     let mut state = LuaState::new(store, now_ms);
+    state.mark_function_call(registered_name, command);
     // (frankenredis-kbyhy) THE SANDBOX LOCK IS NOT INHERITED FROM THE LOAD, and forgetting it is
     // the one way this cache could turn a perf lever into a hole. `execute_compiled` sets
     // `globals_locked` as its first act, so on the old re-execute-per-call path every FCALL was
@@ -5650,7 +5681,82 @@ impl<'a> LuaState<'a> {
     /// (frankenredis-o500d) A state whose sandbox exposes `redis.register_function`, for
     /// executing a library body at load time. Not for EVAL.
     pub(crate) fn new_for_function_load(store: &'a mut Store, now_ms: u64) -> Self {
-        Self::with_globals(store, now_ms, lua_function_load_globals())
+        let mut state = Self::with_globals(store, now_ms, lua_function_load_globals());
+        state.is_eval_script = false;
+        state.load_deadline =
+            Some(Instant::now() + std::time::Duration::from_millis(FUNCTION_LOAD_TIMEOUT_MS));
+        // The load body is bounded by its own deadline, never by the busy hook.
+        state.iteration_limit = u64::MAX;
+        state
+    }
+
+    /// Mark this state as running a FUNCTION (FUNCTION KILL, not SCRIPT KILL, stops it).
+    pub(crate) fn mark_function_call(&mut self, function_name: &'a [u8], command: &'a [Vec<u8>]) {
+        self.is_eval_script = false;
+        self.busy_function_name = function_name;
+        self.busy_command = command;
+    }
+
+    /// The periodic stop test behind every interpreter iteration check: the iteration cap
+    /// (only without a busy hook), FUNCTION LOAD's 500 ms limit, and -- once the script has
+    /// run past `busy-reply-threshold` -- the server's busy hook, which answers other clients
+    /// (upstream scriptInterrupt -> processEventsWhileBlocked) and may accept a KILL.
+    #[cold]
+    #[inline(never)]
+    fn script_must_stop(&mut self) -> bool {
+        if self.killed {
+            return true;
+        }
+        if self.iterations > self.iteration_limit {
+            self.stop_error = "script exceeded maximum iteration count".to_string();
+            return true;
+        }
+        self.next_check_at = self.iterations.saturating_add(SCRIPT_STOP_CHECK_INTERVAL);
+        if let Some(deadline) = self.load_deadline {
+            if Instant::now() >= deadline {
+                self.killed = true;
+                self.next_check_at = 0;
+                self.stop_error = "FUNCTION LOAD timeout".to_string();
+                return true;
+            }
+            return false;
+        }
+        let Some(hook) = fr_store::busy_script_hook() else {
+            return false;
+        };
+        let started = *self.busy_started_at.get_or_insert_with(Instant::now);
+        if started.elapsed().as_millis() < u128::from(self.store.busy_reply_threshold_ms) {
+            return false;
+        }
+        // Serve other clients at most every couple of milliseconds; between visits the
+        // script keeps the CPU.
+        if self
+            .busy_last_hook_at
+            .is_some_and(|last| last.elapsed() < std::time::Duration::from_millis(2))
+        {
+            return false;
+        }
+        let (libraries_count, functions_count) = self.store.function_stats();
+        let mut busy = fr_store::BusyScriptState {
+            is_eval: self.is_eval_script,
+            wrote: self.script_wrote,
+            client_id: self.store.dispatch_client_ctx.client_id,
+            killed: false,
+            function_name: self.busy_function_name,
+            command: self.busy_command,
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            libraries_count,
+            functions_count,
+        };
+        hook(&mut busy);
+        self.busy_last_hook_at = Some(Instant::now());
+        if busy.killed {
+            self.killed = true;
+            self.next_check_at = 0;
+            self.stop_error = "Script killed by user with SCRIPT KILL...".to_string();
+            return true;
+        }
+        false
     }
 
     /// Registrations made by the body executed on this state, in call order.
@@ -5743,6 +5849,20 @@ impl<'a> LuaState<'a> {
             intrinsic_redis_cache: None,
             arg_scratch: Vec::new(),
             iterations: 0,
+            next_check_at: SCRIPT_STOP_CHECK_INTERVAL,
+            iteration_limit: if fr_store::busy_script_hook().is_some() {
+                u64::MAX
+            } else {
+                MAX_ITERATIONS
+            },
+            busy_started_at: None,
+            busy_last_hook_at: None,
+            killed: false,
+            stop_error: String::new(),
+            is_eval_script: true,
+            busy_function_name: &[],
+            busy_command: &[],
+            load_deadline: None,
             current_line: 1,
             rng_seed,
             lua_random,
@@ -5924,8 +6044,8 @@ impl<'a> LuaState<'a> {
         for (line, stmt) in stmts {
             self.current_line = *line;
             self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
-                outcome = Err("script exceeded maximum iteration count".to_string());
+            if self.iterations >= self.next_check_at && self.script_must_stop() {
+                outcome = Err(self.stop_error.clone());
                 break;
             }
             match self.exec_stmt(stmt, env, varargs) {
@@ -6023,8 +6143,8 @@ impl<'a> LuaState<'a> {
 
         loop {
             self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
-                return Err("script exceeded maximum iteration count".to_string());
+            if self.iterations >= self.next_check_at && self.script_must_stop() {
+                return Err(self.stop_error.clone());
             }
             let mut iter_args = vec![state.clone(), control.clone()];
             let results = self.call_function(&iter_fn, &mut iter_args, env, varargs)?;
@@ -6101,8 +6221,8 @@ impl<'a> LuaState<'a> {
         for (offset, (line, stmt)) in body.iter().enumerate().skip(start_pc) {
             self.current_line = *line;
             self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
-                outcome = Err("script exceeded maximum iteration count".to_string());
+            if self.iterations >= self.next_check_at && self.script_must_stop() {
+                outcome = Err(self.stop_error.clone());
                 break;
             }
             if let Stmt::Expression(expr) = stmt
@@ -6338,7 +6458,7 @@ impl<'a> LuaState<'a> {
         };
 
         if let Some(acc_int) = Self::exact_lua_integer(acc) {
-            let remaining_iterations = MAX_ITERATIONS.saturating_sub(self.iterations);
+            let remaining_iterations = self.iteration_limit.saturating_sub(self.iterations);
             if let Some((trips, consumed_iterations, delta)) = Self::numeric_for_closed_form_delta(
                 addend,
                 current,
@@ -6360,20 +6480,20 @@ impl<'a> LuaState<'a> {
 
         loop {
             self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
+            if self.iterations >= self.next_check_at && self.script_must_stop() {
                 *acc_cell.borrow_mut() = LuaValue::Number(acc);
                 env.pop_scope();
-                return Some(Err("script exceeded maximum iteration count".to_string()));
+                return Some(Err(self.stop_error.clone()));
             }
             if (step > 0.0 && current > stop) || (step < 0.0 && current < stop) {
                 break;
             }
             self.current_line = body_line;
             self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
+            if self.iterations >= self.next_check_at && self.script_must_stop() {
                 *acc_cell.borrow_mut() = LuaValue::Number(acc);
                 env.pop_scope();
-                return Some(Err("script exceeded maximum iteration count".to_string()));
+                return Some(Err(self.stop_error.clone()));
             }
             acc += addend.value(current);
             current += step;
@@ -6407,8 +6527,8 @@ impl<'a> LuaState<'a> {
     ) -> Result<ControlFlow, String> {
         loop {
             self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
-                return Err("script exceeded maximum iteration count".to_string());
+            if self.iterations >= self.next_check_at && self.script_must_stop() {
+                return Err(self.stop_error.clone());
             }
             // (CrimsonHawk 7lmle) A bare `coroutine.yield(...)` loop
             // condition suspends here; on resume the yielded value is the
@@ -6455,8 +6575,8 @@ impl<'a> LuaState<'a> {
     ) -> Result<ControlFlow, String> {
         loop {
             self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
-                return Err("script exceeded maximum iteration count".to_string());
+            if self.iterations >= self.next_check_at && self.script_must_stop() {
+                return Err(self.stop_error.clone());
             }
             env.push_scope();
             let cf = self.exec_stmts(body, env, varargs)?;
@@ -6604,11 +6724,11 @@ impl<'a> LuaState<'a> {
         let mut scope_open = false;
         loop {
             self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
+            if self.iterations >= self.next_check_at && self.script_must_stop() {
                 if scope_open {
                     env.pop_scope();
                 }
-                return Err("script exceeded maximum iteration count".to_string());
+                return Err(self.stop_error.clone());
             }
             if (st > 0.0 && i > e) || (st < 0.0 && i < e) {
                 break;
@@ -8516,8 +8636,8 @@ impl<'a> LuaState<'a> {
         for (offset, (line, stmt)) in stmts.iter().enumerate().skip(start_pc) {
             self.current_line = *line;
             self.iterations += 1;
-            if self.iterations > MAX_ITERATIONS {
-                return Err("script exceeded maximum iteration count".to_string());
+            if self.iterations >= self.next_check_at && self.script_must_stop() {
+                return Err(self.stop_error.clone());
             }
             match self.exec_stmt(stmt, env, varargs) {
                 Ok(ControlFlow::None) => {}
@@ -9118,7 +9238,15 @@ impl<'a> LuaState<'a> {
             LuaValue::Str(b"__newindex".to_vec()),
             LuaValue::RustFunction(std::rc::Rc::from("__fr_g_readonly_newindex")),
         );
-        g_table.inner.borrow_mut().metatable = Some(mt);
+        // luaSetTableProtectionRecursively protects the globals table AND its metatable, so
+        // `setmetatable(_G, {})` and `getmetatable(_G).__index = {}` both raise "Attempt to
+        // modify a readonly table".
+        mt.inner.borrow_mut().readonly = true;
+        {
+            let mut inner = g_table.inner.borrow_mut();
+            inner.metatable = Some(mt);
+            inner.readonly = true;
+        }
         self.globals
             .insert("_G".to_string(), LuaValue::Table(g_table.clone()));
         g_table
@@ -10081,9 +10209,31 @@ impl<'a> LuaState<'a> {
                 if !crate::is_known_command(&cmd_bytes) {
                     return Err("ERR Invalid command passed to redis.acl_check_cmd()".to_string());
                 }
-                // Standalone mode without per-call ACL gating: assume
-                // the command is allowed.
-                Ok(vec![LuaValue::Bool(true)])
+                // The remaining arguments coerce like the command name; the
+                // check covers the command, its subcommand and its keys.
+                let mut argv = Vec::with_capacity(args.len());
+                argv.push(cmd_bytes);
+                for arg in &args[1..] {
+                    argv.push(match arg {
+                        LuaValue::Str(b) => b.clone(),
+                        LuaValue::Number(n) => {
+                            if *n == (*n as i64) as f64 && n.is_finite() {
+                                i64_to_ascii_bytes(*n as i64)
+                            } else {
+                                lua_number_to_string(*n).into_bytes()
+                            }
+                        }
+                        _ => {
+                            return Err(
+                                "ERR Lua redis lib command arguments must be strings or integers"
+                                    .to_string(),
+                            );
+                        }
+                    });
+                }
+                Ok(vec![LuaValue::Bool(crate::dispatch_acl_allows_argv(
+                    &argv, self.store,
+                ))])
             }
             "redis.debug" => {
                 // Redis emits debugger console output only when the Lua debugger is active.
@@ -11901,10 +12051,25 @@ impl<'a> LuaState<'a> {
             }
             // (frankenredis-dqbdr) Lua 5.1 string.dump serialises a
             // function to its bytecode form. fr's tree-walking
-            // interpreter has no bytecode representation, so the
-            // function is registered (so `type(string.dump)` returns
-            // 'function') but errors when invoked.
-            "string.dump" => Err("user_script:1: unable to dump given function".to_string()),
+            // interpreter has no bytecode, so a Lua function dumps to the
+            // bare Lua 5.1 binary-chunk header. Nothing can load it back --
+            // and nothing can upstream either: Redis refuses binary chunks,
+            // so `loadstring(string.dump(f))` fails to parse in both (the
+            // ESC byte is an unexpected symbol). A builtin has no bytecode in
+            // Lua 5.1 either: "unable to dump given function".
+            "string.dump" => match args.first() {
+                Some(LuaValue::Function(_)) => Ok(vec![LuaValue::Str(
+                    b"\x1bLuaQ\x00\x01\x04\x08\x04\x08\x00".to_vec(),
+                )]),
+                Some(LuaValue::RustFunction(_)) => {
+                    Err("user_script:1: unable to dump given function".to_string())
+                }
+                other => Err(self.format_builtin_argerror(
+                    "dump",
+                    1,
+                    &format!("function expected, got {}", lua_arg_got_label(other)),
+                )),
+            },
             "string.byte" => {
                 // (frankenredis-ii6en) Upstream string.byte applies
                 // luaL_optint to the optional i and j args, which
@@ -15127,6 +15292,21 @@ fn resp_to_lua(frame: &RespFrame, resp3: bool) -> LuaValue {
         RespFrame::BulkString(None) => null(),
         RespFrame::BulkString(Some(data)) => LuaValue::Str(data.clone()),
         RespFrame::Array(None) => null(),
+        // A reply preceded by an attribute or followed by an out-of-band push (DEBUG PROTOCOL
+        // attrib / push): the script sees only the reply, as upstream's
+        // redisProtocolToLuaType_Attribute skips the attribute.
+        RespFrame::Sequence(items)
+            if items
+                .iter()
+                .filter(|frame| !matches!(frame, RespFrame::Attribute(_) | RespFrame::Push(_)))
+                .count()
+                == 1 =>
+        {
+            items
+                .iter()
+                .find(|frame| !matches!(frame, RespFrame::Attribute(_) | RespFrame::Push(_)))
+                .map_or(LuaValue::Nil, |reply| resp_to_lua(reply, resp3))
+        }
         RespFrame::Array(Some(items)) | RespFrame::Push(items) | RespFrame::Sequence(items) => {
             let t = LuaTable::new();
             for (i, item) in items.iter().enumerate() {
@@ -15189,10 +15369,30 @@ fn resp_to_lua(frame: &RespFrame, resp3: bool) -> LuaValue {
                 LuaValue::Table(t)
             }
         }
-        // RESP3 Verbatim: Lua sees the body as a plain string (the "txt:"
-        // format tag is not surfaced — minor residual vs upstream's
-        // `{format=…, string=…}` table).
-        RespFrame::Verbatim(s) => LuaValue::Str(s.as_bytes().to_vec()),
+        // RESP3 Verbatim → `{verbatim_string = {format = "txt", string = …}}`
+        // (upstream redisProtocolToLuaType_VerbatimString). fr's Verbatim frame
+        // is always the "txt" format.
+        RespFrame::Verbatim(s) => {
+            if resp3 {
+                let inner = LuaTable::new();
+                inner.set(
+                    LuaValue::Str(b"string".to_vec()),
+                    LuaValue::Str(s.as_bytes().to_vec()),
+                );
+                inner.set(
+                    LuaValue::Str(b"format".to_vec()),
+                    LuaValue::Str(b"txt".to_vec()),
+                );
+                let t = LuaTable::new();
+                t.set(
+                    LuaValue::Str(b"verbatim_string".to_vec()),
+                    LuaValue::Table(inner),
+                );
+                LuaValue::Table(t)
+            } else {
+                LuaValue::Str(s.as_bytes().to_vec())
+            }
+        }
         // RESP3 Big Number → `{big_number = "<digits>"}`. (frankenredis-h2uga)
         RespFrame::BigNumber(s) => {
             let t = LuaTable::new();
@@ -15336,9 +15536,21 @@ fn lua_to_resp_at_depth(val: &LuaValue, resp3: bool, depth: u32) -> RespFrame {
             // prefix under RESP3.
             let map_field = t.get(&LuaValue::Str(b"map".to_vec()));
             if let LuaValue::Table(inner) = map_field {
-                let pairs = inner
-                    .hash_pairs()
+                // Every entry `lua_next` visits: the array part (keys 1..N, as
+                // `{map={[0]=false,[1]=true,[2]=false}}` stores 1 and 2) first, then
+                // the hash part.
+                let positional: Vec<(LuaValue, LuaValue)> = inner
+                    .inner
+                    .borrow()
+                    .array
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, value)| !matches!(value, LuaValue::Nil))
+                    .map(|(idx, value)| (LuaValue::Number((idx + 1) as f64), value.clone()))
+                    .collect();
+                let pairs = positional
                     .into_iter()
+                    .chain(inner.hash_pairs())
                     .map(|(k, v)| {
                         (
                             lua_to_resp_at_depth(&k, resp3, depth + 1),
@@ -15379,7 +15591,8 @@ fn lua_to_resp_at_depth(val: &LuaValue, resp3: bool, depth: u32) -> RespFrame {
                 for (k, _) in &inner_borrow.other_hash {
                     items.push(lua_to_resp_at_depth(k, resp3, depth + 1));
                 }
-                return RespFrame::Array(Some(items));
+                // A RESP3 Set (`~`); a RESP2 caller gets it downconverted to an Array.
+                return RespFrame::Set(Some(items));
             }
 
             // {double = x}: upstream script_lua.c::luaReplyToRedisReply
@@ -15419,13 +15632,17 @@ fn lua_to_resp_at_depth(val: &LuaValue, resp3: bool, depth: u32) -> RespFrame {
             // (which yields an empty array for a hint-only table).
             let vs_field = t.get(&LuaValue::Str(b"verbatim_string".to_vec()));
             if let LuaValue::Table(inner) = vs_field {
-                let fmt_ok = matches!(
-                    inner.get(&LuaValue::Str(b"format".to_vec())),
-                    LuaValue::Str(_)
-                );
+                let format = inner.get(&LuaValue::Str(b"format".to_vec()));
                 let str_field = inner.get(&LuaValue::Str(b"string".to_vec()));
-                if fmt_ok && let LuaValue::Str(s) = str_field {
-                    return RespFrame::BulkString(Some(s));
+                if let (LuaValue::Str(format), LuaValue::Str(s)) = (format, str_field) {
+                    // A "txt" verbatim is what fr's Verbatim frame carries (`=` on
+                    // RESP3, downconverted to a bulk string on RESP2); any other
+                    // format has no frame and falls back to the bulk payload.
+                    return match String::from_utf8(s) {
+                        Ok(text) if format == b"txt" => RespFrame::Verbatim(text),
+                        Ok(text) => RespFrame::BulkString(Some(text.into_bytes())),
+                        Err(raw) => RespFrame::BulkString(Some(raw.into_bytes())),
+                    };
                 }
             }
 
@@ -18122,6 +18339,14 @@ pub(crate) fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
         // RESP2 has no Boolean type; upstream addReplyBool downgrades to the
         // integer `:1` / `:0`. (frankenredis-0gz4g)
         RespFrame::Bool(b) => RespFrame::Integer(i64::from(b)),
+        RespFrame::Set(Some(items)) => RespFrame::Array(Some(
+            items
+                .into_iter()
+                .map(downconvert_lua_reply_to_resp2)
+                .collect(),
+        )),
+        RespFrame::Set(None) => RespFrame::Array(None),
+        RespFrame::Verbatim(text) => RespFrame::BulkString(Some(text.into_bytes())),
         other => other,
     }
 }
@@ -22701,12 +22926,12 @@ end
             other => panic!("expected Array for resp2 map hint, got {other:?}"),
         }
 
-        // {set = {1, 2, 3}} → Array of the inner array's values.
+        // {set = {1, 2, 3}} → a RESP3 Set (`~3`) of the inner table's keys.
         let frame = eval_script(b"return {set = {1, 2, 3}}", &[], &[], &mut store, 0)
             .expect("set hint should not error");
         assert_eq!(
             frame,
-            RespFrame::Array(Some(vec![
+            RespFrame::Set(Some(vec![
                 RespFrame::Integer(1),
                 RespFrame::Integer(2),
                 RespFrame::Integer(3),
@@ -22774,7 +22999,8 @@ end
         .expect("big_number hint with CR/LF resp2 should not error");
         assert_eq!(frame, RespFrame::BulkString(Some(b"12 34 56".to_vec())));
 
-        // {verbatim_string = {format='txt', string='hi'}} → BulkString of `string`.
+        // {verbatim_string = {format='txt', string='hi'}} → a RESP3 verbatim (`=6 txt:hi`);
+        // a RESP2 caller gets the bulk payload.
         let frame = eval_script(
             b"return {verbatim_string = {format='txt', string='hi'}}",
             &[],
@@ -22783,6 +23009,15 @@ end
             0,
         )
         .expect("verbatim_string hint should not error");
+        assert_eq!(frame, RespFrame::Verbatim("hi".to_string()));
+        let frame = eval_script(
+            b"return {verbatim_string = {format='txt', string='hi'}}",
+            &[],
+            &[],
+            &mut Store::new(),
+            0,
+        )
+        .expect("verbatim_string hint resp2 should not error");
         assert_eq!(frame, RespFrame::BulkString(Some(b"hi".to_vec())));
 
         // err and ok still take precedence over the type hints.

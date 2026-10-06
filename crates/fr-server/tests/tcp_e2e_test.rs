@@ -8041,3 +8041,61 @@ fn tcp_waitaof_appendfsync_no_keeps_local_ack_visible_across_bgrewriteaof() {
         "franken BGREWRITEAOF must surface the buffered AOF append as a local ack",
     );
 }
+
+/// tests/unit/scripting.tcl "Timedout read-only scripts can be killed by SCRIPT KILL" and
+/// unit/multi.tcl "MULTI and script timeout": past busy-reply-threshold a running script
+/// answers other clients -BUSY, serves MULTI and SCRIPT KILL, and a rejected command taints
+/// the transaction it was sent in.
+#[test]
+fn tcp_busy_script_answers_busy_and_can_be_killed() {
+    let port = reserve_port();
+    let _server = spawn_frankenredis(port, None);
+    let mut admin = connect_client(port);
+    let mut runner = connect_client(port);
+    let mut other = connect_client(port);
+    assert_eq!(
+        send_command(&mut admin, &[b"CONFIG", b"SET", b"lua-time-limit", b"10"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    runner
+        .write_all(&encode_command(&[b"EVAL", b"while true do end", b"0"]))
+        .expect("send busy script");
+    wait_until(
+        Duration::from_secs(10),
+        || matches!(send_command(&mut admin, &[b"PING"]), RespFrame::Error(ref e) if e.starts_with("BUSY")),
+        "the script never reported BUSY",
+    );
+    assert_eq!(
+        send_command(&mut other, &[b"MULTI"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert!(matches!(
+        send_command(&mut other, &[b"INCR", b"xx"]),
+        RespFrame::Error(ref e) if e.starts_with("BUSY")
+    ));
+    assert!(matches!(
+        send_command(&mut admin, &[b"FUNCTION", b"KILL"]),
+        RespFrame::Error(ref e) if e.starts_with("BUSY")
+    ));
+    assert_eq!(
+        send_command(&mut admin, &[b"SCRIPT", b"KILL"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert!(matches!(
+        read_response(&mut runner),
+        RespFrame::Error(ref e) if e.contains("killed by user")
+    ));
+    assert_eq!(
+        send_command(&mut admin, &[b"PING"]),
+        RespFrame::SimpleString("PONG".to_string())
+    );
+    // The INCR rejected while the script ran taints the transaction.
+    assert!(matches!(
+        send_command(&mut other, &[b"EXEC"]),
+        RespFrame::Error(ref e) if e.starts_with("EXECABORT")
+    ));
+    assert_eq!(
+        send_command(&mut other, &[b"PING", b"asdf"]),
+        RespFrame::BulkString(Some(b"asdf".to_vec()))
+    );
+}

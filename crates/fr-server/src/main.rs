@@ -563,7 +563,9 @@ struct ClientConnection {
     /// through `read`, `write`, `shutdown`, `as_raw_fd` or mio registration, all of which
     /// `ClientStream` forwards, so no call site changed.
     stream: ClientStream,
-    writer_stream: Option<StdTcpStream>,
+    /// The duplicated descriptor the writer handoff sends through. Shared (`Arc`) because the
+    /// busy-script hook reads and writes through it too.
+    writer_stream: Option<Arc<StdTcpStream>>,
     writer_in_flight_bytes: usize,
     uring_in_flight_bytes: usize,
     write_failed: bool,
@@ -636,6 +638,9 @@ struct ClientConnection {
     /// connection that only ever issues routed commands now pays one predictable
     /// boolean test instead of a header read and a probe on every packet.
     saw_generic_dispatch: bool,
+    /// `BUSY_HOOK_*` bits shared with this client's entry in the busy-script hook's
+    /// registry; see `publish_busy_hook_state`. `None` for a client the hook cannot reach.
+    busy_hook_state: Option<Arc<std::sync::atomic::AtomicU8>>,
 }
 
 /// Slots in [`ClientConnection::borrowed_route_miss_memo`]. A connection cycles
@@ -875,7 +880,7 @@ impl ClientConnection {
     /// sites and the test suite -- is unchanged.
     fn new_with_writer(
         stream: TcpStream,
-        writer_stream: Option<StdTcpStream>,
+        writer_stream: Option<Arc<StdTcpStream>>,
         session: ClientSession,
         now_ms: u64,
     ) -> Self {
@@ -902,7 +907,7 @@ impl ClientConnection {
     /// `2a4617295` a 1.4x unported win when a rule was implemented twice.
     fn from_client_stream(
         stream: ClientStream,
-        writer_stream: Option<StdTcpStream>,
+        writer_stream: Option<Arc<StdTcpStream>>,
         mut session: ClientSession,
         now_ms: u64,
     ) -> Self {
@@ -934,6 +939,7 @@ impl ClientConnection {
             shared_nothing_partition: None,
             borrowed_route_miss_memo: [0; BORROWED_ROUTE_MEMO_SLOTS],
             saw_generic_dispatch: false,
+            busy_hook_state: None,
         }
     }
 
@@ -997,11 +1003,591 @@ impl ClientConnection {
         }
         result
     }
+
+    /// Tell the busy-script hook whether it may answer this client while a script runs
+    /// (`BUSY_HOOK_*`). Answerable means nothing of the client's is buffered, in flight or
+    /// blocked, so a reply written straight to the socket lands in order. Published after
+    /// every read and write; a stale "not answerable" only makes the client wait for the
+    /// script like any other command would.
+    fn publish_busy_hook_state(&self) {
+        let Some(state) = &self.busy_hook_state else {
+            return;
+        };
+        let answerable = !self.closing
+            && self.blocked.is_none()
+            && self.read_buf.is_empty()
+            && self.large_set_read.is_none()
+            && self.owned_plain_sets.is_empty()
+            && !self.uring_read_active
+            && self.replication_sent_offset.is_none()
+            && !self.has_pending_output()
+            && self.sharded_replies.is_idle()
+            && self.session.busy_script_answerable();
+        let mut bits = 0;
+        if answerable {
+            bits = BUSY_HOOK_ANSWERABLE;
+            if self.session.resp_protocol_version() == 3 {
+                bits |= BUSY_HOOK_RESP3;
+            }
+            if self.session.in_transaction() {
+                bits |= BUSY_HOOK_IN_MULTI;
+            }
+        }
+        state.store(bits, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+// Busy scripts. Upstream re-enters the event loop from the Lua count hook once a script has
+// run past `busy-reply-threshold` (script.c scriptInterrupt -> processEventsWhileBlocked):
+// other clients are answered `-BUSY`, and SCRIPT KILL / FUNCTION KILL / SHUTDOWN NOSAVE /
+// MULTI / DISCARD / FUNCTION STATS are served. Here the interpreter calls
+// `serve_clients_during_busy_script` instead, which reads the idle clients' sockets itself
+// (the event loop is suspended inside the script and owns every connection), answers what it
+// can answer without the runtime, and leaves the rest -- unread bytes, unsent replies,
+// transaction changes -- for `settle_busy_hook_clients` to hand back once the script ends.
+
+/// `ClientConnection::busy_hook_state` bits.
+const BUSY_HOOK_ANSWERABLE: u8 = 1;
+const BUSY_HOOK_RESP3: u8 = 2;
+const BUSY_HOOK_IN_MULTI: u8 = 4;
+
+const BUSY_EVAL_ERROR: &str =
+    "BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.";
+const BUSY_FUNCTION_ERROR: &str =
+    "BUSY Redis is busy running a script. You can only call FUNCTION KILL or SHUTDOWN NOSAVE.";
+
+/// The hook's handle on a client socket. A TCP client shares the descriptor the writer
+/// handoff already duplicated, so the hook costs no descriptor of its own; a client without
+/// one (a Unix socket, or handoff unavailable) gets a duplicate.
+enum BusyHookSocket {
+    Tcp(Arc<StdTcpStream>),
+    #[cfg(unix)]
+    Unix(std::os::unix::net::UnixStream),
+}
+
+impl BusyHookSocket {
+    fn for_connection(conn: &ClientConnection) -> Option<Self> {
+        if let Some(writer) = &conn.writer_stream {
+            return Some(Self::Tcp(Arc::clone(writer)));
+        }
+        match &conn.stream {
+            ClientStream::Tcp(stream) => clone_writer_stream(stream)
+                .ok()
+                .map(|stream| Self::Tcp(Arc::new(stream))),
+            #[cfg(unix)]
+            ClientStream::Unix(stream) => stream
+                .as_fd()
+                .try_clone_to_owned()
+                .ok()
+                .map(|fd| Self::Unix(std::os::unix::net::UnixStream::from(fd))),
+        }
+    }
+
+    fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => (&**stream).read(buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => (&*stream).read(buf),
+        }
+    }
+
+    fn write(&self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => (&**stream).write(buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => (&*stream).write(buf),
+        }
+    }
+}
+
+struct BusyHookClient {
+    token: Token,
+    socket: BusyHookSocket,
+    /// Shared with `ClientConnection::busy_hook_state`.
+    state: Arc<std::sync::atomic::AtomicU8>,
+    /// Read but not answered: an incomplete frame, or everything from the first command the
+    /// hook cannot answer without the runtime. Becomes the front of the connection's input.
+    unread: Vec<u8>,
+    /// Replies the socket did not take; the connection sends them first.
+    unsent: Vec<u8>,
+    /// What MULTI / DISCARD / EXEC / UNWATCH / a rejection did to the transaction.
+    ops: Vec<fr_runtime::BusyScriptTransactionOp>,
+    /// The transaction state as the hook has advanced it during this script.
+    in_multi: bool,
+    /// The hook met a command it cannot answer: nothing more is read until the script ends.
+    held: bool,
+    eof: bool,
+    bytes_in: u64,
+    bytes_out: u64,
+    /// Read from (or found closed) during the current script.
+    touched: bool,
+}
+
+thread_local! {
+    /// Connections by client id, maintained by the event loop's thread -- the only thread
+    /// that runs scripts.
+    static BUSY_HOOK_CLIENTS: std::cell::RefCell<HashMap<u64, BusyHookClient>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Some client was touched and must be settled before the event loop reads again.
+    static BUSY_HOOK_UNSETTLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The pid file and Unix socket path, removed by a SHUTDOWN NOSAVE served mid-script.
+static BUSY_HOOK_SHUTDOWN_FILES: std::sync::OnceLock<(Option<String>, Option<String>)> =
+    std::sync::OnceLock::new();
+
+fn register_busy_hook_client(conn: &mut ClientConnection, token: Token) {
+    let Some(socket) = BusyHookSocket::for_connection(conn) else {
+        return;
+    };
+    let state = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    conn.busy_hook_state = Some(Arc::clone(&state));
+    conn.publish_busy_hook_state();
+    BUSY_HOOK_CLIENTS.with(|registry| {
+        registry.borrow_mut().insert(
+            conn.session.client_id,
+            BusyHookClient {
+                token,
+                socket,
+                state,
+                unread: Vec::new(),
+                unsent: Vec::new(),
+                ops: Vec::new(),
+                in_multi: false,
+                held: false,
+                eof: false,
+                bytes_in: 0,
+                bytes_out: 0,
+                touched: false,
+            },
+        );
+    });
+}
+
+fn unregister_busy_hook_client(client_id: u64) {
+    BUSY_HOOK_CLIENTS.with(|registry| {
+        registry.borrow_mut().remove(&client_id);
+    });
+}
+
+/// What the hook does with one command.
+enum BusyHookAnswer {
+    Reply(RespFrame),
+    /// Leave it, and everything after it, for the event loop once the script ends.
+    Hold,
+}
+
+/// The `fr_store` busy-script hook: called by the interpreter, on the event-loop thread,
+/// every couple of milliseconds once a script has run past `busy-reply-threshold`.
+fn serve_clients_during_busy_script(busy: &mut fr_store::BusyScriptState<'_>) {
+    BUSY_HOOK_CLIENTS.with(|registry| {
+        let Ok(mut registry) = registry.try_borrow_mut() else {
+            return;
+        };
+        let mut scratch = [0u8; 4096];
+        for (&client_id, client) in registry.iter_mut() {
+            if client_id == busy.client_id || client.eof {
+                continue;
+            }
+            if !client.unsent.is_empty() {
+                flush_busy_hook_output(client);
+            }
+            if client.held {
+                continue;
+            }
+            let state = client.state.load(std::sync::atomic::Ordering::Relaxed);
+            if state & BUSY_HOOK_ANSWERABLE == 0 {
+                continue;
+            }
+            let mut read_any = false;
+            loop {
+                match client.socket.read(&mut scratch) {
+                    Ok(0) => {
+                        client.eof = true;
+                        break;
+                    }
+                    Ok(n) => {
+                        client.unread.extend_from_slice(&scratch[..n]);
+                        client.bytes_in += n as u64;
+                        read_any = true;
+                        if n < scratch.len() {
+                            break;
+                        }
+                    }
+                    Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(_) => {
+                        client.eof = true;
+                        break;
+                    }
+                }
+            }
+            if !read_any && !client.eof {
+                continue;
+            }
+            if !client.touched {
+                client.touched = true;
+                client.in_multi = state & BUSY_HOOK_IN_MULTI != 0;
+            }
+            BUSY_HOOK_UNSETTLED.with(|unsettled| unsettled.set(true));
+            let resp3 = state & BUSY_HOOK_RESP3 != 0;
+            let mut consumed = 0;
+            let mut replies = Vec::new();
+            while consumed < client.unread.len() && !client.held {
+                let input = &client.unread[consumed..];
+                let parsed = if should_try_inline_parsing(input[0]) {
+                    match try_parse_inline(input) {
+                        Ok(InlineParseResult::Command(frame, used)) => Ok(Some((frame, used))),
+                        Ok(InlineParseResult::EmptyLine(used)) => {
+                            consumed += used;
+                            continue;
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    fr_protocol::parse_frame_with_config(input, &ParserConfig::default())
+                        .map(|parsed| Some((parsed.frame, parsed.consumed)))
+                };
+                let (frame, used) = match parsed {
+                    Ok(Some(parsed)) => parsed,
+                    Ok(None) | Err(RespParseError::Incomplete) => break,
+                    // A protocol error is the event loop's to report.
+                    Err(_) => {
+                        client.held = true;
+                        break;
+                    }
+                };
+                let Some(argv) = busy_hook_frame_argv(frame) else {
+                    client.held = true;
+                    break;
+                };
+                if argv.is_empty() {
+                    consumed += used;
+                    continue;
+                }
+                match answer_during_busy_script(&argv, busy, client, resp3) {
+                    BusyHookAnswer::Reply(reply) => {
+                        reply.encode_into(&mut replies);
+                        consumed += used;
+                    }
+                    BusyHookAnswer::Hold => client.held = true,
+                }
+            }
+            client.unread.drain(..consumed);
+            if !replies.is_empty() {
+                client.unsent.extend_from_slice(&replies);
+                flush_busy_hook_output(client);
+            }
+        }
+    });
+}
+
+fn busy_hook_frame_argv(frame: RespFrame) -> Option<Vec<Vec<u8>>> {
+    let RespFrame::Array(Some(items)) = frame else {
+        return None;
+    };
+    items
+        .into_iter()
+        .map(|item| match item {
+            RespFrame::BulkString(Some(bytes)) => Some(bytes),
+            _ => None,
+        })
+        .collect()
+}
+
+fn flush_busy_hook_output(client: &mut BusyHookClient) {
+    let mut written = 0;
+    while written < client.unsent.len() {
+        match client.socket.write(&client.unsent[written..]) {
+            Ok(0) => break,
+            Ok(n) => written += n,
+            Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    client.bytes_out += written as u64;
+    client.unsent.drain(..written);
+}
+
+/// One command from a client while a script is busy, in upstream processCommand's order:
+/// unknown command and arity first, then the busy gate, which lets only `CMD_ALLOW_BUSY`
+/// commands through.
+fn answer_during_busy_script(
+    argv: &[Vec<u8>],
+    busy: &mut fr_store::BusyScriptState<'_>,
+    client: &mut BusyHookClient,
+    resp3: bool,
+) -> BusyHookAnswer {
+    use fr_runtime::BusyScriptTransactionOp as Op;
+    let busy_error = if busy.is_eval {
+        BUSY_EVAL_ERROR
+    } else {
+        BUSY_FUNCTION_ERROR
+    };
+    let name = argv[0].as_slice();
+    let is_exec = name.eq_ignore_ascii_case(b"EXEC");
+    if let Some(rejection) = fr_command::unknown_or_arity_rejection(argv) {
+        // A rejected EXEC aborts the transaction (rejectCommand -> execCommandAbort); any
+        // other rejected command inside MULTI flags it.
+        if is_exec {
+            client.in_multi = false;
+            client.ops.push(Op::Discard);
+            return BusyHookAnswer::Reply(RespFrame::Error(
+                "EXECABORT Transaction discarded because of: wrong number of arguments for \
+                 'exec' command"
+                    .to_string(),
+            ));
+        }
+        if client.in_multi {
+            client.ops.push(Op::FlagAbort);
+        }
+        return BusyHookAnswer::Reply(rejection);
+    }
+    let sub = argv.get(1).map(Vec::as_slice).unwrap_or_default();
+    // Upstream's CMD_ALLOW_BUSY commands. EXEC is not one of them.
+    let allowed_while_busy = name.eq_ignore_ascii_case(b"MULTI")
+        || name.eq_ignore_ascii_case(b"DISCARD")
+        || name.eq_ignore_ascii_case(b"WATCH")
+        || name.eq_ignore_ascii_case(b"UNWATCH")
+        || name.eq_ignore_ascii_case(b"AUTH")
+        || name.eq_ignore_ascii_case(b"HELLO")
+        || name.eq_ignore_ascii_case(b"QUIT")
+        || name.eq_ignore_ascii_case(b"RESET")
+        || name.eq_ignore_ascii_case(b"REPLCONF")
+        || name.eq_ignore_ascii_case(b"SHUTDOWN")
+        || (name.eq_ignore_ascii_case(b"SCRIPT") && sub.eq_ignore_ascii_case(b"KILL"))
+        || (name.eq_ignore_ascii_case(b"FUNCTION")
+            && (sub.eq_ignore_ascii_case(b"KILL") || sub.eq_ignore_ascii_case(b"STATS")));
+    if !allowed_while_busy {
+        if is_exec {
+            client.in_multi = false;
+            client.ops.push(Op::Discard);
+            return BusyHookAnswer::Reply(RespFrame::Error(format!(
+                "EXECABORT Transaction discarded because of: {busy_error}"
+            )));
+        }
+        if client.in_multi {
+            client.ops.push(Op::FlagAbort);
+        }
+        return BusyHookAnswer::Reply(RespFrame::Error(busy_error.to_string()));
+    }
+    // Inside MULTI every allowed command but MULTI, DISCARD, WATCH, QUIT and RESET is
+    // QUEUED, which needs the runtime.
+    if client.in_multi
+        && !(name.eq_ignore_ascii_case(b"MULTI")
+            || name.eq_ignore_ascii_case(b"DISCARD")
+            || name.eq_ignore_ascii_case(b"WATCH"))
+    {
+        return BusyHookAnswer::Hold;
+    }
+    if name.eq_ignore_ascii_case(b"MULTI") {
+        if client.in_multi {
+            return BusyHookAnswer::Reply(RespFrame::Error(
+                "ERR MULTI calls can not be nested".to_string(),
+            ));
+        }
+        client.in_multi = true;
+        client.ops.push(Op::Multi);
+        return BusyHookAnswer::Reply(RespFrame::SimpleString("OK".to_string()));
+    }
+    if name.eq_ignore_ascii_case(b"DISCARD") {
+        if !client.in_multi {
+            return BusyHookAnswer::Reply(RespFrame::Error(
+                "ERR DISCARD without MULTI".to_string(),
+            ));
+        }
+        client.in_multi = false;
+        client.ops.push(Op::Discard);
+        return BusyHookAnswer::Reply(RespFrame::SimpleString("OK".to_string()));
+    }
+    if name.eq_ignore_ascii_case(b"UNWATCH") {
+        client.ops.push(Op::Unwatch);
+        return BusyHookAnswer::Reply(RespFrame::SimpleString("OK".to_string()));
+    }
+    if name.eq_ignore_ascii_case(b"WATCH") && client.in_multi {
+        return BusyHookAnswer::Reply(RespFrame::Error(
+            "ERR WATCH inside MULTI is not allowed".to_string(),
+        ));
+    }
+    if name.eq_ignore_ascii_case(b"SCRIPT") || name.eq_ignore_ascii_case(b"FUNCTION") {
+        if sub.eq_ignore_ascii_case(b"STATS") {
+            return BusyHookAnswer::Reply(busy_function_stats_reply(busy, busy_error, resp3));
+        }
+        // script.c scriptKill.
+        let kill_eval = name.eq_ignore_ascii_case(b"SCRIPT");
+        let reply = if busy.wrote {
+            RespFrame::Error(
+                "UNKILLABLE Sorry the script already executed write commands against the \
+                 dataset. You can either wait the script termination or kill the server in a \
+                 hard way using the SHUTDOWN NOSAVE command."
+                    .to_string(),
+            )
+        } else if kill_eval && !busy.is_eval {
+            RespFrame::Error(BUSY_FUNCTION_ERROR.to_string())
+        } else if !kill_eval && busy.is_eval {
+            RespFrame::Error(BUSY_EVAL_ERROR.to_string())
+        } else {
+            busy.killed = true;
+            RespFrame::SimpleString("OK".to_string())
+        };
+        return BusyHookAnswer::Reply(reply);
+    }
+    if name.eq_ignore_ascii_case(b"SHUTDOWN") {
+        let (mut nosave, mut save, mut abort) = (false, false, false);
+        for arg in &argv[1..] {
+            if arg.eq_ignore_ascii_case(b"NOSAVE") {
+                nosave = true;
+            } else if arg.eq_ignore_ascii_case(b"SAVE") {
+                save = true;
+            } else if arg.eq_ignore_ascii_case(b"ABORT") {
+                abort = true;
+            } else if !(arg.eq_ignore_ascii_case(b"NOW") || arg.eq_ignore_ascii_case(b"FORCE")) {
+                return BusyHookAnswer::Reply(RespFrame::Error("ERR syntax error".to_string()));
+            }
+        }
+        if (abort && argv.len() > 2) || (nosave && save) {
+            return BusyHookAnswer::Reply(RespFrame::Error("ERR syntax error".to_string()));
+        }
+        // shutdownCommand: only NOSAVE may stop a server whose script is busy.
+        if !nosave {
+            return BusyHookAnswer::Reply(RespFrame::Error(busy_error.to_string()));
+        }
+        if let Some((pidfile, unix_socket)) = BUSY_HOOK_SHUTDOWN_FILES.get() {
+            for path in [pidfile, unix_socket].into_iter().flatten() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        eprintln!("info: SHUTDOWN NOSAVE during a busy script, exiting");
+        std::process::exit(0);
+    }
+    // AUTH, HELLO, QUIT, RESET, REPLCONF and WATCH need the runtime.
+    BusyHookAnswer::Hold
+}
+
+/// functions.c functionStatsCommand while a script is busy.
+fn busy_function_stats_reply(
+    busy: &fr_store::BusyScriptState<'_>,
+    busy_error: &str,
+    resp3: bool,
+) -> RespFrame {
+    if busy.is_eval {
+        return RespFrame::Error(busy_error.to_string());
+    }
+    let bulk = |bytes: &[u8]| RespFrame::BulkString(Some(bytes.to_vec()));
+    let int = |n: u64| RespFrame::Integer(i64::try_from(n).unwrap_or(i64::MAX));
+    let command = RespFrame::Array(Some(
+        busy.command
+            .iter()
+            .map(|arg| match fr_store::decode_db_key(arg) {
+                Some((_, logical)) => bulk(logical),
+                None => bulk(arg),
+            })
+            .collect(),
+    ));
+    let pairs = |entries: Vec<(RespFrame, RespFrame)>| {
+        if resp3 {
+            RespFrame::Map(Some(entries))
+        } else {
+            RespFrame::Array(Some(
+                entries.into_iter().flat_map(|(k, v)| [k, v]).collect(),
+            ))
+        }
+    };
+    let running = pairs(vec![
+        (bulk(b"name"), bulk(busy.function_name)),
+        (bulk(b"command"), command),
+        (bulk(b"duration_ms"), int(busy.duration_ms)),
+    ]);
+    let lua = pairs(vec![
+        (bulk(b"libraries_count"), int(busy.libraries_count as u64)),
+        (bulk(b"functions_count"), int(busy.functions_count as u64)),
+    ]);
+    pairs(vec![
+        (bulk(b"running_script"), running),
+        (bulk(b"engines"), pairs(vec![(bulk(b"LUA"), lua)])),
+    ])
+}
+
+/// Hand what the busy hook left behind back to the connections: transaction changes, bytes
+/// read but not answered (processed before anything the socket delivers later), replies
+/// the socket did not take, and closed connections. Runs before the event loop reads from
+/// any client again.
+fn settle_busy_hook_clients(
+    clients: &mut ClientMap,
+    runtime: &mut Runtime,
+    poll: &mut Poll,
+    closing_tokens: &mut TokenSet,
+    write_tokens: &mut TokenSet,
+    deferred_tokens: &mut TokenSet,
+    writer_pool: Option<&WriterPool>,
+) {
+    if !BUSY_HOOK_UNSETTLED.with(std::cell::Cell::get) {
+        return;
+    }
+    BUSY_HOOK_UNSETTLED.with(|unsettled| unsettled.set(false));
+    let mut settled = Vec::new();
+    BUSY_HOOK_CLIENTS.with(|registry| {
+        for client in registry.borrow_mut().values_mut() {
+            if !client.touched && !client.held && client.unsent.is_empty() {
+                continue;
+            }
+            settled.push((
+                client.token,
+                std::mem::take(&mut client.ops),
+                std::mem::take(&mut client.unread),
+                std::mem::take(&mut client.unsent),
+                client.eof,
+                std::mem::take(&mut client.bytes_in),
+                std::mem::take(&mut client.bytes_out),
+            ));
+            client.touched = false;
+            client.held = false;
+        }
+    });
+    for (token, ops, unread, unsent, eof, bytes_in, bytes_out) in settled {
+        let Some(conn) = clients.get_mut(&token) else {
+            continue;
+        };
+        runtime.track_net_input_bytes(bytes_in);
+        runtime.track_net_output_bytes(bytes_out);
+        if !ops.is_empty() {
+            for op in ops {
+                conn.session.apply_busy_script_transaction_op(op);
+            }
+            runtime.record_client_session(&conn.session);
+        }
+        if !unread.is_empty() {
+            let mut input = unread;
+            input.extend_from_slice(&conn.read_buf);
+            conn.read_buf = input;
+            deferred_tokens.insert(token);
+        }
+        if !unsent.is_empty() {
+            conn.write_buf.extend_from_slice(&unsent);
+            drive_client_output(
+                token,
+                conn,
+                OutputDriveContext {
+                    runtime,
+                    poll,
+                    write_tokens,
+                    closing_tokens,
+                    writer_pool,
+                },
+                true,
+            );
+        }
+        if eof {
+            conn.closing = true;
+            closing_tokens.insert(token);
+        }
+        conn.publish_busy_hook_state();
+    }
 }
 
 struct WriterJob {
     token: Token,
-    stream: StdTcpStream,
+    stream: Arc<StdTcpStream>,
     bytes: Vec<u8>,
     /// Offset into `bytes` to start sending from: the leading `start` bytes were
     /// already written by the main loop's inline `try_flush` and must not be
@@ -1012,7 +1598,7 @@ struct WriterJob {
 
 struct WriterCompletion {
     token: Token,
-    stream: StdTcpStream,
+    stream: Arc<StdTcpStream>,
     bytes: Vec<u8>,
     status: WriterCompletionStatus,
 }
@@ -1070,7 +1656,7 @@ impl WriterPool {
     fn try_enqueue(
         &self,
         token: Token,
-        stream: StdTcpStream,
+        stream: Arc<StdTcpStream>,
         bytes: Vec<u8>,
         start: usize,
     ) -> Result<(), mpsc::TrySendError<WriterJob>> {
@@ -4209,7 +4795,7 @@ fn reap_shared_nothing_connections(
 fn flush_writer_job(job: WriterJob) -> WriterCompletion {
     let WriterJob {
         token,
-        mut stream,
+        stream,
         mut bytes,
         start,
     } = job;
@@ -4218,7 +4804,7 @@ fn flush_writer_job(job: WriterJob) -> WriterCompletion {
     let mut status = WriterCompletionStatus::Drained;
 
     while total_written < bytes.len() {
-        match stream.write(&bytes[total_written..]) {
+        match (&*stream).write(&bytes[total_written..]) {
             Ok(0) => {
                 status = WriterCompletionStatus::Failed(io::Error::new(
                     ErrorKind::WriteZero,
@@ -5384,6 +5970,10 @@ fn main() -> ExitCode {
     if let Some(path) = unix_socket_path.as_deref() {
         eprintln!("info: listening on unix socket {path}");
     }
+    // Scripts run unbounded under the server, as upstream's do, and serve other clients
+    // once they pass busy-reply-threshold.
+    let _ = BUSY_HOOK_SHUTDOWN_FILES.set((pidfile_path.clone(), unix_socket_path.clone()));
+    fr_store::register_busy_script_hook(serve_clients_during_busy_script);
 
     eprintln!(
         "FrankenRedis v{} ready (mode={mode_str}, port={port}, command_execution_threads={})",
@@ -5442,6 +6032,17 @@ fn main() -> ExitCode {
     let mut sentinel_peer_links: HashMap<String, SentinelPeerLink> = HashMap::new();
 
     loop {
+        // Bytes a busy script's hook read and could not answer wait in `deferred_tokens`,
+        // which keeps the poll below from sleeping on them.
+        settle_busy_hook_clients(
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut deferred_tokens,
+            writer_pool.as_ref(),
+        );
         // Use fr-eventloop's tick planner to determine poll timeout.
         let has_blocked = !blocked_tokens.is_empty();
         // (frankenredis) Clients deferred by CLIENT PAUSE must be released when
@@ -5669,6 +6270,16 @@ fn main() -> ExitCode {
             &mut sharded_staging,
         );
 
+        settle_busy_hook_clients(
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut deferred_tokens,
+            writer_pool.as_ref(),
+        );
+
         // (frankenredis-w1djx) Bracket the periodic maintenance so INFO's `# Debug` can report
         // `eventloop_duration_cron_sum` from real data. Upstream times ONE function,
         // `serverCron`; fr has no such function and spreads the same work across the three
@@ -5879,6 +6490,7 @@ fn main() -> ExitCode {
                 sharded_deferred_tokens.remove(&token);
                 runtime.mark_client_unblocked(conn.session.client_id);
                 client_id_to_token.remove(&conn.session.client_id);
+                unregister_busy_hook_client(conn.session.client_id);
                 // Clean up Pub/Sub subscriptions and stats for this client.
                 runtime.pubsub_cleanup_client(conn.session.client_id);
                 runtime.remove_client_session(conn.session.client_id);
@@ -6271,12 +6883,13 @@ fn bind_unix_listener(path: &str, perm: u32) -> Result<mio::net::UnixListener, S
 /// and the writer-handoff clone are TCP-only -- but everything below is not, and duplicating it per
 /// family is how two paths silently stop agreeing about what a client is.
 fn admit_client(
-    conn: ClientConnection,
+    mut conn: ClientConnection,
     conn_handle: Token,
     clients: &mut ClientMap,
     client_id_to_token: &mut HashMap<u64, Token>,
     runtime: &mut Runtime,
 ) {
+    register_busy_hook_client(&mut conn, conn_handle);
     let client_id = conn.session.client_id;
     runtime.record_client_session(&conn.session);
     clients.insert(conn_handle, conn);
@@ -6473,7 +7086,7 @@ fn accept_connections(
                 }
                 let writer_stream = if writer_handoff_enabled {
                     match clone_writer_stream(&stream) {
-                        Ok(writer_stream) => Some(writer_stream),
+                        Ok(writer_stream) => Some(Arc::new(writer_stream)),
                         Err(e) => {
                             eprintln!("warn: writer handoff unavailable for client: {e}");
                             None
@@ -7261,6 +7874,16 @@ fn handle_readable(
     // so stale bytes past `n` are never observed — behaviour is identical.
     read_scratch: &mut [u8],
 ) {
+    // A busy script may have read from this socket already; its bytes come first.
+    settle_busy_hook_clients(
+        clients,
+        runtime,
+        poll,
+        closing_tokens,
+        write_tokens,
+        deferred_tokens,
+        writer_pool,
+    );
     let Some(conn) = clients.get_mut(&token) else {
         return;
     };
@@ -7536,6 +8159,7 @@ fn handle_readable(
             !budget_exhausted,
         );
     }
+    conn.publish_busy_hook_state();
 }
 
 fn record_deferred_buffered_token(
@@ -37768,6 +38392,7 @@ fn process_deferred_buffered_clients(ctx: DeferredBufferedClientsContext<'_>) {
             },
             false,
         );
+        conn.publish_busy_hook_state();
     }
 }
 
@@ -38724,6 +39349,7 @@ fn drain_writer_completions(
                 closing_tokens.insert(completion.token);
             }
         }
+        conn.publish_busy_hook_state();
     }
 }
 
@@ -38767,6 +39393,7 @@ fn handle_writable(
         },
         true,
     );
+    conn.publish_busy_hook_state();
 }
 
 #[cfg(test)]
