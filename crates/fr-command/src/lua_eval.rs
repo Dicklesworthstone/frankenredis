@@ -13574,6 +13574,17 @@ impl<'a> LuaState<'a> {
                     .unwrap_or_else(|| argv.to_vec());
                     self.store.record_script_propagation(&effect);
                 }
+                // Upstream call() remembers the keys of every READONLY command a script
+                // runs for the calling client's client-side cache (default tracking mode).
+                let tracking = &self.store.dispatch_client_ctx.client_tracking;
+                if tracking.enabled
+                    && !tracking.bcast
+                    && crate::effective_command_flags(argv)
+                        .is_some_and(|flags| flags.split(' ').any(|flag| flag == "readonly"))
+                {
+                    let keys = crate::command_keys(argv);
+                    self.store.script_tracking_read_keys.extend(keys);
+                }
                 // (frankenredis-0czgc) redis.call must RAISE a command error reply
                 // (aborting the script), not return it as a value; redis.pcall packages
                 // it as {err=...}. fr-command returns ~160 command errors as

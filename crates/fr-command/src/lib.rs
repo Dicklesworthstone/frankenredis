@@ -14755,8 +14755,12 @@ fn spublish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comman
         return Err(CommandError::WrongArity("SPUBLISH"));
     }
     // Upstream processCommand restricts a subscribed client only under RESP2
-    // (`c->resp == 2`); a RESP3 client may publish and query freely.
-    if store.dispatch_client_ctx.is_pubsub && store.dispatch_client_ctx.resp_protocol_version != 3 {
+    // (`c->resp == 2`); a RESP3 client may publish and query freely, and a
+    // script's calls never pass that gate at all (they run on the script client).
+    if store.dispatch_client_ctx.is_pubsub
+        && store.dispatch_client_ctx.resp_protocol_version != 3
+        && store.script_nesting_level == 0
+    {
         return Err(CommandError::Custom(
             "ERR Can't execute 'spublish': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string(),
         ));
@@ -26747,8 +26751,12 @@ fn publish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
         return Err(CommandError::WrongArity("PUBLISH"));
     }
     // Upstream processCommand restricts a subscribed client only under RESP2
-    // (`c->resp == 2`); a RESP3 client may publish and query freely.
-    if store.dispatch_client_ctx.is_pubsub && store.dispatch_client_ctx.resp_protocol_version != 3 {
+    // (`c->resp == 2`); a RESP3 client may publish and query freely, and a
+    // script's calls never pass that gate at all (they run on the script client).
+    if store.dispatch_client_ctx.is_pubsub
+        && store.dispatch_client_ctx.resp_protocol_version != 3
+        && store.script_nesting_level == 0
+    {
         return Err(CommandError::Custom(
             "ERR Can't execute 'publish': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string(),
         ));
@@ -26775,8 +26783,12 @@ fn pubsub_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         )));
     }
     // Upstream processCommand restricts a subscribed client only under RESP2
-    // (`c->resp == 2`); a RESP3 client may publish and query freely.
-    if store.dispatch_client_ctx.is_pubsub && store.dispatch_client_ctx.resp_protocol_version != 3 {
+    // (`c->resp == 2`); a RESP3 client may publish and query freely, and a
+    // script's calls never pass that gate at all (they run on the script client).
+    if store.dispatch_client_ctx.is_pubsub
+        && store.dispatch_client_ctx.resp_protocol_version != 3
+        && store.script_nesting_level == 0
+    {
         return Err(CommandError::Custom(format!(
             "ERR Can't execute 'pubsub|{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
             sub.to_ascii_lowercase()
@@ -28176,7 +28188,10 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("DEBUG"));
     }
-    if store.script_nesting_level >= 1 {
+    // `DEBUG SET-DISABLE-DENY-SCRIPTS 1` lifts the NOSCRIPT refusal (upstream
+    // server.script_disable_deny_script); the Tcl suite relies on it to drive
+    // `DEBUG PROTOCOL` from inside scripts.
+    if store.script_nesting_level >= 1 && !store.script_disable_deny_scripts {
         return Err(script_noscript_command_error());
     }
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -28848,12 +28863,15 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("SET-DISABLE-DENY-SCRIPTS") {
         // Upstream debug.c::debugCommand:958-961 toggles
-        // server.script_disable_deny_script via atoi(). fr-command has no
-        // deny-scripts gate to disable, so accept-and-OK is correct.
-        // (frankenredis-r2l7c)
+        // server.script_disable_deny_script via atoi(). (frankenredis-r2l7c)
+        // fr honours it for DEBUG itself, the command it exists to reach.
         if argv.len() != 3 {
             return Err(debug_subcommand_envelope_error(sub));
         }
+        store.script_disable_deny_scripts = std::str::from_utf8(&argv[2])
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .is_some_and(|v| v != 0);
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("AOF-FLUSH-SLEEP") {
         // Upstream debug.c::debugCommand:862-866 sets server.aof_flush_sleep

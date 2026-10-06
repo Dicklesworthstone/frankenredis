@@ -591,6 +591,10 @@ struct ClientConnection {
     closing: bool,
     /// If set, the client is blocked waiting for data.
     blocked: Option<BlockedState>,
+    /// The blocking command as the client sent it and when it blocked: upstream logs a
+    /// blocked command to SLOWLOG once, when it is finally served, under its ORIGINAL argv
+    /// (`blpop l 0`, not the LPOP the serve runs) and with the time it spent blocked.
+    blocked_command: Option<(Vec<Vec<u8>>, u64)>,
     /// If set, this client is a replica and this is the last offset sent to it.
     replication_sent_offset: Option<ReplOffset>,
     /// Reply sequencing for the opt-in key-sharded command execution bus.
@@ -923,6 +927,7 @@ impl ClientConnection {
             uring_read_active: false,
             closing: false,
             blocked: None,
+            blocked_command: None,
             replication_sent_offset: None,
             sharded_replies: ShardedReplyOrder::default(),
             shared_nothing_route_tag: Vec::new(),
@@ -35748,6 +35753,10 @@ fn process_argv_frame(
                 *required_offset = runtime.replication_primary_offset();
             }
             conn.blocked = Some(blocked);
+            // Upstream call() skips SLOWLOG for a command that blocked; it is logged
+            // once, when served.
+            runtime.retract_blocked_command_slowlog(argv);
+            conn.blocked_command = Some((argv.to_vec(), ts));
             blocked_tokens.insert(token);
             if let Some(blocked) = &conn.blocked {
                 blocked_wake_index.insert(token, blocked);
@@ -37514,9 +37523,19 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
             let session = std::mem::take(&mut conn.session);
             let prev = runtime.swap_session(session);
 
+            // The serve re-runs the command (BLPOP as LPOP, XREAD re-executed): upstream treats
+            // that as reprocessing, invisible to MONITOR and SLOWLOG until it succeeds.
+            runtime.set_serving_blocked_client(true);
             let result = try_fulfill_blocked(&blocked.op, runtime, serve_ts);
+            runtime.set_serving_blocked_client(false);
 
             if let Some(response) = result {
+                if let Some((original_argv, blocked_since_ms)) = conn.blocked_command.take() {
+                    let blocked_us = serve_ts
+                        .saturating_sub(blocked_since_ms)
+                        .saturating_mul(1000);
+                    runtime.record_unblocked_command_slowlog(&original_argv, blocked_us, serve_ts);
+                }
                 // (frankenredis-pgplm) Session is swapped into `runtime` here, so
                 // its negotiated protocol drives the RESP3 null encoding.
                 let resp3 = runtime.client_session().resp_protocol_version() == 3;

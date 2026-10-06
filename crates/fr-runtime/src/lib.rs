@@ -4981,6 +4981,9 @@ pub struct ServerState {
     pub ready_keys: HashSet<Vec<u8>>,
     /// Set of client IDs that are in MONITOR mode.
     pub monitor_clients: HashSet<u64, foldhash::quality::RandomState>,
+    /// Set by the server while it re-runs a blocked client's command to serve it: that
+    /// re-run is upstream's "reprocessing", hidden from MONITOR and SLOWLOG.
+    serving_blocked_client: bool,
     /// Pending monitor output lines to deliver to monitor clients.
     pub monitor_output: Vec<(u64, Vec<u8>)>,
     /// CLIENT PAUSE: deadline in ms when pause expires. 0 = not paused.
@@ -5144,6 +5147,7 @@ impl Default for ServerState {
             pubsub_client_shard_channels: HashMap::new(),
             ready_keys: HashSet::new(),
             monitor_clients: HashSet::default(),
+            serving_blocked_client: false,
             monitor_output: Vec::new(),
             client_pause_deadline_ms: 0,
             client_pause_all: false,
@@ -42052,8 +42056,16 @@ impl Runtime {
                     && !argv
                         .first()
                         .is_some_and(|command| fr_command::is_write_command(command))
+                    && !Self::command_is_script_entrypoint(argv)
                 {
                     self.record_client_tracking_keys(&cmd_keys);
+                }
+                // A script is tracked by what it READ, not by its declared KEYS: upstream
+                // remembers the keys of each read-only command the script ran (and skips
+                // the EVAL_RO/FCALL_RO entrypoint itself).
+                if !self.server.store.script_tracking_read_keys.is_empty() {
+                    let keys = std::mem::take(&mut self.server.store.script_tracking_read_keys);
+                    self.record_client_tracking_keys(&keys);
                 }
                 // (gauntlet B8) Lazy expiry on a read command (e.g. GET on an
                 // expired key) and the preflight active-expire cycle queue
@@ -42684,7 +42696,7 @@ impl Runtime {
 
     /// Feed a command to all monitor clients, formatted as Redis does.
     pub fn feed_monitors(&mut self, argv: &[Vec<u8>], now_ms: u64, db: usize) {
-        if self.server.monitor_clients.is_empty() {
+        if self.server.monitor_clients.is_empty() || self.server.serving_blocked_client {
             return;
         }
         // (frankenredis-ax9ox) Upstream feeds the real client peer address in
@@ -42832,8 +42844,34 @@ impl Runtime {
         // so EVAL/EVALSHA/FCALL/PFCOUNT/PUBLISH/SPUBLISH (which can produce
         // replication traffic without being plain writes) must be deferred too —
         // not just `is_write_command`. (frankenredis)
-        argv.first()
-            .is_some_and(|cmd| fr_command::is_write_command(cmd) || command_is_may_replicate(cmd))
+        //
+        // Upstream reads those flags through getCommandFlags, so a SCRIPT is judged by its
+        // declared flags (scriptFlagsToCmdFlags clears MAY_REPLICATE and sets WRITE only
+        // without no-writes) -- a `#!lua flags=no-writes` EVAL or a no-writes FCALL runs during
+        // PAUSE WRITE -- and EXEC by the union of what it queued (`c->mstate.cmd_flags`).
+        let Some(cmd) = argv.first() else {
+            return false;
+        };
+        if let Some(flags) = fr_command::script_effective_command_flags(argv, &self.server.store) {
+            return flags.write;
+        }
+        if eq_ascii_token(cmd, b"EXEC") && self.session.transaction_state.in_transaction {
+            let store = &self.server.store;
+            return self
+                .session
+                .transaction_state
+                .command_queue
+                .iter()
+                .any(
+                    |queued| match fr_command::script_effective_command_flags(queued, store) {
+                        Some(flags) => flags.write,
+                        None => queued.first().is_some_and(|name| {
+                            fr_command::is_write_command(name) || command_is_may_replicate(name)
+                        }),
+                    },
+                );
+        }
+        fr_command::is_write_command(cmd) || command_is_may_replicate(cmd)
     }
 
     pub fn execute_bytes(&mut self, input: &[u8], now_ms: u64) -> Vec<u8> {
@@ -48990,7 +49028,34 @@ impl Runtime {
     }
 
     /// Record a command execution in the slow log if it exceeded the threshold.
+    /// Mark the start/end of the server re-running a blocked client's command to serve it.
+    pub fn set_serving_blocked_client(&mut self, serving: bool) {
+        self.server.serving_blocked_client = serving;
+    }
+
+    /// Drop the SLOWLOG entry just recorded for a command that then BLOCKED: upstream
+    /// call() does not log a command whose client is left blocked.
+    pub fn retract_blocked_command_slowlog(&mut self, argv: &[Vec<u8>]) {
+        self.server.store.retract_last_slowlog_entry(argv);
+    }
+
+    /// Log a blocked command once it is served, under the argv the client sent and with
+    /// the time it spent blocked (upstream updateStatsOnUnblock).
+    pub fn record_unblocked_command_slowlog(
+        &mut self,
+        argv: &[Vec<u8>],
+        duration_us: u64,
+        now_ms: u64,
+    ) {
+        let serving = std::mem::replace(&mut self.server.serving_blocked_client, false);
+        self.record_slowlog(argv, duration_us, now_ms);
+        self.server.serving_blocked_client = serving;
+    }
+
     fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
+        if self.server.serving_blocked_client {
+            return;
+        }
         // (BlackThrush 2026-08-27) Ask BEFORE building the entry's inputs. The two lines
         // below allocate the client address and clone the client name, and
         // `record_slowlog_with_client` then discarded both on its threshold guard -- on
@@ -49000,6 +49065,11 @@ impl Runtime {
         // Upstream `slowlogPushEntryIfNeeded` tests the threshold first for the same
         // reason. The predicate is the recorder's OWN guard, not a copy of it.
         if !self.server.store.slowlog_would_record(duration_us) {
+            return;
+        }
+        // EXEC carries CMD_SKIP_SLOWLOG upstream: the transaction's commands are logged
+        // one by one as they run, never the EXEC that wrapped them.
+        if argv.first().is_some_and(|cmd| eq_ascii_token(cmd, b"EXEC")) {
             return;
         }
         let client_address = if self.session.peer_addr.is_some() {
@@ -49019,6 +49089,9 @@ impl Runtime {
     }
 
     fn record_prebuilt_slowlog(&mut self, argv: Vec<Vec<u8>>, duration_us: u64, now_ms: u64) {
+        if self.server.serving_blocked_client {
+            return;
+        }
         // Same early exit as `record_slowlog`. The caller has already built `argv` here, so
         // this saves the address and name rather than the whole entry.
         if !self.server.store.slowlog_would_record(duration_us) {
@@ -65002,6 +65075,47 @@ mod tests {
                 keys: vec![b"foo1".to_vec(), b"foo2".to_vec()],
             }]
         );
+    }
+
+    #[test]
+    fn tracking_remembers_keys_a_script_reads_not_its_declared_keys() {
+        // tests/unit/tracking.tcl "Tracking only occurs for scripts when a command
+        // calls a read-only command": only the keys of READONLY inner commands count.
+        let mut rt = Runtime::default_strict();
+        let tracker = rt.new_session();
+        let writer = rt.new_session();
+        let previous = rt.swap_session(tracker);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.execute_frame(
+            command(&[
+                b"EVAL",
+                b"redis.call('set', 'k3', 'bar')",
+                b"2",
+                b"k1",
+                b"k2",
+            ]),
+            1,
+        );
+        rt.execute_frame(
+            command(&[b"EVAL", b"redis.call('get', 'k2')", b"2", b"k1", b"k2"]),
+            2,
+        );
+        let tracker_session = rt.swap_session(writer);
+        rt.record_client_session(&tracker_session);
+        rt.execute_frame(
+            command(&[b"MSET", b"k1", b"1", b"k2", b"2", b"k3", b"3"]),
+            3,
+        );
+        assert_eq!(
+            rt.drain_pubsub_for_client(tracker_session.client_id),
+            vec![fr_store::PubSubMessage::Invalidate {
+                keys: vec![b"k2".to_vec()],
+            }]
+        );
+        let _writer = rt.swap_session(previous);
     }
 
     #[test]

@@ -7453,6 +7453,8 @@ pub struct Store {
 
     /// Current recursion depth of Lua script execution.
     pub script_nesting_level: usize,
+    /// `DEBUG SET-DISABLE-DENY-SCRIPTS`: lets NOSCRIPT commands (DEBUG) run from scripts.
+    pub script_disable_deny_scripts: bool,
     /// Whether the current script/function execution context forbids writes.
     pub script_read_only: bool,
     /// Does the running script or function carry upstream's `allow-oom` flag?
@@ -7521,6 +7523,11 @@ pub struct Store {
     /// clients are attached (gated by dispatch_client_ctx.monitors_active);
     /// drained + fed by the runtime after the EVAL command itself is mirrored.
     pub script_monitor_records: Vec<Vec<Vec<u8>>>,
+    /// Keys read by the READONLY commands a script ran, for client-side-caching tracking.
+    /// Upstream call() remembers the keys of each inner read-only command for the calling
+    /// client (never the script's declared KEYS); filled only while the caller tracks in
+    /// default mode, drained by the runtime after the script command.
+    pub script_tracking_read_keys: Vec<Vec<u8>>,
 
     /// Number of keys currently tracked in the expires set.
     pub expires_count: usize,
@@ -8027,6 +8034,7 @@ impl Default for Store {
             stat_rdb_last_load_keys_loaded: 0,
             aof_enabled: false,
             script_nesting_level: 0,
+            script_disable_deny_scripts: false,
             script_read_only: false,
             script_allow_oom: false,
             is_read_only_replica: false,
@@ -8038,6 +8046,7 @@ impl Default for Store {
             script_propagation_mode: SCRIPT_PROPAGATE_ALL,
             script_propagation_records: Vec::new(),
             script_monitor_records: Vec::new(),
+            script_tracking_read_keys: Vec::new(),
             expires_count: 0,
             cached_memory_usage_bytes: std::cell::Cell::new(0),
             cached_memory_usage_dirty: std::cell::Cell::new(0),
@@ -9296,6 +9305,19 @@ impl Store {
         self.slowlog.push_back(entry);
         while self.slowlog.len() > self.slowlog_max_len {
             self.slowlog.pop_front();
+        }
+    }
+
+    /// Remove the newest SLOWLOG entry if it is the one just recorded for `argv`, giving its
+    /// id back, so a command that turned out to block leaves no trace until it is served.
+    pub fn retract_last_slowlog_entry(&mut self, argv: &[Vec<u8>]) {
+        let matches = self
+            .slowlog
+            .back()
+            .is_some_and(|entry| entry.argv == slowlog_build_argv(argv));
+        if matches {
+            self.slowlog.pop_back();
+            self.slowlog_id_counter = self.slowlog_id_counter.saturating_sub(1);
         }
     }
 
@@ -31220,9 +31242,16 @@ impl Store {
             // creation must dirty even when the read delivers no new entries.
             self.dirty = self.dirty.saturating_add(1);
         }
-        // (frankenredis-p4dpj) XREADGROUP is the canonical "active"
-        // path: stamp both seen_time and active_time to now_ms.
-        group_state.touch_consumer_active(&consumer, now_ms);
+        // (frankenredis-p4dpj) XREADGROUP always stamps seen_time; active_time
+        // only moves when an entry is actually delivered into the PEL
+        // (t_stream.c streamReplyWithRange, `group && !noack`). A read that
+        // returns nothing, a NOACK read and a history read leave it alone, so a
+        // consumer created by an empty read reports `inactive -1`.
+        if matches!(cursor, StreamGroupReadCursor::NewEntries) && !noack && !records.is_empty() {
+            group_state.touch_consumer_active(&consumer, now_ms);
+        } else {
+            group_state.set_consumer_seen_time(&consumer, now_ms);
+        }
         if let StreamGroupReadCursor::NewEntries = cursor
             && let Some(last_seen_id) = last_seen_id
         {
@@ -31357,7 +31386,9 @@ impl Store {
             && let Some(group_state) = groups.get_mut(group)
         {
             group_state.insert_consumer(consumer.to_vec());
-            group_state.touch_consumer_active(consumer, now_ms);
+            // A history read refreshes seen_time only; active_time belongs to
+            // deliveries and claims (t_stream.c).
+            group_state.set_consumer_seen_time(consumer, now_ms);
         }
         let limit = count.unwrap_or(usize::MAX);
         let entries = match self.entries.get(key) {

@@ -1062,18 +1062,57 @@ impl UpstreamStreamSkeleton {
         } else {
             Some((max_deleted_ms, max_deleted_seq))
         };
-        Ok((
-            Self {
-                stream_length,
-                nodes,
-                watermark,
-                groups,
-                metadata,
-                entries_added,
-                max_deleted,
-            },
-            cursor,
-        ))
+        let mut skeleton = Self {
+            stream_length,
+            nodes,
+            watermark,
+            groups,
+            metadata,
+            entries_added,
+            max_deleted,
+        };
+        if !is_v2_or_later && !skeleton.groups.is_empty() {
+            // Type 15 carries no group offsets: rdb.c estimates each one with
+            // streamEstimateDistanceFromFirstEverEntry against the loaded stream
+            // (entries_added = length, no tombstone watermark, first_id = first entry).
+            let first_id = skeleton
+                .flat_entries()
+                .ok()
+                .and_then(|entries| entries.ids().next());
+            let last_id = (last_id_ms as u64, last_id_seq as u64);
+            let length = u64::try_from(stream_length).unwrap_or(u64::MAX);
+            for group in &mut skeleton.groups {
+                let id = (group.last_delivered_id_ms, group.last_delivered_id_seq);
+                group.entries_read = estimate_v1_entries_read(length, last_id, first_id, id);
+            }
+        }
+        Ok((skeleton, cursor))
+    }
+}
+
+/// t_stream.c streamEstimateDistanceFromFirstEverEntry for a stream loaded from type 15,
+/// where `entries_added == length` and there is no max-deleted watermark. `None` is
+/// upstream's SCG_INVALID_ENTRIES_READ.
+fn estimate_v1_entries_read(
+    length: u64,
+    last_id: (u64, u64),
+    first_id: Option<(u64, u64)>,
+    id: (u64, u64),
+) -> Option<u64> {
+    let entries_added = length;
+    if entries_added == 0 {
+        return Some(0);
+    }
+    if id == last_id {
+        return Some(entries_added);
+    }
+    if id > last_id {
+        return None;
+    }
+    match first_id {
+        Some(first) if id < first => Some(entries_added - length),
+        Some(first) if id == first => Some(entries_added - length + 1),
+        _ => None,
     }
 }
 
