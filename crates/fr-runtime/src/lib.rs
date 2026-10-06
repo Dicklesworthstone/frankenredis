@@ -4893,6 +4893,9 @@ pub struct ServerState {
     pub aof_rewrite_start_time_sec: Option<u64>,
     /// Whether an AOF rewrite is pending because another background child is active.
     pub aof_rewrite_scheduled: bool,
+    /// Set when `maxmemory` changes: the server tick evicts until under the limit
+    /// without waiting for a write (upstream's eviction time proc).
+    background_eviction_pending: bool,
     /// Set when `CONFIG SET appendonly yes` turns AOF on: the next flush must
     /// write a fresh base (upstream startAppendOnly's rewrite) before appending.
     aof_base_pending: bool,
@@ -5122,6 +5125,7 @@ impl Default for ServerState {
             aof_rewrite_pid: None,
             aof_rewrite_start_time_sec: None,
             aof_rewrite_scheduled: false,
+            background_eviction_pending: false,
             rdb_bgsave_scheduled: false,
             rdb_path: None,
             config_file_path: None,
@@ -7887,6 +7891,32 @@ impl Runtime {
             self.deliver_keyspace_notifications();
         }
         stats
+    }
+
+    /// Evict toward `maxmemory` from the server tick after the limit changed, like upstream's
+    /// eviction time proc (updateMaxmemory -> startEvictionTimeProc), so lowering maxmemory
+    /// frees memory and emits `evicted` notifications without waiting for the next write.
+    /// Keeps running each tick while the eviction loop reports progress but is still over.
+    pub fn run_background_eviction(&mut self, now_ms: u64) {
+        if !self.server.background_eviction_pending {
+            return;
+        }
+        self.server.background_eviction_pending = false;
+        if self.server.maxmemory_bytes == 0
+            || (matches!(
+                self.server.replication_runtime_state.role,
+                ReplicationRoleState::Replica { .. }
+            ) && self.server.replica_ignore_maxmemory_enabled())
+        {
+            return;
+        }
+        let result = self.refresh_over_maxmemory(now_ms);
+        if result.status == EvictionLoopStatus::Running {
+            self.server.background_eviction_pending = true;
+        }
+        if self.server.store.notify_keyspace_events != 0 {
+            self.deliver_keyspace_notifications();
+        }
     }
 
     #[must_use]
@@ -40920,6 +40950,11 @@ impl Runtime {
                     Err(err) => err.to_resp(),
                 };
                 let elapsed_us = start.elapsed().as_micros() as u64;
+                // Upstream call() feeds MONITOR for AUTH too (it is neither admin nor
+                // skip-monitor), with the credentials redacted by `feed_monitors`.
+                if !self.server.monitor_clients.is_empty() {
+                    self.feed_monitors(argv, now_ms, self.session.selected_db);
+                }
                 self.record_slowlog(argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(argv, elapsed_us, now_ms);
                 self.server
@@ -40934,6 +40969,11 @@ impl Runtime {
                     Err(err) => err.to_resp(),
                 };
                 let elapsed_us = start.elapsed().as_micros() as u64;
+                // Upstream call() feeds MONITOR for HELLO too (it is neither admin nor
+                // skip-monitor), with the credentials redacted by `feed_monitors`.
+                if !self.server.monitor_clients.is_empty() {
+                    self.feed_monitors(argv, now_ms, self.session.selected_db);
+                }
                 self.record_slowlog(argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(argv, elapsed_us, now_ms);
                 self.server
@@ -42607,6 +42647,13 @@ impl Runtime {
         self.server.store.stat_blocked_clients = blocked_clients as u64;
     }
 
+    /// INFO clients `total_blocking_keys` / `total_blocking_keys_on_nokey`, owned by the
+    /// server's blocked-client index.
+    pub fn set_blocking_keys_for_info(&mut self, blocking_keys: usize, on_nokey: usize) {
+        self.server.store.stat_total_blocking_keys = blocking_keys as u64;
+        self.server.store.stat_total_blocking_keys_on_nokey = on_nokey as u64;
+    }
+
     pub fn mark_client_unblocked(&mut self, client_id: u64) {
         self.server.blocked_client_ids.remove(&client_id);
         self.server.store.stat_blocked_clients = self.server.blocked_client_ids.len() as u64;
@@ -42918,25 +42965,30 @@ impl Runtime {
         }
 
         let loop_result = self.refresh_over_maxmemory(now_ms);
+        // Under the limit nothing is refused, whatever the command's flags: answer
+        // before resolving them so the common write path pays no flag lookup.
+        if loop_result.status == EvictionLoopStatus::Ok {
+            return None;
+        }
 
         // `scriptFlagsToCmdFlags` makes a resolved shebang script/function denyoom unless it
         // declares allow-oom or no-writes. Compat EVAL and unresolved EVALSHA/FCALL deliberately
         // leave the command table alone and must reach their later NOSCRIPT/script paths instead
         // of being preempted by OOM.
+        //
+        // Container commands are judged by the SUBCOMMAND's flags, like upstream's resolved
+        // `c->cmd`: FUNCTION LOAD / FUNCTION RESTORE are denyoom though FUNCTION itself
+        // carries no flags, so they used to load libraries straight past maxmemory.
         let script_command_flags =
             fr_command::script_effective_command_flags(argv, &self.server.store);
         let command_denyoom = script_command_flags.map_or_else(
             || {
-                argv.first()
-                    .is_some_and(|cmd| fr_command::command_is_denyoom(cmd))
+                fr_command::effective_command_flags(argv)
+                    .is_some_and(|flags| flags.split(' ').any(|flag| flag == "denyoom"))
             },
             |flags| flags.denyoom,
         );
         if script_entrypoint && (script_command_flags.is_none() || !command_denyoom) {
-            return None;
-        }
-
-        if loop_result.status == EvictionLoopStatus::Ok {
             return None;
         }
 
@@ -47878,6 +47930,9 @@ impl Runtime {
         if let Some(maxmemory) = next_maxmemory {
             self.server.maxmemory_bytes = maxmemory;
             self.server.store.maxmemory_bytes_live = maxmemory;
+            // Upstream updateMaxmemory -> startEvictionTimeProc: evict right away,
+            // not on the next write. Drained by `run_background_eviction`.
+            self.server.background_eviction_pending = maxmemory != 0;
         }
         if let Some(maxmemory_policy) = next_maxmemory_policy {
             self.server.store.maxmemory_policy = maxmemory_policy;

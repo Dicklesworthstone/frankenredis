@@ -1004,20 +1004,21 @@ impl UpstreamStreamSkeleton {
                 let (consumer_name, c) =
                     rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
                 cursor += c;
-                // seen_time (type 19+), then active_time (type 21+); both mstime_t.
-                // An active_time of -1 is upstream's "never actively consumed"
-                // sentinel. (frankenredis-sq4ov)
-                let mut seen_time_ms = 0u64;
-                let mut active_time_ms: Option<u64> = None;
-                if is_v2_or_later {
-                    seen_time_ms = take_millisecond_time(data, cursor)?;
-                    cursor += 8;
-                }
-                if is_v3 {
+                // seen_time is present in EVERY stream type (rdb.c rdbLoadObject loads it
+                // unconditionally); active_time only in type 21. An active_time of -1 is
+                // upstream's "never actively consumed" sentinel (frankenredis-sq4ov), and
+                // for older types upstream estimates it as the seen_time ("That's the best
+                // estimate we got"). Reading seen_time for type 19+ only made every Redis
+                // 5/6 stream with a consumer misparse.
+                let seen_time_ms = take_millisecond_time(data, cursor)?;
+                cursor += 8;
+                let active_time_ms = if is_v3 {
                     let raw = take_millisecond_time(data, cursor)?;
                     cursor += 8;
-                    active_time_ms = if raw as i64 == -1 { None } else { Some(raw) };
-                }
+                    if raw as i64 == -1 { None } else { Some(raw) }
+                } else {
+                    Some(seen_time_ms)
+                };
                 consumers.push(RdbStreamConsumer {
                     name: consumer_name.clone(),
                     seen_time_ms,
@@ -2311,7 +2312,8 @@ mod tests {
             vec![RdbStreamConsumer {
                 name: b"alice".to_vec(),
                 seen_time_ms: 1100,
-                active_time_ms: None,
+                // Type 19 carries no active_time; rdb.c estimates it as the seen_time.
+                active_time_ms: Some(1100),
             }]
         );
         assert_eq!(

@@ -13128,7 +13128,7 @@ mod tests {
     ///      re-emitted file).
     ///   8. Read post-state on oracle_b and compare to pre-state.
     ///
-    /// Streams (RDB_TYPE_STREAM=15 fr-persist private encoding) and
+    /// Streams (fr-persist private encoding, type 101 -- formerly 15) and
     /// HashWithTtls (type 100, FrankenRedis private) are **excluded** —
     /// their cross-impl gate is owned by br-frankenredis-ian4 (file-level
     /// stream corpus + upstream STREAM_LISTPACKS_3 encoder loadback).

@@ -7590,6 +7590,8 @@ pub struct Store {
     pub stat_connected_clients: u64,
     /// Number of clients currently blocked on a blocking operation.
     pub stat_blocked_clients: u64,
+    pub stat_total_blocking_keys: u64,
+    pub stat_total_blocking_keys_on_nokey: u64,
     /// Number of clients with client-side caching tracking enabled.
     pub stat_tracking_clients: u64,
     /// (frankenredis-trackingtotal) Number of distinct keys being tracked
@@ -8058,6 +8060,8 @@ impl Default for Store {
             stat_total_connections_received: 0,
             stat_connected_clients: 0,
             stat_blocked_clients: 0,
+            stat_total_blocking_keys: 0,
+            stat_total_blocking_keys_on_nokey: 0,
             stat_tracking_clients: 0,
             stat_tracking_total_keys: 0,
             stat_tracking_total_items: 0,
@@ -46696,6 +46700,34 @@ mod tests {
         store.record_slowlog(&[b"SET".to_vec(), b"d".to_vec(), b"4".to_vec()], 80, 5_000);
         let after = store.get_slowlog(1);
         assert_eq!(after[0].id, 3);
+    }
+
+    /// tests/unit/type/stream-cgroups.tcl "Loading from legacy (Redis <= v6.2.x, rdb_ver < 10)
+    /// persistence": a Redis 5 DUMP of a stream with consumer groups (RDB_TYPE_STREAM_LISTPACKS,
+    /// RDB version 9) must RESTORE. Redis 7.2.4 accepts it.
+    #[test]
+    fn restore_accepts_redis5_stream_listpacks_v1_payload() {
+        const PAYLOAD: &[&[u8]] = &[
+        b"\x0f\x01\x10\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\xc3\x40\x4a\x40\x57",
+        b"\x16\x57\x00\x00\x00\x23\x00\x02\x01\x04\x01\x01\x01\x84\x64\x61\x74\x61\x05\x00\x01\x03\x01\x00",
+        b"\x20\x01\x03\x81\x61\x02\x04\x20\x0a\x00\x01\x40\x0a\x00\x62\x60\x0a\x00\x02\x40\x0a\x00\x63\x60",
+        b"\x0a\x40\x22\x01\x81\x64\x20\x0a\x40\x39\x20\x0a\x00\x65\x60\x0a\x00\x05\x40\x0a\x00\x66\x20\x0a",
+        b"\x00\xff\x02\x06\x00\x02\x02\x67\x31\x05\x00\x04\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00",
+        b"\x00\x00\x00\x00\x3e\xf7\x83\x43\x7a\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00",
+        b"\x00\x00\x00\x00\x00\x3e\xf7\x83\x43\x7a\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x04\x00\x00",
+        b"\x00\x00\x00\x00\x00\x00\x3e\xf7\x83\x43\x7a\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x05\x00",
+        b"\x00\x00\x00\x00\x00\x00\x00\x3e\xf7\x83\x43\x7a\x01\x00\x00\x01\x01\x03\x63\x31\x31\x3e\xf7\x83",
+        b"\x43\x7a\x01\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        b"\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x04\x00\x00",
+        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x05\x00\x00\x00\x00\x00\x00\x00\x00\x02\x67",
+        b"\x32\x00\x00\x00\x00\x09\x00\x3d\x52\xef\x68\x67\x52\x1d\xfa",
+        ];
+        let payload: Vec<u8> = PAYLOAD.concat();
+        let mut store = Store::new();
+        store
+            .restore_key(b"x", 0, &payload, false, 1_000)
+            .expect("Redis 5 stream DUMP must restore");
+        assert_eq!(store.xlen(b"x", 1_000).expect("xlen"), 2);
     }
 
     #[test]

@@ -14754,7 +14754,9 @@ fn spublish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comman
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("SPUBLISH"));
     }
-    if store.dispatch_client_ctx.is_pubsub {
+    // Upstream processCommand restricts a subscribed client only under RESP2
+    // (`c->resp == 2`); a RESP3 client may publish and query freely.
+    if store.dispatch_client_ctx.is_pubsub && store.dispatch_client_ctx.resp_protocol_version != 3 {
         return Err(CommandError::Custom(
             "ERR Can't execute 'spublish': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string(),
         ));
@@ -18400,9 +18402,13 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         let _ = write!(
             info,
             "total_blocking_keys:{}\r\n",
-            store.stat_blocked_clients
+            store.stat_total_blocking_keys
         );
-        info.push_str("total_blocking_keys_on_nokey:0\r\n");
+        let _ = write!(
+            info,
+            "total_blocking_keys_on_nokey:{}\r\n",
+            store.stat_total_blocking_keys_on_nokey
+        );
         info.push_str("\r\n");
     }
 
@@ -26740,7 +26746,9 @@ fn publish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("PUBLISH"));
     }
-    if store.dispatch_client_ctx.is_pubsub {
+    // Upstream processCommand restricts a subscribed client only under RESP2
+    // (`c->resp == 2`); a RESP3 client may publish and query freely.
+    if store.dispatch_client_ctx.is_pubsub && store.dispatch_client_ctx.resp_protocol_version != 3 {
         return Err(CommandError::Custom(
             "ERR Can't execute 'publish': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string(),
         ));
@@ -26766,7 +26774,9 @@ fn pubsub_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             sub
         )));
     }
-    if store.dispatch_client_ctx.is_pubsub {
+    // Upstream processCommand restricts a subscribed client only under RESP2
+    // (`c->resp == 2`); a RESP3 client may publish and query freely.
+    if store.dispatch_client_ctx.is_pubsub && store.dispatch_client_ctx.resp_protocol_version != 3 {
         return Err(CommandError::Custom(format!(
             "ERR Can't execute 'pubsub|{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
             sub.to_ascii_lowercase()
@@ -28005,6 +28015,8 @@ fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             }
         }
         store.script_flush();
+        // Upstream SCRIPT FLUSH replaces the Lua VM, so cjson's settings return to defaults.
+        lua_eval::cjson_reset_config();
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("DEBUG") {
         if argv.len() != 3 {

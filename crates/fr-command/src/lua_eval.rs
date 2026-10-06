@@ -4578,7 +4578,17 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
     globals.insert("table".to_string(), LuaValue::Table(table_lib));
 
     let cjson_table = LuaTable::new_shared_template();
-    for name in &["encode", "decode"] {
+    for name in &[
+        "encode",
+        "decode",
+        "encode_sparse_array",
+        "encode_max_depth",
+        "decode_max_depth",
+        "encode_number_precision",
+        "encode_keep_buffer",
+        "encode_invalid_numbers",
+        "decode_invalid_numbers",
+    ] {
         cjson_table.set(
             LuaValue::Str(name.as_bytes().to_vec()),
             LuaValue::RustFunction(std::rc::Rc::from(format!("cjson.{name}"))),
@@ -12920,6 +12930,192 @@ impl<'a> LuaState<'a> {
                 })?;
                 Ok(vec![LuaValue::Str(json.into_bytes())])
             }
+            "cjson.encode_max_depth"
+            | "cjson.decode_max_depth"
+            | "cjson.encode_number_precision" => {
+                // lua_cjson.c json_integer_option: set when given, always return the setting.
+                let inv = self.current_invocation_name.as_deref();
+                let (short, max) = match name {
+                    "cjson.encode_max_depth" => ("encode_max_depth", i64::from(i32::MAX)),
+                    "cjson.decode_max_depth" => ("decode_max_depth", i64::from(i32::MAX)),
+                    _ => ("encode_number_precision", 14),
+                };
+                if args.len() > 1 {
+                    return Err(lua_format_argerror(
+                        inv,
+                        short,
+                        2,
+                        "found too many arguments",
+                    ));
+                }
+                let requested = match args.first() {
+                    None | Some(LuaValue::Nil) => None,
+                    Some(LuaValue::Number(n)) => Some(*n as i64),
+                    Some(LuaValue::Str(s)) => std::str::from_utf8(s)
+                        .ok()
+                        .and_then(|t| t.trim().parse::<f64>().ok())
+                        .map(|n| n as i64),
+                    Some(other) => {
+                        return Err(lua_format_argerror(
+                            inv,
+                            short,
+                            1,
+                            &format!("number expected, got {}", other.type_name()),
+                        ));
+                    }
+                };
+                if let Some(value) = requested
+                    && !(1..=max).contains(&value)
+                {
+                    return Err(lua_format_argerror(
+                        inv,
+                        short,
+                        1,
+                        &format!("expected integer between 1 and {max}"),
+                    ));
+                }
+                let config = cjson_update_config(|config| {
+                    if let Some(value) = requested {
+                        match short {
+                            "encode_max_depth" => config.encode_max_depth = value as u32,
+                            "decode_max_depth" => config.decode_max_depth = value as u32,
+                            _ => config.encode_number_precision = value as u8,
+                        }
+                    }
+                });
+                let current = match short {
+                    "encode_max_depth" => i64::from(config.encode_max_depth),
+                    "decode_max_depth" => i64::from(config.decode_max_depth),
+                    _ => i64::from(config.encode_number_precision),
+                };
+                Ok(vec![LuaValue::Number(current as f64)])
+            }
+            "cjson.encode_keep_buffer"
+            | "cjson.decode_invalid_numbers"
+            | "cjson.encode_invalid_numbers" => {
+                // lua_cjson.c json_enum_option: a boolean or one of the named options; the
+                // reply is the boolean form unless the setting is a non-boolean option.
+                let inv = self.current_invocation_name.as_deref();
+                let short = name.trim_start_matches("cjson.");
+                let options: &[&str] = if short == "encode_invalid_numbers" {
+                    &["off", "on", "null"]
+                } else {
+                    &["off", "on"]
+                };
+                if args.len() > 1 {
+                    return Err(lua_format_argerror(
+                        inv,
+                        short,
+                        2,
+                        "found too many arguments",
+                    ));
+                }
+                let requested: Option<u8> = match args.first() {
+                    None | Some(LuaValue::Nil) => None,
+                    Some(LuaValue::Bool(b)) => Some(u8::from(*b)),
+                    Some(LuaValue::Str(s)) => {
+                        match options.iter().position(|o| o.as_bytes() == s.as_slice()) {
+                            Some(idx) => Some(idx as u8),
+                            None => {
+                                return Err(lua_format_argerror(
+                                    inv,
+                                    short,
+                                    1,
+                                    &format!("invalid option '{}'", String::from_utf8_lossy(s)),
+                                ));
+                            }
+                        }
+                    }
+                    Some(other) => {
+                        return Err(lua_format_argerror(
+                            inv,
+                            short,
+                            1,
+                            &format!("string expected, got {}", other.type_name()),
+                        ));
+                    }
+                };
+                let config = cjson_update_config(|config| {
+                    if let Some(value) = requested {
+                        match short {
+                            "encode_keep_buffer" => config.encode_keep_buffer = value != 0,
+                            "decode_invalid_numbers" => {
+                                config.decode_invalid_numbers = value != 0;
+                            }
+                            _ => config.encode_invalid_numbers = value,
+                        }
+                    }
+                });
+                let current = match short {
+                    "encode_keep_buffer" => u8::from(config.encode_keep_buffer),
+                    "decode_invalid_numbers" => u8::from(config.decode_invalid_numbers),
+                    _ => config.encode_invalid_numbers,
+                };
+                Ok(vec![if current <= 1 {
+                    LuaValue::Bool(current == 1)
+                } else {
+                    LuaValue::Str(options[usize::from(current)].as_bytes().to_vec())
+                }])
+            }
+            "cjson.encode_sparse_array" => {
+                // lua_cjson.c json_cfg_encode_sparse_array: (convert, ratio, safe), each
+                // optional, returning all three settings.
+                let inv = self.current_invocation_name.as_deref();
+                if args.len() > 3 {
+                    return Err(lua_format_argerror(
+                        inv,
+                        "encode_sparse_array",
+                        4,
+                        "found too many arguments",
+                    ));
+                }
+                let convert = match args.first() {
+                    None | Some(LuaValue::Nil) => None,
+                    Some(LuaValue::Bool(b)) => Some(*b),
+                    Some(LuaValue::Str(s)) if s.as_slice() == b"on" => Some(true),
+                    Some(LuaValue::Str(s)) if s.as_slice() == b"off" => Some(false),
+                    Some(other) => {
+                        return Err(lua_format_argerror(
+                            inv,
+                            "encode_sparse_array",
+                            1,
+                            &format!("string expected, got {}", other.type_name()),
+                        ));
+                    }
+                };
+                let int_arg = |idx: usize| -> Result<Option<i64>, String> {
+                    match args.get(idx) {
+                        None | Some(LuaValue::Nil) => Ok(None),
+                        Some(LuaValue::Number(n)) if *n >= 0.0 && *n <= f64::from(i32::MAX) => {
+                            Ok(Some(*n as i64))
+                        }
+                        Some(_) => Err(lua_format_argerror(
+                            inv,
+                            "encode_sparse_array",
+                            1,
+                            "expected integer between 0 and 2147483647",
+                        )),
+                    }
+                };
+                let ratio = int_arg(1)?;
+                let safe = int_arg(2)?;
+                let config = cjson_update_config(|config| {
+                    if let Some(convert) = convert {
+                        config.encode_sparse_convert = convert;
+                    }
+                    if let Some(ratio) = ratio {
+                        config.encode_sparse_ratio = ratio;
+                    }
+                    if let Some(safe) = safe {
+                        config.encode_sparse_safe = safe;
+                    }
+                });
+                Ok(vec![
+                    LuaValue::Bool(config.encode_sparse_convert),
+                    LuaValue::Number(config.encode_sparse_ratio as f64),
+                    LuaValue::Number(config.encode_sparse_safe as f64),
+                ])
+            }
             "cjson.decode" => {
                 // (frankenredis-pt4d4) Upstream lua_cjson.c::json_decode
                 // calls luaL_argcheck(L, lua_gettop(L) == 1, 1, ...) and
@@ -16389,6 +16585,27 @@ pub(crate) fn lua_number_to_string(n: f64) -> String {
     strip_trailing_zeros(&s)
 }
 
+/// C `%.{precision}g` of a finite number, for cjson's `encode_number_precision` (fpconv_g_fmt).
+/// `lua_number_to_string` is the precision-14 special case and stays the hot path.
+fn format_number_g(n: f64, precision: i32) -> String {
+    if n == 0.0 {
+        return if n.is_sign_negative() { "-0" } else { "0" }.to_string();
+    }
+    let precision = precision.max(1);
+    // %g picks scientific notation from the exponent AFTER rounding to `precision`
+    // significant digits, so read it back from the scientific rendering.
+    let sci = format!("{:.*e}", (precision - 1) as usize, n);
+    let exponent: i32 = sci
+        .rsplit_once('e')
+        .and_then(|(_, e)| e.parse().ok())
+        .unwrap_or(0);
+    if exponent < -4 || exponent >= precision {
+        return rust_e_to_c_g(&sci);
+    }
+    let frac_digits = (precision - 1 - exponent).max(0) as usize;
+    strip_trailing_zeros(&format!("{:.*}", frac_digits, n))
+}
+
 /// Convert Rust's "1.2e5" / "1.2e-5" to C %g style "1.2e+05" / "1.2e-05".
 /// Then strip trailing zeros from the mantissa (before the 'e').
 fn rust_e_to_c_g(formatted: &str) -> String {
@@ -16914,18 +17131,62 @@ fn lua_value_to_u32_for_bitop(
 // — return the exact error wording vendored emits for unserialisable values.
 // The script error wrap adds 'user_script:N: ' prefix and the trailing
 // 'script: <sha>, on @user_script:N.' tail.
-/// Upstream lua_cjson's `DEFAULT_ENCODE_MAX_DEPTH` (deps/lua/src/lua_cjson.c:68).
-///
-/// (frankenredis-cjson-encode-depth-zo5ac) Not a tuning knob: `cjson.setmaxdepth` is not exposed by Redis, so 1000
-/// is the only value a script can ever observe and matching it exactly is the whole requirement.
-const CJSON_ENCODE_MAX_DEPTH: u32 = 1000;
+/// Upstream lua_cjson's runtime `json_config_t` (deps/lua/src/lua_cjson.c). Redis exposes its
+/// setters -- `cjson.encode_max_depth`, `decode_max_depth`, `encode_number_precision`,
+/// `encode_keep_buffer`, `encode_invalid_numbers`, `decode_invalid_numbers`,
+/// `encode_sparse_array` -- and a setting persists for the life of the Lua VM, so a script
+/// that changes it affects later scripts until something sets it back (tests/unit/
+/// scripting.tcl "JSON smoke test" restores the defaults itself). The encode and decode
+/// depth limits are separate fields with separate setters upstream and stay separate here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CjsonConfig {
+    encode_max_depth: u32,
+    decode_max_depth: u32,
+    encode_number_precision: u8,
+    encode_keep_buffer: bool,
+    /// 0 = refuse NaN/Inf (`off`), 1 = emit `NaN`/`Infinity` (`on`), 2 = emit `null`.
+    encode_invalid_numbers: u8,
+    decode_invalid_numbers: bool,
+    encode_sparse_convert: bool,
+    encode_sparse_ratio: i64,
+    encode_sparse_safe: i64,
+}
 
-/// Upstream lua_cjson's `DEFAULT_DECODE_MAX_DEPTH` (deps/lua/src/lua_cjson.c:69).
-///
-/// (frankenredis-cjson-encode-depth-zo5ac) Separate constant from the encode limit even though
-/// both are 1000 upstream: they are separate `json_config_t` fields with separate setters, so
-/// tying them together here would be inventing a relationship the incumbent does not have.
-const CJSON_DECODE_MAX_DEPTH: u32 = 1000;
+/// lua_cjson.c's DEFAULT_* values.
+const CJSON_DEFAULT_CONFIG: CjsonConfig = CjsonConfig {
+    encode_max_depth: 1000,
+    decode_max_depth: 1000,
+    encode_number_precision: 14,
+    encode_keep_buffer: true,
+    encode_invalid_numbers: 0,
+    decode_invalid_numbers: true,
+    encode_sparse_convert: false,
+    encode_sparse_ratio: 2,
+    encode_sparse_safe: 10,
+};
+
+thread_local! {
+    static CJSON_CONFIG: std::cell::Cell<CjsonConfig> =
+        const { std::cell::Cell::new(CJSON_DEFAULT_CONFIG) };
+}
+
+fn cjson_config() -> CjsonConfig {
+    CJSON_CONFIG.with(std::cell::Cell::get)
+}
+
+fn cjson_update_config(update: impl FnOnce(&mut CjsonConfig)) -> CjsonConfig {
+    CJSON_CONFIG.with(|cell| {
+        let mut config = cell.get();
+        update(&mut config);
+        cell.set(config);
+        config
+    })
+}
+
+/// Restore lua_cjson's defaults, as a fresh Lua VM would have them (SCRIPT FLUSH).
+pub(crate) fn cjson_reset_config() {
+    CJSON_CONFIG.with(|cell| cell.set(CJSON_DEFAULT_CONFIG));
+}
 
 /// Encode a Lua value as JSON the way Redis-bundled cjson does.
 ///
@@ -16945,8 +17206,23 @@ fn lua_value_to_json_at_depth(val: &LuaValue, current_depth: u32) -> Result<Stri
         LuaValue::Nil => Ok("null".to_string()),
         LuaValue::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
         LuaValue::Number(n) => {
+            let config = cjson_config();
             if !n.is_finite() {
-                return Err("Cannot serialise number: must not be NaN or Inf".to_string());
+                // lua_cjson.c json_append_number: refuse (`off`), JavaScript spellings (`on`),
+                // or `null`, per encode_invalid_numbers.
+                return match config.encode_invalid_numbers {
+                    0 => Err("Cannot serialise number: must not be NaN or Inf".to_string()),
+                    1 if n.is_nan() => Ok("NaN".to_string()),
+                    1 if *n < 0.0 => Ok("-Infinity".to_string()),
+                    1 => Ok("Infinity".to_string()),
+                    _ => Ok("null".to_string()),
+                };
+            }
+            if config.encode_number_precision != 14 {
+                return Ok(format_number_g(
+                    *n,
+                    i32::from(config.encode_number_precision),
+                ));
             }
             // (frankenredis-t6bqz) Upstream lua_cjson's
             // json_append_number routes ALL numbers through
@@ -16967,7 +17243,7 @@ fn lua_value_to_json_at_depth(val: &LuaValue, current_depth: u32) -> Result<Stri
             // incremented value into every recursive call below, matching upstream passing
             // `current_depth` on to json_append_array / json_append_object.
             let current_depth = current_depth + 1;
-            if current_depth > CJSON_ENCODE_MAX_DEPTH {
+            if current_depth > cjson_config().encode_max_depth {
                 return Err(format!(
                     "Cannot serialise, excessive nesting ({current_depth})"
                 ));
@@ -17025,15 +17301,21 @@ fn lua_value_to_json_at_depth(val: &LuaValue, current_depth: u32) -> Result<Stri
             }
 
             let candidate_array = !has_non_int_key && (array_len > 0 || !hash_pairs.is_empty());
-            let array_ok =
-                candidate_array && (max_int_key <= 10 || int_key_count * 2 >= max_int_key);
+            // lua_cjson.c lua_array_length: excessively sparse when
+            // `ratio > 0 && max > safe && max > items * ratio`.
+            let config = cjson_config();
+            let too_sparse = config.encode_sparse_ratio > 0
+                && max_int_key > config.encode_sparse_safe
+                && max_int_key > int_key_count.saturating_mul(config.encode_sparse_ratio);
+            let array_ok = candidate_array && !too_sparse;
 
             // (frankenredis-pt4d4) Pure-integer-key tables that fail
             // the sparse threshold are rejected by Lua-bundled cjson
-            // under its default encode_sparse_convert=false setting.
+            // under its default encode_sparse_convert=false setting,
+            // and encoded as an object when it is on.
             // Mixed/string-key tables fall through to object form
             // unchanged.
-            if candidate_array && !array_ok {
+            if candidate_array && !array_ok && !config.encode_sparse_convert {
                 return Err("Cannot serialise table: excessively sparse array".to_string());
             }
 
@@ -17135,6 +17417,9 @@ struct JsonParser<'a> {
     /// it `parse_value` -> `parse_array`/`parse_object` -> `parse_value` had no terminating
     /// condition and a nested-enough input ran the native stack out.
     depth: u32,
+    /// `cjson.decode_max_depth`, read ONCE per decode so the recursive descent's frames stay
+    /// the size they were (a debug-build 1000-deep decode runs close to a 2 MiB test stack).
+    max_depth: u32,
 }
 
 impl<'a> JsonParser<'a> {
@@ -17143,6 +17428,7 @@ impl<'a> JsonParser<'a> {
             bytes: input.as_bytes(),
             pos: 0,
             depth: 0,
+            max_depth: cjson_config().decode_max_depth,
         }
     }
 
@@ -17307,7 +17593,7 @@ impl<'a> JsonParser<'a> {
         // the +1 every other error in this parser applies, because upstream's nesting error does
         // not apply it either (contrast json_throw_parse_error, which documents the +1).
         self.depth += 1;
-        if self.depth > CJSON_DECODE_MAX_DEPTH {
+        if self.depth > self.max_depth {
             return Err(format!(
                 "Found too many nested data structures ({}) at character {}",
                 self.depth, self.pos
@@ -17352,7 +17638,7 @@ impl<'a> JsonParser<'a> {
         // the +1 every other error in this parser applies, because upstream's nesting error does
         // not apply it either (contrast json_throw_parse_error, which documents the +1).
         self.depth += 1;
-        if self.depth > CJSON_DECODE_MAX_DEPTH {
+        if self.depth > self.max_depth {
             return Err(format!(
                 "Found too many nested data structures ({}) at character {}",
                 self.depth, self.pos
@@ -17839,6 +18125,61 @@ pub fn compile_check(script: &[u8]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// tests/unit/scripting.tcl "JSON smoke test": the lua_cjson setters Redis exposes exist,
+    /// return their setting, persist across scripts, and drive encode/decode.
+    #[test]
+    fn cjson_configuration_functions_match_lua_cjson() {
+        let mut store = Store::new();
+        let mut run = |script: &[u8]| eval_script(script, &[], &[], &mut store, 0);
+        super::cjson_reset_config();
+        assert_eq!(
+            run(b"return cjson.encode_keep_buffer(false)").unwrap(),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            run(b"return cjson.encode_max_depth()").unwrap(),
+            RespFrame::Integer(1000)
+        );
+        // Persisted into the next script, and enforced by encode/decode.
+        run(b"cjson.encode_max_depth(1) cjson.decode_max_depth(1)").unwrap();
+        assert_eq!(
+            run(b"local ok = pcall(cjson.encode, {a={1}}) return ok").unwrap(),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            run(b"local ok = pcall(cjson.decode, '{\"o\": {\"a\": [1]}}') return ok").unwrap(),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            run(b"return cjson.encode({1,2})").unwrap(),
+            RespFrame::BulkString(Some(b"[1,2]".to_vec()))
+        );
+        assert_eq!(
+            run(b"local ok = pcall(cjson.encode, {n=0/0}) return ok").unwrap(),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            run(b"return cjson.encode_invalid_numbers('null')").unwrap(),
+            RespFrame::BulkString(Some(b"null".to_vec()))
+        );
+        assert_eq!(
+            run(b"return cjson.encode({1/0})").unwrap(),
+            RespFrame::BulkString(Some(b"[null]".to_vec()))
+        );
+        run(b"cjson.encode_invalid_numbers(true) cjson.encode_number_precision(3)").unwrap();
+        assert_eq!(
+            run(b"return cjson.encode({-1/0, 3.14159})").unwrap(),
+            RespFrame::BulkString(Some(b"[-Infinity,3.14]".to_vec()))
+        );
+        assert!(run(b"cjson.encode_max_depth(0)").is_err());
+        // SCRIPT FLUSH (a fresh VM upstream) restores every default.
+        super::cjson_reset_config();
+        assert_eq!(
+            run(b"return {cjson.encode_max_depth(), cjson.encode_number_precision()}").unwrap(),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1000), RespFrame::Integer(14)]))
+        );
+    }
 
     /// A tail-recursive loop must run at a depth `MAX_CALL_DEPTH` could never reach.
     ///

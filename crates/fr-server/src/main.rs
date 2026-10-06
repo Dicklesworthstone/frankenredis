@@ -249,6 +249,11 @@ struct BlockedWakeRegistration {
     seq: u64,
     deadline_ms: u64,
     is_wait: bool,
+    /// The distinct keys this client is blocked on and whether it blocks with
+    /// upstream's `unblock_on_nokey` (XREADGROUP), so `remove` can keep the
+    /// exact per-key counts INFO's `total_blocking_keys[_on_nokey]` report.
+    keys: Vec<Vec<u8>>,
+    unblock_on_nokey: bool,
 }
 
 /// Advisory wake index for blocked clients.
@@ -264,6 +269,8 @@ struct BlockedWakeIndex {
     timeouts: BinaryHeap<Reverse<(u64, u64, usize)>>,
     waiters: VecDeque<BlockedWakeRef>,
     live: HashMap<Token, BlockedWakeRegistration>,
+    /// Exact count of live blocked clients per key: (all waiters, nokey waiters).
+    key_counts: HashMap<Vec<u8>, (usize, usize)>,
 }
 
 impl BlockedWakeIndex {
@@ -272,8 +279,20 @@ impl BlockedWakeIndex {
         self.next_seq = self.next_seq.wrapping_add(1).max(1);
         let seq = self.next_seq;
         let wake_ref = BlockedWakeRef { seq, token };
-        for key in blocked.op.keys() {
-            self.by_key.entry(key).or_default().push_back(wake_ref);
+        let mut keys = blocked.op.keys();
+        keys.sort_unstable();
+        keys.dedup();
+        let unblock_on_nokey = matches!(blocked.op, BlockingOp::BXreadgroup { .. });
+        for key in &keys {
+            self.by_key
+                .entry(key.clone())
+                .or_default()
+                .push_back(wake_ref);
+            let counts = self.key_counts.entry(key.clone()).or_default();
+            counts.0 += 1;
+            if unblock_on_nokey {
+                counts.1 += 1;
+            }
         }
         if blocked.deadline_ms != u64::MAX {
             // ubs:ignore
@@ -293,12 +312,27 @@ impl BlockedWakeIndex {
                 seq,
                 deadline_ms: blocked.deadline_ms,
                 is_wait,
+                keys,
+                unblock_on_nokey,
             },
         );
     }
 
     fn remove(&mut self, token: Token) {
-        self.live.remove(&token);
+        let Some(registration) = self.live.remove(&token) else {
+            return;
+        };
+        for key in registration.keys {
+            if let Some(counts) = self.key_counts.get_mut(&key) {
+                counts.0 = counts.0.saturating_sub(1);
+                if registration.unblock_on_nokey {
+                    counts.1 = counts.1.saturating_sub(1);
+                }
+                if counts.0 == 0 {
+                    self.key_counts.remove(&key);
+                }
+            }
+        }
     }
 
     fn clear(&mut self) {
@@ -306,6 +340,18 @@ impl BlockedWakeIndex {
         self.timeouts.clear();
         self.waiters.clear();
         self.live.clear();
+        self.key_counts.clear();
+    }
+
+    /// INFO `total_blocking_keys` and `total_blocking_keys_on_nokey`: keys with at
+    /// least one blocked client, and those with at least one XREADGROUP waiter.
+    fn blocking_key_totals(&self) -> (usize, usize) {
+        let on_nokey = self
+            .key_counts
+            .values()
+            .filter(|(_, nokey)| *nokey > 0)
+            .count();
+        (self.key_counts.len(), on_nokey)
     }
 
     fn is_live_ref(&self, wake_ref: BlockedWakeRef) -> bool {
@@ -5627,6 +5673,8 @@ fn main() -> ExitCode {
 
         // Run active expiry cycle once per tick (fast cycle).
         let _ = runtime.run_active_expire_cycle(ts, fr_eventloop::ActiveExpireCycleKind::Fast);
+        // Evict after a maxmemory change without waiting for a write.
+        runtime.run_background_eviction(ts);
 
         // Sample instantaneous ops/sec and throughput once per tick.
         let elapsed = ts.saturating_sub(last_ops_sample_ms);
@@ -35577,6 +35625,8 @@ fn process_argv_frame(
     // A client parked by CLIENT PAUSE counts as blocked, like upstream's
     // blockPostponeClient (BLOCKED_POSTPONE bumps server.blocked_clients).
     runtime.set_blocked_clients_count_for_info(blocked_tokens.len() + paused_tokens.len());
+    let (blocking_keys, blocking_keys_on_nokey) = blocked_wake_index.blocking_key_totals();
+    runtime.set_blocking_keys_for_info(blocking_keys, blocking_keys_on_nokey);
     // CLIENT PAUSE gate: delay command processing while paused.
     // Fast path: `is_client_paused` is an O(1) deadline check that is
     // false on the overwhelmingly common no-pause path. Guarding the

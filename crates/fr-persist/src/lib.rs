@@ -1299,7 +1299,14 @@ const RDB_TYPE_HASH: u8 = 4;
 /// this field"; any other value is the absolute ms-since-epoch deadline.
 /// (br-frankenredis-th7q)
 const RDB_TYPE_HASH_WITH_TTLS: u8 = 100;
-const RDB_TYPE_STREAM: u8 = 15; // FrankenRedis stream encoding
+/// Tag 15: upstream's RDB_TYPE_STREAM_LISTPACKS (Redis 5.0-6.2), and also what fr's private
+/// stream encoding was written under before it moved to `RDB_TYPE_STREAM_PRIVATE`. The loader
+/// tries the upstream reading first.
+const RDB_TYPE_STREAM_LISTPACKS_V1_OR_LEGACY_PRIVATE: u8 = 15;
+/// FrankenRedis-private stream encoding (only written when a stream cannot be encoded as
+/// upstream STREAM_LISTPACKS_3 losslessly). Kept in the private high range beside
+/// `RDB_TYPE_HASH_WITH_TTLS` so it never collides with an upstream type tag.
+const RDB_TYPE_STREAM_PRIVATE: u8 = 101;
 /// Upstream Redis compact-encoding type tags. fr-persist decodes these so a
 /// dump.rdb produced by `redis-server` (which prefers compact forms for
 /// small data structures) can be loaded without truncation. Encoder side
@@ -4120,7 +4127,7 @@ fn encode_private_stream_rdb_value(
     entries_added: Option<u64>,
     max_deleted: Option<(u64, u64)>,
 ) {
-    buf.push(RDB_TYPE_STREAM);
+    buf.push(RDB_TYPE_STREAM_PRIVATE);
     rdb_encode_string(buf, key);
     let (wm_ms, wm_seq) = watermark.unwrap_or((0, 0));
     buf.extend_from_slice(&wm_ms.to_le_bytes());
@@ -6223,7 +6230,8 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                 | RDB_TYPE_HASH_WITH_TTLS
                 | RDB_TYPE_ZSET
                 | RDB_TYPE_ZSET_2
-                | RDB_TYPE_STREAM
+                | RDB_TYPE_STREAM_LISTPACKS_V1_OR_LEGACY_PRIVATE
+                | RDB_TYPE_STREAM_PRIVATE
                 | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2
                 | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3
                 | RDB_TYPE_SET_INTSET
@@ -6357,7 +6365,8 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
             | RDB_TYPE_HASH_WITH_TTLS
             | RDB_TYPE_ZSET
             | RDB_TYPE_ZSET_2
-            | RDB_TYPE_STREAM
+            | RDB_TYPE_STREAM_LISTPACKS_V1_OR_LEGACY_PRIVATE
+            | RDB_TYPE_STREAM_PRIVATE
             | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2
             | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3
             | RDB_TYPE_SET_INTSET
@@ -6491,7 +6500,28 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                         }
                         RdbValue::SortedSet(members)
                     }
-                    RDB_TYPE_STREAM => {
+                    RDB_TYPE_STREAM_LISTPACKS_V1_OR_LEGACY_PRIVATE
+                        if rdb_stream::UpstreamStreamSkeleton::decode(
+                            UPSTREAM_RDB_TYPE_STREAM_LISTPACKS,
+                            &data[cursor..],
+                        )
+                        .is_ok() =>
+                    {
+                        // Tag 15 is upstream's RDB_TYPE_STREAM_LISTPACKS, what Redis 5.0-6.2
+                        // write for every stream; fr's old private stream encoding reused the
+                        // same byte, so a Redis <= 6.2 dump.rdb with a stream failed to load.
+                        // The upstream reading wins whenever it decodes; fr's private records
+                        // (now written as RDB_TYPE_STREAM_PRIVATE) still load through the arm
+                        // below.
+                        let (skeleton, consumed) = rdb_stream::UpstreamStreamSkeleton::decode(
+                            UPSTREAM_RDB_TYPE_STREAM_LISTPACKS,
+                            &data[cursor..],
+                        )
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        RdbValue::StreamSkeleton(Box::new(skeleton))
+                    }
+                    RDB_TYPE_STREAM_LISTPACKS_V1_OR_LEGACY_PRIVATE | RDB_TYPE_STREAM_PRIVATE => {
                         // Decode watermark, private entries-added counter, and the
                         // max-deleted-entry-id watermark (frankenredis-fplrm).
                         if cursor + 40 > data.len() {
@@ -13457,13 +13487,17 @@ mod tests {
             }];
             let encoded = encode_rdb(&entries, &[]);
 
-            // Private TYPE_STREAM = 15 (0x0F) remains the default encoding.
-            // Empty streams without a watermark also keep this shape under the
-            // upstream feature because type-21 always decodes a concrete last-id.
-            assert!(
-                encoded.contains(&0x0F),
-                "RDB stream must have TYPE_STREAM (0x0F)"
+            // An empty stream without a watermark has no lossless type-21 form
+            // (type 21 always carries a concrete last-id), so it takes fr's private
+            // encoding -- under its own private tag, NOT 15, which is upstream's
+            // RDB_TYPE_STREAM_LISTPACKS and must stay readable as such.
+            assert_eq!(
+                type_byte_for_key(&encoded, b"mystream"),
+                Some(crate::RDB_TYPE_STREAM_PRIVATE),
+                "fr's private stream encoding must not reuse upstream's tag 15"
             );
+            let decoded = decode_rdb(&encoded).expect("private stream round-trips");
+            assert_eq!(decoded.0.len(), 1);
         }
 
         /// Golden test: RDB EOF marker is always 0xFF.
