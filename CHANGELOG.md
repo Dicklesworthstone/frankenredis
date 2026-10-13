@@ -5,7 +5,7 @@ All notable changes to FrankenRedis are documented in this file.
 FrankenRedis is a clean-room Rust reimplementation of Redis targeting full drop-in replacement parity
 with deterministic latency, mathematical rigor, and memory safety. The first tagged release is
 **v0.1.0**; earlier development is organized into date-bounded phases derived from the linear commit
-history on `main`. Workspace version: **0.1.1**.
+history on `main`. Workspace version: **0.1.2**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenredis>
 
@@ -15,6 +15,109 @@ This 2026-08-19 refresh covers the previously undocumented window **2026-05-17 t
 Representative commits in each phase are live-linked to GitHub.
 
 ---
+
+## [0.1.2] -- 2026-10-13
+
+Fidelity fixes found by running every Redis 7.2.4 Tcl unit against FrankenRedis
+and against Redis 7.2.4 under the same external-server harness. Most of them
+only showed on a database other than 0, which is where the upstream suite runs.
+
+### Replication and propagation
+
+- A replica no longer receives every database change twice (`SELECT 1`
+  `SELECT 1` ...). The per-replica `SELECT` prefix is gone; the shared stream
+  database is invalidated at FULLRESYNC instead, as upstream does. This was the
+  SWAPDB replication-stream failure that stopped the upstream suite after 10
+  of 89 units in 0.1.1.
+- `SPOP` without a count always propagates `SREM`, also when it empties the
+  set. `SPOP` with a count that takes the whole set propagates `UNLINK` under
+  `lazyfree-lazy-server-del`.
+- `PUBLISH` inside `MULTI` propagates to replicas. Each propagated effect
+  records its database, so a `SELECT` lands inside the `MULTI` it belongs to.
+- Re-enabling AOF (`CONFIG SET appendonly yes`) always writes a fresh base, and
+  `BGREWRITEAOF` with AOF off writes into `appenddirname`. Before, enabling AOF
+  after such a rewrite made every following write fail with `MISCONF`.
+
+### Keys on databases other than 0
+
+- `SORT ... BY` / `GET` read their pattern keys from the client's selected
+  database. On any other database `SORT` silently sorted by the elements and
+  `GET` returned nils.
+- `FCALL` passes logical key names to the function. On a database other than 0
+  `redis.call(..., KEYS[1])` read nil.
+- `XREAD BLOCK ... $` resolves `$` in the client's database; on another
+  database it returned the stream's existing entries at once.
+- `COMMAND GETKEYS SORT` follows upstream: only the last `STORE key` is a key.
+
+### Scripts and functions
+
+- **Busy scripts.** A script that runs past `busy-reply-threshold` no longer
+  blocks the server silently: other clients get `-BUSY`, `SCRIPT KILL` and
+  `FUNCTION KILL` work (and report `UNKILLABLE` after a write), `FUNCTION
+  STATS` shows the running script, and `SHUTDOWN NOSAVE` exits. Scripts are no
+  longer capped at one million statements under the server.
+- `FUNCTION RESTORE` follows upstream's join rules: `REPLACE` displaces
+  same-named libraries, a colliding function name fails the whole restore, and
+  `FCALL` stops serving a replaced library's old code.
+- `FUNCTION LOAD` and `FUNCTION RESTORE` are refused over `maxmemory`.
+  `FUNCTION LOAD` keeps upstream's 500 ms load timeout and reports writes to
+  globals as "Attempt to modify a readonly table".
+- `CLIENT PAUSE WRITE` judges a script by its declared flags and `EXEC` by its
+  queued commands.
+- `DEBUG RELOAD` honours `NOSAVE`, `NOFLUSH` and `MERGE`.
+- Lua `cjson` exposes its configuration API (`encode_max_depth`,
+  `decode_max_depth`, `encode_number_precision`, and the rest).
+  `redis.acl_check_cmd` consults the caller's ACL. RESP3 conversions keep map
+  keys, sets and verbatim strings.
+
+### Transactions
+
+- A `SELECT` queued inside `MULTI` applies to the commands after it. Before,
+  their keys landed in the database the transaction started in.
+- Any rejection of `EXEC` before it runs (`NOREPLICAS`, `MISCONF`, `READONLY`,
+  `MASTERDOWN`, `OOM`, `NOAUTH`) aborts the transaction with `EXECABORT`.
+  `EXEC` also checks its queued commands for out-of-memory and stale-replica
+  rules.
+
+### Streams
+
+- Streams written by Redis 5.0 to 6.2 load. Any such stream with a consumer
+  failed `RESTORE` with "Bad data format", and RDB files with one could not be
+  read.
+- RDB files with streams stay compatible with 0.1.1 in both directions: a
+  stream with a consumer group and a pending entry written by either version
+  loads in the other.
+- Blocked `XREADGROUP` is woken with `WRONGTYPE` when its key changes type and
+  with `NOGROUP` on `FLUSHALL` / `FLUSHDB`.
+- `XREADGROUP` marks a consumer active only when it delivers entries.
+- `XADD` with an `ms-*` id reports the right error on sequence overflow.
+
+### Client tracking, pub/sub and monitoring
+
+- Client tracking invalidates keys written inside `MULTI` / `EXEC` and
+  remembers the keys a script reads. `BCAST` sends one message per prefix, and
+  RESP2 redirection uses the `__redis__:invalidate` message form.
+- Subscribe and unsubscribe confirmations bypass `CLIENT REPLY OFF` / `SKIP`.
+  `PUBSUB NUMPAT` counts unique patterns.
+- `SLOWLOG` and `MONITOR` redact credentials (`AUTH`, `HELLO AUTH`, `ACL
+  SETUSER`, `MIGRATE AUTH`, `CONFIG SET masterauth`). A blocked command is
+  logged once, under its original arguments.
+- `INFO` counts clients parked by `CLIENT PAUSE` as blocked and reports exact
+  `total_blocking_keys`.
+
+### Other commands
+
+- `CONFIG SET maxmemory` evicts right away instead of at the next write.
+- `BLMPOP` / `BZMPOP` reject a repeated `COUNT`. `GEORADIUSBYMEMBER ... STORE`
+  on a missing source deletes the destination and replies 0.
+
+### Tools
+
+- `scripts/published_binary_persistence_gate.py` checks a published binary by
+  hash: persistence, default FEC settings, RDB restart and upgrade from the
+  previous version.
+- `scripts/upstream_redis_tcl_full.py` takes `--tags`, so it can run the suite
+  the way Redis's own external-server CI does (`--tags -slow`).
 
 ## [0.1.1] -- 2026-10-02
 
