@@ -157,6 +157,12 @@ def main() -> int:
     parser.add_argument("--report", type=Path)
     parser.add_argument("--log", type=Path)
     parser.add_argument("--timeout", type=int, default=7200)
+    parser.add_argument(
+        "--tags",
+        default="",
+        help='passed to runtest --tags, e.g. "-slow" as upstream\'s own external-server CI does; '
+        "the default runs every default test",
+    )
     args = parser.parse_args()
 
     try:
@@ -178,6 +184,9 @@ def main() -> int:
             "--ignore-digest",
             "--no-latency",
         ]
+        if args.tags:
+            cmd += ["--tags", args.tags]
+            print(f"runtest --tags {args.tags!r}: tests excluded by these tags are not run or counted.")
         with tempfile.TemporaryDirectory(prefix="fr-upstream-tcl-full-") as tmp:
             proc = subprocess.Popen(
                 [str(args.fr.resolve()), "--port", str(args.port), "--save", "", "--appendonly", "no", "--enable-debug-command", "yes"],
