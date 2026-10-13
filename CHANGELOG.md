@@ -19,7 +19,7 @@ Representative commits in each phase are live-linked to GitHub.
 ## [0.1.2] -- 2026-10-13
 
 Fidelity fixes found by running every Redis 7.2.4 Tcl unit against FrankenRedis
-and against Redis 7.2.4 under the same external-server harness. Most of them
+and against Redis 7.2.4 under the same external-server harness. Several of them
 only showed on a database other than 0, which is where the upstream suite runs.
 
 ### Replication and propagation
@@ -118,6 +118,38 @@ only showed on a database other than 0, which is where the upstream suite runs.
   previous version.
 - `scripts/upstream_redis_tcl_full.py` takes `--tags`, so it can run the suite
   the way Redis's own external-server CI does (`--tags -slow`).
+
+### Qualification limits
+
+- The Rust workspace gate (`cargo fmt --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace`, Linux x86_64, with
+  the Redis 7.2.4 reference server in place) reports 5,170 passed, 2 failed and
+  58 ignored tests (0.1.1: 5,155 passed, 1 failed). The two failures:
+  - the CLIENT PAUSE / replica REPLCONF ACK TCP test, unchanged since v0.1.0
+    ([issue #4](https://github.com/Dicklesworthstone/frankenredis/issues/4));
+  - the SYNC/PSYNC pending-output test, which depends on socket buffer sizes
+    and fails the same way for v0.1.1 on the gate host
+    ([issue #5](https://github.com/Dicklesworthstone/frankenredis/issues/5)).
+- The unmodified Redis 7.2.4 Tcl suite, external-server mode:
+  - run as upstream's own external-server CI runs it (`--tags -slow`): 21 of
+    89 units complete, 1,271 assertions pass and 16 fail, then the run stops in
+    `unit/multi` because the server is still a replica after the "MULTI / EXEC
+    with REPLICAOF" case;
+  - the complete default suite: 13 of 89 units, 623 assertions pass and none
+    fail, then a harness exception in `unit/type/set` (a slow test needs the
+    server's pid, which an external server doesn't give the harness). 0.1.1
+    stopped after 10 units with 330 passing and 2 failing;
+  - six units run alone against 0.1.1 and this release: no assertion that
+    passes on 0.1.1 fails here. Lists go from 100 passing (then a hang) to 273,
+    transactions from 40 (then an abort) to 59, streams from 65 to 69.
+  - The curated fidelity lane passes all 72 selected assertions.
+  - Full-suite green is not claimed
+    ([issue #3](https://github.com/Dicklesworthstone/frankenredis/issues/3)).
+    Receipts, binary hashes and the exact invocations are under
+    `artifacts/upstream_redis_tcl_full/v0.1.2/`.
+- Running the test suite rewrites 73 tracked fixture files under
+  `crates/fr-conformance/fixtures/`
+  ([issue #6](https://github.com/Dicklesworthstone/frankenredis/issues/6)).
 
 ## [0.1.1] -- 2026-10-02
 

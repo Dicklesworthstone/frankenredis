@@ -1,0 +1,52 @@
+{
+  "schema_version": "fr_release_tcl_provenance/v1",
+  "release": "v0.1.2",
+  "redis_commit": "d2c8a4b91e8c0e6aefd1f5bc0bf582cddbe046b7",
+  "reference_redis_server_sha256": "70b07f3d0c124ab4298dc8adcdbc3247ee1fb873ccb37b415afd7b04e6145478",
+  "host": "Linux 6.17.0-41-generic x86_64, Ubuntu 25.10, glibc 2.42",
+  "binaries": {
+    "candidate_183c696c0_debug": {
+      "source_commit": "183c696c0",
+      "profile": "debug",
+      "sha256": "7c915d743497dcba3f89b2312582d48690e49b77cfbc09085bf5c1abb69c5a87",
+      "used_for": [
+        "full-report.json",
+        "noslow-tags-slow-report.json",
+        "unit-by-unit-vs-v0.1.1.log"
+      ]
+    },
+    "release_commit_82f5cb8f3_debug": {
+      "source_commit": "82f5cb8f3",
+      "profile": "debug",
+      "sha256": "8cd7293731a322329cd69349d7a4cf4f44ccf0a2dcb283ae770b922d13561c56",
+      "used_for": [
+        "fidelity-report.json"
+      ]
+    },
+    "baseline_v0.1.1_debug": {
+      "source_commit": "49efe1d31 (v0.1.1)",
+      "profile": "debug",
+      "sha256": "2ac09d67bf17056dc2c0f559acd09e5194f5fcc93291671159a3536691702f20",
+      "used_for": [
+        "unit-by-unit-vs-v0.1.1.log"
+      ]
+    }
+  },
+  "server_code_note": "183c696c0..82f5cb8f3 changes no server code: a test expectation (552d3bbd6), the Tcl runner's --tags option (6c3ff38b0) and version strings and CHANGELOG (82f5cb8f3).",
+  "invocations": {
+    "full-report.json": "python3 scripts/upstream_redis_tcl_full.py (as of 183c696c0) --upstream <redis d2c8a4b9> --fr <candidate> --timeout 12600",
+    "noslow-tags-slow-report.json": "python3 scripts/upstream_redis_tcl_full.py (as of 6c3ff38b0) --tags=-slow --port 29281 --timeout 12600",
+    "unit-by-unit-vs-v0.1.1.log": "per unit and binary: ./runtest --host 127.0.0.1 --port <p> --clients 1 --ignore-encoding --ignore-digest --no-latency --tags -slow --single <unit> (timeout 900 s), server started with --save '' --appendonly no --enable-debug-command yes",
+    "fidelity-report.json": "python3 scripts/upstream_redis_tcl_fidelity.py --upstream <redis d2c8a4b9> --fr <release-commit binary>"
+  },
+  "full_suite_passed": false,
+  "receipts_sha256": {
+    "fidelity-report.json": "1b292b161d8bf49b539cbf4611457857068b8272ac82aca82aaf12b35f0e1d03",
+    "fidelity.log": "59e578ffaaa2cd82d54fe6e01f0400847e358d4c0fca78604dc2dfeb61345178",
+    "full-report.json": "2c5d4c1f0325dc1b1eb698f1f7abb3bd4c54bcae487f38cff905145d04fe094b",
+    "full-runtest.log": "c92cb8984a2158f22ad09a180c2b32e1b19dbefc3634a0652adac643ee4386c3",
+    "noslow-tags-slow-report.json": "19c2f162af3e1b74791c1a9bcf2852608f05e4606b1d9c1f976fc1ef6528e7b9",
+    "noslow-tags-slow-runtest.log": "efae8fd8d312a2f8f312098b53744c99fc0579b97e0aacc0cc4d0d92875f83d7",
+    "unit-by-unit-vs-v0.1.1.log": "a9cd2fb74d5720a10edf98a445c047af0f9a9807ded45b6a3dcf4458647de6dd"
+  }
+}

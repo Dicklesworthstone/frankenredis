@@ -1,0 +1,25 @@
+== unit-ab start 2026-10-13T22:02:39Z base=2ac09d67bf17 cand=7c915d743497
+UNIT unit/multi base rc=1 ok=40 err=2 exception=[exception]: Executing test client: NOTBUSY No scripts in execution right now..
+UNIT unit/multi cand rc=1 ok=59 err=1 exception=
+  ONLY-CAND [err]: MULTI propagation of XREADGROUP in tests/unit/multi.tcl
+  ONLY-BASE [err]: MULTI / EXEC is propagated correctly (multiple commands with SELECT) in tests/unit/multi.tcl
+  ONLY-BASE [err]: MULTI / EXEC is propagated correctly (multiple commands) in tests/unit/multi.tcl
+UNIT unit/type/stream base rc=1 ok=65 err=10 exception=
+UNIT unit/type/stream cand rc=1 ok=69 err=6 exception=
+  ONLY-BASE [err]: Blocking XREAD waiting new data in tests/unit/type/stream.tcl
+  ONLY-BASE [err]: XADD with artial ID with maximal seq in tests/unit/type/stream.tcl
+  ONLY-BASE [err]: XREAD + multiple XADD inside transaction in tests/unit/type/stream.tcl
+  ONLY-BASE [err]: XREAD with same stream name multiple times should work in tests/unit/type/stream.tcl
+UNIT unit/type/stream-cgroups base rc=124 ok=20 err=0 exception=
+UNIT unit/type/stream-cgroups cand rc=1 ok=56 err=1 exception=
+  ONLY-CAND [err]: XGROUP DESTROY should unblock XREADGROUP with -NOGROUP in tests/unit/type/stream-cgroups.tcl
+UNIT unit/expire base rc=1 ok=64 err=1 exception=
+UNIT unit/expire cand rc=1 ok=64 err=1 exception=
+UNIT unit/type/set base rc=1 ok=116 err=1 exception=
+UNIT unit/type/set cand rc=0 ok=117 err=0 exception=
+  ONLY-BASE [err]: SPOP new implementation: code path #1 propagate as DEL or UNLINK in tests/unit/type/set.tcl
+UNIT unit/type/list base rc=124 ok=100 err=2 exception=
+UNIT unit/type/list cand rc=0 ok=273 err=0 exception=
+  ONLY-BASE [err]: MULTI + LPUSH + EXPIRE + DEBUG SLEEP on blocked client, key already expired in tests/unit/type/list.tcl
+  ONLY-BASE [err]: SWAPDB wants to wake blocked client, but the key already expired in tests/unit/type/list.tcl
+== unit-ab done 2026-10-13T22:35:41Z
