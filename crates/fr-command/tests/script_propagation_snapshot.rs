@@ -109,8 +109,9 @@ fn script_propagation_effects_are_stable() {
         ("incr", vec!["INCR str"]),
         // INCRBYFLOAT propagates the resolved value AND preserves the TTL.
         ("incrbyfloat_rewrite", vec!["SET f 1.75 KEEPTTL"]),
-        // SPOP on a one-member set empties it, so the effect is DEL, not SREM.
-        ("spop_rewrite", vec!["DEL set"]),
+        // A count-less SPOP always propagates SREM, also when it empties the
+        // set (Redis 7.2.4 spopCommand rewrites to SREM before deleting the key).
+        ("spop_rewrite", vec!["SREM set only"]),
         // The `*` id is resolved to a concrete one before propagation.
         (
             "xadd_star_rewrite",
