@@ -7418,6 +7418,8 @@ pub struct Store {
     pub set_max_listpack_value: usize,
     pub zset_max_listpack_entries: usize,
     pub zset_max_listpack_value: usize,
+    pub stream_node_max_entries: usize,
+    pub stream_node_max_bytes: usize,
     /// (frankenredis-uwhyl) proto-max-bulk-len: the max string byte-length the
     /// store enforces for APPEND/SETRANGE/SET-grow + the bit-offset ceiling for
     /// SETBIT/BITFIELD/BITOP. Synced from the server config on CONFIG SET; default
@@ -8105,6 +8107,8 @@ impl Default for Store {
             set_max_listpack_value: 64,
             zset_max_listpack_entries: 128,
             zset_max_listpack_value: 64,
+            stream_node_max_entries: REDIS_STREAM_NODE_MAX_ENTRIES,
+            stream_node_max_bytes: 4096,
             proto_max_bulk_len: 512 * 1024 * 1024, // (frankenredis-uwhyl) redis 7.2 default
             must_obey_client: false,
             hll_sparse_max_bytes: HLL_REDIS_SPARSE_MAX_BYTES,
@@ -8449,6 +8453,10 @@ impl Store {
     /// introspection surfaces are static tables and must not flap at runtime.
     pub fn set_forward_hash_field_ttl_enabled(&mut self, enabled: bool) {
         self.forward_hash_field_ttl_enabled = enabled;
+    }
+
+    pub fn sentinel_parse_config(&mut self, text: &str) -> Result<(), String> {
+        fr_sentinel::parse_sentinel_config(&mut self.sentinel_state, text)
     }
 
     /// (frankenredis-pkdgs) Ingest a `__sentinel__:hello` payload received from a
@@ -30233,6 +30241,26 @@ impl Store {
         }
     }
 
+    #[must_use]
+    pub const fn effective_stream_node_max_entries(&self) -> usize {
+        if self.stream_node_max_entries == 0 {
+            REDIS_STREAM_NODE_MAX_ENTRIES
+        } else {
+            self.stream_node_max_entries
+        }
+    }
+
+    #[must_use]
+    pub fn stream_len_and_first_id_no_stat(&self, key: &[u8]) -> Option<(usize, Option<StreamId>)> {
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => Some((entries.len(), entries.first_id())),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+
     pub fn stream_watermark(&self, key: &[u8]) -> Result<Option<StreamId>, StoreError> {
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
@@ -31131,6 +31159,7 @@ impl Store {
             self.drop_if_expired(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let node_max = self.effective_stream_node_max_entries();
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
@@ -31150,7 +31179,7 @@ impl Store {
                     let len = ids.len();
                     let mut removed = 0usize;
                     while removed < len {
-                        let node = REDIS_STREAM_NODE_MAX_ENTRIES.min(len - removed);
+                        let node = node_max.min(len - removed);
                         // Upstream: `if (limit && (deleted + entries) > limit) break;`
                         if limit.is_some_and(|lim| removed + node > lim) {
                             break;

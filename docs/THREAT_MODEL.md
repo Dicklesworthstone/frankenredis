@@ -23,13 +23,14 @@ Per the Security Doctrine in AGENTS.md: "Threat model notes for each major subsy
 | Default no-auth | Server starts with no password by default (matches Redis). | Deployment responsibility. Document in security guide. |
 | ACL bypass | Per-command ACL enforcement via `is_command_authorized()`. Deny-first precedence. 82 conformance tests. | Covered for implemented surface. |
 
-## 3. Persistence (fr-persist)
+## 3. Persistence (fr-persist, fr-fec)
 
 | Threat | Mitigation | Residual Risk |
 |--------|-----------|---------------|
 | RDB corruption (disk error) | CRC64 checksum validation on load. Rejects mismatched checksums. | Covered. |
 | RDB poisoning (crafted file) | Size clamping on LZF decompression (prevents OOM). Magic/version/EOF validation. Proptest fuzz coverage (30K random inputs, zero panics). | Covered. |
 | AOF truncation | AOF load replays available records. Partial frame at end is silently skipped. | Truncation loses data but does not crash. |
+| Primary/sidecar drift & bitrot | RaptorQ (RFC 6330) `.raptorq.json` sidecar binds primary payload via SHA-256 `source_hash` and per-symbol hashes (`fr-fec`). If primary bytes diverge from the sidecar `source_hash` or fail structural decoding, recovery verifies decoded bytes against `source_hash` and preserves the damaged primary at `<path>.corrupt` before atomic overwrite. | Recovery requires sufficient intact repair symbols within FEC block bounds. |
 | File permission attacks | No explicit permission checks on persistence files. | Deployment responsibility. |
 | Atomic write safety | AOF/RDB writes use atomic temp-file + rename. Parent directory fsync after rename. | Covered (crash-safe). |
 

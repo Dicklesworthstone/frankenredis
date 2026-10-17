@@ -117,8 +117,9 @@ DECLARED_ABSENT = {
     # (frankenredis-w1djx) `unixsocket` was declared here and is GONE: upstream's INFO does not
     # emit it at all. It appeared only because the extraction window overran into the startup
     # log-banner expander -- see `_function_body_len`. Do not re-add it.
-    # `# Server`, only during a graceful shutdown pause.
-    "shutdown_in_milliseconds": "shutdown in progress",
+    # IMPLEMENTED (frankenredis-svf0d): `shutdown_in_milliseconds` now renders in `# Server`
+    # when `shutdown_deadline_ms` is active during a graceful replica-catch-up shutdown window,
+    # and is removed per this gate's deletion condition.
 }
 
 

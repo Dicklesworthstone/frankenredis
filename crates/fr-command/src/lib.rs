@@ -254,12 +254,98 @@ pub fn rewrite_effect_command_for_propagation(
         ]);
     }
     if eq_ascii_command(cmd, b"XADD") {
-        let id_idx = xadd_id_arg_index(argv)?;
-        if !argv.get(id_idx)?.contains(&b'*') {
+        let generated_id = bulk(reply)?;
+        let mut idx = 2;
+        let mut approx_trim: Option<(bool, usize, usize)> = None;
+        while idx < argv.len() {
+            if eq_ascii_command(&argv[idx], b"NOMKSTREAM") {
+                idx += 1;
+            } else if eq_ascii_command(&argv[idx], b"MAXLEN")
+                || eq_ascii_command(&argv[idx], b"MINID")
+            {
+                let is_maxlen = eq_ascii_command(&argv[idx], b"MAXLEN");
+                idx += 1;
+                if idx < argv.len() && eq_ascii_command(&argv[idx], b"~") {
+                    if idx + 1 < argv.len() {
+                        approx_trim = Some((is_maxlen, idx, idx + 1));
+                    }
+                    idx += 2;
+                } else if idx < argv.len() && eq_ascii_command(&argv[idx], b"=") {
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            } else if eq_ascii_command(&argv[idx], b"LIMIT") && idx + 1 < argv.len() {
+                idx += 2;
+            } else {
+                break;
+            }
+        }
+        let id_idx = (idx < argv.len()).then_some(idx)?;
+        let needs_id_rewrite = argv.get(id_idx)?.contains(&b'*');
+        if !needs_id_rewrite && approx_trim.is_none() {
             return None;
         }
         let mut out = argv.to_vec();
-        out[id_idx] = bulk(reply)?;
+        if needs_id_rewrite {
+            out[id_idx] = generated_id;
+        }
+        if let Some((is_maxlen, approx_idx, threshold_idx)) = approx_trim {
+            let key = argv.get(1)?;
+            let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
+            if let Some((stream_len, first_id)) = store
+                .stream_len_and_first_id_no_stat(&encoded)
+                .or_else(|| store.stream_len_and_first_id_no_stat(key))
+            {
+                out[approx_idx] = b"=".to_vec();
+                out[threshold_idx] = if is_maxlen {
+                    stream_len.to_string().into_bytes()
+                } else {
+                    format_stream_id(first_id.unwrap_or((u64::MAX, u64::MAX)))
+                };
+            }
+        }
+        return Some(out);
+    }
+    if eq_ascii_command(cmd, b"XTRIM") {
+        if !matches!(reply, RespFrame::Integer(n) if *n > 0) {
+            return None;
+        }
+        let mut idx = 2;
+        let mut approx_trim: Option<(bool, usize, usize)> = None;
+        while idx < argv.len() {
+            if eq_ascii_command(&argv[idx], b"MAXLEN") || eq_ascii_command(&argv[idx], b"MINID") {
+                let is_maxlen = eq_ascii_command(&argv[idx], b"MAXLEN");
+                idx += 1;
+                if idx < argv.len() && eq_ascii_command(&argv[idx], b"~") {
+                    if idx + 1 < argv.len() {
+                        approx_trim = Some((is_maxlen, idx, idx + 1));
+                    }
+                    idx += 2;
+                } else if idx < argv.len() && eq_ascii_command(&argv[idx], b"=") {
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            } else if eq_ascii_command(&argv[idx], b"LIMIT") && idx + 1 < argv.len() {
+                idx += 2;
+            } else {
+                break;
+            }
+        }
+        let (is_maxlen, approx_idx, threshold_idx) = approx_trim?;
+        let key = argv.get(1)?;
+        let encoded = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, key);
+        let (stream_len, first_id) = store
+            .stream_len_and_first_id_no_stat(&encoded)
+            .or_else(|| store.stream_len_and_first_id_no_stat(key))?;
+        let mut out = argv.to_vec();
+        out[approx_idx] = b"=".to_vec();
+        out[threshold_idx] = if is_maxlen {
+            stream_len.to_string().into_bytes()
+        } else {
+            format_stream_id(first_id.unwrap_or((u64::MAX, u64::MAX)))
+        };
         return Some(out);
     }
     if eq_ascii_command(cmd, b"GETDEL") && argv.len() == 2 {
@@ -9587,6 +9673,7 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
                 store.must_obey_client,
                 limit_given,
                 trim_limit_usize,
+                store.stream_node_max_entries,
             );
             store
                 .xtrim_minid_approx(&argv[1], min_id, approx_limit, now_ms)
@@ -9834,9 +9921,18 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         let max_len = maxlen_value.expect("maxlen_value set when strategy = MaxLen");
         let effective_max_len = if approx {
             let current_len = store.xlen(&argv[1], now_ms)?;
-            let approx_limit =
-                stream_effective_approx_limit(store.must_obey_client, limit_given, limit);
-            stream_approx_trim_target(current_len, max_len, approx_limit)
+            let approx_limit = stream_effective_approx_limit(
+                store.must_obey_client,
+                limit_given,
+                limit,
+                store.stream_node_max_entries,
+            );
+            stream_approx_trim_target_with_node_max(
+                current_len,
+                max_len,
+                approx_limit,
+                store.effective_stream_node_max_entries(),
+            )
         } else {
             max_len
         };
@@ -9855,8 +9951,12 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     } else {
         let min_id = minid_value.expect("minid_value set when strategy = MinId");
         let removed = if approx {
-            let approx_limit =
-                stream_effective_approx_limit(store.must_obey_client, limit_given, limit);
+            let approx_limit = stream_effective_approx_limit(
+                store.must_obey_client,
+                limit_given,
+                limit,
+                store.stream_node_max_entries,
+            );
             store.xtrim_minid_approx(&argv[1], min_id, approx_limit, now_ms)?
         } else {
             store.xtrim_minid(
@@ -9902,9 +10002,18 @@ pub fn apply_xadd_maxlen_trim_after_add(
         // xlen returns Result<usize, StoreError>; on error, mirror the generic
         // path's no-op fallback (trim to the current length).
         let current_len = store.xlen(key, now_ms).unwrap_or(max_len);
-        let approx_limit =
-            stream_effective_approx_limit(store.must_obey_client, limit_given, trim_limit);
-        stream_approx_trim_target(current_len, max_len, approx_limit)
+        let approx_limit = stream_effective_approx_limit(
+            store.must_obey_client,
+            limit_given,
+            trim_limit,
+            store.stream_node_max_entries,
+        );
+        stream_approx_trim_target_with_node_max(
+            current_len,
+            max_len,
+            approx_limit,
+            store.effective_stream_node_max_entries(),
+        )
     } else {
         max_len
     };
@@ -9956,21 +10065,43 @@ fn stream_effective_approx_limit(
     obeyed: bool,
     limit_given: bool,
     limit: Option<usize>,
+    stream_node_max_entries: usize,
 ) -> Option<usize> {
     if obeyed {
         None
     } else if limit_given {
         limit
     } else {
-        Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
+        // (frankenredis-ks8vh) Upstream t_stream.c:1029-1031:
+        //   args->limit = 100 * server.stream_node_max_entries;
+        //   if (args->limit <= 0) args->limit = 10000;
+        //   if (args->limit > 1000000) args->limit = 1000000;
+        let raw = stream_node_max_entries.saturating_mul(100);
+        let default_limit = if raw == 0 {
+            STREAM_APPROX_TRIM_DEFAULT_LIMIT
+        } else {
+            raw.min(1_000_000)
+        };
+        Some(default_limit)
     }
 }
 
+#[cfg(test)]
 fn stream_approx_trim_target(current_len: usize, max_len: usize, limit: Option<usize>) -> usize {
+    stream_approx_trim_target_with_node_max(current_len, max_len, limit, STREAM_NODE_MAX_ENTRIES)
+}
+
+fn stream_approx_trim_target_with_node_max(
+    current_len: usize,
+    max_len: usize,
+    limit: Option<usize>,
+    node_max_entries: usize,
+) -> usize {
+    let node_max = node_max_entries.max(1);
     let mut removed = 0usize;
     loop {
         let remaining = current_len - removed;
-        let node = STREAM_NODE_MAX_ENTRIES.min(remaining);
+        let node = node_max.min(remaining);
         if node == 0 {
             break;
         }
@@ -18366,11 +18497,11 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("redis_build_id:0\r\n");
         // Upstream server.c::genRedisInfoString:5469-5471 selects
         // redis_mode from server flags: "cluster" when cluster_enabled,
-        // "sentinel" when sentinel_mode, else "standalone". fr does
-        // not track sentinel_mode so only the cluster/standalone
-        // branch matters. (frankenredis-xa8u4)
+        // "sentinel" when sentinel_mode, else "standalone". (frankenredis-xa8u4, frankenredis-svf0d)
         info.push_str(if store.cluster_enabled {
             "redis_mode:cluster\r\n"
+        } else if store.sentinel_mode {
+            "redis_mode:sentinel\r\n"
         } else {
             "redis_mode:standalone\r\n"
         });

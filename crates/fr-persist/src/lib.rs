@@ -315,7 +315,8 @@ pub fn parse_aof_manifest(input: &str) -> Result<AofManifest, PersistError> {
 pub fn read_aof_manifest_file(path: &Path) -> Result<AofManifest, PersistError> {
     match std::fs::read(path) {
         Ok(bytes) => {
-            if let Ok(contents) = std::str::from_utf8(&bytes)
+            if sidecar_source_hash_matches(path, &bytes)
+                && let Ok(contents) = std::str::from_utf8(&bytes)
                 && let Ok(manifest) = parse_aof_manifest(contents)
             {
                 return Ok(manifest);
@@ -325,6 +326,8 @@ pub fn read_aof_manifest_file(path: &Path) -> Result<AofManifest, PersistError> 
                 && let Ok(manifest) = parse_aof_manifest(recovered_str)
             {
                 Ok(manifest)
+            } else if !sidecar_source_hash_matches(path, &bytes) {
+                Err(PersistError::InvalidFrame)
             } else {
                 match std::str::from_utf8(&bytes) {
                     Ok(contents) => parse_aof_manifest(contents),
@@ -367,28 +370,40 @@ pub fn read_aof_manifest_dir(manifest_path: &Path) -> Result<MultipartAofLoad, P
             Ok(bytes) => bytes,
             Err(e) => return Err(PersistError::Io(e)),
         };
-        if data.is_empty() {
+        let hash_matches = sidecar_source_hash_matches(&entry_path, &data);
+        if data.is_empty() && hash_matches {
             continue;
         }
         let is_rdb_base =
             entry.file_type == AofManifestFileType::Base && entry.file_name.ends_with(".rdb");
         if is_rdb_base {
-            let decoded = match decode_rdb_prefix(&data) {
-                Ok(dec) => dec,
-                Err(err) => {
-                    if let Some(recovered) = try_recover_rdb_from_sidecar(&entry_path)
-                        && let Ok(dec) = decode_rdb_prefix(&recovered)
-                    {
-                        dec
-                    } else {
-                        return Err(err);
-                    }
-                }
+            let decoded = if hash_matches
+                && !data.is_empty()
+                && let Ok(dec) = decode_rdb_prefix(&data)
+            {
+                dec
+            } else if let Some(recovered) = try_recover_rdb_from_sidecar(&entry_path)
+                && let Ok(dec) = decode_rdb_prefix(&recovered)
+            {
+                dec
+            } else if !hash_matches {
+                return Err(PersistError::InvalidFrame);
+            } else {
+                decode_rdb_prefix(&data)?
             };
             out.base_rdb_entries = decoded.entries;
             out.base_rdb_functions = decoded.functions;
         } else {
-            out.records.extend(decode_aof_stream(&data)?);
+            let aof_bytes = if hash_matches {
+                data
+            } else if let Some(recovered) = try_recover_rdb_from_sidecar(&entry_path) {
+                recovered
+            } else {
+                return Err(PersistError::InvalidFrame);
+            };
+            if !aof_bytes.is_empty() {
+                out.records.extend(decode_aof_stream(&aof_bytes)?);
+            }
         }
     }
     Ok(out)
@@ -7284,6 +7299,7 @@ pub fn read_rdb_file_with_functions(
     match std::fs::read(path) {
         Ok(data) => {
             if !data.is_empty()
+                && sidecar_source_hash_matches(path, &data)
                 && let Ok(decoded) = decode_rdb_prefix(&data)
                 && decoded.consumed == data.len()
             {
@@ -7306,16 +7322,31 @@ pub fn read_rdb_file_with_functions(
     }
 }
 
+fn sidecar_source_hash_matches(path: &Path, bytes: &[u8]) -> bool {
+    let (env_path, sym_path) = fr_fec::sidecar_paths(path);
+    if !env_path.is_file() || !sym_path.is_file() {
+        return true;
+    }
+    let Ok(envelope_json) = std::fs::read_to_string(&env_path) else {
+        return false;
+    };
+    let Ok(envelope) = fr_fec::envelope_from_json(&envelope_json) else {
+        return false;
+    };
+    envelope.source_hash.is_empty() || fr_fec::sha256_hex(bytes) == envelope.source_hash
+}
+
 /// (Spec §9/§19) Attempts systematic RaptorQ forward-error-correction recovery of an RDB
 /// snapshot file from its durability sidecars (`.envelope.json` and `.symbols`).
 ///
 /// If recovery succeeds:
+/// - Preserves any existing corrupt primary at `<path>.corrupt` before overwriting.
 /// - Repairs and writes the source RDB bytes back to `path` on disk.
 /// - Appends a [`fr_fec::DecodeProof`] to `decode_proofs` in the envelope and sets scrub status to `recovered`.
 /// - Returns the recovered bytes.
 pub fn try_recover_rdb_from_sidecar(path: &Path) -> Option<Vec<u8>> {
     let (env_path, sym_path) = fr_fec::sidecar_paths(path);
-    if !env_path.exists() || !sym_path.exists() {
+    if !env_path.is_file() || !sym_path.is_file() {
         return None;
     }
     let now_unix_ms = std::time::SystemTime::now()
@@ -7329,9 +7360,9 @@ pub fn try_recover_rdb_from_sidecar(path: &Path) -> Option<Vec<u8>> {
     match outcome {
         fr_fec::ScrubOutcome::Recovered { source, .. } => Some(source),
         fr_fec::ScrubOutcome::Clean => {
-            // The sidecar symbols are 100% intact, but the RDB file on disk was corrupted,
-            // truncated, or missing. Decode the source from intact symbols, persist proof into
-            // the envelope, and restore the RDB file on disk.
+            // The sidecar symbols are 100% intact, but the primary file on disk was corrupted,
+            // truncated, or missing. Decode the source from intact symbols, preserve any corrupt
+            // primary at `<path>.corrupt`, persist proof into the envelope, and restore `path`.
             let (source, proof) = fr_fec::decode_artifact(
                 &envelope,
                 &symbols,
@@ -7339,6 +7370,13 @@ pub fn try_recover_rdb_from_sidecar(path: &Path) -> Option<Vec<u8>> {
                 now_unix_ms,
             )
             .ok()?;
+            if path.is_file()
+                && std::fs::read(path)
+                    .map(|existing| existing != source)
+                    .unwrap_or(false)
+            {
+                let _ = std::fs::copy(path, fr_fec::corrupt_backup_path(path));
+            }
             envelope.decode_proofs.push(proof);
             envelope.scrub.status = "recovered".to_string();
             let json = fr_fec::envelope_to_json(&envelope);
@@ -14327,7 +14365,14 @@ mod tests {
             assert!(keys.contains(b"counter".as_slice()));
             assert_eq!(recovered_aux.get("redis-ver"), Some(&"7.2.4".to_string()));
 
-            // Verify that the envelope was updated with the DecodeProof.
+            // Verify that the envelope was updated with the DecodeProof and .corrupt was preserved.
+            let corrupt_rdb = fr_fec::corrupt_backup_path(&rdb_path);
+            assert!(corrupt_rdb.exists(), "corrupt RDB backup must exist");
+            assert_eq!(
+                std::fs::read(&corrupt_rdb).expect("read corrupt rdb backup"),
+                corrupted
+            );
+            assert_eq!(std::fs::read(&rdb_path).expect("read healed rdb"), encoded);
             let env =
                 fr_fec::envelope_from_json(&std::fs::read_to_string(&env_path).expect("read env"))
                     .expect("parse env");
@@ -14335,6 +14380,7 @@ mod tests {
             assert_eq!(env.decode_proofs.len(), 1);
 
             let _ = std::fs::remove_file(&rdb_path);
+            let _ = std::fs::remove_file(&corrupt_rdb);
             let _ = std::fs::remove_file(&env_path);
             let _ = std::fs::remove_file(&sym_path);
             let _ = std::fs::remove_dir(&dir);
@@ -14383,22 +14429,48 @@ mod tests {
             assert_eq!(loaded.records.len(), 1);
 
             // 2. Corrupt manifest on disk.
-            let mut manifest_bytes = std::fs::read(&manifest_path).expect("read manifest");
+            let orig_manifest_bytes = std::fs::read(&manifest_path).expect("read manifest");
+            let mut manifest_bytes = orig_manifest_bytes.clone();
             assert!(manifest_bytes.len() > 5);
             manifest_bytes[0] ^= 0xff;
             manifest_bytes[1] ^= 0xee;
             std::fs::write(&manifest_path, &manifest_bytes).expect("write corrupted manifest");
 
-            // read_aof_manifest_dir recovers corrupted manifest from sidecars:
+            // read_aof_manifest_dir recovers corrupted manifest from sidecars and preserves .corrupt:
             let loaded_after_manifest_corrupt =
                 crate::read_aof_manifest_dir(&manifest_path).expect("auto-heal manifest");
             assert_eq!(loaded_after_manifest_corrupt.base_rdb_entries.len(), 1);
+            let corrupt_manifest = fr_fec::corrupt_backup_path(&manifest_path);
+            assert!(
+                corrupt_manifest.exists(),
+                "corrupt manifest backup must exist"
+            );
+            assert_eq!(
+                std::fs::read(&corrupt_manifest).expect("read corrupt manifest backup"),
+                manifest_bytes
+            );
+            assert_eq!(
+                std::fs::read(&manifest_path).expect("read healed manifest"),
+                orig_manifest_bytes
+            );
             let m_env = fr_fec::envelope_from_json(
                 &std::fs::read_to_string(&manifest_env).expect("read manifest env"),
             )
             .expect("parse manifest env");
             assert_eq!(m_env.scrub.status, "recovered");
             assert_eq!(m_env.decode_proofs.len(), 1);
+
+            // 2b. Replace manifest with a syntactically valid but tampered manifest (hash mismatch).
+            let tampered_valid_manifest = b"file appendonly.aof.1.incr.aof seq 1 type i\n".to_vec();
+            std::fs::write(&manifest_path, &tampered_valid_manifest)
+                .expect("write tampered valid manifest");
+            let loaded_after_tampered_manifest =
+                crate::read_aof_manifest_dir(&manifest_path).expect("auto-heal tampered manifest");
+            assert_eq!(loaded_after_tampered_manifest.base_rdb_entries.len(), 1);
+            assert_eq!(
+                std::fs::read(&corrupt_manifest).expect("read tampered manifest backup"),
+                tampered_valid_manifest
+            );
 
             // 3. Corrupt base RDB on disk.
             let base_path = dir.join("appendonly.aof.1.base.rdb");
@@ -14415,6 +14487,12 @@ mod tests {
             assert_eq!(
                 loaded_after_base_corrupt.base_rdb_entries[0].key,
                 b"aof_base_key"
+            );
+            let corrupt_base = fr_fec::corrupt_backup_path(&base_path);
+            assert!(corrupt_base.exists(), "corrupt base RDB backup must exist");
+            assert_eq!(
+                std::fs::read(&corrupt_base).expect("read corrupt base RDB backup"),
+                base_bytes
             );
             let b_env = fr_fec::envelope_from_json(
                 &std::fs::read_to_string(&base_env).expect("read base env"),

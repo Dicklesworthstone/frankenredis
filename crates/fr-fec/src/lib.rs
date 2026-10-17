@@ -68,6 +68,7 @@ pub struct FecEnvelope {
     pub schema_version: String,
     pub artifact_id: String,
     pub artifact_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_hash: String,
     pub padding: u32,
     pub symbol_size: u16,
@@ -77,6 +78,8 @@ pub struct FecEnvelope {
     pub decode_proofs: Vec<DecodeProof>,
 }
 
+pub type FecSidecarEnvelope = FecEnvelope;
+
 /// The encoded form of an artifact: the envelope plus every serialized symbol
 /// (source symbols first, then repair symbols).
 #[derive(Clone, Debug)]
@@ -85,7 +88,8 @@ pub struct EncodedArtifact {
     pub symbols: Vec<EncodingPacket>,
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+#[must_use]
+pub fn sha256_hex(data: &[u8]) -> String {
     let digest = Sha256::digest(data);
     format!("sha256:{}", hex::encode(digest))
 }
@@ -202,7 +206,7 @@ pub fn scrub(envelope: &FecEnvelope, symbols: &[EncodingPacket], now_unix_ms: u6
             ),
         };
     };
-    if sha256_hex(&source) != envelope.source_hash {
+    if !envelope.source_hash.is_empty() && sha256_hex(&source) != envelope.source_hash {
         return ScrubOutcome::Failed {
             reason: "reconstructed source hash does not match envelope.source_hash".to_string(),
         };
@@ -252,7 +256,7 @@ pub fn decode_artifact(
         ));
     };
     let actual = sha256_hex(&source);
-    if actual != envelope.source_hash {
+    if !envelope.source_hash.is_empty() && actual != envelope.source_hash {
         return Err(format!(
             "recovered source hash {actual} does not match envelope.source_hash {}",
             envelope.source_hash
@@ -262,7 +266,7 @@ pub fn decode_artifact(
         ts_unix_ms: now_unix_ms,
         reason: reason.to_string(),
         recovered_blocks: envelope.raptorq.k,
-        proof_hash: sha256_hex(&source),
+        proof_hash: actual,
     };
     Ok((source, proof))
 }
@@ -339,6 +343,12 @@ pub fn sidecar_paths(
     (envelope, symbols)
 }
 
+/// Path where a corrupted primary artifact is preserved before sidecar recovery overwrites it.
+pub fn corrupt_backup_path(artifact_path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    let p = artifact_path.as_ref();
+    std::path::PathBuf::from(format!("{}.corrupt", p.display()))
+}
+
 /// Write sidecar envelope and symbols files alongside an artifact.
 pub fn write_sidecar(
     artifact_path: impl AsRef<std::path::Path>,
@@ -386,23 +396,57 @@ pub fn read_sidecar(
 }
 
 /// Scrub an artifact's sidecar, updating status and proofs on disk when recovered.
+/// Also verifies that an existing primary file at `artifact_path` matches
+/// `envelope.source_hash`; if the primary on disk disagrees with `envelope.source_hash`,
+/// the corrupt primary is preserved at `<path>.corrupt` before overwriting with the
+/// recovered payload.
 pub fn scrub_sidecar(
     artifact_path: impl AsRef<std::path::Path>,
     now_unix_ms: u64,
 ) -> Result<ScrubOutcome, String> {
     let path = artifact_path.as_ref();
     let (mut envelope, symbols) = read_sidecar(path)?;
-    let outcome = scrub(&envelope, &symbols, now_unix_ms);
+    let mut outcome = scrub(&envelope, &symbols, now_unix_ms);
+    let primary_mismatch = std::fs::read(path).ok().is_some_and(|disk_bytes| {
+        !envelope.source_hash.is_empty() && sha256_hex(&disk_bytes) != envelope.source_hash
+    });
+    if matches!(outcome, ScrubOutcome::Clean)
+        && primary_mismatch
+        && let Ok((source, proof)) = decode_artifact(
+            &envelope,
+            &symbols,
+            "primary artifact hash mismatch against envelope.source_hash; recovered from intact RaptorQ sidecar",
+            now_unix_ms,
+        )
+    {
+        outcome = ScrubOutcome::Recovered { source, proof };
+    }
     match &outcome {
         ScrubOutcome::Clean => {
-            envelope.scrub.last_ok_unix_ms = now_unix_ms;
-            envelope.scrub.status = "ok".to_string();
-            let (envelope_path, _) = sidecar_paths(path);
-            let json = envelope_to_json(&envelope);
-            std::fs::write(&envelope_path, json)
-                .map_err(|err| format!("update envelope {}: {err}", envelope_path.display()))?;
+            if envelope.scrub.last_ok_unix_ms != now_unix_ms || envelope.scrub.status != "ok" {
+                envelope.scrub.last_ok_unix_ms = now_unix_ms;
+                envelope.scrub.status = "ok".to_string();
+                let (envelope_path, _) = sidecar_paths(path);
+                let json = envelope_to_json(&envelope);
+                std::fs::write(&envelope_path, json)
+                    .map_err(|err| format!("update envelope {}: {err}", envelope_path.display()))?;
+            }
         }
         ScrubOutcome::Recovered { source, proof } => {
+            if path.is_file()
+                && std::fs::read(path)
+                    .map(|existing| existing != *source)
+                    .unwrap_or(false)
+            {
+                let backup = corrupt_backup_path(path);
+                std::fs::copy(path, &backup).map_err(|err| {
+                    format!(
+                        "preserve corrupt primary {} -> {}: {err}",
+                        path.display(),
+                        backup.display()
+                    )
+                })?;
+            }
             envelope.decode_proofs.push(proof.clone());
             envelope.scrub.status = "recovered".to_string();
             let (envelope_path, _) = sidecar_paths(path);

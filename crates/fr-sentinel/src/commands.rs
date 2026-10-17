@@ -925,7 +925,15 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
-fn cmd_flushconfig(_state: &SentinelState) -> RespFrame {
+fn cmd_flushconfig(state: &SentinelState) -> RespFrame {
+    if let Some(path) = &state.config_file_path {
+        let content = crate::format_sentinel_config(state);
+        if let Err(err) = std::fs::write(path, content) {
+            return RespFrame::Error(format!(
+                "ERR Sentinel was not able to save the new configuration on disk!!!: {err}"
+            ));
+        }
+    }
     RespFrame::SimpleString("OK".into())
 }
 

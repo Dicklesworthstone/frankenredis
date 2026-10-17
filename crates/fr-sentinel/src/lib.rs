@@ -393,6 +393,7 @@ pub struct SentinelState {
     pub simfailure_flags: SimFailureFlags,
     pub loglevel: String,
     pub debug_config: SentinelDebugConfig,
+    pub config_file_path: Option<std::path::PathBuf>,
 }
 
 impl Default for SentinelState {
@@ -465,6 +466,7 @@ impl SentinelState {
             simfailure_flags: SimFailureFlags::empty(),
             loglevel: "notice".to_string(),
             debug_config: SentinelDebugConfig::default(),
+            config_file_path: None,
         }
     }
 
@@ -548,6 +550,584 @@ impl SentinelState {
     pub fn myid_hex(&self) -> String {
         String::from_utf8_lossy(&self.myid).into_owned()
     }
+}
+
+fn parse_yes_no_token(token: &str) -> Result<bool, String> {
+    if token.eq_ignore_ascii_case("yes") {
+        Ok(true)
+    } else if token.eq_ignore_ascii_case("no") {
+        Ok(false)
+    } else {
+        Err(format!("Invalid yes/no value '{token}'"))
+    }
+}
+
+struct ParsedSentinelDirective {
+    line_number: usize,
+    name: String,
+    args: Vec<String>,
+}
+
+fn tokenize_config_line(line: &str, line_number: usize) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut chars = line.chars().peekable();
+    while let Some(&ch) = chars.peek() {
+        if ch.is_ascii_whitespace() {
+            chars.next();
+            continue;
+        }
+        if ch == '#' {
+            break;
+        }
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            chars.next();
+            let mut token = String::new();
+            let mut closed = false;
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    if let Some(esc) = chars.next() {
+                        token.push(esc);
+                    }
+                } else if c == quote {
+                    closed = true;
+                    break;
+                } else {
+                    token.push(c);
+                }
+            }
+            if !closed {
+                return Err(format!("line {line_number}: unbalanced quotes in config"));
+            }
+            tokens.push(token);
+        } else {
+            let mut token = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_ascii_whitespace() || c == '#' {
+                    break;
+                }
+                token.push(c);
+                chars.next();
+            }
+            tokens.push(token);
+        }
+    }
+    Ok(tokens)
+}
+
+pub fn parse_sentinel_config(state: &mut SentinelState, config_text: &str) -> Result<(), String> {
+    let mut directives = Vec::new();
+    for (idx, line) in config_text.lines().enumerate() {
+        let line_number = idx + 1;
+        let tokens = tokenize_config_line(line, line_number)?;
+        if let Some((first, rest)) = tokens.split_first() {
+            directives.push(ParsedSentinelDirective {
+                line_number,
+                name: first.clone(),
+                args: rest.to_vec(),
+            });
+        }
+    }
+    let now = state.previous_time;
+    for directive in directives {
+        if !directive.name.eq_ignore_ascii_case("sentinel") {
+            continue;
+        }
+        let args = directive.args;
+        let Some(sub) = args.first().map(|s| s.to_ascii_lowercase()) else {
+            return Err(format!(
+                "line {}: sentinel directive requires a subcommand",
+                directive.line_number
+            ));
+        };
+        match sub.as_str() {
+            "monitor" => {
+                if args.len() != 5 {
+                    return Err(format!(
+                        "line {}: sentinel monitor requires <name> <host> <port> <quorum>",
+                        directive.line_number
+                    ));
+                }
+                let port: u16 = args[3].parse().map_err(|_| {
+                    format!(
+                        "line {}: invalid port '{}' in sentinel monitor",
+                        directive.line_number, args[3]
+                    )
+                })?;
+                let quorum: u32 = args[4].parse().map_err(|_| {
+                    format!(
+                        "line {}: invalid quorum '{}' in sentinel monitor",
+                        directive.line_number, args[4]
+                    )
+                })?;
+                state
+                    .monitor(&args[1], &args[2], port, quorum)
+                    .map_err(|e| format!("line {}: {e}", directive.line_number))?;
+            }
+            "down-after-milliseconds" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "line {}: sentinel down-after-milliseconds requires <name> <ms>",
+                        directive.line_number
+                    ));
+                }
+                let ms: u64 = args[2].parse().map_err(|_| {
+                    format!(
+                        "line {}: invalid milliseconds '{}'",
+                        directive.line_number, args[2]
+                    )
+                })?;
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                master.down_after_period = ms;
+            }
+            "parallel-syncs" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "line {}: sentinel parallel-syncs requires <name> <count>",
+                        directive.line_number
+                    ));
+                }
+                let count: i32 = args[2].parse().map_err(|_| {
+                    format!(
+                        "line {}: invalid parallel-syncs '{}'",
+                        directive.line_number, args[2]
+                    )
+                })?;
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                master.parallel_syncs = count;
+            }
+            "failover-timeout" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "line {}: sentinel failover-timeout requires <name> <ms>",
+                        directive.line_number
+                    ));
+                }
+                let ms: u64 = args[2].parse().map_err(|_| {
+                    format!(
+                        "line {}: invalid failover-timeout '{}'",
+                        directive.line_number, args[2]
+                    )
+                })?;
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                master.failover_timeout = ms;
+            }
+            "auth-pass" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "line {}: sentinel auth-pass requires <name> <password>",
+                        directive.line_number
+                    ));
+                }
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                master.auth_pass = Some(args[2].clone());
+            }
+            "auth-user" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "line {}: sentinel auth-user requires <name> <username>",
+                        directive.line_number
+                    ));
+                }
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                master.auth_user = Some(args[2].clone());
+            }
+            "notification-script" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "line {}: sentinel notification-script requires <name> <path>",
+                        directive.line_number
+                    ));
+                }
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                master.notification_script = Some(args[2].clone());
+            }
+            "client-reconfig-script" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "line {}: sentinel client-reconfig-script requires <name> <path>",
+                        directive.line_number
+                    ));
+                }
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                master.client_reconfig_script = Some(args[2].clone());
+            }
+            "config-epoch" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "line {}: sentinel config-epoch requires <name> <epoch>",
+                        directive.line_number
+                    ));
+                }
+                let epoch: u64 = args[2].parse().map_err(|_| {
+                    format!(
+                        "line {}: invalid config-epoch '{}'",
+                        directive.line_number, args[2]
+                    )
+                })?;
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                master.config_epoch = epoch;
+            }
+            "leader-epoch" => {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "line {}: sentinel leader-epoch requires <name> <epoch>",
+                        directive.line_number
+                    ));
+                }
+                let epoch: u64 = args[2].parse().map_err(|_| {
+                    format!(
+                        "line {}: invalid leader-epoch '{}'",
+                        directive.line_number, args[2]
+                    )
+                })?;
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                master.leader_epoch = epoch;
+            }
+            "known-replica" | "known-slave" => {
+                if args.len() != 4 {
+                    return Err(format!(
+                        "line {}: sentinel {} requires <name> <ip> <port>",
+                        directive.line_number, sub
+                    ));
+                }
+                let port: u16 = args[3].parse().map_err(|_| {
+                    format!(
+                        "line {}: invalid replica port '{}'",
+                        directive.line_number, args[3]
+                    )
+                })?;
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                let addr = SentinelAddr::new(&args[2], port);
+                let slave_key = crate::failover::sentinel_slave_key(&addr);
+                let slave = crate::failover::reset_slave_instance(
+                    &slave_key,
+                    addr,
+                    master.quorum,
+                    master.down_after_period,
+                    now,
+                );
+                master.slaves.insert(slave_key, slave);
+            }
+            "known-sentinel" => {
+                if args.len() < 4 || args.len() > 5 {
+                    return Err(format!(
+                        "line {}: sentinel known-sentinel requires <name> <ip> <port> [runid]",
+                        directive.line_number
+                    ));
+                }
+                let port: u16 = args[3].parse().map_err(|_| {
+                    format!(
+                        "line {}: invalid sentinel port '{}'",
+                        directive.line_number, args[3]
+                    )
+                })?;
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                let addr = SentinelAddr::new(&args[2], port);
+                let sentinel_key = format!("{}:{}", addr.ip, addr.port);
+                let mut sentinel = SentinelRedisInstance::new_master(&sentinel_key, addr, 0);
+                sentinel.flags = InstanceFlags::SENTINEL;
+                sentinel.down_after_period = master.down_after_period;
+                sentinel.initialize_created_link_state(now);
+                sentinel.runid = args.get(4).cloned();
+                master.sentinels.insert(sentinel_key, sentinel);
+            }
+            "rename-command" => {
+                if args.len() != 4 {
+                    return Err(format!(
+                        "line {}: sentinel rename-command requires <name> <cmd> <renamed>",
+                        directive.line_number
+                    ));
+                }
+                let master = state.get_master_mut(&args[1]).ok_or_else(|| {
+                    format!(
+                        "line {}: No such master '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                master
+                    .renamed_commands
+                    .insert(args[2].to_ascii_lowercase(), args[3].clone());
+            }
+            "announce-ip" => {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "line {}: sentinel announce-ip requires <ip>",
+                        directive.line_number
+                    ));
+                }
+                state.announce_ip = Some(args[1].clone());
+            }
+            "announce-port" => {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "line {}: sentinel announce-port requires <port>",
+                        directive.line_number
+                    ));
+                }
+                let port: u16 = args[1].parse().map_err(|_| {
+                    format!(
+                        "line {}: invalid announce-port '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                state.announce_port = Some(port);
+            }
+            "sentinel-user" => {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "line {}: sentinel sentinel-user requires <user>",
+                        directive.line_number
+                    ));
+                }
+                state.sentinel_auth_user = Some(args[1].clone());
+            }
+            "sentinel-pass" => {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "line {}: sentinel sentinel-pass requires <password>",
+                        directive.line_number
+                    ));
+                }
+                state.sentinel_auth_pass = Some(args[1].clone());
+            }
+            "myid" => {
+                if args.len() != 2 || args[1].len() != 40 {
+                    return Err(format!(
+                        "line {}: sentinel myid requires a 40-char id",
+                        directive.line_number
+                    ));
+                }
+                state.myid.copy_from_slice(args[1].as_bytes());
+            }
+            "current-epoch" => {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "line {}: sentinel current-epoch requires <epoch>",
+                        directive.line_number
+                    ));
+                }
+                let epoch: u64 = args[1].parse().map_err(|_| {
+                    format!(
+                        "line {}: invalid current-epoch '{}'",
+                        directive.line_number, args[1]
+                    )
+                })?;
+                state.current_epoch = epoch;
+            }
+            "resolve-hostnames" => {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "line {}: sentinel resolve-hostnames requires <yes|no>",
+                        directive.line_number
+                    ));
+                }
+                state.resolve_hostnames = parse_yes_no_token(&args[1])
+                    .map_err(|e| format!("line {}: {e}", directive.line_number))?;
+            }
+            "announce-hostnames" => {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "line {}: sentinel announce-hostnames requires <yes|no>",
+                        directive.line_number
+                    ));
+                }
+                state.announce_hostnames = parse_yes_no_token(&args[1])
+                    .map_err(|e| format!("line {}: {e}", directive.line_number))?;
+            }
+            "deny-scripts-reconfig" => {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "line {}: sentinel deny-scripts-reconfig requires <yes|no>",
+                        directive.line_number
+                    ));
+                }
+                state.deny_scripts_reconfig = parse_yes_no_token(&args[1])
+                    .map_err(|e| format!("line {}: {e}", directive.line_number))?;
+            }
+            other => {
+                return Err(format!(
+                    "line {}: Unrecognized sentinel configuration statement 'sentinel {other}'",
+                    directive.line_number
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[must_use]
+pub fn format_sentinel_config(state: &SentinelState) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "sentinel myid {}", state.myid_hex());
+    if state.deny_scripts_reconfig {
+        let _ = writeln!(out, "sentinel deny-scripts-reconfig yes");
+    } else {
+        let _ = writeln!(out, "sentinel deny-scripts-reconfig no");
+    }
+    if state.resolve_hostnames {
+        let _ = writeln!(out, "sentinel resolve-hostnames yes");
+    }
+    if state.announce_hostnames {
+        let _ = writeln!(out, "sentinel announce-hostnames yes");
+    }
+    if let Some(ip) = &state.announce_ip {
+        let _ = writeln!(out, "sentinel announce-ip {ip}");
+    }
+    if let Some(port) = state.announce_port {
+        let _ = writeln!(out, "sentinel announce-port {port}");
+    }
+    if let Some(user) = &state.sentinel_auth_user {
+        let _ = writeln!(out, "sentinel sentinel-user {user}");
+    }
+    if let Some(pass) = &state.sentinel_auth_pass {
+        let _ = writeln!(out, "sentinel sentinel-pass {pass}");
+    }
+
+    let mut master_names: Vec<&String> = state.masters.keys().collect();
+    master_names.sort();
+    for name in master_names {
+        let master = &state.masters[name];
+        let host = if state.announce_hostnames {
+            &master.addr.hostname
+        } else {
+            &master.addr.ip
+        };
+        let _ = writeln!(
+            out,
+            "sentinel monitor {} {} {} {}",
+            master.name, host, master.addr.port, master.quorum
+        );
+        if master.down_after_period != DEFAULT_DOWN_AFTER_MS {
+            let _ = writeln!(
+                out,
+                "sentinel down-after-milliseconds {} {}",
+                master.name, master.down_after_period
+            );
+        }
+        if master.failover_timeout != DEFAULT_FAILOVER_TIMEOUT_MS {
+            let _ = writeln!(
+                out,
+                "sentinel failover-timeout {} {}",
+                master.name, master.failover_timeout
+            );
+        }
+        if master.parallel_syncs != 1 {
+            let _ = writeln!(
+                out,
+                "sentinel parallel-syncs {} {}",
+                master.name, master.parallel_syncs
+            );
+        }
+        if let Some(pass) = &master.auth_pass {
+            let _ = writeln!(out, "sentinel auth-pass {} {pass}", master.name);
+        }
+        if let Some(user) = &master.auth_user {
+            let _ = writeln!(out, "sentinel auth-user {} {user}", master.name);
+        }
+        if let Some(script) = &master.notification_script {
+            let _ = writeln!(out, "sentinel notification-script {} {script}", master.name);
+        }
+        if let Some(script) = &master.client_reconfig_script {
+            let _ = writeln!(
+                out,
+                "sentinel client-reconfig-script {} {script}",
+                master.name
+            );
+        }
+        let _ = writeln!(
+            out,
+            "sentinel config-epoch {} {}",
+            master.name, master.config_epoch
+        );
+        let _ = writeln!(
+            out,
+            "sentinel leader-epoch {} {}",
+            master.name, master.leader_epoch
+        );
+
+        let mut slave_keys: Vec<&String> = master.slaves.keys().collect();
+        slave_keys.sort();
+        for sk in slave_keys {
+            let slave = &master.slaves[sk];
+            let _ = writeln!(
+                out,
+                "sentinel known-replica {} {} {}",
+                master.name, slave.addr.ip, slave.addr.port
+            );
+        }
+
+        let mut sentinel_keys: Vec<&String> = master.sentinels.keys().collect();
+        sentinel_keys.sort();
+        for sen_key in sentinel_keys {
+            let sen = &master.sentinels[sen_key];
+            if let Some(runid) = &sen.runid {
+                let _ = writeln!(
+                    out,
+                    "sentinel known-sentinel {} {} {} {}",
+                    master.name, sen.addr.ip, sen.addr.port, runid
+                );
+            }
+        }
+    }
+    let _ = writeln!(out, "sentinel current-epoch {}", state.current_epoch);
+    out
 }
 
 #[cfg(test)]
@@ -762,5 +1342,70 @@ mod tests {
     fn read_seed(root: &std::path::Path, name: &str) -> Result<String, String> {
         std::fs::read_to_string(root.join(name))
             .map_err(|err| format!("read sentinel fuzz seed {name}: {err}"))
+    }
+
+    #[test]
+    fn sentinel_config_parse_and_flushconfig_roundtrip() {
+        let cfg = "\
+port 26379
+sentinel myid 0123456789abcdef0123456789abcdef01234567
+sentinel announce-ip 10.0.0.5
+sentinel announce-port 26380
+sentinel resolve-hostnames yes
+sentinel announce-hostnames yes
+sentinel monitor mymaster 127.0.0.1 6379 2
+sentinel down-after-milliseconds mymaster 5000
+sentinel failover-timeout mymaster 15000
+sentinel parallel-syncs mymaster 3
+sentinel auth-pass mymaster secretpass
+sentinel auth-user mymaster sentineluser
+sentinel config-epoch mymaster 4
+sentinel leader-epoch mymaster 5
+sentinel known-replica mymaster 127.0.0.1 6380
+sentinel known-sentinel mymaster 127.0.0.1 26381 fedcba9876543210fedcba9876543210fedcba98
+sentinel current-epoch 7
+";
+        let mut state = SentinelState::new();
+        parse_sentinel_config(&mut state, cfg).expect("parse sentinel.conf");
+        assert_eq!(state.myid_hex(), "0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(state.announce_ip.as_deref(), Some("10.0.0.5"));
+        assert_eq!(state.announce_port, Some(26380));
+        assert!(state.resolve_hostnames);
+        assert!(state.announce_hostnames);
+        assert_eq!(state.current_epoch, 7);
+
+        let master = state.get_master("mymaster").expect("mymaster registered");
+        assert_eq!(master.addr.port, 6379);
+        assert_eq!(master.quorum, 2);
+        assert_eq!(master.down_after_period, 5000);
+        assert_eq!(master.failover_timeout, 15000);
+        assert_eq!(master.parallel_syncs, 3);
+        assert_eq!(master.auth_pass.as_deref(), Some("secretpass"));
+        assert_eq!(master.auth_user.as_deref(), Some("sentineluser"));
+        assert_eq!(master.config_epoch, 4);
+        assert_eq!(master.leader_epoch, 5);
+        assert!(master.slaves.contains_key("127.0.0.1:6380"));
+        assert!(master.sentinels.contains_key("127.0.0.1:26381"));
+
+        // Verify SENTINEL FLUSHCONFIG writes out a re-parseable config to disk.
+        let tmp_path =
+            std::env::temp_dir().join(format!("fr_sentinel_flush_{}.conf", std::process::id()));
+        state.config_file_path = Some(tmp_path.clone());
+        let reply = crate::commands::dispatch_sentinel_command(&mut state, &[b"FLUSHCONFIG"]);
+        assert_eq!(reply, fr_protocol::RespFrame::SimpleString("OK".into()));
+        let flushed = std::fs::read_to_string(&tmp_path).expect("read flushed sentinel.conf");
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let mut reloaded = SentinelState::new();
+        parse_sentinel_config(&mut reloaded, &flushed).expect("re-parse flushed sentinel.conf");
+        assert_eq!(reloaded.myid_hex(), state.myid_hex());
+        assert_eq!(reloaded.current_epoch, 7);
+        let reloaded_master = reloaded.get_master("mymaster").expect("reloaded mymaster");
+        assert_eq!(reloaded_master.quorum, 2);
+        assert_eq!(reloaded_master.down_after_period, 5000);
+        assert_eq!(reloaded_master.failover_timeout, 15000);
+        assert_eq!(reloaded_master.parallel_syncs, 3);
+        assert!(reloaded_master.slaves.contains_key("127.0.0.1:6380"));
+        assert!(reloaded_master.sentinels.contains_key("127.0.0.1:26381"));
     }
 }

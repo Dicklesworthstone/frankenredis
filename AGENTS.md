@@ -127,16 +127,21 @@ We only use **Cargo** in this project, NEVER any other package manager.
 |-------|---------|
 | `fr-protocol` | RESP parser and wire types |
 | `fr-command` | Command dispatch and execution (depends on `fr-protocol`, `fr-store`) |
-| `fr-store` | In-memory data engine (strings, hashes, lists, sets, sorted sets) |
+| `fr-store` | In-memory data engine (strings, hashes, lists, sets, sorted sets, streams) |
 | `fr-expire` | Key expiration and TTL management |
-| `fr-persist` | AOF and RDB persistence pipelines (depends on `fr-protocol`) |
+| `fr-persist` | AOF and RDB persistence pipelines and RaptorQ sidecar recovery (depends on `fr-protocol`, `fr-fec`) |
+| `fr-fec` | RaptorQ (RFC 6330) forward-error-correction sidecar envelope, primary SHA-256 `source_hash` binding, scrub and decode proofs |
 | `fr-repl` | Replication protocol and state machine |
+| `fr-sentinel` | Sentinel monitoring, peer consensus, leader election, failover, and `sentinel.conf` persistence |
 | `fr-eventloop` | Single-threaded event loop and I/O multiplexing |
 | `fr-config` | Server configuration and runtime tuning |
 | `fr-runtime` | Core runtime orchestration and per-client/session semantics (depends on `fr-command`, `fr-config`, `fr-protocol`, `fr-store`) |
 | `fr-server` | Standalone `frankenredis` TCP server binary using `mio` on top of `fr-runtime` |
+| `fr-simd` | Runtime-dispatched SIMD kernels with scalar reference implementations |
+| `fr-uring` | Optional `io_uring` batched-write and multishot-receive boundary (`io-uring-writes` feature) |
+| `fr-bench` | TCP benchmark harness with HdrHistogram percentile reporting |
 | `fr-conformance` | Conformance test harness against legacy Redis (depends on `fr-config`, `fr-persist`, `fr-protocol`, `fr-runtime`, `serde`, `serde_json`) |
-| `serde` + `serde_json` | Serialization (used in conformance) |
+| `serde` + `serde_json` | Serialization (used in conformance and FEC sidecars) |
 
 ### Release Profile
 
@@ -243,10 +248,15 @@ cargo test -p fr-command
 cargo test -p fr-store
 cargo test -p fr-expire
 cargo test -p fr-persist
+cargo test -p fr-fec
 cargo test -p fr-repl
+cargo test -p fr-sentinel
 cargo test -p fr-eventloop
 cargo test -p fr-config
 cargo test -p fr-runtime
+cargo test -p fr-simd
+cargo test -p fr-uring
+cargo test -p fr-bench
 cargo test -p fr-conformance
 ```
 
@@ -258,11 +268,16 @@ cargo test -p fr-conformance
 | `fr-command` | Command dispatch, argument validation, error replies |
 | `fr-store` | Data structure operations, memory limits, key enumeration |
 | `fr-expire` | TTL tracking, lazy vs active expiration, edge cases |
-| `fr-persist` | AOF format, RDB snapshots, recovery ordering invariants |
+| `fr-persist` | AOF format, RDB snapshots, RaptorQ sidecar recovery, ordering invariants |
+| `fr-fec` | RaptorQ sidecar envelopes, SHA-256 `source_hash` binding, multi-block repair, scrub and decode proofs |
 | `fr-repl` | Replication state machine, ordering guarantees |
+| `fr-sentinel` | Sentinel monitoring, peer consensus, leader election, failover, `sentinel.conf` persistence |
 | `fr-eventloop` | Event dispatch, client lifecycle |
 | `fr-config` | Configuration parsing, defaults, validation |
 | `fr-runtime` | Server assembly, integration paths |
+| `fr-simd` | SIMD kernel parity against scalar reference implementations |
+| `fr-uring` | Batched write and multishot receive boundary |
+| `fr-bench` | Workload generation and latency histogram accounting |
 | `fr-conformance` | Differential testing against legacy Redis, golden output matching |
 
 ### Upstream Redis 7.2.4 Fidelity — MANDATORY FOR RELEASES
@@ -324,7 +339,7 @@ If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to f
 ```
 TCP Client → fr-server → fr-runtime → RESP Parser → Command Router → Data Engine → Persistence → Replication
              (mio loop)  (session/core)   (fr-protocol)  (fr-command)     (fr-store)    (fr-persist)   (fr-repl)
-                                                                                 (fr-expire)
+                                                                                 (fr-expire)   (fr-fec)
 ```
 
 ### Workspace Structure
@@ -338,11 +353,16 @@ frankenredis/
 │   ├── fr-store/                      # In-memory data engine
 │   ├── fr-expire/                     # Key expiration and TTL management
 │   ├── fr-persist/                    # AOF and RDB persistence pipelines
+│   ├── fr-fec/                        # RaptorQ forward-error-correction sidecars
 │   ├── fr-repl/                       # Replication protocol and state machine
+│   ├── fr-sentinel/                   # Sentinel monitoring, consensus, failover, config persistence
 │   ├── fr-eventloop/                  # Single-threaded event loop
 │   ├── fr-config/                     # Server configuration
 │   ├── fr-runtime/                    # Core runtime orchestration and session semantics
 │   ├── fr-server/                     # Standalone mio-based TCP server binary
+│   ├── fr-simd/                       # Runtime-dispatched SIMD kernels
+│   ├── fr-uring/                      # Optional io_uring write boundary
+│   ├── fr-bench/                      # TCP benchmark harness
 │   └── fr-conformance/                # Conformance tests against legacy Redis
 ├── legacy_redis_code/redis/           # Upstream C Redis source (behavioral oracle)
 ├── baselines/                         # Performance baseline artifacts

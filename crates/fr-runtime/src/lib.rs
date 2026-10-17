@@ -5319,11 +5319,14 @@ impl ServerState {
         let records = fr_persist::read_aof_file(&path)?;
         let count = records.len();
         let mut replayed_store = Store::new();
+        copy_encoding_thresholds(&mut replayed_store, &self.store);
+        replayed_store.must_obey_client = true;
         for (index, record) in records.iter().enumerate() {
             let replay_now_ms = now_ms.saturating_add(index as u64);
             dispatch_argv(&record.argv, &mut replayed_store, replay_now_ms)
                 .map_err(|_| PersistError::InvalidFrame)?;
         }
+        replayed_store.must_obey_client = false;
         // Preserve server context that the boot path set on `self.store`
         // BEFORE load_aof was invoked — `replayed_store` is a fresh
         // `Store::new()` with all defaults, so swapping it in wholesale
@@ -7199,6 +7202,8 @@ fn copy_encoding_thresholds(replacement: &mut Store, original: &Store) {
     replacement.zset_max_listpack_entries = original.zset_max_listpack_entries;
     replacement.zset_max_listpack_value = original.zset_max_listpack_value;
     replacement.hll_sparse_max_bytes = original.hll_sparse_max_bytes;
+    replacement.stream_node_max_entries = original.stream_node_max_entries;
+    replacement.stream_node_max_bytes = original.stream_node_max_bytes;
     replacement.lazyfree_lazy_server_del = original.lazyfree_lazy_server_del;
     replacement.busy_reply_threshold_ms = original.busy_reply_threshold_ms;
 }
@@ -7371,7 +7376,14 @@ impl Runtime {
     }
 
     pub fn set_config_file_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.server.store.sentinel_state.config_file_path = path.clone();
         self.server.config_file_path = path;
+    }
+
+    pub fn load_sentinel_config_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|err| format!("Failed to read sentinel config '{}': {err}", path.display()))?;
+        self.server.store.sentinel_parse_config(&text)
     }
 
     /// Set the `enable-debug-command` knob. Accepts `"no"`, `"local"`,
@@ -7691,6 +7703,7 @@ impl Runtime {
                 .as_ref()
                 .map_or(0, |(entries, _functions)| entries.len());
         let mut original_store = std::mem::replace(&mut self.server.store, Store::new());
+        copy_encoding_thresholds(&mut self.server.store, &original_store);
         let original_records = std::mem::take(&mut self.server.aof_records);
         let original_aof_db = self.server.aof_selected_db;
         let original_db = self.session.selected_db;
@@ -41632,7 +41645,9 @@ impl Runtime {
                     Some(self.handle_bgrewriteaof_command(argv, now_ms))
                 }
                 Some(RuntimeSpecialCommand::Failover) => Some(self.handle_failover_command(argv)),
-                Some(RuntimeSpecialCommand::Shutdown) => Some(self.handle_shutdown_command(argv)),
+                Some(RuntimeSpecialCommand::Shutdown) => {
+                    Some(self.handle_shutdown_command(argv, now_ms))
+                }
                 Some(RuntimeSpecialCommand::Pubsub) => Some(self.handle_pubsub_command(argv)),
                 Some(RuntimeSpecialCommand::Subscribe) => Some(self.handle_subscribe_command(argv)),
                 Some(RuntimeSpecialCommand::Unsubscribe) => {
@@ -46199,6 +46214,8 @@ impl Runtime {
         let mut next_keyspace_events: Option<u32> = None;
         let mut next_list_max_listpack_size: Option<i64> = None;
         let mut next_hll_sparse_max_bytes: Option<usize> = None;
+        let mut next_stream_node_max_entries: Option<usize> = None;
+        let mut next_stream_node_max_bytes: Option<usize> = None;
         let mut next_rdb_path = self
             .server
             .rdb_path
@@ -46391,6 +46408,7 @@ impl Runtime {
                         );
                     }
                 };
+                next_stream_node_max_entries = Some(usize::try_from(parsed).unwrap_or(usize::MAX));
                 static_override_updates
                     .push(("stream-node-max-entries".to_string(), parsed.to_string()));
                 continue;
@@ -47077,6 +47095,9 @@ impl Runtime {
                 if canonical == "hll-sparse-max-bytes" {
                     next_hll_sparse_max_bytes = Some(parsed);
                 } else {
+                    if canonical == "stream-node-max-bytes" {
+                        next_stream_node_max_bytes = Some(parsed);
+                    }
                     static_override_updates.push((canonical.to_string(), parsed.to_string()));
                 }
                 continue;
@@ -48416,6 +48437,12 @@ impl Runtime {
                 "hll-sparse-max-bytes".to_string(),
                 hll_sparse_max_bytes.to_string(),
             );
+        }
+        if let Some(stream_node_max_entries) = next_stream_node_max_entries {
+            self.server.store.stream_node_max_entries = stream_node_max_entries;
+        }
+        if let Some(stream_node_max_bytes) = next_stream_node_max_bytes {
+            self.server.store.stream_node_max_bytes = stream_node_max_bytes;
         }
         // Apply encoding threshold updates to Store and CONFIG GET state.
         // (frankenredis-10lqb) list-max-listpack-{entries,value} are
@@ -49911,7 +49938,7 @@ impl Runtime {
         RespFrame::SimpleString("Background append only file rewriting started".to_string())
     }
 
-    fn handle_shutdown_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_shutdown_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         let mut flags = 0u8;
         let mut abort = false;
         for arg in &argv[1..] {
@@ -49953,6 +49980,13 @@ impl Runtime {
         self.server.shutdown_requested = true;
         self.server.shutdown_nosave = flags & 0b0001 != 0;
         self.server.shutdown_now = flags & 0b0100 != 0;
+        let timeout_secs = self.server.configured_shutdown_timeout_secs();
+        if !self.server.shutdown_now && timeout_secs != 0 && !self.server.is_ready_to_shutdown() {
+            self.server.shutdown_deadline_ms =
+                Some(now_ms.saturating_add(timeout_secs.saturating_mul(1000)));
+        } else {
+            self.server.shutdown_deadline_ms = None;
+        }
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -50743,6 +50777,20 @@ impl Runtime {
 
         if want("server") {
             dispatch_command_section(self, "server", &mut info)?;
+            if let Some(deadline_ms) = self.server.shutdown_deadline_ms {
+                let remaining_ms = deadline_ms.saturating_sub(now_ms);
+                let line = format!("shutdown_in_milliseconds:{remaining_ms}\r\n");
+                let marker = b"io_threads_active:0\r\n";
+                if let Some(pos) = info
+                    .windows(marker.len())
+                    .rposition(|window| window == marker)
+                {
+                    let insert_at = pos + marker.len();
+                    info.splice(insert_at..insert_at, line.into_bytes());
+                } else {
+                    info.extend_from_slice(line.as_bytes());
+                }
+            }
         }
         if want("clients") {
             dispatch_command_section(self, "clients", &mut info)?;
@@ -88127,6 +88175,349 @@ user bob reset off nopass +@all
                 ]),
                 1100,
             ),
+        );
+    }
+
+    #[test]
+    fn shutdown_with_lagging_replica_sets_deadline_and_emits_info_shutdown_in_milliseconds() {
+        let mut rt = Runtime::default_strict();
+        // Register client 2 as a replica via PSYNC.
+        let replica_session = rt.new_session();
+        let client1_session = rt.swap_session(replica_session);
+        let psync_reply = rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 1_000);
+        assert!(matches!(psync_reply, RespFrame::SimpleString(_)));
+
+        // Switch back to client 1 and perform a write so primary_offset > replica ack_offset.
+        let _replica_session = rt.swap_session(client1_session);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"v"]), 1_000),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.server.is_ready_to_shutdown());
+
+        // Configure shutdown-timeout to 5 seconds and issue SHUTDOWN at t=2_000.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"shutdown-timeout", b"5"]),
+                1_500
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SHUTDOWN"]), 2_000),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.server.shutdown_requested);
+        assert_eq!(rt.server.shutdown_deadline_ms, Some(7_000));
+
+        // INFO server at t=3_250 should report shutdown_in_milliseconds:3750.
+        let info_reply = rt.execute_frame(command(&[b"INFO", b"server"]), 3_250);
+        let RespFrame::BulkString(Some(info_bytes)) = info_reply else {
+            panic!("expected bulk string from INFO server");
+        };
+        let info_text = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(
+            info_text.contains("shutdown_in_milliseconds:3750\r\n"),
+            "missing shutdown_in_milliseconds in INFO server:\n{info_text}"
+        );
+
+        // SHUTDOWN ABORT clears the deadline and removes shutdown_in_milliseconds from INFO.
+        assert_eq!(
+            rt.execute_frame(command(&[b"SHUTDOWN", b"ABORT"]), 3_500),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.server.shutdown_requested);
+        assert_eq!(rt.server.shutdown_deadline_ms, None);
+        let info_after = rt.execute_frame(command(&[b"INFO", b"server"]), 3_600);
+        let RespFrame::BulkString(Some(info_after_bytes)) = info_after else {
+            panic!("expected bulk string from INFO server");
+        };
+        let info_after_text = String::from_utf8(info_after_bytes).expect("utf8 info");
+        assert!(!info_after_text.contains("shutdown_in_milliseconds:"));
+    }
+
+    #[test]
+    fn sentinel_config_load_and_flushconfig_persists_runtime_changes() {
+        let unique_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let conf_path = std::env::temp_dir().join(format!(
+            "fr_runtime_sentinel_flushconfig_{}_{unique_nanos}.conf",
+            std::process::id()
+        ));
+        let initial_conf = "\
+sentinel monitor myprimary 127.0.0.1 6379 2
+sentinel down-after-milliseconds myprimary 4500
+sentinel failover-timeout myprimary 120000
+sentinel parallel-syncs myprimary 3
+sentinel auth-pass myprimary s3cr3t
+sentinel auth-user myprimary sentinel-admin
+sentinel announce-ip 10.20.30.40
+sentinel announce-port 26380
+";
+        std::fs::write(&conf_path, initial_conf).expect("write initial sentinel.conf");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_sentinel_mode(true);
+        rt.set_config_file_path(Some(conf_path.clone()));
+        rt.load_sentinel_config_file(&conf_path)
+            .expect("load sentinel.conf");
+
+        // Verify SENTINEL MASTER reflects loaded directives.
+        let master_reply =
+            rt.execute_frame(command(&[b"SENTINEL", b"MASTER", b"myprimary"]), 1_000);
+        let RespFrame::Array(Some(fields)) = master_reply else {
+            panic!("expected array from SENTINEL MASTER, got {master_reply:?}");
+        };
+        assert!(fields.windows(2).any(|w| {
+            w[0] == RespFrame::BulkString(Some(b"down-after-milliseconds".to_vec()))
+                && w[1] == RespFrame::BulkString(Some(b"4500".to_vec()))
+        }));
+
+        // Update down-after-milliseconds via SENTINEL SET and flush to disk.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"SENTINEL",
+                    b"SET",
+                    b"myprimary",
+                    b"down-after-milliseconds",
+                    b"9000",
+                ]),
+                1_100,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SENTINEL", b"FLUSHCONFIG"]), 1_200),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let rewritten = std::fs::read_to_string(&conf_path).expect("read rewritten sentinel.conf");
+        assert!(
+            rewritten.contains("sentinel down-after-milliseconds myprimary 9000"),
+            "rewritten sentinel.conf missing updated down-after-milliseconds:\n{rewritten}"
+        );
+        assert!(rewritten.contains("sentinel announce-ip 10.20.30.40"));
+        assert!(rewritten.contains("sentinel announce-port 26380"));
+    }
+
+    #[test]
+    fn stream_approx_trim_and_limit_respect_config_and_aof_propagation_ks8vh() {
+        let mut rt = Runtime::default_strict();
+        rt.set_enable_debug_command("yes");
+
+        // 1. XADD with LIMIT consecutive calls (stream-node-max-entries = 10)
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"stream-node-max-entries", b"10"]),
+                100,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for i in 0..100u64 {
+            rt.execute_frame(
+                command(&[b"XADD", b"mystream", b"*", b"xitem", b"v"]),
+                200 + i,
+            );
+        }
+        rt.execute_frame(
+            command(&[
+                b"XADD",
+                b"mystream",
+                b"MAXLEN",
+                b"~",
+                b"55",
+                b"LIMIT",
+                b"30",
+                b"*",
+                b"xitem",
+                b"v",
+            ]),
+            400,
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"XLEN", b"mystream"]), 401),
+            RespFrame::Integer(71)
+        );
+        rt.execute_frame(
+            command(&[
+                b"XADD",
+                b"mystream",
+                b"MAXLEN",
+                b"~",
+                b"55",
+                b"LIMIT",
+                b"30",
+                b"*",
+                b"xitem",
+                b"v",
+            ]),
+            402,
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"XLEN", b"mystream"]), 403),
+            RespFrame::Integer(62)
+        );
+
+        // 2. XTRIM with ~ is limited by 100 * stream-node-max-entries (100 * 1 = 100)
+        rt.execute_frame(command(&[b"DEL", b"mystream"]), 500);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"stream-node-max-entries", b"1"]),
+                501,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for i in 0..102u64 {
+            rt.execute_frame(
+                command(&[b"XADD", b"mystream", b"*", b"xitem", b"v"]),
+                600 + i,
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"XTRIM", b"mystream", b"MAXLEN", b"~", b"1"]),
+                800,
+            ),
+            RespFrame::Integer(100)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"XLEN", b"mystream"]), 801),
+            RespFrame::Integer(2)
+        );
+
+        // 3. XTRIM with LIMIT delete entries no more than limit (stream-node-max-entries = 2)
+        rt.execute_frame(command(&[b"DEL", b"mystream"]), 900);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"stream-node-max-entries", b"2"]),
+                901,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for i in 0..3u64 {
+            rt.execute_frame(
+                command(&[b"XADD", b"mystream", b"*", b"xitem", b"v"]),
+                910 + i,
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"XTRIM", b"mystream", b"MAXLEN", b"~", b"0", b"LIMIT", b"1"]),
+                920,
+            ),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"XTRIM", b"mystream", b"MAXLEN", b"~", b"0", b"LIMIT", b"2"]),
+                921,
+            ),
+            RespFrame::Integer(2)
+        );
+
+        // 4. AOF propagation of XADD with ~ MAXLEN + LIMIT, XADD with ~ MINID + LIMIT, and XTRIM ~ MAXLEN
+        let unique_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let aof_path = std::env::temp_dir().join(format!(
+            "fr_runtime_ks8vh_stream_trim_{}_{unique_nanos}.aof",
+            std::process::id()
+        ));
+        let mut rt_aof = Runtime::default_strict();
+        rt_aof.set_enable_debug_command("yes");
+        rt_aof.set_aof_path(aof_path);
+        assert_eq!(
+            rt_aof.execute_frame(
+                command(&[b"CONFIG", b"SET", b"stream-node-max-entries", b"10"]),
+                1000,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        for i in 0..100u64 {
+            let id_str = format!("{}", i + 1);
+            rt_aof.execute_frame(
+                command(&[b"XADD", b"s_maxlen", b"*", b"xitem", b"v"]),
+                1100 + i,
+            );
+            rt_aof.execute_frame(
+                command(&[b"XADD", b"s_minid", id_str.as_bytes(), b"xitem", b"v"]),
+                1100 + i,
+            );
+            rt_aof.execute_frame(
+                command(&[b"XADD", b"s_xtrim", b"*", b"xitem", b"v"]),
+                1100 + i,
+            );
+        }
+        rt_aof.execute_frame(
+            command(&[
+                b"XADD",
+                b"s_maxlen",
+                b"MAXLEN",
+                b"~",
+                b"55",
+                b"LIMIT",
+                b"30",
+                b"*",
+                b"xitem",
+                b"v",
+            ]),
+            1300,
+        );
+        rt_aof.execute_frame(
+            command(&[
+                b"XADD", b"s_minid", b"MINID", b"~", b"55", b"LIMIT", b"30", b"*", b"xitem", b"v",
+            ]),
+            1301,
+        );
+        assert_eq!(
+            rt_aof.execute_frame(
+                command(&[b"XTRIM", b"s_xtrim", b"MAXLEN", b"~", b"85"]),
+                1302
+            ),
+            RespFrame::Integer(10)
+        );
+        assert_eq!(
+            rt_aof.execute_frame(command(&[b"XLEN", b"s_maxlen"]), 1303),
+            RespFrame::Integer(71)
+        );
+        assert_eq!(
+            rt_aof.execute_frame(command(&[b"XLEN", b"s_minid"]), 1304),
+            RespFrame::Integer(71)
+        );
+        assert_eq!(
+            rt_aof.execute_frame(command(&[b"XLEN", b"s_xtrim"]), 1305),
+            RespFrame::Integer(90)
+        );
+
+        assert_eq!(
+            rt_aof.execute_frame(
+                command(&[b"CONFIG", b"SET", b"stream-node-max-entries", b"1"]),
+                1400,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt_aof.execute_frame(command(&[b"DEBUG", b"LOADAOF"]), 1401),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt_aof.execute_frame(command(&[b"XADD", b"s_maxlen", b"*", b"xitem", b"v"]), 1500);
+        rt_aof.execute_frame(command(&[b"XADD", b"s_minid", b"*", b"xitem", b"v"]), 1501);
+        rt_aof.execute_frame(command(&[b"XADD", b"s_xtrim", b"*", b"xitem", b"v"]), 1502);
+        assert_eq!(
+            rt_aof.execute_frame(command(&[b"XLEN", b"s_maxlen"]), 1503),
+            RespFrame::Integer(72)
+        );
+        assert_eq!(
+            rt_aof.execute_frame(command(&[b"XLEN", b"s_minid"]), 1504),
+            RespFrame::Integer(72)
+        );
+        assert_eq!(
+            rt_aof.execute_frame(command(&[b"XLEN", b"s_xtrim"]), 1505),
+            RespFrame::Integer(91)
         );
     }
 }

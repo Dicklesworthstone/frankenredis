@@ -66,6 +66,79 @@ fn sidecar_write_read_scrub_roundtrip() {
 }
 
 #[test]
+fn sidecar_detects_primary_tampering_and_preserves_corrupt_backup() {
+    let content = b"{\"snapshot\": \"primary_v1\", \"checksum\": 999}\n";
+    let artifact = setup_temp_artifact("primary_tamper_test.json", content);
+
+    let (env, env_path, sym_path) =
+        write_sidecar(&artifact, "snapshot", 4, 64, NOW).expect("write sidecar");
+    assert!(env_path.exists());
+    assert!(sym_path.exists());
+
+    // Verify backward-compatible deserialization when source_hash is omitted from JSON.
+    let legacy_json = serde_json::json!({
+        "schema_version": "frankenredis_fec_envelope/v1",
+        "artifact_id": "legacy.rdb",
+        "artifact_type": "snapshot",
+        "padding": 22,
+        "symbol_size": 64,
+        "oti": [0, 0, 0, 42, 0, 0, 0, 64, 1, 0, 1, 8],
+        "raptorq": {
+            "k": 1,
+            "repair_symbols": 4,
+            "overhead_ratio": 4.0,
+            "symbol_hashes": []
+        },
+        "scrub": {
+            "last_ok_unix_ms": NOW,
+            "status": "ok"
+        },
+        "decode_proofs": []
+    })
+    .to_string();
+    let legacy_env: fr_fec::FecSidecarEnvelope = fr_fec::envelope_from_json(&legacy_json)
+        .expect("deserialize legacy envelope without source_hash");
+    assert!(legacy_env.source_hash.is_empty());
+
+    // Tamper with the primary file on disk while leaving .symbols completely intact.
+    let tampered = b"{\"snapshot\": \"TAMPERED!\", \"checksum\": 000}\n";
+    fs::write(&artifact, tampered).expect("write tampered primary");
+
+    let corrupt_path = fr_fec::corrupt_backup_path(&artifact);
+    let _ = fs::remove_file(&corrupt_path);
+
+    let outcome = scrub_sidecar(&artifact, NOW + 5_000).expect("scrub tampered primary");
+    match outcome {
+        ScrubOutcome::Recovered { source, proof } => {
+            assert_eq!(source, content);
+            assert!(
+                proof.reason.contains("primary artifact hash mismatch"),
+                "unexpected proof reason: {}",
+                proof.reason
+            );
+        }
+        other => panic!("expected Recovered outcome, got {other:?}"),
+    }
+
+    // Primary file on disk must be restored to original content.
+    assert_eq!(fs::read(&artifact).expect("read restored primary"), content);
+    // Corrupt primary must be preserved at <path>.corrupt.
+    assert!(corrupt_path.exists(), ".corrupt backup must be preserved");
+    assert_eq!(
+        fs::read(&corrupt_path).expect("read .corrupt backup"),
+        tampered
+    );
+    // Envelope source_hash is still bound to original content.
+    let (recheck_env, _) = read_sidecar(&artifact).expect("read after primary recovery");
+    assert_eq!(recheck_env.source_hash, env.source_hash);
+
+    let _ = fs::remove_file(&artifact);
+    let _ = fs::remove_file(&corrupt_path);
+    let _ = fs::remove_file(&env_path);
+    let _ = fs::remove_file(&sym_path);
+}
+
+#[test]
 fn symbol_stream_serialization_roundtrip() {
     let content = b"Some test data for symbol stream serialization testing";
     let artifact = setup_temp_artifact("stream_test.bin", content);
@@ -80,6 +153,31 @@ fn symbol_stream_serialization_roundtrip() {
     for (orig, deser) in symbols.iter().zip(deserialized.iter()) {
         assert_eq!(orig.serialize(), deser.serialize());
     }
+}
+
+fn verify_tracked_artifact_sidecar_clean(path: &std::path::Path, rel: &str) {
+    let (env_path, sym_path) = fr_fec::sidecar_paths(path);
+    if rel.starts_with("artifacts/") && (!path.exists() || !env_path.exists() || !sym_path.exists())
+    {
+        // `.rchignore` excludes `artifacts/` when syncing to remote build workers.
+        return;
+    }
+    assert!(path.exists(), "artifact missing: {}", path.display());
+    let (envelope, symbols) =
+        read_sidecar(path).unwrap_or_else(|err| panic!("read sidecar {}: {err}", path.display()));
+    let outcome = fr_fec::scrub(&envelope, &symbols, NOW);
+    assert!(
+        matches!(outcome, ScrubOutcome::Clean),
+        "expected Clean scrub for {}, got {outcome:?}",
+        path.display()
+    );
+    let disk_bytes = fs::read(path).expect("read primary artifact");
+    assert_eq!(
+        fr_fec::sha256_hex(&disk_bytes),
+        envelope.source_hash,
+        "primary sha256 mismatch for {}",
+        path.display()
+    );
 }
 
 #[test]
@@ -106,9 +204,7 @@ fn reproducibility_ledgers_raptorq_sidecars_scrub_clean() {
 
     for rel in ledgers {
         let path = repo_root.join(rel);
-        assert!(path.exists(), "artifact missing: {}", path.display());
-        let gate_res = verify_sidecar_gate(&path, NOW);
-        assert!(gate_res.is_ok(), "gate check for {}", path.display());
+        verify_tracked_artifact_sidecar_clean(&path, rel);
     }
 }
 
@@ -142,8 +238,6 @@ fn release_grade_state_artifacts_raptorq_sidecars_scrub_clean() {
 
     for rel in state_artifacts {
         let path = repo_root.join(rel);
-        assert!(path.exists(), "artifact missing: {}", path.display());
-        let gate_res = verify_sidecar_gate(&path, NOW);
-        assert!(gate_res.is_ok(), "gate check for {}", path.display());
+        verify_tracked_artifact_sidecar_clean(&path, rel);
     }
 }

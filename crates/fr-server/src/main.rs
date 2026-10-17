@@ -5102,6 +5102,9 @@ fn startup_config_from_directives(
                 expect_config_arg_count(directive, 1)?;
                 config.enable_hash_field_ttl = Some(config_arg_string(directive, 0)?);
             }
+            b"sentinel" => {
+                // Parsed by `runtime.load_sentinel_config_file` when running in sentinel mode.
+            }
             // (frankenredis-4ib91) Anything this parser does not name is handed
             // to CONFIG SET at boot rather than silently discarded. Directives
             // CONFIG SET also refuses are reported there, so an unknown or
@@ -5596,6 +5599,13 @@ fn main() -> ExitCode {
         runtime.set_sentinel_announce_port(port);
     }
     runtime.set_config_file_path(config_path.map(std::path::PathBuf::from));
+    if sentinel_mode
+        && let Some(path) = config_path
+        && let Err(err) = runtime.load_sentinel_config_file(std::path::Path::new(path))
+    {
+        eprintln!("error: sentinel config file '{path}': {err}");
+        return ExitCode::from(1);
+    }
     // CLI flag wins over config-file directive; both override the
     // runtime's "no" default which mirrors upstream Redis 7.2's
     // safe-by-default `enable-debug-command` behavior.
