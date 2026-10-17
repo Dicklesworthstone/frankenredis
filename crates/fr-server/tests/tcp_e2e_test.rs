@@ -5426,11 +5426,15 @@ fn pending_output_sync_reply(
     let _server = spawn(port);
     let mut client = BufferedTcpClient::connect(port);
 
-    // These frames deliberately share one write. A multi-megabyte ECHO reply
-    // cannot drain before the following SYNC/PSYNC is dispatched, which is the
-    // state upstream replication.c::syncCommand refuses rather than
-    // interleaving the old reply into a new replication stream.
-    let payload = vec![b'x'; 4 * 1024 * 1024];
+    // These frames deliberately share one write that fits within upstream's
+    // 16 KiB `PROTO_IOBUF_LEN` (and stays below `PROTO_MBULK_BIG_ARG` = 32 KiB,
+    // which otherwise causes networking.c:readQueryFromClient to clamp `readlen`
+    // to the exact end of the ECHO bulk string and defer reading SYNC/PSYNC to
+    // the next event-loop tick after `beforeSleep` flushes the reply). Within a
+    // single `processInputBuffer` / `process_buffered_frames` batch, ECHO queues
+    // its reply into the client output buffer and the immediately following
+    // SYNC/PSYNC sees `clientHasPendingReplies(c)` / `output_buffer_bytes > 0`.
+    let payload = vec![b'x'; 4096];
     let mut pipeline = encode_command(&[b"ECHO", &payload]);
     pipeline.extend_from_slice(&encode_command(command));
     client.write_all(&pipeline);
@@ -5512,23 +5516,44 @@ fn replica_ack_during_client_pause_offset(spawn: impl FnOnce(u16) -> ManagedChil
 
     let mut pauser = connect_client(port);
     assert_eq!(
-        send_command(&mut pauser, &[b"CLIENT", b"PAUSE", b"1200", b"ALL"]),
+        send_command(&mut pauser, &[b"CLIENT", b"PAUSE", b"300", b"ALL"]),
         RespFrame::SimpleString("OK".to_string())
     );
 
-    // An ACK has no direct reply.  The following INFO is issued by the same
-    // replica connection, so upstream's CLIENT_SLAVE exemption must let both
-    // commands through before the 1.2s global pause expires.
-    replica
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .expect("set replica timeout");
     send_command_expect_no_response(&mut replica, &[b"REPLCONF", b"ACK", b"42"]);
-    let started = Instant::now();
-    let info = send_command(&mut replica, &[b"INFO", b"replication"]);
-    assert!(
-        started.elapsed() < Duration::from_millis(600),
-        "replica INFO was deferred by CLIENT PAUSE instead of being exempt"
+    let info = send_command(&mut pauser, &[b"INFO", b"replication"]);
+
+    // Upstream networking.c:397-406 disconnects any post-PSYNC replica that
+    // issues a reply-generating command such as INFO, and does so immediately
+    // even while CLIENT PAUSE ALL is active because replicas are never paused.
+    assert_eq!(
+        send_command(&mut pauser, &[b"CLIENT", b"PAUSE", b"1200", b"ALL"]),
+        RespFrame::SimpleString("OK".to_string())
     );
+    let started = Instant::now();
+    replica
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("set replica timeout");
+    replica
+        .write_all(&encode_command(&[b"INFO", b"replication"]))
+        .expect("write INFO on replica");
+    let mut eof_probe = [0_u8; 1];
+    assert_eq!(
+        replica
+            .read(&mut eof_probe)
+            .expect("read EOF from disconnected replica"),
+        0,
+        "server must disconnect post-PSYNC replica that generates a command reply"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "post-PSYNC replica command was deferred by CLIENT PAUSE instead of being processed immediately"
+    );
+    assert_eq!(
+        send_command(&mut pauser, &[b"CLIENT", b"UNPAUSE"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+
     send_shutdown_nosave(port);
     match info {
         RespFrame::BulkString(Some(bytes)) => String::from_utf8(bytes).expect("INFO utf8"),

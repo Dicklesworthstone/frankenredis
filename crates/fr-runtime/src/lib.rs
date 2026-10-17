@@ -5335,6 +5335,20 @@ impl ServerState {
         self.aof_records = records;
         // (frankenredis-ol9tz) Replayed records mirror the on-disk file.
         self.aof_disk_flushed_records = self.aof_records.len();
+        // (frankenredis-jebgy) Keep `aof_base_offset` anchored so the loaded
+        // `aof_records` span ends at `primary_offset`; otherwise a prior
+        // `primary_offset > repl_backlog_size` causes `trim_replication_backlog`
+        // to drain newly captured writes after `load_aof` / `DEBUG LOADAOF`.
+        let records_bytes: u64 = self
+            .aof_records
+            .iter()
+            .map(|r| u64::try_from(r.encoded_resp_len()).unwrap_or(0))
+            .sum();
+        self.aof_base_offset = self
+            .replication_ack_state
+            .primary_offset
+            .0
+            .saturating_sub(records_bytes);
         Ok(count)
     }
 
@@ -5937,7 +5951,7 @@ impl ServerState {
         duration_us: u64,
         failed: bool,
     ) {
-        if !self.latency_tracking {
+        if !self.latency_tracking || self.serving_blocked_client {
             return;
         }
         if argv.is_empty() {
@@ -7743,6 +7757,21 @@ impl Runtime {
         // (frankenredis-ol9tz) The replayed records are exactly the on-disk
         // file contents, so the incremental flush starts from the tail.
         self.server.aof_disk_flushed_records = self.server.aof_records.len();
+        // (frankenredis-jebgy) Anchor `aof_base_offset` to `primary_offset - records_bytes`
+        // when `load_aof` replaces `aof_records` (including via `DEBUG LOADAOF`),
+        // preserving the invariant that `aof_records` ends at `primary_offset`.
+        let records_bytes: u64 = self
+            .server
+            .aof_records
+            .iter()
+            .map(|r| u64::try_from(r.encoded_resp_len()).unwrap_or(0))
+            .sum();
+        self.server.aof_base_offset = self
+            .server
+            .replication_ack_state
+            .primary_offset
+            .0
+            .saturating_sub(records_bytes);
         self.server.aof_selected_db = self.session.selected_db;
         self.session.selected_db = original_db;
         // Preserve server context that the boot path established on
@@ -40474,7 +40503,9 @@ impl Runtime {
         now_ms: u64,
         unix_time_us: Option<u64>,
     ) -> RespFrame {
-        self.server.store.stat_total_commands_processed += 1;
+        if !self.server.serving_blocked_client {
+            self.server.store.stat_total_commands_processed += 1;
+        }
         if self.session.connected_at_ms == 0 {
             self.session.connected_at_ms = now_ms;
         }
@@ -40609,7 +40640,9 @@ impl Runtime {
                 resolved_canonical,
             )
         });
-        if let RespFrame::Error(msg) = &reply {
+        if !self.server.serving_blocked_client
+            && let RespFrame::Error(msg) = &reply
+        {
             self.server.store.stat_total_error_replies += 1;
             if self.execution_source.counts_as_unexpected_error_reply() {
                 self.server.store.stat_unexpected_error_replies += 1;
@@ -41789,10 +41822,7 @@ impl Runtime {
         // (frankenredis-ax9ox) For EVAL/EVALSHA, mirror the script's inner
         // redis.call commands (with the `lua` address) AFTER the EVAL line, as
         // upstream does.
-        if argv
-            .first()
-            .is_some_and(|cmd| Self::command_uses_script_propagation(cmd))
-        {
+        if Self::command_is_script_entrypoint(argv) {
             self.feed_script_monitor_commands(now_ms, self.session.selected_db);
         }
 
@@ -43404,6 +43434,9 @@ impl Runtime {
             || eq_ascii_token(command, b"EVALSHA_RO")
             || eq_ascii_token(command, b"FCALL")
             || eq_ascii_token(command, b"FCALL_RO")
+            || eq_ascii_token(command, b"XREADGROUP")
+            || eq_ascii_token(command, b"XCLAIM")
+            || eq_ascii_token(command, b"XAUTOCLAIM")
     }
 
     /// Whether `argv` starts a SCRIPT, i.e. upstream's EVAL/FCALL family.
@@ -49287,6 +49320,45 @@ impl Runtime {
         let serving = std::mem::replace(&mut self.server.serving_blocked_client, false);
         self.record_slowlog(argv, duration_us, now_ms);
         self.server.serving_blocked_client = serving;
+    }
+
+    /// Record slowlog, commandstats duration/failure, and errorstats when a blocked
+    /// command finishes unblocking.
+    pub fn record_unblocked_command_completion(
+        &mut self,
+        argv: &[Vec<u8>],
+        duration_us: u64,
+        now_ms: u64,
+        response: &RespFrame,
+    ) {
+        self.record_unblocked_command_slowlog(argv, duration_us, now_ms);
+        let failed = if let RespFrame::Error(msg) = response {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+            true
+        } else {
+            false
+        };
+        if self.server.latency_tracking
+            && let Some(parent) = argv.first()
+        {
+            let name = String::from_utf8_lossy(parent);
+            self.server
+                .store
+                .record_unblocked_command_histogram(&name, duration_us, failed);
+        }
     }
 
     fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
@@ -67311,20 +67383,43 @@ mod tests {
         assert_eq!(rw(&[b"EXPIRE", b"k", b"100"]), pexpireat(b"k", 1_100_000));
         // PEXPIRE ms -> now + ms
         assert_eq!(rw(&[b"PEXPIRE", b"k", b"500"]), pexpireat(b"k", 1_000_500));
-        // EXPIREAT sec -> sec*1000 (absolute, unit-converted)
-        assert_eq!(rw(&[b"EXPIREAT", b"k", b"50"]), pexpireat(b"k", 50_000));
-        // PEXPIREAT ms -> passthrough as PEXPIREAT
+        // EXPIREAT sec (future) -> sec*1000 (absolute, unit-converted)
         assert_eq!(
-            rw(&[b"PEXPIREAT", b"k", b"123456"]),
-            pexpireat(b"k", 123_456)
+            rw(&[b"EXPIREAT", b"k", b"2000"]),
+            pexpireat(b"k", 2_000_000)
+        );
+        // PEXPIREAT ms (future) -> passthrough as PEXPIREAT
+        assert_eq!(
+            rw(&[b"PEXPIREAT", b"k", b"2123456"]),
+            pexpireat(b"k", 2_123_456)
         );
         // Conditional flags are dropped (success already happened).
         assert_eq!(
             rw(&[b"EXPIRE", b"k", b"100", b"GT"]),
             pexpireat(b"k", 1_100_000)
         );
-        // A past deadline is preserved (deletes the key on the replica too).
-        assert_eq!(rw(&[b"EXPIRE", b"k", b"-1"]), pexpireat(b"k", 999_000));
+        // Past deadlines on EXPIRE / PEXPIRE / EXPIREAT / PEXPIREAT propagate as DEL
+        // per upstream expire.c::expireGenericCommand (checkAlreadyExpired).
+        let del_k = Some(vec![b"DEL".to_vec(), b"k".to_vec()]);
+        assert_eq!(rw(&[b"EXPIRE", b"k", b"-1"]), del_k);
+        assert_eq!(rw(&[b"EXPIREAT", b"k", b"50"]), del_k);
+        assert_eq!(rw(&[b"PEXPIREAT", b"k", b"123456"]), del_k);
+        // RESTORE with relative ttl > 0 rewrites to absolute timestamp + ABSTTL.
+        assert_eq!(
+            rw(&[b"RESTORE", b"k", b"100000", b"payload"]),
+            Some(vec![
+                b"RESTORE".to_vec(),
+                b"k".to_vec(),
+                b"1100000".to_vec(),
+                b"payload".to_vec(),
+                b"ABSTTL".to_vec(),
+            ])
+        );
+        assert_eq!(
+            rw(&[b"RESTORE", b"k", b"1100000", b"payload", b"absttl"]),
+            None
+        );
+        assert_eq!(rw(&[b"RESTORE", b"k", b"0", b"payload"]), None);
         // Non-expire commands and malformed values are propagated verbatim.
         assert_eq!(rw(&[b"EXPIRE", b"k", b"notanint"]), None);
         assert_eq!(rw(&[b"PERSIST", b"k"]), None);
@@ -71866,6 +71961,150 @@ mod tests {
         }
 
         clean_aof_artifacts(&dir, "trim.aof");
+    }
+
+    #[test]
+    fn load_aof_after_backlog_eviction_preserves_post_load_replication_stream() {
+        let dir = std::env::temp_dir().join("fr_runtime_load_aof_backlog_offset_sync");
+        let _ = std::fs::create_dir_all(&dir);
+        clean_aof_artifacts(&dir, "reload.aof");
+        let aof_path = dir.join("reload.aof");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_enable_debug_command("yes");
+        rt.set_aof_path(aof_path.clone());
+        rt.server.repl_backlog_size = 64;
+        rt.server.replication_runtime_state.ensure_replica(1);
+
+        // Seed a small AOF file on disk first.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"yes"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"seed", b"1"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.flush_aof_to_disk(1);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"no"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Advance primary_offset well past repl_backlog_size (64 bytes).
+        for i in 0..40u32 {
+            let key = format!("pre{i:03}");
+            assert_eq!(
+                rt.execute_frame(command(&[b"SET", key.as_bytes(), b"value"]), 10 + i as u64),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+        assert!(
+            rt.replication_primary_offset().0 > 500,
+            "primary_offset must be well past repl_backlog_size"
+        );
+
+        // Reload the small AOF via DEBUG LOADAOF while primary_offset > repl_backlog_size.
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"LOADAOF"]), 100),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let offset_after_load = rt.replication_primary_offset().0;
+
+        // Subsequent writes (including MULTI/EXEC) must NOT be drained by trim_replication_backlog.
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"post_load", b"survives"]), 101),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let tail = rt.encoded_aof_stream_from_offset(offset_after_load);
+        let tail_str = String::from_utf8_lossy(&tail);
+        assert!(
+            tail_str.contains("post_load") && tail_str.contains("survives"),
+            "post-LOADAOF write must survive in replication stream, got: {tail_str:?}"
+        );
+
+        clean_aof_artifacts(&dir, "reload.aof");
+    }
+
+    #[test]
+    fn blocked_xreadgroup_unblocked_by_xgroup_destroy_records_single_call_and_failure() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"XADD", b"mystream", b"*", b"f", b"1"]), 10),
+            RespFrame::BulkString(Some(b"10-0".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"XGROUP", b"CREATE", b"mystream", b"mygroup", b"$"]),
+                11
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 12),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let xreadgroup_argv: Vec<Vec<u8>> = [
+            b"XREADGROUP".as_slice(),
+            b"GROUP",
+            b"mygroup",
+            b"consumer_1",
+            b"COUNT",
+            b"1",
+            b"BLOCK",
+            b"0",
+            b"STREAMS",
+            b"mystream",
+            b">",
+        ]
+        .iter()
+        .map(|arg| arg.to_vec())
+        .collect();
+        let xreadgroup_frame = RespFrame::Array(Some(
+            xreadgroup_argv
+                .iter()
+                .map(|arg| RespFrame::BulkString(Some(arg.clone())))
+                .collect(),
+        ));
+
+        // Initial blocking execution returns Array(None) and records calls=1, failed_calls=0.
+        assert_eq!(
+            rt.execute_frame(xreadgroup_frame.clone(), 20),
+            RespFrame::Array(None)
+        );
+        rt.retract_blocked_command_slowlog(&xreadgroup_argv);
+
+        // Destroy the group on another client, then re-evaluate as a woken blocked client.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"XGROUP", b"DESTROY", b"mystream", b"mygroup"]),
+                30
+            ),
+            RespFrame::Integer(1)
+        );
+        rt.set_serving_blocked_client(true);
+        let wake_reply = rt.execute_frame(xreadgroup_frame, 35);
+        rt.set_serving_blocked_client(false);
+        assert!(
+            matches!(&wake_reply, RespFrame::Error(msg) if msg.starts_with("NOGROUP")),
+            "expected -NOGROUP on wake, got {wake_reply:?}"
+        );
+        rt.record_unblocked_command_completion(&xreadgroup_argv, 15_000, 35, &wake_reply);
+
+        let info = match rt.execute_frame(command(&[b"INFO", b"commandstats"]), 36) {
+            RespFrame::BulkString(Some(bytes)) => String::from_utf8(bytes).expect("utf8"),
+            other => panic!("unexpected INFO commandstats reply: {other:?}"),
+        };
+        let line = info
+            .lines()
+            .find(|line| line.starts_with("cmdstat_xreadgroup:"))
+            .expect("cmdstat_xreadgroup line present");
+        assert!(
+            line.starts_with("cmdstat_xreadgroup:calls=1,")
+                && line.ends_with(",rejected_calls=0,failed_calls=1"),
+            "expected calls=1,*,rejected_calls=0,failed_calls=1, got {line:?}"
+        );
     }
 
     #[test]
@@ -87461,5 +87700,433 @@ user bob reset off nopass +@all
         assert!(one.is_some(), "the one-option form must be served");
         assert_eq!(one, two, "arity-4 and arity-6 wrappers must agree");
         assert_eq!(two, three, "arity-6 and arity-8 wrappers must agree");
+    }
+
+    #[test]
+    fn xreadgroup_xclaim_xautoclaim_propagate_canonical_side_effects_6x12m() {
+        let mut primary = Runtime::default_strict();
+        primary.server.replication_runtime_state.ensure_replica(1);
+
+        primary.execute_frame(command(&[b"XADD", b"s", b"1-0", b"f", b"a"]), 100);
+        primary.execute_frame(command(&[b"XADD", b"s", b"2-0", b"f", b"b"]), 100);
+        primary.execute_frame(command(&[b"XADD", b"s", b"3-0", b"f", b"c"]), 100);
+        primary.execute_frame(command(&[b"XGROUP", b"CREATE", b"s", b"g", b"0"]), 100);
+
+        let before_read = primary.aof_records().len();
+        primary.execute_frame(
+            command(&[
+                b"XREADGROUP",
+                b"GROUP",
+                b"g",
+                b"c1",
+                b"COUNT",
+                b"2",
+                b"STREAMS",
+                b"s",
+                b">",
+            ]),
+            500,
+        );
+        let read_records: Vec<Vec<Vec<u8>>> = primary.aof_records()[before_read..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert_eq!(
+            read_records,
+            vec![
+                vec![b"MULTI".to_vec()],
+                vec![
+                    b"XCLAIM".to_vec(),
+                    b"s".to_vec(),
+                    b"g".to_vec(),
+                    b"c1".to_vec(),
+                    b"0".to_vec(),
+                    b"1-0".to_vec(),
+                    b"TIME".to_vec(),
+                    b"500".to_vec(),
+                    b"RETRYCOUNT".to_vec(),
+                    b"1".to_vec(),
+                    b"FORCE".to_vec(),
+                    b"JUSTID".to_vec(),
+                    b"LASTID".to_vec(),
+                    b"1-0".to_vec(),
+                ],
+                vec![
+                    b"XCLAIM".to_vec(),
+                    b"s".to_vec(),
+                    b"g".to_vec(),
+                    b"c1".to_vec(),
+                    b"0".to_vec(),
+                    b"2-0".to_vec(),
+                    b"TIME".to_vec(),
+                    b"500".to_vec(),
+                    b"RETRYCOUNT".to_vec(),
+                    b"1".to_vec(),
+                    b"FORCE".to_vec(),
+                    b"JUSTID".to_vec(),
+                    b"LASTID".to_vec(),
+                    b"2-0".to_vec(),
+                ],
+                vec![b"EXEC".to_vec()],
+            ]
+        );
+
+        // History read (cursor 0-0) increments dirty locally for delivery count/time
+        // in PEL, but upstream does NOT propagate anything to AOF/replicas.
+        let before_hist = primary.aof_records().len();
+        primary.execute_frame(
+            command(&[
+                b"XREADGROUP",
+                b"GROUP",
+                b"g",
+                b"c1",
+                b"STREAMS",
+                b"s",
+                b"0-0",
+            ]),
+            550,
+        );
+        assert_eq!(primary.aof_records().len(), before_hist);
+
+        // NOACK with a brand-new consumer c_noack reading 3-0 emits
+        // XGROUP CREATECONSUMER + XGROUP SETID ... ENTRIESREAD.
+        let before_noack = primary.aof_records().len();
+        primary.execute_frame(
+            command(&[
+                b"XREADGROUP",
+                b"GROUP",
+                b"g",
+                b"c_noack",
+                b"NOACK",
+                b"STREAMS",
+                b"s",
+                b">",
+            ]),
+            600,
+        );
+        let noack_records: Vec<Vec<Vec<u8>>> = primary.aof_records()[before_noack..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert_eq!(
+            noack_records,
+            vec![
+                vec![b"MULTI".to_vec()],
+                vec![
+                    b"XGROUP".to_vec(),
+                    b"CREATECONSUMER".to_vec(),
+                    b"s".to_vec(),
+                    b"g".to_vec(),
+                    b"c_noack".to_vec(),
+                ],
+                vec![
+                    b"XGROUP".to_vec(),
+                    b"SETID".to_vec(),
+                    b"s".to_vec(),
+                    b"g".to_vec(),
+                    b"3-0".to_vec(),
+                    b"ENTRIESREAD".to_vec(),
+                    b"3".to_vec(),
+                ],
+                vec![b"EXEC".to_vec()],
+            ]
+        );
+
+        // XCLAIM of 1-0 to c2 at t=700 propagates a single bare canonical XCLAIM.
+        // Note that c1 had read 1-0 once via `>` (deliveries=1) and once via `0-0`
+        // history read (deliveries=2), so XCLAIM increments it to 3.
+        let before_claim = primary.aof_records().len();
+        primary.execute_frame(command(&[b"XCLAIM", b"s", b"g", b"c2", b"0", b"1-0"]), 700);
+        let claim_records: Vec<Vec<Vec<u8>>> = primary.aof_records()[before_claim..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert_eq!(
+            claim_records,
+            vec![vec![
+                b"XCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"c2".to_vec(),
+                b"0".to_vec(),
+                b"1-0".to_vec(),
+                b"TIME".to_vec(),
+                b"700".to_vec(),
+                b"RETRYCOUNT".to_vec(),
+                b"3".to_vec(),
+                b"FORCE".to_vec(),
+                b"JUSTID".to_vec(),
+                b"LASTID".to_vec(),
+                b"3-0".to_vec(),
+            ]]
+        );
+
+        // XCLAIM that claims 0 entries (min-idle-time not met) but advances LASTID
+        // propagates XGROUP SETID.
+        let before_lastid = primary.aof_records().len();
+        primary.execute_frame(
+            command(&[
+                b"XCLAIM", b"s", b"g", b"c3", b"999999", b"1-0", b"LASTID", b"9-0",
+            ]),
+            750,
+        );
+        let lastid_records: Vec<Vec<Vec<u8>>> = primary.aof_records()[before_lastid..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert_eq!(
+            lastid_records,
+            vec![vec![
+                b"XGROUP".to_vec(),
+                b"SETID".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"9-0".to_vec(),
+                b"ENTRIESREAD".to_vec(),
+                b"3".to_vec(),
+            ]]
+        );
+
+        // XDEL 2-0 leaves a tombstone in PEL; XAUTOCLAIM evicts 2-0 and claims 1-0,
+        // propagating canonical XCLAIM for both so the replica PEL also evicts 2-0.
+        primary.execute_frame(command(&[b"XDEL", b"s", b"2-0"]), 800);
+        let before_autoclaim = primary.aof_records().len();
+        primary.execute_frame(
+            command(&[
+                b"XAUTOCLAIM",
+                b"s",
+                b"g",
+                b"c4",
+                b"0",
+                b"0-0",
+                b"COUNT",
+                b"10",
+            ]),
+            900,
+        );
+        let autoclaim_records: Vec<Vec<Vec<u8>>> = primary.aof_records()[before_autoclaim..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert_eq!(
+            autoclaim_records,
+            vec![
+                vec![b"MULTI".to_vec()],
+                vec![
+                    b"XCLAIM".to_vec(),
+                    b"s".to_vec(),
+                    b"g".to_vec(),
+                    b"c4".to_vec(),
+                    b"0".to_vec(),
+                    b"1-0".to_vec(),
+                    b"TIME".to_vec(),
+                    b"900".to_vec(),
+                    b"RETRYCOUNT".to_vec(),
+                    b"4".to_vec(),
+                    b"FORCE".to_vec(),
+                    b"JUSTID".to_vec(),
+                    b"LASTID".to_vec(),
+                    b"9-0".to_vec(),
+                ],
+                vec![
+                    b"XCLAIM".to_vec(),
+                    b"s".to_vec(),
+                    b"g".to_vec(),
+                    b"c1".to_vec(),
+                    b"0".to_vec(),
+                    b"2-0".to_vec(),
+                    b"TIME".to_vec(),
+                    b"550".to_vec(),
+                    b"RETRYCOUNT".to_vec(),
+                    b"2".to_vec(),
+                    b"FORCE".to_vec(),
+                    b"JUSTID".to_vec(),
+                    b"LASTID".to_vec(),
+                    b"9-0".to_vec(),
+                ],
+                vec![b"EXEC".to_vec()],
+            ]
+        );
+
+        // Lua EVAL calling XREADGROUP also propagates canonical XCLAIM rather than XREADGROUP.
+        primary.execute_frame(command(&[b"XADD", b"s", b"10-0", b"f", b"d"]), 950);
+        let before_eval = primary.aof_records().len();
+        primary.execute_frame(
+            command(&[
+                b"EVAL",
+                b"return redis.call('XREADGROUP', 'GROUP', 'g', 'c_lua', 'STREAMS', 's', '>')",
+                b"1",
+                b"s",
+            ]),
+            1000,
+        );
+        let eval_records: Vec<Vec<Vec<u8>>> = primary.aof_records()[before_eval..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert_eq!(
+            eval_records,
+            vec![vec![
+                b"XCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"c_lua".to_vec(),
+                b"0".to_vec(),
+                b"10-0".to_vec(),
+                b"TIME".to_vec(),
+                b"1000".to_vec(),
+                b"RETRYCOUNT".to_vec(),
+                b"1".to_vec(),
+                b"FORCE".to_vec(),
+                b"JUSTID".to_vec(),
+                b"LASTID".to_vec(),
+                b"10-0".to_vec(),
+            ]]
+        );
+
+        // MULTI/EXEC wrapping two XREADGROUP commands emits a single MULTI .. EXEC
+        // envelope around the canonical XCLAIM commands (tests/unit/multi.tcl:805).
+        primary.execute_frame(command(&[b"XADD", b"s", b"12-0", b"f", b"m1"]), 1010);
+        primary.execute_frame(command(&[b"XADD", b"s", b"13-0", b"f", b"m2"]), 1010);
+        primary.execute_frame(command(&[b"XADD", b"s", b"14-0", b"f", b"m3"]), 1010);
+        let before_multi = primary.aof_records().len();
+        primary.execute_frame(command(&[b"MULTI"]), 1020);
+        primary.execute_frame(
+            command(&[
+                b"XREADGROUP",
+                b"GROUP",
+                b"g",
+                b"c_multi",
+                b"COUNT",
+                b"2",
+                b"STREAMS",
+                b"s",
+                b">",
+            ]),
+            1020,
+        );
+        primary.execute_frame(
+            command(&[
+                b"XREADGROUP",
+                b"GROUP",
+                b"g",
+                b"c_multi",
+                b"STREAMS",
+                b"s",
+                b">",
+            ]),
+            1020,
+        );
+        primary.execute_frame(command(&[b"EXEC"]), 1020);
+        let multi_records: Vec<Vec<Vec<u8>>> = primary.aof_records()[before_multi..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert_eq!(
+            multi_records,
+            vec![
+                vec![b"MULTI".to_vec()],
+                vec![
+                    b"XCLAIM".to_vec(),
+                    b"s".to_vec(),
+                    b"g".to_vec(),
+                    b"c_multi".to_vec(),
+                    b"0".to_vec(),
+                    b"12-0".to_vec(),
+                    b"TIME".to_vec(),
+                    b"1020".to_vec(),
+                    b"RETRYCOUNT".to_vec(),
+                    b"1".to_vec(),
+                    b"FORCE".to_vec(),
+                    b"JUSTID".to_vec(),
+                    b"LASTID".to_vec(),
+                    b"12-0".to_vec(),
+                ],
+                vec![
+                    b"XCLAIM".to_vec(),
+                    b"s".to_vec(),
+                    b"g".to_vec(),
+                    b"c_multi".to_vec(),
+                    b"0".to_vec(),
+                    b"13-0".to_vec(),
+                    b"TIME".to_vec(),
+                    b"1020".to_vec(),
+                    b"RETRYCOUNT".to_vec(),
+                    b"1".to_vec(),
+                    b"FORCE".to_vec(),
+                    b"JUSTID".to_vec(),
+                    b"LASTID".to_vec(),
+                    b"13-0".to_vec(),
+                ],
+                vec![
+                    b"XCLAIM".to_vec(),
+                    b"s".to_vec(),
+                    b"g".to_vec(),
+                    b"c_multi".to_vec(),
+                    b"0".to_vec(),
+                    b"14-0".to_vec(),
+                    b"TIME".to_vec(),
+                    b"1020".to_vec(),
+                    b"RETRYCOUNT".to_vec(),
+                    b"1".to_vec(),
+                    b"FORCE".to_vec(),
+                    b"JUSTID".to_vec(),
+                    b"LASTID".to_vec(),
+                    b"14-0".to_vec(),
+                ],
+                vec![b"EXEC".to_vec()],
+            ]
+        );
+
+        // Replay the entire AOF/replication stream onto a replica and verify PEL
+        // and consumer group last-delivered-id cursor continuity match primary.
+        let mut replica = Runtime::default_strict();
+        for rec in primary.aof_records() {
+            let frame = RespFrame::Array(Some(
+                rec.argv
+                    .iter()
+                    .cloned()
+                    .map(|b| RespFrame::BulkString(Some(b)))
+                    .collect(),
+            ));
+            replica.execute_frame(frame, 1020);
+        }
+        assert_eq!(
+            replica.execute_frame(command(&[b"XPENDING", b"s", b"g", b"-", b"+", b"10"]), 1020),
+            primary.execute_frame(command(&[b"XPENDING", b"s", b"g", b"-", b"+", b"10"]), 1020),
+        );
+        for rt in [&mut primary, &mut replica] {
+            rt.execute_frame(command(&[b"XADD", b"s", b"15-0", b"f", b"e"]), 1050);
+        }
+        assert_eq!(
+            replica.execute_frame(
+                command(&[
+                    b"XREADGROUP",
+                    b"GROUP",
+                    b"g",
+                    b"c_promoted",
+                    b"COUNT",
+                    b"1",
+                    b"STREAMS",
+                    b"s",
+                    b">",
+                ]),
+                1100,
+            ),
+            primary.execute_frame(
+                command(&[
+                    b"XREADGROUP",
+                    b"GROUP",
+                    b"g",
+                    b"c_promoted",
+                    b"COUNT",
+                    b"1",
+                    b"STREAMS",
+                    b"s",
+                    b">",
+                ]),
+                1100,
+            ),
+        );
     }
 }

@@ -64,17 +64,59 @@ fn golden_logs_exist_and_validate() {
     }
 }
 
+fn verify_committed_sidecar_and_gate_in_tempdir(
+    artifact_path: &std::path::Path,
+    temp_dir: &std::path::Path,
+    now_unix_ms: u64,
+) {
+    let (envelope, symbols) = fr_fec::read_sidecar(artifact_path).unwrap_or_else(|err| {
+        panic!(
+            "read committed sidecar for {}: {err}",
+            artifact_path.display()
+        )
+    });
+    let outcome = fr_fec::scrub(&envelope, &symbols, now_unix_ms);
+    assert!(
+        matches!(outcome, fr_fec::ScrubOutcome::Clean),
+        "committed sidecar scrub must be Clean for {}: {outcome:?}",
+        artifact_path.display()
+    );
+
+    let file_name = artifact_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("artifact file name");
+    let temp_artifact = temp_dir.join(file_name);
+    let (src_env, src_sym) = fr_fec::sidecar_paths(artifact_path);
+    let (dst_env, dst_sym) = fr_fec::sidecar_paths(&temp_artifact);
+    fs::copy(artifact_path, &temp_artifact).expect("copy artifact to temp_dir");
+    fs::copy(&src_env, &dst_env).expect("copy envelope to temp_dir");
+    fs::copy(&src_sym, &dst_sym).expect("copy symbols to temp_dir");
+
+    let gate_res = fr_fec::verify_sidecar_gate(&temp_artifact, now_unix_ms);
+    assert!(
+        gate_res.is_ok(),
+        "gate check for {}: {:?}",
+        artifact_path.display(),
+        gate_res.err()
+    );
+}
+
 #[test]
 fn conformance_fixtures_and_goldens_raptorq_sidecars_scrub_clean() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let fixtures_root = repo_root.join("crates/fr-conformance/fixtures");
     let log_root = fixtures_root.join("log_contract_v1");
+    let temp_dir = std::env::temp_dir().join(format!(
+        "fr_conformance_sidecar_gate_{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("create temp dir for sidecar gate");
 
     for packet_id in PACKET_FAMILIES {
         let golden_path = log_root.join(format!("{packet_id}.golden.jsonl"));
         assert!(golden_path.exists());
-        let gate_res = fr_fec::verify_sidecar_gate(&golden_path, 1_788_700_000_000);
-        assert!(gate_res.is_ok(), "gate check for {}", golden_path.display());
+        verify_committed_sidecar_and_gate_in_tempdir(&golden_path, &temp_dir, 1_788_700_000_000);
     }
 
     let entries = fs::read_dir(&fixtures_root).expect("read fixtures dir");
@@ -84,8 +126,7 @@ fn conformance_fixtures_and_goldens_raptorq_sidecars_scrub_clean() {
         if path.is_file() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.ends_with(".json") && !name.ends_with(".envelope.json") {
-                let gate_res = fr_fec::verify_sidecar_gate(&path, 1_788_700_000_000);
-                assert!(gate_res.is_ok(), "gate check for {}", path.display());
+                verify_committed_sidecar_and_gate_in_tempdir(&path, &temp_dir, 1_788_700_000_000);
             }
         }
     }

@@ -6279,6 +6279,16 @@ impl CommandHistogram {
         self.buckets[bucket_idx] += 1;
     }
 
+    /// Record the additional blocked duration and optional failure outcome when a
+    /// command that initially blocked (and was counted once in `calls` on entry)
+    /// finishes unblocking.
+    pub fn record_unblocked_completion(&mut self, blocked_us: u64, failed: bool) {
+        if failed {
+            self.failed_calls += 1;
+        }
+        self.total_usec = self.total_usec.saturating_add(blocked_us);
+    }
+
     /// Does this command have any LATENCY samples, as opposed to merely call counters?
     ///
     /// (frankenredis-trackgate) INFO latencystats emits a row per command that HAS a latency
@@ -6761,6 +6771,29 @@ impl CommandHistogramTracker {
         }
         with_direct_histogram_fields!(get_match);
         self.histograms.get(&key)
+    }
+
+    /// Update an existing command's histogram when a blocked call finishes.
+    pub fn record_unblocked_completion(&mut self, command: &str, blocked_us: u64, failed: bool) {
+        let key = command.to_ascii_lowercase();
+        macro_rules! get_mut_match {
+            ($($name:literal => $field:ident),* $(,)?) => {
+                match key.as_str() {
+                    $($name => {
+                        self.$field
+                            .get_or_insert_with(CommandHistogram::default)
+                            .record_unblocked_completion(blocked_us, failed);
+                        return;
+                    })*
+                    _ => {}
+                }
+            };
+        }
+        with_direct_histogram_fields!(get_mut_match);
+        self.histograms
+            .entry(key)
+            .or_default()
+            .record_unblocked_completion(blocked_us, failed);
     }
 
     /// Get all histograms, sorted by command name.
@@ -9153,6 +9186,17 @@ impl Store {
         self.command_histograms.get(command)
     }
 
+    /// Update an existing command's histogram when a blocked command completes.
+    pub fn record_unblocked_command_histogram(
+        &mut self,
+        command: &str,
+        blocked_us: u64,
+        failed: bool,
+    ) {
+        self.command_histograms
+            .record_unblocked_completion(command, blocked_us, failed);
+    }
+
     /// Get all command histograms, sorted by command name.
     #[must_use]
     pub fn all_command_histograms(&self) -> Vec<(&str, &CommandHistogram)> {
@@ -9285,6 +9329,70 @@ impl Store {
             };
         }
         entries_read
+    }
+
+    fn format_stream_id_bytes(id: StreamId) -> Vec<u8> {
+        format!("{}-{}", id.0, id.1).into_bytes()
+    }
+
+    fn stream_propagate_xclaim_argv(
+        logical_key: &[u8],
+        group: &[u8],
+        consumer: &[u8],
+        id: StreamId,
+        delivery_time_ms: u64,
+        delivery_count: u64,
+        last_id: StreamId,
+    ) -> Vec<Vec<u8>> {
+        let id_bytes = Self::format_stream_id_bytes(id);
+        vec![
+            b"XCLAIM".to_vec(),
+            logical_key.to_vec(),
+            group.to_vec(),
+            consumer.to_vec(),
+            b"0".to_vec(),
+            id_bytes,
+            b"TIME".to_vec(),
+            delivery_time_ms.to_string().into_bytes(),
+            b"RETRYCOUNT".to_vec(),
+            delivery_count.to_string().into_bytes(),
+            b"FORCE".to_vec(),
+            b"JUSTID".to_vec(),
+            b"LASTID".to_vec(),
+            Self::format_stream_id_bytes(last_id),
+        ]
+    }
+
+    fn stream_propagate_group_id_argv(
+        logical_key: &[u8],
+        group: &[u8],
+        last_id: StreamId,
+        entries_read: Option<u64>,
+    ) -> Vec<Vec<u8>> {
+        let entries_read_i64 = entries_read.map_or(-1i64, |v| i64::try_from(v).unwrap_or(i64::MAX));
+        vec![
+            b"XGROUP".to_vec(),
+            b"SETID".to_vec(),
+            logical_key.to_vec(),
+            group.to_vec(),
+            Self::format_stream_id_bytes(last_id),
+            b"ENTRIESREAD".to_vec(),
+            entries_read_i64.to_string().into_bytes(),
+        ]
+    }
+
+    fn stream_propagate_consumer_creation_argv(
+        logical_key: &[u8],
+        group: &[u8],
+        consumer: &[u8],
+    ) -> Vec<Vec<u8>> {
+        vec![
+            b"XGROUP".to_vec(),
+            b"CREATECONSUMER".to_vec(),
+            logical_key.to_vec(),
+            group.to_vec(),
+            consumer.to_vec(),
+        ]
     }
 
     pub fn reset_slowlog(&mut self) {
@@ -31300,6 +31408,10 @@ impl Store {
         let Some(group_state) = groups.get_mut(group) else {
             return Ok(None);
         };
+        let logical_key = decode_db_key(key)
+            .map(|(_, lk)| lk.to_vec())
+            .unwrap_or_else(|| key.to_vec());
+        let mut propagated_commands: Vec<Vec<Vec<u8>>> = Vec::new();
         let consumer = consumer.to_vec();
         let consumer_created = group_state.insert_consumer(consumer.clone());
         if consumer_created {
@@ -31308,6 +31420,13 @@ impl Store {
             // server.dirty++ independent of the per-serve bump below. Implicit
             // creation must dirty even when the read delivers no new entries.
             self.dirty = self.dirty.saturating_add(1);
+            if noack {
+                propagated_commands.push(Self::stream_propagate_consumer_creation_argv(
+                    &logical_key,
+                    group,
+                    &consumer,
+                ));
+            }
         }
         // (frankenredis-p4dpj) XREADGROUP always stamps seen_time; active_time
         // only moves when an entry is actually delivered into the PEL
@@ -31353,7 +31472,23 @@ impl Store {
                         group_state.decrement_pending_consumer(&old.consumer);
                     }
                     group_state.increment_pending_consumer(&consumer);
+                    propagated_commands.push(Self::stream_propagate_xclaim_argv(
+                        &logical_key,
+                        group,
+                        &consumer,
+                        *id,
+                        now_ms,
+                        1,
+                        *id,
+                    ));
                 }
+            } else {
+                propagated_commands.push(Self::stream_propagate_group_id_argv(
+                    &logical_key,
+                    group,
+                    last_seen_id,
+                    group_state.entries_read,
+                ));
             }
             // Consumer group state was mutated — mark dirty for AOF persistence
             self.dirty = self.dirty.saturating_add(1);
@@ -31389,6 +31524,9 @@ impl Store {
             // xgroup-createconsumer keyspace event upstream (streamCreateConsumer
             // with SCC_DEFAULT). Queued here, after the group borrow ends.
             self.notify_stream_createconsumer_event(key);
+        }
+        for cmd in &propagated_commands {
+            self.record_script_propagation(cmd);
         }
         Ok(Some(records))
     }
@@ -31703,6 +31841,9 @@ impl Store {
         options: StreamClaimOptions,
         now_ms: u64,
     ) -> Result<Option<StreamClaimReply>, StoreError> {
+        if self.script_nesting_level == 0 {
+            self.clear_script_propagation_state();
+        }
         self.invalidate_stream_pel_summary(key, group);
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
@@ -31731,12 +31872,21 @@ impl Store {
             return Ok(None);
         };
 
-        if let Some(last_id) = options.last_id {
+        let logical_key = decode_db_key(key)
+            .map(|(_, lk)| lk.to_vec())
+            .unwrap_or_else(|| key.to_vec());
+        let mut propagated_commands: Vec<Vec<Vec<u8>>> = Vec::new();
+        let mut propagate_last_id = false;
+        if let Some(last_id) = options.last_id
+            && last_id > group_state.last_delivered_id
+        {
             group_state.last_delivered_id = last_id;
+            propagate_last_id = true;
         }
 
         let mut claimed_ids = Vec::new();
         let mut claimed_entries = Vec::new();
+        let mut removed_tombstones = 0u64;
         let consumer_vec = consumer.to_vec();
 
         // (frankenredis-v9p5j) Upstream t_stream.c::xclaimCommand calls
@@ -31762,6 +31912,17 @@ impl Store {
             let Some(fields) = stream_records.get(id) else {
                 if let Some(removed) = group_state.pending.remove(id) {
                     group_state.decrement_pending_consumer(&removed.consumer);
+                    propagated_commands.push(Self::stream_propagate_xclaim_argv(
+                        &logical_key,
+                        group,
+                        &removed.consumer,
+                        *id,
+                        removed.last_delivered_ms,
+                        removed.deliveries,
+                        group_state.last_delivered_id,
+                    ));
+                    propagate_last_id = false;
+                    removed_tombstones = removed_tombstones.saturating_add(1);
                 }
                 continue;
             };
@@ -31812,11 +31973,23 @@ impl Store {
             } else if !options.justid {
                 pending_entry.deliveries = pending_entry.deliveries.saturating_add(1);
             }
+            let delivery_time_ms = pending_entry.last_delivered_ms;
+            let deliveries = pending_entry.deliveries;
             if !created_by_force && old_consumer != consumer_vec {
                 group_state.decrement_pending_consumer(&old_consumer);
                 group_state.increment_pending_consumer(&consumer_vec);
             }
 
+            propagated_commands.push(Self::stream_propagate_xclaim_argv(
+                &logical_key,
+                group,
+                &consumer_vec,
+                *id,
+                delivery_time_ms,
+                deliveries,
+                group_state.last_delivered_id,
+            ));
+            propagate_last_id = false;
             claimed_ids.push(*id);
             if !options.justid {
                 claimed_entries.push((*id, fields.clone()));
@@ -31831,11 +32004,26 @@ impl Store {
             group_state.set_consumer_active_time(&consumer_vec, now_ms);
             self.dirty = self.dirty.saturating_add(claimed_ids.len() as u64);
         }
+        if removed_tombstones > 0 {
+            self.dirty = self.dirty.saturating_add(removed_tombstones);
+        }
+        if propagate_last_id {
+            propagated_commands.push(Self::stream_propagate_group_id_argv(
+                &logical_key,
+                group,
+                group_state.last_delivered_id,
+                group_state.entries_read,
+            ));
+            self.dirty = self.dirty.saturating_add(1);
+        }
 
         if consumer_created {
             // (frankenredis-hqj0t) Implicit consumer creation fires
             // xgroup-createconsumer upstream, even when zero entries are claimed.
             self.notify_stream_createconsumer_event(key);
+        }
+        for cmd in &propagated_commands {
+            self.record_script_propagation(cmd);
         }
         if options.justid {
             Ok(Some(StreamClaimReply::Ids(claimed_ids)))
@@ -31853,6 +32041,9 @@ impl Store {
         options: StreamAutoClaimOptions,
         now_ms: u64,
     ) -> Result<Option<StreamAutoClaimReply>, StoreError> {
+        if self.script_nesting_level == 0 {
+            self.clear_script_propagation_state();
+        }
         self.invalidate_stream_pel_summary(key, group);
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(None);
@@ -31892,6 +32083,7 @@ impl Store {
 
         let mut claimed_ids = Vec::new();
         let mut deleted_ids = Vec::new();
+        let mut ordered_actions: Vec<(StreamId, bool)> = Vec::new();
         let mut scanned_last: Option<StreamId> = None;
         // Upstream t_stream.c::xautoclaimCommand decrements the same
         // `count` budget for both claimed and deleted entries, so the
@@ -31905,6 +32097,7 @@ impl Store {
             scanned_last = Some(*id);
             if !stream_records.contains_key(id) {
                 deleted_ids.push(*id);
+                ordered_actions.push((*id, true));
                 budget -= 1;
                 continue;
             }
@@ -31915,6 +32108,7 @@ impl Store {
             }
 
             claimed_ids.push(*id);
+            ordered_actions.push((*id, false));
             budget -= 1;
         }
 
@@ -31925,12 +32119,10 @@ impl Store {
             return Ok(None);
         };
 
-        for id in &deleted_ids {
-            if let Some(removed) = group_state.pending.remove(id) {
-                group_state.decrement_pending_consumer(&removed.consumer);
-            }
-        }
-
+        let logical_key = decode_db_key(key)
+            .map(|(_, lk)| lk.to_vec())
+            .unwrap_or_else(|| key.to_vec());
+        let mut propagated_commands: Vec<Vec<Vec<u8>>> = Vec::new();
         let consumer_vec = consumer.to_vec();
 
         // (frankenredis-v9p5j) Upstream
@@ -31951,18 +32143,43 @@ impl Store {
         }
         group_state.set_consumer_seen_time(&consumer_vec, now_ms);
 
-        for id in &claimed_ids {
-            if let Some(pending_entry) = group_state.pending.get_mut(id) {
+        for (id, is_deleted) in &ordered_actions {
+            if *is_deleted {
+                if let Some(removed) = group_state.pending.remove(id) {
+                    group_state.decrement_pending_consumer(&removed.consumer);
+                    propagated_commands.push(Self::stream_propagate_xclaim_argv(
+                        &logical_key,
+                        group,
+                        &removed.consumer,
+                        *id,
+                        removed.last_delivered_ms,
+                        removed.deliveries,
+                        group_state.last_delivered_id,
+                    ));
+                    self.dirty = self.dirty.saturating_add(1);
+                }
+            } else if let Some(pending_entry) = group_state.pending.get_mut(id) {
                 let old_consumer = pending_entry.consumer.clone();
                 pending_entry.consumer = consumer_vec.clone();
                 pending_entry.last_delivered_ms = now_ms;
                 if !options.justid {
                     pending_entry.deliveries = pending_entry.deliveries.saturating_add(1);
                 }
+                let delivery_time_ms = pending_entry.last_delivered_ms;
+                let deliveries = pending_entry.deliveries;
                 if old_consumer != consumer_vec {
                     group_state.decrement_pending_consumer(&old_consumer);
                     group_state.increment_pending_consumer(&consumer_vec);
                 }
+                propagated_commands.push(Self::stream_propagate_xclaim_argv(
+                    &logical_key,
+                    group,
+                    &consumer_vec,
+                    *id,
+                    delivery_time_ms,
+                    deliveries,
+                    group_state.last_delivered_id,
+                ));
             }
         }
         if !claimed_ids.is_empty() {
@@ -31988,6 +32205,9 @@ impl Store {
             // (frankenredis-hqj0t) Implicit consumer creation fires
             // xgroup-createconsumer upstream, even when zero entries are claimed.
             self.notify_stream_createconsumer_event(key);
+        }
+        for cmd in &propagated_commands {
+            self.record_script_propagation(cmd);
         }
         if options.justid {
             Ok(Some(StreamAutoClaimReply::Ids {

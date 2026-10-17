@@ -8259,7 +8259,7 @@ fn process_buffered_frames(
         let pending_output = conn.pending_output_bytes();
         runtime.set_session_output_buffer_bytes(pending_output);
         if pending_output > 0 {
-            let client_id = conn.session.client_id;
+            let client_id = runtime.client_id();
             let output_hard_limit = *output_hard_limit_cache
                 .get_or_insert_with(|| runtime.effective_output_hard_limit(client_id));
             if pending_output > output_hard_limit {
@@ -36356,44 +36356,45 @@ fn process_argv_frame(
                 })
             })
     {
-        // Redis behavior: if the keys already have data, we shouldn't block.
-        // try_build_blocked_state only returns Some if it's a blocking command.
-        if let Some(immediate_response) = try_fulfill_blocked(&blocked.op, runtime, ts) {
-            encode_client_reply(&immediate_response, client_resp3, &mut conn.write_buf);
-        } else {
-            // (frankenredis-97shd) When a WAIT/WAITAOF blocks, solicit an immediate
-            // replica ack via REPLCONF GETACK so the blocked command resolves within
-            // ~1 RTT instead of waiting for the replica's ~1Hz periodic ACK (which
-            // made short-timeout WAIT undercount to :0 vs redis :1). No-op with no
-            // replicas attached.
-            let solicit_ack = matches!(
-                blocked.op,
-                BlockingOp::Wait { .. } | BlockingOp::Waitaof { .. }
-            );
-            if let BlockingOp::Wait {
-                required_offset, ..
-            } = &mut blocked.op
-            {
-                *required_offset = runtime.replication_primary_offset();
-            }
-            conn.blocked = Some(blocked);
-            // Upstream call() skips SLOWLOG for a command that blocked; it is logged
-            // once, when served.
-            runtime.retract_blocked_command_slowlog(argv);
-            conn.blocked_command = Some((argv.to_vec(), ts));
-            blocked_tokens.insert(token);
-            if let Some(blocked) = &conn.blocked {
-                blocked_wake_index.insert(token, blocked);
-            }
-            if solicit_ack {
-                runtime.solicit_replica_ack();
-            }
-            runtime.mark_client_blocked(runtime.client_id());
-            return ProcessArgvAction::BreakAfterConsume;
+        // (frankenredis-97shd) When a WAIT/WAITAOF blocks, solicit an immediate
+        // replica ack via REPLCONF GETACK so the blocked command resolves within
+        // ~1 RTT instead of waiting for the replica's ~1Hz periodic ACK (which
+        // made short-timeout WAIT undercount to :0 vs redis :1). No-op with no
+        // replicas attached.
+        let solicit_ack = matches!(
+            blocked.op,
+            BlockingOp::Wait { .. } | BlockingOp::Waitaof { .. }
+        );
+        if let BlockingOp::Wait {
+            required_offset, ..
+        } = &mut blocked.op
+        {
+            *required_offset = runtime.replication_primary_offset();
         }
+        conn.blocked = Some(blocked);
+        // Upstream call() skips SLOWLOG for a command that blocked; it is logged
+        // once, when served.
+        runtime.retract_blocked_command_slowlog(argv);
+        conn.blocked_command = Some((argv.to_vec(), ts));
+        blocked_tokens.insert(token);
+        if let Some(blocked) = &conn.blocked {
+            blocked_wake_index.insert(token, blocked);
+        }
+        if solicit_ack {
+            runtime.solicit_replica_ack();
+        }
+        runtime.mark_client_blocked(runtime.client_id());
+        return ProcessArgvAction::BreakAfterConsume;
     } else if suppress_client_network_reply(runtime, argv, &response) {
         // Redis treats REPLCONF ACK/GETACK as internal control
         // frames and does not send a direct reply on client links.
+    } else if conn.replication_sent_offset.is_some() {
+        // Upstream networking.c:397-406 (_addReplyToBufferOrList) disconnects
+        // any post-SYNC/PSYNC CLIENT_TYPE_SLAVE connection that generates a
+        // reply instead of queueing it onto the replication stream.
+        conn.closing = true;
+        closing_tokens.insert(token);
+        return ProcessArgvAction::BreakAfterConsume;
     } else {
         encode_client_reply(&response, client_resp3, &mut conn.write_buf);
     }
@@ -36469,7 +36470,7 @@ fn disconnect_if_output_limit_exceeded(
     if pending_output == 0 {
         return false;
     }
-    let client_id = conn.session.client_id;
+    let client_id = runtime.client_id();
     let output_hard_limit = *output_hard_limit_cache
         .get_or_insert_with(|| runtime.effective_output_hard_limit(client_id));
     if pending_output > output_hard_limit {
@@ -38096,12 +38097,22 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
 
             // Check timeout first.
             if serve_ts >= blocked.deadline_ms {
+                runtime.set_serving_blocked_client(true);
+                let timeout_response = blocked_timeout_response(&blocked.op, runtime, serve_ts);
+                runtime.set_serving_blocked_client(false);
+                if let Some((original_argv, blocked_since_ms)) = conn.blocked_command.take() {
+                    let blocked_us = serve_ts
+                        .saturating_sub(blocked_since_ms)
+                        .saturating_mul(1000);
+                    runtime.record_unblocked_command_completion(
+                        &original_argv,
+                        blocked_us,
+                        serve_ts,
+                        &timeout_response,
+                    );
+                }
                 let resp3 = conn.session.resp_protocol_version() == 3;
-                encode_client_reply(
-                    &blocked_timeout_response(&blocked.op, runtime, serve_ts),
-                    resp3,
-                    &mut conn.write_buf,
-                );
+                encode_client_reply(&timeout_response, resp3, &mut conn.write_buf);
                 conn.blocked = None;
                 blocked_tokens.remove(&token);
                 blocked_wake_index.remove(token);
@@ -38158,7 +38169,12 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
                     let blocked_us = serve_ts
                         .saturating_sub(blocked_since_ms)
                         .saturating_mul(1000);
-                    runtime.record_unblocked_command_slowlog(&original_argv, blocked_us, serve_ts);
+                    runtime.record_unblocked_command_completion(
+                        &original_argv,
+                        blocked_us,
+                        serve_ts,
+                        &response,
+                    );
                 }
                 // (frankenredis-pgplm) Session is swapped into `runtime` here, so
                 // its negotiated protocol drives the RESP3 null encoding.
@@ -38268,6 +38284,10 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
                 RespFrame::Error("UNBLOCKED client unblocked via CLIENT UNBLOCK".to_string())
             }
         };
+        if let Some((original_argv, blocked_since_ms)) = conn.blocked_command.take() {
+            let blocked_us = ts.saturating_sub(blocked_since_ms).saturating_mul(1000);
+            runtime.record_unblocked_command_completion(&original_argv, blocked_us, ts, &response);
+        }
 
         let resp3 = conn.session.resp_protocol_version() == 3;
         encode_client_reply(&response, resp3, &mut conn.write_buf);

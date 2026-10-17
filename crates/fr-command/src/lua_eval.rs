@@ -13737,7 +13737,14 @@ impl<'a> LuaState<'a> {
                 if dirty_after > dirty_before {
                     self.script_wrote = true;
                 }
-                if dirty_after > dirty_before || command_may_propagate_from_script(argv) {
+                let is_stream_also_propagate = argv.first().is_some_and(|cmd| {
+                    crate::eq_ascii_command(cmd, b"XREADGROUP")
+                        || crate::eq_ascii_command(cmd, b"XCLAIM")
+                        || crate::eq_ascii_command(cmd, b"XAUTOCLAIM")
+                });
+                if !is_stream_also_propagate
+                    && (dirty_after > dirty_before || command_may_propagate_from_script(argv))
+                {
                     // (frankenredis-x1225) Record the DETERMINISTIC effect form so
                     // a script's XADD `*` / SPOP / INCRBYFLOAT (etc.) propagates a
                     // concrete command, not the non-deterministic one — otherwise

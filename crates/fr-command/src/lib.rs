@@ -416,11 +416,33 @@ pub fn rewrite_relative_expire_for_propagation(
         } else {
             value
         };
+        if abs_ms <= now {
+            return Some(vec![b"DEL".to_vec(), argv[1].clone()]);
+        }
         return Some(vec![
             b"PEXPIREAT".to_vec(),
             argv[1].clone(),
             abs_ms.to_string().into_bytes(),
         ]);
+    }
+
+    if eq_ascii_command(cmd, b"RESTORE") || eq_ascii_command(cmd, b"RESTORE-ASKING") {
+        if argv.len() < 4 {
+            return None;
+        }
+        let ttl: i64 = std::str::from_utf8(&argv[2]).ok()?.parse().ok()?;
+        if ttl <= 0 {
+            return None;
+        }
+        let has_absttl = argv[4..].iter().any(|arg| eq_ascii_command(arg, b"ABSTTL"));
+        if has_absttl {
+            return None;
+        }
+        let abs_ms = now.saturating_add(ttl);
+        let mut rewritten = argv.to_vec();
+        rewritten[2] = abs_ms.to_string().into_bytes();
+        rewritten.push(b"ABSTTL".to_vec());
+        return Some(rewritten);
     }
 
     if eq_ascii_command(cmd, b"SETEX") || eq_ascii_command(cmd, b"PSETEX") {
@@ -10585,6 +10607,10 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     let stream_count = tail / 2;
     let keys = &argv[idx..idx + stream_count];
     let ids = &argv[idx + stream_count..];
+
+    if store.script_nesting_level == 0 {
+        store.clear_script_propagation_state();
+    }
 
     let mut out = Vec::new();
     for (key, id_arg) in keys.iter().zip(ids.iter()) {
