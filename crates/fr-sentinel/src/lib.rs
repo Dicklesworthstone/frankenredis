@@ -595,6 +595,7 @@ impl SentinelState {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn queue_client_reconfig_script(
         &mut self,
         master_name: &str,

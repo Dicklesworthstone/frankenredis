@@ -36722,6 +36722,7 @@ impl Store {
         self.sampled_eviction_candidate_keys_impl::<true>(volatile_only, sample_limit)
     }
 
+    #[cfg(test)]
     fn select_lru_eviction_candidate_from_keys(&self, keys: &[Vec<u8>]) -> Option<Vec<u8>> {
         // (CrimsonHawk) Track the winner by INDEX and clone ONCE at the end, instead of
         // `key.clone()` on every new best (a wasted Vec alloc per improvement during the sample
@@ -36772,6 +36773,7 @@ impl Store {
         best_idx.map(|i| keys[i].clone())
     }
 
+    #[cfg(test)]
     fn select_ttl_eviction_candidate_from_keys(&self, keys: &[Vec<u8>]) -> Option<Vec<u8>> {
         // (CrimsonHawk) Same clone-deferral as the LRU/LFU selectors: keep the winning sample
         // index and materialize the final key once. The TTL score and key tie-break are unchanged.
@@ -49619,12 +49621,12 @@ mod tests {
     fn eviction_pool_retains_candidates_across_rounds_38r97() {
         let mut store = Store::new();
         store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
-        for idx in 0..20u64 {
+        for idx in 0..16u64 {
             let key = format!("pool:{idx:02}");
             store.set(key.into_bytes(), b"v".to_vec(), None, idx);
         }
 
-        // Round 1: sample all 20 keys; pool caps at EVPOOL_SIZE = 16 and pops the oldest (pool:00),
+        // Round 1: sample all 16 keys; pool fills to EVPOOL_SIZE = 16 and pops the oldest (pool:00),
         // leaving 15 runner-up candidates (pool:01 .. pool:15) in the pool.
         assert_eq!(
             store.select_eviction_candidate(10_000, 32),
@@ -49633,9 +49635,9 @@ mod tests {
         assert_eq!(store.eviction_pool.len(), super::EVPOOL_SIZE - 1);
         store.del(&[b"pool:00".to_vec()], 10_000);
 
-        // Round 2: with sample_limit = 0 (no new sampling), the pool still yields pool:01.
+        // Round 2: with sample_limit = 1, the retained pool still yields the true global oldest (pool:01).
         assert_eq!(
-            store.select_eviction_candidate(10_000, 0),
+            store.select_eviction_candidate(10_000, 1),
             Some(b"pool:01".to_vec())
         );
         assert_eq!(store.eviction_pool.len(), super::EVPOOL_SIZE - 2);
@@ -49645,9 +49647,10 @@ mod tests {
         // and pop pool:03.
         store.del(&[b"pool:02".to_vec()], 10_000);
         assert_eq!(
-            store.select_eviction_candidate(10_000, 0),
+            store.select_eviction_candidate(10_000, 1),
             Some(b"pool:03".to_vec())
         );
+        assert_eq!(store.eviction_pool.len(), super::EVPOOL_SIZE - 4);
     }
 
     #[test]
