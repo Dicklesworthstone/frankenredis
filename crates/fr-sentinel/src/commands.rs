@@ -308,6 +308,7 @@ fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
                 master.down_after_period = default_down_after;
                 master.failover_timeout = default_failover_timeout;
             }
+            state.flush_config_if_configured();
             RespFrame::SimpleString("OK".into())
         }
         Err(e) => RespFrame::Error(e.into()),
@@ -370,7 +371,10 @@ fn cmd_remove(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
     }
     let name = String::from_utf8_lossy(args[0]);
     match state.remove(&name) {
-        Ok(()) => RespFrame::SimpleString("OK".into()),
+        Ok(()) => {
+            state.flush_config_if_configured();
+            RespFrame::SimpleString("OK".into())
+        }
         Err(e) => RespFrame::Error(e.into()),
     }
 }
@@ -543,6 +547,7 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
             }
         }
     }
+    state.flush_config_if_configured();
     RespFrame::SimpleString("OK".into())
 }
 
