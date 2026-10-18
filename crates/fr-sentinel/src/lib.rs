@@ -21,6 +21,9 @@ pub const ELECTION_TIMEOUT_MS: u64 = 10000;
 pub const SCRIPT_MAX_RUNTIME_MS: u64 = 60000;
 pub const SCRIPT_RETRY_DELAY_MS: u64 = 30000;
 pub const DEFAULT_FAILOVER_TIMEOUT_MS: u64 = 180000;
+pub const SENTINEL_SCRIPT_MAX_QUEUE: usize = 256;
+pub const SENTINEL_SCRIPT_MAX_RUNNING: usize = 16;
+pub const SENTINEL_SCRIPT_MAX_RETRY: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SentinelDebugConfig {
@@ -394,6 +397,7 @@ pub struct SentinelState {
     pub loglevel: String,
     pub debug_config: SentinelDebugConfig,
     pub config_file_path: Option<std::path::PathBuf>,
+    pub(crate) running_script_children: HashMap<i64, std::process::Child>,
 }
 
 impl Default for SentinelState {
@@ -467,6 +471,7 @@ impl SentinelState {
             loglevel: "notice".to_string(),
             debug_config: SentinelDebugConfig::default(),
             config_file_path: None,
+            running_script_children: HashMap::new(),
         }
     }
 
@@ -549,6 +554,178 @@ impl SentinelState {
     #[must_use]
     pub fn myid_hex(&self) -> String {
         String::from_utf8_lossy(&self.myid).into_owned()
+    }
+
+    pub fn flush_config_if_configured(&self) {
+        if let Some(ref path) = self.config_file_path {
+            let content = format_sentinel_config(self);
+            let _ = std::fs::write(path, content);
+        }
+    }
+
+    pub fn queue_script_job(&mut self, path: String, args: Vec<String>) {
+        if self.scripts_queue.len() >= SENTINEL_SCRIPT_MAX_QUEUE {
+            return;
+        }
+        self.scripts_queue.push(ScriptJob {
+            path,
+            args,
+            retry_count: 0,
+            pid: None,
+            start_time_ms: 0,
+        });
+    }
+
+    pub fn queue_notification_script(
+        &mut self,
+        master_name: &str,
+        event_type: &str,
+        event_description: &str,
+    ) {
+        let Some(path) = self
+            .masters
+            .get(master_name)
+            .and_then(|m| m.notification_script.clone())
+        else {
+            return;
+        };
+        self.queue_script_job(
+            path,
+            vec![event_type.to_string(), event_description.to_string()],
+        );
+    }
+
+    pub fn queue_client_reconfig_script(
+        &mut self,
+        master_name: &str,
+        role: &str,
+        state: &str,
+        from_ip: &str,
+        from_port: u16,
+        to_ip: &str,
+        to_port: u16,
+    ) {
+        let Some(path) = self
+            .masters
+            .get(master_name)
+            .and_then(|m| m.client_reconfig_script.clone())
+        else {
+            return;
+        };
+        // Upstream sentinelRemoveMatchingScripts: cancel any older unstarted
+        // client-reconfig jobs for the same master before queueing the newer state.
+        self.scripts_queue.retain(|job| {
+            !(job.pid.is_none()
+                && job.path == path
+                && job.args.first().is_some_and(|m| m == master_name))
+        });
+        self.queue_script_job(
+            path,
+            vec![
+                master_name.to_string(),
+                role.to_string(),
+                state.to_string(),
+                from_ip.to_string(),
+                from_port.to_string(),
+                to_ip.to_string(),
+                to_port.to_string(),
+            ],
+        );
+    }
+
+    pub fn run_pending_scripts(&mut self, now_ms: u64) {
+        let max_runtime = self.debug_config.script_max_runtime;
+        let retry_delay = self.debug_config.script_retry_delay;
+
+        // 1. Collect terminated scripts and kill timed-out scripts.
+        let mut idx = 0;
+        while idx < self.scripts_queue.len() {
+            let Some(pid) = self.scripts_queue[idx].pid else {
+                idx += 1;
+                continue;
+            };
+            let Some(mut child) = self.running_script_children.remove(&pid) else {
+                idx += 1;
+                continue;
+            };
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    self.running_scripts = self.running_scripts.saturating_sub(1);
+                    let retryable = status.code().is_none_or(|c| c == 1);
+                    if retryable
+                        && self.scripts_queue[idx].retry_count + 1 < SENTINEL_SCRIPT_MAX_RETRY
+                    {
+                        self.scripts_queue[idx].retry_count += 1;
+                        self.scripts_queue[idx].pid = None;
+                        self.scripts_queue[idx].start_time_ms = now_ms.saturating_add(retry_delay);
+                        idx += 1;
+                    } else {
+                        self.scripts_queue.remove(idx);
+                    }
+                }
+                Ok(None) => {
+                    if now_ms.saturating_sub(self.scripts_queue[idx].start_time_ms) > max_runtime {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        self.running_scripts = self.running_scripts.saturating_sub(1);
+                        if self.scripts_queue[idx].retry_count + 1 < SENTINEL_SCRIPT_MAX_RETRY {
+                            self.scripts_queue[idx].retry_count += 1;
+                            self.scripts_queue[idx].pid = None;
+                            self.scripts_queue[idx].start_time_ms =
+                                now_ms.saturating_add(retry_delay);
+                            idx += 1;
+                        } else {
+                            self.scripts_queue.remove(idx);
+                        }
+                    } else {
+                        self.running_script_children.insert(pid, child);
+                        idx += 1;
+                    }
+                }
+                Err(_) => {
+                    self.running_scripts = self.running_scripts.saturating_sub(1);
+                    self.scripts_queue.remove(idx);
+                }
+            }
+        }
+
+        if self.tilt {
+            return;
+        }
+
+        // 2. Spawn pending scripts up to SENTINEL_SCRIPT_MAX_RUNNING.
+        let mut spawn_idx = 0;
+        while spawn_idx < self.scripts_queue.len()
+            && self.running_scripts < SENTINEL_SCRIPT_MAX_RUNNING
+        {
+            if self.scripts_queue[spawn_idx].pid.is_some()
+                || self.scripts_queue[spawn_idx].start_time_ms > now_ms
+            {
+                spawn_idx += 1;
+                continue;
+            }
+            let spawned = std::process::Command::new(&self.scripts_queue[spawn_idx].path)
+                .args(&self.scripts_queue[spawn_idx].args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match spawned {
+                Ok(child) => {
+                    let pid = i64::from(child.id());
+                    self.scripts_queue[spawn_idx].pid = Some(pid);
+                    self.scripts_queue[spawn_idx].start_time_ms = now_ms;
+                    self.running_scripts += 1;
+                    self.running_script_children.insert(pid, child);
+                    spawn_idx += 1;
+                }
+                Err(_) => {
+                    // Upstream child exits with _exit(2) on execve failure, which
+                    // sentinelCollectTerminatedScripts removes without retrying.
+                    self.scripts_queue.remove(spawn_idx);
+                }
+            }
+        }
     }
 }
 
