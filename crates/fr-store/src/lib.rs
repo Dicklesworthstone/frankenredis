@@ -8524,42 +8524,69 @@ impl Store {
     /// probe failed (mark the link disconnected). Delegates to the already
     /// unit-tested fr-sentinel health/discovery primitives.
     pub fn apply_sentinel_probe_result(&mut self, name: &str, now_ms: u64, info: Option<&str>) {
-        let Some(master) = self.sentinel_state.masters.get_mut(name) else {
-            return;
+        let (health, odown, master_desc, quorum) = {
+            let Some(master) = self.sentinel_state.masters.get_mut(name) else {
+                return;
+            };
+            fr_sentinel::health::record_ping_sent(&mut master.link, now_ms);
+            match info {
+                Some(info) => {
+                    fr_sentinel::health::record_pong(&mut master.link, now_ms);
+                    fr_sentinel::health::record_reconnect(&mut master.link, now_ms);
+                    fr_sentinel::health::record_info_response(master, info, now_ms);
+                    let replicas = fr_sentinel::discovery::parse_replica_info_from_master(info);
+                    fr_sentinel::discovery::discover_replicas_from_info(master, &replicas, now_ms);
+                }
+                None => {
+                    fr_sentinel::health::record_disconnect(&mut master.link);
+                }
+            }
+            // (frankenredis-pkdgs) Evaluate subjective-down: a master unreachable
+            // longer than down-after-milliseconds gets the S_DOWN flag (rendered as
+            // "s_down" in SENTINEL MASTER flags), and a recovered one clears it.
+            // Without this fr showed only "master,disconnected" where redis-sentinel
+            // shows "s_down,master,disconnected".
+            let health = fr_sentinel::health::evaluate_instance_health(master, now_ms);
+            fr_sentinel::health::apply_health_result(master, &health, now_ms);
+            // (frankenredis-pkdgs) Then objective-down: O_DOWN when S_DOWN AND the
+            // count of sentinels reporting it down (this one always votes, +1 from
+            // is_s_down) meets the configured quorum. With a single sentinel and
+            // quorum=1 the self-vote alone flips O_DOWN; higher quorums stay S_DOWN
+            // until peer votes arrive (sentinel-to-sentinel gossip not yet wired, so
+            // no external votes here). Matches redis-sentinel's
+            // 's_down,o_down,master,disconnected'.
+            // (frankenredis-rc-sentinel-peer-votes) The peers' latest
+            // is-master-down-by-addr answers count alongside this sentinel's own
+            // view, so a quorum above 1 can be reached.
+            let votes = fr_sentinel::consensus::peer_o_down_votes(master);
+            let odown = fr_sentinel::consensus::evaluate_o_down(master, &votes, now_ms);
+            fr_sentinel::consensus::apply_o_down_result(master, &odown, now_ms);
+            (
+                health,
+                odown,
+                format!(
+                    "master {} {} {}",
+                    master.name, master.addr.ip, master.addr.port
+                ),
+                master.quorum,
+            )
         };
-        fr_sentinel::health::record_ping_sent(&mut master.link, now_ms);
-        match info {
-            Some(info) => {
-                fr_sentinel::health::record_pong(&mut master.link, now_ms);
-                fr_sentinel::health::record_reconnect(&mut master.link, now_ms);
-                fr_sentinel::health::record_info_response(master, info, now_ms);
-                let replicas = fr_sentinel::discovery::parse_replica_info_from_master(info);
-                fr_sentinel::discovery::discover_replicas_from_info(master, &replicas, now_ms);
-            }
-            None => {
-                fr_sentinel::health::record_disconnect(&mut master.link);
-            }
+        if health.should_mark_s_down {
+            self.sentinel_state
+                .queue_notification_script(name, "+sdown", &master_desc);
+        } else if health.should_clear_s_down {
+            self.sentinel_state
+                .queue_notification_script(name, "-sdown", &master_desc);
         }
-        // (frankenredis-pkdgs) Evaluate subjective-down: a master unreachable
-        // longer than down-after-milliseconds gets the S_DOWN flag (rendered as
-        // "s_down" in SENTINEL MASTER flags), and a recovered one clears it.
-        // Without this fr showed only "master,disconnected" where redis-sentinel
-        // shows "s_down,master,disconnected".
-        let health = fr_sentinel::health::evaluate_instance_health(master, now_ms);
-        fr_sentinel::health::apply_health_result(master, &health, now_ms);
-        // (frankenredis-pkdgs) Then objective-down: O_DOWN when S_DOWN AND the
-        // count of sentinels reporting it down (this one always votes, +1 from
-        // is_s_down) meets the configured quorum. With a single sentinel and
-        // quorum=1 the self-vote alone flips O_DOWN; higher quorums stay S_DOWN
-        // until peer votes arrive (sentinel-to-sentinel gossip not yet wired, so
-        // no external votes here). Matches redis-sentinel's
-        // 's_down,o_down,master,disconnected'.
-        // (frankenredis-rc-sentinel-peer-votes) The peers' latest
-        // is-master-down-by-addr answers count alongside this sentinel's own
-        // view, so a quorum above 1 can be reached.
-        let votes = fr_sentinel::consensus::peer_o_down_votes(master);
-        let odown = fr_sentinel::consensus::evaluate_o_down(master, &votes, now_ms);
-        fr_sentinel::consensus::apply_o_down_result(master, &odown, now_ms);
+        if odown.should_mark_o_down {
+            let effective_votes = odown.votes_for_down + 1;
+            let odown_desc = format!("{master_desc} #quorum {effective_votes}/{quorum}");
+            self.sentinel_state
+                .queue_notification_script(name, "+odown", &odown_desc);
+        } else if odown.should_clear_o_down {
+            self.sentinel_state
+                .queue_notification_script(name, "-odown", &master_desc);
+        }
     }
 
     /// (frankenredis-rc-sentinel-peer-votes) The `SENTINEL IS-MASTER-DOWN-BY-ADDR`
@@ -8626,8 +8653,34 @@ impl Store {
         now_ms: u64,
         info: Option<&str>,
     ) {
-        if let Some(master) = self.sentinel_state.masters.get_mut(master) {
-            fr_sentinel::failover::apply_replica_probe(master, replica_key, now_ms, info);
+        let mut sdown_transition: Option<(&'static str, String)> = None;
+        if let Some(m) = self.sentinel_state.masters.get_mut(master) {
+            let was_sdown = m.slaves.get(replica_key).is_some_and(|s| s.is_s_down());
+            fr_sentinel::failover::apply_replica_probe(m, replica_key, now_ms, info);
+            if let Some(s) = m.slaves.get(replica_key) {
+                let now_sdown = s.is_s_down();
+                if !was_sdown && now_sdown {
+                    sdown_transition = Some((
+                        "+sdown",
+                        format!(
+                            "slave {} {} {} @ {} {} {}",
+                            s.name, s.addr.ip, s.addr.port, m.name, m.addr.ip, m.addr.port
+                        ),
+                    ));
+                } else if was_sdown && !now_sdown {
+                    sdown_transition = Some((
+                        "-sdown",
+                        format!(
+                            "slave {} {} {} @ {} {} {}",
+                            s.name, s.addr.ip, s.addr.port, m.name, m.addr.ip, m.addr.port
+                        ),
+                    ));
+                }
+            }
+        }
+        if let Some((event, desc)) = sdown_transition {
+            self.sentinel_state
+                .queue_notification_script(master, event, &desc);
         }
     }
 
@@ -36740,10 +36793,7 @@ impl Store {
         best_idx.map(|i| keys[i].clone())
     }
 
-    fn eviction_pool_entry_cmp(
-        a: &EvictionPoolEntry,
-        b: &EvictionPoolEntry,
-    ) -> std::cmp::Ordering {
+    fn eviction_pool_entry_cmp(a: &EvictionPoolEntry, b: &EvictionPoolEntry) -> std::cmp::Ordering {
         a.idle.cmp(&b.idle).then_with(|| b.key.cmp(&a.key))
     }
 
@@ -36765,10 +36815,7 @@ impl Store {
                     return None;
                 }
                 let freq = entry.current_lfu_freq(now_ms, self.lfu_decay_time);
-                Some(
-                    (u64::from(u8::MAX - freq) << 32)
-                        | u64::from(u32::MAX - entry.last_access_ms),
-                )
+                Some((u64::from(u8::MAX - freq) << 32) | u64::from(u32::MAX - entry.last_access_ms))
             }
             MaxmemoryPolicy::VolatileTtl => {
                 let expires_at_ms = self.expiry_ms(key)?;
@@ -36789,11 +36836,7 @@ impl Store {
             let Some(idle) = self.eviction_idle_score_for_key(&key, now_ms) else {
                 continue;
             };
-            if let Some(existing) = self
-                .eviction_pool
-                .iter_mut()
-                .find(|entry| entry.key == key)
-            {
+            if let Some(existing) = self.eviction_pool.iter_mut().find(|entry| entry.key == key) {
                 existing.idle = idle;
                 self.eviction_pool.sort_by(Self::eviction_pool_entry_cmp);
                 continue;
@@ -49570,6 +49613,41 @@ mod tests {
             Some(sampled_key)
         );
         assert_eq!(store.select_eviction_candidate(10_000, 32), Some(oldest));
+    }
+
+    #[test]
+    fn eviction_pool_retains_candidates_across_rounds_38r97() {
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
+        for idx in 0..20u64 {
+            let key = format!("pool:{idx:02}");
+            store.set(key.into_bytes(), b"v".to_vec(), None, idx);
+        }
+
+        // Round 1: sample all 20 keys; pool caps at EVPOOL_SIZE = 16 and pops the oldest (pool:00),
+        // leaving 15 runner-up candidates (pool:01 .. pool:15) in the pool.
+        assert_eq!(
+            store.select_eviction_candidate(10_000, 32),
+            Some(b"pool:00".to_vec())
+        );
+        assert_eq!(store.eviction_pool.len(), super::EVPOOL_SIZE - 1);
+        store.del(&[b"pool:00".to_vec()], 10_000);
+
+        // Round 2: with sample_limit = 0 (no new sampling), the pool still yields pool:01.
+        assert_eq!(
+            store.select_eviction_candidate(10_000, 0),
+            Some(b"pool:01".to_vec())
+        );
+        assert_eq!(store.eviction_pool.len(), super::EVPOOL_SIZE - 2);
+        store.del(&[b"pool:01".to_vec()], 10_000);
+
+        // Deleting a pooled runner-up (pool:02) causes the next round to skip stale pool entries
+        // and pop pool:03.
+        store.del(&[b"pool:02".to_vec()], 10_000);
+        assert_eq!(
+            store.select_eviction_candidate(10_000, 0),
+            Some(b"pool:03".to_vec())
+        );
     }
 
     #[test]

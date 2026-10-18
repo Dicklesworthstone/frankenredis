@@ -1592,10 +1592,8 @@ sentinel current-epoch 7
         state
             .monitor("mymaster", "127.0.0.1", 6379, 1)
             .expect("monitor mymaster");
-        let tmp_conf = std::env::temp_dir().join(format!(
-            "fr_sentinel_autoflush_{}.conf",
-            std::process::id()
-        ));
+        let tmp_conf =
+            std::env::temp_dir().join(format!("fr_sentinel_autoflush_{}.conf", std::process::id()));
         state.config_file_path = Some(tmp_conf.clone());
 
         if let Some(master) = state.get_master_mut("mymaster") {

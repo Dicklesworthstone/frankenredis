@@ -750,7 +750,9 @@ pub fn failover_step(state: &mut SentinelState, master_name: &str, now: u64) -> 
         state.queue_notification_script(
             master_name,
             "+selected-slave",
-            &format!("slave {new_ip}:{new_port} {new_ip} {new_port} @ {master_name} {old_ip} {old_port}"),
+            &format!(
+                "slave {new_ip}:{new_port} {new_ip} {new_port} @ {master_name} {old_ip} {old_port}"
+            ),
         );
         state.queue_client_reconfig_script(
             master_name,

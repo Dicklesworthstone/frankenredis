@@ -38,3 +38,4 @@ frbuild/
 artifacts/
 .bench-history/
 .worktrees/
+.beads/
