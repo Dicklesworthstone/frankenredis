@@ -1585,4 +1585,75 @@ sentinel current-epoch 7
         assert!(reloaded_master.slaves.contains_key("127.0.0.1:6380"));
         assert!(reloaded_master.sentinels.contains_key("127.0.0.1:26381"));
     }
+
+    #[test]
+    fn sentinel_failover_queues_and_runs_scripts_and_auto_flushes_config() {
+        let mut state = SentinelState::new();
+        state
+            .monitor("mymaster", "127.0.0.1", 6379, 1)
+            .expect("monitor mymaster");
+        let tmp_conf = std::env::temp_dir().join(format!(
+            "fr_sentinel_autoflush_{}.conf",
+            std::process::id()
+        ));
+        state.config_file_path = Some(tmp_conf.clone());
+
+        if let Some(master) = state.get_master_mut("mymaster") {
+            master.notification_script = Some("/bin/true".to_string());
+            master.client_reconfig_script = Some("/bin/false".to_string());
+            master.failover_epoch = 3;
+            let addr = SentinelAddr::new("127.0.0.1", 6380);
+            let slave = crate::failover::reset_slave_instance("127.0.0.1:6380", addr, 1, 5000, 100);
+            master.slaves.insert("127.0.0.1:6380".to_string(), slave);
+        }
+
+        let mut ctx = crate::failover::FailoverContext::new();
+        ctx.promoted_slave_key = Some("127.0.0.1:6380".to_string());
+        crate::failover::finalize_failover(&mut state, "mymaster", &ctx, 200);
+
+        // Two scripts should be queued: client-reconfig-script ("leader" "end") and notification-script ("+switch-master").
+        assert_eq!(state.scripts_queue.len(), 2);
+        assert_eq!(state.scripts_queue[0].path, "/bin/false");
+        assert_eq!(
+            state.scripts_queue[0].args,
+            vec![
+                "mymaster",
+                "leader",
+                "end",
+                "127.0.0.1",
+                "6379",
+                "127.0.0.1",
+                "6380"
+            ]
+        );
+        assert_eq!(state.scripts_queue[1].path, "/bin/true");
+        assert_eq!(state.scripts_queue[1].args[0], "+switch-master");
+
+        // Auto-flush wrote the updated master address (port 6380) to sentinel.conf.
+        let flushed = std::fs::read_to_string(&tmp_conf).expect("auto-flushed sentinel.conf");
+        assert!(
+            flushed.contains("sentinel monitor mymaster 127.0.0.1 6380 1"),
+            "flushed config should reflect promoted master: {flushed}"
+        );
+
+        // Spawn scripts and reap them once they exit.
+        state.run_pending_scripts(200);
+        for _ in 0..50 {
+            if state.running_scripts == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            state.run_pending_scripts(250);
+        }
+        assert_eq!(state.running_scripts, 0);
+        // /bin/true exited 0 and was removed; /bin/false exited 1 and was scheduled for retry.
+        assert_eq!(state.scripts_queue.len(), 1);
+        assert_eq!(state.scripts_queue[0].path, "/bin/false");
+        assert_eq!(state.scripts_queue[0].retry_count, 1);
+        assert!(state.scripts_queue[0].pid.is_none());
+        assert_eq!(
+            state.scripts_queue[0].start_time_ms,
+            250 + state.debug_config.script_retry_delay
+        );
+    }
 }

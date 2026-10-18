@@ -7210,6 +7210,15 @@ struct DumpPayloadCache {
 /// already paid for one error rendered in two places drifting three ways.
 pub const NOREPLICAS_ERROR: &str = "NOREPLICAS Not enough good replicas to write.";
 
+/// Upstream `EVPOOL_SIZE` (`evict.c:55`).
+pub const EVPOOL_SIZE: usize = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EvictionPoolEntry {
+    idle: u64,
+    key: Vec<u8>,
+}
+
 #[derive(Debug)]
 pub struct Store {
     /// The keyspace dict. Uses `foldhash` (a fast, HashDoS-resistant, pure-
@@ -7404,6 +7413,11 @@ pub struct Store {
     /// LFU counter increment via 1/(baseval*log_factor + 1) — higher
     /// factor = slower growth. (frankenredis-lfulog)
     pub lfu_log_factor: u64,
+    /// (frankenredis-38r97) Persistent sorted candidate pool (`EVPOOL_SIZE = 16`,
+    /// mirroring `EvictionPoolLRU` in upstream `evict.c:55-68`), sorted ascending
+    /// by `(idle_score, Reverse(key))` so the best candidate is at the tail.
+    eviction_pool: Vec<EvictionPoolEntry>,
+    eviction_pool_policy: MaxmemoryPolicy,
 
     // Encoding thresholds — configurable via CONFIG SET, used by OBJECT ENCODING.
     // (frankenredis-10lqb) Lists deliberately have only the byte-budget
@@ -8091,6 +8105,8 @@ impl Default for Store {
             maxmemory_policy: MaxmemoryPolicy::default(),
             lfu_decay_time: 1,
             lfu_log_factor: 10,
+            eviction_pool: Vec::with_capacity(EVPOOL_SIZE),
+            eviction_pool_policy: MaxmemoryPolicy::default(),
             // (frankenredis-0o5hj) Upstream Redis 7.2.4 default is 512
             // (config.c:3215 createSizeTConfig("hash-max-listpack-entries",
             // ..., server.hash_max_listpack_entries, 512, ...)). The
@@ -8435,6 +8451,7 @@ impl Store {
     /// at 0 it pins last-ok-ping-reply / info-refresh to 0).
     pub fn sentinel_begin_tick(&mut self, now_ms: u64) {
         self.sentinel_state.check_tilt(now_ms);
+        self.sentinel_state.run_pending_scripts(now_ms);
     }
 
     /// (frankenredis-pkdgs) Announce this sentinel at `port` in its hello
@@ -16138,6 +16155,7 @@ impl Store {
         // (frankenredis-uhthd step 2): KEYS/SCAN/RANDOMKEY read `entries` itself,
         // so clearing that cannot leave ghost names behind.
         self.expiry_deadlines.clear();
+        self.eviction_pool.clear();
         // (frankenredis-3e92e) Structural keyspace change invalidates SCAN
         // resume points.
         self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
@@ -36672,6 +36690,7 @@ impl Store {
         best_idx.map(|i| keys[i].clone())
     }
 
+    #[allow(dead_code)]
     fn select_lfu_eviction_candidate_from_keys(
         &self,
         keys: &[Vec<u8>],
@@ -36721,33 +36740,104 @@ impl Store {
         best_idx.map(|i| keys[i].clone())
     }
 
+    fn eviction_pool_entry_cmp(
+        a: &EvictionPoolEntry,
+        b: &EvictionPoolEntry,
+    ) -> std::cmp::Ordering {
+        a.idle.cmp(&b.idle).then_with(|| b.key.cmp(&a.key))
+    }
+
+    fn eviction_idle_score_for_key(&self, key: &[u8], now_ms: u64) -> Option<u64> {
+        let entry = self.entries.get(key)?;
+        match self.maxmemory_policy {
+            MaxmemoryPolicy::AllkeysLru | MaxmemoryPolicy::VolatileLru => {
+                if self.maxmemory_policy == MaxmemoryPolicy::VolatileLru
+                    && !self.key_has_expiry(key)
+                {
+                    return None;
+                }
+                Some(u64::from(u32::MAX - entry.last_access_ms))
+            }
+            MaxmemoryPolicy::AllkeysLfu | MaxmemoryPolicy::VolatileLfu => {
+                if self.maxmemory_policy == MaxmemoryPolicy::VolatileLfu
+                    && !self.key_has_expiry(key)
+                {
+                    return None;
+                }
+                let freq = entry.current_lfu_freq(now_ms, self.lfu_decay_time);
+                Some(
+                    (u64::from(u8::MAX - freq) << 32)
+                        | u64::from(u32::MAX - entry.last_access_ms),
+                )
+            }
+            MaxmemoryPolicy::VolatileTtl => {
+                let expires_at_ms = self.expiry_ms(key)?;
+                Some(u64::MAX - expires_at_ms)
+            }
+            MaxmemoryPolicy::Noeviction
+            | MaxmemoryPolicy::AllkeysRandom
+            | MaxmemoryPolicy::VolatileRandom => None,
+        }
+    }
+
+    fn populate_eviction_pool(&mut self, keys: Vec<Vec<u8>>, now_ms: u64) {
+        if self.eviction_pool_policy != self.maxmemory_policy {
+            self.eviction_pool.clear();
+            self.eviction_pool_policy = self.maxmemory_policy;
+        }
+        for key in keys {
+            let Some(idle) = self.eviction_idle_score_for_key(&key, now_ms) else {
+                continue;
+            };
+            if let Some(existing) = self
+                .eviction_pool
+                .iter_mut()
+                .find(|entry| entry.key == key)
+            {
+                existing.idle = idle;
+                self.eviction_pool.sort_by(Self::eviction_pool_entry_cmp);
+                continue;
+            }
+            let candidate = EvictionPoolEntry { idle, key };
+            if self.eviction_pool.len() < EVPOOL_SIZE {
+                self.eviction_pool.push(candidate);
+                self.eviction_pool.sort_by(Self::eviction_pool_entry_cmp);
+            } else if Self::eviction_pool_entry_cmp(&candidate, &self.eviction_pool[0])
+                == std::cmp::Ordering::Greater
+            {
+                self.eviction_pool[0] = candidate;
+                self.eviction_pool.sort_by(Self::eviction_pool_entry_cmp);
+            }
+        }
+    }
+
+    fn pop_eviction_pool_candidate(&mut self, volatile_only: bool) -> Option<Vec<u8>> {
+        while let Some(best) = self.eviction_pool.pop() {
+            let valid = self.entries.contains_key(best.key.as_slice())
+                && (!volatile_only || self.key_has_expiry(best.key.as_slice()));
+            if valid {
+                return Some(best.key);
+            }
+        }
+        None
+    }
+
     fn select_eviction_candidate(&mut self, now_ms: u64, sample_limit: usize) -> Option<Vec<u8>> {
         match self.maxmemory_policy {
             MaxmemoryPolicy::Noeviction => None,
 
-            MaxmemoryPolicy::AllkeysLru => {
+            MaxmemoryPolicy::AllkeysLru | MaxmemoryPolicy::AllkeysLfu => {
                 let keys = self.sampled_eviction_candidate_keys(false, sample_limit);
-                self.select_lru_eviction_candidate_from_keys(&keys)
+                self.populate_eviction_pool(keys, now_ms);
+                self.pop_eviction_pool_candidate(false)
             }
 
-            MaxmemoryPolicy::AllkeysLfu => {
-                let keys = self.sampled_eviction_candidate_keys(false, sample_limit);
-                self.select_lfu_eviction_candidate_from_keys(&keys, now_ms)
-            }
-
-            MaxmemoryPolicy::VolatileLru => {
+            MaxmemoryPolicy::VolatileLru
+            | MaxmemoryPolicy::VolatileLfu
+            | MaxmemoryPolicy::VolatileTtl => {
                 let keys = self.sampled_eviction_candidate_keys(true, sample_limit);
-                self.select_lru_eviction_candidate_from_keys(&keys)
-            }
-
-            MaxmemoryPolicy::VolatileLfu => {
-                let keys = self.sampled_eviction_candidate_keys(true, sample_limit);
-                self.select_lfu_eviction_candidate_from_keys(&keys, now_ms)
-            }
-
-            MaxmemoryPolicy::VolatileTtl => {
-                let keys = self.sampled_eviction_candidate_keys(true, sample_limit);
-                self.select_ttl_eviction_candidate_from_keys(&keys)
+                self.populate_eviction_pool(keys, now_ms);
+                self.pop_eviction_pool_candidate(true)
             }
 
             MaxmemoryPolicy::AllkeysRandom => {

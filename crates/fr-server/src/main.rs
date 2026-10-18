@@ -5434,6 +5434,13 @@ fn main() -> ExitCode {
                 cli_passthrough.push((other[2..].to_string(), value.clone()));
                 i += 1;
             }
+            other
+                if !other.starts_with('-')
+                    && config_path.is_none()
+                    && (other.ends_with(".conf") || std::path::Path::new(other).is_file()) =>
+            {
+                config_path = Some(other.to_string());
+            }
             other => {
                 eprintln!("error: unknown argument: {other}");
                 eprintln!("Try 'frankenredis --help' for usage.");
