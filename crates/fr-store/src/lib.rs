@@ -24,7 +24,7 @@ pub use packed_set::PackedStreamLogBTreeReference;
 pub use packed_set::PackedZSet as BenchPackedZSet;
 use packed_set::{
     GenericSet, HashFieldMap, ListValue, PackedStreamLog, PackedZSet, PackedZSetInsertResult,
-    PackedZSetIter, RestoredListNode, RetainedListpackChunk, packed_node_totals_from_value_spans,
+    PackedZSetIter, RestoredListNode, RetainedListpackChunk, packed_node_totals_from_listpack,
 };
 
 use fr_expire::evaluate_expiry;
@@ -9303,10 +9303,12 @@ impl Store {
     }
 
     fn stream_entries_added_value(&self, key: &[u8], live_len: usize) -> u64 {
-        self.stream_entries_added
-            .get(key)
-            .copied()
-            .unwrap_or_else(|| u64::try_from(live_len).unwrap_or(u64::MAX))
+        if !self.stream_entries_added.is_empty()
+            && let Some(&added) = self.stream_entries_added.get(key)
+        {
+            return added;
+        }
+        u64::try_from(live_len).unwrap_or(u64::MAX)
     }
 
     fn stream_read_range_has_tombstones(
@@ -20756,13 +20758,12 @@ impl Store {
         let mut total_len = 0_usize;
         let mut non_empty_nodes = 0_usize;
         for blob in &nodes {
-            let entries = fr_persist::listpack::decode_value_spans(blob)
-                .map_err(|_| StoreError::InvalidDumpPayload)?;
-            if !entries.is_empty() {
-                let (node_raw, node_enc) = packed_node_totals_from_value_spans(blob, &entries);
+            if let Some((node_len, node_raw, node_enc)) = packed_node_totals_from_listpack(blob)
+                .map_err(|_| StoreError::InvalidDumpPayload)?
+            {
                 raw_total += node_raw;
                 enc_total += node_enc;
-                total_len += entries.len();
+                total_len += node_len;
                 non_empty_nodes += 1;
             }
         }
@@ -30560,25 +30561,41 @@ impl Store {
     pub fn stream_watermark(&self, key: &[u8]) -> Result<Option<StreamId>, StoreError> {
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::Stream(entries) => {
-                    let btree_last = entries.last_id();
-                    let xsetid_last = self.stream_last_ids.get(key).copied();
-                    Ok(match (btree_last, xsetid_last) {
-                        (Some(a), Some(b)) => Some(a.max(b)),
-                        (Some(a), None) => Some(a),
-                        (None, Some(b)) => Some(b),
-                        (None, None) => None,
-                    })
-                }
+                Value::Stream(entries) => Ok(self.stream_watermark_for_entries(key, entries)),
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(None),
         }
     }
 
+    /// Compute the stream watermark when the caller already holds `&StreamEntries`
+    /// (e.g. during RDB snapshot serialization), avoiding a redundant `KeyDict` probe.
+    #[must_use]
+    pub fn stream_watermark_for_entries(
+        &self,
+        key: &[u8],
+        entries: &StreamEntries,
+    ) -> Option<StreamId> {
+        let btree_last = entries.last_id();
+        let xsetid_last = if self.stream_last_ids.is_empty() {
+            None
+        } else {
+            self.stream_last_ids.get(key).copied()
+        };
+        match (btree_last, xsetid_last) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
+
     /// Return consumer group state for a stream key (for RDB persistence).
     #[must_use]
     pub fn stream_consumer_groups(&self, key: &[u8]) -> Option<&StreamGroupState> {
+        if self.stream_groups.is_empty() {
+            return None;
+        }
         self.stream_groups.get(key)
     }
 
@@ -30796,22 +30813,38 @@ impl Store {
         last_id: Option<StreamId>,
         now_ms: u64,
     ) {
-        self.stream_groups.remove(key);
-        self.stream_max_deleted_ids.remove(key);
+        if !self.stream_groups.is_empty() {
+            self.stream_groups.remove(key);
+        }
+        let watermark = skeleton.watermark();
+        let entries_added = skeleton.entries_added();
+        let max_deleted = skeleton.max_deleted();
         let count = skeleton.declared_len() as u64;
-        if let Some(id) = last_id {
+        if let Some(id) = watermark.or(last_id) {
             self.stream_last_ids.insert(key.to_vec(), id);
         }
-        self.stream_entries_added.insert(key.to_vec(), count);
-        self.internal_entries_insert(
-            key,
-            Entry::new(
-                Value::Stream(Box::new(StreamEntries::pending(skeleton, last_id))),
-                now_ms,
-            ),
+        self.stream_entries_added
+            .insert(key.to_vec(), entries_added);
+        if let Some(md) = max_deleted
+            && md != (0, 0)
+        {
+            self.stream_max_deleted_ids.insert(key.to_vec(), md);
+        } else if !self.stream_max_deleted_ids.is_empty() {
+            self.stream_max_deleted_ids.remove(key);
+        }
+        let mut entry = Entry::new(
+            Value::Stream(Box::new(StreamEntries::pending(skeleton, last_id))),
+            now_ms,
         );
+        if watermark.is_some() {
+            entry.touch_write(now_ms, self.lfu_tracking_enabled());
+        }
+        self.internal_entries_insert(key, entry);
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-        self.dirty = self.dirty.saturating_add(count);
+        self.dirty = self
+            .dirty
+            .saturating_add(count)
+            .saturating_add(u64::from(watermark.is_some()));
     }
 
     pub fn load_stream_entries(
@@ -32633,7 +32666,11 @@ impl Store {
 
     #[must_use]
     pub fn stream_max_deleted_id(&self, key: &[u8]) -> Option<StreamId> {
-        self.stream_max_deleted_ids.get(key).copied()
+        if self.stream_max_deleted_ids.is_empty() {
+            None
+        } else {
+            self.stream_max_deleted_ids.get(key).copied()
+        }
     }
 
     /// Number of consumer groups on a stream key, WITHOUT recording a keyspace
@@ -32643,7 +32680,11 @@ impl Store {
     /// xinfoCommand does a single lookupKeyReadOrReply).
     #[must_use]
     pub fn stream_group_count(&self, key: &[u8]) -> usize {
-        self.stream_groups.get(key).map_or(0, BTreeMap::len)
+        if self.stream_groups.is_empty() {
+            0
+        } else {
+            self.stream_groups.get(key).map_or(0, BTreeMap::len)
+        }
     }
 
     #[must_use]
@@ -32658,7 +32699,9 @@ impl Store {
 
     pub fn restore_stream_max_deleted_id(&mut self, key: &[u8], max_deleted_id: StreamId) {
         if max_deleted_id == (0, 0) {
-            self.stream_max_deleted_ids.remove(key);
+            if !self.stream_max_deleted_ids.is_empty() {
+                self.stream_max_deleted_ids.remove(key);
+            }
         } else {
             self.stream_max_deleted_ids
                 .insert(key.to_vec(), max_deleted_id);
@@ -39094,14 +39137,13 @@ impl Store {
                             let (listpack, consumed) =
                                 decode_rdb_string_cow(payload, cursor, data_end)?;
                             cursor += consumed;
-                            let entries = fr_persist::listpack::decode_value_spans(&listpack)
-                                .map_err(|_| StoreError::InvalidDumpPayload)?;
-                            if !entries.is_empty() {
-                                let (node_raw, node_enc) =
-                                    packed_node_totals_from_value_spans(&listpack, &entries);
+                            if let Some((node_len, node_raw, node_enc)) =
+                                packed_node_totals_from_listpack(&listpack)
+                                    .map_err(|_| StoreError::InvalidDumpPayload)?
+                            {
                                 raw_total += node_raw;
                                 enc_total += node_enc;
-                                total_len += entries.len();
+                                total_len += node_len;
                                 non_empty_nodes += 1;
                             }
                         }
@@ -39440,18 +39482,6 @@ impl Store {
             ),
             _ => {}
         }
-        if replace && let Some(old_entry) = self.entries.get(key) {
-            let old_was_stream = matches!(&old_entry.value, Value::Stream(_));
-            // RESTORE REPLACE semantically discards the old object even though
-            // the key name is unchanged. Reuse the keyspace slot for speed, but
-            // clear per-object sidecars that belong to the old value.
-            self.hash_field_ttl_clear_for_key(key);
-            if old_was_stream {
-                self.drop_stream_side_metadata(key);
-                self.stream_entries_added.remove(key);
-                self.stream_max_deleted_ids.remove(key);
-            }
-        }
         // (frankenredis-f16dz) Apply RESTORE IDLETIME/FREQ to the restored
         // entry before insertion, mirroring upstream restoreCommand's
         // objectSetLRUOrLFU EXACTLY: it is POLICY-CONDITIONAL — under an LFU
@@ -39472,7 +39502,20 @@ impl Store {
         } else {
             entry.set_restore_idletime(metadata.idletime_secs.unwrap_or(0), now_ms);
         }
-        self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
+        let old_entry = self.internal_entries_insert_with_expiry(key, entry, expires_at_ms);
+        if let Some(old_entry) = old_entry {
+            // (frankenredis-33832) Inspect the replaced entry returned by
+            // `internal_entries_insert_with_expiry` directly instead of probing
+            // `self.entries.get(key)` a second time before the insert, and only
+            // clear hash-field TTL sidecars when the replaced value was a Hash.
+            if matches!(&old_entry.value, Value::Hash(_)) {
+                self.hash_field_ttl_clear_for_key(key);
+            } else if matches!(&old_entry.value, Value::Stream(_)) {
+                self.drop_stream_side_metadata(key);
+                self.stream_entries_added.remove(key);
+                self.stream_max_deleted_ids.remove(key);
+            }
+        }
         if let Some(last_id) = restored_stream_last_id {
             self.stream_last_ids.insert(key.to_vec(), last_id);
         }

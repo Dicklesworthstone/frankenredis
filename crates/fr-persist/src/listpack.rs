@@ -1135,7 +1135,7 @@ fn decode_string_entry_range(
 /// Both methods return `Result` so the arena sink can reject an offset past
 /// `u32::MAX` at the same point `narrow_span` rejects one for a string; the `Vec`
 /// sink is infallible and its `Ok` folds away.
-trait ListpackSpanSink {
+pub trait ListpackSpanSink {
     /// A string entry, as a range into the ORIGINAL listpack payload.
     fn push_string(&mut self, range: Range<u32>) -> Result<(), ListpackError>;
     /// An integer entry, as the number. The sink decides where the canonical
@@ -1712,7 +1712,11 @@ fn decode_value_spans_impl<const PRESIZE: bool>(
 /// the per-entry destination differs. Monomorphisation gives each sink its own
 /// copy, so the `Vec<ListpackValueSpan>` path compiles to what it did before this
 /// was factored out.
-fn decode_spans_into<S: ListpackSpanSink>(data: &[u8], mut sink: S) -> Result<S, ListpackError> {
+#[inline]
+pub fn decode_spans_into<S: ListpackSpanSink>(
+    data: &[u8],
+    mut sink: S,
+) -> Result<S, ListpackError> {
     let (total_bytes, num_elements) = parse_header(data)?;
     let end = (total_bytes as usize) - 1;
     let mut cursor = LISTPACK_HEADER_SIZE;
@@ -1819,19 +1823,58 @@ fn zset_member_spans_have_duplicate(data: &[u8], pairs: &[(ListpackValueSpan, f6
     false
 }
 
-/// Validate a `RDB_TYPE_ZSET_LISTPACK` payload and report its shape.
-///
-/// EXACTLY the acceptance of [`decode_zset_listpack_pairs`] -- same structural
-/// walk, same terminator and element-count guards, same odd-count rejection, same
-/// score parse (so an unparseable score is still `InvalidScore`) -- reached
-/// through [`decode_zset_spans_and_scores`], which shares the raw-entry core with
-/// it. What it does NOT do is allocate a member buffer per pair.
-///
-/// This is the zset twin of the hash listpack arm's `decode_value_spans` call:
-/// carrying a blob past the decoder must not make the decoder accept payloads it
-/// used to reject, or a corrupt RDB reads as decodable and every test asserting
-/// rejection silently stops testing anything.
-pub fn zset_listpack_shape(data: &[u8]) -> Result<ZsetListpackShape, ListpackError> {
+/// Compare the Redis-observable bytes of a previously validated listpack entry at
+/// `cursor` against `target` without allocating.
+#[inline]
+fn raw_entry_bytes_eq(data: &[u8], cursor: usize, target: &[u8]) -> bool {
+    let first = data[cursor];
+    if first & 0xC0 == 0x80 {
+        let slen = (first & 0x3F) as usize;
+        return &data[cursor + 1..cursor + 1 + slen] == target;
+    }
+    let Ok((raw, _)) = decode_entry_raw(data, cursor) else {
+        return false;
+    };
+    match raw.kind() {
+        RawKind::String(range) => &data[usize_range(range)] == target,
+        RawKind::Integer(value) => {
+            let mut scratch = [0u8; 20];
+            let start = crate::decimal_i64_into(&mut scratch, value);
+            &scratch[start..] == target
+        }
+    }
+}
+
+/// Insert `entry_cursor` (guaranteed >= `LISTPACK_HEADER_SIZE == 6`, so `0` is the
+/// empty-slot sentinel) into `table`, returning `true` if `bytes` duplicates an
+/// existing occupant.
+#[inline]
+fn probe_cursor_table<const SLOTS: usize>(
+    data: &[u8],
+    table: &mut [u16; SLOTS],
+    bytes: &[u8],
+    entry_cursor: u16,
+) -> bool {
+    debug_assert!(SLOTS.is_power_of_two());
+    debug_assert!(usize::from(entry_cursor) >= LISTPACK_HEADER_SIZE);
+    let mut slot = (zset_member_probe_hash(bytes) as usize) & (SLOTS - 1);
+    loop {
+        let occupant = table[slot];
+        if occupant == 0 {
+            table[slot] = entry_cursor;
+            return false;
+        }
+        if raw_entry_bytes_eq(data, usize::from(occupant), bytes) {
+            return true;
+        }
+        slot = (slot + 1) & (SLOTS - 1);
+    }
+}
+
+/// Bench/test reference: the 3-pass heap-allocating `zset_listpack_shape` that
+/// allocates `Vec<(ListpackValueSpan, f64)>` via `decode_zset_spans_and_scores`.
+#[doc(hidden)]
+pub fn zset_listpack_shape_orig(data: &[u8]) -> Result<ZsetListpackShape, ListpackError> {
     let pairs = decode_zset_spans_and_scores(data)?;
     let mut max_member_len = 0_usize;
     for (member, _) in &pairs {
@@ -1842,6 +1885,99 @@ pub fn zset_listpack_shape(data: &[u8]) -> Result<ZsetListpackShape, ListpackErr
         max_member_len,
         has_duplicate_member: zset_member_spans_have_duplicate(data, &pairs),
     })
+}
+
+/// Validate a `RDB_TYPE_ZSET_LISTPACK` payload and report its shape in a single
+/// allocation-free pass for retainable payloads (frankenredis-33832).
+///
+/// EXACTLY the acceptance of [`decode_zset_listpack_pairs`] -- same structural
+/// walk, same terminator and element-count guards, same odd-count rejection, same
+/// score parse -- without allocating a `Vec<(ListpackValueSpan, f64)>` on the heap.
+pub fn zset_listpack_shape(data: &[u8]) -> Result<ZsetListpackShape, ListpackError> {
+    let (total_bytes, num_elements) = parse_header(data)?;
+    let end = (total_bytes as usize) - 1;
+    if end <= usize::from(u16::MAX)
+        && num_elements != LISTPACK_HDR_NUMELE_UNKNOWN
+        && usize::from(num_elements).div_ceil(2) <= ZSET_STACK_DUP_MAX
+    {
+        const SLOTS: usize = ZSET_STACK_DUP_MAX * 2;
+        let mut table = [0u16; SLOTS];
+        let mut cursor = LISTPACK_HEADER_SIZE;
+        let mut count = 0_usize;
+        let mut max_member_len = 0_usize;
+        let mut has_duplicate_member = false;
+        let mut overflowed = false;
+
+        while cursor < end {
+            let member_cursor = cursor as u16;
+            let (raw_member, consumed) = decode_entry_raw(data, cursor)?;
+            cursor = cursor
+                .checked_add(consumed)
+                .ok_or(ListpackError::TruncatedEntry)?;
+            if cursor > end {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            if cursor >= end {
+                return Err(ListpackError::ElementCountMismatch);
+            }
+            let (raw_score, consumed) = decode_entry_raw(data, cursor)?;
+            cursor = cursor
+                .checked_add(consumed)
+                .ok_or(ListpackError::TruncatedEntry)?;
+            if cursor > end {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            if let RawKind::String(range) = raw_score.kind() {
+                let text = std::str::from_utf8(&data[usize_range(range)])
+                    .map_err(|_| ListpackError::TruncatedEntry)?;
+                let parsed: f64 = text.parse().map_err(|_| ListpackError::TruncatedEntry)?;
+                if parsed.is_nan() {
+                    return Err(ListpackError::TruncatedEntry);
+                }
+            }
+            if count / 2 >= ZSET_STACK_DUP_MAX {
+                overflowed = true;
+                break;
+            }
+            match raw_member.kind() {
+                RawKind::String(range) => {
+                    let bytes = &data[usize_range(range)];
+                    max_member_len = max_member_len.max(bytes.len());
+                    if !has_duplicate_member {
+                        has_duplicate_member =
+                            probe_cursor_table::<SLOTS>(data, &mut table, bytes, member_cursor);
+                    }
+                }
+                RawKind::Integer(value) => {
+                    if !has_duplicate_member {
+                        let mut scratch = [0u8; 20];
+                        let start = crate::decimal_i64_into(&mut scratch, value);
+                        let bytes = &scratch[start..];
+                        max_member_len = max_member_len.max(bytes.len());
+                        has_duplicate_member =
+                            probe_cursor_table::<SLOTS>(data, &mut table, bytes, member_cursor);
+                    } else {
+                        max_member_len = max_member_len.max(crate::decimal_i64_len(value));
+                    }
+                }
+            }
+            count += 2;
+        }
+        if !overflowed {
+            if cursor != end {
+                return Err(ListpackError::MissingTerminator);
+            }
+            if count != usize::from(num_elements) {
+                return Err(ListpackError::ElementCountMismatch);
+            }
+            return Ok(ZsetListpackShape {
+                pair_count: count / 2,
+                max_member_len,
+                has_duplicate_member,
+            });
+        }
+    }
+    zset_listpack_shape_orig(data)
 }
 
 /// What a `RDB_TYPE_SET_LISTPACK` payload looks like, WITHOUT materializing a
@@ -1921,13 +2057,10 @@ fn set_member_spans_have_duplicate(data: &[u8], spans: &[ListpackValueSpan]) -> 
     false
 }
 
-/// Validate a `RDB_TYPE_SET_LISTPACK` payload and report its shape.
-///
-/// EXACTLY the acceptance the eager path applies -- it IS [`decode_value_spans`],
-/// which is what `decode_listpack` validates with -- minus the per-member
-/// `Vec<u8>`. Carrying a blob past the decoder must not make the decoder accept
-/// payloads it used to reject.
-pub fn set_listpack_shape(data: &[u8]) -> Result<SetListpackShape, ListpackError> {
+/// Bench/test reference: the 3-pass heap-allocating `set_listpack_shape` that
+/// allocates `Vec<ListpackValueSpan>` via `decode_value_spans`.
+#[doc(hidden)]
+pub fn set_listpack_shape_orig(data: &[u8]) -> Result<SetListpackShape, ListpackError> {
     let spans = decode_value_spans(data)?;
     let mut max_member_len = 0_usize;
     let mut has_possible_int_member = false;
@@ -1944,6 +2077,87 @@ pub fn set_listpack_shape(data: &[u8]) -> Result<SetListpackShape, ListpackError
         has_duplicate_member: set_member_spans_have_duplicate(data, &spans),
         has_possible_int_member,
     })
+}
+
+/// Validate a `RDB_TYPE_SET_LISTPACK` payload and report its shape in a single
+/// allocation-free pass for retainable payloads (frankenredis-33832).
+///
+/// EXACTLY the acceptance the eager path applies -- same structural walk, backlen,
+/// terminator, and element-count checks as [`decode_value_spans`] -- without
+/// allocating a `Vec<ListpackValueSpan>` on the heap.
+pub fn set_listpack_shape(data: &[u8]) -> Result<SetListpackShape, ListpackError> {
+    let (total_bytes, num_elements) = parse_header(data)?;
+    let end = (total_bytes as usize) - 1;
+    if end <= usize::from(u16::MAX)
+        && num_elements != LISTPACK_HDR_NUMELE_UNKNOWN
+        && usize::from(num_elements) <= ZSET_STACK_DUP_MAX
+    {
+        const SLOTS: usize = ZSET_STACK_DUP_MAX * 2;
+        let mut table = [0u16; SLOTS];
+        let mut cursor = LISTPACK_HEADER_SIZE;
+        let mut count = 0_usize;
+        let mut max_member_len = 0_usize;
+        let mut has_duplicate_member = false;
+        let mut has_possible_int_member = false;
+        let mut overflowed = false;
+
+        while cursor < end {
+            let entry_cursor = cursor as u16;
+            let (raw, consumed) = decode_entry_raw(data, cursor)?;
+            cursor = cursor
+                .checked_add(consumed)
+                .ok_or(ListpackError::TruncatedEntry)?;
+            if cursor > end {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            if count >= ZSET_STACK_DUP_MAX {
+                overflowed = true;
+                break;
+            }
+            match raw.kind() {
+                RawKind::String(range) => {
+                    let bytes = &data[usize_range(range)];
+                    max_member_len = max_member_len.max(bytes.len());
+                    if !has_possible_int_member {
+                        has_possible_int_member = member_could_be_int(bytes);
+                    }
+                    if !has_duplicate_member {
+                        has_duplicate_member =
+                            probe_cursor_table::<SLOTS>(data, &mut table, bytes, entry_cursor);
+                    }
+                }
+                RawKind::Integer(value) => {
+                    has_possible_int_member = true;
+                    if !has_duplicate_member {
+                        let mut scratch = [0u8; 20];
+                        let start = crate::decimal_i64_into(&mut scratch, value);
+                        let bytes = &scratch[start..];
+                        max_member_len = max_member_len.max(bytes.len());
+                        has_duplicate_member =
+                            probe_cursor_table::<SLOTS>(data, &mut table, bytes, entry_cursor);
+                    } else {
+                        max_member_len = max_member_len.max(crate::decimal_i64_len(value));
+                    }
+                }
+            }
+            count += 1;
+        }
+        if !overflowed {
+            if cursor != end {
+                return Err(ListpackError::MissingTerminator);
+            }
+            if count != usize::from(num_elements) {
+                return Err(ListpackError::ElementCountMismatch);
+            }
+            return Ok(SetListpackShape {
+                member_count: count,
+                max_member_len,
+                has_duplicate_member,
+                has_possible_int_member,
+            });
+        }
+    }
+    set_listpack_shape_orig(data)
 }
 
 /// What a `RDB_TYPE_HASH_LISTPACK` payload looks like, WITHOUT materializing a
@@ -2077,14 +2291,93 @@ fn hash_field_spans_have_duplicate(data: &[u8], spans: &[ListpackValueSpan]) -> 
     !(0..pair_count).all(|i| seen.insert(spans[i * 2].as_bytes(data)))
 }
 
-/// Validate a `RDB_TYPE_HASH_LISTPACK` payload and report its shape.
-///
-/// EXACTLY the acceptance the hash arm already applies -- it IS
-/// [`decode_value_spans`] plus the even-element-count guard the decoder has always
-/// run -- minus any owned entry. An ODD element count is a decode ERROR here, as it
-/// has always been: `rdb_decodes_compact_hash_listpack_rejects_odd_entry_count`
-/// caught exactly that being deferred to apply once already.
-pub fn hash_listpack_shape(data: &[u8]) -> Result<HashListpackShape, ListpackError> {
+/// Single-pass zero-allocation hash listpack shape walk over a stack cursor table of
+/// `SLOTS` slots (frankenredis-33832). Out-of-line (`#[inline(never)]`) for the same
+/// reason as [`hash_field_spans_probe`]: keeping the 512 B (`SLOTS = 256`) and 2 KB
+/// (`SLOTS = 1024`) stack arrays in separate frames avoids charging the 2 KB zeroing
+/// setup to small hashes (`<= 64` fields).
+#[inline(never)]
+fn hash_listpack_shape_cursor_probe<const SLOTS: usize>(
+    data: &[u8],
+    end: usize,
+    num_elements: u16,
+) -> Result<Option<HashListpackShape>, ListpackError> {
+    debug_assert!(SLOTS.is_power_of_two());
+    let max_pairs = SLOTS / 2;
+    let mut table = [0u16; SLOTS];
+    let mut cursor = LISTPACK_HEADER_SIZE;
+    let mut count = 0_usize;
+    let mut max_entry_len = 0_usize;
+    let mut has_duplicate_field = false;
+
+    while cursor < end {
+        let entry_cursor = cursor as u16;
+        let (raw, consumed) = decode_entry_raw(data, cursor)?;
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+        if count & 1 == 0 {
+            let pair_index = count / 2;
+            if pair_index >= max_pairs {
+                return Ok(None);
+            }
+            match raw.kind() {
+                RawKind::String(range) => {
+                    let bytes = &data[usize_range(range)];
+                    max_entry_len = max_entry_len.max(bytes.len());
+                    if !has_duplicate_field {
+                        has_duplicate_field =
+                            probe_cursor_table::<SLOTS>(data, &mut table, bytes, entry_cursor);
+                    }
+                }
+                RawKind::Integer(value) => {
+                    if !has_duplicate_field {
+                        let mut scratch = [0u8; 20];
+                        let start = crate::decimal_i64_into(&mut scratch, value);
+                        let bytes = &scratch[start..];
+                        max_entry_len = max_entry_len.max(bytes.len());
+                        has_duplicate_field =
+                            probe_cursor_table::<SLOTS>(data, &mut table, bytes, entry_cursor);
+                    } else {
+                        max_entry_len = max_entry_len.max(crate::decimal_i64_len(value));
+                    }
+                }
+            }
+        } else {
+            // Value entry: only byte_len participates in HashListpackShape; never
+            // construct a ListpackValueSpan, never format integer values to ASCII,
+            // and never touch the duplicate table.
+            let val_len = match raw.kind() {
+                RawKind::String(range) => (range.end - range.start) as usize,
+                RawKind::Integer(value) => crate::decimal_i64_len(value),
+            };
+            max_entry_len = max_entry_len.max(val_len);
+        }
+        count += 1;
+    }
+    if cursor != end {
+        return Err(ListpackError::MissingTerminator);
+    }
+    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && count != usize::from(num_elements) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    if !count.is_multiple_of(2) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    Ok(Some(HashListpackShape {
+        pair_count: count / 2,
+        max_entry_len,
+        has_duplicate_field,
+    }))
+}
+
+/// Bench/test reference: the 3-pass heap-allocating `hash_listpack_shape` that
+/// allocates `Vec<ListpackValueSpan>` via `decode_value_spans`.
+#[doc(hidden)]
+pub fn hash_listpack_shape_orig(data: &[u8]) -> Result<HashListpackShape, ListpackError> {
     let spans = decode_value_spans(data)?;
     if !spans.len().is_multiple_of(2) {
         return Err(ListpackError::ElementCountMismatch);
@@ -2098,6 +2391,39 @@ pub fn hash_listpack_shape(data: &[u8]) -> Result<HashListpackShape, ListpackErr
         max_entry_len,
         has_duplicate_field: hash_field_spans_have_duplicate(data, &spans),
     })
+}
+
+/// Validate a `RDB_TYPE_HASH_LISTPACK` payload and report its shape in a single
+/// allocation-free pass for retainable payloads (frankenredis-33832).
+///
+/// EXACTLY the acceptance the hash arm already applies -- same structural walk,
+/// backlen, terminator, element-count, and even-element-count guards as
+/// [`decode_value_spans`] -- without allocating a `Vec<ListpackValueSpan>` on the
+/// heap or rendering integer values to ASCII.
+pub fn hash_listpack_shape(data: &[u8]) -> Result<HashListpackShape, ListpackError> {
+    let (total_bytes, num_elements) = parse_header(data)?;
+    let end = (total_bytes as usize) - 1;
+    if end <= usize::from(u16::MAX) && num_elements != LISTPACK_HDR_NUMELE_UNKNOWN {
+        let pair_bound = usize::from(num_elements).div_ceil(2);
+        if pair_bound <= HASH_NARROW_PROBE_MAX {
+            if let Some(shape) = hash_listpack_shape_cursor_probe::<{ ZSET_STACK_DUP_MAX * 2 }>(
+                data,
+                end,
+                num_elements,
+            )? {
+                return Ok(shape);
+            }
+        } else if pair_bound <= HASH_STACK_DUP_MAX
+            && let Some(shape) = hash_listpack_shape_cursor_probe::<{ HASH_STACK_DUP_MAX * 2 }>(
+                data,
+                end,
+                num_elements,
+            )?
+        {
+            return Ok(shape);
+        }
+    }
+    hash_listpack_shape_orig(data)
 }
 
 #[cfg(test)]
@@ -3616,5 +3942,130 @@ mod tests {
         assert_eq!(spans[0].as_bytes(&blob), b"-9223372036854775808");
         assert_eq!(spans[1].as_bytes(&blob), b"9223372036854775807");
         assert_eq!(spans[0].byte_len(), 20, "i64::MIN renders to 20 bytes");
+    }
+
+    #[test]
+    fn listpack_shapes_single_pass_match_orig_across_valid_and_malformed_inputs_33832() {
+        // 1. Verify decimal_i64_len matches decimal_i64_bytes(v).len() across boundaries
+        let mut samples = vec![0i64, -1, 1, i64::MIN, i64::MAX, i64::MIN + 1, i64::MAX - 1];
+        let mut p = 1i64;
+        for _ in 0..18 {
+            samples.extend_from_slice(&[p, p - 1, p + 1, -p, -(p - 1), -(p + 1)]);
+            p = p.saturating_mul(10);
+        }
+        for v in samples {
+            assert_eq!(
+                crate::decimal_i64_len(v),
+                crate::decimal_i64_bytes(v).len(),
+                "decimal_i64_len mismatch for {v}"
+            );
+        }
+
+        // 2. Hash listpack shapes across narrow (<=64), wide (65..=512), and cold (>512) bands,
+        // with string/integer fields and values, unique and duplicate fields.
+        for pair_count in [0usize, 1, 40, 64, 65, 200, 512, 520] {
+            for with_dup in [false, true] {
+                let mut owned: Vec<Vec<u8>> = Vec::with_capacity(pair_count * 2);
+                for i in 0..pair_count {
+                    let field = if with_dup && i + 1 == pair_count && pair_count >= 2 {
+                        owned[0].clone()
+                    } else if i % 5 == 0 {
+                        format!("{}", (i as i64) - 50).into_bytes()
+                    } else {
+                        format!("field:{i:04}:name").into_bytes()
+                    };
+                    let val = if i % 2 == 0 {
+                        format!("{}", (i as i64) * 1_000_000 - 123_456).into_bytes()
+                    } else {
+                        format!("val:{i:04}:payload_bytes").into_bytes()
+                    };
+                    owned.push(field);
+                    owned.push(val);
+                }
+                let slices: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+                let lp = crate::encode_listpack_strings_blob(&slices).expect("encode hash lp");
+                assert_eq!(
+                    hash_listpack_shape(&lp),
+                    hash_listpack_shape_orig(&lp),
+                    "hash_listpack_shape mismatch at pair_count={pair_count}, with_dup={with_dup}"
+                );
+            }
+        }
+
+        // 3. Set listpack shapes across string-only, possible-int, integer-encoded, unique/dup.
+        for member_count in [0usize, 1, 40, 128, 130] {
+            for (with_dup, with_int) in [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let mut owned: Vec<Vec<u8>> = Vec::with_capacity(member_count);
+                for i in 0..member_count {
+                    let member = if with_dup && i + 1 == member_count && member_count >= 2 {
+                        owned[0].clone()
+                    } else if with_int && i == member_count / 2 {
+                        b"-9223372036854775808".to_vec()
+                    } else {
+                        format!("member:{i:04}:alpha").into_bytes()
+                    };
+                    owned.push(member);
+                }
+                let slices: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+                let lp = crate::encode_listpack_strings_blob(&slices).expect("encode set lp");
+                assert_eq!(
+                    set_listpack_shape(&lp),
+                    set_listpack_shape_orig(&lp),
+                    "set_listpack_shape mismatch at count={member_count}, dup={with_dup}, int={with_int}"
+                );
+            }
+        }
+
+        // 4. Zset listpack shapes across unique/dup, int/float/inf scores, and int members.
+        for pair_count in [0usize, 1, 40, 128, 130] {
+            for with_dup in [false, true] {
+                let mut owned: Vec<Vec<u8>> = Vec::with_capacity(pair_count * 2);
+                for i in 0..pair_count {
+                    let member = if with_dup && i + 1 == pair_count && pair_count >= 2 {
+                        owned[0].clone()
+                    } else if i == 3 {
+                        b"42".to_vec()
+                    } else {
+                        format!("zmem:{i:04}").into_bytes()
+                    };
+                    let score = if i % 3 == 0 {
+                        format!("{}", (i as i64) - 20).into_bytes()
+                    } else if i % 7 == 0 {
+                        b"inf".to_vec()
+                    } else {
+                        format!("{}", (i as f64) * 0.75 - 1.25).into_bytes()
+                    };
+                    owned.push(member);
+                    owned.push(score);
+                }
+                let slices: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+                let lp = crate::encode_listpack_strings_blob(&slices).expect("encode zset lp");
+                assert_eq!(
+                    zset_listpack_shape(&lp),
+                    zset_listpack_shape_orig(&lp),
+                    "zset_listpack_shape mismatch at pair_count={pair_count}, dup={with_dup}"
+                );
+            }
+        }
+
+        // 5. Malformed / error inputs must return the exact same Err variant as *_orig.
+        let odd_lp = assemble(&[
+            &entry_6bit_str(b"k0"),
+            &entry_7bit_uint(1),
+            &entry_6bit_str(b"k1"),
+        ]);
+        let nan_lp = assemble(&[&entry_6bit_str(b"m0"), &entry_6bit_str(b"nan")]);
+        let bad_score_lp = assemble(&[&entry_6bit_str(b"m0"), &entry_6bit_str(b"not_a_float")]);
+        let mut missing_term = assemble(&[&entry_6bit_str(b"k0"), &entry_7bit_uint(1)]);
+        *missing_term.last_mut().unwrap() = 0x00;
+        let mut wrong_count = assemble(&[&entry_6bit_str(b"k0"), &entry_7bit_uint(1)]);
+        wrong_count[4] = 4; // header claims 4 elements, body has 2
+
+        for bad in [&odd_lp, &nan_lp, &bad_score_lp, &missing_term, &wrong_count] {
+            assert_eq!(hash_listpack_shape(bad), hash_listpack_shape_orig(bad));
+            assert_eq!(set_listpack_shape(bad), set_listpack_shape_orig(bad));
+            assert_eq!(zset_listpack_shape(bad), zset_listpack_shape_orig(bad));
+        }
     }
 }

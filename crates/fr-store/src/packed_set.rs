@@ -4557,6 +4557,91 @@ pub(crate) fn packed_node_totals_from_value_spans(
     packed_node_totals(bytes, entries, &[])
 }
 
+struct PackedNodeTotalsSink<'a> {
+    bytes: &'a [u8],
+    count: usize,
+    raw_total: u64,
+    derivable: bool,
+}
+
+impl fr_persist::listpack::ListpackSpanSink for PackedNodeTotalsSink<'_> {
+    #[inline]
+    fn push_string(
+        &mut self,
+        range: std::ops::Range<u32>,
+    ) -> Result<(), fr_persist::listpack::ListpackError> {
+        self.count += 1;
+        let start = range.start as usize;
+        let end = range.end as usize;
+        self.raw_total += (end - start) as u64;
+        if self.derivable
+            && matches!(self.bytes.get(start), Some(&b) if b.is_ascii_digit() || b == b'-')
+            && list_lp_int_scan_first(&self.bytes[start..end]).is_some()
+        {
+            self.derivable = false;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn push_integer(&mut self, value: i64) -> Result<(), fr_persist::listpack::ListpackError> {
+        self.count += 1;
+        self.raw_total += fr_persist::decimal_i64_len(value) as u64;
+        Ok(())
+    }
+
+    #[inline]
+    fn span_count(&self) -> usize {
+        self.count
+    }
+}
+
+pub(crate) fn packed_node_totals_from_listpack_orig(
+    bytes: &[u8],
+) -> Result<Option<(usize, u64, u64)>, fr_persist::listpack::ListpackError> {
+    let entries = fr_persist::listpack::decode_value_spans(bytes)?;
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let (raw_total, enc_total) = packed_node_totals_from_value_spans(bytes, &entries);
+    Ok(Some((entries.len(), raw_total, enc_total)))
+}
+
+/// (frankenredis-33832) Single-pass zero-allocation quicklist packed-node totals
+/// computation directly over the listpack byte slice via [`fr_persist::listpack::ListpackSpanSink`].
+///
+/// Replaces `decode_value_spans(bytes)` + `packed_node_totals_from_value_spans(bytes, &entries)`
+/// on `RDB_TYPE_LIST_QUICKLIST_2` (`RESTORE` and `DEBUG RELOAD` retained list load),
+/// eliminating the per-node `Vec<ListpackValueSpan>` heap allocation, the 20-byte ASCII
+/// decimal integer rendering loop, and the second pass over the span vector.
+pub(crate) fn packed_node_totals_from_listpack(
+    bytes: &[u8],
+) -> Result<Option<(usize, u64, u64)>, fr_persist::listpack::ListpackError> {
+    let sink = fr_persist::listpack::decode_spans_into(
+        bytes,
+        PackedNodeTotalsSink {
+            bytes,
+            count: 0,
+            raw_total: 0,
+            derivable: true,
+        },
+    )?;
+    if sink.count == 0 {
+        return Ok(None);
+    }
+    if sink.derivable {
+        let enc_total = bytes.len() as u64 - LIST_LP_OVERHEAD;
+        debug_assert_eq!(
+            Some((sink.count, sink.raw_total, enc_total)),
+            packed_node_totals_from_listpack_orig(bytes).ok().flatten(),
+            "single-pass packed_node_totals_from_listpack must match orig"
+        );
+        Ok(Some((sink.count, sink.raw_total, enc_total)))
+    } else {
+        packed_node_totals_from_listpack_orig(bytes)
+    }
+}
+
 const LIST_CHUNK_TARGET: usize = 128;
 
 #[derive(Clone, Debug)]
@@ -11154,5 +11239,59 @@ mod tests {
             assert_eq!(set.contains(m), want, "after tombstoning, member {i} wrong");
         }
         assert_eq!(removed.len(), 67);
+    }
+
+    #[test]
+    fn packed_node_totals_from_listpack_matches_orig_33832() {
+        let empty_lp = crate::encode_listpack_strings(&[]).expect("empty lp");
+        assert_eq!(
+            super::packed_node_totals_from_listpack(&empty_lp),
+            super::packed_node_totals_from_listpack_orig(&empty_lp),
+        );
+        assert_eq!(super::packed_node_totals_from_listpack(&empty_lp), Ok(None));
+
+        let mixed_items: Vec<Vec<u8>> = vec![
+            b"alpha".to_vec(),
+            b"0".to_vec(),
+            b"-1".to_vec(),
+            b"127".to_vec(),
+            b"128".to_vec(),
+            b"-4096".to_vec(),
+            b"32767".to_vec(),
+            b"100000".to_vec(),
+            b"2147483647".to_vec(),
+            b"9223372036854775807".to_vec(),
+            b"-9223372036854775808".to_vec(),
+            b"007".to_vec(),
+            b"-0".to_vec(),
+            b"20260818T000001".to_vec(),
+            vec![b'x'; 300],
+        ];
+        let mixed_refs: Vec<&[u8]> = mixed_items.iter().map(Vec::as_slice).collect();
+        let mixed_lp = crate::encode_listpack_strings(&mixed_refs).expect("mixed lp");
+        assert_eq!(
+            super::packed_node_totals_from_listpack(&mixed_lp),
+            super::packed_node_totals_from_listpack_orig(&mixed_lp),
+        );
+
+        // Non-derivable listpack: manually craft a 1-element listpack where "42" is
+        // string-encoded (0x82 '4' '2', backlen 0x03) instead of integer-encoded.
+        let non_derivable_lp: [u8; 11] = [
+            11, 0, 0, 0, // total_bytes = 11
+            1, 0, // num_elements = 1
+            0x82, b'4', b'2', 0x03, // 6-bit string len=2 ("42"), backlen=3
+            0xFF, // EOF
+        ];
+        assert_eq!(
+            super::packed_node_totals_from_listpack(&non_derivable_lp),
+            super::packed_node_totals_from_listpack_orig(&non_derivable_lp),
+        );
+
+        // Malformed listpack
+        let bad_lp: [u8; 6] = [6, 0, 0, 0, 0, 0];
+        assert_eq!(
+            super::packed_node_totals_from_listpack(&bad_lp),
+            super::packed_node_totals_from_listpack_orig(&bad_lp),
+        );
     }
 }

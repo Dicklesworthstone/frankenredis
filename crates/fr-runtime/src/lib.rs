@@ -53598,7 +53598,7 @@ fn store_to_rdb_entries_borrowed<'a>(
                 // The owned build below still runs for any stream the listpacks3
                 // encoder declines -- exactly the streams `encode_stream_rdb_value`
                 // would have sent down `encode_private_stream_rdb_value` anyway.
-                let watermark = store_ref.stream_watermark(key).unwrap_or(None);
+                let watermark = store_ref.stream_watermark_for_entries(key, entries_map);
                 let entries_added = Some(store_ref.stream_entries_added(key, entries_map.len()));
                 let max_deleted = store_ref.stream_max_deleted_id(key);
                 // Annotated because the blob builder below takes `&[...]`, which
@@ -53663,7 +53663,9 @@ fn store_to_rdb_entries_borrowed<'a>(
                     && skeleton.max_deleted() == max_deleted
                     && skeleton.groups() == groups.as_slice()
                 {
-                    fr_persist::RdbValueRef::StreamListpacks3(skeleton.upstream_payload().to_vec())
+                    fr_persist::RdbValueRef::StreamListpacks3(std::borrow::Cow::Borrowed(
+                        skeleton.upstream_payload(),
+                    ))
                 } else {
                     type BorrowedStreamEntry<'a> = (u64, u64, Vec<(&'a [u8], &'a [u8])>);
                     let borrowed_entries: Vec<BorrowedStreamEntry<'_>> = entries_map
@@ -53677,7 +53679,7 @@ fn store_to_rdb_entries_borrowed<'a>(
                         entries_added,
                         max_deleted,
                     ) {
-                        fr_persist::RdbValueRef::StreamListpacks3(blob)
+                        fr_persist::RdbValueRef::StreamListpacks3(std::borrow::Cow::Owned(blob))
                     } else {
                         let stream_entries: Vec<fr_persist::StreamEntry> = borrowed_entries
                             .into_iter()
@@ -54213,28 +54215,19 @@ fn apply_rdb_entries_to_store(
                 let Ok(validated_last_id) = skeleton.validate_entries() else {
                     return Err(PersistError::InvalidFrame);
                 };
-                let watermark = skeleton.watermark();
-                let entries_added = Some(skeleton.entries_added());
-                let max_deleted = skeleton.max_deleted();
-                // Groups are COPIED before the skeleton moves: stream METADATA, a
-                // handful per stream, not the entry data retention exists to defer.
-                let groups = skeleton.groups().to_vec();
+                // Groups are COPIED before the skeleton moves only when non-empty:
+                // stream METADATA, a handful per stream, not the entry data retention
+                // exists to defer. `watermark`, `entries_added`, and `max_deleted` are
+                // installed in one pass inside `load_stream_pending`.
+                let groups = if skeleton.groups().is_empty() {
+                    None
+                } else {
+                    Some(skeleton.groups().to_vec())
+                };
                 store.load_stream_pending(&key, *skeleton, validated_last_id, now_ms);
-                if let Some((wm_ms, wm_seq)) = watermark {
-                    let _ = store.xsetid_with_metadata(
-                        &key,
-                        (wm_ms, wm_seq),
-                        entries_added,
-                        max_deleted,
-                        now_ms,
-                    );
-                } else if let Some(added) = entries_added {
-                    store.restore_stream_entries_added(&key, added);
+                if let Some(groups) = groups.as_deref() {
+                    restore_stream_groups_into(store, &key, groups, now_ms);
                 }
-                if let Some(md) = max_deleted {
-                    store.restore_stream_max_deleted_id(&key, md);
-                }
-                restore_stream_groups_into(store, &key, &groups, now_ms);
                 counts.loaded = counts.loaded.saturating_add(1);
                 if let Some(expires_at) = entry_expire_ms {
                     store.expire_at_milliseconds(

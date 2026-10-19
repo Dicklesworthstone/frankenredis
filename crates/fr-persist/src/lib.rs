@@ -44,6 +44,57 @@ pub(crate) fn decimal_i64_scratch(value: i64) -> ([u8; 20], usize) {
     (scratch, start)
 }
 
+#[inline]
+pub(crate) const fn decimal_u64_len(n: u64) -> usize {
+    if n < 10 {
+        1
+    } else if n < 100 {
+        2
+    } else if n < 1_000 {
+        3
+    } else if n < 10_000 {
+        4
+    } else if n < 100_000 {
+        5
+    } else if n < 1_000_000 {
+        6
+    } else if n < 10_000_000 {
+        7
+    } else if n < 100_000_000 {
+        8
+    } else if n < 1_000_000_000 {
+        9
+    } else if n < 10_000_000_000 {
+        10
+    } else if n < 100_000_000_000 {
+        11
+    } else if n < 1_000_000_000_000 {
+        12
+    } else if n < 10_000_000_000_000 {
+        13
+    } else if n < 100_000_000_000_000 {
+        14
+    } else if n < 1_000_000_000_000_000 {
+        15
+    } else if n < 10_000_000_000_000_000 {
+        16
+    } else if n < 100_000_000_000_000_000 {
+        17
+    } else if n < 1_000_000_000_000_000_000 {
+        18
+    } else if n < 10_000_000_000_000_000_000 {
+        19
+    } else {
+        20
+    }
+}
+
+#[inline]
+#[must_use]
+pub const fn decimal_i64_len(value: i64) -> usize {
+    (value < 0) as usize + decimal_u64_len(value.unsigned_abs())
+}
+
 pub(crate) fn decimal_i64_bytes(value: i64) -> Vec<u8> {
     if (0..10).contains(&value) {
         return vec![b'0' + value as u8];
@@ -1740,7 +1791,7 @@ pub enum RdbValueRef<'a> {
         pair_count: usize,
         max_member_len: usize,
     },
-    StreamListpacks3(Vec<u8>),
+    StreamListpacks3(std::borrow::Cow<'a, [u8]>),
     StreamSkeleton(Box<rdb_stream::UpstreamStreamSkeleton>),
     Stream(Box<RdbStreamValue>),
 }
@@ -1841,7 +1892,7 @@ impl<'a> RdbValueRef<'a> {
                 pair_count,
                 max_member_len,
             },
-            Self::StreamListpacks3(blob) => RdbValue::StreamListpacks3(blob),
+            Self::StreamListpacks3(blob) => RdbValue::StreamListpacks3(blob.into_owned()),
             Self::StreamSkeleton(s) => RdbValue::StreamSkeleton(s),
             Self::Stream(stream) => RdbValue::Stream(
                 stream.entries,
@@ -3235,7 +3286,7 @@ fn encode_rdb_entry_borrowed(
         RdbValueRef::StreamListpacks3(blob) => {
             buf.push(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3);
             rdb_encode_string_with(buf, entry.key, compress);
-            buf.extend_from_slice(blob);
+            buf.extend_from_slice(blob.as_ref());
         }
         RdbValueRef::StreamSkeleton(skeleton) => {
             buf.push(skeleton.upstream_type_byte());
