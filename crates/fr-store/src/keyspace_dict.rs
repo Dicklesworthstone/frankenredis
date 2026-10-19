@@ -1324,6 +1324,10 @@ impl<V> KeyDict<V> {
     /// (doubles) between steps. Keys inserted or deleted mid-scan may or may not
     /// appear. This is the `dictScan` reverse-binary-cursor contract.
     pub fn scan<F: FnMut(&[u8], &V)>(&self, cursor: u64, count: usize, mut emit: F) -> u64 {
+        if self.count == 0 {
+            return 0;
+        }
+        let min_emitted = count.max(1);
         let mut v = cursor;
         let mut emitted = 0usize;
         loop {
@@ -1340,16 +1344,15 @@ impl<V> KeyDict<V> {
             v = reverse_bits_u64(v);
             v = v.wrapping_add(1);
             v = reverse_bits_u64(v);
-            if v == 0 || emitted >= count.max(1) {
+            if v == 0 || emitted >= min_emitted {
                 return v;
             }
         }
     }
 
     /// The same reverse-binary SCAN as [`Self::scan`], except hash buckets that
-    /// cannot contain `first_byte` are skipped. The fingerprint has deliberate
-    /// 64-way collisions, so it only rules buckets out; every candidate is still
-    /// emitted for the caller's full MATCH validation.
+    /// cannot contain `first_byte` are skipped, and only chain entries whose
+    /// actual first byte equals `first_byte` are passed to `emit`.
     pub fn scan_first_byte<F: FnMut(&[u8], &V)>(
         &self,
         cursor: u64,
@@ -1357,6 +1360,10 @@ impl<V> KeyDict<V> {
         first_byte: u8,
         mut emit: F,
     ) -> u64 {
+        if self.count == 0 {
+            return 0;
+        }
+        let min_emitted = count.max(1);
         let wanted = Self::first_byte_bit(&[first_byte]);
         let mut v = cursor;
         let mut emitted = 0usize;
@@ -1366,7 +1373,10 @@ impl<V> KeyDict<V> {
                 let mut node = self.buckets[b];
                 while node != NIL {
                     let n = self.nodes.get(node);
-                    emit(n.key.as_slice(), &n.value);
+                    let key = n.key.as_slice();
+                    if key.first() == Some(&first_byte) {
+                        emit(key, &n.value);
+                    }
                     emitted += 1;
                     node = n.next;
                 }
@@ -1375,8 +1385,30 @@ impl<V> KeyDict<V> {
             v = reverse_bits_u64(v);
             v = v.wrapping_add(1);
             v = reverse_bits_u64(v);
-            if v == 0 || emitted >= count.max(1) {
+            if v == 0 || emitted >= min_emitted {
                 return v;
+            }
+        }
+    }
+
+    /// Visit all keys in the table whose first byte equals `first_byte`, skipping
+    /// buckets whose 16-bit first-byte fingerprint lacks `first_byte`'s bit.
+    pub fn for_each_key_with_first_byte<'a>(&'a self, first_byte: u8, mut f: impl FnMut(&'a [u8])) {
+        if self.count == 0 {
+            return;
+        }
+        let wanted = Self::first_byte_bit(&[first_byte]);
+        for (b, &bits) in self.first_byte_bits.iter().enumerate() {
+            if bits & wanted != 0 {
+                let mut node = self.buckets[b];
+                while node != NIL {
+                    let n = self.nodes.get(node);
+                    let key = n.key.as_slice();
+                    if key.first() == Some(&first_byte) {
+                        f(key);
+                    }
+                    node = n.next;
+                }
             }
         }
     }
@@ -1413,6 +1445,11 @@ impl<V> KeyDict<V> {
             let b = reduce(next_rand(), nb);
             let head = self.buckets[b];
             if head != NIL {
+                let first_node = self.nodes.get(head);
+                if first_node.next == NIL {
+                    let _ = next_rand();
+                    return Some((first_node.key.as_slice(), &first_node.value));
+                }
                 let chain_len = chain(head).count();
                 let pick = reduce(next_rand(), chain_len);
                 let chosen = chain(head).nth(pick).expect("pick is within chain length");
@@ -1446,11 +1483,14 @@ impl<'a, V> Iterator for KeyDictIter<'a, V> {
     type Item = (&'a [u8], &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
         loop {
             if self.current != NIL {
                 let node = self.dict.nodes.get(self.current);
                 self.current = node.next;
-                self.remaining = self.remaining.saturating_sub(1);
+                self.remaining -= 1;
                 return Some((node.key.as_slice(), &node.value));
             }
             if self.bucket >= self.dict.buckets.len() {
