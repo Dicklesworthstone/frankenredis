@@ -53055,16 +53055,15 @@ fn try_encode_string_only_rdb_snapshot(
 ) -> Option<Vec<u8>> {
     use fr_store::Value;
 
-    if !store.entries_are_all_strings() {
-        return None;
-    }
-
     let total_len = store.len();
     let is_all_db0 = store.dbsize_in_db(0) == total_len;
-    let mut entries = Vec::with_capacity(total_len);
+    let mut entries = Vec::new();
     let mut has_multiple_dbs = false;
     let all_strings = store.try_for_each_entry_ref(|key, value, expires_at_ms| {
         if let Value::String(value) = value {
+            if entries.capacity() == 0 {
+                entries.reserve_exact(total_len);
+            }
             let (db, logical_key) = if is_all_db0 {
                 (0, key)
             } else {

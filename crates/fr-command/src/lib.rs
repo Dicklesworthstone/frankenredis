@@ -29532,7 +29532,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 }
 
 /// Compute a hex digest of database contents for DEBUG DIGEST.
-/// If keys is None, compute over all keys in sorted order.
+/// If keys is None, compute over all keys.
 fn compute_debug_digest(store: &mut Store, now_ms: u64, keys: Option<&[&[u8]]>) -> String {
     let mut digest = [0u8; 20];
 
@@ -29547,9 +29547,9 @@ fn compute_debug_digest(store: &mut Store, now_ms: u64, keys: Option<&[&[u8]]>) 
         for key in key_list {
             let pk = fr_store::encode_db_key(db, key);
             store.expire_key_if_stale(&pk, now_ms);
-            if store.get_value_and_expiry(&pk).is_some() {
+            if let Some((value, expires_at_ms)) = store.get_value_and_expiry(&pk) {
                 let mut object_digest = [0u8; 20];
-                mix_debug_object_digest(store, &pk, now_ms, &mut object_digest);
+                mix_debug_object_digest(value, expires_at_ms, &mut object_digest);
                 for (dst, src) in digest.iter_mut().zip(object_digest) {
                     *dst ^= src;
                 }
@@ -29558,58 +29558,51 @@ fn compute_debug_digest(store: &mut Store, now_ms: u64, keys: Option<&[&[u8]]>) 
         return digest_to_hex(&digest);
     }
 
-    // Redis's computeDatasetDigest walks DBs in ascending order and, for every
-    // NON-EMPTY DB, mixes htonl(dbid) into the running digest *before* XOR-ing
-    // that DB's per-key digests in — so "the same dataset moved to another DB"
-    // yields a different digest. Each per-key digest mixes the LOGICAL key name.
-    // fr stores keys DB-namespaced (encode_db_key), so the old code mixed a single
-    // htonl(0) plus the *physical* (namespaced) key name: byte-identical to redis
-    // for db 0 but divergent for every key in a non-zero DB. Group by decoded DB
-    // index and mix htonl(dbid) + the de-namespaced name to match redis across DBs.
-    let mut keys_by_db: std::collections::BTreeMap<usize, Vec<Vec<u8>>> =
-        std::collections::BTreeMap::new();
-    for key in store.all_keys() {
-        let db = fr_store::decode_db_key(&key).map_or(0, |(db, _)| db);
-        keys_by_db.entry(db).or_default().push(key);
+    // Reap due volatile keys once, then walk live entries by reference.
+    // Within each DB, per-key digests are combined via `xor_digest` (XOR is
+    // commutative and associative), so we can accumulate per-DB XOR digests in a
+    // single pass without cloning or sorting keys/values.
+    store.expire_snapshot_volatile_keys(now_ms);
+    if store.is_empty() {
+        return digest_to_hex(&digest);
     }
 
-    for (db, phys_keys) in &keys_by_db {
-        // Resolve survivors first (lazy-expiry mutates the store); only a DB that
-        // still holds at least one live key contributes its htonl(dbid) header.
-        let mut survivors: Vec<&[u8]> = Vec::new();
-        for pk in phys_keys {
-            store.expire_key_if_stale(pk, now_ms);
-            if store.get_value_and_expiry(pk).is_some() {
-                survivors.push(pk.as_slice());
-            }
-        }
-        if survivors.is_empty() {
-            continue;
-        }
-        mix_digest(&mut digest, &(*db as u32).to_be_bytes());
-        for pk in survivors {
-            let logical = fr_store::decode_db_key(pk).map_or(pk, |(_, lk)| lk);
+    if store.dbsize_in_db(0) == store.len() {
+        mix_digest(&mut digest, &0u32.to_be_bytes());
+        store.for_each_entry_ref(|key, value, expires_at_ms| {
             let mut key_value_digest = [0u8; 20];
-            mix_digest(&mut key_value_digest, logical);
-            mix_debug_object_digest(store, pk, now_ms, &mut key_value_digest);
+            mix_digest(&mut key_value_digest, key);
+            mix_debug_object_digest(value, expires_at_ms, &mut key_value_digest);
             xor_digest(&mut digest, &key_value_digest);
+        });
+        return digest_to_hex(&digest);
+    }
+
+    let mut db_digests: std::collections::BTreeMap<usize, [u8; 20]> =
+        std::collections::BTreeMap::new();
+    store.for_each_entry_ref(|key, value, expires_at_ms| {
+        let (db, logical) = fr_store::decode_db_key(key).unwrap_or((0, key));
+        let mut key_value_digest = [0u8; 20];
+        mix_digest(&mut key_value_digest, logical);
+        mix_debug_object_digest(value, expires_at_ms, &mut key_value_digest);
+        let db_xor = db_digests.entry(db).or_insert([0u8; 20]);
+        xor_digest(db_xor, &key_value_digest);
+    });
+
+    for (db, db_xor) in db_digests {
+        mix_digest(&mut digest, &(db as u32).to_be_bytes());
+        for (dst, src) in digest.iter_mut().zip(db_xor) {
+            *dst ^= src;
         }
     }
 
     digest_to_hex(&digest)
 }
 
-fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &mut [u8; 20]) {
-    let Some((value, expires_at_ms)) = store
-        .get_value_and_expiry(key)
-        .map(|(value, expires_at_ms)| (value.clone(), expires_at_ms))
-    else {
-        return;
-    };
-
-    mix_digest(digest, &debug_object_type_code(&value).to_be_bytes());
+fn mix_debug_object_digest(value: &Value, expires_at_ms: Option<u64>, digest: &mut [u8; 20]) {
+    mix_digest(digest, &debug_object_type_code(value).to_be_bytes());
     match value {
-        Value::String(bytes) => mix_digest(digest, &bytes),
+        Value::String(bytes) => mix_digest(digest, bytes),
         Value::Integer(value) => mix_digest(digest, value.to_string().as_bytes()),
         Value::List(items) => {
             for item in items.iter() {
@@ -29629,13 +29622,10 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
                 xor_digest(digest, &element_digest);
             }
         }
-        Value::SortedSet(_) => {
-            let pairs = store
-                .zrange_withscores(key, 0, -1, now_ms)
-                .unwrap_or_default();
-            for (member, score) in pairs {
+        Value::SortedSet(zset) => {
+            for (member, score) in zset.iter() {
                 let mut element_digest = [0u8; 20];
-                mix_digest(&mut element_digest, &member);
+                mix_digest(&mut element_digest, member);
                 mix_digest(&mut element_digest, debug_score_string(score).as_bytes());
                 xor_digest(digest, &element_digest);
             }
@@ -29688,22 +29678,19 @@ fn mix_digest(digest: &mut [u8; 20], data: &[u8]) {
     *digest = sha1_digest(digest);
 }
 
+#[inline]
 fn sha1_digest(data: &[u8]) -> [u8; 20] {
-    let hex = sha1_hex_public(data);
-    let mut out = [0u8; 20];
-    for (idx, slot) in out.iter_mut().enumerate() {
-        let hex_idx = idx * 2;
-        *slot = u8::from_str_radix(&hex[hex_idx..hex_idx + 2], 16).unwrap_or(0);
-    }
-    out
+    fr_store::sha1_bytes(data)
 }
 
 fn digest_to_hex(digest: &[u8; 20]) -> String {
-    let mut hex = String::with_capacity(40);
-    for byte in digest {
-        hex.push_str(&format!("{byte:02x}"));
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = [0u8; 40];
+    for (i, &byte) in digest.iter().enumerate() {
+        out[i * 2] = HEX[(byte >> 4) as usize];
+        out[i * 2 + 1] = HEX[(byte & 0x0f) as usize];
     }
-    hex
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn role_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {

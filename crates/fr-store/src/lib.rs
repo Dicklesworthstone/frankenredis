@@ -6900,6 +6900,26 @@ impl ValueType {
             Self::Stream => "stream",
         }
     }
+
+    #[inline]
+    #[must_use]
+    pub fn from_type_name_ascii_case(name: &[u8]) -> Option<Self> {
+        if name.eq_ignore_ascii_case(b"string") {
+            Some(Self::String)
+        } else if name.eq_ignore_ascii_case(b"hash") {
+            Some(Self::Hash)
+        } else if name.eq_ignore_ascii_case(b"list") {
+            Some(Self::List)
+        } else if name.eq_ignore_ascii_case(b"set") {
+            Some(Self::Set)
+        } else if name.eq_ignore_ascii_case(b"zset") {
+            Some(Self::ZSet)
+        } else if name.eq_ignore_ascii_case(b"stream") {
+            Some(Self::Stream)
+        } else {
+            None
+        }
+    }
 }
 
 /// Default number of databases (matches Redis default).
@@ -7848,16 +7868,37 @@ pub struct Store {
 }
 
 const DB_NAMESPACE_PREFIX: &[u8] = b"\0frdb\0";
+const DB_NAMESPACE_HEADER_LEN: usize = DB_NAMESPACE_PREFIX.len() + std::mem::size_of::<u64>();
+
+#[inline]
+#[must_use]
+const fn encode_db_key_header(db: usize) -> [u8; DB_NAMESPACE_HEADER_LEN] {
+    let db_bytes = (db as u64).to_be_bytes();
+    [
+        b'\0',
+        b'f',
+        b'r',
+        b'd',
+        b'b',
+        b'\0',
+        db_bytes[0],
+        db_bytes[1],
+        db_bytes[2],
+        db_bytes[3],
+        db_bytes[4],
+        db_bytes[5],
+        db_bytes[6],
+        db_bytes[7],
+    ]
+}
 
 #[must_use]
 pub fn encode_db_key(db: usize, key: &[u8]) -> Vec<u8> {
     if db == 0 {
         return key.to_vec();
     }
-    let mut encoded =
-        Vec::with_capacity(DB_NAMESPACE_PREFIX.len() + std::mem::size_of::<u64>() + key.len());
-    encoded.extend_from_slice(DB_NAMESPACE_PREFIX);
-    encoded.extend_from_slice(&(db as u64).to_be_bytes());
+    let mut encoded = Vec::with_capacity(DB_NAMESPACE_HEADER_LEN + key.len());
+    encoded.extend_from_slice(&encode_db_key_header(db));
     encoded.extend_from_slice(key);
     encoded
 }
@@ -14841,176 +14882,106 @@ impl Store {
         result
     }
 
-    /// (frankenredis-keysfast) Push the LOGICAL key into `result` when it
-    /// matches `pattern`. `is_star` (pattern == `*`) takes the redis allkeys
-    /// fast path and skips `glob_match` entirely. Used by the full-DB-scan arm
-    /// of `keys_matching_in_db`.
-    /// (BlackThrush 2026-08-27) The BORROWED twin, so the full-DB arm can sort before
-    /// it allocates. Same decode, same glob, same acceptance -- it differs only in
-    /// pushing the logical key's SLICE instead of a fresh `Vec`.
-    fn push_logical_key_ref_if_match<'k>(
-        result: &mut Vec<&'k [u8]>,
-        physical_key: &'k [u8],
-        glob: &PreparedGlob<'_>,
-        is_star: bool,
-    ) {
-        let logical = decode_db_key(physical_key)
-            .map(|(_, logical)| logical)
-            .unwrap_or(physical_key);
-        if is_star || glob.matches(logical) {
-            result.push(logical);
-        }
-    }
-
     #[must_use]
     pub fn keys_matching_in_db(&mut self, db: usize, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
-        // (frankenredis-2wgom) Range-prune by the pattern's literal prefix. The
-        // prefix applies to the LOGICAL key, so the candidate PHYSICAL range is
-        // `encode_db_key(db, lit) ..`; the db-membership filter (db-0: not
-        // db-encoded; db>0: carries the db prefix) keeps correctness exact even
-        // when the byte range bleeds past the db, and `glob_match` still filters
-        // every candidate. O(log n + matches) vs the old O(n) all-key glob.
-        let lit = glob_literal_prefix(pattern);
-        if lit.is_empty() {
-            // (frankenredis-keysfast) Full-DB scan hot path (KEYS *, KEYS *abc,
-            // etc.). The old path cloned EVERY physical key into a candidate
-            // buffer, called drop_if_expired on each (one hashmap probe), then
-            // re-probed `entries.contains_key` (a second probe), ran glob_match
-            // on every key even for the `*` all-keys case, cloned matches a
-            // second time, and finally re-sorted — all O(n) waste on top of the
-            // unavoidable per-match copy. Instead reap ONLY the due volatile keys
-            // (O(due), gated O(1) by has_expiry_due): this is the IDENTICAL
-            // eviction set/order to the old sweep, because drop_if_expired is a
-            // no-op on non-volatile and not-due keys and the old candidate set
-            // was exactly this db's keys. Then walk the already-sorted
-            // `ordered_keys` index immutably, skipping glob for `*`, emitting one
-            // owned copy per match (as redis does). Output order is unchanged
-            // (ordered_keys is physical/logical sorted), so the final sort is
-            // dropped. Byte-identical replies + identical eviction side effects.
-            // (frankenredis-keysnotify) FILTER, do not collect. This used to reap the due
-            // volatile keys before walking, which made a READ command delete keys: DBSIZE
-            // fell, subscribers received a `__keyevent@0__:expired` that upstream never
-            // sends, and the deletion propagated. Upstream's keysCommand calls keyIsExpired
-            // per candidate and deletes nothing. Gated on `expires_count` so a DB with no
-            // TTLs pays nothing, exactly as the old reap was.
-            let check_expiry = self.expires_count != 0;
-            let is_star = pattern == b"*";
-            // (cc_fr) Classify the glob ONCE for the whole full-DB walk (byte-identical to
-            // per-key `glob_match`); `is_star` still short-circuits before it.
-            let pg = glob_prepare(pattern);
-            // (frankenredis-uhthd step 2) Walk the table, then sort. The ordered
-            // side index that made this walk pre-sorted is gone, so the sort is
-            // back -- and KEYS output stays sorted, which is what the previous
-            // behaviour promised and several fixtures pin. Redis's own KEYS is
-            // unordered, so keeping the sort is a superset guarantee, not a
-            // divergence.
-            // (BlackThrush 2026-08-27) SORT THE SLICES, THEN ALLOCATE. The sort stays --
-            // it is the superset guarantee this arm's comment above promises and several
-            // fixtures pin -- but it was being run over `Vec<Vec<u8>>`, so every
-            // comparison chased two indirections and every move shuffled a 24-byte
-            // `Vec` header for a key whose bytes never move. Sorting `&[u8]` moves a
-            // 16-byte fat pointer instead, and the per-match `to_vec` happens ONCE,
-            // afterwards, in output order.
-            //
-            // Byte-identical by construction: `Ord` for `&[u8]` and for `Vec<u8>` are
-            // both lexicographic over the same bytes, so this sorts the same multiset
-            // into the same order and then copies it.
-            //
-            // Measured: `KEYS *` over 64 keys spent 6,457 Ir/op in `small_sort` plus
-            // 3,297 in `quicksort` plus the `memcmp` those drive, 42.6 pct of the whole
-            // command, against a redis `keysCommand` that does not sort at all.
-            let mut matched: Vec<&[u8]> = Vec::new();
+        if self.dbsize_in_db(db) == 0 {
+            return Vec::new();
+        }
+        let check_expiry = self.db_expires_counts.get(db).copied().unwrap_or(0) != 0;
+        let is_star = pattern == b"*";
+        let pg = glob_prepare(pattern);
+
+        // Exact-key pattern (no unescaped glob metacharacters): O(1) hash lookup instead of O(N) scan.
+        if let Some(LiteralGlob::Exact(exact)) = pg.shape {
             if db == 0 {
-                for key in self.entries.keys() {
-                    if decode_db_key(key).is_some() {
-                        continue;
-                    }
-                    if check_expiry && self.key_is_logically_expired(key, now_ms) {
-                        continue;
-                    }
-                    Self::push_logical_key_ref_if_match(&mut matched, key, &pg, is_star);
+                if decode_db_key(exact).is_none()
+                    && self.entries.contains_key(exact)
+                    && (!check_expiry || !self.key_is_logically_expired(exact, now_ms))
+                {
+                    return vec![exact.to_vec()];
                 }
             } else {
-                let prefix = encode_db_key(db, b"");
-                for key in self.entries.keys().filter(|k| k.starts_with(&prefix)) {
-                    if check_expiry && self.key_is_logically_expired(key, now_ms) {
-                        continue;
-                    }
-                    Self::push_logical_key_ref_if_match(&mut matched, key, &pg, is_star);
+                let phys = encode_db_key(db, exact);
+                if self.entries.contains_key(&phys)
+                    && (!check_expiry || !self.key_is_logically_expired(&phys, now_ms))
+                {
+                    return vec![exact.to_vec()];
                 }
+            }
+            return Vec::new();
+        }
+
+        let all_in_db0 = db == 0 && self.dbsize_in_db(0) == self.entries.len();
+        let lit = pg.literal_prefix;
+        let mut matched: Vec<&[u8]> = Vec::new();
+
+        if !lit.is_empty() {
+            let first_byte = lit[0];
+            if db == 0 {
+                self.entries
+                    .for_each_key_with_first_byte(first_byte, |key| {
+                        if !all_in_db0 && first_byte == 0 && decode_db_key(key).is_some() {
+                            return;
+                        }
+                        if pg.matches(key)
+                            && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
+                        {
+                            matched.push(key);
+                        }
+                    });
+            } else {
+                let db_header = encode_db_key_header(db);
+                self.entries.for_each_key_with_first_byte(b'\0', |key| {
+                    if !key.starts_with(&db_header) {
+                        return;
+                    }
+                    let logical = &key[DB_KEY_HEADER_LEN..];
+                    if pg.matches(logical)
+                        && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
+                    {
+                        matched.push(logical);
+                    }
+                });
             }
             matched.sort_unstable();
             return matched.into_iter().map(<[u8]>::to_vec).collect();
         }
-        // (frankenredis-uhthd step 2) The ordered range-prune is forfeited with the
-        // side index (see `keys_matching`); candidates are now every key of the db,
-        // filtered by the same literal prefix the range used to encode.
-        let candidates: Vec<Vec<u8>> = {
-            let lower = encode_db_key(db, lit);
-            let db_prefix = encode_db_key(db, b"");
-            let in_db = |key: &[u8]| -> bool {
-                if db == 0 {
-                    decode_db_key(key).is_none()
-                } else {
-                    key.starts_with(&db_prefix)
-                }
-            };
-            self.entries
-                .keys()
-                .filter(|k| in_db(k) && k.starts_with(lower.as_slice()))
-                .map(<[u8]>::to_vec)
-                .collect()
-        };
 
-        // (perf) Skip the reap loop when nothing can expire (`expires_count == 0`) — each
-        // `drop_if_expired` is a discarded `contains_key`, O(candidates) waste on a no-TTL DB.
-        // Byte-identical (no eviction with no TTL). Same CrimsonHawk guard as keys_matching.
-        //
-        // (frankenredis-keysexpired) READ THE GUARD BEFORE THE REAP RUNS. `no_ttl` was
-        // computed AFTER this loop, and the loop is exactly what can drive `expires_count`
-        // to zero: reaping the db's last volatile key made `no_ttl` true, which then told
-        // the filter below "there were no TTLs, so the reap evicted nothing, skip the
-        // re-probe" -- and the candidate the reap had just deleted was emitted. `KEYS k`
-        // and `KEYS k*` returned a logically expired key where redis returns nothing,
-        // while `KEYS *` (a different branch) filtered it correctly.
-        //
-        // One value, read once, describing the state the filter's assumption is about.
-        // (frankenredis-keysnotify) FILTER, do not collect -- see the full-scan branch. The
-        // reap that stood here made KEYS delete keys and publish `expired`; upstream's
-        // keysCommand only checks. Nothing is mutated now, so the `contains_key` re-probe
-        // that used to undo the reap is gone with it, and with it the guard-ordering trap
-        // that `frankenredis-keysexpired` fixed: `no_ttl` no longer describes a state this
-        // function can change.
-        let no_ttl = self.expires_count == 0;
-
-        // (cc_fr) Classify the glob ONCE for the range-pruned candidates (byte-identical
-        // to per-candidate `glob_match`).
-        let pg = glob_prepare(pattern);
-        // (perf) The `contains_key` filter exists ONLY to drop candidates the reap loop above
-        // evicted. On the no-TTL fast path that loop is skipped (`expires_count == 0`) and the
-        // candidates were read straight out of `entries` moments ago, so every one is still
-        // present — the re-probe is always true. Skip it there; this completes the no-TTL guard
-        // so a range KEYS over a no-TTL DB does ZERO redundant keyspace probes. Byte-identical.
-        // `no_ttl` is captured above, before the reap; see the note there for why reading it
-        // here was the bug.
-        let mut result: Vec<Vec<u8>> = candidates
-            .into_iter()
-            .filter(|key| no_ttl || !self.key_is_logically_expired(key, now_ms))
-            .filter_map(|key| {
-                let logical = decode_db_key(&key)
-                    .map(|(_, logical)| logical)
-                    .unwrap_or(key.as_slice());
-                if pg.matches(logical) {
-                    Some(logical.to_vec())
-                } else {
-                    None
+        if all_in_db0 {
+            for key in self.entries.keys() {
+                if (is_star || pg.matches(key))
+                    && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
+                {
+                    matched.push(key);
                 }
-            })
-            .collect();
-        // (CrimsonHawk) sort_unstable: matched keys are unique — byte-identical to the stable sort, but
-        // pdqsort is faster and skips the stable-sort scratch alloc (KEYS over a large keyspace).
-        result.sort_unstable();
-        result
+            }
+        } else if db == 0 {
+            for key in self.entries.keys() {
+                if decode_db_key(key).is_some() {
+                    continue;
+                }
+                if (is_star || pg.matches(key))
+                    && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
+                {
+                    matched.push(key);
+                }
+            }
+        } else {
+            let db_header = encode_db_key_header(db);
+            self.entries.for_each_key_with_first_byte(b'\0', |key| {
+                if !key.starts_with(&db_header) {
+                    return;
+                }
+                let logical = &key[DB_KEY_HEADER_LEN..];
+                if (is_star || pg.matches(logical))
+                    && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
+                {
+                    matched.push(logical);
+                }
+            });
+        }
+        matched.sort_unstable();
+        matched.into_iter().map(<[u8]>::to_vec).collect()
     }
 
     #[must_use]
@@ -15434,7 +15405,10 @@ impl Store {
     }
 
     fn expire_volatile_keys_in_db(&mut self, db: usize, now_ms: u64) {
-        if !self.has_expiry_due(now_ms) {
+        if db >= self.database_count
+            || self.db_expires_counts[db] == 0
+            || !self.has_expiry_due(now_ms)
+        {
             return;
         }
         self.rebuild_volatile_keys_if_dirty();
@@ -34867,55 +34841,50 @@ impl Store {
         }
 
         self.expire_volatile_keys_in_db(db, now_ms);
-        if self.entries.is_empty() {
+        let db_count = self.db_key_counts[db];
+        if db_count == 0 {
             return None;
         }
 
-        // (frankenredis-uhthd step 2) O(1) random-bucket sampling off the table,
-        // where this used to rebuild a per-db `Vec<StoreKey>` holding a second
-        // owned copy of every key in the db.
-        //
-        // Keys are db-encoded in ONE global table, so a global sample has to be
-        // rejected when it lands in another db. Rejection sampling is exactly
-        // uniform over the target db when it succeeds, and on the overwhelmingly
-        // common single-db server it succeeds on the first draw.
+        let all_in_db0 = db == 0 && db_count == self.entries.len();
         let (entries, rng_seed) = (&self.entries, &mut self.rng_seed);
         let mut next_rand = || {
             *rng_seed = rng_seed.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
             *rng_seed
         };
+        if all_in_db0 {
+            let (physical, _) = entries.random_sample(&mut next_rand)?;
+            return Some(physical.to_vec());
+        }
+        let db_header = encode_db_key_header(db);
         for _ in 0..RANDOMKEY_REJECTION_DRAWS {
             let (physical, _) = entries.random_sample(&mut next_rand)?;
-            if physical_key_belongs_to_db(physical, db) {
-                return Some(
-                    decode_db_key(physical)
-                        .map_or_else(|| physical.to_vec(), |(_, logical)| logical.to_vec()),
-                );
+            if db == 0 {
+                if decode_db_key(physical).is_none() {
+                    return Some(physical.to_vec());
+                }
+            } else if let Some(logical) = physical.strip_prefix(&db_header) {
+                return Some(logical.to_vec());
             }
         }
 
         // Fallback for a db holding a small fraction of the keyspace, where
-        // rejection can miss many times in a row. Counting then indexing is O(n),
-        // but it keeps the draw EXACTLY uniform rather than biasing toward
-        // whichever key iteration happens to reach first -- and it is O(n) only in
-        // the case the old code paid O(n) on unconditionally, without keeping the
-        // index afterwards.
-        let n = entries
-            .keys()
-            .filter(|k| physical_key_belongs_to_db(k, db))
-            .count();
-        if n == 0 {
-            return None;
+        // rejection can miss many times in a row. `db_count` is already tracked
+        // exactly per DB, so we avoid the first O(n) `.count()` pass.
+        let idx = (next_rand() as usize) % db_count;
+        if db == 0 {
+            let physical = entries
+                .keys()
+                .filter(|k| decode_db_key(k).is_none())
+                .nth(idx)?;
+            Some(physical.to_vec())
+        } else {
+            let physical = entries
+                .keys()
+                .filter(|k| k.starts_with(&db_header))
+                .nth(idx)?;
+            Some(physical[DB_NAMESPACE_HEADER_LEN..].to_vec())
         }
-        let idx = (next_rand() as usize) % n;
-        let physical = entries
-            .keys()
-            .filter(|k| physical_key_belongs_to_db(k, db))
-            .nth(idx)?;
-        Some(
-            decode_db_key(physical)
-                .map_or_else(|| physical.to_vec(), |(_, logical)| logical.to_vec()),
-        )
     }
 
     /// Return up to `count` keys that hash to the given cluster slot.
@@ -34964,35 +34933,8 @@ impl Store {
         self.scan_in_db(0, cursor, pattern, None, count, now_ms)
     }
 
-    /// (frankenredis-n9am7) Cursor-resumed, DB-scoped SCAN for the real SCAN
-    /// command. Produces the SAME sorted, glob+TYPE-filtered logical-key sequence
-    /// as materialising the whole DB and paging by index — `cursor` is the count
-    /// of matched keys already returned (the index into that sequence). But it
-    /// RESUMES past the previous batch's last key in O(log n) via `db_scan_cache`
-    /// instead of re-walking + re-sorting the whole DB every call, so a full SCAN
-    /// of a DB drops from O(n^2/count) to O(n) total. Returns
-    /// `(next_cursor, up-to-count keys)`; `next_cursor == 0` exactly when no
-    /// further matches remain (byte-identical paging to the old index slice).
     /// SCAN one batch, handing each matched LOGICAL key to `visit` instead of
     /// collecting it.
-    ///
-    /// (frankenredis-hwcm1) The owning form below allocates once per returned key
-    /// and once more for the Vec that holds them, and those were the last
-    /// allocations left on this shape after ad0b142f7 removed the reply tree:
-    /// measured 3.0 `__rust_alloc` per op, down from 8.0, with the remainder
-    /// being exactly this. A caller that is writing the keys straight into a
-    /// connection buffer never needs them owned.
-    ///
-    /// The signature is what forces the copies, not the walk: `scan_in_db`
-    /// returns `Vec<Vec<u8>>` out of a `&mut self` that reaps expiries first and
-    /// pushes the resume cache last, so it cannot hand back borrows into
-    /// `ordered_keys`. Splitting the walk out lets the borrow live only for the
-    /// duration of the callback, which is where it is actually used.
-    ///
-    /// `last_key` stays owned deliberately: it is read AFTER the loop, when the
-    /// resume cache is pushed under `&mut self`, so keeping a borrow of
-    /// `ordered_keys` alive for it would conflict. It costs one copy, and only
-    /// when the batch fills.
     pub fn scan_in_db_visit<F: FnMut(&[u8])>(&mut self, query: ScanQuery<'_>, mut visit: F) -> u64 {
         let ScanQuery {
             db,
@@ -35002,96 +34944,52 @@ impl Store {
             count,
             now_ms,
         } = query;
-        // Reap due volatile keys first — identical eviction set to keys_in_db /
-        // keys_matching_in_db (drop_if_expired is a no-op on non-volatile keys).
-        // Doing it up front is what lets the walk below skip a per-key liveness
-        // test: every key `KeyDict::scan` hands back is present in the table by
-        // construction, and every expired one in THIS db is already gone.
         self.expire_volatile_keys_in_db(db, now_ms);
+        let db_count = self.dbsize_in_db(db);
+        if db_count == 0 {
+            return 0;
+        }
 
-        // (frankenredis-uhthd step 2) THE CURSOR IS REDIS'S, NOT A POSITION.
-        //
-        // This used to walk a sorted `BTreeSet` side index with a positional
-        // cursor plus an LRU of resume keys. That gave fr a STRONGER ordering
-        // guarantee than Redis makes — and paid for it with a second owned copy of
-        // every key in the keyspace, which is where the 3.0005x RSS gap lived.
-        //
-        // Redis's SCAN order is not merely "unspecified" in the docs; it is not
-        // reproducible even between two runs of the same 7.2.4 binary on the same
-        // data, because the dict hash function is seeded from random bytes at
-        // startup (measured: three fresh servers, identical inserts, three
-        // different orders). So no caller could ever have depended on matching
-        // Redis's order, and the sorted order was fr's own invention.
-        //
-        // What Redis DOES promise is the reverse-binary cursor contract, and that
-        // is now served directly by the table: a key present for the whole scan is
-        // returned at least once even across a rehash, and the scan terminates.
-        // `scripts/scan_guarantee_differ.py` holds fr to exactly that contract
-        // against a live 7.2.4 on the same schedule.
-        //
-        // COUNT is a WORK BUDGET, matching Redis: it bounds elements TRAVERSED,
-        // not elements returned, so a batch may return fewer than COUNT (or none)
-        // and still hand back a non-zero cursor. The old code treated it as a
-        // matched-key budget, which is why it needed the resume LRU at all.
         let batch = count.max(1);
         let is_star = pattern.is_none() || pattern == Some(b"*".as_slice());
-        let prepared_glob = pattern.map(glob_prepare);
-        // Prefix-filter the RAW physical key before decoding its logical form or
-        // invoking the glob matcher. `encode_db_key` makes this one prefix work
-        // for DB 0 (where physical == logical) and for DB-scoped keys alike.
-        // The allocation is once per SCAN call, never once per candidate.
-        let physical_literal_prefix = pattern
-            .map(glob_literal_prefix)
-            .filter(|prefix| !prefix.is_empty())
-            .map(|prefix| encode_db_key(db, prefix));
-        // KeyDict can additionally skip whole buckets for DB 0, whose physical
-        // first byte is the logical first byte. DB-encoded keys retain the normal
-        // walk because their first byte names the database rather than the key.
-        let prefix_first_byte = (db == 0)
-            .then(|| {
-                physical_literal_prefix
-                    .as_deref()
-                    .and_then(|prefix| prefix.first().copied())
-            })
-            .flatten();
-        let db_prefix = encode_db_key(db, b"");
+        let prepared_glob = if is_star {
+            None
+        } else {
+            pattern.map(glob_prepare)
+        };
+        let parsed_type_filter = type_filter.map(ValueType::from_type_name_ascii_case);
+        let all_in_db0 = db == 0 && db_count == self.entries.len();
+        let check_expiry = self.db_expires_counts.get(db).copied().unwrap_or(0) != 0;
+        let db_header = encode_db_key_header(db);
+        let prefix_first_byte = if db == 0 {
+            prepared_glob
+                .as_ref()
+                .and_then(|pg| pg.literal_prefix.first().copied())
+        } else {
+            Some(b'\0')
+        };
 
-        // Shared reborrow so the scan closure can consult `self` (expiry) while
-        // `self.entries` is itself borrowed by the walk. Both are shared borrows;
-        // taking the reborrow explicitly keeps that obvious rather than relying on
-        // the closure capture inference.
         let this: &Self = self;
         let mut scan_entry = |physical: &[u8], entry: &Entry| {
-            // DB membership. Keys are db-encoded in one global table, so a scan of
-            // db N still traverses other DBs' keys and rejects them here. That is
-            // the same cost profile the previous global side index had.
-            if db == 0 {
+            let logical = if all_in_db0 {
+                physical
+            } else if db == 0 {
                 if decode_db_key(physical).is_some() {
                     return;
                 }
-            } else if !physical.starts_with(db_prefix.as_slice()) {
-                return;
-            }
-            if physical_literal_prefix
-                .as_deref()
-                .is_some_and(|prefix| !physical.starts_with(prefix))
-            {
-                return;
-            }
-            let logical = decode_db_key(physical).map(|(_, l)| l).unwrap_or(physical);
-            // Glob (skipped for the `*` / no-pattern all-keys fast path).
-            if !is_star
-                && let Some(pg) = prepared_glob.as_ref()
+                physical
+            } else {
+                let Some(logical) = physical.strip_prefix(&db_header) else {
+                    return;
+                };
+                logical
+            };
+            if let Some(pg) = prepared_glob.as_ref()
                 && !pg.matches(logical)
             {
                 return;
             }
-            // TYPE filter. The entry is already in hand, so this reads the value
-            // discriminant directly instead of re-probing the table through
-            // `peek_value_type`. The expiry half of that helper is still needed:
-            // the reap above only covers THIS db, and a key can carry a deadline
-            // that passed between the reap and here.
-            if let Some(t) = type_filter {
+            if let Some(wanted_vt) = parsed_type_filter {
                 let vt = match &entry.value {
                     Value::String(_) | Value::Integer(_) => ValueType::String,
                     Value::Hash(_) => ValueType::Hash,
@@ -35100,12 +34998,13 @@ impl Store {
                     Value::SortedSet(_) => ValueType::ZSet,
                     Value::Stream(_) => ValueType::Stream,
                 };
-                if !vt.as_str().as_bytes().eq_ignore_ascii_case(t) {
+                if wanted_vt != Some(vt) {
                     return;
                 }
-                if this
-                    .expiry_ms(physical)
-                    .is_some_and(|deadline| now_ms > deadline)
+                if check_expiry
+                    && this
+                        .expiry_ms(physical)
+                        .is_some_and(|deadline| now_ms > deadline)
                 {
                     return;
                 }
@@ -42201,8 +42100,9 @@ fn generate_run_id() -> String {
     hex
 }
 
-/// Minimal SHA-1 implementation (pure Rust, no unsafe).
-fn sha1_hex(data: &[u8]) -> String {
+/// Minimal SHA-1 implementation returning the raw 20-byte digest (pure Rust, no unsafe, zero heap allocation).
+#[must_use]
+pub fn sha1_bytes(data: &[u8]) -> [u8; 20] {
     let mut h0: u32 = 0x6745_2301;
     let mut h1: u32 = 0xEFCD_AB89;
     let mut h2: u32 = 0x98BA_DCFE;
@@ -42285,6 +42185,17 @@ fn sha1_hex(data: &[u8]) -> String {
         h3 = h3.wrapping_add(d);
         h4 = h4.wrapping_add(e);
     }
+    let mut out = [0u8; 20];
+    out[0..4].copy_from_slice(&h0.to_be_bytes());
+    out[4..8].copy_from_slice(&h1.to_be_bytes());
+    out[8..12].copy_from_slice(&h2.to_be_bytes());
+    out[12..16].copy_from_slice(&h3.to_be_bytes());
+    out[16..20].copy_from_slice(&h4.to_be_bytes());
+    out
+}
+
+/// Minimal SHA-1 implementation (pure Rust, no unsafe).
+fn sha1_hex(data: &[u8]) -> String {
     // (frankenredis-w08xv) Table-driven hex instead of
     // `format!("{h0:08x}…")`. Every EVAL hashes its script body to find it in
     // the script cache, so this runs once per EVAL, and callgrind put the five
@@ -42294,11 +42205,11 @@ fn sha1_hex(data: &[u8]) -> String {
     // nothing. Byte-identical output: `{:08x}` is lowercase, zero-padded,
     // big-endian nibble order, which is exactly what this emits.
     const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = sha1_bytes(data);
     let mut out = String::with_capacity(40);
-    for word in [h0, h1, h2, h3, h4] {
-        for shift in [28u32, 24, 20, 16, 12, 8, 4, 0] {
-            out.push(HEX[((word >> shift) & 0xF) as usize] as char);
-        }
+    for byte in digest {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xF) as usize] as char);
     }
     out
 }
@@ -45599,6 +45510,7 @@ fn scan_pattern_matches(pattern: Option<&[u8]>, item: &[u8]) -> bool {
 pub struct PreparedGlob<'a> {
     pattern: &'a [u8],
     shape: Option<LiteralGlob<'a>>,
+    literal_prefix: &'a [u8],
 }
 
 impl<'a> PreparedGlob<'a> {
@@ -45615,7 +45527,15 @@ impl<'a> PreparedGlob<'a> {
             Some(LiteralGlob::Prefix(lit)) => string.starts_with(lit),
             Some(LiteralGlob::Suffix(lit)) => string.ends_with(lit),
             Some(LiteralGlob::Contains(lit)) => literal_glob_contains(string, lit),
-            None => glob_match_inner(self.pattern, string, 0, 0),
+            None => {
+                string.starts_with(self.literal_prefix)
+                    && glob_match_inner(
+                        &self.pattern[self.literal_prefix.len()..],
+                        &string[self.literal_prefix.len()..],
+                        0,
+                        0,
+                    )
+            }
         }
     }
 }
@@ -45627,6 +45547,7 @@ pub fn glob_prepare(pattern: &[u8]) -> PreparedGlob<'_> {
     PreparedGlob {
         pattern,
         shape: literal_glob_shape(pattern),
+        literal_prefix: glob_literal_prefix(pattern),
     }
 }
 
@@ -87386,5 +87307,71 @@ mod tests {
                 members.len()
             );
         }
+    }
+
+    #[test]
+    fn keys_and_scan_prefix_and_exact_parity() {
+        let mut store = Store::new();
+        assert!(store.keys_matching_in_db(0, b"*", 100).is_empty());
+        assert_eq!(store.randomkey_in_db(0, 100), None);
+
+        store.set(b"user:1", b"a".to_vec(), None, 100);
+        store.set(b"user:2", b"b".to_vec(), Some(150), 100);
+        store.set(b"order:1", b"c".to_vec(), None, 100);
+        store.sadd(b"user:set", &[b"m1".as_slice()], 100).unwrap();
+
+        let db2_k1 = encode_db_key(2, b"user:9");
+        let db2_k2 = encode_db_key(2, b"other:9");
+        store.set(&db2_k1, b"x".to_vec(), None, 100);
+        store.set(&db2_k2, b"y".to_vec(), None, 100);
+
+        // Exact match in db 0 and db 2
+        assert_eq!(
+            store.keys_matching_in_db(0, b"user:1", 100),
+            vec![b"user:1".to_vec()]
+        );
+        assert!(store.keys_matching_in_db(0, b"user:9", 100).is_empty());
+        assert_eq!(
+            store.keys_matching_in_db(2, b"user:9", 100),
+            vec![b"user:9".to_vec()]
+        );
+        // Expired exact match should not be returned
+        assert!(store.keys_matching_in_db(0, b"user:2", 200).is_empty());
+
+        // Prefix match in db 0 before and after expiry of user:2
+        assert_eq!(
+            store.keys_matching_in_db(0, b"user:*", 100),
+            vec![b"user:1".to_vec(), b"user:2".to_vec(), b"user:set".to_vec()]
+        );
+        assert_eq!(
+            store.keys_matching_in_db(0, b"user:*", 200),
+            vec![b"user:1".to_vec(), b"user:set".to_vec()]
+        );
+        // Complex glob with literal prefix
+        assert_eq!(
+            store.keys_matching_in_db(0, b"user:[12]", 100),
+            vec![b"user:1".to_vec(), b"user:2".to_vec()]
+        );
+        // Prefix match in db 2
+        assert_eq!(
+            store.keys_matching_in_db(2, b"user:*", 100),
+            vec![b"user:9".to_vec()]
+        );
+
+        // Full SCAN with prefix + TYPE filter in db 0 and db 2
+        let (_, scanned_strings) =
+            store.scan_in_db(0, 0, Some(b"user:*"), 100, Some(b"STRING"), 100);
+        let mut scanned_strings = scanned_strings;
+        scanned_strings.sort();
+        assert_eq!(
+            scanned_strings,
+            vec![b"user:1".to_vec(), b"user:2".to_vec()]
+        );
+
+        let (_, scanned_sets) = store.scan_in_db(0, 0, Some(b"user:*"), 100, Some(b"set"), 100);
+        assert_eq!(scanned_sets, vec![b"user:set".to_vec()]);
+
+        let (_, scanned_db2) = store.scan_in_db(2, 0, Some(b"user:*"), 100, None, 100);
+        assert_eq!(scanned_db2, vec![b"user:9".to_vec()]);
     }
 }
