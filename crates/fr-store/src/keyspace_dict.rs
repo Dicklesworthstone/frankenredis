@@ -381,6 +381,94 @@ impl NodeKey {
             Self::Heap(bytes) => bytes,
         }
     }
+
+    /// Remap a physical database key from `from_db` to `to_db` in place.
+    ///
+    /// - When `from_db != 0 && to_db != 0`, both prefixes are 14 bytes
+    ///   (`db_namespace_prefix` + `u64::to_be_bytes()`), so the 8-byte DB index
+    ///   is overwritten in place with zero heap allocations or byte shifts.
+    /// - When `from_db != 0 && to_db == 0` and the logical key fits in
+    ///   [`NODE_KEY_INLINE_CAP`], the key transitions to [`Self::Inline`] with
+    ///   zero new heap allocations. (frankenredis-4f8vx)
+    #[inline]
+    fn remap_db_in_place(&mut self, from_db: usize, to_db: usize, db_namespace_prefix: &[u8]) {
+        const PREFIX_LEN: usize = 14;
+        debug_assert_eq!(db_namespace_prefix.len(), 6);
+        if from_db == to_db {
+            return;
+        }
+        if from_db != 0 && to_db != 0 {
+            match self {
+                Self::Inline { len, bytes }
+                    if usize::from(*len) >= PREFIX_LEN && bytes[..6] == *db_namespace_prefix =>
+                {
+                    bytes[6..PREFIX_LEN].copy_from_slice(&(to_db as u64).to_be_bytes());
+                    return;
+                }
+                Self::Heap(bytes)
+                    if bytes.len() >= PREFIX_LEN && bytes[..6] == *db_namespace_prefix =>
+                {
+                    bytes[6..PREFIX_LEN].copy_from_slice(&(to_db as u64).to_be_bytes());
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if from_db == 0 {
+            let slice = self.as_slice();
+            let new_len = PREFIX_LEN + slice.len();
+            if new_len <= NODE_KEY_INLINE_CAP {
+                let mut inline_bytes = [0u8; NODE_KEY_INLINE_CAP];
+                inline_bytes[..6].copy_from_slice(db_namespace_prefix);
+                inline_bytes[6..PREFIX_LEN].copy_from_slice(&(to_db as u64).to_be_bytes());
+                inline_bytes[PREFIX_LEN..new_len].copy_from_slice(slice);
+                *self = Self::Inline {
+                    len: new_len as u8,
+                    bytes: inline_bytes,
+                };
+            } else {
+                let mut vec = Vec::with_capacity(new_len);
+                vec.extend_from_slice(db_namespace_prefix);
+                vec.extend_from_slice(&(to_db as u64).to_be_bytes());
+                vec.extend_from_slice(slice);
+                *self = Self::Heap(vec.into_boxed_slice());
+            }
+        } else if to_db == 0 {
+            let slice = self.as_slice();
+            if slice.len() >= PREFIX_LEN && slice[..6] == *db_namespace_prefix {
+                let logical_len = slice.len() - PREFIX_LEN;
+                if logical_len <= NODE_KEY_INLINE_CAP {
+                    let mut inline_bytes = [0u8; NODE_KEY_INLINE_CAP];
+                    inline_bytes[..logical_len].copy_from_slice(&slice[PREFIX_LEN..]);
+                    *self = Self::Inline {
+                        len: logical_len as u8,
+                        bytes: inline_bytes,
+                    };
+                } else {
+                    *self = Self::Heap(Box::from(&slice[PREFIX_LEN..]));
+                }
+            }
+        } else {
+            let slice = self.as_slice();
+            let new_len = PREFIX_LEN + slice.len();
+            if new_len <= NODE_KEY_INLINE_CAP {
+                let mut inline_bytes = [0u8; NODE_KEY_INLINE_CAP];
+                inline_bytes[..6].copy_from_slice(db_namespace_prefix);
+                inline_bytes[6..PREFIX_LEN].copy_from_slice(&(to_db as u64).to_be_bytes());
+                inline_bytes[PREFIX_LEN..new_len].copy_from_slice(slice);
+                *self = Self::Inline {
+                    len: new_len as u8,
+                    bytes: inline_bytes,
+                };
+            } else {
+                let mut vec = Vec::with_capacity(new_len);
+                vec.extend_from_slice(db_namespace_prefix);
+                vec.extend_from_slice(&(to_db as u64).to_be_bytes());
+                vec.extend_from_slice(slice);
+                *self = Self::Heap(vec.into_boxed_slice());
+            }
+        }
+    }
 }
 
 /// One key/value cell; `next` chains collisions in the same bucket.
@@ -964,6 +1052,166 @@ impl<V> KeyDict<V> {
             cur = next;
         }
         None
+    }
+
+    /// Swap all keys belonging to `left_db` (up to `left_cap`) and `right_db` (up to
+    /// `right_cap`) in place within the arena without removing/reallocating `Node<V>`
+    /// cells, touching the `free` list, or probing target bucket chains for duplicates.
+    /// (frankenredis-4f8vx)
+    pub fn swap_databases_in_place<F>(
+        &mut self,
+        left_db: usize,
+        left_cap: usize,
+        right_db: usize,
+        right_cap: usize,
+        db_namespace_prefix: &[u8],
+        mut on_before_remap: F,
+    ) -> (usize, usize)
+    where
+        F: FnMut(u32, &[u8], &V, usize, usize),
+    {
+        const PREFIX_LEN: usize = 14;
+        debug_assert_eq!(db_namespace_prefix.len(), 6);
+        if left_db == right_db || (left_cap == 0 && right_cap == 0) || self.count == 0 {
+            return (0, 0);
+        }
+
+        let left_prefix = if left_db != 0 {
+            let mut p = [0u8; PREFIX_LEN];
+            p[..6].copy_from_slice(db_namespace_prefix);
+            p[6..PREFIX_LEN].copy_from_slice(&(left_db as u64).to_be_bytes());
+            Some(p)
+        } else {
+            None
+        };
+        let right_prefix = if right_db != 0 {
+            let mut p = [0u8; PREFIX_LEN];
+            p[..6].copy_from_slice(db_namespace_prefix);
+            p[6..PREFIX_LEN].copy_from_slice(&(right_db as u64).to_be_bytes());
+            Some(p)
+        } else {
+            None
+        };
+
+        let is_db0_nul_key = |key: &[u8]| -> bool {
+            if key.len() < PREFIX_LEN || key[..6] != *db_namespace_prefix {
+                return true;
+            }
+            let mut db_bytes = [0u8; 8];
+            db_bytes.copy_from_slice(&key[6..PREFIX_LEN]);
+            usize::try_from(u64::from_be_bytes(db_bytes)).is_err()
+        };
+
+        let both_nonzero = left_db != 0 && right_db != 0;
+        let nul_bit = Self::first_byte_bit(b"\0");
+
+        let mut left_count = 0usize;
+        let mut right_count = 0usize;
+        let mut unlinked = Vec::with_capacity(left_cap.saturating_add(right_cap));
+        let num_buckets = self.buckets.len();
+
+        for b in 0..num_buckets {
+            if left_count == left_cap && right_count == right_cap {
+                break;
+            }
+            let mut cur = self.buckets[b];
+            if cur == NIL {
+                continue;
+            }
+            if both_nonzero && (self.first_byte_bits[b] & nul_bit) == 0 {
+                continue;
+            }
+            let mut prev = NIL;
+            let mut kept_bits = 0u16;
+            let mut any_unlinked = false;
+            while cur != NIL {
+                let (next, matched_dir) = {
+                    let node = self.nodes.get(cur);
+                    let key = node.key.as_slice();
+                    let dir = if key.first() != Some(&b'\0') {
+                        if left_db == 0 && left_count < left_cap {
+                            Some((left_db, right_db, true))
+                        } else if right_db == 0 && right_count < right_cap {
+                            Some((right_db, left_db, false))
+                        } else {
+                            None
+                        }
+                    } else if let Some(lp) = &left_prefix
+                        && left_count < left_cap
+                        && key.starts_with(lp)
+                    {
+                        Some((left_db, right_db, true))
+                    } else if let Some(rp) = &right_prefix
+                        && right_count < right_cap
+                        && key.starts_with(rp)
+                    {
+                        Some((right_db, left_db, false))
+                    } else if ((left_db == 0 && left_count < left_cap)
+                        || (right_db == 0 && right_count < right_cap))
+                        && is_db0_nul_key(key)
+                    {
+                        if left_db == 0 && left_count < left_cap {
+                            Some((left_db, right_db, true))
+                        } else {
+                            Some((right_db, left_db, false))
+                        }
+                    } else {
+                        None
+                    };
+                    (node.next, dir)
+                };
+
+                if let Some((from_db, to_db, is_left)) = matched_dir {
+                    if is_left {
+                        left_count += 1;
+                    } else {
+                        right_count += 1;
+                    }
+                    any_unlinked = true;
+                    if prev != NIL {
+                        self.nodes.get_mut(prev).next = next;
+                    } else {
+                        self.buckets[b] = next;
+                    }
+                    {
+                        let node = self.nodes.get(cur);
+                        on_before_remap(cur, node.key.as_slice(), &node.value, from_db, to_db);
+                    }
+                    let new_hash = {
+                        let node = self.nodes.get_mut(cur);
+                        node.key
+                            .remap_db_in_place(from_db, to_db, db_namespace_prefix);
+                        self.hasher.hash_one(node.key.as_slice()) as u32
+                    };
+                    self.nodes.get_mut(cur).hash = new_hash;
+                    unlinked.push(cur);
+                } else {
+                    let key = self.nodes.get(cur).key.as_slice();
+                    kept_bits |= Self::first_byte_bit(key);
+                    prev = cur;
+                }
+                cur = next;
+            }
+            if any_unlinked {
+                self.first_byte_bits[b] = kept_bits;
+            }
+        }
+
+        let mask = self.mask;
+        for idx in unlinked {
+            let (b, bit) = {
+                let node = self.nodes.get(idx);
+                let b = (u64::from(node.hash) & mask) as usize;
+                let bit = Self::first_byte_bit(node.key.as_slice());
+                (b, bit)
+            };
+            let head = self.buckets[b];
+            self.nodes.get_mut(idx).next = head;
+            self.buckets[b] = idx;
+            self.first_byte_bits[b] |= bit;
+        }
+
+        (left_count, right_count)
     }
 
     /// Halve the bucket table (repeatedly, to the smallest power-of-two that keeps

@@ -16232,6 +16232,7 @@ impl Store {
         self.cached_memory_usage_bytes.set(0);
         self.cached_memory_usage_dirty.set(0);
         self.hash_field_expires.clear();
+        self.hash_field_expired_counts.clear();
         self.running_digest = 0;
         self.digest_stale = false;
         self.expires_count = 0;
@@ -16301,6 +16302,12 @@ impl Store {
         if cap == 0 {
             self.dirty = self.dirty.saturating_add(1);
             return 0;
+        }
+        if db < self.database_count && cap == self.entries.len() {
+            let removed = cap as u64;
+            self.flushdb();
+            self.dirty = self.dirty.saturating_add(removed.saturating_sub(1));
+            return removed;
         }
         let mut keys = Vec::with_capacity(cap);
         let prefix = if db != 0 {
@@ -16709,6 +16716,19 @@ impl Store {
     }
 
     pub fn swap_databases(&mut self, left_db: usize, right_db: usize) -> u64 {
+        self.swap_databases_impl::<true>(left_db, right_db)
+    }
+
+    #[cfg(test)]
+    pub fn swap_databases_orig(&mut self, left_db: usize, right_db: usize) -> u64 {
+        self.swap_databases_impl::<false>(left_db, right_db)
+    }
+
+    fn swap_databases_impl<const IN_PLACE: bool>(
+        &mut self,
+        left_db: usize,
+        right_db: usize,
+    ) -> u64 {
         struct SwappedEntry {
             swapped_key: Vec<u8>,
             entry: Entry,
@@ -16717,6 +16737,15 @@ impl Store {
 
         struct SwappedSidemaps {
             key: Vec<u8>,
+            groups: Option<StreamGroupState>,
+            last_id: Option<StreamId>,
+            entries_added: Option<u64>,
+            max_deleted_id: Option<StreamId>,
+            field_ttls: Vec<(Vec<u8>, u64)>,
+        }
+
+        struct InPlaceSwappedSidemaps {
+            idx: u32,
             groups: Option<StreamGroupState>,
             last_id: Option<StreamId>,
             entries_added: Option<u64>,
@@ -16756,6 +16785,202 @@ impl Store {
         if left_cap == 0 && right_cap == 0 {
             self.dirty = self.dirty.saturating_add(1);
             return 0;
+        }
+
+        if IN_PLACE {
+            let mut left_exp_rem = if left_db < self.database_count {
+                self.db_expires_counts[left_db]
+            } else {
+                self.expires_count
+            };
+            let mut right_exp_rem = if right_db < self.database_count {
+                self.db_expires_counts[right_db]
+            } else {
+                self.expires_count
+            };
+            let has_expiries = self.expires_count != 0 && (left_exp_rem != 0 || right_exp_rem != 0);
+            let has_stream_or_hash_sidemaps = !self.stream_max_deleted_ids.is_empty()
+                || !self.stream_groups.is_empty()
+                || !self.stream_last_ids.is_empty()
+                || !self.stream_entries_added.is_empty()
+                || !self.hash_field_expires.is_empty()
+                || !self.hash_field_expired_counts.is_empty();
+
+            let mut had_any_expiring = false;
+            let (left_count, right_count) = if !has_expiries && !has_stream_or_hash_sidemaps {
+                self.entries.swap_databases_in_place(
+                    left_db,
+                    left_cap,
+                    right_db,
+                    right_cap,
+                    DB_NAMESPACE_PREFIX,
+                    |_, _, _, _, _| {},
+                )
+            } else {
+                let mut swapped_expiries: Vec<(u32, std::num::NonZeroU64)> =
+                    Vec::with_capacity(if has_expiries {
+                        left_exp_rem.saturating_add(right_exp_rem)
+                    } else {
+                        0
+                    });
+                let mut swapped_sidemaps: Vec<InPlaceSwappedSidemaps> = Vec::new();
+                let expiry_deadlines = &mut self.expiry_deadlines;
+                let stream_max_deleted_ids = &mut self.stream_max_deleted_ids;
+                let stream_groups = &mut self.stream_groups;
+                let stream_last_ids = &mut self.stream_last_ids;
+                let stream_entries_added = &mut self.stream_entries_added;
+                let hash_field_expires = &mut self.hash_field_expires;
+                let hash_field_expired_counts = &mut self.hash_field_expired_counts;
+
+                let counts = self.entries.swap_databases_in_place(
+                    left_db,
+                    left_cap,
+                    right_db,
+                    right_cap,
+                    DB_NAMESPACE_PREFIX,
+                    |idx, old_key, entry, from_db, _to_db| {
+                        let exp_rem = if from_db == left_db {
+                            &mut left_exp_rem
+                        } else {
+                            &mut right_exp_rem
+                        };
+                        if *exp_rem > 0
+                            && let Some(dl) = expiry_deadlines.remove(old_key)
+                        {
+                            *exp_rem -= 1;
+                            had_any_expiring = true;
+                            swapped_expiries.push((idx, dl));
+                        }
+                        if has_stream_or_hash_sidemaps {
+                            match &entry.value {
+                                Value::Stream(_) => {
+                                    let max_deleted_id = if stream_max_deleted_ids.is_empty() {
+                                        None
+                                    } else {
+                                        stream_max_deleted_ids.remove(old_key)
+                                    };
+                                    let groups = if stream_groups.is_empty() {
+                                        None
+                                    } else {
+                                        stream_groups.remove(old_key)
+                                    };
+                                    let last_id = if stream_last_ids.is_empty() {
+                                        None
+                                    } else {
+                                        stream_last_ids.remove(old_key)
+                                    };
+                                    let entries_added = if stream_entries_added.is_empty() {
+                                        None
+                                    } else {
+                                        stream_entries_added.remove(old_key)
+                                    };
+                                    if groups.is_some()
+                                        || last_id.is_some()
+                                        || entries_added.is_some()
+                                        || max_deleted_id.is_some()
+                                    {
+                                        swapped_sidemaps.push(InPlaceSwappedSidemaps {
+                                            idx,
+                                            groups,
+                                            last_id,
+                                            entries_added,
+                                            max_deleted_id,
+                                            field_ttls: Vec::new(),
+                                        });
+                                    }
+                                }
+                                Value::Hash(_) => {
+                                    if !hash_field_expired_counts.is_empty() {
+                                        hash_field_expired_counts.remove(old_key);
+                                    }
+                                    if !hash_field_expires.is_empty() {
+                                        let key_vec = old_key.to_vec();
+                                        let field_ttls: Vec<(Vec<u8>, u64)> = hash_field_expires
+                                            .range((key_vec.clone(), Vec::new())..)
+                                            .take_while(|((k, _), _)| k.as_slice() == old_key)
+                                            .map(|((_, f), v)| (f.clone(), *v))
+                                            .collect();
+                                        for (field, _) in &field_ttls {
+                                            hash_field_expires
+                                                .remove(&(key_vec.clone(), field.clone()));
+                                        }
+                                        if !field_ttls.is_empty() {
+                                            swapped_sidemaps.push(InPlaceSwappedSidemaps {
+                                                idx,
+                                                groups: None,
+                                                last_id: None,
+                                                entries_added: None,
+                                                max_deleted_id: None,
+                                                field_ttls,
+                                            });
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    },
+                );
+
+                for (idx, dl) in swapped_expiries {
+                    let new_key = store_key_from_slice(self.entries.node_key(idx));
+                    self.expiry_deadlines.insert(new_key, dl);
+                }
+                for sidemaps in swapped_sidemaps {
+                    let new_key = self.entries.node_key(sidemaps.idx).to_vec();
+                    if let Some(groups) = sidemaps.groups {
+                        self.stream_groups.insert(new_key.clone(), groups);
+                    }
+                    if let Some(last_id) = sidemaps.last_id {
+                        self.stream_last_ids.insert(new_key.clone(), last_id);
+                    }
+                    if let Some(entries_added) = sidemaps.entries_added {
+                        self.stream_entries_added
+                            .insert(new_key.clone(), entries_added);
+                    }
+                    if let Some(max_deleted_id) = sidemaps.max_deleted_id {
+                        self.stream_max_deleted_ids
+                            .insert(new_key.clone(), max_deleted_id);
+                    }
+                    for (field, expires_at_ms) in sidemaps.field_ttls {
+                        self.hash_field_expires
+                            .insert((new_key.clone(), field), expires_at_ms);
+                    }
+                }
+                counts
+            };
+
+            if had_any_expiring {
+                self.mark_volatile_keys_dirty();
+            }
+            if left_db < self.database_count && right_db < self.database_count {
+                self.db_key_counts.swap(left_db, right_db);
+                self.db_expires_counts.swap(left_db, right_db);
+            } else if left_db < self.database_count {
+                self.db_key_counts[left_db] = 0;
+                self.db_expires_counts[left_db] = 0;
+            } else if right_db < self.database_count {
+                self.db_key_counts[right_db] = 0;
+                self.db_expires_counts[right_db] = 0;
+            }
+
+            let touched = (left_count + right_count) as u64;
+            if touched > 0 {
+                self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                if !self.hll_register_cache.is_empty() {
+                    self.hll_register_cache.clear();
+                }
+                if !self.dump_payload_cache.is_empty() {
+                    self.clear_dump_payload_cache();
+                }
+                let mut mem = self.mem_estimate_cache.borrow_mut();
+                if !mem.is_empty() {
+                    mem.clear();
+                }
+            }
+            self.dirty = self.dirty.saturating_add(touched.max(1));
+            return touched;
         }
 
         let (left_keys, right_keys) = {
@@ -57968,6 +58193,111 @@ mod tests {
         assert_eq!(store.expires_in_db(0), 1);
         assert_eq!(store.expires_in_db(1), 1);
         assert_eq!(store.expires_count, 2);
+    }
+
+    #[test]
+    fn swap_databases_in_place_matches_orig_across_key_lengths_and_types_4f8vx() {
+        let populate = |store: &mut Store| {
+            // DB 0: short inline key (<=1 B so DB>0 stays inline), medium key (<=15 B),
+            // long heap key (>15 B), NUL-prefixed DB 0 key, expiring key, hash with field TTL
+            store.set(b"x".to_vec(), b"v_short_0".to_vec(), None, 100);
+            store.set(
+                b"med_key_db0".to_vec(),
+                b"v_med_0".to_vec(),
+                Some(5_000),
+                100,
+            );
+            store.set(
+                b"long_heap_key_in_database_zero_12345".to_vec(),
+                b"v_long_0".to_vec(),
+                None,
+                100,
+            );
+            store.set(b"\0raw_db0_key".to_vec(), b"v_nul_0".to_vec(), None, 100);
+            store
+                .hset(b"h0", b"f1".to_vec(), b"hv1".to_vec(), 100)
+                .unwrap();
+            store
+                .hash_field_expires
+                .insert((b"h0".to_vec(), b"f1".to_vec()), 9_000);
+
+            // DB 1: short, medium, long, expiring, hash
+            store.set(
+                encode_db_key(1, b"y"),
+                b"v_short_1".to_vec(),
+                Some(8_000),
+                100,
+            );
+            store.set(
+                encode_db_key(1, b"med_key_db1"),
+                b"v_med_1".to_vec(),
+                None,
+                100,
+            );
+            store.set(
+                encode_db_key(1, b"long_heap_key_in_database_one_67890"),
+                b"v_long_1".to_vec(),
+                Some(12_000),
+                100,
+            );
+            let h1_key = encode_db_key(1, b"h1");
+            store
+                .hset(&h1_key, b"f2".to_vec(), b"hv2".to_vec(), 100)
+                .unwrap();
+            store
+                .hash_field_expires
+                .insert((h1_key, b"f2".to_vec()), 15_000);
+
+            // DB 2: unrelated keys that must remain untouched during 0<->1 swap, then swap 1<->2
+            store.set(encode_db_key(2, b"z"), b"v_short_2".to_vec(), None, 100);
+            store.set(
+                encode_db_key(2, b"long_heap_key_in_database_two_abcdef"),
+                b"v_long_2".to_vec(),
+                Some(20_000),
+                100,
+            );
+        };
+
+        let mut cand = Store::new();
+        let mut orig = Store::new();
+        populate(&mut cand);
+        populate(&mut orig);
+
+        let slots_before = cand.entries.storage_slots();
+
+        // 1. Swap DB 0 <-> DB 1
+        assert_eq!(cand.swap_databases(0, 1), orig.swap_databases_orig(0, 1));
+        assert_eq!(
+            cand.entries.storage_slots(),
+            slots_before,
+            "in-place swap must not allocate new arena slots"
+        );
+        assert_eq!(cand.entries, orig.entries);
+        assert_eq!(cand.db_key_counts, orig.db_key_counts);
+        assert_eq!(cand.db_expires_counts, orig.db_expires_counts);
+        assert_eq!(cand.expiry_deadlines, orig.expiry_deadlines);
+        assert_eq!(cand.hash_field_expires, orig.hash_field_expires);
+        assert_eq!(cand.dirty, orig.dirty);
+
+        // 2. Swap DB 1 <-> DB 2 (both non-zero DBs, exercising in-place 8-byte DB ID rewrite + b'\0' prefilter)
+        assert_eq!(cand.swap_databases(1, 2), orig.swap_databases_orig(1, 2));
+        assert_eq!(cand.entries.storage_slots(), slots_before);
+        assert_eq!(cand.entries, orig.entries);
+        assert_eq!(cand.db_key_counts, orig.db_key_counts);
+        assert_eq!(cand.db_expires_counts, orig.db_expires_counts);
+        assert_eq!(cand.expiry_deadlines, orig.expiry_deadlines);
+        assert_eq!(cand.hash_field_expires, orig.hash_field_expires);
+        assert_eq!(cand.dirty, orig.dirty);
+
+        // 3. Swap DB 0 <-> DB 2
+        assert_eq!(cand.swap_databases(0, 2), orig.swap_databases_orig(0, 2));
+        assert_eq!(cand.entries.storage_slots(), slots_before);
+        assert_eq!(cand.entries, orig.entries);
+        assert_eq!(cand.db_key_counts, orig.db_key_counts);
+        assert_eq!(cand.db_expires_counts, orig.db_expires_counts);
+        assert_eq!(cand.expiry_deadlines, orig.expiry_deadlines);
+        assert_eq!(cand.hash_field_expires, orig.hash_field_expires);
+        assert_eq!(cand.dirty, orig.dirty);
     }
 
     #[test]
