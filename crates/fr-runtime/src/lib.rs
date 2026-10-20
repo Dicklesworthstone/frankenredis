@@ -32592,9 +32592,9 @@ impl Runtime {
             + limit.map_or(0, |(o, c)| b"LIMIT".len() + o.len() + c.len());
         let packet_id = self.plain_zremrange_write_preamble("zrangestore", argv_len_sum, now_ms);
         let st = self.chained_command_start();
-        fr_command::record_source_key_lookups(&mut self.server.store, &[src], now_ms);
         let reply = 'reply: {
             let pairs = if let Some((lo, hi)) = bounds {
+                fr_command::record_source_key_lookups(&mut self.server.store, &[src], now_ms);
                 match fr_command::zscore_inverted_wrongtype_guard(
                     &mut self.server.store,
                     src,
@@ -32624,7 +32624,7 @@ impl Runtime {
                     Err(err) => break 'reply CommandError::Store(err).to_resp(),
                 }
             } else {
-                match self.server.store.zrangebylex_withscores_limited(
+                match self.server.store.zrangebylex_withscores_limited_counted(
                     src,
                     min_arg,
                     max_arg,
@@ -32747,17 +32747,14 @@ impl Runtime {
             + if rev { b"REV".len() } else { 0 };
         let packet_id = self.plain_zremrange_write_preamble("zrangestore", argv_len_sum, now_ms);
         let st = self.chained_command_start();
-        // Generic ordering, kept in this order on purpose: the source keyspace hit/miss
-        // that upstream's lookupKeyRead records, THEN the no-stat range walk.
-        fr_command::record_source_key_lookups(&mut self.server.store, &[src], now_ms);
         let ranged = if rev {
             self.server
                 .store
-                .zrevrange_withscores(src, start, stop, now_ms)
+                .zrevrange_withscores_counted(src, start, stop, now_ms)
         } else {
             self.server
                 .store
-                .zrange_withscores(src, start, stop, now_ms)
+                .zrange_withscores_counted(src, start, stop, now_ms)
         };
         let reply = match ranged {
             Ok(pairs) => {
@@ -38342,6 +38339,104 @@ impl Runtime {
 
         self.record_plain_rand_member_borrowed_metrics(
             PlainRandMemberCmd::Hrandfield,
+            key,
+            None,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(RespFrame::Error(msg)) = &error_reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(())
+    }
+
+    pub fn execute_plain_zrandmember_borrowed_into(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if !self.can_execute_plain_rand_member_borrowed(
+            PlainRandMemberCmd::Zrandmember,
+            key,
+            now_ms,
+            default_read_allowed,
+        ) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("zrandmember");
+        self.session.last_argv_len_sum = b"ZRANDMEMBER".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .zrandmember_borrow_counted(key, now_ms, |m| {
+                if suppress_reply {
+                    return;
+                }
+                match m {
+                    Some(member) => fr_protocol::encode_bulk_string_slice(Some(member), resp3, out),
+                    None => {
+                        let nil = RespFrame::BulkString(None);
+                        if resp3 {
+                            nil.encode_into_resp3(out);
+                        } else {
+                            nil.encode_into(out);
+                        }
+                    }
+                }
+            });
+        let elapsed_us = self.finish_chained_command(start);
+        let mut error_reply = None;
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let failed = error_reply.is_some();
+
+        self.record_plain_rand_member_borrowed_metrics(
+            PlainRandMemberCmd::Zrandmember,
             key,
             None,
             elapsed_us,

@@ -11794,13 +11794,18 @@ fn process_buffered_frames(
                     b"XADD",
                 ) {
                     // XADD key * field value: key=key, a=id("*"), b=field, c=value.
-                    if let Some(response) = runtime.execute_plain_xadd_borrowed(
-                        packet.key,
-                        None,
-                        packet.a,
-                        &[(packet.b, packet.c)],
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_xadd_borrowed_with_default_write_gate(
+                            packet.key,
+                            None,
+                            packet.a,
+                            &[(packet.b, packet.c)],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -12276,8 +12281,12 @@ fn process_buffered_frames(
                     // (key=numkeys) and `5 k1 k2 k3 k4 k5`; execute validates
                     // numkeys/LIMIT before using the fast path.
                     let tail = [packet.key, packet.a, packet.b, packet.c, packet.d, packet.e];
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if let Some(response) =
-                        runtime.execute_plain_sintercard_borrowed(&tail, ts, None)
+                        runtime.execute_plain_sintercard_borrowed(&tail, ts, default_read_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13125,9 +13134,12 @@ fn process_buffered_frames(
                     b"ZRANGE",
                 ) {
                     // ZRANGE key min max BYSCORE|BYLEX|REV: a=min, b=max, c=option
-                    // token. Only the no-LIMIT/WITHSCORES forms. REV takes the
-                    // zero-copy `_into` member-borrow path (FastEncodedReply);
-                    // BYSCORE/BYLEX stay on the owned FastReply path.
+                    // token. Only the no-LIMIT/WITHSCORES forms. All three take the
+                    // zero-copy `_into` member-borrow path (FastEncodedReply).
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if packet.c.eq_ignore_ascii_case(b"REV") {
                         if runtime
                             .execute_plain_zrange_rev_borrowed_into(
@@ -13136,7 +13148,7 @@ fn process_buffered_frames(
                                 packet.b,
                                 ts,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                         {
@@ -13162,7 +13174,7 @@ fn process_buffered_frames(
                                 packet.b,
                                 ts,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                         {
@@ -13188,7 +13200,7 @@ fn process_buffered_frames(
                                 packet.b,
                                 ts,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                         {
@@ -14474,6 +14486,10 @@ fn process_buffered_frames(
                 ) {
                     // ZRANGEBYSCORE key min max LIMIT offset count: a=min, b=max,
                     // c=LIMIT token, d=offset, e=count. Only the LIMIT form here.
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
                     if packet.c.eq_ignore_ascii_case(b"LIMIT")
                         && runtime
                             .execute_plain_zrangebyscore_limit_borrowed_into(
@@ -14484,7 +14500,7 @@ fn process_buffered_frames(
                                 packet.e,
                                 ts,
                                 &mut conn.write_buf,
-                                None,
+                                default_read_allowed,
                             )
                             .is_some()
                     {
@@ -16042,12 +16058,12 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_keymeta_borrowed(cmd, key, ts)
+                            && runtime
+                                .execute_plain_keymeta_borrowed_into(cmd, key, ts, out)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                         if let Some((key, seconds)) = borrowed_plain_expire_args(&borrowed_args)
@@ -16194,14 +16210,17 @@ fn parse_borrowed_multibulk_action(
                                 None => {}
                             }
                         }
-                        if let Some((key, field)) = borrowed_plain_hget_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_hget_borrowed(key, field, ts)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, field)) = borrowed_plain_hget_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_hget_borrowed_into(key, field, ts, client_resp3, out)
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
                             && let Some(response) =
@@ -16212,33 +16231,65 @@ fn parse_borrowed_multibulk_action(
                                 response,
                             });
                         }
-                        if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_rand_member_borrowed(cmd, key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if matches!(cmd, PlainRandMemberCmd::Hrandfield)
+                                && runtime
+                                    .execute_plain_hrandfield_borrowed_into(
+                                        key,
+                                        ts,
+                                        client_resp3,
+                                        out,
+                                        None,
+                                    )
+                                    .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((cmd, key, count)) =
                             borrowed_plain_rand_member_count_args(&borrowed_args)
-                            && let Some(response) = runtime
-                                .execute_plain_rand_member_count_borrowed(cmd, key, count, ts)
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if matches!(cmd, PlainRandMemberCmd::Hrandfield)
+                                && runtime
+                                    .execute_plain_hrandfield_count_borrowed_into(
+                                        key,
+                                        count,
+                                        ts,
+                                        client_resp3,
+                                        out,
+                                        None,
+                                    )
+                                    .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
-                        if let Some((key, fields)) = borrowed_plain_hmget_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_hmget_borrowed(key, fields, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, fields)) = borrowed_plain_hmget_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_hmget_borrowed_into(
+                                    key,
+                                    fields,
+                                    ts,
+                                    client_resp3,
+                                    out,
+                                    None,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((key, field)) = borrowed_plain_hstrlen_args(&borrowed_args)
                             && let Some(response) =
@@ -16325,14 +16376,24 @@ fn parse_borrowed_multibulk_action(
                                 response,
                             });
                         }
-                        if let Some((key, index)) = borrowed_plain_lindex_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_lindex_borrowed(key, index, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((key, index)) = borrowed_plain_lindex_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_lindex_borrowed_into(
+                                    key,
+                                    index,
+                                    ts,
+                                    client_resp3,
+                                    out,
+                                    None,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((key, element)) = borrowed_plain_lpos_args(&borrowed_args)
                             && let Some(response) =
@@ -16395,14 +16456,23 @@ fn parse_borrowed_multibulk_action(
                         }
                     }
                     b'O' => {
-                        if let Some(key) = borrowed_plain_object_encoding_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_object_encoding_borrowed(key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some(key) = borrowed_plain_object_encoding_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if runtime
+                                .execute_plain_object_encoding_borrowed_into(
+                                    key,
+                                    ts,
+                                    client_resp3,
+                                    out,
+                                    None,
+                                )
+                                .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some(key) = borrowed_plain_object_refcount_args(&borrowed_args)
                             && let Some(response) =
@@ -16443,12 +16513,12 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_keymeta_borrowed(cmd, key, ts)
+                            && runtime
+                                .execute_plain_keymeta_borrowed_into(cmd, key, ts, out)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                     }
@@ -16563,24 +16633,45 @@ fn parse_borrowed_multibulk_action(
                                 response,
                             });
                         }
-                        if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_rand_member_borrowed(cmd, key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if matches!(cmd, PlainRandMemberCmd::Srandmember)
+                                && runtime
+                                    .execute_plain_srandmember_borrowed_into(
+                                        key,
+                                        ts,
+                                        client_resp3,
+                                        out,
+                                        None,
+                                    )
+                                    .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((cmd, key, count)) =
                             borrowed_plain_rand_member_count_args(&borrowed_args)
-                            && let Some(response) = runtime
-                                .execute_plain_rand_member_count_borrowed(cmd, key, count, ts)
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if matches!(cmd, PlainRandMemberCmd::Srandmember)
+                                && runtime
+                                    .execute_plain_srandmember_count_borrowed_into(
+                                        key,
+                                        count,
+                                        ts,
+                                        client_resp3,
+                                        out,
+                                    )
+                                    .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((key, members)) = borrowed_plain_smismember_args(&borrowed_args)
                             && runtime
@@ -16612,12 +16703,12 @@ fn parse_borrowed_multibulk_action(
                     }
                     b'T' => {
                         if let Some((cmd, key)) = borrowed_plain_keymeta_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_keymeta_borrowed(cmd, key, ts)
+                            && runtime
+                                .execute_plain_keymeta_borrowed_into(cmd, key, ts, out)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                     }
@@ -16692,24 +16783,45 @@ fn parse_borrowed_multibulk_action(
                                 response,
                             });
                         }
-                        if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_rand_member_borrowed(cmd, key, ts, None)
-                        {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                        if let Some((cmd, key)) = borrowed_plain_rand_member_args(&borrowed_args) {
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if matches!(cmd, PlainRandMemberCmd::Zrandmember)
+                                && runtime
+                                    .execute_plain_zrandmember_borrowed_into(
+                                        key,
+                                        ts,
+                                        client_resp3,
+                                        out,
+                                        None,
+                                    )
+                                    .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((cmd, key, count)) =
                             borrowed_plain_rand_member_count_args(&borrowed_args)
-                            && let Some(response) = runtime
-                                .execute_plain_rand_member_count_borrowed(cmd, key, count, ts)
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
-                                consumed: parsed.consumed,
-                                response,
-                            });
+                            let client_resp3 =
+                                runtime.client_session().resp_protocol_version() == 3;
+                            if matches!(cmd, PlainRandMemberCmd::Zrandmember)
+                                && runtime
+                                    .execute_plain_zrandmember_count_borrowed_into(
+                                        key,
+                                        count,
+                                        ts,
+                                        client_resp3,
+                                        out,
+                                    )
+                                    .is_some()
+                            {
+                                return Ok(BorrowedMultibulkAction::FastEncodedReply {
+                                    consumed: parsed.consumed,
+                                });
+                            }
                         }
                         if let Some((cmd, key, member)) = borrowed_plain_rank_args(&borrowed_args)
                             && let Some(response) =
@@ -16740,12 +16852,12 @@ fn parse_borrowed_multibulk_action(
                             }
                         }
                         if let Some((key, start, stop)) = borrowed_plain_zrange_args(&borrowed_args)
-                            && let Some(response) =
-                                runtime.execute_plain_zrange_borrowed(key, start, stop, ts)
+                            && runtime
+                                .execute_plain_zrange_borrowed_into(key, start, stop, ts, out)
+                                .is_some()
                         {
-                            return Ok(BorrowedMultibulkAction::FastReply {
+                            return Ok(BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: parsed.consumed,
-                                response,
                             });
                         }
                         if let Some((key, start, stop)) =
@@ -17314,6 +17426,8 @@ enum BorrowedDispatchFloorClass {
     /// decline rather than the class, which is what "a floor class is a promise its arm must
     /// keep" requires. LIMIT forms are arity 9 and still reach generic.
     Zrangestore6,
+    /// `ZRANGESTORE dst src min max <BYSCORE|BYLEX> LIMIT offset count` at arity 9.
+    Zrangestore9,
     Getrange,
     BitcountKey,
     /// (frankenredis-f2zrr) `BITCOUNT key start end`. Its sibling BitcountKey was
@@ -19215,6 +19329,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // the arm, so nothing this class captures is declined.
         (6, BorrowedDispatchFloorCommand::Zrangestore) => {
             Some(BorrowedDispatchFloorClass::Zrangestore6)
+        }
+        (9, BorrowedDispatchFloorCommand::Zrangestore) => {
+            Some(BorrowedDispatchFloorClass::Zrangestore9)
         }
         (4, BorrowedDispatchFloorCommand::Zremrangebyrank) => {
             Some(BorrowedDispatchFloorClass::Zremrangebyrank)
@@ -25691,6 +25808,61 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::Zrangestore9 => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+            let routed = parse_borrowed_plain_key_arg7_packet(
+                unparsed,
+                &parser_config,
+                b"*9\r\n$11\r\n",
+                b"ZRANGESTORE",
+            )
+            .and_then(|packet| {
+                let bound_limit = if packet.e.eq_ignore_ascii_case(b"LIMIT") {
+                    if packet.d.eq_ignore_ascii_case(b"BYSCORE") {
+                        Some((false, packet.f, packet.g))
+                    } else if packet.d.eq_ignore_ascii_case(b"BYLEX") {
+                        Some((true, packet.f, packet.g))
+                    } else {
+                        None
+                    }
+                } else if packet.d.eq_ignore_ascii_case(b"LIMIT") {
+                    if packet.g.eq_ignore_ascii_case(b"BYSCORE") {
+                        Some((false, packet.e, packet.f))
+                    } else if packet.g.eq_ignore_ascii_case(b"BYLEX") {
+                        Some((true, packet.e, packet.f))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let (lex, offset_arg, count_arg) = bound_limit?;
+                runtime
+                    .execute_plain_zrangestore_bound_limit_borrowed_with_default_write_gate(
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        packet.c,
+                        lex,
+                        Some((offset_arg, count_arg)),
+                        ts,
+                        default_write_allowed,
+                    )
+                    .map(|r| (packet.consumed, r))
+            });
+            if let Some((consumed, response)) = routed {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Zrangestore => {
             // (frankenredis-gvm6z) No new parser: `key_arg3` already serves
             // "command + four bulks", which is exactly this shape (key=dst, a=src,
@@ -26748,17 +26920,20 @@ fn try_dispatch_floor_classified_action(
                 *read_gate_cache
                     .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
             );
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) = parse_borrowed_plain_zrandmember_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_rand_member_borrowed(
-                    PlainRandMemberCmd::Zrandmember,
-                    packet.key,
-                    ts,
-                    default_read_allowed,
-                )
+                && runtime
+                    .execute_plain_zrandmember_borrowed_into(
+                        packet.key,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -30748,6 +30923,59 @@ fn parse_borrowed_plain_key_arg5_packet<'a>(
         c,
         d,
         e,
+    })
+}
+
+// Generic *9 `CMD key arg1 arg2 arg3 arg4 arg5 arg6 arg7` parser for option forms such as
+// `ZRANGESTORE dst src min max BYSCORE|BYLEX LIMIT offset count`.
+struct BorrowedPlainKeyArg7Packet<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    a: &'a [u8],
+    b: &'a [u8],
+    c: &'a [u8],
+    d: &'a [u8],
+    e: &'a [u8],
+    f: &'a [u8],
+    g: &'a [u8],
+}
+
+fn parse_borrowed_plain_key_arg7_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+    prefix: &[u8],
+    cmd: &[u8],
+) -> Option<BorrowedPlainKeyArg7Packet<'a>> {
+    if config.max_array_len < 9 || config.max_bulk_len < cmd.len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(prefix).and_then(|rest| {
+        rest.get(..cmd.len())
+            .filter(|c| c.eq_ignore_ascii_case(cmd))
+            .map(|_| input.len() - rest.len() + cmd.len())
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (a, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (b, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (c, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (d, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (e, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (f, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (g, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyArg7Packet {
+        consumed,
+        key,
+        a,
+        b,
+        c,
+        d,
+        e,
+        f,
+        g,
     })
 }
 
@@ -58879,7 +59107,7 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 && !pkt.d.eq_ignore_ascii_case(b"BYLEX")
         );
 
-        // Neighbouring arities are not this class: 5 has its own, LIMIT forms are arity 9.
+        // Neighbouring arities are not this class: 5 has its own, LIMIT forms have Zrangestore9.
         for wrong in [
             vec!["ZRANGESTORE", "d", "s", "0", "-1"],
             vec![
@@ -58898,6 +59126,49 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 super::classify_borrowed_dispatch_floor_packet(&packet(&wrong), &cfg),
                 Some(super::BorrowedDispatchFloorClass::Zrangestore6),
                 "{wrong:?} must not be claimed as Zrangestore6"
+            );
+        }
+
+        // Arity-9 LIMIT forms map to Zrangestore9 and parse via key_arg7.
+        for form in [
+            vec![
+                "ZRANGESTORE",
+                "d",
+                "s",
+                "1",
+                "2",
+                "BYSCORE",
+                "LIMIT",
+                "0",
+                "1",
+            ],
+            vec![
+                "zrangestore",
+                "d",
+                "s",
+                "[a",
+                "[z",
+                "bylex",
+                "limit",
+                "1",
+                "2",
+            ],
+        ] {
+            let pkt_bytes = packet(&form);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt_bytes, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Zrangestore9),
+                "{form:?} must be claimed by the arity-9 class"
+            );
+            assert!(
+                super::parse_borrowed_plain_key_arg7_packet(
+                    &pkt_bytes,
+                    &cfg,
+                    b"*9\r\n$11\r\n",
+                    b"ZRANGESTORE"
+                )
+                .is_some(),
+                "{form:?} must parse via key_arg7"
             );
         }
     }

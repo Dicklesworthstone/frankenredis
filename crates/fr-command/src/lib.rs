@@ -13826,11 +13826,10 @@ fn zrangestore_cmd(
         ));
     }
 
-    // The source range reads below are no-stat; upstream zrangestoreCommand
-    // (zrangeGenericCommand) does a lookupKeyRead on src, so record one keyspace
-    // hit/miss here (after option validation, before the range walk / wrongtype).
-    record_source_key_lookups(store, &[src.as_slice()], now_ms);
+    // The BYSCORE range read below is no-stat; BYLEX and rank reads use single-probe
+    // `*_counted` methods on the happy path while preserving the pre-parse lookup on error.
     let pairs: Vec<(Vec<u8>, f64)> = if byscore {
+        record_source_key_lookups(store, &[src.as_slice()], now_ms);
         let min = parse_score_bound(&argv[3])?;
         let max = parse_score_bound(&argv[4])?;
         let (lo, hi) = if rev { (max, min) } else { (min, max) };
@@ -13854,14 +13853,16 @@ fn zrangestore_cmd(
     } else if bylex {
         let min_lex = &argv[3];
         let max_lex = &argv[4];
-        validate_lex_bound(min_lex)?;
-        validate_lex_bound(max_lex)?;
+        if let Err(err) = validate_lex_bound(min_lex).and_then(|()| validate_lex_bound(max_lex)) {
+            record_source_key_lookups(store, &[src.as_slice()], now_ms);
+            return Err(err);
+        }
         let (lo, hi) = if rev {
             (max_lex.as_slice(), min_lex.as_slice())
         } else {
             (min_lex.as_slice(), max_lex.as_slice())
         };
-        store.zrangebylex_withscores_limited(
+        store.zrangebylex_withscores_limited_counted(
             src,
             lo,
             hi,
@@ -13872,12 +13873,17 @@ fn zrangestore_cmd(
         )?
     } else {
         // Default: by rank (index)
-        let start = parse_i64_arg(&argv[3])?;
-        let stop = parse_i64_arg(&argv[4])?;
+        let (start, stop) = match (parse_i64_arg(&argv[3]), parse_i64_arg(&argv[4])) {
+            (Ok(s), Ok(e)) => (s, e),
+            (Err(err), _) | (_, Err(err)) => {
+                record_source_key_lookups(store, &[src.as_slice()], now_ms);
+                return Err(err);
+            }
+        };
         if rev {
-            store.zrevrange_withscores(src, start, stop, now_ms)?
+            store.zrevrange_withscores_counted(src, start, stop, now_ms)?
         } else {
-            store.zrange_withscores(src, start, stop, now_ms)?
+            store.zrange_withscores_counted(src, start, stop, now_ms)?
         }
     };
 

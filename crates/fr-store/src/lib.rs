@@ -1850,26 +1850,93 @@ impl FullSortedSet {
             .filter_map(|sm| sm.member.as_actual().map(|member| (member, &sm.score)))
     }
 
+    fn for_each_index_slice_asc(
+        &self,
+        start_idx: usize,
+        count: usize,
+        mut f: impl FnMut(&[u8], f64),
+    ) {
+        if let FullZSetOrder::Compact(keys) = &self.ordered
+            && keys.len() == self.dict.len()
+        {
+            let start = start_idx.min(keys.len());
+            let end = start.saturating_add(count).min(keys.len());
+            for sm in &keys[start..end] {
+                if let Some(member) = sm.member.as_actual() {
+                    f(member, sm.score);
+                }
+            }
+            return;
+        }
+        if let Some(tree) = &self.rank_tree
+            && let Some(start_key) = tree.select(start_idx)
+        {
+            for (member, score) in self
+                .ordered
+                .range(start_key..)
+                .filter_map(|sm| sm.member.as_actual().map(|m| (m, sm.score)))
+                .take(count)
+            {
+                f(member, score);
+            }
+            return;
+        }
+        for (member, score) in self.iter_asc().skip(start_idx).take(count) {
+            f(member, *score);
+        }
+    }
+
+    fn for_each_index_slice_desc(
+        &self,
+        start_idx: usize,
+        count: usize,
+        mut f: impl FnMut(&[u8], f64),
+    ) {
+        let len = self.dict.len();
+        if let FullZSetOrder::Compact(keys) = &self.ordered
+            && keys.len() == len
+        {
+            if start_idx >= keys.len() || count == 0 {
+                return;
+            }
+            let end_excl = keys.len() - start_idx;
+            let start_incl = end_excl.saturating_sub(count);
+            for sm in keys[start_incl..end_excl].iter().rev() {
+                if let Some(member) = sm.member.as_actual() {
+                    f(member, sm.score);
+                }
+            }
+            return;
+        }
+        if start_idx < len
+            && let Some(tree) = &self.rank_tree
+            && let Some(start_key) = tree.select(len - 1 - start_idx)
+        {
+            for (member, score) in self
+                .ordered
+                .range(..=start_key)
+                .rev()
+                .filter_map(|sm| sm.member.as_actual().map(|m| (m, sm.score)))
+                .take(count)
+            {
+                f(member, score);
+            }
+            return;
+        }
+        for (member, score) in self.iter_desc().skip(start_idx).take(count) {
+            f(member, *score);
+        }
+    }
+
     /// `count` (member, score) pairs starting at ascending index `start_idx`.
     /// When the order-statistic tree is already built (a prior ZRANK/ZREVRANK),
     /// jump to `start_idx` in O(log n) via `select` instead of an O(start_idx)
     /// linear skip; behaviour is identical either way. (frankenredis-m4uxp)
     fn index_slice_asc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
-        if let Some(tree) = &self.rank_tree
-            && let Some(start_key) = tree.select(start_idx)
-        {
-            return self
-                .ordered
-                .range(start_key..)
-                .take(count)
-                .filter_map(|sm| sm.member.as_actual().map(|m| (m.to_vec(), sm.score)))
-                .collect();
-        }
-        self.iter_asc()
-            .skip(start_idx)
-            .take(count)
-            .map(|(m, s)| (m.to_vec(), *s))
-            .collect()
+        let cap = count.min(self.dict.len().saturating_sub(start_idx));
+        let mut out = Vec::with_capacity(cap);
+        self.for_each_index_slice_asc(start_idx, count, |m, s| out.push((m.to_vec(), s)));
+        out
     }
 
     /// `count` (member, score) pairs starting at descending index `start_idx`
@@ -1878,24 +1945,10 @@ impl FullSortedSet {
     /// when it is already built; identical to a linear `iter_desc().skip`.
     /// (frankenredis-m4uxp)
     fn index_slice_desc(&self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
-        let len = self.dict.len();
-        if start_idx < len
-            && let Some(tree) = &self.rank_tree
-            && let Some(start_key) = tree.select(len - 1 - start_idx)
-        {
-            return self
-                .ordered
-                .range(..=start_key)
-                .rev()
-                .take(count)
-                .filter_map(|sm| sm.member.as_actual().map(|m| (m.to_vec(), sm.score)))
-                .collect();
-        }
-        self.iter_desc()
-            .skip(start_idx)
-            .take(count)
-            .map(|(m, s)| (m.to_vec(), *s))
-            .collect()
+        let cap = count.min(self.dict.len().saturating_sub(start_idx));
+        let mut out = Vec::with_capacity(cap);
+        self.for_each_index_slice_desc(start_idx, count, |m, s| out.push((m.to_vec(), s)));
+        out
     }
 
     fn iter_desc(&self) -> impl Iterator<Item = (&[u8], &f64)> {
@@ -2051,6 +2104,26 @@ impl FullSortedSet {
         if self.deep_index_reads >= ZSET_INDEX_TREE_WARM_HITS {
             let _ = self.ensure_rank_tree();
         }
+    }
+
+    fn for_each_index_slice_asc_adaptive(
+        &mut self,
+        start_idx: usize,
+        count: usize,
+        f: impl FnMut(&[u8], f64),
+    ) {
+        self.maybe_warm_rank_tree_for_index(start_idx, count);
+        self.for_each_index_slice_asc(start_idx, count, f);
+    }
+
+    fn for_each_index_slice_desc_adaptive(
+        &mut self,
+        start_idx: usize,
+        count: usize,
+        f: impl FnMut(&[u8], f64),
+    ) {
+        self.maybe_warm_rank_tree_for_index(start_idx, count);
+        self.for_each_index_slice_desc(start_idx, count, f);
     }
 
     fn index_slice_asc_adaptive(&mut self, start_idx: usize, count: usize) -> Vec<(Vec<u8>, f64)> {
@@ -3036,41 +3109,62 @@ impl SortedSet {
     }
 
     /// Borrow an ascending rank window. Packed zsets skip the fixed-width score bytes of records
-    /// before the window; Full zsets retain the prior ordered iterator traversal.
-    fn for_each_index_slice_asc(
-        &self,
-        start_idx: usize,
-        count: usize,
-        mut f: impl FnMut(&[u8], f64),
-    ) {
+    /// before the window; Full zsets use O(1) Compact slice indexing or O(log n) rank_tree seek
+    /// when warm.
+    #[allow(dead_code)]
+    fn for_each_index_slice_asc(&self, start_idx: usize, count: usize, f: impl FnMut(&[u8], f64)) {
         match self.inner() {
             SortedSetInner::Packed(packed) => {
                 packed.for_each_index_slice_asc(start_idx, count, f);
             }
             SortedSetInner::Full(full) => {
-                for (member, score) in full.iter_asc().skip(start_idx).take(count) {
-                    f(member, *score);
-                }
+                full.for_each_index_slice_asc(start_idx, count, f);
+            }
+        }
+    }
+
+    fn for_each_index_slice_asc_adaptive(
+        &mut self,
+        start_idx: usize,
+        count: usize,
+        f: impl FnMut(&[u8], f64),
+    ) {
+        match self.inner_mut() {
+            SortedSetInner::Packed(packed) => {
+                packed.for_each_index_slice_asc(start_idx, count, f);
+            }
+            SortedSetInner::Full(full) => {
+                full.for_each_index_slice_asc_adaptive(start_idx, count, f);
             }
         }
     }
 
     /// Borrow a descending rank window. Packed zsets materialize only the requested borrowed
-    /// window; Full zsets retain the prior ordered iterator traversal.
-    fn for_each_index_slice_desc(
-        &self,
-        start_idx: usize,
-        count: usize,
-        mut f: impl FnMut(&[u8], f64),
-    ) {
+    /// window; Full zsets use O(1) Compact slice indexing or O(log n) rank_tree seek when warm.
+    #[allow(dead_code)]
+    fn for_each_index_slice_desc(&self, start_idx: usize, count: usize, f: impl FnMut(&[u8], f64)) {
         match self.inner() {
             SortedSetInner::Packed(packed) => {
                 packed.for_each_index_slice_desc(start_idx, count, f);
             }
             SortedSetInner::Full(full) => {
-                for (member, score) in full.iter_desc().skip(start_idx).take(count) {
-                    f(member, *score);
-                }
+                full.for_each_index_slice_desc(start_idx, count, f);
+            }
+        }
+    }
+
+    fn for_each_index_slice_desc_adaptive(
+        &mut self,
+        start_idx: usize,
+        count: usize,
+        f: impl FnMut(&[u8], f64),
+    ) {
+        match self.inner_mut() {
+            SortedSetInner::Packed(packed) => {
+                packed.for_each_index_slice_desc(start_idx, count, f);
+            }
+            SortedSetInner::Full(full) => {
+                full.for_each_index_slice_desc_adaptive(start_idx, count, f);
             }
         }
     }
@@ -28241,11 +28335,8 @@ impl Store {
                 let s_idx = s.max(0) as usize;
                 let e_idx = e.min(len - 1) as usize;
                 let count = e_idx - s_idx + 1;
-                let result: Vec<Vec<u8>> = zs
-                    .index_slice_asc_adaptive(s_idx, count)
-                    .into_iter()
-                    .map(|(m, _)| m)
-                    .collect();
+                let mut result = Vec::with_capacity(count);
+                zs.for_each_index_slice_asc_adaptive(s_idx, count, |m, _| result.push(m.to_vec()));
                 entry.touch(now_ms);
                 Ok(result)
             }
@@ -28355,7 +28446,7 @@ impl Store {
                 }
             }
         };
-        match &entry.value {
+        match &mut entry.value {
             Value::SortedSet(zs) => {
                 let len = zs.len() as i64;
                 let s = normalize_index(start, len);
@@ -28368,9 +28459,9 @@ impl Store {
                 let e_idx = e.min(len - 1) as usize;
                 let count = e_idx - s_idx + 1;
                 sink(SmembersScanEvent::Len(count));
-                for (m, _score) in zs.iter_asc().skip(s_idx).take(count) {
+                zs.for_each_index_slice_asc_adaptive(s_idx, count, |m, _score| {
                     sink(SmembersScanEvent::Member(m));
-                }
+                });
                 entry.touch(now_ms);
                 Ok(())
             }
@@ -28483,7 +28574,7 @@ impl Store {
                 }
             }
         };
-        match &entry.value {
+        match &mut entry.value {
             Value::SortedSet(zs) => {
                 let len = zs.len() as i64;
                 let s = normalize_index(start, len);
@@ -28496,9 +28587,9 @@ impl Store {
                 let e_idx = e.min(len - 1) as usize;
                 let count = e_idx - s_idx + 1;
                 sink(SmembersScanEvent::Len(count));
-                for (m, _score) in zs.iter_desc().skip(s_idx).take(count) {
+                zs.for_each_index_slice_desc_adaptive(s_idx, count, |m, _score| {
                     sink(SmembersScanEvent::Member(m));
-                }
+                });
                 entry.touch(now_ms);
                 Ok(())
             }
@@ -28566,11 +28657,8 @@ impl Store {
                 let s_idx = s.max(0) as usize;
                 let e_idx = e.min(len - 1) as usize;
                 let count = e_idx - s_idx + 1;
-                let result: Vec<Vec<u8>> = zs
-                    .index_slice_desc_adaptive(s_idx, count)
-                    .into_iter()
-                    .map(|(m, _)| m)
-                    .collect();
+                let mut result = Vec::with_capacity(count);
+                zs.for_each_index_slice_desc_adaptive(s_idx, count, |m, _| result.push(m.to_vec()));
                 entry.touch(now_ms);
                 Ok(result)
             }
@@ -30109,6 +30197,26 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.zrange_withscores_impl::<false>(key, start, stop, now_ms)
+    }
+
+    pub fn zrange_withscores_counted(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.zrange_withscores_impl::<true>(key, start, stop, now_ms)
+    }
+
+    fn zrange_withscores_impl<const COUNT_STATS: bool>(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
@@ -30120,6 +30228,9 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -30142,7 +30253,12 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 }
             }
-            None => Ok(Vec::new()),
+            None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -30179,7 +30295,7 @@ impl Store {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
                         let len = zs.len() as i64;
                         let s = normalize_index(start, len);
@@ -30192,7 +30308,7 @@ impl Store {
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
                         sink(ZRangeWithScoresScanEvent::Len(count));
-                        zs.for_each_index_slice_asc(s_idx, count, |member, score| {
+                        zs.for_each_index_slice_asc_adaptive(s_idx, count, |member, score| {
                             sink(ZRangeWithScoresScanEvent::Pair(member, score));
                         });
                         entry.touch(now_ms);
@@ -30304,6 +30420,26 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.zrevrange_withscores_impl::<false>(key, start, stop, now_ms)
+    }
+
+    pub fn zrevrange_withscores_counted(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.zrevrange_withscores_impl::<true>(key, start, stop, now_ms)
+    }
+
+    fn zrevrange_withscores_impl<const COUNT_STATS: bool>(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
         // contains_key when nothing is volatile. Byte-identical (nothing evicts with no TTL).
@@ -30315,6 +30451,9 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -30338,7 +30477,12 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 }
             }
-            None => Ok(Vec::new()),
+            None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -30370,7 +30514,7 @@ impl Store {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                match &entry.value {
+                match &mut entry.value {
                     Value::SortedSet(zs) => {
                         let len = zs.len() as i64;
                         let s = normalize_index(start, len);
@@ -30383,7 +30527,7 @@ impl Store {
                         let e_idx = e.min(len - 1) as usize;
                         let count = e_idx - s_idx + 1;
                         sink(ZRangeWithScoresScanEvent::Len(count));
-                        zs.for_each_index_slice_desc(s_idx, count, |member, score| {
+                        zs.for_each_index_slice_desc_adaptive(s_idx, count, |member, score| {
                             sink(ZRangeWithScoresScanEvent::Pair(member, score));
                         });
                         entry.touch(now_ms);
@@ -31335,11 +31479,29 @@ impl Store {
         self.zrandmember_impl::<true>(key, now_ms)
     }
 
+    pub fn zrandmember_borrow_counted<R>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        visit: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, StoreError> {
+        self.zrandmember_borrow_impl::<true, R>(key, now_ms, visit)
+    }
+
     fn zrandmember_impl<const COUNT_STATS: bool>(
         &mut self,
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.zrandmember_borrow_impl::<COUNT_STATS, _>(key, now_ms, |m| m.map(<[u8]>::to_vec))
+    }
+
+    fn zrandmember_borrow_impl<const COUNT_STATS: bool, R>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        visit: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<R, StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired — see lpop.
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
@@ -31360,24 +31522,19 @@ impl Store {
                 match &mut entry.value {
                     Value::SortedSet(zs) => {
                         if zs.is_empty() {
-                            return Ok(None);
+                            return Ok(visit(None));
                         }
                         let idx = (rand_val as usize) % zs.len();
-                        // (frankenredis-k681u) The picked member is the idx-th in
-                        // ascending (score, member) order. `iter_asc().nth(idx)`
-                        // is an O(idx) linear skip over the BTreeMap; route through
-                        // index_slice_asc_adaptive(idx, 1), which uses the
-                        // order-statistic treap's select() for an O(log n) jump
-                        // (and adaptively warms it on repeated deep draws, exactly
-                        // like ZRANGE-by-index m4uxp). Byte-identical: same idx-th
-                        // sorted member, same Packed fallback.
-                        let member = zs
-                            .index_slice_asc_adaptive(idx, 1)
-                            .into_iter()
-                            .next()
-                            .map(|(m, _)| m);
+                        let mut visit = Some(visit);
+                        let mut out = None;
+                        zs.for_each_index_slice_asc_adaptive(idx, 1, |m, _| {
+                            if let Some(v) = visit.take() {
+                                out = Some(v(Some(m)));
+                            }
+                        });
+                        let res = out.unwrap_or_else(|| visit.take().unwrap()(None));
                         entry.touch(now_ms);
-                        Ok(member)
+                        Ok(res)
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -31387,7 +31544,7 @@ impl Store {
                     self.record_keyspace_miss(key);
                 }
                 let _ = Self::lcg_next_seed(&mut self.rng_seed);
-                Ok(None)
+                Ok(visit(None))
             }
         }
     }

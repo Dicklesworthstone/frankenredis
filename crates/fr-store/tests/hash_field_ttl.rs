@@ -530,7 +530,7 @@ fn hmget_returns_none_for_fields_that_have_just_expired() {
     seed_hash(&mut store, b"h", &[(b"alive", b"v"), (b"dead", b"v")]);
     store.hash_field_set_abs_expiry(b"h", b"dead", NOW - 1, HashFieldTtlCondition::None, NOW);
     let got = store
-        .hmget(b"h", &[b"alive", b"dead", b"nope"], NOW)
+        .hmget(b"h", &[&b"alive"[..], b"dead", b"nope"], NOW)
         .expect("hmget");
     assert_eq!(got, vec![Some(b"v".to_vec()), None, None]);
 }
