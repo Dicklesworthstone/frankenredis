@@ -5280,8 +5280,7 @@ fn mget(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("MGET"));
     }
-    let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
-    let values = store.mget(&keys, now_ms);
+    let values = store.mget(&argv[1..], now_ms);
     let frames = values.into_iter().map(RespFrame::BulkString).collect();
     Ok(RespFrame::Array(Some(frames)))
 }
@@ -5711,8 +5710,7 @@ fn hdel(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("HDEL"));
     }
-    let fields: Vec<&[u8]> = argv[2..].iter().map(Vec::as_slice).collect();
-    let removed = store.hdel(&argv[1], &fields, now_ms)?;
+    let removed = store.hdel(&argv[1], &argv[2..], now_ms)?;
     Ok(RespFrame::Integer(
         i64::try_from(removed).unwrap_or(i64::MAX),
     ))
@@ -5790,8 +5788,7 @@ fn hmget(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("HMGET"));
     }
-    let fields: Vec<&[u8]> = argv[2..].iter().map(Vec::as_slice).collect();
-    let values = store.hmget(&argv[1], &fields, now_ms)?;
+    let values = store.hmget(&argv[1], &argv[2..], now_ms)?;
     let frames = values.into_iter().map(RespFrame::BulkString).collect();
     Ok(RespFrame::Array(Some(frames)))
 }
@@ -5996,8 +5993,7 @@ fn srem(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("SREM"));
     }
-    let members: Vec<&[u8]> = argv[2..].iter().map(Vec::as_slice).collect();
-    let removed = store.srem(&argv[1], &members, now_ms)?;
+    let removed = store.srem(&argv[1], &argv[2..], now_ms)?;
     Ok(RespFrame::Integer(
         i64::try_from(removed).unwrap_or(i64::MAX),
     ))
@@ -7255,8 +7251,7 @@ fn zrem(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("ZREM"));
     }
-    let members: Vec<&[u8]> = argv[2..].iter().map(Vec::as_slice).collect();
-    let removed = store.zrem(&argv[1], &members, now_ms)?;
+    let removed = store.zrem(&argv[1], &argv[2..], now_ms)?;
     Ok(RespFrame::Integer(
         i64::try_from(removed).unwrap_or(i64::MAX),
     ))
@@ -8014,11 +8009,8 @@ fn geopos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     // (frankenredis keyspace-acct) Upstream geo.c::geoposCommand does ONE
     // lookupKeyReadOrReply for the key, then reads each member from that object.
     // Per-member store.zscore each bumped keyspace_hits -> N vs redis's 1. Record
-    // the key lookup once, then read all members via the no-stat zmscore (mirrors
-    // the geodist fix). Byte-identical reply; only the keyspace stat is corrected.
-    let members: Vec<&[u8]> = argv[2..].iter().map(Vec::as_slice).collect();
-    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
-    let scores = store.zmscore(&argv[1], &members, now_ms)?;
+    // the key lookup once and read all members in a single probe via zmscore_counted.
+    let scores = store.zmscore_counted(&argv[1], &argv[2..], now_ms)?;
     let mut frames = Vec::with_capacity(scores.len());
     for score in scores {
         let frame = match score {
@@ -8063,9 +8055,8 @@ fn geodist(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     // (frankenredis keyspace-acct) Upstream geo.c::geodistCommand does ONE
     // lookupKeyReadOrReply for the key, then reads both members from that object.
     // Two separate store.zscore calls each bumped keyspace_hits -> 2 vs redis's 1.
-    // Record the key lookup once, then read both scores via the no-stat zmscore.
-    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
-    let scores = store.zmscore(&argv[1], &[argv[2].as_slice(), argv[3].as_slice()], now_ms)?;
+    // Record the key lookup once and read both scores in a single probe via zmscore_counted_pair.
+    let scores = store.zmscore_counted_pair(&argv[1], &argv[2], &argv[3], now_ms)?;
     let (Some(score1), Some(score2)) = (scores[0], scores[1]) else {
         return Ok(RespFrame::BulkString(None));
     };
@@ -15382,9 +15373,9 @@ fn incrbyfloat(
 /// and without firing keyspace events. Call BEFORE the store computation so a
 /// later WRONGTYPE/empty result still records the lookups, as upstream does.
 /// Destination keys of the *STORE variants are writes and are NOT counted here.
-pub fn record_source_key_lookups(store: &mut Store, keys: &[&[u8]], now_ms: u64) {
-    for &key in keys {
-        let _ = store.exists_no_touch(key, now_ms);
+pub fn record_source_key_lookups<K: AsRef<[u8]>>(store: &mut Store, keys: &[K], now_ms: u64) {
+    for key in keys {
+        let _ = store.exists_no_touch(key.as_ref(), now_ms);
     }
 }
 
@@ -15393,11 +15384,10 @@ fn sinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("SINTER"));
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
-    let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
     // (frankenredis-rc-keyspace-gates) sinterGenericCommand stops looking up
     // source keys at the first missing one; SUNION/SDIFF look up all of them.
-    store.record_set_algebra_source_lookups(&keys, now_ms, true);
-    let members = store.sinter(&keys, now_ms)?;
+    store.record_set_algebra_source_lookups(&argv[1..], now_ms, true);
+    let members = store.sinter(&argv[1..], now_ms)?;
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
@@ -15414,9 +15404,8 @@ fn sunion(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("SUNION"));
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
-    let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
-    record_source_key_lookups(store, &keys, now_ms);
-    let members = store.sunion(&keys, now_ms)?;
+    record_source_key_lookups(store, &argv[1..], now_ms);
+    let members = store.sunion(&argv[1..], now_ms)?;
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
@@ -15433,9 +15422,8 @@ fn sdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Err(CommandError::WrongArity("SDIFF"));
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
-    let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
-    record_source_key_lookups(store, &keys, now_ms);
-    let members = store.sdiff(&keys, now_ms)?;
+    record_source_key_lookups(store, &argv[1..], now_ms);
+    let members = store.sdiff(&argv[1..], now_ms)?;
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
@@ -15564,9 +15552,8 @@ fn sinterstore(
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("SINTERSTORE"));
     }
-    let keys: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
-    record_source_key_lookups(store, &keys, now_ms);
-    let count = store.sinterstore(&argv[1], &keys, now_ms)?;
+    record_source_key_lookups(store, &argv[2..], now_ms);
+    let count = store.sinterstore(&argv[1], &argv[2..], now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
 
@@ -15578,9 +15565,8 @@ fn sunionstore(
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("SUNIONSTORE"));
     }
-    let keys: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
-    record_source_key_lookups(store, &keys, now_ms);
-    let count = store.sunionstore(&argv[1], &keys, now_ms)?;
+    record_source_key_lookups(store, &argv[2..], now_ms);
+    let count = store.sunionstore(&argv[1], &argv[2..], now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
 
@@ -15588,9 +15574,8 @@ fn sdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("SDIFFSTORE"));
     }
-    let keys: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
-    record_source_key_lookups(store, &keys, now_ms);
-    let count = store.sdiffstore(&argv[1], &keys, now_ms)?;
+    record_source_key_lookups(store, &argv[2..], now_ms);
+    let count = store.sdiffstore(&argv[1], &argv[2..], now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
 
@@ -15698,10 +15683,8 @@ fn zrandmember(
         return Err(CommandError::SyntaxError);
     }
     if argv.len() == 2 {
-        // No count: return single element or nil. store.zrandmember is no-stat,
-        // so record the keyspace lookup here (upstream lookupKeyReadOrReply).
-        record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
-        return match store.zrandmember(&argv[1], now_ms)? {
+        // No count: return single element or nil in one keyspace lookup.
+        return match store.zrandmember_counted(&argv[1], now_ms)? {
             Some(m) => Ok(RespFrame::BulkString(Some(m))),
             None => Ok(RespFrame::BulkString(None)),
         };
@@ -15720,10 +15703,8 @@ fn zrandmember(
     if argv.len() == 4 && !withscores {
         return Err(CommandError::SyntaxError);
     }
-    // store.zrandmember_count is no-stat; record the single keyspace lookup
-    // (placed after all syntax/count validation, matching upstream order).
-    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
-    let pairs = store.zrandmember_count(&argv[1], count, now_ms)?;
+    // Single keyspace lookup placed after all syntax/count validation, matching upstream order.
+    let pairs = store.zrandmember_count_counted(&argv[1], count, now_ms)?;
     // (frankenredis-jnf53) Mirror ZRANGE WITHSCORES wire shape: under
     // RESP3 wrap each (member, score) in a 2-element Array; under RESP2
     // emit flat alternating.
@@ -15739,9 +15720,7 @@ fn zmscore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         return Err(CommandError::WrongArity("ZMSCORE"));
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
-    let members: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
-    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
-    let scores = store.zmscore(&argv[1], &members, now_ms)?;
+    let scores = store.zmscore_counted(&argv[1], &argv[2..], now_ms)?;
     let frames = scores
         .into_iter()
         .map(|s| match s {
@@ -16129,10 +16108,8 @@ fn hrandfield(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         return Err(CommandError::SyntaxError);
     }
     if argv.len() == 2 {
-        // No count: return single field or nil. store.hrandfield is no-stat,
-        // so record the keyspace lookup here (upstream lookupKeyReadOrReply).
-        record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
-        return match store.hrandfield(&argv[1], now_ms)? {
+        // No count: return single field or nil in one keyspace lookup.
+        return match store.hrandfield_counted(&argv[1], now_ms)? {
             Some(field) => Ok(RespFrame::BulkString(Some(field))),
             None => Ok(RespFrame::BulkString(None)),
         };
@@ -16150,10 +16127,8 @@ fn hrandfield(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() == 4 && !withvalues {
         return Err(CommandError::SyntaxError);
     }
-    // store.hrandfield_count is no-stat; record the single keyspace lookup
-    // (placed after all syntax/count validation, matching upstream order).
-    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
-    let pairs = store.hrandfield_count(&argv[1], count, now_ms)?;
+    // Single keyspace lookup placed after all syntax/count validation, matching upstream order.
+    let pairs = store.hrandfield_count_counted(&argv[1], count, now_ms)?;
     if withvalues {
         // Upstream t_hash.c::hrandfieldWithCountCommand uses
         // addReplyArrayLen(2) per pair when in RESP3 mode (array of
@@ -16250,11 +16225,9 @@ fn zrangebylex(
         ));
     }
     // (frankenredis keyspace-acct) Legacy ZRANGEBYLEX must record the keyspace
-    // hit/miss like upstream's lookupKeyReadOrReply (zrangebylex_limited is
-    // no-stat; the unified ZRANGE BYLEX path records separately).
-    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
+    // hit/miss like upstream's lookupKeyReadOrReply.
     // LIMIT pushed into the lex walk — O(offset+count). (frankenredis-qchm7)
-    let members = store.zrangebylex_limited(
+    let members = store.zrangebylex_limited_counted(
         &argv[1],
         &argv[2],
         &argv[3],
@@ -16289,10 +16262,9 @@ fn zrevrangebylex(
         ));
     }
     // (frankenredis keyspace-acct) Record the keyspace hit/miss like upstream.
-    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     // REV + LIMIT pushed into the lex walk: zrevrangebylex(key, max, min) is
-    // zrangebylex_limited(key, min, max, rev=true). (frankenredis-qchm7)
-    let members = store.zrangebylex_limited(
+    // zrangebylex_limited_counted(key, min, max, rev=true). (frankenredis-qchm7)
+    let members = store.zrangebylex_limited_counted(
         &argv[1],
         &argv[3],
         &argv[2],
@@ -16315,10 +16287,8 @@ fn zlexcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     validate_lex_bound(&argv[2])?;
     validate_lex_bound(&argv[3])?;
     // (frankenredis keyspace-acct) Record the keyspace hit/miss like upstream's
-    // lookupKeyReadOrReply; store.zlexcount is no-stat (same lex-range class as
-    // the ZRANGEBYLEX fix).
-    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
-    let count = store.zlexcount(&argv[1], &argv[2], &argv[3], now_ms)?;
+    // lookupKeyReadOrReply in a single probe.
+    let count = store.zlexcount_counted(&argv[1], &argv[2], &argv[3], now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
 
@@ -16352,12 +16322,11 @@ fn pfcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("PFCOUNT"));
     }
-    let keys: Vec<&[u8]> = argv[1..].iter().map(|k| k.as_slice()).collect();
     // (frankenredis keyspace-acct) Upstream hyperloglog.c::pfcountCommand does
     // lookupKeyRead per source key, bumping keyspace_hits/misses; store.pfcount
     // is no-stat, so record the per-key lookups here to match.
-    record_source_key_lookups(store, &keys, now_ms);
-    let count = store.pfcount(&keys, now_ms)?;
+    record_source_key_lookups(store, &argv[1..], now_ms);
+    let count = store.pfcount(&argv[1..], now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
 
@@ -16369,10 +16338,8 @@ fn pfmerge(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     // destination AND each source (it reads them all to merge, then writes the
     // dest) — so each records a keyspace hit/miss. store.pfmerge is no-stat;
     // record one lookup per key arg (dest first, then sources) before merging.
-    let all_keys: Vec<&[u8]> = argv[1..].iter().map(|k| k.as_slice()).collect();
-    record_source_key_lookups(store, &all_keys, now_ms);
-    let sources: Vec<&[u8]> = argv[2..].iter().map(|k| k.as_slice()).collect();
-    store.pfmerge(&argv[1], &sources, now_ms)?;
+    record_source_key_lookups(store, &argv[1..], now_ms);
+    store.pfmerge(&argv[1], &argv[2..], now_ms)?;
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
 
@@ -17488,9 +17455,8 @@ fn smismember(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         return Err(CommandError::WrongArity("SMISMEMBER"));
     }
     let key = &argv[1];
-    let members: Vec<&[u8]> = argv[2..].iter().map(|v| v.as_slice()).collect();
     let results = store
-        .smismember(key, &members, now_ms)
+        .smismember(key, &argv[2..], now_ms)
         .map_err(CommandError::Store)?;
     let frames: Vec<RespFrame> = results
         .into_iter()
@@ -17526,7 +17492,7 @@ fn sintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             "ERR Number of keys can't be greater than number of args".to_string(),
         ));
     }
-    let keys: Vec<&[u8]> = argv[2..keys_end].iter().map(Vec::as_slice).collect();
+    let keys = &argv[2..keys_end];
     let mut limit: u64 = 0;
     let mut idx = keys_end;
     while idx < argv.len() {
@@ -17555,8 +17521,8 @@ fn sintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             return Err(CommandError::SyntaxError);
         }
     }
-    record_source_key_lookups(store, &keys, now_ms);
-    let count = store.sintercard(&keys, limit, now_ms)?;
+    record_source_key_lookups(store, keys, now_ms);
+    let count = store.sintercard(keys, limit, now_ms)?;
     #[allow(clippy::cast_possible_wrap)]
     Ok(RespFrame::Integer(count as i64))
 }
@@ -18334,7 +18300,7 @@ fn bitop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     }
     let op = &argv[1];
     let dest = &argv[2];
-    let keys: Vec<&[u8]> = argv[3..].iter().map(|v| v.as_slice()).collect();
+    let keys = &argv[3..];
 
     // Validate operation
     let is_valid_op = eq_ascii_command(op, b"AND")
@@ -18354,9 +18320,9 @@ fn bitop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     // store.bitop reads the source keys no-stat; upstream bitopCommand does a
     // lookupKeyRead per source key, so record one keyspace hit/miss per source
     // (after op/arity validation, matching upstream order).
-    record_source_key_lookups(store, &keys, now_ms);
+    record_source_key_lookups(store, keys, now_ms);
     let len = store
-        .bitop(op, dest, &keys, now_ms)
+        .bitop(op, dest, keys, now_ms)
         .map_err(CommandError::Store)?;
     Ok(RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)))
 }
@@ -18464,10 +18430,9 @@ fn zunionstore(
     for &key in &keys {
         // (frankenredis-6f2f5) Store::zunionstore never records keyspace
         // hits/misses for its source keys, so the lookupKeyRead per key is
-        // recorded here — before the type check, matching upstream's
-        // lookup-then-checkType order so a wrong-type key still counts as a hit.
-        let _ = store.exists_no_touch(key, now_ms);
-        store.ensure_zset_or_set_source(key, now_ms)?;
+        // recorded here — combined with the type check in one probe so a
+        // wrong-type key still counts as a hit.
+        store.lookup_and_ensure_zset_or_set_source(key, now_ms)?;
     }
     let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys, numkeys)?;
     let count = store
@@ -18500,10 +18465,9 @@ fn zinterstore(
     // (frankenredis-zsetop-wrongtype) Source-key type-check precedes the
     // WEIGHTS/AGGREGATE option parse — see zunionstore().
     for &key in &keys {
-        // (frankenredis-6f2f5) Record the per-key lookupKeyRead before the type
-        // check (Store::zinterstore doesn't), matching upstream's order.
-        let _ = store.exists_no_touch(key, now_ms);
-        store.ensure_zset_or_set_source(key, now_ms)?;
+        // (frankenredis-6f2f5) Record the per-key lookupKeyRead combined with
+        // the type check in a single probe.
+        store.lookup_and_ensure_zset_or_set_source(key, now_ms)?;
     }
     let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys, numkeys)?;
     let count = store
@@ -30290,26 +30254,12 @@ fn bitfield_cmd(
             }
         }
     }
-    // All args valid: now type-check the key once (WRONGTYPE for a non-string
-    // present key, even with no read/write op). No-stat peek leaves keyspace
-    // accounting untouched; the execution loop below does the real stat-bearing
-    // accesses for the success path.
-    match store.peek_value_type(key, now_ms) {
-        None | Some(ValueType::String) => {}
-        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
-    }
     // Keyspace accounting: upstream bitfieldGeneric looks the key up ONCE for the
     // whole command — lookupKeyWrite (no keyspace stats) when any SET/INCRBY op
-    // is present, else lookupKeyRead (one hit/miss). Record that single read here
-    // only in the all-GET (read-only) case; the per-op store reads below are
-    // no-stat so they never double-count.
+    // is present, else lookupKeyRead (one hit/miss). In the all-GET (read-only)
+    // case, `bitfield_get_batch_read` performs the type check, keyspace hit/miss
+    // accounting, and batch bitfield read in a SINGLE keyspace lookup.
     if !has_write {
-        record_source_key_lookups(store, &[key.as_slice()], now_ms);
-        // (CrimsonHawk) Read-only fast path: an all-GET BITFIELD re-resolved the key
-        // per op via bitfield_get_no_stat (drop_if_expired + entries.get each time —
-        // ~3 keyspace lookups/op). Collect the GET ops (args already validated in the
-        // pass above) and apply them all after a single keyspace lookup. OVERFLOW
-        // clauses are no-ops for reads. Byte-identical to the per-op loop below.
         let mut ops: Vec<(u64, u8, bool)> = Vec::with_capacity(argv.len() / 3);
         let mut i = 2;
         while i < argv.len() {
@@ -30326,10 +30276,19 @@ fn bitfield_cmd(
                 i += 2;
             }
         }
-        let vals = store.bitfield_get_batch(key, &ops, now_ms);
+        let vals = store
+            .bitfield_get_batch_read(key, &ops, now_ms)
+            .map_err(CommandError::Store)?;
         return Ok(RespFrame::Array(Some(
             vals.into_iter().map(RespFrame::Integer).collect(),
         )));
+    }
+    // All args valid: now type-check the key once for the write path (WRONGTYPE
+    // for a non-string present key, even with no read/write op). No-stat peek
+    // leaves keyspace accounting untouched.
+    match store.peek_value_type(key, now_ms) {
+        None | Some(ValueType::String) => {}
+        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
     }
 
     // (frankenredis-i229a) Parse the whole command into ops + per-op clamp metadata, then apply
@@ -30639,19 +30598,10 @@ fn bitfield_ro_cmd(
             "ERR BITFIELD_RO only supports the GET subcommand".to_string(),
         ));
     }
-    // Read-only branch: type-check the key once (WRONGTYPE for a non-string
-    // present key, even with no GET op). No-stat peek; the single read-only
-    // keyspace lookup is recorded once below (per-GET reads are no-stat).
-    match store.peek_value_type(key, now_ms) {
-        None | Some(ValueType::String) => {}
-        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
-    }
     // BITFIELD_RO is always read-only: upstream does one lookupKeyRead for the
-    // whole command. Record that single hit/miss; the per-GET store reads below
-    // are no-stat so a multi-GET BITFIELD_RO records exactly one, like redis.
-    record_source_key_lookups(store, &[key.as_slice()], now_ms);
-
-    let mut results: Vec<RespFrame> = Vec::new();
+    // whole command. Validate UTF-8 of subcommand tokens first, then perform the
+    // type check, keyspace hit/miss accounting, and batch read in a single probe.
+    let mut ops: Vec<(u64, u8, bool)> = Vec::with_capacity(argv.len() / 3);
     let mut i = 2;
     while i < argv.len() {
         let sub = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -30661,17 +30611,19 @@ fn bitfield_ro_cmd(
                 bitfield_parse_encoding(&argv[i + 1]).expect("GET encoding validated");
             let bit_offset = bitfield_parse_offset(&argv[i + 2], bits, offset_limit)
                 .expect("GET offset validated");
-            let val = store
-                .bitfield_get_no_stat(key, bit_offset, bits, signed, now_ms)
-                .map_err(CommandError::Store)?;
-            results.push(RespFrame::Integer(val));
+            ops.push((bit_offset, bits, signed));
             i += 3;
         } else {
             // OVERFLOW (no-op for read-only); SET/INCRBY already returned above.
             i += 2;
         }
     }
-    Ok(RespFrame::Array(Some(results)))
+    let vals = store
+        .bitfield_get_batch_read(key, &ops, now_ms)
+        .map_err(CommandError::Store)?;
+    Ok(RespFrame::Array(Some(
+        vals.into_iter().map(RespFrame::Integer).collect(),
+    )))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

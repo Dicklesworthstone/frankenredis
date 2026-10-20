@@ -11386,14 +11386,14 @@ impl Store {
     /// miss. The zero-copy SINTER/SUNION/SDIFF fast paths skipped this entirely
     /// (keyspace_hits stayed 0), which the keyspace_accounting and
     /// keyspace_stats parity gates caught against live 7.2.4.
-    pub fn record_set_algebra_source_lookups(
+    pub fn record_set_algebra_source_lookups<K: AsRef<[u8]>>(
         &mut self,
-        keys: &[&[u8]],
+        keys: &[K],
         now_ms: u64,
         stop_at_first_miss: bool,
     ) {
         for key in keys {
-            let hit = self.record_keyspace_lookup(key, now_ms);
+            let hit = self.record_keyspace_lookup(key.as_ref(), now_ms);
             if !hit && stop_at_first_miss {
                 break;
             }
@@ -12094,7 +12094,7 @@ impl Store {
 
     /// MGET returns values for each key; non-string keys return None (like Redis).
     #[must_use]
-    pub fn mget(&mut self, keys: &[&[u8]], now_ms: u64) -> Vec<Option<Vec<u8>>> {
+    pub fn mget<K: AsRef<[u8]>>(&mut self, keys: &[K], now_ms: u64) -> Vec<Option<Vec<u8>>> {
         // (frankenredis-cc get-ttl-lru-single-lookup) With LFU off, MGET consumes no RNG and only
         // LRU-touches, so `record_keyspace_lookup` (drop_if_expired probe) + value `get_mut`
         // collapses to ONE `get_mut` per key. (CrimsonHawk) Short-circuit the per-key expiry PEEK
@@ -12103,7 +12103,7 @@ impl Store {
         if !self.lfu_tracking_enabled() {
             let mut results = Vec::with_capacity(keys.len());
             for key in keys {
-                if let Some(entry) = self.lookup_live_for_read_mut(key, now_ms) {
+                if let Some(entry) = self.lookup_live_for_read_mut(key.as_ref(), now_ms) {
                     let v = entry.value.string_owned();
                     if v.is_some() {
                         entry.touch(now_ms);
@@ -12115,7 +12115,7 @@ impl Store {
             }
             return results;
         }
-        self.mget_lfu_impl::<true>(keys, now_ms)
+        self.mget_lfu_impl::<true, K>(keys, now_ms)
     }
 
     /// A/B toggle for the LFU MGET keyspace-probe collapse. `COLLAPSE = true` (shipped) folds
@@ -12125,15 +12125,16 @@ impl Store {
     /// the "structural LFU wall"). `false` is the prior three-probe form. Byte/RNG-identical: same
     /// keyspace hit/miss accounting, same `next_rand()` draw per PRESENT key, same LFU bump, LRU
     /// touch, and non-string→None. Only reached with LFU tracking on.
-    fn mget_lfu_impl<const COLLAPSE: bool>(
+    fn mget_lfu_impl<const COLLAPSE: bool, K: AsRef<[u8]>>(
         &mut self,
-        keys: &[&[u8]],
+        keys: &[K],
         now_ms: u64,
     ) -> Vec<Option<Vec<u8>>> {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
+            let key = key.as_ref();
             if COLLAPSE {
                 if self.expires_count != 0
                     && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
@@ -12193,7 +12194,7 @@ impl Store {
         keys: &[&[u8]],
         now_ms: u64,
     ) -> Vec<Option<Vec<u8>>> {
-        self.mget_lfu_impl::<true>(keys, now_ms)
+        self.mget_lfu_impl::<true, _>(keys, now_ms)
     }
 
     #[doc(hidden)]
@@ -12203,7 +12204,7 @@ impl Store {
         keys: &[&[u8]],
         now_ms: u64,
     ) -> Vec<Option<Vec<u8>>> {
-        self.mget_lfu_impl::<false>(keys, now_ms)
+        self.mget_lfu_impl::<false, _>(keys, now_ms)
     }
 
     pub fn setnx(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
@@ -13418,6 +13419,121 @@ impl Store {
         ops.iter()
             .map(|&(off, bits, signed)| bitfield_read(b, off, bits, signed))
             .collect()
+    }
+
+    /// Single-lookup read-only BITFIELD with 1 GET op: combines type check,
+    /// `exists_no_touch` keyspace hit/miss accounting, and `bitfield_read` into a
+    /// single keyspace lookup (checking `WrongType` before incrementing
+    /// `stat_keyspace_hits` to match `peek_value_type` + `exists_no_touch`).
+    pub fn bitfield_get_single_read(
+        &mut self,
+        key: &[u8],
+        bit_offset: u64,
+        bits: u8,
+        signed: bool,
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
+            return Ok(bitfield_read(&[], bit_offset, bits, signed));
+        }
+        match self.entries.get(key) {
+            Some(entry) => {
+                let bytes = entry
+                    .value
+                    .string_bytes_inline()
+                    .ok_or(StoreError::WrongType)?;
+                let val = bitfield_read(bytes.as_slice(), bit_offset, bits, signed);
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                Ok(val)
+            }
+            None => {
+                self.record_keyspace_miss(key);
+                Ok(bitfield_read(&[], bit_offset, bits, signed))
+            }
+        }
+    }
+
+    /// Single-lookup read-only BITFIELD with 2 GET ops.
+    pub fn bitfield_get_two_read(
+        &mut self,
+        key: &[u8],
+        op0: (u64, u8, bool),
+        op1: (u64, u8, bool),
+        now_ms: u64,
+    ) -> Result<[i64; 2], StoreError> {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
+            return Ok([
+                bitfield_read(&[], op0.0, op0.1, op0.2),
+                bitfield_read(&[], op1.0, op1.1, op1.2),
+            ]);
+        }
+        match self.entries.get(key) {
+            Some(entry) => {
+                let bytes = entry
+                    .value
+                    .string_bytes_inline()
+                    .ok_or(StoreError::WrongType)?;
+                let b = bytes.as_slice();
+                let out = [
+                    bitfield_read(b, op0.0, op0.1, op0.2),
+                    bitfield_read(b, op1.0, op1.1, op1.2),
+                ];
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                Ok(out)
+            }
+            None => {
+                self.record_keyspace_miss(key);
+                Ok([
+                    bitfield_read(&[], op0.0, op0.1, op0.2),
+                    bitfield_read(&[], op1.0, op1.1, op1.2),
+                ])
+            }
+        }
+    }
+
+    /// Single-lookup read-only BITFIELD batch GET ops: combines type check,
+    /// `exists_no_touch` keyspace hit/miss accounting, and `bitfield_get_batch`
+    /// into one lookup.
+    pub fn bitfield_get_batch_read(
+        &mut self,
+        key: &[u8],
+        ops: &[(u64, u8, bool)],
+        now_ms: u64,
+    ) -> Result<Vec<i64>, StoreError> {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
+            return Ok(ops
+                .iter()
+                .map(|&(off, bits, signed)| bitfield_read(&[], off, bits, signed))
+                .collect());
+        }
+        match self.entries.get(key) {
+            Some(entry) => {
+                let bytes = entry
+                    .value
+                    .string_bytes_inline()
+                    .ok_or(StoreError::WrongType)?;
+                let b = bytes.as_slice();
+                let out: Vec<i64> = ops
+                    .iter()
+                    .map(|&(off, bits, signed)| bitfield_read(b, off, bits, signed))
+                    .collect();
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                Ok(out)
+            }
+            None => {
+                self.record_keyspace_miss(key);
+                Ok(ops
+                    .iter()
+                    .map(|&(off, bits, signed)| bitfield_read(&[], off, bits, signed))
+                    .collect())
+            }
+        }
     }
 
     /// Write an arbitrary-width integer field to the string at `key`.
@@ -14761,10 +14877,22 @@ impl Store {
     /// implementation), so this reports the value upstream WOULD report
     /// given the same encoding state.
     pub fn object_refcount(&mut self, key: &[u8], now_ms: u64) -> Option<i64> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             return None;
         }
-        self.object_refcount_raw(key)
+        match self.entries.get(key) {
+            Some(entry) => {
+                let rc = self.entry_refcount(entry);
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                Some(rc)
+            }
+            None => {
+                self.record_keyspace_miss(key);
+                None
+            }
+        }
     }
 
     /// (frankenredis-debugobjraw) `object_refcount` without `expireIfNeeded` and without the
@@ -14772,43 +14900,58 @@ impl Store {
     #[must_use]
     pub fn object_refcount_raw(&self, key: &[u8]) -> Option<i64> {
         let entry = self.entries.get(key)?;
+        Some(self.entry_refcount(entry))
+    }
+
+    #[inline]
+    fn entry_refcount(&self, entry: &Entry) -> i64 {
         if entry.has_flag(ENTRY_FORCE_RAW_ENCODING) || entry.has_flag(ENTRY_FORCE_STRING_ENCODING) {
-            return Some(1);
+            return 1;
         }
         // (frankenredis-gt318) A COPY destination is a private dupStringObject
         // copy (refcount 1), never the interned shared integer — so it never
         // reports INT_MAX even for an int-encoded value in [0, 10000).
         if entry.has_flag(ENTRY_INT_COPY_NOT_SHARED) {
-            return Some(1);
+            return 1;
         }
         let n = match &entry.value {
             Value::Integer(value) => *value,
             Value::String(v) => {
                 let Ok(n) = parse_i64(v) else {
-                    return Some(1);
+                    return 1;
                 };
                 n
             }
-            _ => return Some(1),
+            _ => return 1,
         };
         const OBJ_SHARED_INTEGERS: i64 = 10000;
         if !(0..OBJ_SHARED_INTEGERS).contains(&n) {
-            return Some(1);
+            return 1;
         }
         if self.maxmemory_bytes_live > 0 && self.maxmemory_policy.forbids_shared_integers() {
-            return Some(1);
+            return 1;
         }
-        Some(i64::from(i32::MAX))
+        i64::from(i32::MAX)
     }
 
     /// Return the LFU access frequency counter for a key without mutating it.
     pub fn object_freq(&mut self, key: &[u8], now_ms: u64) -> Option<u8> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             return None;
         }
-        self.entries
-            .get(key)
-            .map(|entry| entry.current_lfu_freq(now_ms, self.lfu_decay_time))
+        match self.entries.get(key) {
+            Some(entry) => {
+                let freq = entry.current_lfu_freq(now_ms, self.lfu_decay_time);
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                Some(freq)
+            }
+            None => {
+                self.record_keyspace_miss(key);
+                None
+            }
+        }
     }
 
     /// Touch a key (update its last access time) without modifying the value.
@@ -18616,9 +18759,9 @@ impl Store {
     /// whether the hash is now empty. Factored out of the closure so the LFU keyspace-probe
     /// collapse (`hdel_impl::<true>`) and its prior-path baseline (`::<false>`) run byte-identical
     /// bodies.
-    fn hdel_apply(
+    fn hdel_apply<F: AsRef<[u8]>>(
         entry: &mut Entry,
-        fields: &[&[u8]],
+        fields: &[F],
         now_ms: u64,
         lfu_tracking_enabled: bool,
     ) -> Result<(u64, bool), StoreError> {
@@ -18630,7 +18773,7 @@ impl Store {
             // (frankenredis-sremfast) Order-agnostic O(1) remove for
             // hashtable-encoded hashes (was O(n) per field shift).
             // (frankenredis-ym6ih) `delete` skips the discarded-value alloc.
-            if m.delete(field) {
+            if m.delete(field.as_ref()) {
                 removed += 1;
             }
         }
@@ -18641,8 +18784,13 @@ impl Store {
         Ok((removed, is_empty))
     }
 
-    pub fn hdel(&mut self, key: &[u8], fields: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
-        self.hdel_impl::<true>(key, fields, now_ms)
+    pub fn hdel<F: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        fields: &[F],
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        self.hdel_impl::<true, F>(key, fields, now_ms)
     }
 
     /// A/B toggle for the LFU HDEL keyspace-probe collapse. `COLLAPSE = true` (shipped) resolves the
@@ -18656,10 +18804,10 @@ impl Store {
     /// is the same taken before or after it; the field-split draw advances `rng_seed` exactly as
     /// `next_rand` did, present-key-gated as before. With LFU off both arms do identical work (no
     /// `contains_key` was drawn) — the collapse only removes the LFU-only rand-gate probe.
-    fn hdel_impl<const COLLAPSE: bool>(
+    fn hdel_impl<const COLLAPSE: bool, F: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        fields: &[&[u8]],
+        fields: &[F],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
@@ -18739,7 +18887,7 @@ impl Store {
             // map removes nothing) — eliding 2 allocations + a BTree probe per field.
             if !self.hash_field_expires.is_empty() {
                 for field in fields {
-                    self.hash_field_ttl_clear_for_field(key, field);
+                    self.hash_field_ttl_clear_for_field(key, field.as_ref());
                 }
             }
         }
@@ -18759,7 +18907,7 @@ impl Store {
         fields: &[&[u8]],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
-        self.hdel_impl::<false>(key, fields, now_ms)
+        self.hdel_impl::<false, _>(key, fields, now_ms)
     }
 
     pub fn hexists(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> Result<bool, StoreError> {
@@ -19388,10 +19536,10 @@ impl Store {
         Ok(vals)
     }
 
-    pub fn hmget(
+    pub fn hmget<F: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        fields: &[&[u8]],
+        fields: &[F],
         now_ms: u64,
     ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
         // (CrimsonHawk) Field-TTL-gated non-LFU single-lookup collapse — see `hmget_for_each`.
@@ -19402,7 +19550,7 @@ impl Store {
                     match &entry.value {
                         Value::Hash(m) => Ok(fields
                             .iter()
-                            .map(|f| m.get(f).map(<[u8]>::to_vec))
+                            .map(|f| m.get(f.as_ref()).map(<[u8]>::to_vec))
                             .collect()),
                         _ => Err(StoreError::WrongType),
                     }
@@ -19410,7 +19558,7 @@ impl Store {
                 None => Ok(fields.iter().map(|_| None).collect()),
             };
         }
-        self.hmget_lfu_impl::<true>(key, fields, now_ms)
+        self.hmget_lfu_impl::<true, F>(key, fields, now_ms)
     }
 
     /// A/B toggle for the LFU HMGET keyspace-probe collapse. `COLLAPSE = true` (shipped) adds a
@@ -19418,10 +19566,10 @@ impl Store {
     /// field-TTL reap and fold `record_keyspace_lookup` + the `contains_key` rand gate + `get_mut`
     /// into one mutable lookup. The owned result construction remains identical. When any hash
     /// field TTL exists, or LFU is disabled, the exact prior path remains in use.
-    fn hmget_lfu_impl<const COLLAPSE: bool>(
+    fn hmget_lfu_impl<const COLLAPSE: bool, F: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        fields: &[&[u8]],
+        fields: &[F],
         now_ms: u64,
     ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -19443,7 +19591,7 @@ impl Store {
                     match &entry.value {
                         Value::Hash(m) => Ok(fields
                             .iter()
-                            .map(|field| m.get(field).map(<[u8]>::to_vec))
+                            .map(|field| m.get(field.as_ref()).map(<[u8]>::to_vec))
                             .collect()),
                         _ => Err(StoreError::WrongType),
                     }
@@ -19461,7 +19609,7 @@ impl Store {
         // an empty `hash_field_expires` makes the per-field drop loop a no-op.
         if !self.hash_field_expires.is_empty() {
             for field in fields {
-                self.drop_hash_field_if_expired(key, field, now_ms);
+                self.drop_hash_field_if_expired(key, field.as_ref(), now_ms);
             }
         }
         let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
@@ -19478,7 +19626,7 @@ impl Store {
                 match &entry.value {
                     Value::Hash(m) => Ok(fields
                         .iter()
-                        .map(|f| m.get(f).map(<[u8]>::to_vec))
+                        .map(|f| m.get(f.as_ref()).map(<[u8]>::to_vec))
                         .collect()),
                     _ => Err(StoreError::WrongType),
                 }
@@ -19496,7 +19644,7 @@ impl Store {
         fields: &[&[u8]],
         now_ms: u64,
     ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
-        self.hmget_lfu_impl::<false>(key, fields, now_ms)
+        self.hmget_lfu_impl::<false, _>(key, fields, now_ms)
     }
 
     /// (frankenredis-hmgetinto) Borrowed HMGET: invokes `emit` once per requested
@@ -19509,10 +19657,10 @@ impl Store {
     /// returns `Err(WrongType)` and `emit` is NEVER called, so the caller can
     /// encode a whole-command error without having written any array element,
     /// matching HMGET's whole-command WRONGTYPE semantics.
-    pub fn hmget_for_each<F: FnMut(Option<&[u8]>)>(
+    pub fn hmget_for_each<Fld: AsRef<[u8]>, F: FnMut(Option<&[u8]>)>(
         &mut self,
         key: &[u8],
-        fields: &[&[u8]],
+        fields: &[Fld],
         now_ms: u64,
         mut emit: F,
     ) -> Result<(), StoreError> {
@@ -19529,7 +19677,7 @@ impl Store {
                         match &entry.value {
                             Value::Hash(m) => {
                                 for field in fields {
-                                    emit(m.get(field));
+                                    emit(m.get(field.as_ref()));
                                 }
                                 Ok(())
                             }
@@ -19564,7 +19712,7 @@ impl Store {
                     match &entry.value {
                         Value::Hash(m) => {
                             for field in fields {
-                                emit(m.get(field));
+                                emit(m.get(field.as_ref()));
                             }
                             Ok(())
                         }
@@ -19595,7 +19743,7 @@ impl Store {
         // a no-op, so skipping it changes nothing.
         if !self.hash_field_expires.is_empty() {
             for field in fields {
-                self.drop_hash_field_if_expired(key, field, now_ms);
+                self.drop_hash_field_if_expired(key, field.as_ref(), now_ms);
             }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -19615,7 +19763,7 @@ impl Store {
                 match &entry.value {
                     Value::Hash(m) => {
                         for field in fields {
-                            emit(m.get(field));
+                            emit(m.get(field.as_ref()));
                         }
                         Ok(())
                     }
@@ -20220,6 +20368,22 @@ impl Store {
         res
     }
     pub fn hrandfield(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
+        self.hrandfield_impl::<false>(key, now_ms)
+    }
+
+    pub fn hrandfield_counted(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.hrandfield_impl::<true>(key, now_ms)
+    }
+
+    fn hrandfield_impl<const COUNT_STATS: bool>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         // (CrimsonHawk) Guard the bare expiry probes: skip the key drop when nothing is
         // volatile, and the hash-field drop when no field TTLs exist anywhere. Byte-identical
         // (both are no-ops in those cases; the get_mut below re-probes the key).
@@ -20235,6 +20399,9 @@ impl Store {
         let rand_val = self.next_rand();
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_val);
                 }
@@ -20255,7 +20422,12 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 }
             }
-            None => Ok(None),
+            None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -20266,6 +20438,24 @@ impl Store {
     /// (already hoisted before the field read in the original ⇒ no borrow-conflict rework needed),
     /// and `get_index(rand_val % len)`.
     pub fn hrandfield_borrow(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        sink: impl FnMut(Option<&[u8]>),
+    ) -> Result<(), StoreError> {
+        self.hrandfield_borrow_impl::<false>(key, now_ms, sink)
+    }
+
+    pub fn hrandfield_borrow_counted(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        sink: impl FnMut(Option<&[u8]>),
+    ) -> Result<(), StoreError> {
+        self.hrandfield_borrow_impl::<true>(key, now_ms, sink)
+    }
+
+    fn hrandfield_borrow_impl<const COUNT_STATS: bool>(
         &mut self,
         key: &[u8],
         now_ms: u64,
@@ -20283,6 +20473,9 @@ impl Store {
         let rand_val = self.next_rand();
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_val);
                 }
@@ -20304,6 +20497,9 @@ impl Store {
                 }
             }
             None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
                 sink(None);
                 Ok(())
             }
@@ -20315,6 +20511,26 @@ impl Store {
     /// Negative count: `|count|` fields with possible repeats.
     #[allow(clippy::type_complexity)]
     pub fn hrandfield_count(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+        self.hrandfield_count_impl::<false>(key, count, now_ms)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn hrandfield_count_counted(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+        self.hrandfield_count_impl::<true>(key, count, now_ms)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn hrandfield_count_impl<const COUNT_STATS: bool>(
         &mut self,
         key: &[u8],
         count: i64,
@@ -20342,6 +20558,9 @@ impl Store {
         // AND the 2nd `entries.get(key)` probe).
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
@@ -20365,7 +20584,12 @@ impl Store {
                     _ => unreachable!("type checked above"),
                 }
             }
-            None => Ok(Vec::new()),
+            None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -20378,6 +20602,26 @@ impl Store {
     /// plain reply is field names only). All `indices` are `% len` ⇒ `get_index` always yields
     /// `Some` ⇒ the sunk field count == `indices.len()`.
     pub fn hrandfield_count_field_borrow_scan(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.hrandfield_count_field_borrow_scan_impl::<false>(key, count, now_ms, sink)
+    }
+
+    pub fn hrandfield_count_field_borrow_scan_counted(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.hrandfield_count_field_borrow_scan_impl::<true>(key, count, now_ms, sink)
+    }
+
+    fn hrandfield_count_field_borrow_scan_impl<const COUNT_STATS: bool>(
         &mut self,
         key: &[u8],
         count: i64,
@@ -20395,6 +20639,9 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
@@ -20425,6 +20672,9 @@ impl Store {
                 }
             }
             None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
                 sink(SmembersScanEvent::Len(0));
                 Ok(())
             }
@@ -20437,6 +20687,26 @@ impl Store {
     /// selection intentionally mirror `hrandfield_count` and
     /// `hrandfield_count_field_borrow_scan`.
     pub fn hrandfield_count_pair_borrow_scan(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+        sink: impl FnMut(HrandfieldWithValuesScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.hrandfield_count_pair_borrow_scan_impl::<false>(key, count, now_ms, sink)
+    }
+
+    pub fn hrandfield_count_pair_borrow_scan_counted(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+        sink: impl FnMut(HrandfieldWithValuesScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.hrandfield_count_pair_borrow_scan_impl::<true>(key, count, now_ms, sink)
+    }
+
+    fn hrandfield_count_pair_borrow_scan_impl<const COUNT_STATS: bool>(
         &mut self,
         key: &[u8],
         count: i64,
@@ -20454,6 +20724,9 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
@@ -20484,6 +20757,9 @@ impl Store {
                 }
             }
             None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
                 sink(HrandfieldWithValuesScanEvent::Len(0));
                 Ok(())
             }
@@ -23455,8 +23731,13 @@ impl Store {
         }
     }
 
-    pub fn srem(&mut self, key: &[u8], members: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
-        self.srem_impl::<true>(key, members, now_ms)
+    pub fn srem<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        members: &[M],
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        self.srem_impl::<true, M>(key, members, now_ms)
     }
 
     /// A/B toggle for the LFU SREM keyspace-probe collapse. `COLLAPSE = true` (shipped) draws
@@ -23464,10 +23745,10 @@ impl Store {
     /// eliminating the separate `contains_key` gate before `get_mut` (two probes to one).
     /// `false` preserves the prior two-probe path for same-binary measurement. SREM is a direct
     /// `get_mut` write, so no digest-wrapper bookkeeping needs to move.
-    fn srem_impl<const COLLAPSE: bool>(
+    fn srem_impl<const COLLAPSE: bool, M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        members: &[&[u8]],
+        members: &[M],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
@@ -23509,7 +23790,7 @@ impl Store {
                             None => {
                                 let mut removed = 0_u64;
                                 for m in members {
-                                    if s.swap_remove(m) {
+                                    if s.swap_remove(m.as_ref()) {
                                         removed += 1;
                                     }
                                 }
@@ -23547,7 +23828,7 @@ impl Store {
         members: &[&[u8]],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
-        self.srem_impl::<false>(key, members, now_ms)
+        self.srem_impl::<false, _>(key, members, now_ms)
     }
 
     pub fn smembers(&mut self, key: &[u8], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
@@ -23930,7 +24211,11 @@ impl Store {
         self.sismember_impl::<true>(key, member, now_ms)
     }
 
-    pub fn sinter(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+    pub fn sinter<K: AsRef<[u8]>>(
+        &mut self,
+        keys: &[K],
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
         // Plain SINTER (no destination): unlike SINTERSTORE, the reply is a
         // sorted Vec, so the intermediate result *set* that `sinter_value` builds
         // is pure overhead here — the smallest set's members are already unique
@@ -23944,13 +24229,13 @@ impl Store {
         let Some(min_idx) = self.sinter_prepare(keys, now_ms)? else {
             return Ok(Vec::new());
         };
-        let Some(smallest) = self
-            .entries
-            .get(keys[min_idx])
-            .and_then(|e| match &e.value {
-                Value::Set(s) => Some(s),
-                _ => None,
-            })
+        let Some(smallest) =
+            self.entries
+                .get(keys[min_idx].as_ref())
+                .and_then(|e| match &e.value {
+                    Value::Set(s) => Some(s),
+                    _ => None,
+                })
         else {
             return Ok(Vec::new());
         };
@@ -23965,7 +24250,7 @@ impl Store {
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != min_idx)
-                    .filter_map(|(_, key)| match &self.entries.get(key)?.value {
+                    .filter_map(|(_, key)| match &self.entries.get(key.as_ref())?.value {
                         Value::Set(s) => Some(s.as_ref()),
                         _ => None,
                     })
@@ -24008,7 +24293,7 @@ impl Store {
                     if i == min_idx || res.is_empty() {
                         continue;
                     }
-                    if let Some(s) = self.entries.get(key).and_then(|e| match &e.value {
+                    if let Some(s) = self.entries.get(key.as_ref()).and_then(|e| match &e.value {
                         Value::Set(s) => Some(s),
                         _ => None,
                     }) {
@@ -24038,9 +24323,9 @@ impl Store {
     /// `&[u8]` refs (no `member.to_vec()` — SINTER's only copy) straight from the base set, sorts the refs,
     /// and streams them. The intset/single arm materializes (byte-sort of decimal reps != value order).
     /// Byte-identical event stream to `sinter` + encode.
-    pub fn sinter_borrow_scan(
+    pub fn sinter_borrow_scan<K: AsRef<[u8]>>(
         &mut self,
-        keys: &[&[u8]],
+        keys: &[K],
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
@@ -24048,13 +24333,13 @@ impl Store {
             sink(SmembersScanEvent::Len(0));
             return Ok(());
         };
-        let Some(smallest) = self
-            .entries
-            .get(keys[min_idx])
-            .and_then(|e| match &e.value {
-                Value::Set(s) => Some(s),
-                _ => None,
-            })
+        let Some(smallest) =
+            self.entries
+                .get(keys[min_idx].as_ref())
+                .and_then(|e| match &e.value {
+                    Value::Set(s) => Some(s),
+                    _ => None,
+                })
         else {
             sink(SmembersScanEvent::Len(0));
             return Ok(());
@@ -24065,7 +24350,7 @@ impl Store {
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != min_idx)
-                    .filter_map(|(_, key)| match &self.entries.get(key)?.value {
+                    .filter_map(|(_, key)| match &self.entries.get(key.as_ref())?.value {
                         Value::Set(s) => Some(s.as_ref()),
                         _ => None,
                     })
@@ -24110,7 +24395,7 @@ impl Store {
                     if i == min_idx || res.is_empty() {
                         continue;
                     }
-                    if let Some(s) = self.entries.get(key).and_then(|e| match &e.value {
+                    if let Some(s) = self.entries.get(key.as_ref()).and_then(|e| match &e.value {
                         Value::Set(s) => Some(s),
                         _ => None,
                     }) {
@@ -24137,13 +24422,17 @@ impl Store {
     /// which case any existing sets have already been touched. Extracted verbatim
     /// so `sinter` (Vec reply) and `sinter_value` (SetValue for SINTERSTORE) share
     /// byte-identical side-effects. (frankenredis: plain-SINTER direct-Vec)
-    fn sinter_prepare(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Option<usize>, StoreError> {
+    fn sinter_prepare<K: AsRef<[u8]>>(
+        &mut self,
+        keys: &[K],
+        now_ms: u64,
+    ) -> Result<Option<usize>, StoreError> {
         if keys.is_empty() {
             return Ok(None);
         }
         if self.expires_count != 0 {
             for key in keys {
-                self.drop_if_expired(key, now_ms);
+                self.drop_if_expired(key.as_ref(), now_ms);
             }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -24155,7 +24444,7 @@ impl Store {
         let mut has_empty = false;
 
         for (i, key) in keys.iter().enumerate() {
-            match self.entries.get(key) {
+            match self.entries.get(key.as_ref()) {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
                         if s.len() < min_card {
@@ -24174,7 +24463,7 @@ impl Store {
         if has_empty {
             // Touch existing sets to emulate Redis behavior.
             for key in keys {
-                if let Some(entry) = self.entries.get_mut(key) {
+                if let Some(entry) = self.entries.get_mut(key.as_ref()) {
                     let rand_sample = if lfu_tracking_enabled {
                         Self::lcg_next_seed(&mut self.rng_seed)
                     } else {
@@ -24196,7 +24485,7 @@ impl Store {
         } else {
             0
         };
-        if let Some(entry) = self.entries.get_mut(keys[min_idx]) {
+        if let Some(entry) = self.entries.get_mut(keys[min_idx].as_ref()) {
             if lfu_tracking_enabled {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
@@ -24211,7 +24500,7 @@ impl Store {
             } else {
                 0
             };
-            if let Some(entry) = self.entries.get_mut(key)
+            if let Some(entry) = self.entries.get_mut(key.as_ref())
                 && let Value::Set(_) = &entry.value
             {
                 if lfu_tracking_enabled {
@@ -24232,9 +24521,9 @@ impl Store {
     /// smallest-as-base, retain_intersect) is identical to the prior inline
     /// `sinter` body, so SINTER's reply is unchanged. Returns `None` when the
     /// intersection is empty (a missing source, or an emptied result).
-    fn sinter_value(
+    fn sinter_value<K: AsRef<[u8]>>(
         &mut self,
-        keys: &[&[u8]],
+        keys: &[K],
         now_ms: u64,
     ) -> Result<Option<Box<SetValue>>, StoreError> {
         let Some(min_idx) = self.sinter_prepare(keys, now_ms)? else {
@@ -24252,13 +24541,13 @@ impl Store {
         // paths, so SINTER stays byte-identical; the result encoding is transient
         // (SINTER returns a Vec; SINTERSTORE re-derives via set_value_entry).
         // (frankenredis-sinterfresh)
-        let Some(smallest) = self
-            .entries
-            .get(keys[min_idx])
-            .and_then(|e| match &e.value {
-                Value::Set(s) => Some(s),
-                _ => None,
-            })
+        let Some(smallest) =
+            self.entries
+                .get(keys[min_idx].as_ref())
+                .and_then(|e| match &e.value {
+                    Value::Set(s) => Some(s),
+                    _ => None,
+                })
         else {
             return Ok(None);
         };
@@ -24289,7 +24578,7 @@ impl Store {
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != min_idx)
-                    .filter_map(|(_, key)| match &self.entries.get(key)?.value {
+                    .filter_map(|(_, key)| match &self.entries.get(key.as_ref())?.value {
                         Value::Set(s) => Some(s.as_ref()),
                         _ => None,
                     })
@@ -24333,7 +24622,7 @@ impl Store {
                     if i == min_idx || res.is_empty() {
                         continue;
                     }
-                    if let Some(s) = self.entries.get(key).and_then(|e| match &e.value {
+                    if let Some(s) = self.entries.get(key.as_ref()).and_then(|e| match &e.value {
                         Value::Set(s) => Some(s),
                         _ => None,
                     }) {
@@ -24350,9 +24639,9 @@ impl Store {
         }
     }
 
-    pub fn sintercard(
+    pub fn sintercard<K: AsRef<[u8]>>(
         &mut self,
-        keys: &[&[u8]],
+        keys: &[K],
         limit: u64,
         now_ms: u64,
     ) -> Result<u64, StoreError> {
@@ -24368,7 +24657,7 @@ impl Store {
         // O(n) set-algebra dwarfs the O(k) drop-loop, so those are NOT guarded.
         if self.expires_count != 0 {
             for key in keys {
-                self.drop_if_expired(key, now_ms);
+                self.drop_if_expired(key.as_ref(), now_ms);
             }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -24380,7 +24669,7 @@ impl Store {
         let mut has_empty = false;
 
         for (i, key) in keys.iter().enumerate() {
-            match self.entries.get(key) {
+            match self.entries.get(key.as_ref()) {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
                         if s.len() < min_card {
@@ -24398,7 +24687,7 @@ impl Store {
 
         if has_empty {
             for key in keys {
-                if let Some(entry) = self.entries.get_mut(key) {
+                if let Some(entry) = self.entries.get_mut(key.as_ref()) {
                     let rand_sample = if lfu_tracking_enabled {
                         Self::lcg_next_seed(&mut self.rng_seed)
                     } else {
@@ -24420,7 +24709,7 @@ impl Store {
         } else {
             0
         };
-        match self.entries.get_mut(keys[min_idx]) {
+        match self.entries.get_mut(keys[min_idx].as_ref()) {
             Some(entry) => match &entry.value {
                 Value::Set(_) => {
                     if lfu_tracking_enabled {
@@ -24442,7 +24731,7 @@ impl Store {
             } else {
                 0
             };
-            let Some(entry) = self.entries.get_mut(key) else {
+            let Some(entry) = self.entries.get_mut(key.as_ref()) else {
                 continue;
             };
             match &entry.value {
@@ -24505,7 +24794,7 @@ impl Store {
             (0, 1)
         };
 
-        let min_set = match self.entries.get(keys[min_idx]) {
+        let min_set = match self.entries.get(keys[min_idx].as_ref()) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => s,
                 _ => return Err(StoreError::WrongType),
@@ -24529,7 +24818,7 @@ impl Store {
             if i == min_idx {
                 continue;
             }
-            match self.entries.get(key) {
+            match self.entries.get(key.as_ref()) {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => other_sets.push(s.as_ref()),
                     _ => return Err(StoreError::WrongType),
@@ -24620,7 +24909,11 @@ impl Store {
         Ok(count)
     }
 
-    pub fn sunion(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+    pub fn sunion<K: AsRef<[u8]>>(
+        &mut self,
+        keys: &[K],
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
         let Some(result) = self.sunion_value(keys, now_ms)? else {
             return Ok(Vec::new());
         };
@@ -24638,9 +24931,9 @@ impl Store {
     /// `sunion` pays (build-set + into_owned). The intset arm still materializes: the reply is byte-sorted on
     /// decimal reps, whose order differs from ascending-value, so it can't be sunk in-place. Byte-identical
     /// event stream to `sunion` + encode.
-    pub fn sunion_borrow_scan(
+    pub fn sunion_borrow_scan<K: AsRef<[u8]>>(
         &mut self,
-        keys: &[&[u8]],
+        keys: &[K],
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
@@ -24677,14 +24970,14 @@ impl Store {
     /// every element. Returns `None` for an empty union (no source set present).
     /// The preamble (expiry drop, WRONGTYPE, LFU bump, touch, largest-as-base) is
     /// identical to the prior inline `sunion` body, so SUNION's reply is unchanged.
-    fn sunion_value(
+    fn sunion_value<K: AsRef<[u8]>>(
         &mut self,
-        keys: &[&[u8]],
+        keys: &[K],
         now_ms: u64,
     ) -> Result<Option<SetValue>, StoreError> {
         if self.expires_count != 0 {
             for key in keys {
-                self.drop_if_expired(key, now_ms);
+                self.drop_if_expired(key.as_ref(), now_ms);
             }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -24694,7 +24987,7 @@ impl Store {
         let mut max_card = 0;
         let mut base_idx = None;
         for (i, key) in keys.iter().enumerate() {
-            if let Some(entry) = self.entries.get_mut(key) {
+            if let Some(entry) = self.entries.get_mut(key.as_ref()) {
                 let rand_sample = if lfu_tracking_enabled {
                     Self::lcg_next_seed(&mut self.rng_seed)
                 } else {
@@ -24721,7 +25014,7 @@ impl Store {
             return Ok(None);
         };
 
-        let mut result = match self.entries.get(keys[base_idx]) {
+        let mut result = match self.entries.get(keys[base_idx].as_ref()) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => s.as_ref().clone(),
                 _ => return Err(StoreError::WrongType),
@@ -24734,7 +25027,7 @@ impl Store {
             if i == base_idx {
                 continue;
             }
-            if let Some(entry) = self.entries.get(key)
+            if let Some(entry) = self.entries.get(key.as_ref())
                 && let Value::Set(s) = &entry.value
             {
                 result.union_with(s, max_intset_entries);
@@ -24744,7 +25037,11 @@ impl Store {
         Ok(Some(result))
     }
 
-    pub fn sdiff(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+    pub fn sdiff<K: AsRef<[u8]>>(
+        &mut self,
+        keys: &[K],
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
         let Some(result) = self.sdiff_value(keys, now_ms)? else {
             return Ok(Vec::new());
         };
@@ -24759,9 +25056,9 @@ impl Store {
     /// `sunion_borrow_scan`. Reuses `sdiff_value` (identical preamble) and streams the sorted members
     /// through the sink; GENERIC results sink members BORROWED (`&[u8]`, no per-member `to_vec`), the intset
     /// arm materializes (byte-sort of decimal reps != value order). Byte-identical event stream to `sdiff`.
-    pub fn sdiff_borrow_scan(
+    pub fn sdiff_borrow_scan<K: AsRef<[u8]>>(
         &mut self,
-        keys: &[&[u8]],
+        keys: &[K],
         now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
@@ -24796,17 +25093,17 @@ impl Store {
     /// Preamble (expiry drop, WRONGTYPE, LFU bump, touch, first-as-base,
     /// retain_diff) is identical to the prior inline `sdiff`, so SDIFF's reply is
     /// unchanged. Returns `None` for an empty difference.
-    fn sdiff_value(
+    fn sdiff_value<K: AsRef<[u8]>>(
         &mut self,
-        keys: &[&[u8]],
+        keys: &[K],
         now_ms: u64,
     ) -> Result<Option<Box<SetValue>>, StoreError> {
-        let Some(first_key) = keys.first().copied() else {
+        let Some(first_key) = keys.first().map(K::as_ref) else {
             return Ok(None);
         };
         if self.expires_count != 0 {
             for key in keys {
-                self.drop_if_expired(key, now_ms);
+                self.drop_if_expired(key.as_ref(), now_ms);
             }
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -24820,7 +25117,7 @@ impl Store {
         // bumps stay byte-identical. The difference itself is computed afterwards
         // from immutable borrows. (frankenredis-sdifffresh)
         for key in keys {
-            if let Some(entry) = self.entries.get_mut(key) {
+            if let Some(entry) = self.entries.get_mut(key.as_ref()) {
                 let rand_sample = if lfu_tracking_enabled {
                     Self::lcg_next_seed(&mut self.rng_seed)
                 } else {
@@ -24867,7 +25164,7 @@ impl Store {
                 let other_sets: Vec<&SetValue> = keys
                     .iter()
                     .skip(1)
-                    .filter_map(|key| match &self.entries.get(key)?.value {
+                    .filter_map(|key| match &self.entries.get(key.as_ref())?.value {
                         Value::Set(s) => Some(s.as_ref()),
                         _ => None,
                     })
@@ -24892,7 +25189,7 @@ impl Store {
                     if res.is_empty() {
                         break;
                     }
-                    if let Some(s) = self.entries.get(key).and_then(|e| match &e.value {
+                    if let Some(s) = self.entries.get(key.as_ref()).and_then(|e| match &e.value {
                         Value::Set(s) => Some(s),
                         _ => None,
                     }) {
@@ -25518,10 +25815,10 @@ impl Store {
         Ok(true)
     }
 
-    pub fn sinterstore(
+    pub fn sinterstore<K: AsRef<[u8]>>(
         &mut self,
         destination: &[u8],
-        keys: &[&[u8]],
+        keys: &[K],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         // (BlackThrush) Build+store the intersection SetValue directly via
@@ -25534,10 +25831,10 @@ impl Store {
         Ok(self.store_set_algebra_value(destination, value.map(|v| *v), now_ms))
     }
 
-    pub fn sunionstore(
+    pub fn sunionstore<K: AsRef<[u8]>>(
         &mut self,
         destination: &[u8],
-        keys: &[&[u8]],
+        keys: &[K],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         // (frankenredis-sunionstore-direct) Store the union SetValue directly
@@ -25566,10 +25863,38 @@ impl Store {
         }
     }
 
-    pub fn sdiffstore(
+    /// Single-lookup combination of `exists_no_touch` + `ensure_zset_or_set_source`
+    /// for ZUNION/ZINTER/ZDIFF/ZINTERCARD source keys: records a keyspace hit/miss
+    /// AND validates that a present key is a `SortedSet` or `Set` in one probe.
+    pub fn lookup_and_ensure_zset_or_set_source(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
+            return Ok(());
+        }
+        match self.entries.get(key) {
+            None => {
+                self.record_keyspace_miss(key);
+                Ok(())
+            }
+            Some(entry) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                match &entry.value {
+                    Value::SortedSet(_) | Value::Set(_) => Ok(()),
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+        }
+    }
+
+    pub fn sdiffstore<K: AsRef<[u8]>>(
         &mut self,
         destination: &[u8],
-        keys: &[&[u8]],
+        keys: &[K],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         // (BlackThrush) Build+store the difference SetValue directly via
@@ -26565,18 +26890,23 @@ impl Store {
         self.zadd_with_options_borrowed(key, &borrowed, opts, now_ms)
     }
 
-    pub fn zrem(&mut self, key: &[u8], members: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
-        self.zrem_impl::<true>(key, members, now_ms)
+    pub fn zrem<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        members: &[M],
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        self.zrem_impl::<true, M>(key, members, now_ms)
     }
 
     /// A/B toggle for the LFU ZREM keyspace-probe collapse. `COLLAPSE = true` (shipped) draws the
     /// LFU random sample through the disjoint `rng_seed` field after the entry has been found,
     /// eliminating the separate `contains_key` gate before `get_mut` (two probes to one).
     /// `false` preserves the prior two-probe path for same-binary measurement.
-    fn zrem_impl<const COLLAPSE: bool>(
+    fn zrem_impl<const COLLAPSE: bool, M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        members: &[&[u8]],
+        members: &[M],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
@@ -26609,7 +26939,7 @@ impl Store {
             };
             let mut removed = 0_u64;
             for member in members {
-                if zs.remove(member) {
+                if zs.remove(member.as_ref()) {
                     removed += 1;
                 }
             }
@@ -26638,7 +26968,7 @@ impl Store {
         members: &[&[u8]],
         now_ms: u64,
     ) -> Result<u64, StoreError> {
-        self.zrem_impl::<false>(key, members, now_ms)
+        self.zrem_impl::<false, _>(key, members, now_ms)
     }
 
     pub fn zget_score_or_set_member(
@@ -30115,6 +30445,26 @@ impl Store {
         max: &[u8],
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
+        self.zrangebylex_impl::<false>(key, min, max, now_ms)
+    }
+
+    pub fn zrangebylex_counted(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        self.zrangebylex_impl::<true>(key, min, max, now_ms)
+    }
+
+    fn zrangebylex_impl<const COUNT_STATS: bool>(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
         validate_lex_range_bounds(min, max)?;
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
@@ -30127,6 +30477,9 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -30145,7 +30498,12 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 }
             }
-            None => Ok(Vec::new()),
+            None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -30166,7 +30524,19 @@ impl Store {
         now_ms: u64,
         sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
-        self.zrangebylex_members_borrow_scan_impl::<true>(key, min, max, rev, now_ms, sink)
+        self.zrangebylex_members_borrow_scan_impl::<true, false>(key, min, max, rev, now_ms, sink)
+    }
+
+    pub fn zrangebylex_members_borrow_scan_counted(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrangebylex_members_borrow_scan_impl::<true, true>(key, min, max, rev, now_ms, sink)
     }
 
     /// Frozen two-probe LFU reference for the Meta-Lever 1 resurrection harness.
@@ -30182,11 +30552,11 @@ impl Store {
         now_ms: u64,
         sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
-        self.zrangebylex_members_borrow_scan_impl::<false>(key, min, max, rev, now_ms, sink)
+        self.zrangebylex_members_borrow_scan_impl::<false, false>(key, min, max, rev, now_ms, sink)
     }
 
     #[inline(always)]
-    fn zrangebylex_members_borrow_scan_impl<const COLLAPSE: bool>(
+    fn zrangebylex_members_borrow_scan_impl<const COLLAPSE: bool, const COUNT_STATS: bool>(
         &mut self,
         key: &[u8],
         min: &[u8],
@@ -30213,6 +30583,9 @@ impl Store {
         };
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let sample = if COLLAPSE {
                         Self::lcg_next_seed(&mut self.rng_seed)
@@ -30235,6 +30608,9 @@ impl Store {
                 }
             }
             None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
                 sink(SmembersScanEvent::Len(0));
                 Ok(())
             }
@@ -30244,6 +30620,26 @@ impl Store {
     /// Like `zrangebylex` but returns (member, score) pairs. Avoids O(n) individual
     /// zscore lookups when ZRANGE BYLEX WITHSCORES is requested. (frankenredis-ry0sr)
     pub fn zrangebylex_withscores(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.zrangebylex_withscores_impl::<false>(key, min, max, now_ms)
+    }
+
+    pub fn zrangebylex_withscores_counted(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.zrangebylex_withscores_impl::<true>(key, min, max, now_ms)
+    }
+
+    fn zrangebylex_withscores_impl<const COUNT_STATS: bool>(
         &mut self,
         key: &[u8],
         min: &[u8],
@@ -30262,6 +30658,9 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -30276,7 +30675,12 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 }
             }
-            None => Ok(Vec::new()),
+            None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -30300,6 +30704,34 @@ impl Store {
         count: Option<usize>,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
+        self.zrangebylex_limited_impl::<false>(key, min, max, rev, offset, count, now_ms)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn zrangebylex_limited_counted(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        count: Option<usize>,
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        self.zrangebylex_limited_impl::<true>(key, min, max, rev, offset, count, now_ms)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn zrangebylex_limited_impl<const COUNT_STATS: bool>(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        count: Option<usize>,
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
         validate_lex_range_bounds(min, max)?;
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
@@ -30313,6 +30745,9 @@ impl Store {
         let take = count.unwrap_or(usize::MAX);
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -30332,7 +30767,12 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 }
             }
-            None => Ok(Vec::new()),
+            None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -30353,6 +30793,40 @@ impl Store {
         offset: usize,
         take: usize,
         now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrangebylex_members_limit_borrow_scan_impl::<false>(
+            key, min, max, rev, offset, take, now_ms, sink,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn zrangebylex_members_limit_borrow_scan_counted(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        take: usize,
+        now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrangebylex_members_limit_borrow_scan_impl::<true>(
+            key, min, max, rev, offset, take, now_ms, sink,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn zrangebylex_members_limit_borrow_scan_impl<const COUNT_STATS: bool>(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        take: usize,
+        now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
         validate_lex_range_bounds(min, max)?;
@@ -30365,6 +30839,9 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -30383,6 +30860,9 @@ impl Store {
                 }
             }
             None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
                 sink(SmembersScanEvent::Len(0));
                 Ok(())
             }
@@ -30395,6 +30875,34 @@ impl Store {
     /// (frankenredis-qchm7)
     #[allow(clippy::too_many_arguments)]
     pub fn zrangebylex_withscores_limited(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        count: Option<usize>,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.zrangebylex_withscores_limited_impl::<false>(key, min, max, rev, offset, count, now_ms)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn zrangebylex_withscores_limited_counted(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        offset: usize,
+        count: Option<usize>,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.zrangebylex_withscores_limited_impl::<true>(key, min, max, rev, offset, count, now_ms)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn zrangebylex_withscores_limited_impl<const COUNT_STATS: bool>(
         &mut self,
         key: &[u8],
         min: &[u8],
@@ -30417,6 +30925,9 @@ impl Store {
         let take = count.unwrap_or(usize::MAX);
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -30432,7 +30943,12 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 }
             }
-            None => Ok(Vec::new()),
+            None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -30488,6 +31004,26 @@ impl Store {
         min: &[u8],
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
+        self.zrevrangebylex_impl::<false>(key, max, min, now_ms)
+    }
+
+    pub fn zrevrangebylex_counted(
+        &mut self,
+        key: &[u8],
+        max: &[u8],
+        min: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        self.zrevrangebylex_impl::<true>(key, max, min, now_ms)
+    }
+
+    fn zrevrangebylex_impl<const COUNT_STATS: bool>(
+        &mut self,
+        key: &[u8],
+        max: &[u8],
+        min: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
         validate_lex_range_bounds(min, max)?;
         // (perf) Guard the bare no-TTL reap probe on expires_count (DEL-class, see getex): the
         // get_mut below resolves presence via its miss arm, so the drop degrades to a discarded
@@ -30500,6 +31036,9 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -30519,11 +31058,36 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 }
             }
-            None => Ok(Vec::new()),
+            None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
+                Ok(Vec::new())
+            }
         }
     }
 
     pub fn zlexcount(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.zlexcount_impl::<false>(key, min, max, now_ms)
+    }
+
+    pub fn zlexcount_counted(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.zlexcount_impl::<true>(key, min, max, now_ms)
+    }
+
+    fn zlexcount_impl<const COUNT_STATS: bool>(
         &mut self,
         key: &[u8],
         min: &[u8],
@@ -30543,6 +31107,9 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -30557,7 +31124,12 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 }
             }
-            None => Ok(0),
+            None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
+                Ok(0)
+            }
         }
     }
 
@@ -30752,6 +31324,22 @@ impl Store {
     }
 
     pub fn zrandmember(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
+        self.zrandmember_impl::<false>(key, now_ms)
+    }
+
+    pub fn zrandmember_counted(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.zrandmember_impl::<true>(key, now_ms)
+    }
+
+    fn zrandmember_impl<const COUNT_STATS: bool>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired — see lpop.
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
@@ -30761,6 +31349,9 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
@@ -30792,6 +31383,9 @@ impl Store {
                 }
             }
             None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
                 let _ = Self::lcg_next_seed(&mut self.rng_seed);
                 Ok(None)
             }
@@ -30807,6 +31401,24 @@ impl Store {
         count: i64,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.zrandmember_count_impl::<false>(key, count, now_ms)
+    }
+
+    pub fn zrandmember_count_counted(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.zrandmember_count_impl::<true>(key, count, now_ms)
+    }
+
+    fn zrandmember_count_impl<const COUNT_STATS: bool>(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired — see lpop.
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
@@ -30815,8 +31427,14 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         let Some(entry) = self.entries.get_mut(key) else {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
             return Ok(Vec::new());
         };
+        if COUNT_STATS {
+            self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+        }
         if lfu_tracking_enabled {
             let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
@@ -30848,6 +31466,26 @@ impl Store {
         key: &[u8],
         count: i64,
         now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrandmember_count_member_borrow_scan_impl::<false>(key, count, now_ms, sink)
+    }
+
+    pub fn zrandmember_count_member_borrow_scan_counted(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrandmember_count_member_borrow_scan_impl::<true>(key, count, now_ms, sink)
+    }
+
+    fn zrandmember_count_member_borrow_scan_impl<const COUNT_STATS: bool>(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
         mut sink: impl FnMut(SmembersScanEvent<'_>),
     ) -> Result<(), StoreError> {
         if self.expires_count != 0 {
@@ -30857,9 +31495,15 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         let Some(entry) = self.entries.get_mut(key) else {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
             sink(SmembersScanEvent::Len(0));
             return Ok(());
         };
+        if COUNT_STATS {
+            self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+        }
         if lfu_tracking_enabled {
             let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
@@ -30893,6 +31537,26 @@ impl Store {
         key: &[u8],
         count: i64,
         now_ms: u64,
+        sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrandmember_count_withscores_borrow_scan_impl::<false>(key, count, now_ms, sink)
+    }
+
+    pub fn zrandmember_count_withscores_borrow_scan_counted(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+        sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrandmember_count_withscores_borrow_scan_impl::<true>(key, count, now_ms, sink)
+    }
+
+    fn zrandmember_count_withscores_borrow_scan_impl<const COUNT_STATS: bool>(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
         mut sink: impl FnMut(ZRangeWithScoresScanEvent<'_>),
     ) -> Result<(), StoreError> {
         if self.expires_count != 0 {
@@ -30902,9 +31566,15 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         let Some(entry) = self.entries.get_mut(key) else {
+            if COUNT_STATS {
+                self.record_keyspace_miss(key);
+            }
             sink(ZRangeWithScoresScanEvent::Len(0));
             return Ok(());
         };
+        if COUNT_STATS {
+            self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+        }
         if lfu_tracking_enabled {
             let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
@@ -30929,10 +31599,28 @@ impl Store {
         Ok(())
     }
 
-    pub fn zmscore(
+    pub fn zmscore<M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        members: &[&[u8]],
+        members: &[M],
+        now_ms: u64,
+    ) -> Result<Vec<Option<f64>>, StoreError> {
+        self.zmscore_impl::<false, M>(key, members, now_ms)
+    }
+
+    pub fn zmscore_counted<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        members: &[M],
+        now_ms: u64,
+    ) -> Result<Vec<Option<f64>>, StoreError> {
+        self.zmscore_impl::<true, M>(key, members, now_ms)
+    }
+
+    fn zmscore_impl<const COUNT_STATS: bool, M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        members: &[M],
         now_ms: u64,
     ) -> Result<Vec<Option<f64>>, StoreError> {
         // (CrimsonHawk) ZMSCORE records NO keyspace stat and DISCARDS drop_if_expired's
@@ -30948,6 +31636,9 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         match self.entries.get_mut(key) {
             Some(entry) => {
+                if COUNT_STATS {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                }
                 if lfu_tracking_enabled {
                     let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -30955,14 +31646,100 @@ impl Store {
                 match &entry.value {
                     Value::SortedSet(zs) => {
                         let result: Vec<Option<f64>> =
-                            members.iter().map(|m| zs.get_score(m)).collect();
+                            members.iter().map(|m| zs.get_score(m.as_ref())).collect();
                         entry.touch(now_ms);
                         Ok(result)
                     }
                     _ => Err(StoreError::WrongType),
                 }
             }
-            None => Ok(members.iter().map(|_| None).collect()),
+            None => {
+                if COUNT_STATS {
+                    self.record_keyspace_miss(key);
+                }
+                Ok(members.iter().map(|_| None).collect())
+            }
+        }
+    }
+
+    /// Zero-alloc ZMSCORE for 2 members with keyspace hit/miss counting.
+    pub fn zmscore_counted_pair(
+        &mut self,
+        key: &[u8],
+        m1: &[u8],
+        m2: &[u8],
+        now_ms: u64,
+    ) -> Result<[Option<f64>; 2], StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        let s1 = zs.get_score(m1);
+                        let s2 = zs.get_score(m2);
+                        entry.touch(now_ms);
+                        Ok([s1, s2])
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                self.record_keyspace_miss(key);
+                Ok([None, None])
+            }
+        }
+    }
+
+    /// Zero-alloc streaming ZMSCORE with keyspace hit/miss counting: invokes `emit`
+    /// once with `(members.len(), score_iter)` only after type-checking `key`.
+    pub fn zmscore_counted_for_each<M: AsRef<[u8]>, F: FnMut(Option<f64>)>(
+        &mut self,
+        key: &[u8],
+        members: &[M],
+        now_ms: u64,
+        mut emit: F,
+    ) -> Result<(), StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                }
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        for m in members {
+                            emit(zs.get_score(m.as_ref()));
+                        }
+                        entry.touch(now_ms);
+                        Ok(())
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
+            None => {
+                self.record_keyspace_miss(key);
+                for _ in members {
+                    emit(None);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -33887,7 +34664,7 @@ impl Store {
         card
     }
 
-    pub fn pfcount(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
+    pub fn pfcount<K: AsRef<[u8]>>(&mut self, keys: &[K], now_ms: u64) -> Result<u64, StoreError> {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
@@ -33900,7 +34677,7 @@ impl Store {
         // persists (the modified key is propagated to AOF/replicas as the
         // deterministic PFCOUNT). Multi-key PFCOUNT never touches the cache.
         if keys.len() == 1 {
-            let key = keys[0];
+            let key = keys[0].as_ref();
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
             }
@@ -33961,7 +34738,8 @@ impl Store {
         }
 
         let mut merged: Vec<u8> = Vec::with_capacity(HLL_REGISTERS);
-        for &key in keys {
+        for key in keys {
+            let key = key.as_ref();
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
             }
@@ -34004,10 +34782,10 @@ impl Store {
 
     /// PFMERGE: merge source HLLs into dest. If dest already exists as an HLL
     /// its registers are included in the union (per Redis semantics).
-    pub fn pfmerge(
+    pub fn pfmerge<K: AsRef<[u8]>>(
         &mut self,
         dest: &[u8],
-        sources: &[&[u8]],
+        sources: &[K],
         now_ms: u64,
     ) -> Result<(), StoreError> {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -34035,7 +34813,8 @@ impl Store {
         }
 
         // Merge all sources
-        for &src in sources {
+        for src in sources {
+            let src = src.as_ref();
             if self.expires_count != 0 {
                 self.drop_if_expired(src, now_ms);
             }
@@ -34787,11 +35566,11 @@ impl Store {
     }
 
     /// BITOP: perform bitwise operation between strings.
-    pub fn bitop(
+    pub fn bitop<K: AsRef<[u8]>>(
         &mut self,
         op: &[u8],
         dest: &[u8],
-        keys: &[&[u8]],
+        keys: &[K],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -34810,7 +35589,8 @@ impl Store {
         const MAX_BITOP_TOTAL_BYTES: usize = 512 * 1024 * 1024; // 512 MiB
         let mut total_bytes = 0usize;
         let mut lens: Vec<usize> = Vec::with_capacity(keys.len());
-        for &key in keys {
+        for key in keys {
+            let key = key.as_ref();
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
             }
@@ -34846,7 +35626,9 @@ impl Store {
         // Value::String yields a Cow::Borrowed so large strings are zero-copy.
         macro_rules! operand {
             ($key:expr) => {
-                self.entries.get($key).and_then(|e| e.value.string_bytes())
+                self.entries
+                    .get(($key).as_ref())
+                    .and_then(|e| e.value.string_bytes())
             };
         }
 
@@ -34899,7 +35681,7 @@ impl Store {
                 // General path (0/1/3+ operands): init `result` = first operand + zero-tail DIRECTLY
                 // (equal-length operands make the `resize` a no-op, eliminating the old `vec![0; max_len]`
                 // memset pass), then fold the remaining operands in place.
-                let mut result = match keys.first().and_then(|&k| operand!(k)) {
+                let mut result = match keys.first().and_then(|k| operand!(k)) {
                     Some(first) => {
                         let mut r = first.into_owned();
                         r.resize(max_len, 0);
@@ -34908,7 +35690,7 @@ impl Store {
                     None => vec![0u8; max_len],
                 };
 
-                for &key in keys.iter().skip(1) {
+                for key in keys.iter().skip(1) {
                     let val = operand!(key).unwrap_or(std::borrow::Cow::Borrowed(&[]));
                     let val = val.as_ref();
                     if is_and {
@@ -35339,17 +36121,18 @@ impl Store {
     }
 
     /// SMISMEMBER: check membership for multiple members.
-    pub fn smismember(
+    pub fn smismember<M: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
-        members: &[&[u8]],
+        members: &[M],
         now_ms: u64,
     ) -> Result<Vec<bool>, StoreError> {
         if !self.lfu_tracking_enabled() {
             return match self.lookup_live_for_read_mut(key, now_ms) {
                 Some(entry) => match &entry.value {
                     Value::Set(s) => {
-                        let result: Vec<bool> = members.iter().map(|m| s.contains(m)).collect();
+                        let result: Vec<bool> =
+                            members.iter().map(|m| s.contains(m.as_ref())).collect();
                         entry.touch(now_ms);
                         Ok(result)
                     }
@@ -35373,7 +36156,7 @@ impl Store {
         let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
         match &entry.value {
             Value::Set(s) => {
-                let result: Vec<bool> = members.iter().map(|m| s.contains(m)).collect();
+                let result: Vec<bool> = members.iter().map(|m| s.contains(m.as_ref())).collect();
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 entry.touch(now_ms);
                 Ok(result)
@@ -51675,7 +52458,7 @@ mod tests {
             other => return Err(format!("new set LFU frequency mismatch: {other:?}")),
         }
         let result = store
-            .smismember(b"s", &[b"a", b"missing"], 1)
+            .smismember(b"s", &[b"a".as_slice(), b"missing"], 1)
             .map_err(|err| format!("smismember failed: {err:?}"))?;
         let mut results = result.into_iter();
         match results.next() {
@@ -52142,7 +52925,8 @@ mod tests {
         // ZMSCORE: correct scores, WRONGTYPE, missing→all-None; NO keyspace stat change.
         let (h1, m1) = (s.stat_keyspace_hits, s.stat_keyspace_misses);
         assert_eq!(
-            s.zmscore(b"zs", &[b"b", b"none", b"a"], 2).unwrap(),
+            s.zmscore(b"zs", &[b"b".as_slice(), b"none", b"a"], 2)
+                .unwrap(),
             vec![Some(2.0), None, Some(1.0)]
         );
         assert_eq!(s.zmscore(b"absent", &[b"a"], 2).unwrap(), vec![None]);
@@ -57373,7 +58157,7 @@ mod tests {
         store.set(b"dead".to_vec(), b"D".to_vec(), Some(50), 100); // TTL, will be past
         assert!(store.expires_count >= 2);
         // now_ms = 500: "dead" (deadline 50) is expired, "soon" (deadline 1000) lives.
-        let got = store.mget(&[b"live", b"dead", b"soon", b"absent"], 500);
+        let got = store.mget(&[b"live".as_slice(), b"dead", b"soon", b"absent"], 500);
         assert_eq!(
             got,
             vec![Some(b"L".to_vec()), None, Some(b"S".to_vec()), None]
@@ -59752,7 +60536,12 @@ mod tests {
         let mut store = Store::new();
         store.hset(b"h", b"f1".to_vec(), b"v1".to_vec(), 0).unwrap();
         store.hset(b"h", b"f2".to_vec(), b"v2".to_vec(), 0).unwrap();
-        assert_eq!(store.hdel(b"h", &[b"f1", b"missing"], 0).unwrap(), 1);
+        assert_eq!(
+            store
+                .hdel(b"h", &[b"f1".as_slice(), b"missing"], 0)
+                .unwrap(),
+            1
+        );
         assert_eq!(store.hlen(b"h", 0).unwrap(), 1);
         assert_eq!(store.hdel(b"h", &[b"f2"], 0).unwrap(), 1);
         assert!(!store.exists(b"h", 0));
@@ -59948,7 +60737,9 @@ mod tests {
     fn hmget_returns_values_or_none() {
         let mut store = Store::new();
         store.hset(b"h", b"a".to_vec(), b"1".to_vec(), 0).unwrap();
-        let result = store.hmget(b"h", &[b"a", b"missing"], 0).unwrap();
+        let result = store
+            .hmget(b"h", &[b"a".as_slice(), b"missing"], 0)
+            .unwrap();
         assert_eq!(result, vec![Some(b"1".to_vec()), None]);
         let result = store.hmget(b"nokey", &[b"a"], 0).unwrap();
         assert_eq!(result, vec![None]);
@@ -60070,7 +60861,7 @@ mod tests {
             other => return Err(format!("new hash LFU frequency mismatch: {other:?}")),
         }
         let values = store
-            .hmget(b"h", &[b"a", b"missing"], 1)
+            .hmget(b"h", &[b"a".as_slice(), b"missing"], 1)
             .map_err(|err| format!("hmget failed: {err:?}"))?;
         match values.as_slice() {
             [Some(value), None] => match value.as_slice() {
@@ -65963,7 +66754,10 @@ mod tests {
         assert_eq!(store.scard(b"s", 0).unwrap(), 2);
         assert!(store.sismember(b"s", b"a", 0).unwrap());
         assert!(!store.sismember(b"s", b"c", 0).unwrap());
-        assert_eq!(store.srem(b"s", &[b"a", b"missing"], 0).unwrap(), 1);
+        assert_eq!(
+            store.srem(b"s", &[b"a".as_slice(), b"missing"], 0).unwrap(),
+            1
+        );
         assert_eq!(store.scard(b"s", 0).unwrap(), 1);
     }
 
@@ -76415,11 +77209,11 @@ mod tests {
         store.rpush(b"lst", &[b"x".to_vec()], 0).unwrap();
         // SDIFF: first source missing, second is a list -> WRONGTYPE.
         assert!(matches!(
-            store.sdiff(&[b"nomiss", b"lst"], 0),
+            store.sdiff(&[b"nomiss".as_slice(), b"lst"], 0),
             Err(StoreError::WrongType)
         ));
         assert!(matches!(
-            store.sdiffstore(b"dst", &[b"nomiss", b"lst"], 0),
+            store.sdiffstore(b"dst", &[b"nomiss".as_slice(), b"lst"], 0),
             Err(StoreError::WrongType)
         ));
         // ensure_zset_or_set_source backs the ZDIFF fix.
@@ -76609,7 +77403,7 @@ mod tests {
         store
             .sadd(b"s1", &[b"a".to_vec(), b"b".to_vec()], 0)
             .unwrap();
-        let result = store.sinter(&[b"s1", b"missing"], 0).unwrap();
+        let result = store.sinter(&[b"s1".as_slice(), b"missing"], 0).unwrap();
         assert!(result.is_empty());
     }
 
@@ -79075,7 +79869,7 @@ mod tests {
             let mut s = with(&ov_val);
             s.set(b"h2".to_vec(), ov_val.clone(), None, 0);
             assert!(
-                s.pfcount(&[b"h", b"h2"], 0).is_ok(),
+                s.pfcount(&[b"h".as_slice(), b"h2"], 0).is_ok(),
                 "multi-key PFCOUNT must tolerate trailing VAL garbage (hllMerge)"
             );
         }
@@ -79532,7 +80326,7 @@ mod tests {
         );
 
         store
-            .pfmerge(b"merged", &[b"sparse_src", b"dense_src"], 0)
+            .pfmerge(b"merged", &[b"sparse_src".as_slice(), b"dense_src"], 0)
             .unwrap();
 
         assert_eq!(

@@ -20185,9 +20185,7 @@ impl Runtime {
 
         let resp3 = self.session.resp_protocol_version == 3;
         let start = self.chained_command_start();
-        // Mirror record_source_key_lookups(store, &[key]) then store.zmscore.
-        let _ = self.server.store.exists_no_touch(key, now_ms);
-        let result = self.server.store.zmscore(key, members, now_ms);
+        let result = self.server.store.zmscore_counted(key, members, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(scores) => RespFrame::Array(Some(
@@ -20269,35 +20267,37 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let _ = self.server.store.exists_no_touch(key, now_ms);
-        let result = self.server.store.zmscore(key, members, now_ms);
+        let mut wrote_header = false;
+        let result = self
+            .server
+            .store
+            .zmscore_counted_for_each(key, members, now_ms, |score| {
+                if suppress_reply {
+                    return;
+                }
+                if !wrote_header {
+                    wrote_header = true;
+                    fr_protocol::encode_aggregate_header(members.len(), false, out);
+                }
+                match score {
+                    Some(score) => fr_protocol::encode_redis_double(score, resp3, out),
+                    None => encode_bulk_string_slice(None, resp3, out),
+                }
+            });
         let elapsed_us = self.finish_chained_command(start);
 
         let mut error_msg = None;
-        match result {
-            Ok(scores) => {
-                if !suppress_reply {
-                    fr_protocol::encode_aggregate_header(scores.len(), false, out);
-                    for score in scores {
-                        match score {
-                            Some(score) => fr_protocol::encode_redis_double(score, resp3, out),
-                            None => encode_bulk_string_slice(None, resp3, out),
-                        }
-                    }
+        if let Err(err) = result {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
                 }
             }
-            Err(err) => {
-                let reply = CommandError::Store(err).to_resp();
-                if !suppress_reply {
-                    if resp3 {
-                        reply.encode_into_resp3(out);
-                    } else {
-                        reply.encode_into(out);
-                    }
-                }
-                if let RespFrame::Error(msg) = reply {
-                    error_msg = Some(msg);
-                }
+            if let RespFrame::Error(msg) = reply {
+                error_msg = Some(msg);
             }
         }
         let failed = error_msg.is_some();
@@ -26253,10 +26253,7 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // Mirror generic zrangebylex: one keyspace lookup for the key, then the
-        // no-stat store walk.
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
-        let reply = match self.server.store.zrangebylex(key, min, max, now_ms) {
+        let reply = match self.server.store.zrangebylex_counted(key, min, max, now_ms) {
             Ok(members) => RespFrame::Array(Some(
                 members
                     .into_iter()
@@ -26331,24 +26328,27 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
         let mut error_msg = None;
-        let scan =
-            self.server
-                .store
-                .zrangebylex_members_borrow_scan(key, min, max, false, now_ms, |ev| {
-                    if suppress_reply {
-                        return;
+        let scan = self.server.store.zrangebylex_members_borrow_scan_counted(
+            key,
+            min,
+            max,
+            false,
+            now_ms,
+            |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
                     }
-                    match ev {
-                        fr_store::SmembersScanEvent::Len(n) => {
-                            fr_protocol::encode_aggregate_header(n, false, out);
-                        }
-                        fr_store::SmembersScanEvent::Member(m) => {
-                            encode_bulk_string_slice(Some(m), false, out);
-                        }
+                    fr_store::SmembersScanEvent::Member(m) => {
+                        encode_bulk_string_slice(Some(m), false, out);
                     }
-                });
+                }
+            },
+        );
         if let Err(err) = scan {
             let reply = CommandError::Store(err).to_resp();
             if !suppress_reply {
@@ -26411,24 +26411,27 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
         let mut error_msg = None;
-        let scan =
-            self.server
-                .store
-                .zrangebylex_members_borrow_scan(key, min, max, true, now_ms, |ev| {
-                    if suppress_reply {
-                        return;
+        let scan = self.server.store.zrangebylex_members_borrow_scan_counted(
+            key,
+            min,
+            max,
+            true,
+            now_ms,
+            |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
                     }
-                    match ev {
-                        fr_store::SmembersScanEvent::Len(n) => {
-                            fr_protocol::encode_aggregate_header(n, false, out);
-                        }
-                        fr_store::SmembersScanEvent::Member(m) => {
-                            encode_bulk_string_slice(Some(m), false, out);
-                        }
+                    fr_store::SmembersScanEvent::Member(m) => {
+                        encode_bulk_string_slice(Some(m), false, out);
                     }
-                });
+                }
+            },
+        );
         if let Err(err) = scan {
             let reply = CommandError::Store(err).to_resp();
             if !suppress_reply {
@@ -26580,8 +26583,7 @@ impl Runtime {
             now_ms,
         );
         let st = self.chained_command_start();
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
-        let reply = match self.server.store.zrangebylex_limited(
+        let reply = match self.server.store.zrangebylex_limited_counted(
             key,
             min,
             max,
@@ -26673,7 +26675,6 @@ impl Runtime {
         );
         let suppress_reply = self.suppress_current_network_reply();
         let st = self.chained_command_start();
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
         let error_msg = self.stream_bylex_limit_members_into(
             key,
             min,
@@ -26732,28 +26733,31 @@ impl Runtime {
         out: &mut Vec<u8>,
     ) -> Option<String> {
         let mut error_msg = None;
-        let scan = self.server.store.zrangebylex_members_limit_borrow_scan(
-            key,
-            min,
-            max,
-            rev,
-            offset,
-            count,
-            now_ms,
-            |ev| {
-                if suppress_reply {
-                    return;
-                }
-                match ev {
-                    fr_store::SmembersScanEvent::Len(n) => {
-                        fr_protocol::encode_aggregate_header(n, false, out);
+        let scan = self
+            .server
+            .store
+            .zrangebylex_members_limit_borrow_scan_counted(
+                key,
+                min,
+                max,
+                rev,
+                offset,
+                count,
+                now_ms,
+                |ev| {
+                    if suppress_reply {
+                        return;
                     }
-                    fr_store::SmembersScanEvent::Member(m) => {
-                        encode_bulk_string_slice(Some(m), false, out);
+                    match ev {
+                        fr_store::SmembersScanEvent::Len(n) => {
+                            fr_protocol::encode_aggregate_header(n, false, out);
+                        }
+                        fr_store::SmembersScanEvent::Member(m) => {
+                            encode_bulk_string_slice(Some(m), false, out);
+                        }
                     }
-                }
-            },
-        );
+                },
+            );
         if let Err(err) = scan {
             let reply = CommandError::Store(err).to_resp();
             if !suppress_reply {
@@ -26808,8 +26812,11 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
-        let reply = match self.server.store.zrevrangebylex(key, max, min, now_ms) {
+        let reply = match self
+            .server
+            .store
+            .zrevrangebylex_counted(key, max, min, now_ms)
+        {
             Ok(members) => RespFrame::Array(Some(
                 members
                     .into_iter()
@@ -27460,8 +27467,7 @@ impl Runtime {
             now_ms,
         );
         let st = self.chained_command_start();
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
-        let reply = match self.server.store.zrangebylex(key, min, max, now_ms) {
+        let reply = match self.server.store.zrangebylex_counted(key, min, max, now_ms) {
             Ok(members) => RespFrame::Array(Some(
                 members
                     .into_iter()
@@ -27528,24 +27534,27 @@ impl Runtime {
         );
         let suppress_reply = self.suppress_current_network_reply();
         let st = self.chained_command_start();
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
         let mut error_msg = None;
-        let scan =
-            self.server
-                .store
-                .zrangebylex_members_borrow_scan(key, min, max, false, now_ms, |ev| {
-                    if suppress_reply {
-                        return;
+        let scan = self.server.store.zrangebylex_members_borrow_scan_counted(
+            key,
+            min,
+            max,
+            false,
+            now_ms,
+            |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
                     }
-                    match ev {
-                        fr_store::SmembersScanEvent::Len(n) => {
-                            fr_protocol::encode_aggregate_header(n, false, out);
-                        }
-                        fr_store::SmembersScanEvent::Member(m) => {
-                            encode_bulk_string_slice(Some(m), false, out);
-                        }
+                    fr_store::SmembersScanEvent::Member(m) => {
+                        encode_bulk_string_slice(Some(m), false, out);
                     }
-                });
+                }
+            },
+        );
         if let Err(err) = scan {
             let reply = CommandError::Store(err).to_resp();
             if !suppress_reply {
@@ -27836,8 +27845,7 @@ impl Runtime {
             now_ms,
         );
         let st = self.chained_command_start();
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
-        let reply = match self.server.store.zrangebylex_limited(
+        let reply = match self.server.store.zrangebylex_limited_counted(
             key,
             min,
             max,
@@ -27934,7 +27942,6 @@ impl Runtime {
         );
         let suppress_reply = self.suppress_current_network_reply();
         let st = self.chained_command_start();
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
         let error_msg = self.stream_bylex_limit_members_into(
             key,
             min,
@@ -32338,8 +32345,11 @@ impl Runtime {
         let st = self.chained_command_start();
         let reply = 'reply: {
             for &k in keys {
-                let _ = self.server.store.exists_no_touch(k, now_ms);
-                if let Err(err) = self.server.store.ensure_zset_or_set_source(k, now_ms) {
+                if let Err(err) = self
+                    .server
+                    .store
+                    .lookup_and_ensure_zset_or_set_source(k, now_ms)
+                {
                     break 'reply CommandError::Store(err).to_resp();
                 }
             }
@@ -35304,26 +35314,18 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // Mirror generic geodist: one keyspace lookup for the key, then no-stat
-        // zmscore for both members.
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
-        let reply = match self.server.store.zmscore(key, &[m1, m2], now_ms) {
-            Ok(scores) => match (scores[0], scores[1]) {
-                (Some(s1), Some(s2)) => {
-                    match (
-                        fr_command::geo_decode_score(s1),
-                        fr_command::geo_decode_score(s2),
-                    ) {
-                        (Some((lon1, lat1)), Some((lon2, lat2))) => {
-                            let distance =
-                                fr_command::geo_distance_m(lon1, lat1, lon2, lat2) / to_meter;
-                            fr_command::geo_distance_reply(distance)
-                        }
-                        _ => RespFrame::BulkString(None),
-                    }
+        let reply = match self.server.store.zmscore_counted_pair(key, m1, m2, now_ms) {
+            Ok([Some(s1), Some(s2)]) => match (
+                fr_command::geo_decode_score(s1),
+                fr_command::geo_decode_score(s2),
+            ) {
+                (Some((lon1, lat1)), Some((lon2, lat2))) => {
+                    let distance = fr_command::geo_distance_m(lon1, lat1, lon2, lat2) / to_meter;
+                    fr_command::geo_distance_reply(distance)
                 }
                 _ => RespFrame::BulkString(None),
             },
+            Ok(_) => RespFrame::BulkString(None),
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(start);
@@ -35667,10 +35669,11 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // Mirror generic zlexcount EXACTLY: record the one keyspace lookup
-        // (store.zlexcount is no-stat), then count.
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
-        let reply = match self.server.store.zlexcount(key, min_arg, max_arg, now_ms) {
+        let reply = match self
+            .server
+            .store
+            .zlexcount_counted(key, min_arg, max_arg, now_ms)
+        {
             Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
             Err(err) => CommandError::Store(err).to_resp(),
         };
@@ -37219,8 +37222,7 @@ impl Runtime {
             now_ms,
         );
         let st = self.chained_command_start();
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
-        let reply = match self.server.store.zmscore(key, members, now_ms) {
+        let reply = match self.server.store.zmscore_counted(key, members, now_ms) {
             Ok(scores) => {
                 let frames = scores
                     .into_iter()
@@ -37364,10 +37366,7 @@ impl Runtime {
 
         let resp3 = self.session.resp_protocol_version == 3;
         let start = self.chained_command_start();
-        // Mirror generic geopos: one keyspace lookup for the key, then no-stat
-        // zmscore for all members.
-        fr_command::record_source_key_lookups(&mut self.server.store, &[key], now_ms);
-        let reply = match self.server.store.zmscore(key, members, now_ms) {
+        let reply = match self.server.store.zmscore_counted(key, members, now_ms) {
             Ok(scores) => {
                 let frames = scores
                     .into_iter()
@@ -37792,13 +37791,10 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // Mirror generic single-GET BITFIELD: ONE keyspace lookup (=
-        // record_source_key_lookups via exists_no_touch) then a no-stat per-op read.
-        let _ = self.server.store.exists_no_touch(key, now_ms);
         let result = self
             .server
             .store
-            .bitfield_get_no_stat(key, bit_offset, bits, signed, now_ms);
+            .bitfield_get_single_read(key, bit_offset, bits, signed, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(val) => RespFrame::Array(Some(vec![RespFrame::Integer(val)])),
@@ -37939,22 +37935,16 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let result = match self.server.store.peek_value_type(key, now_ms) {
-            None | Some(fr_store::ValueType::String) => {
-                // Redis performs one lookupKeyRead for the whole BITFIELD_RO.
-                let _ = self.server.store.exists_no_touch(key, now_ms);
-                Ok(self.server.store.bitfield_get_batch(
-                    key,
-                    &[(bit_offset1, bits1, signed1), (bit_offset2, bits2, signed2)],
-                    now_ms,
-                ))
-            }
-            Some(_) => Err(fr_store::StoreError::WrongType),
-        };
+        let result = self.server.store.bitfield_get_two_read(
+            key,
+            (bit_offset1, bits1, signed1),
+            (bit_offset2, bits2, signed2),
+            now_ms,
+        );
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
-            Ok(values) => {
-                RespFrame::Array(Some(values.into_iter().map(RespFrame::Integer).collect()))
+            Ok([v1, v2]) => {
+                RespFrame::Array(Some(vec![RespFrame::Integer(v1), RespFrame::Integer(v2)]))
             }
             Err(err) => CommandError::Store(err).to_resp(),
         };
@@ -38140,16 +38130,8 @@ impl Runtime {
         let result = match cmd {
             // store.srandmember records its own keyspace lookup (record_keyspace_lookup).
             PlainRandMemberCmd::Srandmember => self.server.store.srandmember(key, now_ms),
-            // store.hrandfield / store.zrandmember are no-stat: mirror the generic's
-            // record_source_key_lookups(store, &[key]) (one exists_no_touch) first.
-            PlainRandMemberCmd::Hrandfield => {
-                let _ = self.server.store.exists_no_touch(key, now_ms);
-                self.server.store.hrandfield(key, now_ms)
-            }
-            PlainRandMemberCmd::Zrandmember => {
-                let _ = self.server.store.exists_no_touch(key, now_ms);
-                self.server.store.zrandmember(key, now_ms)
-            }
+            PlainRandMemberCmd::Hrandfield => self.server.store.hrandfield_counted(key, now_ms),
+            PlainRandMemberCmd::Zrandmember => self.server.store.zrandmember_counted(key, now_ms),
         };
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
@@ -38324,24 +38306,25 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // HRANDFIELD is no-stat; record the single keyspace access first (mirrors the RespFrame arm).
-        let _ = self.server.store.exists_no_touch(key, now_ms);
-        let result = self.server.store.hrandfield_borrow(key, now_ms, |m| {
-            if suppress_reply {
-                return;
-            }
-            match m {
-                Some(field) => fr_protocol::encode_bulk_string_slice(Some(field), resp3, out),
-                None => {
-                    let nil = RespFrame::BulkString(None);
-                    if resp3 {
-                        nil.encode_into_resp3(out);
-                    } else {
-                        nil.encode_into(out);
+        let result = self
+            .server
+            .store
+            .hrandfield_borrow_counted(key, now_ms, |m| {
+                if suppress_reply {
+                    return;
+                }
+                match m {
+                    Some(field) => fr_protocol::encode_bulk_string_slice(Some(field), resp3, out),
+                    None => {
+                        let nil = RespFrame::BulkString(None);
+                        if resp3 {
+                            nil.encode_into_resp3(out);
+                        } else {
+                            nil.encode_into(out);
+                        }
                     }
                 }
-            }
-        });
+            });
         let elapsed_us = self.finish_chained_command(start);
         let mut error_reply = None;
         if let Err(err) = result {
@@ -38448,8 +38431,11 @@ impl Runtime {
                 }
             }
             PlainRandMemberCmd::Hrandfield => {
-                let _ = self.server.store.exists_no_touch(key, now_ms);
-                match self.server.store.hrandfield_count(key, count, now_ms) {
+                match self
+                    .server
+                    .store
+                    .hrandfield_count_counted(key, count, now_ms)
+                {
                     Ok(pairs) => RespFrame::Array(Some(
                         pairs
                             .into_iter()
@@ -38460,8 +38446,11 @@ impl Runtime {
                 }
             }
             PlainRandMemberCmd::Zrandmember => {
-                let _ = self.server.store.exists_no_touch(key, now_ms);
-                match self.server.store.zrandmember_count(key, count, now_ms) {
+                match self
+                    .server
+                    .store
+                    .zrandmember_count_counted(key, count, now_ms)
+                {
                     Ok(pairs) => RespFrame::Array(Some(
                         pairs
                             .into_iter()
@@ -38682,25 +38671,22 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // HRANDFIELD count is no-stat; record the single keyspace access first (mirrors the
-        // RespFrame Hrandfield arm) before the no-stat borrow-scan.
-        let _ = self.server.store.exists_no_touch(key, now_ms);
-        let result =
-            self.server
-                .store
-                .hrandfield_count_field_borrow_scan(key, count, now_ms, |ev| {
-                    if suppress_reply {
-                        return;
+        let result = self
+            .server
+            .store
+            .hrandfield_count_field_borrow_scan_counted(key, count, now_ms, |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
                     }
-                    match ev {
-                        fr_store::SmembersScanEvent::Len(n) => {
-                            fr_protocol::encode_aggregate_header(n, false, out);
-                        }
-                        fr_store::SmembersScanEvent::Member(m) => {
-                            fr_protocol::encode_bulk_string_slice(Some(m), false, out);
-                        }
+                    fr_store::SmembersScanEvent::Member(m) => {
+                        fr_protocol::encode_bulk_string_slice(Some(m), false, out);
                     }
-                });
+                }
+            });
         let elapsed_us = self.finish_chained_command(start);
         let mut error_reply = None;
         if let Err(err) = result {
@@ -38791,11 +38777,10 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let _ = self.server.store.exists_no_touch(key, now_ms);
         let result =
             self.server
                 .store
-                .hrandfield_count_pair_borrow_scan(key, count, now_ms, |ev| {
+                .hrandfield_count_pair_borrow_scan_counted(key, count, now_ms, |ev| {
                     if suppress_reply {
                         return;
                     }
@@ -38928,45 +38913,30 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let _ = self.server.store.exists_no_touch(key, now_ms);
-        let result =
-            self.server
-                .store
-                .zrandmember_count_withscores_borrow_scan(key, count, now_ms, |ev| {
-                    if suppress_reply {
-                        return;
-                    }
-                    match ev {
-                        fr_store::ZRangeWithScoresScanEvent::Len(n) => {
-                            if resp3 {
-                                fr_protocol::encode_aggregate_header(n, false, out);
-                            } else {
-                                fr_protocol::encode_aggregate_header(n * 2, false, out);
-                            }
-                        }
-                        fr_store::ZRangeWithScoresScanEvent::Pair(member, score) => {
-                            if resp3 {
-                                fr_protocol::encode_aggregate_header(2, false, out);
-                            }
-                            fr_protocol::encode_bulk_string_slice(Some(member), false, out);
-                            if resp3 {
-                                // (frankenredis-rc-zrandmember-resp3-double) A RESP3 client
-                                // gets the score as a Double (`,3`), the way ZRANGE WITHSCORES
-                                // and 7.2.4's addReplyDouble do; this path wrote a bulk string
-                                // under both protocols and was the one RESP3 typing divergence
-                                // resp3_reply_type_gate still reported.
-                                RespFrame::double_from_f64(score).encode_into_resp3(out);
-                            } else {
-                                let ss = fr_store::redis_score_to_string(score);
-                                fr_protocol::encode_bulk_string_slice(
-                                    Some(ss.as_bytes()),
-                                    false,
-                                    out,
-                                );
-                            }
+        let result = self
+            .server
+            .store
+            .zrandmember_count_withscores_borrow_scan_counted(key, count, now_ms, |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::ZRangeWithScoresScanEvent::Len(n) => {
+                        if resp3 {
+                            fr_protocol::encode_aggregate_header(n, false, out);
+                        } else {
+                            fr_protocol::encode_aggregate_header(n * 2, false, out);
                         }
                     }
-                });
+                    fr_store::ZRangeWithScoresScanEvent::Pair(member, score) => {
+                        if resp3 {
+                            fr_protocol::encode_aggregate_header(2, false, out);
+                        }
+                        fr_protocol::encode_bulk_string_slice(Some(member), false, out);
+                        fr_protocol::encode_redis_double(score, resp3, out);
+                    }
+                }
+            });
         let elapsed_us = self.finish_chained_command(start);
         let mut error_reply = None;
         if let Err(err) = result {
@@ -39076,25 +39046,22 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // ZRANDMEMBER count is no-stat; record the single keyspace access first (mirrors the
-        // RespFrame Zrandmember arm) before the no-stat borrow-scan.
-        let _ = self.server.store.exists_no_touch(key, now_ms);
-        let result =
-            self.server
-                .store
-                .zrandmember_count_member_borrow_scan(key, count, now_ms, |ev| {
-                    if suppress_reply {
-                        return;
+        let result = self
+            .server
+            .store
+            .zrandmember_count_member_borrow_scan_counted(key, count, now_ms, |ev| {
+                if suppress_reply {
+                    return;
+                }
+                match ev {
+                    fr_store::SmembersScanEvent::Len(n) => {
+                        fr_protocol::encode_aggregate_header(n, false, out);
                     }
-                    match ev {
-                        fr_store::SmembersScanEvent::Len(n) => {
-                            fr_protocol::encode_aggregate_header(n, false, out);
-                        }
-                        fr_store::SmembersScanEvent::Member(m) => {
-                            fr_protocol::encode_bulk_string_slice(Some(m), false, out);
-                        }
+                    fr_store::SmembersScanEvent::Member(m) => {
+                        fr_protocol::encode_bulk_string_slice(Some(m), false, out);
                     }
-                });
+                }
+            });
         let elapsed_us = self.finish_chained_command(start);
         let mut error_reply = None;
         if let Err(err) = result {
