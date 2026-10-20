@@ -1635,6 +1635,10 @@ impl HashFieldMap {
     /// a single `get_mut`. The promotion check fires under the identical condition
     /// as `insert` (new field only), so the encoding transition is unchanged.
     pub fn insert_borrowed(&mut self, field: &[u8], value: Vec<u8>) -> bool {
+        self.insert_borrowed_slice(field, &value)
+    }
+
+    pub fn insert_borrowed_slice(&mut self, field: &[u8], value: &[u8]) -> bool {
         self.materialize_listpack();
         // (cc_fr) O(1) promotion precondition before the O(n) `contains_key` locate scan (see
         // `insert`): the steady-state small-hash HSET (below all caps) short-circuits and skips
@@ -1649,12 +1653,52 @@ impl HashFieldMap {
             self.promote();
         }
         match self {
-            HashFieldMap::Packed(p) => p.insert_borrowed(field, value),
+            HashFieldMap::Packed(p) => p.insert_borrowed_slice(field, value),
             // CompactFieldMap::insert_borrowed keeps an existing field's
             // position and reports "newly added" directly, matching the IndexMap
             // get_mut/insert split byte-for-byte while avoiding old-value
             // allocation on duplicate-field HSET.
-            HashFieldMap::Hash(h) => h.insert_borrowed(field, &value),
+            HashFieldMap::Hash(h) => h.insert_borrowed(field, value),
+            HashFieldMap::Listpack(_) => unreachable!("listpack was materialized before mutation"),
+        }
+    }
+
+    /// Borrowed `HSETNX` primitive: inserts `(field, value)` iff `field` is absent,
+    /// returning `true` when inserted and `false` when already present. Avoids
+    /// materializing a retained listpack or allocating `Vec<u8>` on an existing field,
+    /// and avoids a second scan/probe when inserting a new field.
+    pub fn insert_if_absent(&mut self, field: &[u8], value: &[u8]) -> bool {
+        match self {
+            HashFieldMap::Listpack(l) => {
+                if l.get(field).is_some() {
+                    return false;
+                }
+                self.materialize_listpack();
+                self.append_known_absent_after_materialize(field, value);
+                true
+            }
+            HashFieldMap::Packed(p) => {
+                if p.contains_key(field) {
+                    return false;
+                }
+                self.append_known_absent_after_materialize(field, value);
+                true
+            }
+            HashFieldMap::Hash(h) => h.insert_if_absent(field, value),
+        }
+    }
+
+    fn append_known_absent_after_materialize(&mut self, field: &[u8], value: &[u8]) {
+        if let HashFieldMap::Packed(p) = self
+            && (p.len() >= PACKED_MAX_ENTRIES
+                || field.len() > PACKED_MAX_VALUE
+                || value.len() > PACKED_MAX_VALUE)
+        {
+            self.promote();
+        }
+        match self {
+            HashFieldMap::Packed(p) => p.append(field, value),
+            HashFieldMap::Hash(h) => h.append_known_absent(field, value),
             HashFieldMap::Listpack(_) => unreachable!("listpack was materialized before mutation"),
         }
     }
@@ -2156,6 +2200,47 @@ impl CompactFieldMap {
         }
 
         // New field. Ensure load factor < 0.75 (count slots used incl tombstones).
+        let used = self.order.len() + self.tombs + 1;
+        if self.slots.is_empty() || used * 4 >= self.slots.len() * 3 {
+            let target = (self.order.len() + 1) * 2;
+            self.rehash(target.max(self.slots.len()));
+        }
+        let new_off = self.append_entry(field, value);
+        let pos = self.order.len();
+        self.order.push(new_off);
+        let mask = self.slots.len() - 1;
+        let tag = (h >> 56) as u8;
+        let mut slot = (h as usize) & mask;
+        let mut first_tomb: Option<usize> = None;
+        loop {
+            let s = self.slots[slot];
+            if s == CFM_EMPTY {
+                let target = first_tomb.unwrap_or(slot);
+                if self.slots[target] == CFM_TOMB {
+                    self.tombs -= 1;
+                }
+                self.slots[target] = (pos as u32) + 2;
+                self.tags[target] = tag;
+                self.slot_of.push(target as u32);
+                break;
+            }
+            if s == CFM_TOMB && first_tomb.is_none() {
+                first_tomb = Some(slot);
+            }
+            slot = (slot + 1) & mask;
+        }
+        self.maybe_compact();
+        true
+    }
+
+    /// Borrowed `HSETNX` primitive for [`CompactFieldMap`]: hashes `field` once,
+    /// returns `false` if already present, and otherwise appends and indexes the
+    /// new entry using the same precomputed hash.
+    pub(crate) fn insert_if_absent(&mut self, field: &[u8], value: &[u8]) -> bool {
+        let h = self.hash(field);
+        if self.lookup_slot_prehashed(field, h).is_some() {
+            return false;
+        }
         let used = self.order.len() + self.tombs + 1;
         if self.slots.is_empty() || used * 4 >= self.slots.len() * 3 {
             let target = (self.order.len() + 1) * 2;
@@ -3978,26 +4063,48 @@ impl PackedStrMap {
     /// position exactly like `IndexMap::insert`, but avoid materializing the
     /// field key and old value.
     pub fn insert_borrowed(&mut self, field: &[u8], value: Vec<u8>) -> bool {
+        self.insert_borrowed_slice(field, &value)
+    }
+
+    pub fn insert_borrowed_slice(&mut self, field: &[u8], value: &[u8]) -> bool {
         if let Some(l) = self.locate(field) {
             let (value_len_prefix, value_len_prefix_len) = encode_varint_array(value.len());
             let new_encoded_len = value_len_prefix_len + value.len();
-            if new_encoded_len == l.value_end - l.value_enc_start {
+            let old_encoded_len = l.value_end - l.value_enc_start;
+            if new_encoded_len == old_encoded_len {
                 let value_start = l.value_enc_start + value_len_prefix_len;
                 self.buf[l.value_enc_start..value_start]
                     .copy_from_slice(&value_len_prefix[..value_len_prefix_len]);
-                self.buf[value_start..l.value_end].copy_from_slice(&value);
+                self.buf[value_start..l.value_end].copy_from_slice(value);
+            } else if new_encoded_len > old_encoded_len {
+                let grow = new_encoded_len - old_encoded_len;
+                let old_buf_len = self.buf.len();
+                self.buf.resize(old_buf_len + grow, 0);
+                self.buf
+                    .copy_within(l.value_end..old_buf_len, l.value_end + grow);
+                let value_start = l.value_enc_start + value_len_prefix_len;
+                self.buf[l.value_enc_start..value_start]
+                    .copy_from_slice(&value_len_prefix[..value_len_prefix_len]);
+                self.buf[value_start..l.value_enc_start + new_encoded_len].copy_from_slice(value);
             } else {
-                let mut encoded = Vec::with_capacity(new_encoded_len);
-                encoded.extend_from_slice(&value_len_prefix[..value_len_prefix_len]);
-                encoded.extend_from_slice(&value);
-                self.buf.splice(l.value_enc_start..l.value_end, encoded);
+                let shrink = old_encoded_len - new_encoded_len;
+                let old_buf_len = self.buf.len();
+                let value_start = l.value_enc_start + value_len_prefix_len;
+                self.buf[l.value_enc_start..value_start]
+                    .copy_from_slice(&value_len_prefix[..value_len_prefix_len]);
+                self.buf[value_start..l.value_enc_start + new_encoded_len].copy_from_slice(value);
+                self.buf.copy_within(
+                    l.value_end..old_buf_len,
+                    l.value_enc_start + new_encoded_len,
+                );
+                self.buf.truncate(old_buf_len - shrink);
             }
             false
         } else {
             write_varint(&mut self.buf, field.len());
             self.buf.extend_from_slice(field);
             write_varint(&mut self.buf, value.len());
-            self.buf.extend_from_slice(&value);
+            self.buf.extend_from_slice(value);
             self.len += 1;
             true
         }
@@ -4257,7 +4364,31 @@ impl PackedList {
         let Some((rs, _es, ee)) = self.bounds(idx) else {
             return false;
         };
-        self.buf.splice(rs..ee, Self::encode(elem));
+        let (prefix, prefix_len) = encode_varint_array(elem.len());
+        let record_len = prefix_len + elem.len();
+        let old_record_len = ee - rs;
+        if record_len == old_record_len {
+            let elem_start = rs + prefix_len;
+            self.buf[rs..elem_start].copy_from_slice(&prefix[..prefix_len]);
+            self.buf[elem_start..ee].copy_from_slice(elem);
+        } else if record_len > old_record_len {
+            let grow = record_len - old_record_len;
+            let old_len = self.buf.len();
+            self.buf.reserve(grow);
+            self.buf.resize(old_len + grow, 0);
+            self.buf.copy_within(ee..old_len, ee + grow);
+            let elem_start = rs + prefix_len;
+            self.buf[rs..elem_start].copy_from_slice(&prefix[..prefix_len]);
+            self.buf[elem_start..rs + record_len].copy_from_slice(elem);
+        } else {
+            let shrink = old_record_len - record_len;
+            let old_len = self.buf.len();
+            let elem_start = rs + prefix_len;
+            self.buf[rs..elem_start].copy_from_slice(&prefix[..prefix_len]);
+            self.buf[elem_start..rs + record_len].copy_from_slice(elem);
+            self.buf.copy_within(ee..old_len, rs + record_len);
+            self.buf.truncate(old_len - shrink);
+        }
         true
     }
 
@@ -4269,7 +4400,15 @@ impl PackedList {
             return;
         }
         let (rs, _es, _ee) = self.bounds(idx).expect("idx < len");
-        self.buf.splice(rs..rs, Self::encode(elem));
+        let (prefix, prefix_len) = encode_varint_array(elem.len());
+        let record_len = prefix_len + elem.len();
+        let old_len = self.buf.len();
+        self.buf.reserve(record_len);
+        self.buf.resize(old_len + record_len, 0);
+        self.buf.copy_within(rs..old_len, rs + record_len);
+        let elem_start = rs + prefix_len;
+        self.buf[rs..elem_start].copy_from_slice(&prefix[..prefix_len]);
+        self.buf[elem_start..rs + record_len].copy_from_slice(elem);
         self.len += 1;
     }
 
@@ -6851,6 +6990,19 @@ impl ListValue {
         }
     }
 
+    pub fn set_slice(&mut self, idx: usize, elem: &[u8]) -> bool {
+        let old_entry_bytes = self.get(idx).map(list_lp_entry_bytes);
+        let Some(old_entry_bytes) = old_entry_bytes else {
+            return false;
+        };
+        let base = self.lp_bytes - old_entry_bytes;
+        self.lp_bytes = base + list_lp_entry_bytes(elem);
+        match self.repr_mut() {
+            ListRepr::Packed(p) => p.set(idx, elem),
+            ListRepr::Deque(d) => Arc::make_mut(d).set(idx, elem.to_vec()),
+        }
+    }
+
     /// Insert before index `idx` (`idx >= len` appends), matching `VecDeque::insert`.
     /// The caller (LINSERT) makes the conversion decision via `note_command_grow`.
     pub fn insert(&mut self, idx: usize, elem: Vec<u8>) {
@@ -6859,6 +7011,15 @@ impl ListValue {
         match self.repr_mut() {
             ListRepr::Packed(p) => p.insert(idx, &elem),
             ListRepr::Deque(d) => Arc::make_mut(d).insert(idx, elem),
+        }
+    }
+
+    pub fn insert_slice(&mut self, idx: usize, elem: &[u8]) {
+        self.add_entry_bytes(elem);
+        self.maybe_promote(elem.len());
+        match self.repr_mut() {
+            ListRepr::Packed(p) => p.insert(idx, elem),
+            ListRepr::Deque(d) => Arc::make_mut(d).insert(idx, elem.to_vec()),
         }
     }
 

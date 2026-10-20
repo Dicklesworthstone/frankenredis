@@ -10838,7 +10838,7 @@ impl Runtime {
         let reply = match self
             .server
             .store
-            .hset_borrowed(key, field, value.to_vec(), now_ms)
+            .hset_borrowed_slice(key, field, value, now_ms)
         {
             Ok(added) => RespFrame::Integer(i64::from(added)),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -13976,7 +13976,7 @@ impl Runtime {
                 match self
                     .server
                     .store
-                    .hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)
+                    .hset_borrowed_slice(key, pair[0], pair[1], now_ms)
                 {
                     Ok(true) => added += 1,
                     Ok(false) => {}
@@ -14161,7 +14161,7 @@ impl Runtime {
                 match self
                     .server
                     .store
-                    .hset_borrowed(key, pair[0], pair[1].to_vec(), now_ms)
+                    .hset_borrowed_slice(key, pair[0], pair[1], now_ms)
                 {
                     Ok(_) => {}
                     Err(err) => {
@@ -15062,6 +15062,26 @@ impl Runtime {
         borrowed_fields: &[(&[u8], &[u8])],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_xadd_borrowed_with_default_write_gate(
+            key,
+            nomkstream_arg,
+            id_arg,
+            borrowed_fields,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_xadd_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        nomkstream_arg: Option<&[u8]>,
+        id_arg: &[u8],
+        borrowed_fields: &[(&[u8], &[u8])],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         let nomkstream = nomkstream_arg.is_some();
         if !(1..=2).contains(&borrowed_fields.len()) || (nomkstream && borrowed_fields.len() != 1) {
             return None;
@@ -15096,7 +15116,7 @@ impl Runtime {
         } else {
             None
         };
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -15122,11 +15142,7 @@ impl Runtime {
 
         let start = self.chained_command_start();
         let reply = if let Some(id) = id {
-            let fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed_fields
-                .iter()
-                .map(|&(field, value)| (field.to_vec(), value.to_vec()))
-                .collect();
-            match self.server.store.xadd(key, id, &fields, now_ms) {
+            match self.server.store.xadd(key, id, borrowed_fields, now_ms) {
                 Ok(()) => RespFrame::BulkString(Some(fr_command::format_stream_id(id))),
                 Err(err) => CommandError::Store(err).to_resp(),
             }
@@ -15202,6 +15218,35 @@ impl Runtime {
         borrowed_fields: &[(&[u8], &[u8])],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_xadd_maxlen_approx_borrowed_with_default_write_gate(
+            key,
+            maxlen_keyword,
+            approx_keyword,
+            threshold_arg,
+            limit_keyword,
+            limit_arg,
+            id_arg,
+            borrowed_fields,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_xadd_maxlen_approx_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        maxlen_keyword: &[u8],
+        approx_keyword: &[u8],
+        threshold_arg: &[u8],
+        limit_keyword: Option<&[u8]>,
+        limit_arg: Option<&[u8]>,
+        id_arg: &[u8],
+        borrowed_fields: &[(&[u8], &[u8])],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if limit_keyword.is_some() != limit_arg.is_some() {
             return None;
         }
@@ -15254,7 +15299,7 @@ impl Runtime {
         // lookup/auto-ID, then enter the conservative default-write gate.
         let last_id = self.server.store.xlast_id_no_stat(key, now_ms).ok()?;
         let id = fr_command::next_auto_stream_id(last_id, now_ms)?;
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -15283,11 +15328,7 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed_fields
-            .iter()
-            .map(|&(field, value)| (field.to_vec(), value.to_vec()))
-            .collect();
-        let reply = match self.server.store.xadd(key, id, &fields, now_ms) {
+        let reply = match self.server.store.xadd(key, id, borrowed_fields, now_ms) {
             Ok(()) => {
                 // Inline trimming removes entries but, like upstream XADD, must
                 // not add dirty units beyond the append itself.
@@ -25353,11 +25394,11 @@ impl Runtime {
     }
 
     fn can_execute_plain_hsetnx_borrowed(
-        &mut self,
+        &self,
         key: &[u8],
         field: &[u8],
         value: &[u8],
-        now_ms: u64,
+        default_write_allowed: bool,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"HSETNX".len()
@@ -25367,11 +25408,11 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
     }
 
     /// (frankenredis-hsetnxfast) Conservative borrowed WRITE fast path for `HSETNX
-    /// key field value`. Mirrors the generic hsetnx EXACTLY: `store.hsetnx` sets
+    /// key field value`. Mirrors the generic hsetnx EXACTLY: `store.hsetnx_borrowed` sets
     /// the field only if absent (creating the hash as needed) and returns whether
     /// it was set → `Integer(set)`, or the same CommandError::Store(err).to_resp()
     /// mapping on a wrong-type key (WRONGTYPE). Gated by the WRITE predicate, so
@@ -25383,7 +25424,25 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_hsetnx_borrowed(key, field, value, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_hsetnx_borrowed_with_default_write_gate(
+            key,
+            field,
+            value,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_hsetnx_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_hsetnx_borrowed(key, field, value, default_write_allowed) {
             return None;
         }
 
@@ -25401,10 +25460,7 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let result = self
-            .server
-            .store
-            .hsetnx(key, field.to_vec(), value.to_vec(), now_ms);
+        let result = self.server.store.hsetnx_borrowed(key, field, value, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(set) => RespFrame::Integer(i64::from(set)),
@@ -25501,11 +25557,11 @@ impl Runtime {
     }
 
     fn can_execute_plain_linsert_borrowed(
-        &mut self,
+        &self,
         key: &[u8],
         pivot: &[u8],
         value: &[u8],
-        now_ms: u64,
+        default_write_allowed: bool,
     ) -> bool {
         if self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"LINSERT".len()
@@ -25515,22 +25571,18 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
     }
 
     /// (frankenredis-linsfast) Conservative borrowed WRITE fast path for `LINSERT
     /// key BEFORE|AFTER pivot element`. Mirrors the generic linsert handler
-    /// EXACTLY: dispatches to `store.linsert_before`/`store.linsert_after` (which
-    /// own type-check, pivot search, dirty tracking, and digest/LFU updates) and
+    /// EXACTLY: dispatches to `store.linsert_before_borrowed`/`store.linsert_after_borrowed`
+    /// (which own type-check, pivot search, dirty tracking, and digest/LFU updates) and
     /// returns the new list length, `-1` (pivot absent), or `0` (key missing) as
     /// `Integer`, or `CommandError::Store(err).to_resp()` (WRONGTYPE) — identical
     /// to fr-command::linsert. Gated by the WRITE predicate, so the "linsert"
     /// keyspace event, replica/AOF propagation, and tracking are inactive and need
-    /// not be emitted here. `before` selects BEFORE (true) vs AFTER (false); the
-    /// caller resolved the direction token and falls back to the generic syntax-
-    /// error path for any other token. `value.to_vec()` matches the generic
-    /// `argv[4].clone()`, so alloc behaviour is identical and the win is the
-    /// skipped argv materialization + dispatch.
+    /// not be emitted here.
     pub fn execute_plain_linsert_borrowed(
         &mut self,
         key: &[u8],
@@ -25539,7 +25591,27 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_linsert_borrowed(key, pivot, value, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_linsert_borrowed_with_default_write_gate(
+            key,
+            before,
+            pivot,
+            value,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_linsert_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        before: bool,
+        pivot: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_linsert_borrowed(key, pivot, value, default_write_allowed) {
             return None;
         }
 
@@ -25568,11 +25640,11 @@ impl Runtime {
         let result = if before {
             self.server
                 .store
-                .linsert_before(key, pivot, value.to_vec(), now_ms)
+                .linsert_before_borrowed(key, pivot, value, now_ms)
         } else {
             self.server
                 .store
-                .linsert_after(key, pivot, value.to_vec(), now_ms)
+                .linsert_after_borrowed(key, pivot, value, now_ms)
         };
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
@@ -31753,6 +31825,34 @@ impl Runtime {
         keys: &[&[u8]],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zstore_borrowed_with_default_write_gate(
+            which,
+            name_lower,
+            name_upper,
+            dest,
+            numkeys_arg,
+            keys,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "borrowed zstore dispatcher carries command identity plus parsed wire slices"
+    )]
+    pub fn execute_plain_zstore_borrowed_with_default_write_gate(
+        &mut self,
+        which: u8,
+        name_lower: &'static str,
+        name_upper: &'static str,
+        dest: &[u8],
+        numkeys_arg: &[u8],
+        keys: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < keys.len() + 3
             || self.policy.gate.max_bulk_len < name_upper.len()
             || dest.len() > self.policy.gate.max_bulk_len
@@ -31764,7 +31864,7 @@ impl Runtime {
         if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(keys.len() as i64) {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let argv_len_sum = name_upper.len()
@@ -31780,15 +31880,22 @@ impl Runtime {
                     break 'reply CommandError::Store(err).to_resp();
                 }
             }
-            let weights = vec![1.0_f64; keys.len()];
+            const DEFAULT_WEIGHTS: [f64; 8] = [1.0; 8];
+            let mut heap_weights: Vec<f64> = Vec::new();
+            let weights: &[f64] = if keys.len() <= DEFAULT_WEIGHTS.len() {
+                &DEFAULT_WEIGHTS[..keys.len()]
+            } else {
+                heap_weights.resize(keys.len(), 1.0);
+                &heap_weights
+            };
             let result = if which == b'U' {
                 self.server
                     .store
-                    .zunionstore(dest, keys, &weights, b"SUM", now_ms)
+                    .zunionstore(dest, keys, weights, b"SUM", now_ms)
             } else {
                 self.server
                     .store
-                    .zinterstore(dest, keys, &weights, b"SUM", now_ms)
+                    .zinterstore(dest, keys, weights, b"SUM", now_ms)
             };
             match result {
                 Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
@@ -31885,6 +31992,29 @@ impl Runtime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_zrangestore_bound_borrowed_with_default_write_gate(
+        &mut self,
+        dst: &[u8],
+        src: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        lex: bool,
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zrangestore_bound_limit_borrowed_with_default_write_gate(
+            dst,
+            src,
+            min_arg,
+            max_arg,
+            lex,
+            None,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
     /// (frankenredis-gvm6z) Same body, with the arity-9 `LIMIT offset count` tail.
     ///
     /// MEASURED MOTIVE: `zrangestore_limit` sits on the GENERIC path at 3,961.5 instr/op of
@@ -31909,6 +32039,31 @@ impl Runtime {
         lex: bool,
         limit: Option<(&[u8], &[u8])>,
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zrangestore_bound_limit_borrowed_with_default_write_gate(
+            dst,
+            src,
+            min_arg,
+            max_arg,
+            lex,
+            limit,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_zrangestore_bound_limit_borrowed_with_default_write_gate(
+        &mut self,
+        dst: &[u8],
+        src: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        lex: bool,
+        limit: Option<(&[u8], &[u8])>,
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < if limit.is_some() { 9 } else { 6 }
             || self.policy.gate.max_bulk_len < b"ZRANGESTORE".len()
@@ -31946,7 +32101,7 @@ impl Runtime {
             }
             None => (0usize, None),
         };
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -31977,10 +32132,7 @@ impl Runtime {
                     // Fully-inverted range on a zset or missing key: generic DELETES dst and
                     // replies 0 before any walk.
                     Ok(true) => {
-                        let dst_key = dst.to_vec();
-                        self.server
-                            .store
-                            .del(std::slice::from_ref(&dst_key), now_ms);
+                        self.server.store.del_borrowed(&[dst], now_ms);
                         break 'reply RespFrame::Integer(0);
                     }
                     Ok(false) => {}
@@ -32069,6 +32221,29 @@ impl Runtime {
         rev: bool,
         now_ms: u64,
     ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zrangestore_borrowed_with_default_write_gate(
+            dst,
+            src,
+            start_arg,
+            stop_arg,
+            rev,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_zrangestore_borrowed_with_default_write_gate(
+        &mut self,
+        dst: &[u8],
+        src: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        rev: bool,
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
         // (frankenredis-gvm6z) `rev` selects the RANK-REVERSED form, `ZRANGESTORE dst src
         // start stop REV` at arity 6. It is the ONLY difference: generic's rank branch is
         // `if rev { zrevrange_withscores } else { zrange_withscores }` with identical
@@ -32087,7 +32262,7 @@ impl Runtime {
         }
         let start = fr_command::parse_i64_arg(start_arg).ok()?;
         let stop = fr_command::parse_i64_arg(stop_arg).ok()?;
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -32165,7 +32340,24 @@ impl Runtime {
         keys: &[&[u8]],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        self.execute_plain_zstore_borrowed(
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zunionstore_borrowed_with_default_write_gate(
+            dest,
+            nk,
+            keys,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+    pub fn execute_plain_zunionstore_borrowed_with_default_write_gate(
+        &mut self,
+        dest: &[u8],
+        nk: &[u8],
+        keys: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zstore_borrowed_with_default_write_gate(
             b'U',
             "zunionstore",
             "ZUNIONSTORE",
@@ -32173,6 +32365,7 @@ impl Runtime {
             nk,
             keys,
             now_ms,
+            default_write_allowed,
         )
     }
     pub fn execute_plain_zinterstore_borrowed(
@@ -32182,7 +32375,24 @@ impl Runtime {
         keys: &[&[u8]],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        self.execute_plain_zstore_borrowed(
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zinterstore_borrowed_with_default_write_gate(
+            dest,
+            nk,
+            keys,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+    pub fn execute_plain_zinterstore_borrowed_with_default_write_gate(
+        &mut self,
+        dest: &[u8],
+        nk: &[u8],
+        keys: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zstore_borrowed_with_default_write_gate(
             b'I',
             "zinterstore",
             "ZINTERSTORE",
@@ -32190,22 +32400,40 @@ impl Runtime {
             nk,
             keys,
             now_ms,
+            default_write_allowed,
         )
     }
 
     /// (frankenredis-zdiffstore2fast) Borrowed WRITE fast path for `ZDIFFSTORE dest
     /// 2 k1 k2`. Mirrors fr-command::zdiffstore byte-for-byte for the *5 form:
     /// record_source_key_lookups([k1,k2]) → ensure_zset_or_set_source on BOTH keys
-    /// (WRONGTYPE) → members of k1 absent from k2 → store_sorted_set_from_pairs(dest)
-    /// → Integer(count). (ZDIFFSTORE does NOT sort the result before storing — the
-    /// sorted-set build orders by score; the reply is just the count.) Fires only
-    /// when numkeys==2; other numkeys forms fall through to generic.
+    /// (WRONGTYPE) → members of k1 absent from k2 → zdiffstore_no_stats(dest)
+    /// → Integer(count). Fires only when numkeys==2; other numkeys forms fall through
+    /// to generic.
     pub fn execute_plain_zdiffstore_borrowed(
         &mut self,
         dest: &[u8],
         numkeys_arg: &[u8],
         keys: &[&[u8]],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zdiffstore_borrowed_with_default_write_gate(
+            dest,
+            numkeys_arg,
+            keys,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_zdiffstore_borrowed_with_default_write_gate(
+        &mut self,
+        dest: &[u8],
+        numkeys_arg: &[u8],
+        keys: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < keys.len() + 3
             || self.policy.gate.max_bulk_len < b"ZDIFFSTORE".len()
@@ -32218,7 +32446,7 @@ impl Runtime {
         if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(keys.len() as i64) {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
         let argv_len_sum = b"ZDIFFSTORE".len()
@@ -32234,16 +32462,7 @@ impl Runtime {
                     break 'reply CommandError::Store(err).to_resp();
                 }
             }
-            // (CrimsonHawk) Resolve each source view ONCE (see zdiff_members_no_stats)
-            // instead of re-running entries.get(k) on every member probe. Wrong-type
-            // was already rejected by ensure_zset_or_set_source above, so the diff
-            // core cannot error here. Byte-exact: same (member, score) pairs feed the
-            // order-independent dest-set build.
-            let result = self.server.store.zdiff_members_no_stats(keys);
-            let count = result.len();
-            self.server
-                .store
-                .store_sorted_set_from_pairs(dest, result, now_ms);
+            let count = self.server.store.zdiffstore_no_stats(dest, keys, now_ms);
             RespFrame::Integer(count as i64)
         };
         let elapsed_us = self.finish_chained_command(st);
@@ -33091,10 +33310,10 @@ impl Runtime {
     }
 
     fn can_execute_plain_hincrbyfloat_borrowed(
-        &mut self,
+        &self,
         key: &[u8],
         field: &[u8],
-        now_ms: u64,
+        default_write_allowed: bool,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"HINCRBYFLOAT".len()
@@ -33103,7 +33322,7 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
     }
 
     /// (frankenredis-hincrbyfloatfast) Conservative borrowed WRITE fast path for
@@ -33122,7 +33341,25 @@ impl Runtime {
         increment_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_hincrbyfloat_borrowed(key, field, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_hincrbyfloat_borrowed_with_default_write_gate(
+            key,
+            field,
+            increment_arg,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_hincrbyfloat_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        increment_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_hincrbyfloat_borrowed(key, field, default_write_allowed) {
             return None;
         }
         let delta = match parse_f64_arg(increment_arg) {
@@ -33266,11 +33503,11 @@ impl Runtime {
     }
 
     fn can_execute_plain_ltrim_borrowed(
-        &mut self,
+        &self,
         key: &[u8],
         start_arg: &[u8],
         stop_arg: &[u8],
-        now_ms: u64,
+        default_write_allowed: bool,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"LTRIM".len()
@@ -33280,7 +33517,7 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
     }
 
     /// (frankenredis-ltrimfast) Conservative borrowed WRITE fast path for `LTRIM key
@@ -33299,7 +33536,25 @@ impl Runtime {
         stop_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_ltrim_borrowed(key, start_arg, stop_arg, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_ltrim_borrowed_with_default_write_gate(
+            key,
+            start_arg,
+            stop_arg,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_ltrim_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_ltrim_borrowed(key, start_arg, stop_arg, default_write_allowed) {
             return None;
         }
         // Parse the index first (i64 then truncate to i32 — upstream 32-bit index)
@@ -33428,11 +33683,11 @@ impl Runtime {
     }
 
     fn can_execute_plain_lset_borrowed(
-        &mut self,
+        &self,
         key: &[u8],
         index_arg: &[u8],
         value: &[u8],
-        now_ms: u64,
+        default_write_allowed: bool,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"LSET".len()
@@ -33442,14 +33697,14 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
     }
 
     /// (frankenredis-lsetfast) Conservative borrowed WRITE fast path for `LSET key
     /// index value`. Parse the index (i64 truncated to i32, upstream's 32-bit
     /// index), defer on a non-integer so the generic's peek-before-parse ordering
     /// emits the exact "no such key" / WRONGTYPE / "value is not an integer"; then
-    /// `store.lset` once → `+OK` or CommandError::Store(err).to_resp() (KeyNotFound →
+    /// `store.lset_borrowed` once → `+OK` or CommandError::Store(err).to_resp() (KeyNotFound →
     /// "no such key", WrongType → WRONGTYPE, IndexOutOfRange → "index out of range").
     /// This does a SINGLE keyed lookup vs the generic's redundant peek-then-lset
     /// double lookup. Gated by the WRITE predicate, so the "lset" keyspace event,
@@ -33461,14 +33716,32 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_lset_borrowed(key, index_arg, value, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_lset_borrowed_with_default_write_gate(
+            key,
+            index_arg,
+            value,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_lset_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        index_arg: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_lset_borrowed(key, index_arg, value, default_write_allowed) {
             return None;
         }
         // Parse the index first (i64 then truncate to i32 — upstream 32-bit index)
         // and DEFER on a non-integer: the generic peeks the key type before parsing
         // the index, so a bad index on a missing/wrong-type key must surface the
         // key error (no such key / WRONGTYPE) — deferring lets the generic produce
-        // that exact ordering. On a valid index we then call store.lset directly,
+        // that exact ordering. On a valid index we then call store.lset_borrowed directly,
         // which does a SINGLE keyed lookup (returns KeyNotFound / WrongType /
         // IndexOutOfRange) — avoiding the generic's redundant peek-then-lset double
         // lookup, the actual source of LSET's slowdown.
@@ -33488,7 +33761,7 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let result = self.server.store.lset(key, index, value.to_vec(), now_ms);
+        let result = self.server.store.lset_borrowed(key, index, value, now_ms);
         let elapsed_us = self.finish_chained_command(start);
         let reply = match result {
             Ok(()) => RespFrame::SimpleString("OK".to_string()),

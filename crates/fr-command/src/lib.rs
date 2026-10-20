@@ -5528,7 +5528,7 @@ fn hset(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     let mut added = 0_usize;
     let mut i = 2;
     while i + 1 < argv.len() {
-        if store.hset(&argv[1], argv[i].clone(), argv[i + 1].clone(), now_ms)? {
+        if store.hset_borrowed_slice(&argv[1], &argv[i], &argv[i + 1], now_ms)? {
             added += 1;
         }
         i += 2;
@@ -5790,7 +5790,7 @@ fn hmset(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     }
     let mut i = 2;
     while i + 1 < argv.len() {
-        store.hset(&argv[1], argv[i].clone(), argv[i + 1].clone(), now_ms)?;
+        store.hset_borrowed_slice(&argv[1], &argv[i], &argv[i + 1], now_ms)?;
         i += 2;
     }
     Ok(RespFrame::SimpleString("OK".to_string()))
@@ -5809,7 +5809,7 @@ fn hsetnx_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() != 4 {
         return Err(CommandError::WrongArity("HSETNX"));
     }
-    let set = store.hsetnx(&argv[1], argv[2].clone(), argv[3].clone(), now_ms)?;
+    let set = store.hsetnx_borrowed(&argv[1], &argv[2], &argv[3], now_ms)?;
     Ok(RespFrame::Integer(if set { 1 } else { 0 }))
 }
 
@@ -5958,7 +5958,7 @@ fn lset_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     // target index 0. Mirror that truncation for byte-exact parity; LINDEX et al
     // take a 64-bit index upstream and are unaffected.
     let index = i64::from(parse_i64_arg(&argv[2])? as i32);
-    store.lset(&argv[1], index, argv[3].clone(), now_ms)?;
+    store.lset_borrowed(&argv[1], index, &argv[3], now_ms)?;
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
 
@@ -9600,12 +9600,7 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     if idx >= argv.len() || !(argv.len() - idx).is_multiple_of(2) {
         return Err(CommandError::WrongArity("XADD"));
     }
-
-    let mut fields = Vec::with_capacity((argv.len() - idx) / 2);
-    while idx + 1 < argv.len() {
-        fields.push((argv[idx].clone(), argv[idx + 1].clone()));
-        idx += 2;
-    }
+    let field_start_idx = idx;
 
     // XADD is a write (upstream streamTypeLookupWriteOrCreate -> lookupKeyWrite),
     // so resolving the auto-id / existence must NOT bump keyspace_hits/misses.
@@ -9696,14 +9691,34 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     // branch wins when a call is guilty of both: xaddCommand tests errno for
     // EDOM first and only then falls through to this wording.
     const STREAM_LISTPACK_MAX_SIZE: usize = 1 << 30;
-    let totelelen: usize = fields.iter().map(|(f, v)| f.len() + v.len()).sum();
+    let totelelen: usize = argv[field_start_idx..].iter().map(Vec::len).sum();
     if totelelen > STREAM_LISTPACK_MAX_SIZE {
         return Ok(RespFrame::Error(
             "ERR Elements are too large to be stored".to_string(),
         ));
     }
 
-    store.xadd(&argv[1], id, &fields, now_ms)?;
+    let pair_count = (argv.len() - field_start_idx) / 2;
+    if pair_count <= 16 {
+        let mut stack_fields = [(&[][..], &[][..]); 16];
+        for (p_idx, pair) in argv[field_start_idx..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            stack_fields[p_idx] = (pair[0].as_slice(), pair[1].as_slice());
+        }
+        store.xadd(&argv[1], id, &stack_fields[..pair_count], now_ms)?;
+    } else {
+        let fields: Vec<(&[u8], &[u8])> = argv[field_start_idx..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| (pair[0].as_slice(), pair[1].as_slice()))
+            .collect();
+        store.xadd(&argv[1], id, &fields, now_ms)?;
+    }
     // (frankenredis-xaddtrimdirty) Upstream t_stream.c::xaddCommand bumps
     // server.dirty exactly once (for the add). Its inline MAXLEN/MINID trim
     // fires a separate "xtrim" keyspace event but does NOT add to server.dirty —
@@ -16006,10 +16021,10 @@ fn linsert(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     // (frankenredis-re7sp) byte-match BEFORE/AFTER; non-UTF8 -> syntax error (else)
     let direction = &argv[2];
     if direction.eq_ignore_ascii_case(b"BEFORE") {
-        let len = store.linsert_before(&argv[1], &argv[3], argv[4].clone(), now_ms)?;
+        let len = store.linsert_before_borrowed(&argv[1], &argv[3], &argv[4], now_ms)?;
         Ok(RespFrame::Integer(len))
     } else if direction.eq_ignore_ascii_case(b"AFTER") {
-        let len = store.linsert_after(&argv[1], &argv[3], argv[4].clone(), now_ms)?;
+        let len = store.linsert_after_borrowed(&argv[1], &argv[3], &argv[4], now_ms)?;
         Ok(RespFrame::Integer(len))
     } else {
         Err(CommandError::SyntaxError)
@@ -27347,9 +27362,7 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     // rather than re-looking-up every other key in the keyspace per member probe;
     // wrong-type was rejected by ensure_zset_or_set_source above. Byte-identical:
     // same (member, score) survivors feed the order-independent dest-set build.
-    let result = store.zdiff_members_no_stats(&keys);
-    let count = result.len();
-    store.store_sorted_set_from_pairs(dest, result, now_ms);
+    let count = store.zdiffstore_no_stats(dest, &keys, now_ms);
     Ok(RespFrame::Integer(count as i64))
 }
 

@@ -2307,6 +2307,30 @@ impl SortedSet {
         }
     }
 
+    fn from_sorted_unique_borrowed_slice_with_limits(
+        pairs: &[(&[u8], f64)],
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> Self {
+        if pairs.len() <= max_listpack_entries
+            && pairs
+                .iter()
+                .all(|(member, _)| member.len() <= max_listpack_value)
+        {
+            Self {
+                repr: SortedSetRepr::Ready(SortedSetInner::Packed(
+                    PackedZSet::from_sorted_unique_slice_borrowed(pairs),
+                )),
+            }
+        } else {
+            Self {
+                repr: SortedSetRepr::Ready(SortedSetInner::Full(
+                    FullSortedSet::from_sorted_unique_borrowed_pairs(pairs.iter().copied()),
+                )),
+            }
+        }
+    }
+
     fn from_unique_pairs_with_limits(
         pairs: Vec<(Vec<u8>, f64)>,
         max_listpack_entries: usize,
@@ -5250,21 +5274,6 @@ impl<'a> ZSetAlgebraInput<'a> {
                     if !f(member.as_ref(), 1.0) {
                         break;
                     }
-                }
-            }
-        }
-    }
-
-    fn for_each(self, mut f: impl FnMut(&[u8], f64)) {
-        match self {
-            Self::SortedSet(zs) => {
-                for (member, score) in zs.iter() {
-                    f(member, score);
-                }
-            }
-            Self::Set(s) => {
-                for member in s.iter() {
-                    f(member.as_ref(), 1.0);
                 }
             }
         }
@@ -18104,6 +18113,19 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
+        self.hset_borrowed_impl::<true, true>(key, field, &value, now_ms)
+    }
+
+    /// Zero-allocation slice twin of [`Self::hset_borrowed`]: avoids allocating an
+    /// intermediate `Vec<u8>` for `value`, since both `PackedStrMap` and
+    /// `CompactFieldMap` copy `value` directly into their contiguous byte arena.
+    pub fn hset_borrowed_slice(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
         self.hset_borrowed_impl::<true, true>(key, field, value, now_ms)
     }
 
@@ -18125,7 +18147,7 @@ impl Store {
             let mut first_added = false;
             let mut first_error = None;
             for (index, value) in values.iter().enumerate() {
-                match self.hset_borrowed(key, field, value.as_ref().to_vec(), now_ms) {
+                match self.hset_borrowed_slice(key, field, value.as_ref(), now_ms) {
                     Ok(added) if index == 0 => first_added = added,
                     Ok(_) => {}
                     Err(err) if first_error.is_none() => first_error = Some(err),
@@ -18146,15 +18168,11 @@ impl Store {
             .map(|value| value.as_ref().len())
             .max()
             .unwrap_or(0);
-        let final_value = values
-            .last()
-            .expect("values is non-empty")
-            .as_ref()
-            .to_vec();
+        let final_value = values.last().expect("values is non-empty").as_ref();
         let result = match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Hash(hash) => {
-                    let is_new = hash.insert_borrowed(field, final_value);
+                    let is_new = hash.insert_borrowed_slice(field, final_value);
                     entry.touch_lru(now_ms);
                     entry.modification_count = entry.modification_count.wrapping_add(count);
                     Self::refresh_hash_encoding_after_insert::<true>(
@@ -18171,7 +18189,7 @@ impl Store {
             None => {
                 let mut entry = Entry::new(Value::Hash(Box::default()), now_ms);
                 let is_new = match &mut entry.value {
-                    Value::Hash(hash) => hash.insert_borrowed(field, final_value),
+                    Value::Hash(hash) => hash.insert_borrowed_slice(field, final_value),
                     _ => unreachable!("freshly created Hash value"),
                 };
                 entry.touch_lru(now_ms);
@@ -18207,7 +18225,7 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.hset_borrowed_impl::<false, true>(key, field, value, now_ms)
+        self.hset_borrowed_impl::<false, true>(key, field, &value, now_ms)
     }
 
     /// Bench-only baseline: `hset_borrowed` with the O(n) re-scanning encoding refresh (`INCR=false`)
@@ -18220,14 +18238,14 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.hset_borrowed_impl::<true, false>(key, field, value, now_ms)
+        self.hset_borrowed_impl::<true, false>(key, field, &value, now_ms)
     }
 
     fn hset_borrowed_impl<const GETMUT_FIRST: bool, const INCR: bool>(
         &mut self,
         key: &[u8],
         field: &[u8],
-        value: Vec<u8>,
+        value: &[u8],
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0`: the entry access
@@ -18258,7 +18276,7 @@ impl Store {
                 match self.entries.get_mut(key) {
                     Some(entry) => match &mut entry.value {
                         Value::Hash(m) => {
-                            let is_new = m.insert_borrowed(field, value);
+                            let is_new = m.insert_borrowed_slice(field, value);
                             entry.touch_write(now_ms, false);
                             Self::refresh_hash_encoding_after_insert::<INCR>(
                                 entry,
@@ -18274,7 +18292,7 @@ impl Store {
                     None => {
                         let mut entry = Entry::new(Value::Hash(Box::default()), now_ms);
                         let is_new = match &mut entry.value {
-                            Value::Hash(m) => m.insert_borrowed(field, value),
+                            Value::Hash(m) => m.insert_borrowed_slice(field, value),
                             _ => unreachable!("freshly created Hash value"),
                         };
                         entry.touch_write(now_ms, false);
@@ -18293,7 +18311,7 @@ impl Store {
                 let entry = self.internal_entry(key, || Value::Hash(Box::default()), now_ms);
                 match &mut entry.value {
                     Value::Hash(m) => {
-                        let is_new = m.insert_borrowed(field, value);
+                        let is_new = m.insert_borrowed_slice(field, value);
                         entry.touch_write(now_ms, false);
                         Self::refresh_hash_encoding_after_insert::<INCR>(
                             entry,
@@ -18336,7 +18354,7 @@ impl Store {
         }
         let result = match &mut entry.value {
             Value::Hash(m) => {
-                let is_new = m.insert_borrowed(field, value);
+                let is_new = m.insert_borrowed_slice(field, value);
                 entry.touch_write(now_ms, true);
                 // (frankenredis-yp503) Lock the encoding into hashtable
                 // once the hash crosses either listpack threshold.
@@ -19573,12 +19591,12 @@ impl Store {
                 Ok(current) => match current.checked_add(delta) {
                     Some(next) => {
                         // (frankenredis-hincrfast) Borrowed-field upsert (see hsetfast).
-                        // (cc_fr) Format via fr's canonical integer_decimal_bytes (write_u64_digits
-                        // LUT into a stack buffer) not i64::to_string, which routes through the
-                        // fmt::Formatter machinery. Byte-identical decimal bytes.
-                        let v = integer_decimal_bytes(next);
-                        new_value_len = v.len();
-                        m.insert_borrowed(field, v);
+                        // (cc_fr) Format via fr's canonical integer_decimal_into (write_u64_digits
+                        // LUT into a stack buffer) so HINCRBY performs zero heap allocations.
+                        let mut v_buf = [0u8; 21];
+                        let v_len = integer_decimal_into(&mut v_buf, next);
+                        new_value_len = v_len;
+                        m.insert_borrowed_slice(field, &v_buf[..v_len]);
                         touched = true;
                         Ok(next)
                     }
@@ -19636,6 +19654,18 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
+        self.hsetnx_impl::<true, true, true>(key, &field, &value, now_ms)
+    }
+
+    /// Zero-allocation slice twin of [`Self::hsetnx`]: avoids allocating owned
+    /// `Vec<u8>` buffers for `field` and `value`.
+    pub fn hsetnx_borrowed(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
         self.hsetnx_impl::<true, true, true>(key, field, value, now_ms)
     }
 
@@ -19649,7 +19679,7 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.hsetnx_impl::<false, true, false>(key, field, value, now_ms)
+        self.hsetnx_impl::<false, true, false>(key, &field, &value, now_ms)
     }
 
     /// Bench-only baseline: HSETNX with the O(n) re-scanning encoding refresh (`INCR=false`)
@@ -19662,7 +19692,7 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.hsetnx_impl::<true, false, true>(key, field, value, now_ms)
+        self.hsetnx_impl::<true, false, true>(key, &field, &value, now_ms)
     }
 
     /// Exact prior two-probe LFU HSETNX path for the same-binary A/B harness.
@@ -19675,7 +19705,7 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.hsetnx_impl::<true, true, false>(key, field, value, now_ms)
+        self.hsetnx_impl::<true, true, false>(key, &field, &value, now_ms)
     }
 
     /// `COLLAPSE = true` folds HSETNX's allkeys-LFU presence probe into the existing
@@ -19686,8 +19716,8 @@ impl Store {
     fn hsetnx_impl<const GETMUT_FIRST: bool, const INCR: bool, const COLLAPSE: bool>(
         &mut self,
         key: &[u8],
-        field: Vec<u8>,
-        value: Vec<u8>,
+        field: &[u8],
+        value: &[u8],
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
@@ -19705,6 +19735,8 @@ impl Store {
         let rand_sample = if should_bump_lfu { self.next_rand() } else { 0 };
         let max_entries = self.hash_max_listpack_entries;
         let max_value = self.hash_max_listpack_value;
+        let field_len = field.len();
+        let value_len = value.len();
         let apply = |entry: &mut Entry| -> Result<bool, StoreError> {
             if should_bump_lfu {
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -19712,11 +19744,7 @@ impl Store {
             let Value::Hash(m) = &mut entry.value else {
                 return Err(StoreError::WrongType);
             };
-            if !m.contains_key(&field) {
-                // (cc_fr) Capture lengths before the move; drive the O(1) incremental refresh.
-                let field_len = field.len();
-                let value_len = value.len();
-                m.insert(field, value);
+            if m.insert_if_absent(field, value) {
                 entry.touch_write(now_ms, lfu_tracking_enabled);
                 // (frankenredis-yp503) Lock hashtable encoding if threshold crossed. (cc_fr) O(1)
                 // incremental: only the entry count + this new field/value can promote a listpack
@@ -19969,7 +19997,7 @@ impl Store {
                 Ok(next) => {
                     // (frankenredis-hincrfast) Borrowed-field upsert — see HINCRBY above.
                     new_value_len = next.len();
-                    m.insert_borrowed(field, next.clone());
+                    m.insert_borrowed_slice(field, &next);
                     touched = true;
                     Ok(next)
                 }
@@ -21767,6 +21795,16 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<(), StoreError> {
+        self.lset_borrowed(key, index, &value, now_ms)
+    }
+
+    pub fn lset_borrowed(
+        &mut self,
+        key: &[u8],
+        index: i64,
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
         // (the entry access below re-probes entries). Byte-identical; see sadd.
         if self.expires_count != 0 {
@@ -21775,14 +21813,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -21798,7 +21832,7 @@ impl Store {
                             return Err(StoreError::IndexOutOfRange);
                         }
                         let idx = normalize_index(index, len) as usize;
-                        l.set(idx, value);
+                        l.set_slice(idx, value);
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
@@ -22038,6 +22072,16 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
+        self.linsert_before_impl::<true>(key, pivot, &value, now_ms)
+    }
+
+    pub fn linsert_before_borrowed(
+        &mut self,
+        key: &[u8],
+        pivot: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
         self.linsert_before_impl::<true>(key, pivot, value, now_ms)
     }
 
@@ -22053,7 +22097,7 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
-        self.linsert_before_impl::<false>(key, pivot, value, now_ms)
+        self.linsert_before_impl::<false>(key, pivot, &value, now_ms)
     }
 
     /// A/B toggle for the LFU LINSERT BEFORE write-side keyspace-probe collapse. `COLLAPSE = true`
@@ -22065,7 +22109,7 @@ impl Store {
         &mut self,
         key: &[u8],
         pivot: &[u8],
-        value: Vec<u8>,
+        value: &[u8],
         now_ms: u64,
     ) -> Result<i64, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
@@ -22096,7 +22140,7 @@ impl Store {
                         if let Some(pos) = l.iter().position(|v| v == pivot) {
                             let lp_pre = l.listpack_byte_len();
                             let raw_add = value.len() as u64;
-                            l.insert(pos, value);
+                            l.insert_slice(pos, value);
                             l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                             let len = l.len();
                             Self::mark_digest_stale_fields(
@@ -22124,6 +22168,16 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
+        self.linsert_after_impl::<true>(key, pivot, &value, now_ms)
+    }
+
+    pub fn linsert_after_borrowed(
+        &mut self,
+        key: &[u8],
+        pivot: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<i64, StoreError> {
         self.linsert_after_impl::<true>(key, pivot, value, now_ms)
     }
 
@@ -22137,7 +22191,7 @@ impl Store {
         value: Vec<u8>,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
-        self.linsert_after_impl::<false>(key, pivot, value, now_ms)
+        self.linsert_after_impl::<false>(key, pivot, &value, now_ms)
     }
 
     /// A/B toggle for the LFU LINSERT AFTER write-side keyspace-probe collapse — the `pos + 1` twin of
@@ -22148,7 +22202,7 @@ impl Store {
         &mut self,
         key: &[u8],
         pivot: &[u8],
-        value: Vec<u8>,
+        value: &[u8],
         now_ms: u64,
     ) -> Result<i64, StoreError> {
         // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
@@ -22179,7 +22233,7 @@ impl Store {
                         if let Some(pos) = l.iter().position(|v| v == pivot) {
                             let lp_pre = l.listpack_byte_len();
                             let raw_add = value.len() as u64;
-                            l.insert(pos + 1, value);
+                            l.insert_slice(pos + 1, value);
                             l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
                             let len = l.len();
                             Self::mark_digest_stale_fields(
@@ -27077,6 +27131,36 @@ impl Store {
         }
     }
 
+    /// Compute the sorted-set difference of `keys` without touching stats and store
+    /// the resulting sorted set directly into `dest` without intermediate `(Vec<u8>, f64)`
+    /// member allocations or redundant sorting when `keys[0]` is a `SortedSet`.
+    pub fn zdiffstore_no_stats(&mut self, dest: &[u8], keys: &[&[u8]], now_ms: u64) -> usize {
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
+        let built = self.zdiff_members_no_stats_with_slices(keys, |pairs| {
+            if pairs.is_empty() {
+                None
+            } else {
+                Some(SortedSet::from_sorted_unique_borrowed_slice_with_limits(
+                    pairs,
+                    zset_max_entries,
+                    zset_max_value,
+                ))
+            }
+        });
+        self.internal_entries_remove(dest);
+        self.drop_stream_side_metadata(dest);
+        let Some(zs) = built else {
+            self.dirty = self.dirty.saturating_add(1);
+            return 0;
+        };
+        let count = zs.len();
+        let entry = self.zset_dest_entry(zs, now_ms);
+        self.internal_entries_insert(dest, entry);
+        self.dirty = self.dirty.saturating_add(1);
+        count
+    }
+
     fn zintercard_cache_hit(&self, keys: &[&[u8]], limit: u64) -> Option<u64> {
         let cache = self.zintercard_cache.as_ref()?;
         if cache.dirty != self.dirty || cache.limit != limit || cache.keys.len() != keys.len() {
@@ -31314,14 +31398,14 @@ impl Store {
     }
 
     #[cfg_attr(feature = "bench-reference", inline(never))]
-    pub fn xadd(
+    pub fn xadd<F: AsRef<[u8]>, V: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
         id: StreamId,
-        fields: &[StreamField],
+        fields: &[(F, V)],
         now_ms: u64,
     ) -> Result<(), StoreError> {
-        self.xadd_expiry_guard_impl::<true>(key, id, fields, now_ms)
+        self.xadd_expiry_guard_impl::<true, F, V>(key, id, fields, now_ms)
     }
 
     /// Bench-only reference for the pre-guard XADD path: always execute the bare
@@ -31329,22 +31413,22 @@ impl Store {
     #[cfg(feature = "bench-reference")]
     #[doc(hidden)]
     #[inline(never)]
-    pub fn xadd_expiry_reference_bench(
+    pub fn xadd_expiry_reference_bench<F: AsRef<[u8]>, V: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
         id: StreamId,
-        fields: &[StreamField],
+        fields: &[(F, V)],
         now_ms: u64,
     ) -> Result<(), StoreError> {
-        self.xadd_expiry_guard_impl::<false>(key, id, fields, now_ms)
+        self.xadd_expiry_guard_impl::<false, F, V>(key, id, fields, now_ms)
     }
 
     #[inline(always)]
-    fn xadd_expiry_guard_impl<const GUARD: bool>(
+    fn xadd_expiry_guard_impl<const GUARD: bool, F: AsRef<[u8]>, V: AsRef<[u8]>>(
         &mut self,
         key: &[u8],
         id: StreamId,
-        fields: &[StreamField],
+        fields: &[(F, V)],
         now_ms: u64,
     ) -> Result<(), StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0`: the get_mut
@@ -35206,19 +35290,11 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
-        // (frankenredis-zunionfold) Accumulate the union members in a foldhash
-        // map, not the default-SipHash `HashMap::new()`. The output is rebuilt
-        // into an ordered `SortedSet` below, so the hasher never affects the
-        // result — but ZUNIONSTORE over large zsets hashes every member of every
-        // source set here, and foldhash is ~3-5x faster per hash than SipHash.
-        let mut combined: HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
-            HashMap::default();
 
-        for (i, &key) in keys.iter().enumerate() {
+        for &key in keys {
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
             }
-            let weight = weights.get(i).copied().unwrap_or(1.0);
             let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
                 self.next_rand()
             } else {
@@ -35228,31 +35304,8 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                let mut add_member = |member: &[u8], score: f64| {
-                    let weighted = normalize_weighted_score(score, weight);
-                    use std::collections::hash_map::Entry as HEntry;
-                    match combined.entry(member.to_vec()) {
-                        HEntry::Vacant(e) => {
-                            e.insert(weighted);
-                        }
-                        HEntry::Occupied(mut e) => {
-                            let current = e.get_mut();
-                            *current = aggregate_scores(*current, weighted, aggregate);
-                        }
-                    }
-                };
-
                 match &entry.value {
-                    Value::SortedSet(zs) => {
-                        for (member, score) in zs.iter() {
-                            add_member(member, score);
-                        }
-                        entry.touch(now_ms);
-                    }
-                    Value::Set(s) => {
-                        for member in s.iter() {
-                            add_member(member.as_ref(), 1.0);
-                        }
+                    Value::SortedSet(_) | Value::Set(_) => {
                         entry.touch(now_ms);
                     }
                     _ => return Err(StoreError::WrongType),
@@ -35260,18 +35313,79 @@ impl Store {
             }
         }
 
-        let count = combined.len();
-        let deleted = self.internal_entries_remove(dest).is_some();
-        self.stream_groups.remove(dest);
-        self.stream_last_ids.remove(dest);
+        let (built, count) = {
+            // (frankenredis-zunionfold) Accumulate the union members in a foldhash
+            // map, not the default-SipHash `HashMap::new()`. Borrow `Cow::Borrowed`
+            // directly from `self.entries` for SortedSet and GenericSet members so
+            // no intermediate `member.to_vec()` heap allocations are performed.
+            let mut combined: HashMap<Cow<'_, [u8]>, f64, foldhash::quality::RandomState> =
+                HashMap::default();
+            let mut max_member_len = 0_usize;
 
-        if count > 0 {
-            // (frankenredis-zsetbulk) `combined` has unique members, so build the
-            // dest zset in one bulk pass (O(n) BTreeMap build) instead of N
-            // incremental treap/BTreeMap inserts.
-            let pairs: Vec<(Vec<u8>, f64)> = combined.into_iter().collect();
-            let zs =
-                SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
+            for (i, &key) in keys.iter().enumerate() {
+                let weight = weights.get(i).copied().unwrap_or(1.0);
+                if let Some(entry) = self.entries.get(key) {
+                    match &entry.value {
+                        Value::SortedSet(zs) => {
+                            for (member, score) in zs.iter() {
+                                let weighted = normalize_weighted_score(score, weight);
+                                if let Some(current) = combined.get_mut(member) {
+                                    *current = aggregate_scores(*current, weighted, aggregate);
+                                } else {
+                                    max_member_len = max_member_len.max(member.len());
+                                    combined.insert(Cow::Borrowed(member), weighted);
+                                }
+                            }
+                        }
+                        Value::Set(s) => {
+                            let weighted = normalize_weighted_score(1.0, weight);
+                            for member in s.iter() {
+                                if let Some(current) = combined.get_mut(member.as_ref()) {
+                                    *current = aggregate_scores(*current, weighted, aggregate);
+                                } else {
+                                    max_member_len = max_member_len.max(member.len());
+                                    combined.insert(member, weighted);
+                                }
+                            }
+                        }
+                        _ => return Err(StoreError::WrongType),
+                    }
+                }
+            }
+
+            let count = combined.len();
+            let zs = if count == 0 {
+                None
+            } else if count <= 32 {
+                let mut stack_pairs: [(&[u8], f64); 32] = [(&[], 0.0); 32];
+                for (idx, (member, score)) in combined.iter().enumerate() {
+                    stack_pairs[idx] = (member.as_ref(), *score);
+                }
+                Some(SortedSet::from_unique_borrowed_slice_with_shape(
+                    &mut stack_pairs[..count],
+                    max_member_len,
+                    zset_max_entries,
+                    zset_max_value,
+                ))
+            } else {
+                let mut pairs: Vec<(&[u8], f64)> = combined
+                    .iter()
+                    .map(|(member, score)| (member.as_ref(), *score))
+                    .collect();
+                Some(SortedSet::from_unique_borrowed_slice_with_shape(
+                    &mut pairs,
+                    max_member_len,
+                    zset_max_entries,
+                    zset_max_value,
+                ))
+            };
+            (zs, count)
+        };
+
+        let deleted = self.internal_entries_remove(dest).is_some();
+        self.drop_stream_side_metadata(dest);
+
+        if let Some(zs) = built {
             // (frankenredis-v4ba8) re-derive listpack/skiplist from the result.
             let entry = self.zset_dest_entry(zs, now_ms);
             self.internal_entries_insert(dest, entry);
@@ -35293,8 +35407,7 @@ impl Store {
     ) -> Result<usize, StoreError> {
         if keys.is_empty() {
             let deleted = self.internal_entries_remove(dest).is_some();
-            self.stream_groups.remove(dest);
-            self.stream_last_ids.remove(dest);
+            self.drop_stream_side_metadata(dest);
             if deleted {
                 self.dirty = self.dirty.saturating_add(1);
             }
@@ -35354,8 +35467,7 @@ impl Store {
                 }
             }
             let deleted = self.internal_entries_remove(dest).is_some();
-            self.stream_groups.remove(dest);
-            self.stream_last_ids.remove(dest);
+            self.drop_stream_side_metadata(dest);
             if deleted {
                 self.dirty = self.dirty.saturating_add(1);
             }
@@ -35403,48 +35515,149 @@ impl Store {
             }
         }
 
-        let (result, count) = {
-            let inputs: Vec<ZSetAlgebraInput<'_>> = keys
-                .iter()
-                .map(|key| {
-                    self.entries
+        let (built, count) = {
+            let first_inp = self
+                .entries
+                .get(keys[0])
+                .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
+                .ok_or(StoreError::WrongType)?;
+            let mut stack_inputs: [ZSetAlgebraInput<'_>; 8] = [first_inp; 8];
+            let mut heap_inputs: Vec<ZSetAlgebraInput<'_>> = Vec::new();
+            if keys.len() <= stack_inputs.len() {
+                for (idx, &key) in keys.iter().enumerate().skip(1) {
+                    stack_inputs[idx] = self
+                        .entries
                         .get(key)
                         .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
-                        .ok_or(StoreError::WrongType)
-                })
-                .collect::<Result<_, _>>()?;
-
-            // (frankenredis-zsetbulk) Collect the intersection survivors (each
-            // smallest-set member is visited once, so members are unique) and
-            // bulk-build the dest in one O(n) BTreeMap pass instead of N
-            // incremental inserts.
-            let mut pairs: Vec<(Vec<u8>, f64)> = Vec::new();
+                        .ok_or(StoreError::WrongType)?;
+                }
+            } else {
+                heap_inputs.reserve(keys.len());
+                heap_inputs.push(first_inp);
+                for &key in &keys[1..] {
+                    heap_inputs.push(
+                        self.entries
+                            .get(key)
+                            .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
+                            .ok_or(StoreError::WrongType)?,
+                    );
+                }
+            }
+            let active_inputs: &[ZSetAlgebraInput<'_>] = if heap_inputs.is_empty() {
+                &stack_inputs[..keys.len()]
+            } else {
+                &heap_inputs
+            };
             let min_weight = weights.get(min_idx).copied().unwrap_or(1.0);
-            inputs[min_idx].for_each(|member, score| {
+            let combine_member = |member: &[u8], score: f64| -> Option<f64> {
                 let mut aggregate_score = normalize_weighted_score(score, min_weight);
-                for (i, input) in inputs.iter().copied().enumerate() {
+                for (i, input) in active_inputs.iter().copied().enumerate() {
                     if i == min_idx {
                         continue;
                     }
-                    let Some(other_score) = input.score(member) else {
-                        return;
-                    };
+                    let other_score = input.score(member)?;
                     let weight = weights.get(i).copied().unwrap_or(1.0);
                     aggregate_score =
                         aggregate_scores(aggregate_score, other_score * weight, aggregate);
                 }
-                pairs.push((member.to_vec(), aggregate_score));
-            });
-            let result =
-                SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
-            let count = result.len();
-            (result, count)
+                Some(aggregate_score)
+            };
+
+            match active_inputs[min_idx] {
+                ZSetAlgebraInput::SortedSet(zs) => {
+                    let mut stack_out: [(&[u8], f64); 32] = [(&[], 0.0); 32];
+                    let mut heap_out: Vec<(&[u8], f64)> = Vec::new();
+                    let mut out_len = 0_usize;
+                    let mut max_member_len = 0_usize;
+                    for (member, score) in zs.iter() {
+                        let Some(agg_score) = combine_member(member, score) else {
+                            continue;
+                        };
+                        max_member_len = max_member_len.max(member.len());
+                        if out_len < stack_out.len() {
+                            stack_out[out_len] = (member, agg_score);
+                        } else {
+                            if heap_out.is_empty() {
+                                heap_out.reserve(min_card.max(64));
+                                heap_out.extend_from_slice(&stack_out);
+                            }
+                            heap_out.push((member, agg_score));
+                        }
+                        out_len += 1;
+                    }
+                    if out_len == 0 {
+                        (None, 0)
+                    } else if heap_out.is_empty() {
+                        (
+                            Some(SortedSet::from_unique_borrowed_slice_with_shape(
+                                &mut stack_out[..out_len],
+                                max_member_len,
+                                zset_max_entries,
+                                zset_max_value,
+                            )),
+                            out_len,
+                        )
+                    } else {
+                        (
+                            Some(SortedSet::from_unique_borrowed_slice_with_shape(
+                                &mut heap_out,
+                                max_member_len,
+                                zset_max_entries,
+                                zset_max_value,
+                            )),
+                            out_len,
+                        )
+                    }
+                }
+                ZSetAlgebraInput::Set(s) => {
+                    let mut owned_survivors: Vec<(Cow<'_, [u8]>, f64)> = Vec::new();
+                    let mut max_member_len = 0_usize;
+                    for member in s.iter() {
+                        let Some(agg_score) = combine_member(member.as_ref(), 1.0) else {
+                            continue;
+                        };
+                        max_member_len = max_member_len.max(member.len());
+                        owned_survivors.push((member, agg_score));
+                    }
+                    let out_len = owned_survivors.len();
+                    if out_len == 0 {
+                        (None, 0)
+                    } else if out_len <= 32 {
+                        let mut stack_out: [(&[u8], f64); 32] = [(&[], 0.0); 32];
+                        for (idx, (m, score)) in owned_survivors.iter().enumerate() {
+                            stack_out[idx] = (m.as_ref(), *score);
+                        }
+                        (
+                            Some(SortedSet::from_unique_borrowed_slice_with_shape(
+                                &mut stack_out[..out_len],
+                                max_member_len,
+                                zset_max_entries,
+                                zset_max_value,
+                            )),
+                            out_len,
+                        )
+                    } else {
+                        let mut borrowed: Vec<(&[u8], f64)> = owned_survivors
+                            .iter()
+                            .map(|(m, score)| (m.as_ref(), *score))
+                            .collect();
+                        (
+                            Some(SortedSet::from_unique_borrowed_slice_with_shape(
+                                &mut borrowed,
+                                max_member_len,
+                                zset_max_entries,
+                                zset_max_value,
+                            )),
+                            out_len,
+                        )
+                    }
+                }
+            }
         };
         let deleted = self.internal_entries_remove(dest).is_some();
-        self.stream_groups.remove(dest);
-        self.stream_last_ids.remove(dest);
+        self.drop_stream_side_metadata(dest);
 
-        if count > 0 {
+        if let Some(result) = built {
             // (frankenredis-v4ba8) re-derive listpack/skiplist from the result.
             let entry = self.zset_dest_entry(result, now_ms);
             self.internal_entries_insert(dest, entry);

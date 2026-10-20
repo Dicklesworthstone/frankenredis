@@ -17422,24 +17422,37 @@ impl PlainZsetStoreCmd {
         }
     }
 
-    fn execute(
+    fn execute_with_default_write_gate(
         self,
         runtime: &mut Runtime,
         destination: &[u8],
         numkeys: &[u8],
         sources: &[&[u8]],
         ts: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         match self {
-            Self::Union => {
-                runtime.execute_plain_zunionstore_borrowed(destination, numkeys, sources, ts)
-            }
-            Self::Inter => {
-                runtime.execute_plain_zinterstore_borrowed(destination, numkeys, sources, ts)
-            }
-            Self::Diff => {
-                runtime.execute_plain_zdiffstore_borrowed(destination, numkeys, sources, ts)
-            }
+            Self::Union => runtime.execute_plain_zunionstore_borrowed_with_default_write_gate(
+                destination,
+                numkeys,
+                sources,
+                ts,
+                default_write_allowed,
+            ),
+            Self::Inter => runtime.execute_plain_zinterstore_borrowed_with_default_write_gate(
+                destination,
+                numkeys,
+                sources,
+                ts,
+                default_write_allowed,
+            ),
+            Self::Diff => runtime.execute_plain_zdiffstore_borrowed_with_default_write_gate(
+                destination,
+                numkeys,
+                sources,
+                ts,
+                default_write_allowed,
+            ),
         }
     }
 }
@@ -21100,13 +21113,20 @@ fn try_dispatch_floor_classified_action(
             //
             // A declining executor — non-integer range, or the write gate refusing —
             // falls through to the generic path exactly as the cascade would have.
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
                 b"*4\r\n$5\r\n",
                 b"LTRIM",
-            ) && let Some(response) =
-                runtime.execute_plain_ltrim_borrowed(packet.key, packet.a, packet.b, ts)
+            ) && let Some(response) = runtime
+                .execute_plain_ltrim_borrowed_with_default_write_gate(
+                    packet.key,
+                    packet.a,
+                    packet.b,
+                    ts,
+                    default_write_allowed,
+                )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -23164,14 +23184,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Linsert => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_linsert_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_linsert_borrowed(
-                    packet.key,
-                    packet.before,
-                    packet.pivot,
-                    packet.element,
-                    ts,
-                )
+                && let Some(response) = runtime
+                    .execute_plain_linsert_borrowed_with_default_write_gate(
+                        packet.key,
+                        packet.before,
+                        packet.pivot,
+                        packet.element,
+                        ts,
+                        default_write_allowed,
+                    )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -23785,18 +23808,20 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::XaddNomkstream => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
                 unparsed,
                 &parser_config,
                 b"*6\r\n$4\r\n",
                 b"XADD",
             ) && packet.a.eq_ignore_ascii_case(b"NOMKSTREAM")
-                && let Some(response) = runtime.execute_plain_xadd_borrowed(
+                && let Some(response) = runtime.execute_plain_xadd_borrowed_with_default_write_gate(
                     packet.key,
                     Some(packet.a),
                     packet.b,
                     &[(packet.c, packet.d)],
                     ts,
+                    default_write_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -23815,18 +23840,22 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::XaddTwoFields => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
                 unparsed,
                 &parser_config,
                 b"*7\r\n$4\r\n",
                 b"XADD",
-            ) && let Some(response) = runtime.execute_plain_xadd_borrowed(
-                packet.key,
-                None,
-                packet.a,
-                &[(packet.b, packet.c), (packet.d, packet.e)],
-                ts,
-            ) {
+            ) && let Some(response) = runtime
+                .execute_plain_xadd_borrowed_with_default_write_gate(
+                    packet.key,
+                    None,
+                    packet.a,
+                    &[(packet.b, packet.c), (packet.d, packet.e)],
+                    ts,
+                    default_write_allowed,
+                )
+            {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
                     response,
@@ -23867,6 +23896,7 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::XaddMaxlenApprox => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) =
                 parse_borrowed_plain_xadd_maxlen_approx_packet(unparsed, &parser_config)
             {
@@ -23875,17 +23905,20 @@ fn try_dispatch_floor_classified_action(
                     .unwrap_or((b"".as_slice(), b"".as_slice()));
                 let fields = [(packet.field, packet.value), second_pair];
                 let field_count = 1 + usize::from(packet.second_pair.is_some());
-                if let Some(response) = runtime.execute_plain_xadd_maxlen_approx_borrowed(
-                    packet.key,
-                    packet.maxlen_keyword,
-                    packet.approx_keyword,
-                    packet.threshold,
-                    packet.limit_keyword,
-                    packet.limit,
-                    packet.id,
-                    &fields[..field_count],
-                    ts,
-                ) {
+                if let Some(response) = runtime
+                    .execute_plain_xadd_maxlen_approx_borrowed_with_default_write_gate(
+                        packet.key,
+                        packet.maxlen_keyword,
+                        packet.approx_keyword,
+                        packet.threshold,
+                        packet.limit_keyword,
+                        packet.limit,
+                        packet.id,
+                        &fields[..field_count],
+                        ts,
+                        default_write_allowed,
+                    )
+                {
                     Ok(BorrowedMultibulkAction::FastReply {
                         consumed: packet.consumed,
                         response,
@@ -25437,6 +25470,7 @@ fn try_dispatch_floor_classified_action(
             // Every arity-6 option form is served, so this arm never declines a shape the
             // class claimed -- an UNKNOWN keyword still falls through, but that is a syntax
             // error generic must emit, not a form we refuse to serve.
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             let routed = parse_borrowed_plain_key_arg4_packet(
                 unparsed,
                 &parser_config,
@@ -25445,16 +25479,34 @@ fn try_dispatch_floor_classified_action(
             )
             .and_then(|packet| {
                 let response = if packet.d.eq_ignore_ascii_case(b"REV") {
-                    runtime.execute_plain_zrangestore_borrowed(
-                        packet.key, packet.a, packet.b, packet.c, true, ts,
+                    runtime.execute_plain_zrangestore_borrowed_with_default_write_gate(
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        packet.c,
+                        true,
+                        ts,
+                        default_write_allowed,
                     )
                 } else if packet.d.eq_ignore_ascii_case(b"BYSCORE") {
-                    runtime.execute_plain_zrangestore_bound_borrowed(
-                        packet.key, packet.a, packet.b, packet.c, false, ts,
+                    runtime.execute_plain_zrangestore_bound_borrowed_with_default_write_gate(
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        packet.c,
+                        false,
+                        ts,
+                        default_write_allowed,
                     )
                 } else if packet.d.eq_ignore_ascii_case(b"BYLEX") {
-                    runtime.execute_plain_zrangestore_bound_borrowed(
-                        packet.key, packet.a, packet.b, packet.c, true, ts,
+                    runtime.execute_plain_zrangestore_bound_borrowed_with_default_write_gate(
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        packet.c,
+                        true,
+                        ts,
+                        default_write_allowed,
                     )
                 } else {
                     None
@@ -25480,14 +25532,23 @@ fn try_dispatch_floor_classified_action(
             // b=start, c=stop). Same shared parser BITOP's arms use, distinguished by
             // the prefix+token pair, so the only new code is the executor and this arm.
             // A declining executor still reaches the generic path unchanged.
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
                 unparsed,
                 &parser_config,
                 b"*5\r\n$11\r\n",
                 b"ZRANGESTORE",
-            ) && let Some(response) = runtime.execute_plain_zrangestore_borrowed(
-                packet.key, packet.a, packet.b, packet.c, false, ts,
-            ) {
+            ) && let Some(response) = runtime
+                .execute_plain_zrangestore_borrowed_with_default_write_gate(
+                    packet.key,
+                    packet.a,
+                    packet.b,
+                    packet.c,
+                    false,
+                    ts,
+                    default_write_allowed,
+                )
+            {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
                     response,
@@ -26197,9 +26258,16 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Hsetnx => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_hsetnx_packet(unparsed, &parser_config)
-                && let Some(response) =
-                    runtime.execute_plain_hsetnx_borrowed(packet.key, packet.start, packet.end, ts)
+                && let Some(response) = runtime
+                    .execute_plain_hsetnx_borrowed_with_default_write_gate(
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                        default_write_allowed,
+                    )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -26217,13 +26285,16 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Hincrbyfloat => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_hincrbyfloat_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_hincrbyfloat_borrowed(
-                    packet.key,
-                    packet.start,
-                    packet.end,
-                    ts,
-                )
+                && let Some(response) = runtime
+                    .execute_plain_hincrbyfloat_borrowed_with_default_write_gate(
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                        default_write_allowed,
+                    )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -26305,9 +26376,15 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Lset => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_lset_packet(unparsed, &parser_config)
-                && let Some(response) =
-                    runtime.execute_plain_lset_borrowed(packet.key, packet.start, packet.end, ts)
+                && let Some(response) = runtime.execute_plain_lset_borrowed_with_default_write_gate(
+                    packet.key,
+                    packet.start,
+                    packet.end,
+                    ts,
+                    default_write_allowed,
+                )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -26535,6 +26612,7 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::ZsetStore(command) => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             let hit = parse_borrowed_plain_key_arg4_packet(
                 unparsed,
                 &parser_config,
@@ -26543,12 +26621,13 @@ fn try_dispatch_floor_classified_action(
             )
             .and_then(|packet| {
                 command
-                    .execute(
+                    .execute_with_default_write_gate(
                         runtime,
                         packet.key,
                         packet.a,
                         &[packet.b, packet.c, packet.d],
                         ts,
+                        default_write_allowed,
                     )
                     .map(|response| (packet.consumed, response))
             })
@@ -26561,7 +26640,14 @@ fn try_dispatch_floor_classified_action(
                 )
                 .and_then(|packet| {
                     command
-                        .execute(runtime, packet.key, packet.a, &[packet.b, packet.c], ts)
+                        .execute_with_default_write_gate(
+                            runtime,
+                            packet.key,
+                            packet.a,
+                            &[packet.b, packet.c],
+                            ts,
+                            default_write_allowed,
+                        )
                         .map(|response| (packet.consumed, response))
                 })
             });
