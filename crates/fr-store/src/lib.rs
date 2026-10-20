@@ -25580,56 +25580,18 @@ impl Store {
         members: &[(f64, Vec<u8>)],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        // (CrimsonHawk) Guard the bare drop_if_expired (return discarded, called only for
-        // the eviction side-effect) on `expires_count != 0` — mirrors lpush/rpush/sadd.
-        // With no volatile keys nothing can evict, so the whole call is dead; skipping it
-        // elides drop_if_expired's keyspace probe on top of the `contains_key` below.
-        // Byte-identical: an expired key requires a TTL, which keeps expires_count>0.
-        if self.expires_count != 0 {
-            self.drop_if_expired(key, now_ms);
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        if !self.entries.contains_key(key) {
-            let zset_max_entries = self.zset_max_listpack_entries;
-            let zset_max_value = self.zset_max_listpack_value;
-            let mut latest: HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
-                HashMap::with_capacity_and_hasher(
-                    members.len(),
-                    foldhash::quality::RandomState::default(),
-                );
-            let mut added = 0_usize;
-            let mut changed = 0_usize;
-            for (score, member) in members {
-                let score = canonicalize_zero_score(*score);
-                match latest.insert(member.clone(), score) {
-                    Some(old_score) => {
-                        if !old_score.total_cmp(&score).is_eq() {
-                            changed += 1;
-                        }
-                    }
-                    None => added += 1,
-                }
+        if members.len() <= 16 {
+            let mut stack_members = [(0.0_f64, &[][..]); 16];
+            for (idx, (score, member)) in members.iter().enumerate() {
+                stack_members[idx] = (*score, member.as_slice());
             }
-            if added == 0 {
-                return Ok(0);
-            }
-
-            let zs = SortedSet::from_unique_pairs_with_limits(
-                latest.into_iter().collect(),
-                zset_max_entries,
-                zset_max_value,
-            );
-            let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
-            entry.touch_write(now_ms, lfu_tracking_enabled);
-            Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
-            self.internal_entries_insert(key, entry);
-            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-            self.dirty = self.dirty.saturating_add((added + changed) as u64);
-            return Ok(added);
+            return self.zadd_plain_borrowed(key, &stack_members[..members.len()], now_ms);
         }
-
-        self.zadd_with_options(key, members.to_vec(), ZaddOptions::default(), now_ms)
-            .map(|(added, _changed)| added)
+        let borrowed: Vec<(f64, &[u8])> = members
+            .iter()
+            .map(|(score, member)| (*score, member.as_slice()))
+            .collect();
+        self.zadd_plain_borrowed(key, &borrowed, now_ms)
     }
 
     /// Fast path for flagless `ZADD key score member [score member ...]` callers
@@ -26676,10 +26638,7 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<Option<f64>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(None);
-        }
-        match self.entries.get_mut(key) {
+        match self.lookup_live_for_read_mut(key, now_ms) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
                     let result = zs.get_score(member);
@@ -26717,10 +26676,7 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        match self.entries.get_mut(key) {
+        match self.lookup_live_for_read_mut(key, now_ms) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
                     let result = zs.iter_asc().map(|(m, s)| (m.to_vec(), s)).collect();
@@ -27146,15 +27102,22 @@ impl Store {
         }
 
         let mut has_empty = false;
+        let mut min_idx = 0_usize;
+        let mut min_len = usize::MAX;
 
-        for &key in keys {
+        for (idx, &key) in keys.iter().enumerate() {
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
             }
             match self.entries.get_mut(key) {
                 Some(entry) => {
-                    if ZSetAlgebraInput::from_value(&entry.value).is_none() {
+                    let Some(inp) = ZSetAlgebraInput::from_value(&entry.value) else {
                         return Err(StoreError::WrongType);
+                    };
+                    let len = inp.len();
+                    if len < min_len {
+                        min_len = len;
+                        min_idx = idx;
                     }
                     entry.touch(now_ms);
                 }
@@ -27173,76 +27136,99 @@ impl Store {
             // before `inputs` borrows self.entries.
             let seed0 = self.next_rand();
             let seed1 = self.next_rand();
-            let inputs: Vec<ZSetAlgebraInput<'_>> = keys
-                .iter()
-                .map(|key| {
-                    self.entries
-                        .get(key)
-                        .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
-                        .ok_or(StoreError::WrongType)
-                })
-                .collect::<Result<_, _>>()?;
-
-            // (frankenredis-epxuu) Iterate the SMALLEST input (redis's
-            // zinterGenericCommand sorts by cardinality; fr always used
-            // inputs[0], so `ZINTERCARD big small` scanned `big`). For a LIMIT'd
-            // large min input, also walk it in a DE-CLUSTERED coprime-stride
-            // order so the early-stop fires fast even when the intersection is
-            // bunched in one score region (a plain scan walked most of the set
-            // first). The COUNT is order-independent, so this is byte-identical;
-            // only WHEN `count >= limit` trips changes. Collecting the min
-            // input's member refs is cheap pointer copies for a zset (no
-            // membership lookups, no order-statistic-index warming).
-            let min_idx = (0..inputs.len())
-                .min_by_key(|&i| inputs[i].len())
-                .unwrap_or(0);
-            const ZINTERCARD_DECLUSTER_MIN: usize = 256;
-            let min_len = inputs[min_idx].len();
-
-            let mut count = 0_u64;
-            if limit > 0 && min_len > ZINTERCARD_DECLUSTER_MIN {
-                let n = min_len;
-                let mut idx = (seed0 as usize) % n;
-                let stride = zset_coprime_stride(n, seed1);
-                for _ in 0..n {
-                    let pos = idx;
-                    idx = (idx + stride) % n;
-                    let Some(member) = inputs[min_idx].member_at(pos) else {
-                        continue;
-                    };
-                    let member = member.as_ref();
-                    let mut in_all = true;
-                    for (i, input) in inputs.iter().copied().enumerate() {
-                        if i == min_idx {
-                            continue;
-                        }
-                        if input.score(member).is_none() {
-                            in_all = false;
-                            break;
-                        }
+            if min_len == 0 {
+                0
+            } else {
+                let first_inp = self
+                    .entries
+                    .get(keys[0])
+                    .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
+                    .ok_or(StoreError::WrongType)?;
+                let mut stack_inputs: [ZSetAlgebraInput<'_>; 8] = [first_inp; 8];
+                let mut heap_inputs: Vec<ZSetAlgebraInput<'_>> = Vec::new();
+                if keys.len() <= stack_inputs.len() {
+                    for (idx, &key) in keys.iter().enumerate().skip(1) {
+                        stack_inputs[idx] = self
+                            .entries
+                            .get(key)
+                            .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
+                            .ok_or(StoreError::WrongType)?;
                     }
-                    if in_all {
-                        count = count.saturating_add(1);
-                        if count >= limit {
-                            break;
-                        }
+                } else {
+                    heap_inputs.reserve(keys.len());
+                    heap_inputs.push(first_inp);
+                    for &key in &keys[1..] {
+                        heap_inputs.push(
+                            self.entries
+                                .get(key)
+                                .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
+                                .ok_or(StoreError::WrongType)?,
+                        );
                     }
                 }
-            } else {
-                inputs[min_idx].for_each_until(|member, _| {
-                    for (i, input) in inputs.iter().copied().enumerate() {
-                        if i == min_idx {
+                let inputs: &[ZSetAlgebraInput<'_>] = if heap_inputs.is_empty() {
+                    &stack_inputs[..keys.len()]
+                } else {
+                    &heap_inputs
+                };
+
+                // (frankenredis-epxuu) Iterate the SMALLEST input (redis's
+                // zinterGenericCommand sorts by cardinality; fr always used
+                // inputs[0], so `ZINTERCARD big small` scanned `big`). For a LIMIT'd
+                // large min input, also walk it in a DE-CLUSTERED coprime-stride
+                // order so the early-stop fires fast even when the intersection is
+                // bunched in one score region (a plain scan walked most of the set
+                // first). The COUNT is order-independent, so this is byte-identical;
+                // only WHEN `count >= limit` trips changes. Collecting the min
+                // input's member refs is cheap pointer copies for a zset (no
+                // membership lookups, no order-statistic-index warming).
+                const ZINTERCARD_DECLUSTER_MIN: usize = 256;
+
+                let mut count = 0_u64;
+                if limit > 0 && min_len > ZINTERCARD_DECLUSTER_MIN {
+                    let n = min_len;
+                    let mut idx = (seed0 as usize) % n;
+                    let stride = zset_coprime_stride(n, seed1);
+                    for _ in 0..n {
+                        let pos = idx;
+                        idx = (idx + stride) % n;
+                        let Some(member) = inputs[min_idx].member_at(pos) else {
                             continue;
+                        };
+                        let member = member.as_ref();
+                        let mut in_all = true;
+                        for (i, input) in inputs.iter().copied().enumerate() {
+                            if i == min_idx {
+                                continue;
+                            }
+                            if input.score(member).is_none() {
+                                in_all = false;
+                                break;
+                            }
                         }
-                        if input.score(member).is_none() {
-                            return true;
+                        if in_all {
+                            count = count.saturating_add(1);
+                            if count >= limit {
+                                break;
+                            }
                         }
                     }
-                    count = count.saturating_add(1);
-                    limit == 0 || count < limit
-                });
+                } else {
+                    inputs[min_idx].for_each_until(|member, _| {
+                        for (i, input) in inputs.iter().copied().enumerate() {
+                            if i == min_idx {
+                                continue;
+                            }
+                            if input.score(member).is_none() {
+                                return true;
+                            }
+                        }
+                        count = count.saturating_add(1);
+                        limit == 0 || count < limit
+                    });
+                }
+                count
             }
-            count
         };
 
         self.zintercard_cache = Some(ZIntercardCache {
@@ -27762,7 +27748,24 @@ impl Store {
         reverse: bool,
         now_ms: u64,
     ) -> Result<Option<(usize, f64)>, StoreError> {
-        if COLLAPSE_REVERSE_LFU && reverse && self.lfu_tracking_enabled() {
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &mut entry.value {
+                    Value::SortedSet(zs) => {
+                        let res = if reverse {
+                            zs.rev_rank_with_score(member)
+                        } else {
+                            zs.rank_with_score(member)
+                        };
+                        entry.touch(now_ms);
+                        Ok(res)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(None),
+            };
+        }
+        if COLLAPSE_REVERSE_LFU {
             if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
@@ -27778,7 +27781,11 @@ impl Store {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     match &mut entry.value {
                         Value::SortedSet(zs) => {
-                            let result = zs.rev_rank_with_score(member);
+                            let result = if reverse {
+                                zs.rev_rank_with_score(member)
+                            } else {
+                                zs.rank_with_score(member)
+                            };
                             entry.touch(now_ms);
                             Ok(result)
                         }
@@ -27857,45 +27864,53 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
+        let entry = if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => return Ok(Vec::new()),
+            }
         } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.record_keyspace_miss(key);
+                return Ok(Vec::new());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
                 }
-                match &mut entry.value {
-                    Value::SortedSet(zs) => {
-                        let len = zs.len() as i64;
-                        let s = normalize_index(start, len);
-                        let e = normalize_index(stop, len);
-                        if s > e || s >= len || e < 0 {
-                            return Ok(Vec::new());
-                        }
-                        let s_idx = s.max(0) as usize;
-                        let e_idx = e.min(len - 1) as usize;
-                        let count = e_idx - s_idx + 1;
-                        let result: Vec<Vec<u8>> = zs
-                            .index_slice_asc_adaptive(s_idx, count)
-                            .into_iter()
-                            .map(|(m, _)| m)
-                            .collect();
-                        entry.touch(now_ms);
-                        Ok(result)
-                    }
-                    _ => Err(StoreError::WrongType),
+                None => {
+                    self.record_keyspace_miss(key);
+                    return Ok(Vec::new());
                 }
             }
-            None => Ok(Vec::new()),
+        };
+        match &mut entry.value {
+            Value::SortedSet(zs) => {
+                let len = zs.len() as i64;
+                let s = normalize_index(start, len);
+                let e = normalize_index(stop, len);
+                if s > e || s >= len || e < 0 {
+                    return Ok(Vec::new());
+                }
+                let s_idx = s.max(0) as usize;
+                let e_idx = e.min(len - 1) as usize;
+                let count = e_idx - s_idx + 1;
+                let result: Vec<Vec<u8>> = zs
+                    .index_slice_asc_adaptive(s_idx, count)
+                    .into_iter()
+                    .map(|(m, _)| m)
+                    .collect();
+                entry.touch(now_ms);
+                Ok(result)
+            }
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -28174,45 +28189,53 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
+        let entry = if !self.lfu_tracking_enabled() {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => return Ok(Vec::new()),
+            }
         } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.record_keyspace_miss(key);
+                return Ok(Vec::new());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
                 }
-                match &mut entry.value {
-                    Value::SortedSet(zs) => {
-                        let len = zs.len() as i64;
-                        let s = normalize_index(start, len);
-                        let e = normalize_index(stop, len);
-                        if s > e || s >= len || e < 0 {
-                            return Ok(Vec::new());
-                        }
-                        let s_idx = s.max(0) as usize;
-                        let e_idx = e.min(len - 1) as usize;
-                        let count = e_idx - s_idx + 1;
-                        let result: Vec<Vec<u8>> = zs
-                            .index_slice_desc_adaptive(s_idx, count)
-                            .into_iter()
-                            .map(|(m, _)| m)
-                            .collect();
-                        entry.touch(now_ms);
-                        Ok(result)
-                    }
-                    _ => Err(StoreError::WrongType),
+                None => {
+                    self.record_keyspace_miss(key);
+                    return Ok(Vec::new());
                 }
             }
-            None => Ok(Vec::new()),
+        };
+        match &mut entry.value {
+            Value::SortedSet(zs) => {
+                let len = zs.len() as i64;
+                let s = normalize_index(start, len);
+                let e = normalize_index(stop, len);
+                if s > e || s >= len || e < 0 {
+                    return Ok(Vec::new());
+                }
+                let s_idx = s.max(0) as usize;
+                let e_idx = e.min(len - 1) as usize;
+                let count = e_idx - s_idx + 1;
+                let result: Vec<Vec<u8>> = zs
+                    .index_slice_desc_adaptive(s_idx, count)
+                    .into_iter()
+                    .map(|(m, _)| m)
+                    .collect();
+                entry.touch(now_ms);
+                Ok(result)
+            }
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -28224,36 +28247,46 @@ impl Store {
         max: ScoreBound,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        // (br-frankenredis-ot1z)
-        if score_bound_value(min) > score_bound_value(max) {
-            return Ok(Vec::new());
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
+        let entry = if !self.lfu_tracking_enabled() {
+            let Some(entry) = self.lookup_live_for_read_mut(key, now_ms) else {
+                return Ok(Vec::new());
+            };
+            if score_bound_value(min) > score_bound_value(max) {
+                return Ok(Vec::new());
+            }
+            entry
         } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                match &entry.value {
-                    Value::SortedSet(zs) => {
-                        let result = zs.score_bound_members(min, max, false);
-                        entry.touch(now_ms);
-                        Ok(result)
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.record_keyspace_miss(key);
+                return Ok(Vec::new());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    if score_bound_value(min) > score_bound_value(max) {
+                        return Ok(Vec::new());
                     }
-                    _ => Err(StoreError::WrongType),
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
+                }
+                None => {
+                    self.record_keyspace_miss(key);
+                    return Ok(Vec::new());
                 }
             }
-            None => Ok(Vec::new()),
+        };
+        match &entry.value {
+            Value::SortedSet(zs) => {
+                let result = zs.score_bound_members(min, max, false);
+                entry.touch(now_ms);
+                Ok(result)
+            }
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -28265,38 +28298,49 @@ impl Store {
         max: ScoreBound,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        // Upstream behavior for an inverted score range (min > max)
-        // is to return an empty range; BTreeMap::range panics if
-        // start > end, so guard early. (br-frankenredis-ot1z)
-        if score_bound_value(min) > score_bound_value(max) {
-            return Ok(Vec::new());
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
+        let entry = if !self.lfu_tracking_enabled() {
+            let Some(entry) = self.lookup_live_for_read_mut(key, now_ms) else {
+                return Ok(Vec::new());
+            };
+            // Upstream behavior for an inverted score range (min > max)
+            // is to return an empty range; BTreeMap::range panics if
+            // start > end, so guard early. (br-frankenredis-ot1z)
+            if score_bound_value(min) > score_bound_value(max) {
+                return Ok(Vec::new());
+            }
+            entry
         } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                match &entry.value {
-                    Value::SortedSet(zs) => {
-                        let result = zs.score_bound_range(min, max, false);
-                        entry.touch(now_ms);
-                        Ok(result)
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.record_keyspace_miss(key);
+                return Ok(Vec::new());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    if score_bound_value(min) > score_bound_value(max) {
+                        return Ok(Vec::new());
                     }
-                    _ => Err(StoreError::WrongType),
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
+                }
+                None => {
+                    self.record_keyspace_miss(key);
+                    return Ok(Vec::new());
                 }
             }
-            None => Ok(Vec::new()),
+        };
+        match &entry.value {
+            Value::SortedSet(zs) => {
+                let result = zs.score_bound_range(min, max, false);
+                entry.touch(now_ms);
+                Ok(result)
+            }
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -28319,37 +28363,47 @@ impl Store {
         count: Option<usize>,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        if score_bound_value(min) > score_bound_value(max) {
-            return Ok(Vec::new());
-        }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        let lfu_decay = self.lfu_decay_time;
-        let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
+        let entry = if !self.lfu_tracking_enabled() {
+            let Some(entry) = self.lookup_live_for_read_mut(key, now_ms) else {
+                return Ok(Vec::new());
+            };
+            if score_bound_value(min) > score_bound_value(max) {
+                return Ok(Vec::new());
+            }
+            entry
         } else {
-            0
-        };
-        match self.entries.get_mut(key) {
-            Some(entry) => {
-                if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                }
-                match &mut entry.value {
-                    Value::SortedSet(zs) => {
-                        let take = count.unwrap_or(usize::MAX);
-                        let result =
-                            zs.score_bound_range_limited_adaptive(min, max, rev, offset, take);
-                        entry.touch(now_ms);
-                        Ok(result)
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
+                self.drop_if_expired(key, now_ms);
+                self.record_keyspace_miss(key);
+                return Ok(Vec::new());
+            }
+            let lfu_decay = self.lfu_decay_time;
+            let lfu_log_factor = self.lfu_log_factor;
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                    if score_bound_value(min) > score_bound_value(max) {
+                        return Ok(Vec::new());
                     }
-                    _ => Err(StoreError::WrongType),
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    entry
+                }
+                None => {
+                    self.record_keyspace_miss(key);
+                    return Ok(Vec::new());
                 }
             }
-            None => Ok(Vec::new()),
+        };
+        match &mut entry.value {
+            Value::SortedSet(zs) => {
+                let take = count.unwrap_or(usize::MAX);
+                let result = zs.score_bound_range_limited_adaptive(min, max, rev, offset, take);
+                entry.touch(now_ms);
+                Ok(result)
+            }
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -29032,8 +29086,7 @@ impl Store {
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
         let zs = SortedSet::from_unique_pairs_with_limits(pairs, zset_max_entries, zset_max_value);
-        self.stream_groups.remove(key);
-        self.stream_last_ids.remove(key);
+        self.drop_stream_side_metadata(key);
         let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
         // (frankenredis-t8rma) Upstream ZRANGESTORE pre-creates the destination
         // via zsetTypeCreate(length, 0). For BYSCORE / BYLEX the result count is
@@ -29346,26 +29399,63 @@ impl Store {
         }
 
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        // `key_existed` only affects XX (early-return) + LFU (rand + bump); the common no-XX/no-LFU
-        // ZADD short-circuits the probe (`&&`). Byte-identical.
-        let key_existed = (opts.xx || lfu_tracking_enabled) && self.entries.contains_key(key);
-        if opts.xx && !key_existed {
-            return Ok(None);
-        }
-
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && key_existed {
-            self.next_rand()
-        } else {
-            0
-        };
-
         let zset_max_entries = self.zset_max_listpack_entries;
         let zset_max_value = self.zset_max_listpack_value;
 
-        let (res, is_empty, touched) = if opts.xx || lfu_tracking_enabled {
-            // XX/LFU path: reuse `key_existed` for get-or-create (a5e0b0b35), bump, then apply.
+        let (res, is_empty, touched) = if GETMUT_FIRST {
+            match self.entries.get_mut(key) {
+                Some(entry) => {
+                    if lfu_tracking_enabled {
+                        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    }
+                    Self::zincrby_apply_entry(
+                        entry,
+                        member,
+                        delta,
+                        &opts,
+                        now_ms,
+                        lfu_tracking_enabled,
+                        zset_max_entries,
+                        zset_max_value,
+                    )
+                }
+                None => {
+                    if opts.xx {
+                        return Ok(None);
+                    }
+                    self.internal_entries_insert(
+                        key,
+                        Entry::new(Value::SortedSet(Box::new(SortedSet::new())), now_ms),
+                    );
+                    let entry = self
+                        .entries
+                        .get_mut(key)
+                        .expect("zset entry inserted above must exist");
+                    Self::zincrby_apply_entry(
+                        entry,
+                        member,
+                        delta,
+                        &opts,
+                        now_ms,
+                        lfu_tracking_enabled,
+                        zset_max_entries,
+                        zset_max_value,
+                    )
+                }
+            }
+        } else if opts.xx || lfu_tracking_enabled {
+            let key_existed = self.entries.contains_key(key);
+            if opts.xx && !key_existed {
+                return Ok(None);
+            }
+            let rand_sample = if lfu_tracking_enabled && key_existed {
+                self.next_rand()
+            } else {
+                0
+            };
             let entry = if key_existed {
                 self.entries
                     .get_mut(key)
@@ -29392,43 +29482,6 @@ impl Store {
                 zset_max_entries,
                 zset_max_value,
             )
-        } else if GETMUT_FIRST {
-            // (perf) Common no-XX/no-LFU path: get_mut-FIRST — one probe for the existing zset, a
-            // single insert for a new key — instead of `internal_entry`'s contains_key + get_mut.
-            // No RNG / LFU bump here (`key_existed` short-circuited false). Mirrors zadd_plain /
-            // hset_borrowed. `GETMUT_FIRST == false` keeps the old `internal_entry` (the diff ref).
-            match self.entries.get_mut(key) {
-                Some(entry) => Self::zincrby_apply_entry(
-                    entry,
-                    member,
-                    delta,
-                    &opts,
-                    now_ms,
-                    false,
-                    zset_max_entries,
-                    zset_max_value,
-                ),
-                None => {
-                    self.internal_entries_insert(
-                        key,
-                        Entry::new(Value::SortedSet(Box::new(SortedSet::new())), now_ms),
-                    );
-                    let entry = self
-                        .entries
-                        .get_mut(key)
-                        .expect("zset entry inserted above must exist");
-                    Self::zincrby_apply_entry(
-                        entry,
-                        member,
-                        delta,
-                        &opts,
-                        now_ms,
-                        false,
-                        zset_max_entries,
-                        zset_max_value,
-                    )
-                }
-            }
         } else {
             let entry =
                 self.internal_entry(key, || Value::SortedSet(Box::new(SortedSet::new())), now_ms);
@@ -29477,15 +29530,11 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let Some(entry) = self.entries.get_mut(key) else {
             return Ok(None);
         };
         if lfu_tracking_enabled {
+            let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
         }
         let Value::SortedSet(zs) = &mut entry.value else {
@@ -29522,15 +29571,11 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let Some(entry) = self.entries.get_mut(key) else {
             return Ok(None);
         };
         if lfu_tracking_enabled {
+            let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
         }
         let Value::SortedSet(zs) = &mut entry.value else {
@@ -29637,7 +29682,7 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
-        self.zpopmax_count_impl::<false>(key, count, now_ms)
+        self.zpopmax_count_impl::<true>(key, count, now_ms)
     }
 
     /// A/B toggle for the LFU ZPOPMAX-count keyspace-probe collapse. `COLLAPSE = true` draws the
@@ -29734,14 +29779,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -29793,14 +29834,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -29854,14 +29891,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -29904,14 +29937,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -29945,14 +29974,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -30000,14 +30025,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -30055,14 +30076,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -30099,14 +30116,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -30238,14 +30251,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -30292,15 +30301,11 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let take = count.unwrap_or(usize::MAX);
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -30349,14 +30354,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -30404,15 +30405,11 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let take = count.unwrap_or(usize::MAX);
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -30452,14 +30449,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -30496,14 +30489,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -30543,14 +30532,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -30765,17 +30750,13 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let lfu_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        let rand_val = self.next_rand();
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
                 }
+                let rand_val = Self::lcg_next_seed(&mut self.rng_seed);
                 match &mut entry.value {
                     Value::SortedSet(zs) => {
                         if zs.is_empty() {
@@ -30801,7 +30782,10 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 }
             }
-            None => Ok(None),
+            None => {
+                let _ = Self::lcg_next_seed(&mut self.rng_seed);
+                Ok(None)
+            }
         }
     }
 
@@ -30821,93 +30805,26 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let lfu_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        // (frankenredis-4ywto) Read the cardinality + apply LFU/touch WITHOUT
-        // cloning every (member, score). The zset is BTreeMap-backed (no O(1)
-        // nth like the IndexMap-backed hash/set), so we keep the same next_rand()
-        // index-draw sequence as before, then materialise ONLY the chosen members
-        // in a single ordered pass. Allocation drops from O(n) member clones to
-        // O(distinct picks) — e.g. ZRANDMEMBER key 1 over a 100k zset went from
-        // cloning 100k members to one.
-        let len = if let Some(entry) = self.entries.get_mut(key) {
-            if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
-            }
-            let zlen = match &entry.value {
-                Value::SortedSet(zs) => zs.len(),
-                _ => return Err(StoreError::WrongType),
-            };
-            if zlen == 0 {
-                return Ok(Vec::new());
-            }
-            entry.touch(now_ms);
-            zlen
-        } else {
+        let Some(entry) = self.entries.get_mut(key) else {
             return Ok(Vec::new());
         };
-
-        // Draw the pick indices (in output order; duplicates allowed for the
-        // negative-count form) using the IDENTICAL next_rand() sequence as the
-        // old materialise-then-index path, so the output is byte-for-byte the same.
-        let indices: Vec<usize> = if count >= 0 {
-            let n = (count as usize).min(len);
-            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
-            // t_hash.c hrandfieldWithCountCommand (and the identical block in
-            // t_set.c / t_zset.c): when the requested count is >= the collection
-            // size, upstream does NOT sample at all -- it iterates and emits every
-            // element in ITERATION order, consuming no randomness. fr fell through
-            // to the partial Fisher-Yates below, which returns the whole collection
-            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
-            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
-            // threshold, which is what the `else if` preserves.
-            if n == len {
-                (0..len).collect()
-            } else if n < len / 2 && n < 1024 {
-                let mut idxs = Vec::with_capacity(n);
-                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
-                // drawn `usize` indices by value (hasher-independent, so the sampled index
-                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
-                // the isolated loop. Same hasher the keyspace `entries` map uses.
-                let mut picked =
-                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
-                while idxs.len() < n {
-                    let idx = (self.next_rand() as usize) % len;
-                    if picked.insert(idx) {
-                        idxs.push(idx);
-                    }
-                }
-                idxs
-            } else {
-                let mut order: Vec<usize> = (0..len).collect();
-                for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (len - i));
-                    order.swap(i, j);
-                }
-                order.truncate(n);
-                order
-            }
-        } else {
-            let abs_count = count.unsigned_abs() as usize;
-            let mut idxs = Vec::with_capacity(abs_count.min(1024));
-            for _ in 0..abs_count {
-                idxs.push((self.next_rand() as usize) % len);
-            }
-            idxs
-        };
-
-        // Clone only the picked members (Full: O(1) dict positional access;
-        // Packed: small ordered pass). Output preserves pick order + dups.
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => Ok(zs.random_members_at_indices(&indices)),
-                _ => Ok(Vec::new()),
-            },
-            None => Ok(Vec::new()),
+        if lfu_tracking_enabled {
+            let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
         }
+        let zlen = match &entry.value {
+            Value::SortedSet(zs) => zs.len(),
+            _ => return Err(StoreError::WrongType),
+        };
+        if zlen == 0 {
+            return Ok(Vec::new());
+        }
+        entry.touch(now_ms);
+        let indices = Self::srandmember_sample_indices(&mut self.rng_seed, count, zlen);
+        let Value::SortedSet(zs) = &entry.value else {
+            unreachable!();
+        };
+        Ok(zs.random_members_at_indices(&indices))
     }
 
     /// (CrimsonHawk) Borrow-scan twin of [`Store::zrandmember_count`] for the plain (no-WITHSCORES)
@@ -30930,95 +30847,30 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let lfu_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        let len = if let Some(entry) = self.entries.get_mut(key) {
-            if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
-            }
-            let zlen = match &entry.value {
-                Value::SortedSet(zs) => zs.len(),
-                _ => return Err(StoreError::WrongType),
-            };
-            if zlen == 0 {
-                sink(SmembersScanEvent::Len(0));
-                return Ok(());
-            }
-            entry.touch(now_ms);
-            zlen
-        } else {
+        let Some(entry) = self.entries.get_mut(key) else {
             sink(SmembersScanEvent::Len(0));
             return Ok(());
         };
-
-        let indices: Vec<usize> = if count >= 0 {
-            let n = (count as usize).min(len);
-            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
-            // t_hash.c hrandfieldWithCountCommand (and the identical block in
-            // t_set.c / t_zset.c): when the requested count is >= the collection
-            // size, upstream does NOT sample at all -- it iterates and emits every
-            // element in ITERATION order, consuming no randomness. fr fell through
-            // to the partial Fisher-Yates below, which returns the whole collection
-            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
-            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
-            // threshold, which is what the `else if` preserves.
-            if n == len {
-                (0..len).collect()
-            } else if n < len / 2 && n < 1024 {
-                let mut idxs = Vec::with_capacity(n);
-                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
-                // drawn `usize` indices by value (hasher-independent, so the sampled index
-                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
-                // the isolated loop. Same hasher the keyspace `entries` map uses.
-                let mut picked =
-                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
-                while idxs.len() < n {
-                    let idx = (self.next_rand() as usize) % len;
-                    if picked.insert(idx) {
-                        idxs.push(idx);
-                    }
-                }
-                idxs
-            } else {
-                let mut order: Vec<usize> = (0..len).collect();
-                for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (len - i));
-                    order.swap(i, j);
-                }
-                order.truncate(n);
-                order
-            }
-        } else {
-            let abs_count = count.unsigned_abs() as usize;
-            let mut idxs = Vec::with_capacity(abs_count.min(1024));
-            for _ in 0..abs_count {
-                idxs.push((self.next_rand() as usize) % len);
-            }
-            idxs
-        };
-
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    sink(SmembersScanEvent::Len(indices.len()));
-                    zs.random_member_at_indices_borrow_scan(&indices, |m| {
-                        sink(SmembersScanEvent::Member(m))
-                    });
-                    Ok(())
-                }
-                _ => {
-                    sink(SmembersScanEvent::Len(0));
-                    Ok(())
-                }
-            },
-            None => {
-                sink(SmembersScanEvent::Len(0));
-                Ok(())
-            }
+        if lfu_tracking_enabled {
+            let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
         }
+        let zlen = match &entry.value {
+            Value::SortedSet(zs) => zs.len(),
+            _ => return Err(StoreError::WrongType),
+        };
+        if zlen == 0 {
+            sink(SmembersScanEvent::Len(0));
+            return Ok(());
+        }
+        entry.touch(now_ms);
+        let indices = Self::srandmember_sample_indices(&mut self.rng_seed, count, zlen);
+        let Value::SortedSet(zs) = &entry.value else {
+            unreachable!();
+        };
+        sink(SmembersScanEvent::Len(indices.len()));
+        zs.random_member_at_indices_borrow_scan(&indices, |m| sink(SmembersScanEvent::Member(m)));
+        Ok(())
     }
 
     /// (CrimsonHawk) WITHSCORES twin of [`Store::zrandmember_count_member_borrow_scan`] — streams the
@@ -31040,95 +30892,32 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let lfu_rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
-        let len = if let Some(entry) = self.entries.get_mut(key) {
-            if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
-            }
-            let zlen = match &entry.value {
-                Value::SortedSet(zs) => zs.len(),
-                _ => return Err(StoreError::WrongType),
-            };
-            if zlen == 0 {
-                sink(ZRangeWithScoresScanEvent::Len(0));
-                return Ok(());
-            }
-            entry.touch(now_ms);
-            zlen
-        } else {
+        let Some(entry) = self.entries.get_mut(key) else {
             sink(ZRangeWithScoresScanEvent::Len(0));
             return Ok(());
         };
-
-        let indices: Vec<usize> = if count >= 0 {
-            let n = (count as usize).min(len);
-            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
-            // t_hash.c hrandfieldWithCountCommand (and the identical block in
-            // t_set.c / t_zset.c): when the requested count is >= the collection
-            // size, upstream does NOT sample at all -- it iterates and emits every
-            // element in ITERATION order, consuming no randomness. fr fell through
-            // to the partial Fisher-Yates below, which returns the whole collection
-            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
-            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
-            // threshold, which is what the `else if` preserves.
-            if n == len {
-                (0..len).collect()
-            } else if n < len / 2 && n < 1024 {
-                let mut idxs = Vec::with_capacity(n);
-                // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
-                // drawn `usize` indices by value (hasher-independent, so the sampled index
-                // sequence is byte-identical), and foldhash is ~1.6-2.1x faster per insert on
-                // the isolated loop. Same hasher the keyspace `entries` map uses.
-                let mut picked =
-                    HashSet::with_capacity_and_hasher(n, foldhash::quality::RandomState::default());
-                while idxs.len() < n {
-                    let idx = (self.next_rand() as usize) % len;
-                    if picked.insert(idx) {
-                        idxs.push(idx);
-                    }
-                }
-                idxs
-            } else {
-                let mut order: Vec<usize> = (0..len).collect();
-                for i in 0..n {
-                    let j = i + (self.next_rand() as usize % (len - i));
-                    order.swap(i, j);
-                }
-                order.truncate(n);
-                order
-            }
-        } else {
-            let abs_count = count.unsigned_abs() as usize;
-            let mut idxs = Vec::with_capacity(abs_count.min(1024));
-            for _ in 0..abs_count {
-                idxs.push((self.next_rand() as usize) % len);
-            }
-            idxs
-        };
-
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    sink(ZRangeWithScoresScanEvent::Len(indices.len()));
-                    zs.random_member_score_at_indices_borrow_scan(&indices, |m, s| {
-                        sink(ZRangeWithScoresScanEvent::Pair(m, s))
-                    });
-                    Ok(())
-                }
-                _ => {
-                    sink(ZRangeWithScoresScanEvent::Len(0));
-                    Ok(())
-                }
-            },
-            None => {
-                sink(ZRangeWithScoresScanEvent::Len(0));
-                Ok(())
-            }
+        if lfu_tracking_enabled {
+            let lfu_rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+            entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, lfu_rand_sample);
         }
+        let zlen = match &entry.value {
+            Value::SortedSet(zs) => zs.len(),
+            _ => return Err(StoreError::WrongType),
+        };
+        if zlen == 0 {
+            sink(ZRangeWithScoresScanEvent::Len(0));
+            return Ok(());
+        }
+        entry.touch(now_ms);
+        let indices = Self::srandmember_sample_indices(&mut self.rng_seed, count, zlen);
+        let Value::SortedSet(zs) = &entry.value else {
+            unreachable!();
+        };
+        sink(ZRangeWithScoresScanEvent::Len(indices.len()));
+        zs.random_member_score_at_indices_borrow_scan(&indices, |m, s| {
+            sink(ZRangeWithScoresScanEvent::Pair(m, s))
+        });
+        Ok(())
     }
 
     pub fn zmscore(
@@ -31148,14 +30937,10 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -31181,33 +30966,38 @@ impl Store {
         // The stat variant records a keyspace hit/miss (lookupKeyRead); the
         // no-stat variant only applies lazy expiry (lookupKeyWrite suppresses
         // keyspace_hits/misses via LOOKUP_WRITE). (frankenredis-ljtdo)
-        let exists = if record_stat {
-            self.record_keyspace_lookup(key, now_ms)
-        } else if self.expires_count != 0 {
-            self.drop_if_expired(key, now_ms)
+        let xsetid_last = if self.stream_last_ids.is_empty() {
+            None
         } else {
-            self.entries.contains_key(key)
+            self.stream_last_ids.get(key).copied()
         };
-        if !exists {
-            return Ok((false, None));
-        }
-        match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Stream(entries) => {
-                    let btree_last = entries.last_id();
-                    let xsetid_last = self.stream_last_ids.get(key).copied();
-                    let last_id = match (btree_last, xsetid_last) {
-                        (Some(a), Some(b)) => Some(a.max(b)),
-                        (Some(a), None) => Some(a),
-                        (None, Some(b)) => Some(b),
-                        (None, None) => None,
-                    };
-                    entry.touch(now_ms);
-                    Ok((true, last_id))
-                }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok((false, None)),
+        let entry = if record_stat {
+            match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => entry,
+                None => return Ok((false, None)),
+            }
+        } else {
+            if self.expires_count != 0 && !self.drop_if_expired(key, now_ms) {
+                return Ok((false, None));
+            }
+            match self.entries.get_mut(key) {
+                Some(entry) => entry,
+                None => return Ok((false, None)),
+            }
+        };
+        match &entry.value {
+            Value::Stream(entries) => {
+                let btree_last = entries.last_id();
+                let last_id = match (btree_last, xsetid_last) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+                entry.touch(now_ms);
+                Ok((true, last_id))
+            }
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -31442,8 +31232,12 @@ impl Store {
             None => {
                 let mut entries = StreamEntries::new();
                 entries.insert(id, fields);
-                self.stream_groups.remove(key);
-                self.stream_max_deleted_ids.remove(key);
+                if !self.stream_groups.is_empty() {
+                    self.stream_groups.remove(key);
+                }
+                if !self.stream_max_deleted_ids.is_empty() {
+                    self.stream_max_deleted_ids.remove(key);
+                }
                 // Set high watermark to the first entry's ID
                 self.stream_last_ids.insert(key.to_vec(), id);
                 self.stream_entries_added.insert(key.to_vec(), 1);
@@ -31494,8 +31288,12 @@ impl Store {
         // next DEBUG RELOAD and then vanished -- EXISTS 1 -> 0, groups and all.
         // Redis keeps it: XTRIM/XDEL never delete the key, only DEL does.
         // An empty entries list builds an empty map through the ordinary path.
-        self.stream_groups.remove(key);
-        self.stream_max_deleted_ids.remove(key);
+        if !self.stream_groups.is_empty() {
+            self.stream_groups.remove(key);
+        }
+        if !self.stream_max_deleted_ids.is_empty() {
+            self.stream_max_deleted_ids.remove(key);
+        }
         let mut prev: Option<StreamId> = None;
         let strictly_increasing = entries.ids().all(|id| {
             let ok = prev.is_none_or(|p| p < id);
@@ -31581,8 +31379,12 @@ impl Store {
     ) {
         // Same as the borrowed twin above: an empty stream must still create the
         // key so the caller's metadata and consumer-group restore land on it.
-        self.stream_groups.remove(key);
-        self.stream_max_deleted_ids.remove(key);
+        if !self.stream_groups.is_empty() {
+            self.stream_groups.remove(key);
+        }
+        if !self.stream_max_deleted_ids.is_empty() {
+            self.stream_max_deleted_ids.remove(key);
+        }
         // RDB serializes entries strictly id-ascending, so build the node index
         // in one O(n) pass (no per-entry BTree lookup / binary search) — the same
         // `node_key_for` hot path the RESTORE command avoids. A non-increasing
@@ -32278,37 +32080,7 @@ impl Store {
         count: Option<usize>,
         now_ms: u64,
     ) -> Result<Vec<StreamRecord>, StoreError> {
-        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. XREAD is a pure read
-        // (reads the range directly from the entry; no side-map, no touch/LFU-bump, no PEL),
-        // so a direct fold. Byte-identical: key lazy-expiry, hit/miss, count==0 early-return,
-        // WRONGTYPE, missing→empty, range results. LFU path verbatim.
-        if !self.lfu_tracking_enabled() {
-            return match self.lookup_live_for_read_mut(key, now_ms) {
-                Some(entry) => match &entry.value {
-                    Value::Stream(entries) => {
-                        if matches!(count, Some(0)) {
-                            return Ok(Vec::new());
-                        }
-                        let mut out = Vec::new();
-                        for (id, fields) in entries.range((Excluded(start_exclusive), Unbounded)) {
-                            out.push((*id, fields.to_pairs()));
-                            if let Some(limit) = count
-                                && out.len() >= limit
-                            {
-                                break;
-                            }
-                        }
-                        Ok(out)
-                    }
-                    _ => Err(StoreError::WrongType),
-                },
-                None => Ok(Vec::new()),
-            };
-        }
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(Vec::new());
-        }
-        match self.entries.get(key) {
+        match self.lookup_live_for_read_mut(key, now_ms) {
             Some(entry) => match &entry.value {
                 Value::Stream(entries) => {
                     if matches!(count, Some(0)) {
@@ -32334,7 +32106,7 @@ impl Store {
     /// (CrimsonHawk) Borrow-scan twin of [`Store::xread`] — streams the entries after
     /// `start_exclusive` via `sink` ([`XrangeReplyEvent`], reused: `RecordCount`, then per entry
     /// `RecordStart(id, pairs)` + borrowed `Field`s) with fields BORROWED from the packed buffer,
-    /// eliminating the `to_pairs()` clone. IDENTICAL to `xread`: same non-LFU/LFU single-lookup,
+    /// eliminating the `to_pairs()` clone. IDENTICAL to `xread`: same single-lookup,
     /// `count == Some(0)` empty short-circuit, `(Excluded(start_exclusive), Unbounded)` walk + `count`
     /// limit, NO touch/LFU-bump/PEL. `RecordCount` is emitted first so the XREAD reply path can
     /// decide the outer wrapper (records → `[[key, entries]]`; none → nil). Missing key / empty range
@@ -32347,31 +32119,14 @@ impl Store {
         now_ms: u64,
         mut sink: impl FnMut(XrangeReplyEvent<'_>),
     ) -> Result<(), StoreError> {
-        let entries = if !self.lfu_tracking_enabled() {
-            match self.lookup_live_for_read_mut(key, now_ms) {
-                Some(entry) => match &entry.value {
-                    Value::Stream(entries) => entries,
-                    _ => return Err(StoreError::WrongType),
-                },
-                None => {
-                    sink(XrangeReplyEvent::RecordCount(0));
-                    return Ok(());
-                }
-            }
-        } else {
-            if !self.record_keyspace_lookup(key, now_ms) {
+        let entries = match self.lookup_live_for_read_mut(key, now_ms) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => entries,
+                _ => return Err(StoreError::WrongType),
+            },
+            None => {
                 sink(XrangeReplyEvent::RecordCount(0));
                 return Ok(());
-            }
-            match self.entries.get(key) {
-                Some(entry) => match &entry.value {
-                    Value::Stream(entries) => entries,
-                    _ => return Err(StoreError::WrongType),
-                },
-                None => {
-                    sink(XrangeReplyEvent::RecordCount(0));
-                    return Ok(());
-                }
             }
         };
         if matches!(count, Some(0)) {
@@ -32787,20 +32542,18 @@ impl Store {
         group: &[u8],
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
-            return Ok(false);
+        let is_stream = match self.lookup_live_for_read_mut(key, now_ms) {
+            Some(entry) => matches!(&entry.value, Value::Stream(_)),
+            None => return Ok(false),
+        };
+        if !is_stream {
+            return Err(StoreError::WrongType);
         }
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::Stream(_) => Ok(self
-                    .stream_groups
-                    .get(key)
-                    .and_then(|groups| groups.get(group))
-                    .is_some()),
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(false),
-        }
+        Ok(self
+            .stream_groups
+            .get(key)
+            .and_then(|groups| groups.get(group))
+            .is_some())
     }
 
     pub fn xpending_summary(
@@ -32809,25 +32562,9 @@ impl Store {
         group: &[u8],
         now_ms: u64,
     ) -> Result<Option<StreamPendingSummary>, StoreError> {
-        // (CrimsonHawk) Non-LFU single-lookup collapse: fold `record_keyspace_lookup` + the
-        // separate `entries.get` type-check into one `lookup_live_for_read_mut`. XPENDING
-        // does no touch/LFU-bump and reads its data from `self.stream_groups` (not the
-        // entry), so a `is_stream` bool releases the entry borrow before the group access —
-        // shared body, no duplication. Byte-identical: same key lazy-expiry, hit/miss,
-        // WRONGTYPE, missing→None. LFU path uses record + get verbatim.
-        let is_stream = if !self.lfu_tracking_enabled() {
-            match self.lookup_live_for_read_mut(key, now_ms) {
-                Some(entry) => matches!(&entry.value, Value::Stream(_)),
-                None => return Ok(None),
-            }
-        } else {
-            if !self.record_keyspace_lookup(key, now_ms) {
-                return Ok(None);
-            }
-            match self.entries.get(key) {
-                Some(entry) => matches!(&entry.value, Value::Stream(_)),
-                None => return Ok(None),
-            }
+        let is_stream = match self.lookup_live_for_read_mut(key, now_ms) {
+            Some(entry) => matches!(&entry.value, Value::Stream(_)),
+            None => return Ok(None),
         };
         if !is_stream {
             return Err(StoreError::WrongType);
@@ -32867,20 +32604,9 @@ impl Store {
         now_ms: u64,
         min_idle_ms: u64,
     ) -> Result<Option<Vec<StreamPendingRecord>>, StoreError> {
-        // (CrimsonHawk) Non-LFU single-lookup collapse via `is_stream` — see `xpending_summary`.
-        let is_stream = if !self.lfu_tracking_enabled() {
-            match self.lookup_live_for_read_mut(key, now_ms) {
-                Some(entry) => matches!(&entry.value, Value::Stream(_)),
-                None => return Ok(None),
-            }
-        } else {
-            if !self.record_keyspace_lookup(key, now_ms) {
-                return Ok(None);
-            }
-            match self.entries.get(key) {
-                Some(entry) => matches!(&entry.value, Value::Stream(_)),
-                None => return Ok(None),
-            }
+        let is_stream = match self.lookup_live_for_read_mut(key, now_ms) {
+            Some(entry) => matches!(&entry.value, Value::Stream(_)),
+            None => return Ok(None),
         };
         if !is_stream {
             return Err(StoreError::WrongType);
@@ -33614,21 +33340,9 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<StreamGroupInfo>>, StoreError> {
-        // (CrimsonHawk) is_stream single-lookup collapse — see `xpending_summary`. XINFO
-        // GROUPS only type-checks the entry then reads from self.stream_groups.
-        let is_stream = if !self.lfu_tracking_enabled() {
-            match self.lookup_live_for_read_mut(key, now_ms) {
-                Some(entry) => matches!(&entry.value, Value::Stream(_)),
-                None => return Ok(None),
-            }
-        } else {
-            if !self.record_keyspace_lookup(key, now_ms) {
-                return Ok(None);
-            }
-            match self.entries.get(key) {
-                Some(entry) => matches!(&entry.value, Value::Stream(_)),
-                None => return Ok(None),
-            }
+        let is_stream = match self.lookup_live_for_read_mut(key, now_ms) {
+            Some(entry) => matches!(&entry.value, Value::Stream(_)),
+            None => return Ok(None),
         };
         if !is_stream {
             return Err(StoreError::WrongType);
@@ -33704,23 +33418,9 @@ impl Store {
         group: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<StreamConsumerInfoEx>>, StoreError> {
-        // XINFO CONSUMERS only type-checks the entry, then reads the consumer
-        // state from `stream_groups`. On non-LFU reads, fold the stat-counting
-        // lookup and type-check into one live lookup, release the entry borrow,
-        // then read groups.
-        let is_stream = if !self.lfu_tracking_enabled() {
-            match self.lookup_live_for_read_mut(key, now_ms) {
-                Some(entry) => matches!(&entry.value, Value::Stream(_)),
-                None => return Err(StoreError::KeyNotFound),
-            }
-        } else {
-            if !self.record_keyspace_lookup(key, now_ms) {
-                return Err(StoreError::KeyNotFound);
-            }
-            match self.entries.get(key) {
-                Some(entry) => matches!(&entry.value, Value::Stream(_)),
-                None => return Err(StoreError::KeyNotFound),
-            }
+        let is_stream = match self.lookup_live_for_read_mut(key, now_ms) {
+            Some(entry) => matches!(&entry.value, Value::Stream(_)),
+            None => return Err(StoreError::KeyNotFound),
         };
         if !is_stream {
             return Err(StoreError::WrongType);
@@ -33965,85 +33665,50 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         // (CrimsonHawk) Guard the bare drop_if_expired on `expires_count != 0` — see `zadd`.
-        // Return discarded (eviction side-effect only); the contains_key/get_mut below
-        // re-probe. Byte-identical: no volatile key ⇒ nothing evicts. Elides the drop's
+        // Return discarded (eviction side-effect only); the get_mut below re-probes.
+        // Byte-identical: no volatile key ⇒ nothing evicts. Elides the drop's
         // keyspace probe on the no-TTL PFADD path.
         if self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        // (CrimsonHawk) Dense HLL in-place fast path. The generic path below decodes
-        // the HLL, updates registers, then RE-ENCODES all 16384 registers (O(16384))
-        // on every PFADD — measured ~12x slower than redis on a dense HLL. When the
-        // key already holds a dense HLL, patch only the touched 6-bit registers
-        // directly in the stored string (O(elements)). Byte-identical to the
-        // re-encode: same register bytes, TTL preserved (in-place, no reinsert), and
-        // the cardinality-cache field reset to redis' invalidated sentinel exactly as
-        // `hll_encode` writes it (`[0;7, 0x80]`).
-        let dense_hit = self
-            .entries
-            .get(key)
-            .and_then(|entry| entry.value.string_bytes())
-            .is_some_and(|data| hll_parse_encoding(data.as_ref()).ok() == Some(HllEncoding::Dense));
-        if dense_hit {
-            let register_updates = {
-                let entry = self
-                    .entries
-                    .get_mut(key)
-                    .expect("dense_hit implies the key exists");
-                let mut updates = 0_u64;
-                {
-                    let data = entry
-                        .value
-                        .materialize_string()
-                        .expect("dense_hit implies a String value");
-                    let (header, payload) = data.split_at_mut(HLL_REDIS_HEADER_SIZE);
-                    for element in elements {
-                        let hash = hll_hash(element.as_ref());
-                        let index = (hash as usize) & (HLL_REGISTERS - 1);
-                        let count = hll_rho(hash >> HLL_P);
-                        if count > hll_dense_get_register(payload, index) {
-                            hll_dense_set_register(payload, index, count);
-                            updates += 1;
-                        }
-                    }
-                    if updates > 0 {
-                        header[8..16].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0x80]);
-                    }
-                }
-                if updates > 0 {
-                    entry.touch_write(now_ms, lfu_tracking_enabled);
-                }
-                updates
-            };
-            if register_updates > 0 {
-                self.hll_register_cache.remove(key);
-                self.dirty = self.dirty.saturating_add(register_updates);
-            }
-            return Ok(register_updates > 0);
-        }
-        if !self.entries.contains_key(key)
-            && let Some((data, register_updates)) =
-                hll_encode_sparse_create_from_pfadd(elements, self.hll_sparse_max_bytes)
-        {
-            let mut entry = Entry::new(Value::String(data.into()), now_ms);
-            // Upstream hyperloglog.c builds the HLL through createHLLObject /
-            // createObject(OBJ_STRING,...), so even tiny sparse HLL payloads
-            // report raw object encoding rather than embstr.
-            entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
-            entry.touch_write(now_ms, lfu_tracking_enabled);
-            self.internal_entries_insert(key, entry);
-            self.dirty = self
-                .dirty
-                .saturating_add(1_u64.saturating_add(register_updates));
-            return Ok(true);
-        }
         let mut cached_register_updates = None;
-        let (mut registers, encoding, existed) = match self.entries.get(key) {
+        let (mut registers, encoding, existed) = match self.entries.get_mut(key) {
             Some(entry) => {
                 let Some(data) = entry.value.string_bytes() else {
                     return Err(StoreError::WrongType);
                 };
+                if hll_parse_encoding(data.as_ref()).ok() == Some(HllEncoding::Dense) {
+                    drop(data);
+                    let mut register_updates = 0_u64;
+                    {
+                        let data = entry
+                            .value
+                            .materialize_string()
+                            .expect("dense HLL implies a String value");
+                        let (header, payload) = data.split_at_mut(HLL_REDIS_HEADER_SIZE);
+                        for element in elements {
+                            let hash = hll_hash(element.as_ref());
+                            let index = (hash as usize) & (HLL_REGISTERS - 1);
+                            let count = hll_rho(hash >> HLL_P);
+                            if count > hll_dense_get_register(payload, index) {
+                                hll_dense_set_register(payload, index, count);
+                                register_updates += 1;
+                            }
+                        }
+                        if register_updates > 0 {
+                            header[8..16].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0x80]);
+                        }
+                    }
+                    if register_updates > 0 {
+                        entry.touch_write(now_ms, lfu_tracking_enabled);
+                        if !self.hll_register_cache.is_empty() {
+                            self.hll_register_cache.remove(key);
+                        }
+                        self.dirty = self.dirty.saturating_add(register_updates);
+                    }
+                    return Ok(register_updates > 0);
+                }
                 let modification_count = entry.modification_count;
                 // PFADD mirrors hllSparseSet, which only walks to each element's
                 // target register and tolerates ANY trailing opcode garbage (VAL
@@ -34083,7 +33748,24 @@ impl Store {
                 };
                 (registers, encoding, true)
             }
-            None => (vec![0u8; HLL_REGISTERS], HllEncoding::Sparse, false),
+            None => {
+                if let Some((data, register_updates)) =
+                    hll_encode_sparse_create_from_pfadd(elements, self.hll_sparse_max_bytes)
+                {
+                    let mut entry = Entry::new(Value::String(data.into()), now_ms);
+                    // Upstream hyperloglog.c builds the HLL through createHLLObject /
+                    // createObject(OBJ_STRING,...), so even tiny sparse HLL payloads
+                    // report raw object encoding rather than embstr.
+                    entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
+                    entry.touch_write(now_ms, lfu_tracking_enabled);
+                    self.internal_entries_insert(key, entry);
+                    self.dirty = self
+                        .dirty
+                        .saturating_add(1_u64.saturating_add(register_updates));
+                    return Ok(true);
+                }
+                (vec![0u8; HLL_REGISTERS], HllEncoding::Sparse, false)
+            }
         };
 
         // (frankenredis-pfadddirty) Upstream pfaddCommand counts a dirty unit
@@ -34175,20 +33857,16 @@ impl Store {
         // `record_source_key_lookups` (exists_no_touch) — store.pfcount itself is
         // keyspace-no-stat. Mirror that here so the fast path bumps keyspace_hits
         // identically (the key is a confirmed hit). (frankenredis cc)
-        let _ = self.exists_no_touch(key, now_ms);
+        self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let entry = self
             .entries
             .get_mut(key)
             .expect("pfcount_cached_read requires pfcount_cache_hittable == true");
         if lfu_tracking_enabled {
+            let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
         }
         let card = match &entry.value {
@@ -34217,15 +33895,11 @@ impl Store {
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
             }
-            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-                self.next_rand()
-            } else {
-                0
-            };
             let Some(entry) = self.entries.get_mut(key) else {
                 return Ok(0);
             };
             if lfu_tracking_enabled {
+                let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                 entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
             enum Outcome {
@@ -34282,14 +33956,10 @@ impl Store {
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
             }
-            let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-                self.next_rand()
-            } else {
-                0
-            };
             let mut cache_insert = None;
             if let Some(entry) = self.entries.get_mut(key) {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 let Some(data) = entry.value.string_bytes() else {
@@ -34902,8 +34572,10 @@ impl Store {
     /// Remove the per-field TTL for (`key`, `field`). Called from HDEL
     /// once part 3 lands so stale TTLs don't shadow re-added fields.
     pub fn hash_field_ttl_clear_for_field(&mut self, key: &[u8], field: &[u8]) {
-        self.hash_field_expires
-            .remove(&(key.to_vec(), field.to_vec()));
+        if !self.hash_field_expires.is_empty() {
+            self.hash_field_expires
+                .remove(&(key.to_vec(), field.to_vec()));
+        }
     }
 
     /// GETEX: get string value and optionally set/remove expiration.
@@ -35260,9 +34932,7 @@ impl Store {
             // bumps dirty / signals a change when the destination key
             // actually EXISTED (dbDelete returns non-zero). Deleting a
             // non-existent dest is a no-op — no dirty, no keyspace "del".
-            let existed = self.entries.contains_key(dest);
-            self.internal_entries_remove(dest);
-            if existed {
+            if self.internal_entries_remove(dest).is_some() {
                 self.dirty = self.dirty.saturating_add(1);
             }
         } else {
