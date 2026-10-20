@@ -8976,8 +8976,8 @@ fn process_buffered_frames(
                     let default_write_allowed = (is_keepttl || is_get)
                         && cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     // KEEPTTL unconditionally replies +OK → route the non-allocating `_ok` twin to
-                    // FastOkReply (no reply-frame alloc). GET replies the old value → FastReply
-                    // (needs the frame). Other *4 options yield None and fall through to generic.
+                    // FastOkReply (no reply-frame alloc). GET streams the old value directly into
+                    // `conn.write_buf` via `_into` → FastEncodedReply (zero old-value Vec clone).
                     let action = if is_keepttl {
                         runtime
                             .execute_plain_set_keepttl_borrowed_ok(
@@ -8990,16 +8990,18 @@ fn process_buffered_frames(
                                 consumed: packet.consumed,
                             })
                     } else if is_get {
+                        let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                         runtime
-                            .execute_plain_set_get_borrowed(
+                            .execute_plain_set_get_borrowed_into_with_default_write_gate(
                                 packet.key,
                                 packet.a,
                                 ts,
+                                client_resp3,
+                                &mut conn.write_buf,
                                 default_write_allowed,
                             )
-                            .map(|response| BorrowedMultibulkAction::FastReply {
+                            .map(|()| BorrowedMultibulkAction::FastEncodedReply {
                                 consumed: packet.consumed,
-                                response,
                             })
                     } else {
                         None
@@ -9040,6 +9042,41 @@ fn process_buffered_frames(
                         &mut conn.write_buf,
                         &mut argv_scratch,
                     )
+                } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*5\r\n$4\r\n",
+                    b"XADD",
+                ) {
+                    // XADD key * field value: key=key, a=id("*"), b=field, c=value.
+                    // Placed at the top of the post-floor cascade because (5, Xadd) is
+                    // intentionally excluded from the dispatch floor classifier.
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_xadd_borrowed_with_default_write_gate(
+                            packet.key,
+                            None,
+                            packet.a,
+                            &[(packet.b, packet.c)],
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
                 } else if let Some(packet) =
                     parse_borrowed_plain_hset_packet(unparsed, &parser_config)
                 {
@@ -11645,9 +11682,11 @@ fn process_buffered_frames(
                 ) {
                     // (CrimsonHawk) Zero-copy `_into`: stream the XRANGE records' fields borrowed
                     // straight into the write buffer (per-field clone elimination, 11.88x store A/B).
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
-                        .execute_plain_xrange_borrowed_into(
+                        .execute_plain_xrange_borrowed_into_with_default_read_gate(
                             packet.key,
                             packet.a,
                             packet.b,
@@ -11655,6 +11694,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -11679,9 +11719,11 @@ fn process_buffered_frames(
                 ) {
                     // (CrimsonHawk) Zero-copy `_into`: stream the XREVRANGE records' fields borrowed
                     // into the write buffer (per-field clone elimination, ~11.9x store A/B).
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
-                        .execute_plain_xrevrange_borrowed_into(
+                        .execute_plain_xrevrange_borrowed_into_with_default_read_gate(
                             packet.key,
                             packet.a,
                             packet.b,
@@ -11689,6 +11731,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -11789,39 +11832,6 @@ fn process_buffered_frames(
                             packet.a,
                             packet.b,
                             packet.c,
-                            ts,
-                            default_write_allowed,
-                        )
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
-                    unparsed,
-                    &parser_config,
-                    b"*5\r\n$4\r\n",
-                    b"XADD",
-                ) {
-                    // XADD key * field value: key=key, a=id("*"), b=field, c=value.
-                    let default_write_allowed =
-                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if let Some(response) = runtime
-                        .execute_plain_xadd_borrowed_with_default_write_gate(
-                            packet.key,
-                            None,
-                            packet.a,
-                            &[(packet.b, packet.c)],
                             ts,
                             default_write_allowed,
                         )
@@ -12173,16 +12183,19 @@ fn process_buffered_frames(
                     parse_borrowed_plain_xread_multi_packet(unparsed, &parser_config)
                 {
                     // (CrimsonHawk) Zero-copy `_into` for multi-key (2..=8) non-blocking XREAD.
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     let m = packet.stream_count;
                     if runtime
-                        .execute_plain_xread_multi_borrowed_into(
+                        .execute_plain_xread_multi_borrowed_into_with_default_read_gate(
                             &packet.keys[..m],
                             &packet.ids[..m],
                             packet.count,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12937,10 +12950,12 @@ fn process_buffered_frames(
                     b"XREVRANGE",
                 ) {
                     // XREVRANGE key end start COUNT n: a=end, b=start, c=COUNT, d=n.
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if packet.c.eq_ignore_ascii_case(b"COUNT")
                         && runtime
-                            .execute_plain_xrevrange_borrowed_into(
+                            .execute_plain_xrevrange_borrowed_into_with_default_read_gate(
                                 packet.key,
                                 packet.a,
                                 packet.b,
@@ -12948,6 +12963,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
+                                default_read_allowed,
                             )
                             .is_some()
                     {
@@ -12971,10 +12987,12 @@ fn process_buffered_frames(
                     b"XRANGE",
                 ) {
                     // XRANGE key start end COUNT n: a=start, b=end, c=COUNT, d=n.
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if packet.c.eq_ignore_ascii_case(b"COUNT")
                         && runtime
-                            .execute_plain_xrange_borrowed_into(
+                            .execute_plain_xrange_borrowed_into_with_default_read_gate(
                                 packet.key,
                                 packet.a,
                                 packet.b,
@@ -12982,6 +13000,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
+                                default_read_allowed,
                             )
                             .is_some()
                     {
@@ -17424,7 +17443,9 @@ enum BorrowedDispatchFloorClass {
     WaitZero,
     XackMissing,
     XrangeZero,
+    XrangeCount,
     XrevrangeZero,
+    XrevrangeCount,
     /// Single-key non-blocking `XREADGROUP GROUP … STREAMS key <explicit-id>`.
     /// The exact arities mirror `parse_borrowed_plain_xreadgroup_history_packet`.
     XreadgroupHistory,
@@ -19153,8 +19174,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (4, BorrowedDispatchFloorCommand::Xrange) if xrange_zero_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XrangeZero)
         }
+        (6, BorrowedDispatchFloorCommand::Xrange) => Some(BorrowedDispatchFloorClass::XrangeCount),
         (4, BorrowedDispatchFloorCommand::Xrevrange) if xrevrange_zero_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XrevrangeZero)
+        }
+        (6, BorrowedDispatchFloorCommand::Xrevrange) => {
+            Some(BorrowedDispatchFloorClass::XrevrangeCount)
         }
         // The history parser serves exactly `GROUP g c STREAMS key id` (*7) and its
         // COUNT sibling (*9). *9 also spells a multi-key form, so the parser's required
@@ -19169,9 +19194,11 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // 9500.1), `__memcmp_avx2_movbe` 551.2 (the walk comparing command names), plus 429.0
         // and 281.0 in two parsers that RUN AND FAIL on the way. Ledger row 59ca73e8e.
         //
-        // Both single-key arities: `XREAD STREAMS key id` is 4, `XREAD COUNT n STREAMS key id`
-        // is 6. Multi-key and blocking forms are not classified and keep their cascade arms.
-        (4 | 6, BorrowedDispatchFloorCommand::Xread) => {
+        // Single-key arities (`XREAD STREAMS key id` at 4, `XREAD COUNT n STREAMS key id` at 6)
+        // and multi-key (2..=8 streams, with or without COUNT, arities 6..=20 even) are handled
+        // in `XreadSingle` by chaining `parse_borrowed_plain_xread_single_packet` and
+        // `parse_borrowed_plain_xread_multi_packet`.
+        (4 | 6 | 8 | 10 | 12 | 14 | 16 | 18 | 20, BorrowedDispatchFloorCommand::Xread) => {
             Some(BorrowedDispatchFloorClass::XreadSingle)
         }
         (4, BorrowedDispatchFloorCommand::Lrange) if lrange_floor_enabled() => {
@@ -20133,17 +20160,27 @@ fn dispatch_floor_fast_xrange_zero_into(
 ) -> Option<usize> {
     let packet =
         parse_borrowed_plain_key_arg2_packet(unparsed, parser_config, b"*4\r\n$6\r\n", b"XRANGE")?;
-    if packet.a != b"0-0" || packet.b != b"0-0" {
-        return None;
-    }
     let resp3 = runtime.client_session().resp_protocol_version() == 3;
-    runtime.execute_plain_xrange_zero_borrowed_into_with_default_read_gate(
-        packet.key,
-        ts,
-        resp3,
-        out,
-        default_read_allowed,
-    )?;
+    if packet.a == b"0-0" && packet.b == b"0-0" {
+        runtime.execute_plain_xrange_zero_borrowed_into_with_default_read_gate(
+            packet.key,
+            ts,
+            resp3,
+            out,
+            default_read_allowed,
+        )?;
+    } else {
+        runtime.execute_plain_xrange_borrowed_into_with_default_read_gate(
+            packet.key,
+            packet.a,
+            packet.b,
+            None,
+            ts,
+            resp3,
+            out,
+            default_read_allowed,
+        )?;
+    }
     Some(packet.consumed)
 }
 
@@ -20163,17 +20200,27 @@ fn dispatch_floor_fast_xrevrange_zero_into(
         b"*4\r\n$9\r\n",
         b"XREVRANGE",
     )?;
-    if packet.a != b"0-0" || packet.b != b"0-0" {
-        return None;
-    }
     let resp3 = runtime.client_session().resp_protocol_version() == 3;
-    runtime.execute_plain_xrevrange_zero_borrowed_into_with_default_read_gate(
-        packet.key,
-        ts,
-        resp3,
-        out,
-        default_read_allowed,
-    )?;
+    if packet.a == b"0-0" && packet.b == b"0-0" {
+        runtime.execute_plain_xrevrange_zero_borrowed_into_with_default_read_gate(
+            packet.key,
+            ts,
+            resp3,
+            out,
+            default_read_allowed,
+        )?;
+    } else {
+        runtime.execute_plain_xrevrange_borrowed_into_with_default_read_gate(
+            packet.key,
+            packet.a,
+            packet.b,
+            None,
+            ts,
+            resp3,
+            out,
+            default_read_allowed,
+        )?;
+    }
     Some(packet.consumed)
 }
 
@@ -20846,6 +20893,56 @@ fn try_dispatch_floor_classified_action(
                         out,
                         argv_scratch,
                     ),
+                }
+            } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$3\r\n",
+                b"SET",
+            ) {
+                let is_keepttl = packet.b.eq_ignore_ascii_case(b"KEEPTTL");
+                let is_get = packet.b.eq_ignore_ascii_case(b"GET");
+                let default_write_allowed = (is_keepttl || is_get)
+                    && cached_plain_write_gate(write_gate_cache, runtime, ts);
+                let action = if is_keepttl {
+                    runtime
+                        .execute_plain_set_keepttl_borrowed_ok(
+                            packet.key,
+                            packet.a,
+                            ts,
+                            default_write_allowed,
+                        )
+                        .map(|()| BorrowedMultibulkAction::FastOkReply {
+                            consumed: packet.consumed,
+                        })
+                } else if is_get {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    runtime
+                        .execute_plain_set_get_borrowed_into_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            ts,
+                            client_resp3,
+                            out,
+                            default_write_allowed,
+                        )
+                        .map(|()| BorrowedMultibulkAction::FastEncodedReply {
+                            consumed: packet.consumed,
+                        })
+                } else {
+                    None
+                };
+                if let Some(action) = action {
+                    Ok(action)
+                } else {
+                    parse_borrowed_multibulk_action(
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        out,
+                        argv_scratch,
+                    )
                 }
             } else {
                 parse_borrowed_multibulk_action(
@@ -25170,6 +25267,43 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::XrangeCount => {
+            let default_read_allowed = *read_gate_cache
+                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
+                unparsed,
+                &parser_config,
+                b"*6\r\n$6\r\n",
+                b"XRANGE",
+            ) && packet.c.eq_ignore_ascii_case(b"COUNT")
+                && runtime
+                    .execute_plain_xrange_borrowed_into_with_default_read_gate(
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        Some(packet.d),
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::XreadSingle => {
             // (frankenredis-getexgate) VERBATIM the cascade arm's body, so behaviour is
             // identical by construction. In particular the RESP2-only rule is the EXECUTOR's:
@@ -25183,6 +25317,23 @@ fn try_dispatch_floor_classified_action(
                     .execute_plain_xread_single_borrowed_into_with_default_read_gate(
                         packet.key,
                         packet.id,
+                        packet.count,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else if let Some(packet) =
+                parse_borrowed_plain_xread_multi_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_xread_multi_borrowed_into_with_default_read_gate(
+                        &packet.keys[..packet.stream_count],
+                        &packet.ids[..packet.stream_count],
                         packet.count,
                         ts,
                         client_resp3,
@@ -25253,6 +25404,43 @@ fn try_dispatch_floor_classified_action(
                 default_read_allowed,
             ) {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::XrevrangeCount => {
+            let default_read_allowed = *read_gate_cache
+                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
+                unparsed,
+                &parser_config,
+                b"*6\r\n$9\r\n",
+                b"XREVRANGE",
+            ) && packet.c.eq_ignore_ascii_case(b"COUNT")
+                && runtime
+                    .execute_plain_xrevrange_borrowed_into_with_default_read_gate(
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        Some(packet.d),
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,

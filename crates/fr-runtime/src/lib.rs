@@ -11159,13 +11159,8 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // Read old value first (records the hit/miss + WRONGTYPE) exactly like the
-        // generic; only write when the key holds a string (or is absent).
-        let reply = match self.server.store.get(key, now_ms) {
-            Ok(old) => {
-                self.server.store.set_plain_borrowed(key, value, now_ms);
-                RespFrame::BulkString(old)
-            }
+        let reply = match self.server.store.set_plain_get_borrowed(key, value, now_ms) {
+            Ok(old) => RespFrame::BulkString(old),
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(start);
@@ -11186,6 +11181,99 @@ impl Runtime {
 
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    pub fn execute_plain_set_get_borrowed_into(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_set_get_borrowed_into_with_default_write_gate(
+            key,
+            value,
+            now_ms,
+            resp3,
+            out,
+            default_write_allowed,
+        )
+    }
+
+    pub fn execute_plain_set_get_borrowed_into_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_write_allowed: bool,
+    ) -> Option<()> {
+        if !self.can_execute_plain_set_borrowed_with_default_write_gate(
+            key,
+            value,
+            default_write_allowed,
+        ) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("set");
+        self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len() + b"GET".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let mut error_reply = None;
+        if let Err(err) = self
+            .server
+            .store
+            .set_plain_get_borrowed_with(key, value, now_ms, |old| {
+                if !suppress_reply {
+                    fr_protocol::encode_bulk_string_slice(old, resp3, out);
+                }
+            })
+        {
+            let reply = CommandError::Store(err).to_resp();
+            if !suppress_reply {
+                if resp3 {
+                    reply.encode_into_resp3(out);
+                } else {
+                    reply.encode_into(out);
+                }
+            }
+            error_reply = Some(reply);
+        }
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = error_reply.is_some();
+
+        self.record_plain_set_borrowed_metrics(
+            key,
+            value,
+            Some(b"GET"),
+            failed,
+            elapsed_us,
+            now_ms,
+            packet_id,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
     }
 
     /// (frankenredis-setoptget) Borrowed WRITE fast path for `SET key value OPT GET`
@@ -11285,27 +11373,18 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // KEEPTTL+GET can share the read and TTL-preserving overwrite lookup, moving the old
-        // value directly into the reply. NX/XX keep their conditional read-then-maybe-write path.
-        let reply = if is_keepttl {
-            match self
-                .server
+        let result = if is_keepttl {
+            self.server
                 .store
                 .set_keep_ttl_get_borrowed(key, value, now_ms)
-            {
-                Ok(old) => RespFrame::BulkString(old),
-                Err(err) => CommandError::Store(err).to_resp(),
-            }
+        } else if is_nx {
+            self.server.store.set_nx_get_borrowed(key, value, now_ms)
         } else {
-            match self.server.store.get(key, now_ms) {
-                Ok(old) => {
-                    if (is_nx && old.is_none()) || (is_xx && old.is_some()) {
-                        self.server.store.set_plain_borrowed(key, value, now_ms);
-                    }
-                    RespFrame::BulkString(old)
-                }
-                Err(err) => CommandError::Store(err).to_resp(),
-            }
+            self.server.store.set_xx_get_borrowed(key, value, now_ms)
+        };
+        let reply = match result {
+            Ok(old) => RespFrame::BulkString(old),
+            Err(err) => CommandError::Store(err).to_resp(),
         };
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
@@ -36162,6 +36241,31 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_xrange_borrowed_into_with_default_read_gate(
+            key,
+            start_arg,
+            end_arg,
+            count_arg,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_xrange_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        end_arg: &[u8],
+        count_arg: Option<&[u8]>,
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
         if self.policy.gate.max_bulk_len < b"XRANGE".len()
             || key.len() > self.policy.gate.max_bulk_len
             || start_arg.len() > self.policy.gate.max_bulk_len
@@ -36169,7 +36273,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed {
             return None;
         }
         let start = fr_command::parse_stream_range_bound(start_arg, true).ok()?;
@@ -36205,8 +36309,9 @@ impl Runtime {
                         }
                         fr_store::XrangeReplyEvent::RecordStart(id, pairs) => {
                             fr_protocol::encode_aggregate_header(2, false, out);
-                            let id_bytes = fr_command::format_stream_id(id);
-                            fr_protocol::encode_bulk_string_slice(Some(&id_bytes), false, out);
+                            let mut id_buf = [0u8; 42];
+                            let id_bytes = fr_command::format_stream_id_into_buf(id, &mut id_buf);
+                            fr_protocol::encode_bulk_string_slice(Some(id_bytes), false, out);
                             fr_protocol::encode_aggregate_header(pairs * 2, false, out);
                         }
                         fr_store::XrangeReplyEvent::Field(f) => {
@@ -36558,6 +36663,31 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_xrevrange_borrowed_into_with_default_read_gate(
+            key,
+            end_arg,
+            start_arg,
+            count_arg,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_xrevrange_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        end_arg: &[u8],
+        start_arg: &[u8],
+        count_arg: Option<&[u8]>,
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
         if self.policy.gate.max_bulk_len < b"XREVRANGE".len()
             || key.len() > self.policy.gate.max_bulk_len
             || end_arg.len() > self.policy.gate.max_bulk_len
@@ -36565,7 +36695,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed {
             return None;
         }
         let end = fr_command::parse_stream_range_bound(end_arg, false).ok()?;
@@ -36601,8 +36731,9 @@ impl Runtime {
                         }
                         fr_store::XrangeReplyEvent::RecordStart(id, pairs) => {
                             fr_protocol::encode_aggregate_header(2, false, out);
-                            let id_bytes = fr_command::format_stream_id(id);
-                            fr_protocol::encode_bulk_string_slice(Some(&id_bytes), false, out);
+                            let mut id_buf = [0u8; 42];
+                            let id_bytes = fr_command::format_stream_id_into_buf(id, &mut id_buf);
+                            fr_protocol::encode_bulk_string_slice(Some(id_bytes), false, out);
                             fr_protocol::encode_aggregate_header(pairs * 2, false, out);
                         }
                         fr_store::XrangeReplyEvent::Field(f) => {
@@ -36779,9 +36910,11 @@ impl Runtime {
                                 }
                                 fr_store::XrangeReplyEvent::RecordStart(id, pairs) => {
                                     fr_protocol::encode_aggregate_header(2, false, out);
-                                    let id_bytes = fr_command::format_stream_id(id);
+                                    let mut id_buf = [0u8; 42];
+                                    let id_bytes =
+                                        fr_command::format_stream_id_into_buf(id, &mut id_buf);
                                     fr_protocol::encode_bulk_string_slice(
-                                        Some(&id_bytes),
+                                        Some(id_bytes),
                                         false,
                                         out,
                                     );
@@ -36853,6 +36986,29 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_xread_multi_borrowed_into_with_default_read_gate(
+            keys,
+            ids,
+            count_arg,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_xread_multi_borrowed_into_with_default_read_gate(
+        &mut self,
+        keys: &[&[u8]],
+        ids: &[&[u8]],
+        count_arg: Option<&[u8]>,
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
         if self.policy.gate.max_bulk_len < b"XREAD".len()
             || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
             || ids.iter().any(|i| i.len() > self.policy.gate.max_bulk_len)
@@ -36860,7 +37016,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed {
             return None;
         }
         // Pre-validate EVERY id (no side effects) so any declined form defers the whole command.
@@ -36950,9 +37106,11 @@ impl Runtime {
                             }
                             fr_store::XrangeReplyEvent::RecordStart(id, pairs) => {
                                 fr_protocol::encode_aggregate_header(2, false, &mut chunk);
-                                let id_bytes = fr_command::format_stream_id(id);
+                                let mut id_buf = [0u8; 42];
+                                let id_bytes =
+                                    fr_command::format_stream_id_into_buf(id, &mut id_buf);
                                 fr_protocol::encode_bulk_string_slice(
-                                    Some(&id_bytes),
+                                    Some(id_bytes),
                                     false,
                                     &mut chunk,
                                 );
@@ -37156,14 +37314,16 @@ impl Runtime {
                     }
                     fr_store::XreadgroupHistEvent::RecordStart(id, pairs) => {
                         fr_protocol::encode_aggregate_header(2, false, out);
-                        let id_bytes = fr_command::format_stream_id(id);
-                        fr_protocol::encode_bulk_string_slice(Some(&id_bytes), false, out);
+                        let mut id_buf = [0u8; 42];
+                        let id_bytes = fr_command::format_stream_id_into_buf(id, &mut id_buf);
+                        fr_protocol::encode_bulk_string_slice(Some(id_bytes), false, out);
                         fr_protocol::encode_aggregate_header(pairs * 2, false, out);
                     }
                     fr_store::XreadgroupHistEvent::RecordStartNil(id) => {
                         fr_protocol::encode_aggregate_header(2, false, out);
-                        let id_bytes = fr_command::format_stream_id(id);
-                        fr_protocol::encode_bulk_string_slice(Some(&id_bytes), false, out);
+                        let mut id_buf = [0u8; 42];
+                        let id_bytes = fr_command::format_stream_id_into_buf(id, &mut id_buf);
+                        fr_protocol::encode_bulk_string_slice(Some(id_bytes), false, out);
                         // Tombstone value = nil array: `*-1` (RESP2) / `_` (RESP3).
                         out.extend_from_slice(if resp3 { b"_\r\n" } else { b"*-1\r\n" });
                     }

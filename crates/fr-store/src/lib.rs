@@ -10634,6 +10634,28 @@ impl Store {
         self.set_plain_borrowed_expiry_guard_impl::<false>(key, value, now_ms);
     }
 
+    #[inline]
+    fn insert_new_scalar_entry_not_found(
+        &mut self,
+        key: &[u8],
+        entry: Entry,
+        hash: u32,
+        bucket: usize,
+    ) {
+        self.invalidate_write_side_caches_scalar(key);
+        self.entries.insert_not_found(key, entry, hash, bucket);
+        self.keyspace_generation = self.keyspace_generation.wrapping_add(1);
+        let (event_db, logical_key) = match decode_db_key(key) {
+            Some((decoded_db, logical)) => (decoded_db, logical),
+            None => (0, key),
+        };
+        if event_db < self.database_count {
+            self.db_key_counts[event_db] = self.db_key_counts[event_db].saturating_add(1);
+        }
+        self.notify_keyspace_event(NOTIFY_NEW, "new", logical_key, event_db);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+    }
+
     #[inline(always)]
     fn set_plain_borrowed_expiry_guard_impl<const GUARD: bool>(
         &mut self,
@@ -10655,8 +10677,29 @@ impl Store {
         let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
-        let (old_expiry, old_was_stream) = {
-            let Some(entry) = self.entries.get_mut(key) else {
+        let (old_expiry, old_was_stream) = match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
+                let entry = self.entries.node_value_mut(node_idx);
+                let old_was_stream = matches!(&entry.value, Value::Stream(_));
+                let next_lfu_freq = if lfu_tracking_enabled {
+                    entry
+                        .current_lfu_freq(now_ms, lfu_decay_time)
+                        .saturating_add(1)
+                } else {
+                    0
+                };
+                entry.value = canonical_string_value_from_slice(value);
+                entry.last_access_ms = lru_access_millis(now_ms);
+                entry.lfu_freq = next_lfu_freq;
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                entry.modification_count = entry.modification_count.wrapping_add(1);
+                entry.clear_entry_flags();
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                (old_expiry, old_was_stream)
+            }
+            KeyLookup::NotFound { hash, bucket } => {
                 let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
                 entry.lfu_freq = if lfu_tracking_enabled {
                     LFU_INIT_VAL
@@ -10667,28 +10710,10 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
-                self.internal_entries_insert(key, entry);
+                self.insert_new_scalar_entry_not_found(key, entry, hash, bucket);
                 self.dirty = self.dirty.saturating_add(1);
                 return;
-            };
-            let old_was_stream = matches!(&entry.value, Value::Stream(_));
-            let next_lfu_freq = if lfu_tracking_enabled {
-                entry
-                    .current_lfu_freq(now_ms, lfu_decay_time)
-                    .saturating_add(1)
-            } else {
-                0
-            };
-            entry.value = canonical_string_value_from_slice(value);
-            entry.last_access_ms = lru_access_millis(now_ms);
-            entry.lfu_freq = next_lfu_freq;
-            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
-            entry.modification_count = entry.modification_count.wrapping_add(1);
-            entry.clear_entry_flags();
-            if lfu_tracking_enabled {
-                entry.mark_redis_lfu_clock_field();
             }
-            (old_expiry, old_was_stream)
         };
 
         // (CrimsonHawk) These three only have an effect when the key actually carried a
@@ -10733,8 +10758,29 @@ impl Store {
 
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
-        let old_was_stream = {
-            let Some(entry) = self.entries.get_mut(key) else {
+        let old_was_stream = match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
+                let entry = self.entries.node_value_mut(node_idx);
+                let old_was_stream = matches!(&entry.value, Value::Stream(_));
+                let next_lfu_freq = if lfu_tracking_enabled {
+                    entry
+                        .current_lfu_freq(now_ms, lfu_decay_time)
+                        .saturating_add(1)
+                } else {
+                    0
+                };
+                entry.value = canonical_string_value_from_slice(value);
+                entry.last_access_ms = lru_access_millis(now_ms);
+                entry.lfu_freq = next_lfu_freq;
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                entry.modification_count = entry.modification_count.wrapping_add(1);
+                entry.clear_entry_flags();
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                old_was_stream
+            }
+            KeyLookup::NotFound { hash, bucket } => {
                 let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
                 entry.lfu_freq = if lfu_tracking_enabled {
                     LFU_INIT_VAL
@@ -10745,28 +10791,10 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
-                self.internal_entries_insert(key, entry);
+                self.insert_new_scalar_entry_not_found(key, entry, hash, bucket);
                 self.dirty = self.dirty.saturating_add(1);
                 return;
-            };
-            let old_was_stream = matches!(&entry.value, Value::Stream(_));
-            let next_lfu_freq = if lfu_tracking_enabled {
-                entry
-                    .current_lfu_freq(now_ms, lfu_decay_time)
-                    .saturating_add(1)
-            } else {
-                0
-            };
-            entry.value = canonical_string_value_from_slice(value);
-            entry.last_access_ms = lru_access_millis(now_ms);
-            entry.lfu_freq = next_lfu_freq;
-            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
-            entry.modification_count = entry.modification_count.wrapping_add(1);
-            entry.clear_entry_flags();
-            if lfu_tracking_enabled {
-                entry.mark_redis_lfu_clock_field();
             }
-            old_was_stream
         };
 
         self.invalidate_write_side_caches_scalar(key);
@@ -10797,14 +10825,15 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay_time = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let old = match self.entries.get_mut(key) {
-            Some(entry) => {
+        let old = match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
                 self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
                 let rand_sample = if lfu_tracking_enabled {
                     Self::lcg_next_seed(&mut self.rng_seed)
                 } else {
                     0
                 };
+                let entry = self.entries.node_value_mut(node_idx);
                 if !entry.value.is_string_like() {
                     return Err(StoreError::WrongType);
                 }
@@ -10834,11 +10863,24 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.mark_redis_lfu_clock_field();
                 }
-                Some(old)
+                old
             }
-            None => {
+            KeyLookup::NotFound { hash, bucket } => {
                 self.record_keyspace_miss(key);
-                None
+                self.drop_stream_side_metadata(key);
+                let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                entry.lfu_freq = if lfu_tracking_enabled {
+                    LFU_INIT_VAL
+                } else {
+                    0
+                };
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                self.insert_new_scalar_entry_not_found(key, entry, hash, bucket);
+                self.dirty = self.dirty.saturating_add(1);
+                return Ok(None);
             }
         };
 
@@ -10846,26 +10888,351 @@ impl Store {
         // succeeded. Keep WRONGTYPE side-effect-free while preserving cleanup of leaked metadata
         // for a missing or string-like key.
         self.drop_stream_side_metadata(key);
-        if old.is_none() {
-            let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
-            entry.lfu_freq = if lfu_tracking_enabled {
-                LFU_INIT_VAL
-            } else {
-                0
-            };
-            entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
-            if lfu_tracking_enabled {
-                entry.mark_redis_lfu_clock_field();
-            }
-            self.internal_entries_insert(key, entry);
-        } else {
-            // (BlackThrush) SET KEEPTTL GET overwrite writes a scalar → never a mem_estimate_cache
-            // member; skip the always-miss remove (byte-identical, see invalidate_write_side_caches).
-            self.invalidate_write_side_caches_scalar(key);
-            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-        }
+        // (BlackThrush) SET KEEPTTL GET overwrite writes a scalar → never a mem_estimate_cache
+        // member; skip the always-miss remove (byte-identical, see invalidate_write_side_caches).
+        self.invalidate_write_side_caches_scalar(key);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         self.dirty = self.dirty.saturating_add(1);
-        Ok(old)
+        Ok(Some(old))
+    }
+
+    /// Single-probe `SET key value GET` (no NX/XX/TTL). Shares one `KeyDict` lookup across the
+    /// GET read and the plain SET overwrite/insert, moving the old string value into the reply
+    /// and preserving LFU (`touch_access` + overwrite `+1`, or `LFU_INIT_VAL` on new key).
+    pub fn set_plain_get_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let old_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
+        if old_expiry.is_some() && evaluate_expiry(now_ms, old_expiry).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let old = match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                let entry = self.entries.node_value_mut(node_idx);
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
+                }
+                entry.touch_access(
+                    now_ms,
+                    lfu_tracking_enabled,
+                    lfu_decay_time,
+                    lfu_log_factor,
+                    rand_sample,
+                );
+                let next_lfu_freq = if lfu_tracking_enabled {
+                    entry
+                        .current_lfu_freq(now_ms, lfu_decay_time)
+                        .saturating_add(1)
+                } else {
+                    0
+                };
+                let old =
+                    std::mem::replace(&mut entry.value, canonical_string_value_from_slice(value))
+                        .into_string_owned()
+                        .expect("string-like value exposes owned bytes");
+                entry.last_access_ms = lru_access_millis(now_ms);
+                entry.lfu_freq = next_lfu_freq;
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                entry.modification_count = entry.modification_count.wrapping_add(1);
+                entry.clear_entry_flags();
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                old
+            }
+            KeyLookup::NotFound { hash, bucket } => {
+                self.record_keyspace_miss(key);
+                let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                entry.lfu_freq = if lfu_tracking_enabled {
+                    LFU_INIT_VAL
+                } else {
+                    0
+                };
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                self.insert_new_scalar_entry_not_found(key, entry, hash, bucket);
+                self.dirty = self.dirty.saturating_add(1);
+                return Ok(None);
+            }
+        };
+
+        if old_expiry.is_some() {
+            let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+            self.set_existing_expiry_ms(key, None);
+            self.forget_volatile_key(key);
+            self.update_expiry_deadline(old_expiry, None);
+            self.expires_count = self.expires_count.saturating_sub(1);
+            if db < self.database_count {
+                self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
+            }
+        }
+        self.invalidate_write_side_caches_scalar(key);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(1);
+        Ok(Some(old))
+    }
+
+    /// Zero-copy streaming twin of [`Self::set_plain_get_borrowed`]: streams the old string
+    /// value directly into `sink` before overwriting the entry in place.
+    pub fn set_plain_get_borrowed_with(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        mut sink: impl FnMut(Option<&[u8]>),
+    ) -> Result<(), StoreError> {
+        let old_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
+        if old_expiry.is_some() && evaluate_expiry(now_ms, old_expiry).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                let entry = self.entries.node_value_mut(node_idx);
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
+                }
+                entry.touch_access(
+                    now_ms,
+                    lfu_tracking_enabled,
+                    lfu_decay_time,
+                    lfu_log_factor,
+                    rand_sample,
+                );
+                let next_lfu_freq = if lfu_tracking_enabled {
+                    entry
+                        .current_lfu_freq(now_ms, lfu_decay_time)
+                        .saturating_add(1)
+                } else {
+                    0
+                };
+                match &entry.value {
+                    Value::String(bytes) => sink(Some(bytes.as_slice())),
+                    Value::Integer(v) => {
+                        let old = integer_decimal_bytes(*v);
+                        sink(Some(&old));
+                    }
+                    _ => unreachable!("is_string_like checked above"),
+                }
+                entry.value = canonical_string_value_from_slice(value);
+                entry.last_access_ms = lru_access_millis(now_ms);
+                entry.lfu_freq = next_lfu_freq;
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                entry.modification_count = entry.modification_count.wrapping_add(1);
+                entry.clear_entry_flags();
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+            }
+            KeyLookup::NotFound { hash, bucket } => {
+                self.record_keyspace_miss(key);
+                let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                entry.lfu_freq = if lfu_tracking_enabled {
+                    LFU_INIT_VAL
+                } else {
+                    0
+                };
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                self.insert_new_scalar_entry_not_found(key, entry, hash, bucket);
+                self.dirty = self.dirty.saturating_add(1);
+                sink(None);
+                return Ok(());
+            }
+        }
+
+        if old_expiry.is_some() {
+            let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+            self.set_existing_expiry_ms(key, None);
+            self.forget_volatile_key(key);
+            self.update_expiry_deadline(old_expiry, None);
+            self.expires_count = self.expires_count.saturating_sub(1);
+            if db < self.database_count {
+                self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
+            }
+        }
+        self.invalidate_write_side_caches_scalar(key);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(1);
+        Ok(())
+    }
+
+    /// Single-probe `SET key value NX GET` (no TTL). On hit, touches access and returns the
+    /// existing string value without writing; on miss, inserts the new entry in the pre-located
+    /// bucket and returns `Ok(None)`.
+    pub fn set_nx_get_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                let entry = self.entries.node_value_mut(node_idx);
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
+                }
+                entry.touch_access(
+                    now_ms,
+                    lfu_tracking_enabled,
+                    lfu_decay_time,
+                    lfu_log_factor,
+                    rand_sample,
+                );
+                Ok(Some(
+                    entry
+                        .value
+                        .string_owned()
+                        .expect("string-like value exposes owned bytes"),
+                ))
+            }
+            KeyLookup::NotFound { hash, bucket } => {
+                self.record_keyspace_miss(key);
+                let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
+                entry.lfu_freq = if lfu_tracking_enabled {
+                    LFU_INIT_VAL
+                } else {
+                    0
+                };
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                self.insert_new_scalar_entry_not_found(key, entry, hash, bucket);
+                self.dirty = self.dirty.saturating_add(1);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Single-probe `SET key value XX GET` (no TTL). On miss, records keyspace miss and returns
+    /// `Ok(None)` without writing; on hit, moves the old string value into the reply and
+    /// overwrites the entry in place, clearing any TTL.
+    pub fn set_xx_get_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let old_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
+        if old_expiry.is_some() && evaluate_expiry(now_ms, old_expiry).should_evict {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay_time = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let old = match self.entries.lookup(key) {
+            KeyLookup::Found(node_idx) => {
+                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+                let rand_sample = if lfu_tracking_enabled {
+                    Self::lcg_next_seed(&mut self.rng_seed)
+                } else {
+                    0
+                };
+                let entry = self.entries.node_value_mut(node_idx);
+                if !entry.value.is_string_like() {
+                    return Err(StoreError::WrongType);
+                }
+                entry.touch_access(
+                    now_ms,
+                    lfu_tracking_enabled,
+                    lfu_decay_time,
+                    lfu_log_factor,
+                    rand_sample,
+                );
+                let next_lfu_freq = if lfu_tracking_enabled {
+                    entry
+                        .current_lfu_freq(now_ms, lfu_decay_time)
+                        .saturating_add(1)
+                } else {
+                    0
+                };
+                let old =
+                    std::mem::replace(&mut entry.value, canonical_string_value_from_slice(value))
+                        .into_string_owned()
+                        .expect("string-like value exposes owned bytes");
+                entry.last_access_ms = lru_access_millis(now_ms);
+                entry.lfu_freq = next_lfu_freq;
+                entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
+                entry.modification_count = entry.modification_count.wrapping_add(1);
+                entry.clear_entry_flags();
+                if lfu_tracking_enabled {
+                    entry.mark_redis_lfu_clock_field();
+                }
+                old
+            }
+            KeyLookup::NotFound { .. } => {
+                self.record_keyspace_miss(key);
+                return Ok(None);
+            }
+        };
+
+        if old_expiry.is_some() {
+            let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+            self.set_existing_expiry_ms(key, None);
+            self.forget_volatile_key(key);
+            self.update_expiry_deadline(old_expiry, None);
+            self.expires_count = self.expires_count.saturating_sub(1);
+            if db < self.database_count {
+                self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
+            }
+        }
+        self.invalidate_write_side_caches_scalar(key);
+        Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+        self.dirty = self.dirty.saturating_add(1);
+        Ok(Some(old))
     }
 
     /// Bench-only reference for the pre-fusion runtime sequence. The two public calls are kept in
@@ -31909,11 +32276,6 @@ impl Store {
         // The stat variant records a keyspace hit/miss (lookupKeyRead); the
         // no-stat variant only applies lazy expiry (lookupKeyWrite suppresses
         // keyspace_hits/misses via LOOKUP_WRITE). (frankenredis-ljtdo)
-        let xsetid_last = if self.stream_last_ids.is_empty() {
-            None
-        } else {
-            self.stream_last_ids.get(key).copied()
-        };
         let entry = if record_stat {
             match self.lookup_live_for_read_mut(key, now_ms) {
                 Some(entry) => entry,
@@ -31928,20 +32290,26 @@ impl Store {
                 None => return Ok((false, None)),
             }
         };
-        match &entry.value {
+        let btree_last = match &mut entry.value {
             Value::Stream(entries) => {
                 let btree_last = entries.last_id();
-                let last_id = match (btree_last, xsetid_last) {
-                    (Some(a), Some(b)) => Some(a.max(b)),
-                    (Some(a), None) => Some(a),
-                    (None, Some(b)) => Some(b),
-                    (None, None) => None,
-                };
                 entry.touch(now_ms);
-                Ok((true, last_id))
+                btree_last
             }
-            _ => Err(StoreError::WrongType),
-        }
+            _ => return Err(StoreError::WrongType),
+        };
+        let xsetid_last = if self.stream_last_ids.is_empty() {
+            None
+        } else {
+            self.stream_last_ids.get(key).copied()
+        };
+        let last_id = match (btree_last, xsetid_last) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        Ok((true, last_id))
     }
 
     pub fn xlast_id_with_existence(

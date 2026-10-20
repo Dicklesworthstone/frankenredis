@@ -5034,6 +5034,32 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             });
         }
     }
+    if !nx && !xx && matches!(expiry_mode, ExpiryMode::KeepTtl) {
+        if get {
+            return Ok(RespFrame::BulkString(
+                store.set_keep_ttl_get_borrowed(&argv[1], &argv[2], now_ms)?,
+            ));
+        }
+        store.set_keep_ttl_borrowed(&argv[1], &argv[2], now_ms);
+        return Ok(RespFrame::SimpleString("OK".to_string()));
+    }
+    if get && matches!(expiry_mode, ExpiryMode::None) {
+        if !nx && !xx {
+            return Ok(RespFrame::BulkString(
+                store.set_plain_get_borrowed(&argv[1], &argv[2], now_ms)?,
+            ));
+        }
+        if nx {
+            return Ok(RespFrame::BulkString(
+                store.set_nx_get_borrowed(&argv[1], &argv[2], now_ms)?,
+            ));
+        }
+        if xx {
+            return Ok(RespFrame::BulkString(
+                store.set_xx_get_borrowed(&argv[1], &argv[2], now_ms)?,
+            ));
+        }
+    }
 
     let old_value = if get {
         store.get(&argv[1], now_ms)?
@@ -9294,47 +9320,45 @@ fn parse_partial_auto_id(arg: &[u8]) -> Option<u64> {
     ms_str.parse::<u64>().ok()
 }
 
-/// Append the decimal ASCII of `n` to `out` without the general `fmt` machinery.
-/// (CrimsonHawk) `format!` is ~21% of XRANGE full-scan self-time (the per-entry
-/// `<ms>-<seq>` id); this manual path is byte-identical and avoids the formatter
-/// plus its intermediate `String` allocation.
 #[inline]
-fn push_u64_ascii(out: &mut Vec<u8>, n: u64) {
-    // (frankenredis-getexgate) TWO defects, both measured at 2.000 calls/op and 86.0 instr/op
-    // self on BOTH `xrevrange_base` and `xread_one`, which reach this through
-    // `format_stream_id` -- once for the ms timestamp and once for the sequence.
-    //
-    // 1. The digit loop divided by 10 PER DIGIT. `fr_protocol::write_u64_digits` renders two
-    //    digits at a time from `DIGIT_PAIRS` and is already the renderer every other emitter in
-    //    the workspace uses; a stream ID's ms half is ~13 digits, so this is the half that pays.
-    // 2. It ended in `extend_from_slice(&buf[i..])`, a RUNTIME-VARIABLE length, which rustc
-    //    lowers to a `memcpy` CALL. A stream sequence is almost always a single digit, and
-    //    `push` needs no slice at all.
-    //
-    // The single-digit arm subsumes the old `n == 0` special case: zero takes it and emits the
-    // same byte.
-    //
-    // Deliberately NOT adding an `n < 100` arm here, unlike the `fr-protocol` emitters. Nothing
-    // measured reaches this with a two-digit value: the sequence half is single-digit and the ms
-    // half is ~13 digits, so such an arm would sit on the fall-through path of both call sites
-    // and pay for itself nowhere. That is the mistake the `push_usize` rejection records.
-    if n < 10 {
-        out.push(b'0' + n as u8);
-        return;
+fn write_u64_digits_into_42(buf: &mut [u8; 42], end: usize, mut val: u64) -> usize {
+    let mut pos = end;
+    loop {
+        pos -= 1;
+        buf[pos] = b'0' + (val % 10) as u8;
+        val /= 10;
+        if val == 0 {
+            break;
+        }
     }
-    let mut buf = [0u8; 20];
-    let pos = fr_protocol::write_u64_digits(&mut buf, 20, n);
-    out.extend_from_slice(&buf[pos..]);
+    pos
+}
+
+/// Format a stream ID `<ms>-<seq>` into a 42-byte stack buffer without allocating.
+/// Returns the formatted ASCII slice at the tail of `buf`.
+#[inline]
+pub fn format_stream_id_into_buf(id: StreamId, buf: &mut [u8; 42]) -> &[u8] {
+    let seq_pos = if id.1 < 10 {
+        buf[41] = b'0' + id.1 as u8;
+        41
+    } else {
+        write_u64_digits_into_42(buf, 42, id.1)
+    };
+    let dash_pos = seq_pos - 1;
+    buf[dash_pos] = b'-';
+    let ms_pos = if id.0 < 10 {
+        buf[dash_pos - 1] = b'0' + id.0 as u8;
+        dash_pos - 1
+    } else {
+        write_u64_digits_into_42(buf, dash_pos, id.0)
+    };
+    &buf[ms_pos..]
 }
 
 #[inline]
 pub fn format_stream_id(id: StreamId) -> Vec<u8> {
-    // 20 (ms) + 1 ('-') + 20 (seq) worst case.
-    let mut out = Vec::with_capacity(41);
-    push_u64_ascii(&mut out, id.0);
-    out.push(b'-');
-    push_u64_ascii(&mut out, id.1);
-    out
+    let mut buf = [0u8; 42];
+    format_stream_id_into_buf(id, &mut buf).to_vec()
 }
 
 #[inline]
@@ -10039,12 +10063,16 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                 limit,
                 store.stream_node_max_entries,
             );
-            stream_approx_trim_target_with_node_max(
+            let target = stream_approx_trim_target_with_node_max(
                 current_len,
                 max_len,
                 approx_limit,
                 store.effective_stream_node_max_entries(),
-            )
+            );
+            if target >= current_len {
+                return Ok(RespFrame::Integer(0));
+            }
+            target
         } else {
             max_len
         };
@@ -10120,12 +10148,16 @@ pub fn apply_xadd_maxlen_trim_after_add(
             trim_limit,
             store.stream_node_max_entries,
         );
-        stream_approx_trim_target_with_node_max(
+        let target = stream_approx_trim_target_with_node_max(
             current_len,
             max_len,
             approx_limit,
             store.effective_stream_node_max_entries(),
-        )
+        );
+        if target >= current_len {
+            return 0;
+        }
+        target
     } else {
         max_len
     };
