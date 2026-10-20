@@ -11122,12 +11122,20 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Ttl, packet.key, ts)
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
+                    if runtime
+                        .execute_plain_keymeta_borrowed_into_with_default_read_gate(
+                            PlainKeyMetaCmd::Ttl,
+                            packet.key,
+                            ts,
+                            &mut conn.write_buf,
+                            default_read_allowed,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -11142,14 +11150,20 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_pttl_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keymeta_borrowed(
-                        PlainKeyMetaCmd::Pttl,
-                        packet.key,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
+                    if runtime
+                        .execute_plain_keymeta_borrowed_into_with_default_read_gate(
+                            PlainKeyMetaCmd::Pttl,
+                            packet.key,
+                            ts,
+                            &mut conn.write_buf,
+                            default_read_allowed,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -11164,14 +11178,20 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_expiretime_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_keymeta_borrowed(
-                        PlainKeyMetaCmd::Expiretime,
-                        packet.key,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
+                    if runtime
+                        .execute_plain_keymeta_borrowed_into_with_default_read_gate(
+                            PlainKeyMetaCmd::Expiretime,
+                            packet.key,
+                            ts,
+                            &mut conn.write_buf,
+                            default_read_allowed,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -12183,14 +12203,17 @@ fn process_buffered_frames(
                     unparsed,
                     &parser_config,
                 ) {
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
-                        .execute_plain_hrandfield_count_withvalues_borrowed_into(
+                        .execute_plain_hrandfield_count_withvalues_borrowed_into_with_default_read_gate(
                             packet.key,
                             packet.count,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -12216,14 +12239,17 @@ fn process_buffered_frames(
                     // (CrimsonHawk) Zero-copy `_into` for `ZRANDMEMBER key count WITHSCORES` —
                     // stream (member borrowed, score) pairs into the buffer (2.60x member-clone
                     // elimination). Same decline conditions as generic ⇒ fallthrough-safe.
+                    let default_read_allowed = *plain_get_read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
-                        .execute_plain_zrandmember_count_withscores_borrowed_into(
+                        .execute_plain_zrandmember_count_withscores_borrowed_into_with_default_read_gate(
                             packet.key,
                             packet.count,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            default_read_allowed,
                         )
                         .is_some()
                     {
@@ -17121,6 +17147,9 @@ enum BorrowedDispatchFloorClass {
     /// cascade to reach a route that already existed. This is a CLASS variant;
     /// its command-enum counterpart is [`BorrowedDispatchFloorCommand::Zmpop`].
     Zmpop,
+    Zmpop2,
+    Zmpop1Count,
+    Zmpop2Count,
     /// (frankenredis-nscqs) `BITOP <op> dest src...`, carrying the SOURCE COUNT so
     /// one class covers both routed arities: 1 is `BITOP NOT dest src` and the
     /// single-source AND/OR/XOR form, 2 is the two-source form.
@@ -17172,11 +17201,15 @@ enum BorrowedDispatchFloorClass {
     /// sits at ~12375, roughly 5,485 lines past the floor dispatch call, and the
     /// shape censused at 81.0 parses per op against 9,755.4 instr of dispatch.
     ZrangebyscoreLimit,
+    ZrangebyscoreWithscores,
     /// (frankenredis-ozrro) `ZREVRANGEBYSCORE key max min`, arity-4 form only.
     Zrevrangebyscore,
+    ZrevrangebyscoreWithscores,
+    ZrevrangebyscoreLimit,
     /// (frankenredis-ozrro) `ZREVRANGE key start stop`, arity-4 form only —
     /// WITHSCORES has its own arm and keeps the cascade.
     Zrevrange,
+    ZrevrangeWithscores,
     /// (frankenredis-ozrro) `LPOS key element RANK n`.
     LposRank,
     /// (frankenredis-ozrro) `HGETALL key`.
@@ -17235,6 +17268,7 @@ enum BorrowedDispatchFloorClass {
     /// COUNT form was the sibling left walking. WITHVALUES is a distinct packet
     /// and keeps the cascade.
     HrandfieldCount,
+    HrandfieldCountWithvalues,
     /// (frankenredis-ozrro) `PEXPIRETIME key`, the millisecond sibling of the
     /// already-classified `EXPIRETIME`.
     Pexpiretime,
@@ -17306,6 +17340,7 @@ enum BorrowedDispatchFloorClass {
     Scan0(PlainScan0Cmd),
     /// (frankenredis-ozrro) `ZRANGEBYLEX key min max`.
     Zrangebylex,
+    ZrangebylexLimit,
     /// (frankenredis-ozrro) `ZREVRANK key member`.
     Zrevrank,
     /// (frankenredis-ozrro) `SMISMEMBER key member...` at two or three members,
@@ -17462,6 +17497,7 @@ enum BorrowedDispatchFloorClass {
     /// (frankenredis-ozrro) `ZREVRANGEBYLEX key max min`, the plain arity-4 form
     /// only — the `LIMIT` spelling has its own arm and keeps the cascade.
     Zrevrangebylex,
+    ZrevrangebylexLimit,
     /// (frankenredis-ozrro) `SINTERSTORE|SUNIONSTORE|SDIFFSTORE dest src...`.
     /// One class carrying the operation, for the same reason
     /// [`BorrowedDispatchFloorClass::ZsetStore`] carries its own: three adjacent
@@ -17474,6 +17510,7 @@ enum BorrowedDispatchFloorClass {
     SetStore(PlainSetStoreCmd, u8),
     /// (frankenredis-ozrro) `ZINTER numkeys key key`, two sources, no options.
     Zinter2,
+    Zinter3,
     /// (frankenredis-ozrro) `ZDIFF numkeys key key`, two sources, no options.
     Zdiff2,
 }
@@ -18600,6 +18637,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // command names. The COUNT form keeps its later arm; only the bare form
         // moves, because only it has a fixed arity to classify on.
         (4, BorrowedDispatchFloorCommand::Zmpop) => Some(BorrowedDispatchFloorClass::Zmpop),
+        (5, BorrowedDispatchFloorCommand::Zmpop) => Some(BorrowedDispatchFloorClass::Zmpop2),
+        (6, BorrowedDispatchFloorCommand::Zmpop) => Some(BorrowedDispatchFloorClass::Zmpop1Count),
+        (7, BorrowedDispatchFloorCommand::Zmpop) => Some(BorrowedDispatchFloorClass::Zmpop2Count),
         // (frankenredis-nscqs) BITOP's two routed shapes, both of which had an exact
         // borrowed parser+executor stranded deep in the chain. Gated callgrind on
         // `BITOP AND bdst ba bb`, 4,000 ops: Store::bitop is 4.64% and
@@ -18754,19 +18794,10 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // (frankenredis-ex3il) Widened 4..=5 -> 4..=6. Length 6 admits BOTH four
         // plain keys and two keys with LIMIT, and the arm below now serves both, so
         // the widening cannot strand a reading on the generic path.
-        (4..=6, BorrowedDispatchFloorCommand::Sintercard) => {
+        (3..=7, BorrowedDispatchFloorCommand::Sintercard) => {
             Some(BorrowedDispatchFloorClass::Sintercard)
         }
-        // (frankenredis-5na4i) Arity 4 ONLY, deliberately narrower than SINTERCARD's 4..=6. A
-        // floor class is a promise its arm must keep: the arm below serves the argc-4 form and
-        // nothing else, so claiming 5 or 6 would strand the LIMIT form on GENERIC — which is
-        // where it already goes, but at the cost of a failed classification first
-        // (project_floor_class_is_a_promise_its_arm_must_keep).
-        // (frankenredis-5na4i) Arity 4 and 6, listed SEPARATELY rather than as 4..=6. Arity 5 is
-        // `ZINTERCARD 1 k LIMIT n`, which the arm below does NOT serve (both parsers pin
-        // numkeys=2), so a range would claim a shape the arm declines and strand it on GENERIC
-        // after a failed classification — the exact hazard ex3il hit widening SINTERCARD.
-        (4 | 6, BorrowedDispatchFloorCommand::Zintercard) => {
+        (3..=7, BorrowedDispatchFloorCommand::Zintercard) => {
             Some(BorrowedDispatchFloorClass::Zintercard)
         }
         // (frankenredis-5na4i) Arity 3 ONLY: the SUMMARY form. The extended form has a different
@@ -18782,6 +18813,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (3, BorrowedDispatchFloorCommand::Spublish) => Some(BorrowedDispatchFloorClass::Spublish),
         (3, BorrowedDispatchFloorCommand::Hrandfield) => {
             Some(BorrowedDispatchFloorClass::HrandfieldCount)
+        }
+        (4, BorrowedDispatchFloorCommand::Hrandfield) => {
+            Some(BorrowedDispatchFloorClass::HrandfieldCountWithvalues)
         }
         (2, BorrowedDispatchFloorCommand::Pexpiretime) => {
             Some(BorrowedDispatchFloorClass::Pexpiretime)
@@ -18904,6 +18938,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (4, BorrowedDispatchFloorCommand::Zrevrangebylex) => {
             Some(BorrowedDispatchFloorClass::Zrevrangebylex)
         }
+        (7, BorrowedDispatchFloorCommand::Zrevrangebylex) => {
+            Some(BorrowedDispatchFloorClass::ZrevrangebylexLimit)
+        }
         (4, BorrowedDispatchFloorCommand::Sinterstore) => Some(
             BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Inter, 2),
         ),
@@ -18951,6 +18988,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // clean biconditional for this command instead of an exception.
         (5, BorrowedDispatchFloorCommand::Geoadd) => Some(BorrowedDispatchFloorClass::GeoaddOne),
         (4, BorrowedDispatchFloorCommand::Zinter) => Some(BorrowedDispatchFloorClass::Zinter2),
+        (5, BorrowedDispatchFloorCommand::Zinter) => Some(BorrowedDispatchFloorClass::Zinter3),
         (4, BorrowedDispatchFloorCommand::Zdiff) => Some(BorrowedDispatchFloorClass::Zdiff2),
         (arity, BorrowedDispatchFloorCommand::Hmget) if arity >= 3 => {
             Some(BorrowedDispatchFloorClass::Hmget)
@@ -19012,6 +19050,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (5, BorrowedDispatchFloorCommand::Lpos) => Some(BorrowedDispatchFloorClass::LposRank),
         (4, BorrowedDispatchFloorCommand::Zrevrange) => Some(BorrowedDispatchFloorClass::Zrevrange),
+        (5, BorrowedDispatchFloorCommand::Zrevrange) => {
+            Some(BorrowedDispatchFloorClass::ZrevrangeWithscores)
+        }
         (4..=5, BorrowedDispatchFloorCommand::Smismember) => {
             Some(BorrowedDispatchFloorClass::SmismemberFew)
         }
@@ -19022,8 +19063,17 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (4, BorrowedDispatchFloorCommand::Zrangebylex) => {
             Some(BorrowedDispatchFloorClass::Zrangebylex)
         }
+        (7, BorrowedDispatchFloorCommand::Zrangebylex) => {
+            Some(BorrowedDispatchFloorClass::ZrangebylexLimit)
+        }
         (4, BorrowedDispatchFloorCommand::Zrevrangebyscore) => {
             Some(BorrowedDispatchFloorClass::Zrevrangebyscore)
+        }
+        (5, BorrowedDispatchFloorCommand::Zrevrangebyscore) => {
+            Some(BorrowedDispatchFloorClass::ZrevrangebyscoreWithscores)
+        }
+        (7, BorrowedDispatchFloorCommand::Zrevrangebyscore) => {
+            Some(BorrowedDispatchFloorClass::ZrevrangebyscoreLimit)
         }
         (2, BorrowedDispatchFloorCommand::Smembers) => Some(BorrowedDispatchFloorClass::Smembers),
         (3, BorrowedDispatchFloorCommand::Lindex) => Some(BorrowedDispatchFloorClass::Lindex),
@@ -19039,6 +19089,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (4, BorrowedDispatchFloorCommand::Zrangebyscore) => {
             Some(BorrowedDispatchFloorClass::Zrangebyscore)
+        }
+        (5, BorrowedDispatchFloorCommand::Zrangebyscore) => {
+            Some(BorrowedDispatchFloorClass::ZrangebyscoreWithscores)
         }
         // (frankenredis-50ntn) Arity 7 is the LIMIT form and nothing else: every
         // ZRANGEBYSCORE length carries exactly one form, so this claim cannot
@@ -19094,7 +19147,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // (frankenredis-p98mw) The two-pair form, which sat in the gap between the
         // arity-5 claim and the `>= 8 && even` claim below.
         (6, BorrowedDispatchFloorCommand::Zadd) => Some(BorrowedDispatchFloorClass::ZaddTwoPair),
-        (arity, BorrowedDispatchFloorCommand::Zadd) if arity >= 8 && arity.is_multiple_of(2) => {
+        (7..=14 | 16 | 18, BorrowedDispatchFloorCommand::Zadd) => {
             Some(BorrowedDispatchFloorClass::ZaddMulti)
         }
         (4, BorrowedDispatchFloorCommand::Xrange) if xrange_zero_floor_enabled() => {
@@ -21415,6 +21468,105 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::Zmpop2 => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+            if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                &parser_config,
+                b"*5\r\n$5\r\n",
+                b"ZMPOP",
+            ) && let Some(response) = runtime
+                .execute_plain_zmpop2_borrowed_with_default_write_gate(
+                    packet.key,
+                    packet.a,
+                    packet.b,
+                    packet.c,
+                    ts,
+                    default_write_allowed,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zmpop1Count => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+            if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
+                unparsed,
+                &parser_config,
+                b"*6\r\n$5\r\n",
+                b"ZMPOP",
+            ) && let Some(response) = runtime
+                .execute_plain_zmpop1_count_borrowed_with_default_write_gate(
+                    packet.key,
+                    packet.a,
+                    packet.b,
+                    packet.c,
+                    packet.d,
+                    ts,
+                    default_write_allowed,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zmpop2Count => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+            if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
+                unparsed,
+                &parser_config,
+                b"*7\r\n$5\r\n",
+                b"ZMPOP",
+            ) && let Some(response) = runtime
+                .execute_plain_zmpop2_count_borrowed_with_default_write_gate(
+                    packet.key,
+                    packet.a,
+                    packet.b,
+                    packet.c,
+                    packet.d,
+                    packet.e,
+                    ts,
+                    default_write_allowed,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Lrem => {
             // (frankenredis-ozrro) Hoisted ABOVE the let-chain: `cached_plain_write_gate` needs
             // `&mut Runtime` and so does the executor, and a `let` cannot sit inside an
@@ -21914,6 +22066,44 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::ZrevrangebylexLimit => {
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
+            if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
+                unparsed,
+                &parser_config,
+                b"*7\r\n$14\r\n",
+                b"ZREVRANGEBYLEX",
+            ) && packet.c.eq_ignore_ascii_case(b"LIMIT")
+                && runtime
+                    .execute_plain_zrevrangebylex_limit_borrowed_into(
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        packet.d,
+                        packet.e,
+                        ts,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::SetStore(cmd, sources) => {
             // The array-length prefix is the ONLY part that varies with the source
             // count; the name, parsers and executors are shared, and the executors
@@ -21991,6 +22181,41 @@ fn try_dispatch_floor_classified_action(
                 .execute_plain_zinter_borrowed_into(
                     packet.key,
                     &[packet.a, packet.b],
+                    ts,
+                    default_read_allowed,
+                    out,
+                )
+                .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zinter3 => {
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
+            // packet.key holds the numkeys bulk; a/b/c are the three source keys.
+            if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                &parser_config,
+                b"*5\r\n$6\r\n",
+                b"ZINTER",
+            ) && runtime
+                .execute_plain_zinter_borrowed_into(
+                    packet.key,
+                    &[packet.a, packet.b, packet.c],
                     ts,
                     default_read_allowed,
                     out,
@@ -22767,6 +22992,44 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::ZrevrangeWithscores => {
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                &parser_config,
+                b"*5\r\n$9\r\n",
+                b"ZREVRANGE",
+            ) && packet.c.eq_ignore_ascii_case(b"WITHSCORES")
+                && runtime
+                    .execute_plain_zrevrange_withscores_borrowed_into(
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Zrevrank => {
             // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
             let default_read_allowed = Some(
@@ -22829,6 +23092,44 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::ZrangebylexLimit => {
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
+            if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
+                unparsed,
+                &parser_config,
+                b"*7\r\n$11\r\n",
+                b"ZRANGEBYLEX",
+            ) && packet.c.eq_ignore_ascii_case(b"LIMIT")
+                && runtime
+                    .execute_plain_zrangebylex_limit_borrowed_into(
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        packet.d,
+                        packet.e,
+                        ts,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Zrevrangebyscore => {
             // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
             let default_read_allowed = Some(
@@ -22850,6 +23151,82 @@ fn try_dispatch_floor_classified_action(
                     default_read_allowed,
                 )
                 .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::ZrevrangebyscoreWithscores => {
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                &parser_config,
+                b"*5\r\n$16\r\n",
+                b"ZREVRANGEBYSCORE",
+            ) && packet.c.eq_ignore_ascii_case(b"WITHSCORES")
+                && runtime
+                    .execute_plain_zrevrangebyscore_withscores_borrowed_into(
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::ZrevrangebyscoreLimit => {
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
+            if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
+                unparsed,
+                &parser_config,
+                b"*7\r\n$16\r\n",
+                b"ZREVRANGEBYSCORE",
+            ) && packet.c.eq_ignore_ascii_case(b"LIMIT")
+                && runtime
+                    .execute_plain_zrevrangebyscore_limit_borrowed_into(
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        packet.d,
+                        packet.e,
+                        ts,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
@@ -23000,6 +23377,44 @@ fn try_dispatch_floor_classified_action(
                         packet.d,
                         packet.e,
                         ts,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::ZrangebyscoreWithscores => {
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                &parser_config,
+                b"*5\r\n$13\r\n",
+                b"ZRANGEBYSCORE",
+            ) && packet.c.eq_ignore_ascii_case(b"WITHSCORES")
+                && runtime
+                    .execute_plain_zrangebyscore_withscores_borrowed_into(
+                        packet.key,
+                        packet.a,
+                        packet.b,
+                        ts,
+                        client_resp3,
                         out,
                         default_read_allowed,
                     )
@@ -25372,28 +25787,21 @@ fn try_dispatch_floor_classified_action(
             parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
         }
         BorrowedDispatchFloorClass::Ttl => {
-            // (frankenredis-getexgate) RE-CONVERTED, and the earlier revert is now EXPLAINED.
-            // The recorded "hoisted placement lost, 21 instr/op WORSE" was not about placement.
-            // This arm returns FastReply and TYPE returns FastEncodedReply, and until bffba0601
-            // the FastReply arm of the buffered loop CLEARED plain_get_read_gate_cache after
-            // every packet. So the hoist here populated a cache that was thrown away before the
-            // next packet could read it: every op paid the full gate PLUS the get_or_insert_with,
-            // which is the +21. TYPE kept its entry and gained 189 with an identical hoist.
-            // With that clear gone the cache survives the packet, so the hoist is a hit.
             let default_read_allowed = *read_gate_cache
                 .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
             if let Some(packet) = parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
-                && let Some(response) = runtime
-                    .execute_plain_keymeta_borrowed_with_default_read_gate(
+                && runtime
+                    .execute_plain_keymeta_borrowed_into_with_default_read_gate(
                         PlainKeyMetaCmd::Ttl,
                         packet.key,
                         ts,
+                        out,
                         default_read_allowed,
                     )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -26461,11 +26869,10 @@ fn try_dispatch_floor_classified_action(
                 *read_gate_cache
                     .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
             );
-            // (frankenredis-5na4i) One exact parser, one shape. Everything else about
-            // ZINTERCARD -- numkeys disagreeing with the arity, LIMIT, wrong-type operands --
-            // is declined by the parser or by the executor and falls to the generic path, which
-            // is where it goes today anyway. The executor owns the zintercardwt ordering rule
-            // (a wrong-type key must beat a bad LIMIT) by declining rather than reproducing it.
+            // (frankenredis-5na4i, frankenredis-ohsk5) Exact arity parsers for 3..=7.
+            // Everything else about ZINTERCARD -- numkeys disagreeing with the arity,
+            // wrong-type operands -- is declined by the parser or by the executor and
+            // falls to the generic path.
             let hit = parse_borrowed_plain_zintercard2_packet(unparsed, &parser_config)
                 .and_then(|packet| {
                     let tail = [packet.numkeys, packet.k1, packet.k2];
@@ -26473,8 +26880,6 @@ fn try_dispatch_floor_classified_action(
                         .execute_plain_zintercard_borrowed(&tail, ts, default_read_allowed)
                         .map(|response| (packet.consumed, response))
                 })
-                // The two parsers pin different arities, so at most one can match and the order
-                // between them is immaterial.
                 .or_else(|| {
                     parse_borrowed_plain_zintercard_limit_packet(unparsed, &parser_config).and_then(
                         |packet| {
@@ -26485,6 +26890,62 @@ fn try_dispatch_floor_classified_action(
                                 .map(|response| (packet.consumed, response))
                         },
                     )
+                })
+                .or_else(|| {
+                    parse_borrowed_plain_key_arg1_packet(
+                        unparsed,
+                        &parser_config,
+                        b"*3\r\n$10\r\n",
+                        b"ZINTERCARD",
+                    )
+                    .and_then(|packet| {
+                        let tail = [packet.key, packet.arg];
+                        runtime
+                            .execute_plain_zintercard_borrowed(&tail, ts, default_read_allowed)
+                            .map(|response| (packet.consumed, response))
+                    })
+                })
+                .or_else(|| {
+                    parse_borrowed_plain_key_arg3_packet(
+                        unparsed,
+                        &parser_config,
+                        b"*5\r\n$10\r\n",
+                        b"ZINTERCARD",
+                    )
+                    .and_then(|packet| {
+                        let tail = [packet.key, packet.a, packet.b, packet.c];
+                        runtime
+                            .execute_plain_zintercard_borrowed(&tail, ts, default_read_allowed)
+                            .map(|response| (packet.consumed, response))
+                    })
+                })
+                .or_else(|| {
+                    parse_borrowed_plain_key_arg4_packet(
+                        unparsed,
+                        &parser_config,
+                        b"*6\r\n$10\r\n",
+                        b"ZINTERCARD",
+                    )
+                    .and_then(|packet| {
+                        let tail = [packet.key, packet.a, packet.b, packet.c, packet.d];
+                        runtime
+                            .execute_plain_zintercard_borrowed(&tail, ts, default_read_allowed)
+                            .map(|response| (packet.consumed, response))
+                    })
+                })
+                .or_else(|| {
+                    parse_borrowed_plain_key_arg5_packet(
+                        unparsed,
+                        &parser_config,
+                        b"*7\r\n$10\r\n",
+                        b"ZINTERCARD",
+                    )
+                    .and_then(|packet| {
+                        let tail = [packet.key, packet.a, packet.b, packet.c, packet.d, packet.e];
+                        runtime
+                            .execute_plain_zintercard_borrowed(&tail, ts, default_read_allowed)
+                            .map(|response| (packet.consumed, response))
+                    })
                 });
             if let Some((consumed, response)) = hit {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
@@ -26505,9 +26966,8 @@ fn try_dispatch_floor_classified_action(
                 *read_gate_cache
                     .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
             );
-            // Two exact parsers, one per key count. They are tried in the
-            // cascade's own order; `SINTERCARD 3 a b` (a numkeys that disagrees
-            // with the arity) is declined by both, exactly as before.
+            // Exact parsers per arity (3..=7). `SINTERCARD 3 a b` (a numkeys that disagrees
+            // with the arity) is declined by all, falling through to generic.
             let hit = parse_borrowed_plain_sintercard2_packet(unparsed, &parser_config)
                 .and_then(|packet| {
                     let tail = [packet.numkeys, packet.k1, packet.k2];
@@ -26551,6 +27011,34 @@ fn try_dispatch_floor_classified_action(
                                 .execute_plain_sintercard_borrowed(&tail, ts, default_read_allowed)
                                 .map(|response| (packet.consumed, response))
                         })
+                })
+                .or_else(|| {
+                    parse_borrowed_plain_key_arg1_packet(
+                        unparsed,
+                        &parser_config,
+                        b"*3\r\n$10\r\n",
+                        b"SINTERCARD",
+                    )
+                    .and_then(|packet| {
+                        let tail = [packet.key, packet.arg];
+                        runtime
+                            .execute_plain_sintercard_borrowed(&tail, ts, default_read_allowed)
+                            .map(|response| (packet.consumed, response))
+                    })
+                })
+                .or_else(|| {
+                    parse_borrowed_plain_key_arg5_packet(
+                        unparsed,
+                        &parser_config,
+                        b"*7\r\n$10\r\n",
+                        b"SINTERCARD",
+                    )
+                    .and_then(|packet| {
+                        let tail = [packet.key, packet.a, packet.b, packet.c, packet.d, packet.e];
+                        runtime
+                            .execute_plain_sintercard_borrowed(&tail, ts, default_read_allowed)
+                            .map(|response| (packet.consumed, response))
+                    })
                 });
             if let Some((consumed, response)) = hit {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
@@ -26587,6 +27075,37 @@ fn try_dispatch_floor_classified_action(
                         )
                         .map(|()| packet.consumed)
                 });
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::HrandfieldCountWithvalues => {
+            let default_read_allowed = *read_gate_cache
+                .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
+            let hit =
+                parse_borrowed_plain_hrandfield_count_withvalues_packet(unparsed, &parser_config)
+                    .and_then(|packet| {
+                        let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                        runtime
+                    .execute_plain_hrandfield_count_withvalues_borrowed_into_with_default_read_gate(
+                        packet.key,
+                        packet.count,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .map(|()| packet.consumed)
+                    });
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
@@ -26863,22 +27382,21 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Pexpiretime => {
-            // (frankenredis-getexgate) Cached read gate. Same hoist as TYPE; safe for a
-            // FastReply arm now that bffba0601 stopped clearing the cache after every packet.
             let default_read_allowed = *read_gate_cache
                 .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
             if let Some(packet) = parse_borrowed_plain_pexpiretime_packet(unparsed, &parser_config)
-                && let Some(response) = runtime
-                    .execute_plain_keymeta_borrowed_with_default_read_gate(
+                && runtime
+                    .execute_plain_keymeta_borrowed_into_with_default_read_gate(
                         PlainKeyMetaCmd::Pexpiretime,
                         packet.key,
                         ts,
+                        out,
                         default_read_allowed,
                     )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -27103,28 +27621,21 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Pttl => {
-            // (frankenredis-getexgate) RE-CONVERTED, and the earlier revert is now EXPLAINED.
-            // The recorded "hoisted placement lost, 21 instr/op WORSE" was not about placement.
-            // This arm returns FastReply and TYPE returns FastEncodedReply, and until bffba0601
-            // the FastReply arm of the buffered loop CLEARED plain_get_read_gate_cache after
-            // every packet. So the hoist here populated a cache that was thrown away before the
-            // next packet could read it: every op paid the full gate PLUS the get_or_insert_with,
-            // which is the +21. TYPE kept its entry and gained 189 with an identical hoist.
-            // With that clear gone the cache survives the packet, so the hoist is a hit.
             let default_read_allowed = *read_gate_cache
                 .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
             if let Some(packet) = parse_borrowed_plain_pttl_packet(unparsed, &parser_config)
-                && let Some(response) = runtime
-                    .execute_plain_keymeta_borrowed_with_default_read_gate(
+                && runtime
+                    .execute_plain_keymeta_borrowed_into_with_default_read_gate(
                         PlainKeyMetaCmd::Pttl,
                         packet.key,
                         ts,
+                        out,
                         default_read_allowed,
                     )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -27138,22 +27649,21 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Expiretime => {
-            // (frankenredis-getexgate) Cached read gate. Same hoist as TYPE; safe for a
-            // FastReply arm now that bffba0601 stopped clearing the cache after every packet.
             let default_read_allowed = *read_gate_cache
                 .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
             if let Some(packet) = parse_borrowed_plain_expiretime_packet(unparsed, &parser_config)
-                && let Some(response) = runtime
-                    .execute_plain_keymeta_borrowed_with_default_read_gate(
+                && runtime
+                    .execute_plain_keymeta_borrowed_into_with_default_read_gate(
                         PlainKeyMetaCmd::Expiretime,
                         packet.key,
                         ts,
+                        out,
                         default_read_allowed,
                     )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(

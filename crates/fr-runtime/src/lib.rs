@@ -38842,6 +38842,26 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_hrandfield_count_withvalues_borrowed_into_with_default_read_gate(
+            key,
+            count_arg,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    pub fn execute_plain_hrandfield_count_withvalues_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
         let count = parse_i64_arg(count_arg).ok()?;
         let half = i64::MAX / 2;
         if count < -half || count > half {
@@ -38852,7 +38872,7 @@ impl Runtime {
             || self.policy.gate.max_bulk_len < b"WITHVALUES".len()
             || key.len() > self.policy.gate.max_bulk_len
             || count_arg.len() > self.policy.gate.max_bulk_len
-            || !self.plain_borrowed_default_key_read_allows(now_ms)
+            || !default_read_allowed
         {
             return None;
         }
