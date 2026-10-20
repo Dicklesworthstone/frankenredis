@@ -8754,38 +8754,34 @@ impl Store {
     /// O(n) or worse, so the asymptotics of the callers are unchanged and the
     /// returned bytes are identical.
     fn ordered_physical_keys_in_db(&mut self, db: usize) -> Vec<Vec<u8>> {
-        let mut keys = self.physical_keys_in_db_unordered(db);
-        keys.sort_unstable();
-        keys
-    }
-
-    /// Physical keys of one db in ARBITRARY order.
-    ///
-    /// (frankenredis-4f8vx) Split out because the sort is the expensive half and most
-    /// callers do not need it. Sorting `Vec<Vec<u8>>` is a byte-slice comparison per
-    /// step, and on a SWAPDB-only profile `__memcmp_avx2_movbe` was the LARGEST frame at
-    /// 8.94 pct -- larger than the KeyDict insert, remove and lookup that do the actual
-    /// work. SWAPDB needs the SET of keys to move, never their order: it removes each
-    /// into a vector and re-inserts under the opposite prefix, and the two sides cannot
-    /// collide because they target different databases.
-    ///
-    /// KEYS still sorts, via `ordered_physical_keys_in_db` -- its output order is
-    /// observable and pinned by fixtures.
-    fn physical_keys_in_db_unordered(&mut self, db: usize) -> Vec<Vec<u8>> {
-        if db == 0 {
-            self.entries
-                .keys()
-                .filter(|key| decode_db_key(key).is_none())
-                .map(<[u8]>::to_vec)
-                .collect()
-        } else {
-            let prefix = encode_db_key(db, b"");
-            self.entries
-                .keys()
-                .filter(|key| key.starts_with(&prefix))
-                .map(<[u8]>::to_vec)
-                .collect()
+        let cap = self.dbsize_in_db(db);
+        if cap == 0 {
+            return Vec::new();
         }
+        let mut slices = Vec::with_capacity(cap);
+        if db == 0 {
+            if cap == self.entries.len() {
+                slices.extend(self.entries.keys());
+            } else {
+                for key in self.entries.keys() {
+                    if decode_db_key(key).is_none() {
+                        slices.push(key);
+                        if slices.len() == cap {
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            let db_header = encode_db_key_header(db);
+            self.entries.for_each_key_with_first_byte(b'\0', |key| {
+                if key.starts_with(&db_header) {
+                    slices.push(key);
+                }
+            });
+        }
+        slices.sort_unstable();
+        slices.into_iter().map(<[u8]>::to_vec).collect()
     }
 
     #[must_use]
@@ -14883,10 +14879,15 @@ impl Store {
         result
     }
 
-    #[must_use]
-    pub fn keys_matching_in_db(&mut self, db: usize, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
+    pub fn keys_matching_in_db_with_slices<'a, R>(
+        &'a self,
+        db: usize,
+        pattern: &[u8],
+        now_ms: u64,
+        f: impl FnOnce(&[&'a [u8]]) -> R,
+    ) -> R {
         if self.dbsize_in_db(db) == 0 {
-            return Vec::new();
+            return f(&[]);
         }
         let check_expiry = self.db_expires_counts.get(db).copied().unwrap_or(0) != 0;
         let is_star = pattern == b"*";
@@ -14896,25 +14897,57 @@ impl Store {
         if let Some(LiteralGlob::Exact(exact)) = pg.shape {
             if db == 0 {
                 if decode_db_key(exact).is_none()
-                    && self.entries.contains_key(exact)
-                    && (!check_expiry || !self.key_is_logically_expired(exact, now_ms))
+                    && let Some((stored_key, _)) = self.entries.get_key_value(exact)
+                    && (!check_expiry || !self.key_is_logically_expired(stored_key, now_ms))
                 {
-                    return vec![exact.to_vec()];
+                    let single = [stored_key];
+                    return f(&single);
+                }
+            } else if exact.len() <= 256 - DB_NAMESPACE_HEADER_LEN {
+                let db_header = encode_db_key_header(db);
+                let mut stack_phys = [0u8; 256];
+                stack_phys[..DB_NAMESPACE_HEADER_LEN].copy_from_slice(&db_header);
+                let total_len = DB_NAMESPACE_HEADER_LEN + exact.len();
+                stack_phys[DB_NAMESPACE_HEADER_LEN..total_len].copy_from_slice(exact);
+                let phys = &stack_phys[..total_len];
+                if let Some((stored_key, _)) = self.entries.get_key_value(phys)
+                    && (!check_expiry || !self.key_is_logically_expired(stored_key, now_ms))
+                {
+                    let single = [&stored_key[DB_NAMESPACE_HEADER_LEN..]];
+                    return f(&single);
                 }
             } else {
                 let phys = encode_db_key(db, exact);
-                if self.entries.contains_key(&phys)
-                    && (!check_expiry || !self.key_is_logically_expired(&phys, now_ms))
+                if let Some((stored_key, _)) = self.entries.get_key_value(phys.as_slice())
+                    && (!check_expiry || !self.key_is_logically_expired(stored_key, now_ms))
                 {
-                    return vec![exact.to_vec()];
+                    let single = [&stored_key[DB_NAMESPACE_HEADER_LEN..]];
+                    return f(&single);
                 }
             }
-            return Vec::new();
+            return f(&[]);
         }
 
         let all_in_db0 = db == 0 && self.dbsize_in_db(0) == self.entries.len();
         let lit = pg.literal_prefix;
+        const STACK_CAP: usize = 32;
+        let mut stack_buf: [&[u8]; STACK_CAP] = [&[]; STACK_CAP];
+        let mut stack_len = 0usize;
         let mut matched: Vec<&[u8]> = Vec::new();
+        let mut push_match = |logical: &'a [u8]| {
+            if matched.is_empty() {
+                if stack_len < STACK_CAP {
+                    stack_buf[stack_len] = logical;
+                    stack_len += 1;
+                } else {
+                    matched.reserve(STACK_CAP * 2);
+                    matched.extend_from_slice(&stack_buf);
+                    matched.push(logical);
+                }
+            } else {
+                matched.push(logical);
+            }
+        };
 
         if !lit.is_empty() {
             let first_byte = lit[0];
@@ -14927,7 +14960,7 @@ impl Store {
                         if pg.matches(key)
                             && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
                         {
-                            matched.push(key);
+                            push_match(key);
                         }
                     });
             } else {
@@ -14940,12 +14973,17 @@ impl Store {
                     if pg.matches(logical)
                         && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
                     {
-                        matched.push(logical);
+                        push_match(logical);
                     }
                 });
             }
+            if matched.is_empty() {
+                let slice = &mut stack_buf[..stack_len];
+                slice.sort_unstable();
+                return f(slice);
+            }
             matched.sort_unstable();
-            return matched.into_iter().map(<[u8]>::to_vec).collect();
+            return f(&matched);
         }
 
         if all_in_db0 {
@@ -14953,7 +14991,7 @@ impl Store {
                 if (is_star || pg.matches(key))
                     && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
                 {
-                    matched.push(key);
+                    push_match(key);
                 }
             }
         } else if db == 0 {
@@ -14964,7 +15002,7 @@ impl Store {
                 if (is_star || pg.matches(key))
                     && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
                 {
-                    matched.push(key);
+                    push_match(key);
                 }
             }
         } else {
@@ -14977,12 +15015,24 @@ impl Store {
                 if (is_star || pg.matches(logical))
                     && (!check_expiry || !self.key_is_logically_expired(key, now_ms))
                 {
-                    matched.push(logical);
+                    push_match(logical);
                 }
             });
         }
+        if matched.is_empty() {
+            let slice = &mut stack_buf[..stack_len];
+            slice.sort_unstable();
+            return f(slice);
+        }
         matched.sort_unstable();
-        matched.into_iter().map(<[u8]>::to_vec).collect()
+        f(&matched)
+    }
+
+    #[must_use]
+    pub fn keys_matching_in_db(&mut self, db: usize, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
+        self.keys_matching_in_db_with_slices(db, pattern, now_ms, |matched| {
+            matched.iter().map(|k| (*k).to_vec()).collect()
+        })
     }
 
     #[must_use]
@@ -34836,7 +34886,7 @@ impl Store {
     }
 
     #[must_use]
-    pub fn randomkey_in_db(&mut self, db: usize, now_ms: u64) -> Option<Vec<u8>> {
+    pub fn randomkey_in_db_slice(&mut self, db: usize, now_ms: u64) -> Option<&[u8]> {
         if db >= self.database_count {
             return None;
         }
@@ -34855,17 +34905,17 @@ impl Store {
         };
         if all_in_db0 {
             let (physical, _) = entries.random_sample(&mut next_rand)?;
-            return Some(physical.to_vec());
+            return Some(physical);
         }
         let db_header = encode_db_key_header(db);
         for _ in 0..RANDOMKEY_REJECTION_DRAWS {
             let (physical, _) = entries.random_sample(&mut next_rand)?;
             if db == 0 {
                 if decode_db_key(physical).is_none() {
-                    return Some(physical.to_vec());
+                    return Some(physical);
                 }
             } else if let Some(logical) = physical.strip_prefix(&db_header) {
-                return Some(logical.to_vec());
+                return Some(logical);
             }
         }
 
@@ -34878,14 +34928,19 @@ impl Store {
                 .keys()
                 .filter(|k| decode_db_key(k).is_none())
                 .nth(idx)?;
-            Some(physical.to_vec())
+            Some(physical)
         } else {
             let physical = entries
                 .keys()
                 .filter(|k| k.starts_with(&db_header))
                 .nth(idx)?;
-            Some(physical[DB_NAMESPACE_HEADER_LEN..].to_vec())
+            Some(&physical[DB_NAMESPACE_HEADER_LEN..])
         }
+    }
+
+    #[must_use]
+    pub fn randomkey_in_db(&mut self, db: usize, now_ms: u64) -> Option<Vec<u8>> {
+        self.randomkey_in_db_slice(db, now_ms).map(<[u8]>::to_vec)
     }
 
     /// Return up to `count` keys that hash to the given cluster slot.
@@ -38300,6 +38355,9 @@ impl Store {
     }
 
     fn dump_stream_consumer_groups(&self, key: &[u8]) -> Vec<fr_persist::RdbStreamConsumerGroup> {
+        if self.stream_groups.is_empty() {
+            return Vec::new();
+        }
         self.stream_groups
             .get(key)
             .map(|groups| {
@@ -38353,13 +38411,13 @@ impl Store {
         // dump_key always emits a non-empty payload between the leading
         // type byte and the trailing 10-byte version+CRC footer; the
         // arithmetic below is sound for every successfully-dumped key.
-        self.dump_key(key, now_ms).map(|bytes| bytes.len() - 11)
+        self.dump_key_with_slice(key, now_ms, |opt| opt.map(|bytes| bytes.len() - 11))
     }
 
     /// (frankenredis-debugobjraw) `rdb_serialized_object_len` without `expireIfNeeded` and
     /// without the keyspace-stat bump, for `DEBUG OBJECT`. See `dump_key_raw`.
     pub fn rdb_serialized_object_len_raw(&mut self, key: &[u8]) -> Option<usize> {
-        self.dump_key_raw(key).map(|bytes| bytes.len() - 11)
+        self.dump_key_raw_with_slice(key, |opt| opt.map(|bytes| bytes.len() - 11))
     }
 
     /// (frankenredis DEBUG OBJECT quicklist fields) For a list value, return
@@ -38388,6 +38446,70 @@ impl Store {
         self.dump_key_raw(key)
     }
 
+    pub fn dump_key_with_slice<R>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> R {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return f(None);
+        }
+        self.dump_key_raw_with_slice(key, f)
+    }
+
+    pub fn dump_key_raw_with_slice<R>(
+        &mut self,
+        key: &[u8],
+        f: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> R {
+        let Some(entry) = self.entries.get(key) else {
+            return f(None);
+        };
+        let modification_count = entry.modification_count;
+        if !self.dump_payload_cache.is_empty()
+            && !matches!(
+                entry.value,
+                Value::String(_) | Value::Integer(_) | Value::Stream(_)
+            )
+            && let Some(cache) = self.dump_payload_cache.get(key).filter(|cache| {
+                cache.modification_count == modification_count
+                    && cache.zset_max_listpack_entries == self.zset_max_listpack_entries
+                    && cache.zset_max_listpack_value == self.zset_max_listpack_value
+                    && cache.list_max_listpack_size == self.list_max_listpack_size
+                    && cache.hash_max_listpack_entries == self.hash_max_listpack_entries
+                    && cache.hash_max_listpack_value == self.hash_max_listpack_value
+                    && cache.set_max_intset_entries == self.set_max_intset_entries
+                    && cache.set_max_listpack_entries == self.set_max_listpack_entries
+                    && cache.rdb_compression == fr_persist::rdb_compression_enabled()
+            })
+        {
+            return f(Some(&cache.payload));
+        }
+        let Some((buf, cache_dump_payload)) = self.dump_key_raw_uncached(key, entry) else {
+            return f(None);
+        };
+        let out = f(Some(&buf));
+        if cache_dump_payload {
+            self.insert_dump_payload_cache(
+                key,
+                DumpPayloadCache {
+                    modification_count,
+                    zset_max_listpack_entries: self.zset_max_listpack_entries,
+                    zset_max_listpack_value: self.zset_max_listpack_value,
+                    list_max_listpack_size: self.list_max_listpack_size,
+                    rdb_compression: fr_persist::rdb_compression_enabled(),
+                    hash_max_listpack_entries: self.hash_max_listpack_entries,
+                    hash_max_listpack_value: self.hash_max_listpack_value,
+                    set_max_intset_entries: self.set_max_intset_entries,
+                    set_max_listpack_entries: self.set_max_listpack_entries,
+                    payload: buf,
+                },
+            );
+        }
+        out
+    }
+
     /// (frankenredis-debugobjraw) `dump_key` without `expireIfNeeded` and without the
     /// keyspace-stat bump. `DEBUG OBJECT` reaches this through
     /// `rdb_serialized_object_len_raw` to render `serializedlength`, and upstream computes
@@ -38398,19 +38520,47 @@ impl Store {
     pub fn dump_key_raw(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         let entry = self.entries.get(key)?;
         let modification_count = entry.modification_count;
-        if let Some(cache) = self.dump_payload_cache.get(key).filter(|cache| {
-            cache.modification_count == modification_count
-                && cache.zset_max_listpack_entries == self.zset_max_listpack_entries
-                && cache.zset_max_listpack_value == self.zset_max_listpack_value
-                && cache.list_max_listpack_size == self.list_max_listpack_size
-                && cache.hash_max_listpack_entries == self.hash_max_listpack_entries
-                && cache.hash_max_listpack_value == self.hash_max_listpack_value
-                && cache.set_max_intset_entries == self.set_max_intset_entries
-                && cache.set_max_listpack_entries == self.set_max_listpack_entries
-                && cache.rdb_compression == fr_persist::rdb_compression_enabled()
-        }) {
+        if !self.dump_payload_cache.is_empty()
+            && !matches!(
+                entry.value,
+                Value::String(_) | Value::Integer(_) | Value::Stream(_)
+            )
+            && let Some(cache) = self.dump_payload_cache.get(key).filter(|cache| {
+                cache.modification_count == modification_count
+                    && cache.zset_max_listpack_entries == self.zset_max_listpack_entries
+                    && cache.zset_max_listpack_value == self.zset_max_listpack_value
+                    && cache.list_max_listpack_size == self.list_max_listpack_size
+                    && cache.hash_max_listpack_entries == self.hash_max_listpack_entries
+                    && cache.hash_max_listpack_value == self.hash_max_listpack_value
+                    && cache.set_max_intset_entries == self.set_max_intset_entries
+                    && cache.set_max_listpack_entries == self.set_max_listpack_entries
+                    && cache.rdb_compression == fr_persist::rdb_compression_enabled()
+            })
+        {
             return Some(cache.payload.clone());
         }
+        let (buf, cache_dump_payload) = self.dump_key_raw_uncached(key, entry)?;
+        if cache_dump_payload {
+            self.insert_dump_payload_cache(
+                key,
+                DumpPayloadCache {
+                    modification_count,
+                    zset_max_listpack_entries: self.zset_max_listpack_entries,
+                    zset_max_listpack_value: self.zset_max_listpack_value,
+                    list_max_listpack_size: self.list_max_listpack_size,
+                    rdb_compression: fr_persist::rdb_compression_enabled(),
+                    hash_max_listpack_entries: self.hash_max_listpack_entries,
+                    hash_max_listpack_value: self.hash_max_listpack_value,
+                    set_max_intset_entries: self.set_max_intset_entries,
+                    set_max_listpack_entries: self.set_max_listpack_entries,
+                    payload: buf.clone(),
+                },
+            );
+        }
+        Some(buf)
+    }
+
+    fn dump_key_raw_uncached(&self, key: &[u8], entry: &Entry) -> Option<(Vec<u8>, bool)> {
         let mut buf = Vec::with_capacity(64);
         let mut cache_dump_payload = false;
         match &entry.value {
@@ -38619,25 +38769,39 @@ impl Store {
                 }
             }
             Value::Stream(entries) => {
-                let stream_entries = dump_stream_entries(entries);
-                let watermark = self
-                    .stream_last_ids
-                    .get(key)
-                    .copied()
-                    .or_else(|| entries.keys().next_back().copied())
-                    .or(Some((0, 0)));
+                let watermark = if self.stream_last_ids.is_empty() {
+                    None
+                } else {
+                    self.stream_last_ids.get(key).copied()
+                }
+                .or_else(|| entries.last_id())
+                .or(Some((0, 0)));
                 let entries_added = Some(self.stream_entries_added_value(key, entries.len()));
                 let groups = self.dump_stream_consumer_groups(key);
                 let max_deleted = self.stream_max_deleted_id(key);
-                let payload = fr_persist::encode_upstream_stream_listpacks3_payload(
-                    &stream_entries,
-                    watermark,
-                    &groups,
-                    entries_added,
-                    max_deleted,
-                )?;
-                buf.push(RDB_TYPE_STREAM_LISTPACKS_3);
-                buf.extend_from_slice(&payload);
+                if fr_persist::rdb_compression_enabled()
+                    && let Some(skeleton) = entries.pending_skeleton()
+                    && skeleton.upstream_type_byte()
+                        == fr_persist::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3
+                    && skeleton.watermark().or(Some((0, 0))) == watermark
+                    && Some(skeleton.entries_added()) == entries_added
+                    && skeleton.max_deleted() == max_deleted
+                    && skeleton.groups() == groups.as_slice()
+                {
+                    buf.push(RDB_TYPE_STREAM_LISTPACKS_3);
+                    buf.extend_from_slice(skeleton.upstream_payload());
+                } else {
+                    let stream_entries = dump_stream_entries(entries);
+                    let payload = fr_persist::encode_upstream_stream_listpacks3_payload(
+                        &stream_entries,
+                        watermark,
+                        &groups,
+                        entries_added,
+                        max_deleted,
+                    )?;
+                    buf.push(RDB_TYPE_STREAM_LISTPACKS_3);
+                    buf.extend_from_slice(&payload);
+                }
             }
         }
         // Append Redis DUMP footer: 2-byte little-endian RDB version, then CRC64.
@@ -38645,24 +38809,7 @@ impl Store {
         // Compute and append CRC64 over all preceding bytes
         let crc = fr_persist::crc64_redis(&buf);
         buf.extend_from_slice(&crc.to_le_bytes());
-        if cache_dump_payload {
-            self.insert_dump_payload_cache(
-                key,
-                DumpPayloadCache {
-                    modification_count,
-                    zset_max_listpack_entries: self.zset_max_listpack_entries,
-                    zset_max_listpack_value: self.zset_max_listpack_value,
-                    list_max_listpack_size: self.list_max_listpack_size,
-                    rdb_compression: fr_persist::rdb_compression_enabled(),
-                    hash_max_listpack_entries: self.hash_max_listpack_entries,
-                    hash_max_listpack_value: self.hash_max_listpack_value,
-                    set_max_intset_entries: self.set_max_intset_entries,
-                    set_max_listpack_entries: self.set_max_listpack_entries,
-                    payload: buf.clone(),
-                },
-            );
-        }
-        Some(buf)
+        Some((buf, cache_dump_payload))
     }
 
     pub fn restore_key(
@@ -42383,19 +42530,21 @@ fn is_int_encoded_string(bytes: &[u8]) -> bool {
 }
 
 fn estimate_hash_memory_usage_bytes(fields: &HashFieldMap) -> usize {
-    if fields
-        .iter()
-        .all(|(field, value)| field.len() <= 64 && value.len() <= 64)
-        && fields.len() <= 512
-    {
-        let payload = fields
-            .iter()
-            .map(|(field, value)| {
-                estimate_listpack_entry_bytes(field)
-                    .saturating_add(estimate_listpack_entry_bytes(value))
-            })
-            .sum();
-        return estimate_listpack_object_memory_usage_bytes(payload);
+    if fields.len() <= 512 {
+        let mut payload = 0usize;
+        let mut fits_listpack = true;
+        for (field, value) in fields.iter() {
+            if field.len() > 64 || value.len() > 64 {
+                fits_listpack = false;
+                break;
+            }
+            payload = payload
+                .saturating_add(estimate_listpack_entry_bytes(field))
+                .saturating_add(estimate_listpack_entry_bytes(value));
+        }
+        if fits_listpack {
+            return estimate_listpack_object_memory_usage_bytes(payload);
+        }
     }
 
     REDIS_OBJECT_OVERHEAD_BYTES
@@ -42439,11 +42588,7 @@ fn estimate_list_memory_usage_bytes(items: &ListValue) -> usize {
 }
 
 fn estimate_set_memory_usage_bytes(members: &SetValue) -> usize {
-    if members.len() <= 512
-        && members
-            .iter()
-            .all(|member| parse_i64(member.as_ref()).is_ok())
-    {
+    if members.len() <= 512 {
         // A redis intset stores every member at ONE encoding width — the
         // minimal width that fits the widest member (INT16=2, INT32=4,
         // INT64=8) — not 8 bytes each. Mirror encode_intset()'s selection so
@@ -42451,11 +42596,32 @@ fn estimate_set_memory_usage_bytes(members: &SetValue) -> usize {
         // encoding * length). Hard-coding REDIS_SCORE_BYTES (8) over-reported
         // small-int sets (e.g. {1,2,3} -> 80 vs redis 64).
         // (frankenredis-intset-memusage-width)
-        let mut all_i16 = true;
-        let mut all_i32 = true;
-        for member in members.iter() {
-            // The guard above proved every member parses as i64.
-            if let Ok(value) = parse_i64(member.as_ref()) {
+        let intset_width_opt = if let Some(ints) = members.as_int_slice() {
+            // SetValue::Ints is a sorted Vec<i64>; checking the min and max
+            // determines the intset width in O(1) without formatting each
+            // integer into a heap Vec<u8> and re-parsing it twice.
+            let width = match (ints.first(), ints.last()) {
+                (Some(&min), Some(&max)) => {
+                    if i16::try_from(min).is_ok() && i16::try_from(max).is_ok() {
+                        2usize
+                    } else if i32::try_from(min).is_ok() && i32::try_from(max).is_ok() {
+                        4usize
+                    } else {
+                        8usize
+                    }
+                }
+                _ => 2usize,
+            };
+            Some(width)
+        } else {
+            let mut all_i64 = true;
+            let mut all_i16 = true;
+            let mut all_i32 = true;
+            for member in members.iter() {
+                let Ok(value) = parse_i64(member.as_ref()) else {
+                    all_i64 = false;
+                    break;
+                };
                 if i16::try_from(value).is_err() {
                     all_i16 = false;
                 }
@@ -42463,23 +42629,37 @@ fn estimate_set_memory_usage_bytes(members: &SetValue) -> usize {
                     all_i32 = false;
                 }
             }
-        }
-        let intset_width = if all_i16 {
-            2usize
-        } else if all_i32 {
-            4usize
-        } else {
-            8usize
+            if all_i64 {
+                Some(if all_i16 {
+                    2usize
+                } else if all_i32 {
+                    4usize
+                } else {
+                    8usize
+                })
+            } else {
+                None
+            }
         };
-        let payload = 8usize.saturating_add(members.len().saturating_mul(intset_width));
-        return REDIS_OBJECT_OVERHEAD_BYTES.saturating_add(redis_allocation_size(payload));
+        if let Some(intset_width) = intset_width_opt {
+            let payload = 8usize.saturating_add(members.len().saturating_mul(intset_width));
+            return REDIS_OBJECT_OVERHEAD_BYTES.saturating_add(redis_allocation_size(payload));
+        }
     }
-    if members.len() <= 128 && members.iter().all(|member| member.len() <= 64) {
-        let payload = members
-            .iter()
-            .map(|member| estimate_listpack_entry_bytes(member.as_ref()))
-            .sum();
-        return estimate_listpack_object_memory_usage_bytes(payload);
+    if members.len() <= 128 {
+        let mut payload = 0usize;
+        let mut fits_listpack = true;
+        for member in members.iter() {
+            let bytes = member.as_ref();
+            if bytes.len() > 64 {
+                fits_listpack = false;
+                break;
+            }
+            payload = payload.saturating_add(estimate_listpack_entry_bytes(bytes));
+        }
+        if fits_listpack {
+            return estimate_listpack_object_memory_usage_bytes(payload);
+        }
     }
 
     REDIS_OBJECT_OVERHEAD_BYTES
@@ -42496,15 +42676,21 @@ fn estimate_set_memory_usage_bytes(members: &SetValue) -> usize {
 }
 
 fn estimate_sorted_set_memory_usage_bytes(members: &SortedSet) -> usize {
-    if members.len() <= 128 && members.keys().all(|member| member.len() <= 64) {
-        let payload = members
-            .iter()
-            .map(|(member, score)| {
-                estimate_listpack_entry_bytes(member)
-                    .saturating_add(estimate_listpack_score_bytes(score))
-            })
-            .sum();
-        return estimate_listpack_object_memory_usage_bytes(payload);
+    if members.len() <= 128 {
+        let mut payload = 0usize;
+        let mut fits_listpack = true;
+        for (member, score) in members.iter() {
+            if member.len() > 64 {
+                fits_listpack = false;
+                break;
+            }
+            payload = payload
+                .saturating_add(estimate_listpack_entry_bytes(member))
+                .saturating_add(estimate_listpack_score_bytes(score));
+        }
+        if fits_listpack {
+            return estimate_listpack_object_memory_usage_bytes(payload);
+        }
     }
 
     REDIS_OBJECT_OVERHEAD_BYTES
@@ -87374,5 +87560,37 @@ mod tests {
 
         let (_, scanned_db2) = store.scan_in_db(2, 0, Some(b"user:*"), None, 100, 100);
         assert_eq!(scanned_db2, vec![b"user:9".to_vec()]);
+
+        // Verify keys_matching_in_db_with_slices, randomkey_in_db_slice, and dump_key_with_slice
+        let mut slice_keys = Vec::new();
+        store.keys_matching_in_db_with_slices(0, b"user:*", 200, |matched| {
+            for k in matched {
+                slice_keys.push(k.to_vec());
+            }
+        });
+        assert_eq!(slice_keys, vec![b"user:1".to_vec(), b"user:set".to_vec()]);
+        assert!(store.randomkey_in_db_slice(0, 200).is_some());
+
+        // Verify stream DUMP keeps pending_skeleton undecoded when metadata is unchanged
+        store
+            .xadd(b"s_ret", (10, 0), &[(b"f".to_vec(), b"v".to_vec())], 200)
+            .unwrap();
+        let stream_payload = store.dump_key(b"s_ret", 200).unwrap();
+        let mut store2 = Store::new();
+        store2
+            .restore_key(b"s_ret", 0, &stream_payload, false, 200)
+            .unwrap();
+        let dumped_via_slice = store2
+            .dump_key_with_slice(b"s_ret", 200, |opt| opt.map(<[u8]>::to_vec))
+            .unwrap();
+        assert_eq!(dumped_via_slice, stream_payload);
+        let Value::Stream(stream_entries) = &store2.entries.get(b"s_ret".as_slice()).unwrap().value
+        else {
+            panic!("expected stream value");
+        };
+        assert!(
+            stream_entries.pending_skeleton().is_some(),
+            "DUMP on unmodified restored stream must preserve pending_skeleton without materializing"
+        );
     }
 }

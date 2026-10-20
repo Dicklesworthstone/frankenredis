@@ -18756,6 +18756,57 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_dump_borrowed_into(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"DUMP".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("dump");
+        self.session.last_argv_len_sum = b"DUMP".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        self.server
+            .store
+            .dump_key_with_slice(key, now_ms, |payload| {
+                if !suppress_reply {
+                    fr_protocol::encode_bulk_string_slice(payload, resp3, out);
+                }
+            });
+        let elapsed_us = self.finish_chained_command(start);
+
+        self.record_plain_dump_borrowed_metrics(key, elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(())
+    }
+
     fn record_plain_dump_borrowed_metrics(
         &mut self,
         key: &[u8],
@@ -18841,16 +18892,8 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        // Gate guarantees selected_db == 0; mirror the generic randomkey exactly.
-        let reply = match self.server.store.randomkey_in_db(0, now_ms) {
-            Some(physical) => {
-                let logical = fr_store::decode_db_key(&physical)
-                    .map(|(_, logical)| logical.to_vec())
-                    .unwrap_or(physical);
-                RespFrame::BulkString(Some(logical))
-            }
-            None => RespFrame::BulkString(None),
-        };
+        // Gate guarantees selected_db == 0; randomkey_in_db returns the logical key.
+        let reply = RespFrame::BulkString(self.server.store.randomkey_in_db(0, now_ms));
         let elapsed_us = self.finish_chained_command(start);
 
         self.record_plain_randomkey_borrowed_metrics(elapsed_us, now_ms, packet_id);
@@ -18859,6 +18902,51 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
 
         Some(reply)
+    }
+
+    pub fn execute_plain_randomkey_borrowed_into(
+        &mut self,
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 1 || self.policy.gate.max_bulk_len < b"RANDOMKEY".len()
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name = Some("randomkey");
+        self.session.last_argv_len_sum = b"RANDOMKEY".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let suppress_reply = self.suppress_current_network_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let chosen = self.server.store.randomkey_in_db_slice(0, now_ms);
+        if !suppress_reply {
+            fr_protocol::encode_bulk_string_slice(chosen, resp3, out);
+        }
+        let elapsed_us = self.finish_chained_command(start);
+
+        self.record_plain_randomkey_borrowed_metrics(elapsed_us, now_ms, packet_id);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(())
     }
 
     /// (BlueFalcon) Borrowed WRITE fast path for `MOVE key db`. Mirrors the
@@ -28866,16 +28954,17 @@ impl Runtime {
         let packet_id =
             self.plain_read_borrowed_preamble("keys", b"KEYS".len() + pattern.len(), now_ms);
         let st = self.chained_command_start();
-        let matched =
+        let db = self.session.selected_db;
+        let frames =
             self.server
                 .store
-                .keys_matching_in_db(self.session.selected_db, pattern, now_ms);
-        let reply = RespFrame::Array(Some(
-            matched
-                .into_iter()
-                .map(|key| RespFrame::BulkString(Some(key)))
-                .collect(),
-        ));
+                .keys_matching_in_db_with_slices(db, pattern, now_ms, |matched| {
+                    matched
+                        .iter()
+                        .map(|&key| RespFrame::BulkString(Some(key.to_vec())))
+                        .collect()
+                });
+        let reply = RespFrame::Array(Some(frames));
         let elapsed_us = self.finish_chained_command(st);
         self.record_plain_zremrange_borrowed_metrics(
             "keys",
@@ -28892,6 +28981,55 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    pub fn execute_plain_keys_borrowed_into(
+        &mut self,
+        pattern: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"KEYS".len()
+            || pattern.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
+            return None;
+        }
+        let packet_id =
+            self.plain_read_borrowed_preamble("keys", b"KEYS".len() + pattern.len(), now_ms);
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let db = self.session.selected_db;
+        self.server
+            .store
+            .keys_matching_in_db_with_slices(db, pattern, now_ms, |matched| {
+                if !suppress_reply {
+                    fr_protocol::encode_aggregate_header(matched.len(), false, out);
+                    for &key in matched {
+                        fr_protocol::encode_bulk_string_slice(Some(key), resp3, out);
+                    }
+                }
+            });
+        let elapsed_us = self.finish_chained_command(st);
+        self.record_plain_zremrange_borrowed_metrics(
+            "keys",
+            "KEYS",
+            || vec![b"KEYS".to_vec(), pattern.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        Some(())
     }
 
     /// (frankenredis-ozrro) Apply ONE `SCAN` option keyword to the option triple, exactly
@@ -50412,14 +50550,16 @@ impl Runtime {
         if argv.len() != 2 {
             return Err(CommandError::WrongArity("KEYS"));
         }
-        let matched =
+        let db = self.session.selected_db;
+        let frames =
             self.server
                 .store
-                .keys_matching_in_db(self.session.selected_db, &argv[1], now_ms);
-        let frames = matched
-            .into_iter()
-            .map(|key| RespFrame::BulkString(Some(key)))
-            .collect();
+                .keys_matching_in_db_with_slices(db, &argv[1], now_ms, |matched| {
+                    matched
+                        .iter()
+                        .map(|&key| RespFrame::BulkString(Some(key.to_vec())))
+                        .collect()
+                });
         Ok(RespFrame::Array(Some(frames)))
     }
 
@@ -50475,17 +50615,11 @@ impl Runtime {
         if argv.len() != 1 {
             return Err(CommandError::WrongArity("RANDOMKEY"));
         }
-        let Some(physical) = self
-            .server
-            .store
-            .randomkey_in_db(self.session.selected_db, now_ms)
-        else {
-            return Ok(RespFrame::BulkString(None));
-        };
-        let logical = decode_db_key(&physical)
-            .map(|(_, logical)| logical.to_vec())
-            .unwrap_or(physical);
-        Ok(RespFrame::BulkString(Some(logical)))
+        Ok(RespFrame::BulkString(
+            self.server
+                .store
+                .randomkey_in_db(self.session.selected_db, now_ms),
+        ))
     }
 
     fn handle_scan_command(
@@ -88531,5 +88665,124 @@ sentinel announce-port 26380
             rt_aof.execute_frame(command(&[b"XLEN", b"s_xtrim"]), 1505),
             RespFrame::Integer(91)
         );
+    }
+
+    #[test]
+    fn keys_and_randomkey_borrowed_into_match_generic_encoding() {
+        let mut rt = Runtime::default_strict();
+        // Empty DB: RANDOMKEY and KEYS *
+        for resp3 in [false, true] {
+            let mut got_rk = Vec::new();
+            assert!(
+                rt.execute_plain_randomkey_borrowed_into(10, resp3, &mut got_rk, None)
+                    .is_some()
+            );
+            let mut want_rk = Vec::new();
+            if resp3 {
+                RespFrame::BulkString(None).encode_into_resp3(&mut want_rk);
+            } else {
+                RespFrame::BulkString(None).encode_into(&mut want_rk);
+            }
+            assert_eq!(got_rk, want_rk);
+
+            let mut got_keys = Vec::new();
+            assert!(
+                rt.execute_plain_keys_borrowed_into(b"*", 10, resp3, &mut got_keys, None)
+                    .is_some()
+            );
+            let mut want_keys = Vec::new();
+            if resp3 {
+                RespFrame::Array(Some(Vec::new())).encode_into_resp3(&mut want_keys);
+            } else {
+                RespFrame::Array(Some(Vec::new())).encode_into(&mut want_keys);
+            }
+            assert_eq!(got_keys, want_keys);
+        }
+
+        // Populate 40 keys (> 32 stack buffer threshold)
+        for i in 0..40u32 {
+            let k = format!("pfx:{i:02}");
+            rt.execute_frame(command(&[b"SET", k.as_bytes(), b"v"]), 11);
+        }
+        for pat in [&b"*"[..], b"pfx:*", b"pfx:0*", b"pfx:15", b"missing:*"] {
+            let generic = rt.execute_frame(command(&[b"KEYS", pat]), 12);
+            for resp3 in [false, true] {
+                let mut want = Vec::new();
+                if resp3 {
+                    generic.encode_into_resp3(&mut want);
+                } else {
+                    generic.encode_into(&mut want);
+                }
+                let mut got = Vec::new();
+                assert!(
+                    rt.execute_plain_keys_borrowed_into(pat, 12, resp3, &mut got, None)
+                        .is_some()
+                );
+                assert_eq!(got, want, "KEYS {pat:?} resp3={resp3} mismatch");
+            }
+        }
+
+        // RANDOMKEY on populated DB
+        let mut rk_out = Vec::new();
+        assert!(
+            rt.execute_plain_randomkey_borrowed_into(13, false, &mut rk_out, None)
+                .is_some()
+        );
+        assert!(rk_out.starts_with(b"$6\r\npfx:"));
+
+        // DUMP on string, cached hash, and restored stream
+        rt.execute_frame(command(&[b"HSET", b"h1", b"f1", b"v1", b"f2", b"v2"]), 13);
+        rt.execute_frame(command(&[b"XADD", b"s1", b"1-0", b"k", b"v"]), 13);
+        let RespFrame::BulkString(Some(stream_dump)) =
+            rt.execute_frame(command(&[b"DUMP", b"s1"]), 13)
+        else {
+            panic!("expected stream DUMP bulk string");
+        };
+        rt.execute_frame(
+            command(&[b"RESTORE", b"s1_restored", b"0", &stream_dump]),
+            13,
+        );
+        for key in [
+            &b"pfx:00"[..],
+            b"h1",
+            b"h1",
+            b"s1_restored",
+            b"missing_dump",
+        ] {
+            let generic = rt.execute_frame(command(&[b"DUMP", key]), 13);
+            for resp3 in [false, true] {
+                let mut want = Vec::new();
+                if resp3 {
+                    generic.encode_into_resp3(&mut want);
+                } else {
+                    generic.encode_into(&mut want);
+                }
+                let mut got = Vec::new();
+                assert!(
+                    rt.execute_plain_dump_borrowed_into(key, 13, resp3, &mut got, None)
+                        .is_some()
+                );
+                assert_eq!(got, want, "DUMP {key:?} resp3={resp3} mismatch");
+            }
+        }
+
+        // Non-zero DB must decline without writing bytes
+        rt.execute_frame(command(&[b"SELECT", b"1"]), 14);
+        let mut declined = Vec::new();
+        assert!(
+            rt.execute_plain_keys_borrowed_into(b"*", 15, false, &mut declined, None)
+                .is_none()
+        );
+        assert!(declined.is_empty());
+        assert!(
+            rt.execute_plain_randomkey_borrowed_into(15, false, &mut declined, None)
+                .is_none()
+        );
+        assert!(declined.is_empty());
+        assert!(
+            rt.execute_plain_dump_borrowed_into(b"h1", 15, false, &mut declined, None)
+                .is_none()
+        );
+        assert!(declined.is_empty());
     }
 }

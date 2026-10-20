@@ -5460,11 +5460,12 @@ fn keys(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     // EXEC paths. Same architectural drift as MOVE/COPY/FLUSHDB.
     // (frankenredis-shbbv)
     let db = store.dispatch_client_ctx.db_index;
-    let matched = store.keys_matching_in_db(db, &argv[1], now_ms);
-    let frames = matched
-        .into_iter()
-        .map(|k| RespFrame::BulkString(Some(k)))
-        .collect();
+    let frames = store.keys_matching_in_db_with_slices(db, &argv[1], now_ms, |matched| {
+        matched
+            .iter()
+            .map(|&k| RespFrame::BulkString(Some(k.to_vec())))
+            .collect()
+    });
     Ok(RespFrame::Array(Some(frames)))
 }
 
@@ -25529,13 +25530,7 @@ fn randomkey(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // handle_randomkey_command at fr-runtime/src/lib.rs:10213.
     // (frankenredis-bwkfm)
     let db = store.dispatch_client_ctx.db_index;
-    let Some(physical) = store.randomkey_in_db(db, now_ms) else {
-        return Ok(RespFrame::BulkString(None));
-    };
-    let logical = fr_store::decode_db_key(&physical)
-        .map(|(_, logical)| logical.to_vec())
-        .unwrap_or(physical);
-    Ok(RespFrame::BulkString(Some(logical)))
+    Ok(RespFrame::BulkString(store.randomkey_in_db(db, now_ms)))
 }
 
 // ── SCAN family ──────────────────────────────────────────────────────
@@ -25688,7 +25683,8 @@ fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     let mut logical_keys = store.keys_in_db(db, now_ms);
 
     if let Some(ref pat) = args.pattern {
-        logical_keys.retain(|k| fr_store::glob_match(pat, k));
+        let pg = fr_store::glob_prepare(pat);
+        logical_keys.retain(|k| pg.matches(k));
     }
     if let Some(ref tf) = args.type_filter {
         // (frankenredis-re7sp) Compare the TYPE value as raw bytes — redis
@@ -25696,12 +25692,20 @@ fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         // (empty result), it is NOT a "invalid UTF-8 argument" error. (fr-runtime
         // handle_scan_command already does this; this path is hit via Lua/redis.call.)
         let tf: &[u8] = tf;
-        logical_keys.retain(|logical| {
-            let physical = fr_store::encode_db_key(db, logical);
-            store
-                .key_type(&physical, now_ms)
-                .is_some_and(|t| t.as_bytes().eq_ignore_ascii_case(tf))
-        });
+        if db == 0 {
+            logical_keys.retain(|logical| {
+                store
+                    .key_type(logical, now_ms)
+                    .is_some_and(|t| t.as_bytes().eq_ignore_ascii_case(tf))
+            });
+        } else {
+            logical_keys.retain(|logical| {
+                let physical = fr_store::encode_db_key(db, logical);
+                store
+                    .key_type(&physical, now_ms)
+                    .is_some_and(|t| t.as_bytes().eq_ignore_ascii_case(tf))
+            });
+        }
     }
     logical_keys.sort_unstable();
 
@@ -25710,23 +25714,22 @@ fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     // end-of-iteration).
     let cursor_idx = cursor as usize;
     let count = args.count.max(1);
-    let (next_cursor, batch): (u64, Vec<Vec<u8>>) = if cursor_idx >= logical_keys.len() {
+    let (next_cursor, key_frames): (u64, Vec<RespFrame>) = if cursor_idx >= logical_keys.len() {
         (0, Vec::new())
     } else {
         let end = cursor_idx.saturating_add(count).min(logical_keys.len());
-        let slice = logical_keys[cursor_idx..end].to_vec();
         let next = if end >= logical_keys.len() {
             0_u64
         } else {
             end as u64
         };
-        (next, slice)
+        let frames = logical_keys
+            .drain(cursor_idx..end)
+            .map(|k| RespFrame::BulkString(Some(k)))
+            .collect();
+        (next, frames)
     };
 
-    let key_frames: Vec<RespFrame> = batch
-        .into_iter()
-        .map(|k| RespFrame::BulkString(Some(k)))
-        .collect();
     Ok(RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(next_cursor.to_string().into_bytes())),
         RespFrame::Array(Some(key_frames)),

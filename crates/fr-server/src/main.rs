@@ -5605,9 +5605,9 @@ fn main() -> ExitCode {
         // peer sentinels discover us at the right address.
         runtime.set_sentinel_announce_port(port);
     }
-    runtime.set_config_file_path(config_path.map(std::path::PathBuf::from));
+    runtime.set_config_file_path(config_path.as_deref().map(std::path::PathBuf::from));
     if sentinel_mode
-        && let Some(path) = config_path
+        && let Some(path) = config_path.as_deref()
         && let Err(err) = runtime.load_sentinel_config_file(std::path::Path::new(path))
     {
         eprintln!("error: sentinel config file '{path}': {err}");
@@ -10343,12 +10343,19 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_dump_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) =
-                        runtime.execute_plain_dump_borrowed(packet.key, ts, None)
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_dump_borrowed_into(
+                            packet.key,
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                            None,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -10448,8 +10455,17 @@ fn process_buffered_frames(
                 } else if let Some(consumed) =
                     parse_borrowed_plain_randomkey_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_randomkey_borrowed(ts, None) {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    if runtime
+                        .execute_plain_randomkey_borrowed_into(
+                            ts,
+                            client_resp3,
+                            &mut conn.write_buf,
+                            None,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
                     } else {
                         parse_borrowed_multibulk_action(
                             unparsed,
@@ -20775,13 +20791,20 @@ fn try_dispatch_floor_classified_action(
                 *read_gate_cache
                     .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
             );
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) = parse_borrowed_plain_dump_packet(unparsed, &parser_config)
-                && let Some(response) =
-                    runtime.execute_plain_dump_borrowed(packet.key, ts, default_read_allowed)
+                && runtime
+                    .execute_plain_dump_borrowed_into(
+                        packet.key,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -20804,11 +20827,18 @@ fn try_dispatch_floor_classified_action(
                 *read_gate_cache
                     .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
             );
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(consumed) = parse_borrowed_plain_randomkey_packet(unparsed, &parser_config)
-                && let Some(response) =
-                    runtime.execute_plain_randomkey_borrowed(ts, default_read_allowed)
+                && runtime
+                    .execute_plain_randomkey_borrowed_into(
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -24605,12 +24635,24 @@ fn try_dispatch_floor_classified_action(
             // malformed glob is an ordinary empty result upstream, not an error, so the
             // only declines here are a disallowed session or an oversized argument, both
             // of which land on the generic path KEYS already uses.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) = parse_borrowed_plain_keys_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_keys_borrowed(packet.key, ts)
+                && runtime
+                    .execute_plain_keys_borrowed_into(
+                        packet.key,
+                        ts,
+                        client_resp3,
+                        out,
+                        default_read_allowed,
+                    )
+                    .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
