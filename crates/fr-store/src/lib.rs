@@ -30,7 +30,9 @@ use packed_set::{
 use fr_expire::evaluate_expiry;
 // The d2string listpack-score decision is shared with fr-persist's RDB-save encoder.
 // Keeping one copy in fr-protocol is what stops the two from drifting apart again.
-use fr_protocol::{ZsetScoreListpackEntry, push_redis_double_ascii, zset_score_listpack_entry};
+use fr_protocol::{
+    ZsetScoreListpackEntry, format_redis_double_into_buf, zset_score_listpack_entry,
+};
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -15878,10 +15880,13 @@ impl Store {
         Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
         if let Some(old) = old_entry {
             if matches!(&old.value, Value::Stream(_)) && !new_is_stream {
-                self.stream_groups.remove(key);
-                self.stream_last_ids.remove(key);
-                self.stream_entries_added.remove(key);
-                self.stream_max_deleted_ids.remove(key);
+                self.drop_stream_side_metadata(key);
+                if !self.stream_entries_added.is_empty() {
+                    self.stream_entries_added.remove(key);
+                }
+                if !self.stream_max_deleted_ids.is_empty() {
+                    self.stream_max_deleted_ids.remove(key);
+                }
             }
             if old_expiry.is_some() {
                 self.expires_count = self.expires_count.saturating_sub(1);
@@ -15983,8 +15988,12 @@ impl Store {
             self.hash_field_ttl_clear_for_key(key);
         }
         if matches!(&entry.value, Value::Stream(_)) {
-            self.stream_entries_added.remove(key);
-            self.stream_max_deleted_ids.remove(key);
+            if !self.stream_entries_added.is_empty() {
+                self.stream_entries_added.remove(key);
+            }
+            if !self.stream_max_deleted_ids.is_empty() {
+                self.stream_max_deleted_ids.remove(key);
+            }
         }
         Some(entry)
     }
@@ -35336,7 +35345,6 @@ impl Store {
         members: &[&[u8]],
         now_ms: u64,
     ) -> Result<Vec<bool>, StoreError> {
-        // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
         if !self.lfu_tracking_enabled() {
             return match self.lookup_live_for_read_mut(key, now_ms) {
                 Some(entry) => match &entry.value {
@@ -35350,30 +35358,27 @@ impl Store {
                 None => Ok(vec![false; members.len()]),
             };
         }
-        if !self.record_keyspace_lookup(key, now_ms) {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             return Ok(vec![false; members.len()]);
         }
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled {
-            self.next_rand()
-        } else {
-            0
+        let Some(entry) = self.entries.get_mut(key) else {
+            self.record_keyspace_miss(key);
+            return Ok(vec![false; members.len()]);
         };
-        match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::Set(s) => {
-                    let result: Vec<bool> = members.iter().map(|m| s.contains(m)).collect();
-                    if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
-                    }
-                    entry.touch(now_ms);
-                    Ok(result)
-                }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(vec![false; members.len()]),
+        self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+        match &entry.value {
+            Value::Set(s) => {
+                let result: Vec<bool> = members.iter().map(|m| s.contains(m)).collect();
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                entry.touch(now_ms);
+                Ok(result)
+            }
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -35660,13 +35665,9 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let max_listpack_entries = self.hash_max_listpack_entries;
         let max_listpack_value = self.hash_max_listpack_value;
+        let scan_filter = ScanFilter::prepare(pattern);
         let hscan_resume_hint = if cursor != 0 {
             self.hscan_cache
                 .iter()
@@ -35679,6 +35680,7 @@ impl Store {
         let outcome = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -35699,7 +35701,7 @@ impl Store {
                         if fits_listpack {
                             let result: Vec<(Vec<u8>, Vec<u8>)> = h
                                 .iter()
-                                .filter(|(field, _)| scan_pattern_matches(pattern, field))
+                                .filter(|(field, _)| scan_filter.matches(field))
                                 .map(|(f, v)| (f.to_vec(), v.to_vec()))
                                 .collect();
                             return Ok((0, result));
@@ -35728,7 +35730,7 @@ impl Store {
                                             .iter()
                                             .any(|examined| examined == *field)
                                     })
-                                    .filter(|(field, _)| scan_pattern_matches(pattern, field))
+                                    .filter(|(field, _)| scan_filter.matches(field))
                                     .map(|(field, value)| (field.to_vec(), value.to_vec()))
                                     .collect()
                             })
@@ -35754,7 +35756,7 @@ impl Store {
                             pos += 1;
                             processed += 1;
                             examined_members.push(field.to_vec());
-                            if !scan_pattern_matches(pattern, field) {
+                            if !scan_filter.matches(field) {
                                 if processed >= batch_size {
                                     break;
                                 }
@@ -35823,13 +35825,9 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let max_listpack_entries = self.hash_max_listpack_entries;
         let max_listpack_value = self.hash_max_listpack_value;
+        let scan_filter = ScanFilter::prepare(pattern);
         let hscan_resume_hint = if cursor != 0 {
             self.hscan_cache
                 .iter()
@@ -35842,6 +35840,7 @@ impl Store {
         let outcome = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -35869,7 +35868,7 @@ impl Store {
                             // here rather than a new one.
                             let pairs: Vec<(&[u8], &[u8])> = h
                                 .iter()
-                                .filter(|(field, _)| scan_pattern_matches(pattern, field))
+                                .filter(|(field, _)| scan_filter.matches(field))
                                 .collect();
                             sink(SscanReplyEvent::Cursor(0));
                             sink(SscanReplyEvent::Len(pairs.len() * 2));
@@ -35908,7 +35907,7 @@ impl Store {
                                             .iter()
                                             .any(|examined| examined == *field)
                                     })
-                                    .filter(|(field, _)| scan_pattern_matches(pattern, field))
+                                    .filter(|(field, _)| scan_filter.matches(field))
                                     .collect()
                             })
                             .unwrap_or_default();
@@ -35921,7 +35920,7 @@ impl Store {
                             pos += 1;
                             processed += 1;
                             examined_members.push(field.to_vec());
-                            if !scan_pattern_matches(pattern, field) {
+                            if !scan_filter.matches(field) {
                                 if processed >= batch_size {
                                     break;
                                 }
@@ -35990,11 +35989,6 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let max_intset_entries = self.set_max_intset_entries;
         let max_listpack_entries = self.set_max_listpack_entries;
         let max_listpack_value = self.set_max_listpack_value;
@@ -36014,6 +36008,7 @@ impl Store {
         let outcome = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -36156,11 +36151,6 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let max_intset_entries = self.set_max_intset_entries;
         let max_listpack_entries = self.set_max_listpack_entries;
         let max_listpack_value = self.set_max_listpack_value;
@@ -36180,6 +36170,7 @@ impl Store {
         let outcome = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &entry.value {
@@ -36327,18 +36318,15 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let zset_max_listpack_entries = self.zset_max_listpack_entries;
         let zset_max_listpack_value = self.zset_max_listpack_value;
+        let scan_filter = ScanFilter::prepare(pattern);
         let mut zscan_pushback: Option<ZScanResume> = None;
 
         let outcome = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 match &mut entry.value {
@@ -36348,7 +36336,7 @@ impl Store {
                         if fits_listpack {
                             let refs: Vec<(&[u8], f64)> = zs
                                 .iter_asc()
-                                .filter(|(member, _)| scan_pattern_matches(pattern, member))
+                                .filter(|(member, _)| scan_filter.matches(member))
                                 .collect();
                             sink(ZscanReplyEvent::Cursor(0));
                             sink(ZscanReplyEvent::Len(refs.len()));
@@ -36372,7 +36360,7 @@ impl Store {
                         let result: Vec<(&[u8], f64)> = match pattern {
                             Some(pat) if pat != b"*" => window
                                 .into_iter()
-                                .filter(|(member, _)| glob_match(pat, member))
+                                .filter(|(member, _)| scan_filter.matches(member))
                                 .collect(),
                             _ => window,
                         };
@@ -36461,11 +36449,6 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
-            self.next_rand()
-        } else {
-            0
-        };
         let zset_max_listpack_entries = self.zset_max_listpack_entries;
         let zset_max_listpack_value = self.zset_max_listpack_value;
         // (frankenredis e3y73) Take this ZSCAN stream's resume point (last returned
@@ -36488,6 +36471,7 @@ impl Store {
         let outcome = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 // `&mut` so the skiplist path can adaptively warm the rank
@@ -36705,17 +36689,14 @@ impl Store {
         replace: bool,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        // (CrimsonHawk) Guard the two bare drop_if_expired probes on `expires_count != 0`:
-        // with no volatile keys neither source nor destination can evict, and
-        // `record_keyspace_lookup(source)` below re-probes source anyway. Byte-identical:
-        // an expired key needs a TTL (count>0 → both drops run in the original order).
-        if self.expires_count != 0 {
-            self.drop_if_expired(source, now_ms);
-            self.drop_if_expired(destination, now_ms);
-        }
-
         if !self.record_keyspace_lookup(source, now_ms) {
+            if self.expires_count != 0 {
+                self.drop_if_expired(destination, now_ms);
+            }
             return Ok(false);
+        }
+        if self.expires_count != 0 {
+            self.drop_if_expired(destination, now_ms);
         }
         self.copy_inner(source, destination, replace, now_ms)
     }
@@ -36730,15 +36711,9 @@ impl Store {
         replace: bool,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        // (CrimsonHawk) Guard the two bare drop_if_expired probes on `expires_count != 0` —
-        // see `copy`. Byte-identical (contains_key(source) below re-probes; nothing evicts
-        // when no volatile keys exist).
         if self.expires_count != 0 {
             self.drop_if_expired(source, now_ms);
             self.drop_if_expired(destination, now_ms);
-        }
-        if !self.entries.contains_key(source) {
-            return Ok(false);
         }
         self.copy_inner(source, destination, replace, now_ms)
     }
@@ -36781,12 +36756,7 @@ impl Store {
                     || self.stream_entries_added.contains_key(key)
                     || self.stream_max_deleted_ids.contains_key(key)
             });
-        let can_relink = !has_stream_side_state
-            && self
-                .entries
-                .get(source)
-                .is_some_and(|entry| matches!(&entry.value, Value::String(SmallStr::Heap(_))));
-        if !can_relink {
+        if has_stream_side_state {
             let dirty_before = self.dirty;
             let copied = self.copy_no_stat(source, destination, false, now_ms)?;
             if copied {
@@ -36799,11 +36769,6 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled {
-            self.next_rand()
-        } else {
-            0
-        };
         let source_expiry = if self.expires_count != 0 {
             self.expiry_ms(source)
         } else {
@@ -36812,7 +36777,17 @@ impl Store {
         let Some(source_entry) = self.entries.get_mut(source) else {
             return Ok(false);
         };
+        if !matches!(&source_entry.value, Value::String(SmallStr::Heap(_))) {
+            let dirty_before = self.dirty;
+            let copied = self.copy_no_stat(source, destination, false, now_ms)?;
+            if copied {
+                self.del_borrowed(&[source], now_ms);
+                self.dirty = dirty_before.saturating_add(1);
+            }
+            return Ok(copied);
+        }
         if lfu_tracking_enabled {
+            let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
             source_entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
         }
         source_entry.touch(now_ms);
@@ -36852,11 +36827,6 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled {
-            self.next_rand()
-        } else {
-            0
-        };
         let source_expiry = if self.expires_count != 0 {
             self.expiry_ms(source)
         } else {
@@ -36866,6 +36836,7 @@ impl Store {
         let entry = match self.entries.get_mut(source) {
             Some(source_entry) => {
                 if lfu_tracking_enabled {
+                    let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
                     source_entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 source_entry.touch(now_ms);
@@ -36926,46 +36897,79 @@ impl Store {
     /// Returns empty vec if key does not exist.
     /// Returns Err(WrongType) for non-sortable types (string, hash, stream).
     pub fn sort_elements(&mut self, key: &[u8], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        if !self.lfu_tracking_enabled() {
+            return match self.lookup_live_for_read_mut(key, now_ms) {
+                Some(entry) => match &entry.value {
+                    Value::List(l) => {
+                        let result = l.iter().map(<[u8]>::to_vec).collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    Value::Set(s) => {
+                        let result = s.iter().map(|m| m.into_owned()).collect();
+                        entry.touch(now_ms);
+                        Ok(result)
+                    }
+                    Value::SortedSet(zs) => {
+                        let result = zs.iter_asc().map(|(m, _)| m.to_vec()).collect();
+                        entry.touch(now_ms);
+                        entry.set_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING, true);
+                        Ok(result)
+                    }
+                    _ => Err(StoreError::WrongType),
+                },
+                None => Ok(Vec::new()),
+            };
+        }
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             return Ok(Vec::new());
         }
-        match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::List(l) => {
-                    let result = l.iter().map(<[u8]>::to_vec).collect();
-                    entry.touch(now_ms);
-                    Ok(result)
-                }
-                Value::Set(s) => {
-                    let result = s.iter().map(|m| m.into_owned()).collect();
-                    entry.touch(now_ms);
-                    Ok(result)
-                }
-                Value::SortedSet(zs) => {
-                    let result = zs.iter_asc().map(|(m, _)| m.to_vec()).collect();
-                    entry.touch(now_ms);
-                    // Upstream sort.c::sortCommand (line 320) DESTRUCTIVELY
-                    // converts a sorted set to OBJ_ENCODING_SKIPLIST before
-                    // sorting — unconditionally, including SORT_RO, BY-nosort,
-                    // LIMIT, and STORE (it needs dictSize + indexed access). fr
-                    // left a listpack zset unconverted, so OBJECT ENCODING after
-                    // a SORT diverged (listpack vs skiplist). Mirror the one-way
-                    // promotion here (encoding metadata only — no value/digest/
-                    // dirty change). (frankenredis-sortzsetenc)
-                    entry.set_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING, true);
-                    Ok(result)
-                }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(Vec::new()),
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let Some(entry) = self.entries.get_mut(key) else {
+            self.record_keyspace_miss(key);
+            return Ok(Vec::new());
+        };
+        self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+        let rand_sample = Self::lcg_next_seed(&mut self.rng_seed);
+        match &entry.value {
+            Value::List(l) => {
+                let result = l.iter().map(<[u8]>::to_vec).collect();
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                entry.touch(now_ms);
+                Ok(result)
+            }
+            Value::Set(s) => {
+                let result = s.iter().map(|m| m.into_owned()).collect();
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                entry.touch(now_ms);
+                Ok(result)
+            }
+            Value::SortedSet(zs) => {
+                let result = zs.iter_asc().map(|(m, _)| m.to_vec()).collect();
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                entry.touch(now_ms);
+                // Upstream sort.c::sortCommand (line 320) DESTRUCTIVELY
+                // converts a sorted set to OBJ_ENCODING_SKIPLIST before
+                // sorting — unconditionally, including SORT_RO, BY-nosort,
+                // LIMIT, and STORE (it needs dictSize + indexed access). fr
+                // left a listpack zset unconverted, so OBJECT ENCODING after
+                // a SORT diverged (listpack vs skiplist). Mirror the one-way
+                // promotion here (encoding metadata only — no value/digest/
+                // dirty change). (frankenredis-sortzsetenc)
+                entry.set_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING, true);
+                Ok(result)
+            }
+            _ => Err(StoreError::WrongType),
         }
     }
 
     /// Replace the value at `key` with a list built from `elements`.
     /// Used by SORT ... STORE to write the sorted result.
     pub fn store_as_list(&mut self, key: &[u8], elements: Vec<Vec<u8>>) {
-        self.stream_groups.remove(key);
-        self.stream_last_ids.remove(key);
+        self.drop_stream_side_metadata(key);
         // (frankenredis-sortstoredirty) Upstream sortCommand's STORE arm does
         // `server.dirty += outputlen` (one unit per stored element), not a
         // single increment — only the empty-result delete path is +1 (handled
@@ -36988,12 +36992,17 @@ impl Store {
             Some(e) => e,
             None => return 0,
         };
-        if let Some(exp) = self.expiry_ms(key)
+        let exp = if self.expires_count == 0 {
+            None
+        } else {
+            self.expiry_ms(key)
+        };
+        if let Some(exp) = exp
             && now_ms > exp
         {
             return 0;
         }
-        Self::entry_state_digest(key, entry, self.expiry_ms(key))
+        Self::entry_state_digest(key, entry, exp)
     }
 
     fn entry_state_digest(key: &[u8], entry: &Entry, expiry_ms: Option<u64>) -> u64 {
@@ -37090,8 +37099,7 @@ impl Store {
 
     pub fn store_sorted_set(&mut self, dest: &[u8], members: HashMap<Vec<u8>, f64>, now_ms: u64) {
         self.internal_entries_remove(dest);
-        self.stream_groups.remove(dest);
-        self.stream_last_ids.remove(dest);
+        self.drop_stream_side_metadata(dest);
 
         if members.is_empty() {
             self.dirty = self.dirty.saturating_add(1);
@@ -37116,8 +37124,7 @@ impl Store {
         now_ms: u64,
     ) {
         self.internal_entries_remove(dest);
-        self.stream_groups.remove(dest);
-        self.stream_last_ids.remove(dest);
+        self.drop_stream_side_metadata(dest);
 
         if members.is_empty() {
             self.dirty = self.dirty.saturating_add(1);
@@ -37751,11 +37758,17 @@ impl Store {
 
     /// Check if scripts exist in the cache by SHA1.
     pub fn script_exists(&self, sha1s: &[&[u8]]) -> Vec<bool> {
+        let mut buf = [0u8; 40];
         sha1s
             .iter()
             .map(|sha1| {
-                let hex = String::from_utf8_lossy(sha1).to_ascii_lowercase();
-                self.script_cache.contains_key(&hex)
+                if sha1.len() != 40 {
+                    return false;
+                }
+                for (dst, &src) in buf.iter_mut().zip(sha1.iter()) {
+                    *dst = src.to_ascii_lowercase();
+                }
+                std::str::from_utf8(&buf).is_ok_and(|hex| self.script_cache.contains_key(hex))
             })
             .collect()
     }
@@ -37768,8 +37781,15 @@ impl Store {
 
     /// Look up a script body by SHA1 hex.
     pub fn script_get(&self, sha1: &[u8]) -> Option<&[u8]> {
-        let hex = String::from_utf8_lossy(sha1).to_ascii_lowercase();
-        self.script_cache.get(&hex).map(Vec::as_slice)
+        if sha1.len() != 40 {
+            return None;
+        }
+        let mut buf = [0u8; 40];
+        for (dst, &src) in buf.iter_mut().zip(sha1.iter()) {
+            *dst = src.to_ascii_lowercase();
+        }
+        let hex = std::str::from_utf8(&buf).ok()?;
+        self.script_cache.get(hex).map(Vec::as_slice)
     }
 
     /// Fetch a script body by an ALREADY-normalised lowercase hex SHA.
@@ -38764,19 +38784,15 @@ impl Store {
             receivers += 1;
         }
         // Check pattern subscriptions — each matching pattern produces a separate pmessage
-        let matching_patterns: Vec<Vec<u8>> = self
-            .subscribed_patterns
-            .iter()
-            .filter(|pattern| glob_match(pattern, channel))
-            .cloned()
-            .collect();
-        for pattern in matching_patterns {
-            self.pubsub_pending.push(PubSubMessage::PMessage {
-                pattern,
-                channel: channel.to_vec(),
-                data: message.to_vec(),
-            });
-            receivers += 1;
+        for pattern in &self.subscribed_patterns {
+            if glob_match(pattern, channel) {
+                self.pubsub_pending.push(PubSubMessage::PMessage {
+                    pattern: pattern.clone(),
+                    channel: channel.to_vec(),
+                    data: message.to_vec(),
+                });
+                receivers += 1;
+            }
         }
         receivers
     }
@@ -38972,10 +38988,18 @@ impl Store {
         // DUMP is a read (upstream cluster.c::dumpCommand uses lookupKeyRead),
         // so it bumps keyspace_hits on a present key / keyspace_misses on a
         // missing one. (frankenredis-934ax)
-        if !self.record_keyspace_lookup(key, now_ms) {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             return None;
         }
-        self.dump_key_raw(key)
+        if let Some(bytes) = self.dump_key_raw(key) {
+            self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+            Some(bytes)
+        } else {
+            self.record_keyspace_miss(key);
+            None
+        }
     }
 
     pub fn dump_key_with_slice<R>(
@@ -38984,10 +39008,22 @@ impl Store {
         now_ms: u64,
         f: impl FnOnce(Option<&[u8]>) -> R,
     ) -> R {
-        if !self.record_keyspace_lookup(key, now_ms) {
+        if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            self.drop_if_expired(key, now_ms);
+            self.record_keyspace_miss(key);
             return f(None);
         }
-        self.dump_key_raw_with_slice(key, f)
+        let mut hit = false;
+        let out = self.dump_key_raw_with_slice(key, |opt| {
+            hit = opt.is_some();
+            f(opt)
+        });
+        if hit {
+            self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+        } else {
+            self.record_keyspace_miss(key);
+        }
+        out
     }
 
     pub fn dump_key_raw_with_slice<R>(
@@ -39263,7 +39299,7 @@ impl Store {
                     // (frankenredis perf: zset DUMP direct-emit, code-first batch-test pending)
                     let mut encoded = Vec::with_capacity(zs.len().saturating_mul(48));
                     let mut entry_count = 0usize;
-                    let mut score_scratch = Vec::with_capacity(32);
+                    let mut score_buf = [0u8; 32];
                     for (member, score) in zs.iter_asc() {
                         encode_listpack_entry(&mut encoded, member);
                         // Decide the score entry from the f64 itself rather than formatting
@@ -39277,14 +39313,12 @@ impl Store {
                                 encode_listpack_integer_entry(&mut encoded, int_score);
                             }
                             ZsetScoreListpackEntry::Str => {
-                                score_scratch.clear();
-                                push_redis_double_ascii(&mut score_scratch, score);
-                                encode_listpack_string_entry(&mut encoded, &score_scratch);
+                                let n = format_redis_double_into_buf(score, &mut score_buf);
+                                encode_listpack_string_entry(&mut encoded, &score_buf[..n]);
                             }
                             ZsetScoreListpackEntry::Reparse => {
-                                score_scratch.clear();
-                                push_redis_double_ascii(&mut score_scratch, score);
-                                encode_listpack_entry(&mut encoded, &score_scratch);
+                                let n = format_redis_double_into_buf(score, &mut score_buf);
+                                encode_listpack_entry(&mut encoded, &score_buf[..n]);
                             }
                         }
                         entry_count += 2;
@@ -40255,9 +40289,12 @@ impl Store {
     /// Returns None if the key doesn't exist.
     #[must_use]
     pub fn get_value_and_expiry(&self, key: &[u8]) -> Option<(&Value, Option<u64>)> {
-        self.entries
-            .get(key)
-            .map(|entry| (&entry.value, self.expiry_ms(key)))
+        let exp = if self.expires_count == 0 {
+            None
+        } else {
+            self.expiry_ms(key)
+        };
+        self.entries.get(key).map(|entry| (&entry.value, exp))
     }
 
     /// Generate AOF-compatible command sequences that reconstruct the entire store.
@@ -40449,14 +40486,14 @@ impl Store {
                                 .unwrap_or(std::cmp::Ordering::Equal)
                                 .then_with(|| a.0.cmp(b.0))
                         });
+                        let mut score_buf = [0u8; 32];
                         for chunk in pairs.chunks(AOF_REWRITE_ITEMS_PER_CMD) {
                             let mut argv = Vec::with_capacity(2 + chunk.len() * 2);
                             argv.push(b"ZADD".to_vec());
                             argv.push(logical_key.to_vec());
                             for (member, score) in chunk {
-                                let mut score_bytes = Vec::with_capacity(24);
-                                push_redis_double_ascii(&mut score_bytes, *score);
-                                argv.push(score_bytes);
+                                let n = format_redis_double_into_buf(*score, &mut score_buf);
+                                argv.push(score_buf[..n].to_vec());
                                 argv.push((*member).to_vec());
                             }
                             commands.push(argv);
@@ -40498,12 +40535,13 @@ impl Store {
                     // so last_id, entries_added, and max_deleted_entry_id
                     // survive trims, deletes, and empty streams.
                     let max_entry_id = entries.keys().last().copied();
-                    let watermark = self
-                        .stream_last_ids
-                        .get(physical_key)
-                        .copied()
-                        .or(max_entry_id)
-                        .unwrap_or((0, 0));
+                    let watermark = if self.stream_last_ids.is_empty() {
+                        None
+                    } else {
+                        self.stream_last_ids.get(physical_key).copied()
+                    }
+                    .or(max_entry_id)
+                    .unwrap_or((0, 0));
                     let entries_added =
                         self.stream_entries_added_value(physical_key, entries.len());
                     let max_deleted = self.stream_max_deleted_id(physical_key).unwrap_or((0, 0));
@@ -40520,7 +40558,9 @@ impl Store {
                     ]);
 
                     // Emit XGROUP CREATE for each consumer group.
-                    if let Some(groups) = self.stream_groups.get(physical_key) {
+                    if !self.stream_groups.is_empty()
+                        && let Some(groups) = self.stream_groups.get(physical_key)
+                    {
                         let mut group_names: Vec<&Vec<u8>> = groups.keys().collect();
                         group_names.sort_unstable();
                         for group_name in group_names {
@@ -43319,8 +43359,7 @@ fn estimate_listpack_score_bytes(score: f64) -> usize {
     // doubles that fit i64 render as a plain integer (ll2string), everything
     // else via %.17g — so e.g. 1e20 is "1e+20", which lpStringToInt64 rejects
     // and listpack stores as a string entry, matching redis.
-    let s = redis_score_to_string(score);
-    if let Ok(value) = s.parse::<i64>() {
+    let encode_int_len = |value: i64| -> usize {
         // Mirror lpEncodeIntegerGetType's width buckets (listpack.c).
         let encoded = if (0..=127).contains(&value) {
             1
@@ -43336,8 +43375,23 @@ fn estimate_listpack_score_bytes(score: f64) -> usize {
             9
         };
         encoded + 1
-    } else {
-        estimate_listpack_entry_bytes(s.as_bytes())
+    };
+    match zset_score_listpack_entry(score) {
+        ZsetScoreListpackEntry::Int(value) => encode_int_len(value),
+        ZsetScoreListpackEntry::Str => {
+            let mut buf = [0u8; 32];
+            let n = format_redis_double_into_buf(score, &mut buf);
+            estimate_listpack_entry_bytes(&buf[..n])
+        }
+        ZsetScoreListpackEntry::Reparse => {
+            let mut buf = [0u8; 32];
+            let n = format_redis_double_into_buf(score, &mut buf);
+            if let Some(value) = parse_listpack_integer(&buf[..n]) {
+                encode_int_len(value)
+            } else {
+                estimate_listpack_entry_bytes(&buf[..n])
+            }
+        }
     }
 }
 
@@ -43681,31 +43735,55 @@ fn format_simple_decimal_float(value: SimpleDecimalFloat) -> Vec<u8> {
         return b"0".to_vec();
     }
     let negative = value.coefficient < 0;
-    let mut digits = value.coefficient.unsigned_abs().to_string();
-    if value.scale > 0 {
+    let mut mag = value.coefficient.unsigned_abs();
+    let mut raw_digits = [0u8; 40];
+    let mut dpos = 40usize;
+    while mag > 0 {
+        dpos -= 1;
+        raw_digits[dpos] = b'0' + (mag % 10) as u8;
+        mag /= 10;
+    }
+    let digits = &raw_digits[dpos..];
+
+    let mut out = [0u8; 64];
+    let mut len = 0usize;
+    if negative {
+        out[0] = b'-';
+        len = 1;
+    }
+
+    if value.scale == 0 {
+        out[len..len + digits.len()].copy_from_slice(digits);
+        len += digits.len();
+    } else {
         let scale = value.scale as usize;
         if digits.len() <= scale {
-            let mut padded = String::with_capacity(scale + 2);
-            padded.push_str("0.");
-            for _ in 0..(scale - digits.len()) {
-                padded.push('0');
-            }
-            padded.push_str(&digits);
-            digits = padded;
+            out[len] = b'0';
+            out[len + 1] = b'.';
+            len += 2;
+            let zeros = scale - digits.len();
+            out[len..len + zeros].fill(b'0');
+            len += zeros;
+            out[len..len + digits.len()].copy_from_slice(digits);
+            len += digits.len();
         } else {
-            digits.insert(digits.len() - scale, '.');
+            let split = digits.len() - scale;
+            out[len..len + split].copy_from_slice(&digits[..split]);
+            len += split;
+            out[len] = b'.';
+            len += 1;
+            let tail = digits.len() - split;
+            out[len..len + tail].copy_from_slice(&digits[split..]);
+            len += tail;
         }
-        while digits.ends_with('0') {
-            digits.pop();
+        while len > 0 && out[len - 1] == b'0' {
+            len -= 1;
         }
-        if digits.ends_with('.') {
-            digits.pop();
+        if len > 0 && out[len - 1] == b'.' {
+            len -= 1;
         }
     }
-    if negative {
-        digits.insert(0, '-');
-    }
-    digits.into_bytes()
+    out[..len].to_vec()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45300,26 +45378,36 @@ fn hll_cache_write(data: &mut [u8], card: u64) -> bool {
 }
 
 fn hll_encode(registers: &[u8], encoding: HllEncoding) -> Vec<u8> {
-    let mut data = Vec::new();
-    data.extend_from_slice(HLL_REDIS_MAGIC);
-    data.push(match encoding {
-        HllEncoding::Dense => HLL_REDIS_DENSE_ENCODING,
-        HllEncoding::Sparse => HLL_REDIS_SPARSE_ENCODING,
-    });
-    data.extend_from_slice(&[0, 0, 0]);
-    data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0x80]);
     match encoding {
-        HllEncoding::Dense => data.extend_from_slice(&hll_encode_dense_registers(registers)),
+        HllEncoding::Dense => {
+            let mut data = Vec::with_capacity(HLL_REDIS_DENSE_SIZE);
+            data.extend_from_slice(HLL_REDIS_MAGIC);
+            data.push(HLL_REDIS_DENSE_ENCODING);
+            data.extend_from_slice(&[0, 0, 0]);
+            data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0x80]);
+            hll_encode_dense_registers_into(registers, &mut data);
+            data
+        }
         HllEncoding::Sparse => {
             if let Some(encoded) = hll_encode_sparse_registers(registers) {
+                let mut data = Vec::with_capacity(HLL_REDIS_HEADER_SIZE + encoded.len());
+                data.extend_from_slice(HLL_REDIS_MAGIC);
+                data.push(HLL_REDIS_SPARSE_ENCODING);
+                data.extend_from_slice(&[0, 0, 0]);
+                data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0x80]);
                 data.extend_from_slice(&encoded);
+                data
             } else {
-                data[HLL_REDIS_MAGIC.len()] = HLL_REDIS_DENSE_ENCODING;
-                data.extend_from_slice(&hll_encode_dense_registers(registers));
+                let mut data = Vec::with_capacity(HLL_REDIS_DENSE_SIZE);
+                data.extend_from_slice(HLL_REDIS_MAGIC);
+                data.push(HLL_REDIS_DENSE_ENCODING);
+                data.extend_from_slice(&[0, 0, 0]);
+                data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0x80]);
+                hll_encode_dense_registers_into(registers, &mut data);
+                data
             }
         }
     }
-    data
 }
 
 // HLL dense registers are 6-bit LSB-first fields. Exactly 4 registers occupy
@@ -45327,24 +45415,23 @@ fn hll_encode(registers: &[u8], encoding: HllEncoding) -> Vec<u8> {
 // payload (12288 = 4096·3) are exact multiples, so the codec runs in 4096
 // remainder-free groups: one 24-bit word per group instead of per-register
 // bit/8, bit%8, and masked-OR byte loads/stores. (frankenredis-kgsni)
-fn hll_encode_dense_registers(registers: &[u8]) -> Vec<u8> {
-    let mut payload = vec![0u8; HLL_REDIS_DENSE_REGISTER_BYTES];
+fn hll_encode_dense_registers_into(registers: &[u8], out: &mut Vec<u8>) {
+    out.reserve(HLL_REDIS_DENSE_REGISTER_BYTES);
     let (register_chunks, _) = registers.as_chunks::<4>();
-    let (payload_chunks, _) = payload.as_chunks_mut::<3>();
-    for (regs, bytes) in register_chunks
-        .iter()
-        .zip(payload_chunks.iter_mut())
-        .take(HLL_REGISTERS / 4)
-    {
+    for regs in register_chunks.iter().take(HLL_REGISTERS / 4) {
         let w = (u32::from(regs[0] & 0x3f))
             | (u32::from(regs[1] & 0x3f) << 6)
             | (u32::from(regs[2] & 0x3f) << 12)
             | (u32::from(regs[3] & 0x3f) << 18);
-        bytes[0] = w as u8;
-        bytes[1] = (w >> 8) as u8;
-        bytes[2] = (w >> 16) as u8;
+        out.extend_from_slice(&[w as u8, (w >> 8) as u8, (w >> 16) as u8]);
     }
-    payload
+}
+
+#[cfg(test)]
+fn hll_encode_dense_registers(registers: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HLL_REDIS_DENSE_REGISTER_BYTES);
+    hll_encode_dense_registers_into(registers, &mut out);
+    out
 }
 
 fn hll_decode_dense_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {

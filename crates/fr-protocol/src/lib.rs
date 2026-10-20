@@ -758,6 +758,44 @@ pub fn bench_encode_integer<const FUSED: bool>(n: i64, out: &mut Vec<u8>) {
     encode_integer_reply::<FUSED>(n, out)
 }
 
+/// Format an `f64` into a 32-byte stack buffer using Redis 7.2.4 `d2string` rules
+/// (NaN/±inf, signed zero, `double2ll` integer fast-range, and `fpconv_dtoa` Grisu2
+/// fallback), returning the number of ASCII bytes written (`<= 26`).
+#[inline]
+pub fn format_redis_double_into_buf(value: f64, buf: &mut [u8; 32]) -> usize {
+    if value.is_nan() {
+        buf[..3].copy_from_slice(b"nan");
+        return 3;
+    }
+    if value.is_infinite() {
+        return if value > 0.0 {
+            buf[..3].copy_from_slice(b"inf");
+            3
+        } else {
+            buf[..4].copy_from_slice(b"-inf");
+            4
+        };
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            buf[..2].copy_from_slice(b"-0");
+            2
+        } else {
+            buf[0] = b'0';
+            1
+        };
+    }
+    let lo = (-i64::MAX / 2) as f64;
+    let hi = (i64::MAX / 2) as f64;
+    if value >= lo && value <= hi {
+        let truncated = value as i64;
+        if truncated as f64 == value {
+            return write_i64_to_slice(truncated, buf);
+        }
+    }
+    fpconv_dtoa_to_slice(value, buf)
+}
+
 /// Fast d2string cases that format into a fixed stack `buf` (returning the byte
 /// length): NaN/±inf, signed zero, and any integer-valued double in the i64
 /// fast-range. Byte-identical to the matching arms of [`push_redis_double_ascii`].
@@ -822,35 +860,25 @@ pub fn bench_encode_redis_double<const FUSED: bool>(value: f64, resp3: bool, out
 /// prior code for the byte-identity gate and the same-binary A/B.
 #[inline]
 fn encode_redis_double_impl<const FUSED: bool>(value: f64, resp3: bool, out: &mut Vec<u8>) {
-    // Fast path — the overwhelmingly common zset scores (integer-valued) plus
-    // the special constants format into a stack buffer, so the length-prefixed
-    // RESP2 reply can be written header-then-body IN ORDER. Redis's
-    // addReplyHumanLongDouble frames the same way (stack buffer, then bulk
-    // write). Byte-identical output.
+    if FUSED {
+        let mut buf = [0u8; 32];
+        let n = format_redis_double_into_buf(value, &mut buf);
+        buf[n] = b'\r';
+        buf[n + 1] = b'\n';
+        if resp3 {
+            out.extend_from_slice(b",");
+        } else if n < 10 {
+            out.extend_from_slice(&[b'$', b'0' + n as u8, b'\r', b'\n']);
+        } else {
+            let pair = n * 2;
+            out.extend_from_slice(&[b'$', DIGIT_PAIRS[pair], DIGIT_PAIRS[pair + 1], b'\r', b'\n']);
+        }
+        out.extend_from_slice(&buf[..n + 2]);
+        return;
+    }
+
     let mut buf = [0u8; 24];
     if let Some(n) = try_format_redis_double_simple(value, &mut buf) {
-        if FUSED {
-            // n <= 20 (19 digits + sign), so `buf[n..n + 2]` stays in bounds and the
-            // bulk length is always one or two decimal digits.
-            buf[n] = b'\r';
-            buf[n + 1] = b'\n';
-            if resp3 {
-                out.extend_from_slice(b",");
-            } else if n < 10 {
-                out.extend_from_slice(&[b'$', b'0' + n as u8, b'\r', b'\n']);
-            } else {
-                let pair = n * 2;
-                out.extend_from_slice(&[
-                    b'$',
-                    DIGIT_PAIRS[pair],
-                    DIGIT_PAIRS[pair + 1],
-                    b'\r',
-                    b'\n',
-                ]);
-            }
-            out.extend_from_slice(&buf[..n + 2]);
-            return;
-        }
         let body = &buf[..n];
         if resp3 {
             out.reserve(1 + n + 2);
@@ -1111,18 +1139,14 @@ impl RespFrame {
             }
             Self::Map(None) => out.extend_from_slice(b"%-1\r\n"),
             Self::Map(Some(entries)) => {
-                out.extend_from_slice(b"%");
-                push_usize(out, entries.len());
-                out.extend_from_slice(b"\r\n");
+                push_len_header::<true>(out, b'%', entries.len() as u64);
                 for (key, value) in entries {
                     key.encode_into(out);
                     value.encode_into(out);
                 }
             }
             Self::Push(frames) => {
-                out.extend_from_slice(b">");
-                push_usize(out, frames.len());
-                out.extend_from_slice(b"\r\n");
+                push_len_header::<true>(out, b'>', frames.len() as u64);
                 for frame in frames {
                     frame.encode_into(out);
                 }
@@ -1146,9 +1170,7 @@ impl RespFrame {
                 out.extend_from_slice(if *b { b"#t\r\n" } else { b"#f\r\n" });
             }
             Self::Attribute(entries) => {
-                out.extend_from_slice(b"|");
-                push_usize(out, entries.len());
-                out.extend_from_slice(b"\r\n");
+                push_len_header::<true>(out, b'|', entries.len() as u64);
                 for (key, value) in entries {
                     key.encode_into(out);
                     value.encode_into(out);
@@ -1156,9 +1178,7 @@ impl RespFrame {
             }
             Self::Set(None) => out.extend_from_slice(b"~-1\r\n"),
             Self::Set(Some(frames)) => {
-                out.extend_from_slice(b"~");
-                push_usize(out, frames.len());
-                out.extend_from_slice(b"\r\n");
+                push_len_header::<true>(out, b'~', frames.len() as u64);
                 for frame in frames {
                     frame.encode_into(out);
                 }
@@ -1166,9 +1186,8 @@ impl RespFrame {
             Self::Verbatim(s) => {
                 // RESP3 verbatim string: =<len>\r\ntxt:<body>\r\n
                 // len includes the "txt:" prefix (4 bytes)
-                out.extend_from_slice(b"=");
-                push_usize(out, s.len() + 4);
-                out.extend_from_slice(b"\r\ntxt:");
+                push_len_header::<true>(out, b'=', (s.len() + 4) as u64);
+                out.extend_from_slice(b"txt:");
                 out.extend_from_slice(s.as_bytes());
                 out.extend_from_slice(b"\r\n");
             }
@@ -1197,43 +1216,33 @@ impl RespFrame {
                 out.extend_from_slice(b"_\r\n");
             }
             Self::Array(Some(frames)) => {
-                out.extend_from_slice(b"*");
-                push_usize(out, frames.len());
-                out.extend_from_slice(b"\r\n");
+                push_len_header::<DIRECT_SCALARS>(out, b'*', frames.len() as u64);
                 for frame in frames {
                     frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                 }
             }
             Self::Map(Some(entries)) => {
-                out.extend_from_slice(b"%");
-                push_usize(out, entries.len());
-                out.extend_from_slice(b"\r\n");
+                push_len_header::<DIRECT_SCALARS>(out, b'%', entries.len() as u64);
                 for (key, value) in entries {
                     key.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                     value.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                 }
             }
             Self::Attribute(entries) => {
-                out.extend_from_slice(b"|");
-                push_usize(out, entries.len());
-                out.extend_from_slice(b"\r\n");
+                push_len_header::<DIRECT_SCALARS>(out, b'|', entries.len() as u64);
                 for (key, value) in entries {
                     key.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                     value.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                 }
             }
             Self::Set(Some(frames)) => {
-                out.extend_from_slice(b"~");
-                push_usize(out, frames.len());
-                out.extend_from_slice(b"\r\n");
+                push_len_header::<DIRECT_SCALARS>(out, b'~', frames.len() as u64);
                 for frame in frames {
                     frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                 }
             }
             Self::Push(frames) => {
-                out.extend_from_slice(b">");
-                push_usize(out, frames.len());
-                out.extend_from_slice(b"\r\n");
+                push_len_header::<DIRECT_SCALARS>(out, b'>', frames.len() as u64);
                 for frame in frames {
                     frame.encode_into_resp3_impl::<DIRECT_SCALARS>(out);
                 }
@@ -1260,9 +1269,7 @@ impl RespFrame {
             }
             Self::Integer(n) if DIRECT_SCALARS => encode_integer_reply::<true>(*n, out),
             Self::BulkString(Some(bytes)) if DIRECT_SCALARS => {
-                out.extend_from_slice(b"$");
-                push_usize(out, bytes.len());
-                out.extend_from_slice(b"\r\n");
+                push_len_header::<true>(out, b'$', bytes.len() as u64);
                 out.extend_from_slice(bytes);
                 out.extend_from_slice(b"\r\n");
             }
@@ -1280,9 +1287,8 @@ impl RespFrame {
                 out.extend_from_slice(if *value { b"#t\r\n" } else { b"#f\r\n" });
             }
             Self::Verbatim(s) if DIRECT_SCALARS => {
-                out.extend_from_slice(b"=");
-                push_usize(out, s.len() + 4);
-                out.extend_from_slice(b"\r\ntxt:");
+                push_len_header::<true>(out, b'=', (s.len() + 4) as u64);
+                out.extend_from_slice(b"txt:");
                 out.extend_from_slice(s.as_bytes());
                 out.extend_from_slice(b"\r\n");
             }
@@ -1328,9 +1334,9 @@ pub fn format_redis_double(value: f64) -> String {
     // (4611686018427387904), NOT ±2^52 — otherwise grisu2 via fpconv_dtoa.
     // The bound matters: the oracle renders 1e16/1e18/4e18 as plain decimals and
     // only goes scientific at 5e18 ("5e+18"). (frankenredis-sk4ss)
-    let mut out = Vec::with_capacity(24);
-    push_redis_double_ascii(&mut out, value);
-    String::from_utf8(out).expect("ascii")
+    let mut buf = [0u8; 32];
+    let n = format_redis_double_into_buf(value, &mut buf);
+    std::str::from_utf8(&buf[..n]).expect("ascii").to_owned()
 }
 
 // ───────────────────────── fpconv_dtoa (grisu2) ────────────────────────────
@@ -1669,21 +1675,23 @@ fn fpconv_grisu2(d: f64, digits: &mut [u8], k: &mut i32) -> usize {
     fpconv_generate_digits(&w, &upper, &lower, digits, k)
 }
 
-fn fpconv_emit_digits_into(
+fn fpconv_emit_digits_to_slice(
     digits: &[u8],
     mut ndigits: usize,
     k: i32,
     neg: bool,
-    out: &mut Vec<u8>,
-) {
-    let start_len = out.len();
+    out: &mut [u8; 32],
+    mut len: usize,
+) -> usize {
     let exp = (k + ndigits as i32 - 1).abs();
 
     // write plain integer
     if k >= 0 && exp < ndigits as i32 + 7 {
-        out.extend_from_slice(&digits[..ndigits]);
-        out.resize(start_len + ndigits + k as usize, b'0');
-        return;
+        out[len..len + ndigits].copy_from_slice(&digits[..ndigits]);
+        len += ndigits;
+        let zeros = k as usize;
+        out[len..len + zeros].fill(b'0');
+        return len + zeros;
     }
 
     // write decimal w/o scientific notation
@@ -1691,59 +1699,82 @@ fn fpconv_emit_digits_into(
         let offset = ndigits as i32 - k.abs();
         if offset <= 0 {
             let off = (-offset) as usize;
-            out.push(b'0');
-            out.push(b'.');
-            out.resize(start_len + 2 + off, b'0');
-            out.extend_from_slice(&digits[..ndigits]);
+            out[len] = b'0';
+            out[len + 1] = b'.';
+            len += 2;
+            out[len..len + off].fill(b'0');
+            len += off;
+            out[len..len + ndigits].copy_from_slice(&digits[..ndigits]);
+            return len + ndigits;
         } else {
             let off = offset as usize;
-            out.extend_from_slice(&digits[..off]);
-            out.push(b'.');
-            out.extend_from_slice(&digits[off..ndigits]);
+            out[len..len + off].copy_from_slice(&digits[..off]);
+            len += off;
+            out[len] = b'.';
+            len += 1;
+            let tail = ndigits - off;
+            out[len..len + tail].copy_from_slice(&digits[off..ndigits]);
+            return len + tail;
         }
-        return;
     }
 
     // write decimal w/ scientific notation
     ndigits = ndigits.min(18 - usize::from(neg));
-    out.push(digits[0]);
+    out[len] = digits[0];
+    len += 1;
     if ndigits > 1 {
-        out.push(b'.');
-        out.extend_from_slice(&digits[1..ndigits]);
+        out[len] = b'.';
+        len += 1;
+        let tail = ndigits - 1;
+        out[len..len + tail].copy_from_slice(&digits[1..ndigits]);
+        len += tail;
     }
-    out.push(b'e');
-    out.push(if k + ndigits as i32 - 1 < 0 {
+    out[len] = b'e';
+    out[len + 1] = if k + ndigits as i32 - 1 < 0 {
         b'-'
     } else {
         b'+'
-    });
+    };
+    len += 2;
 
     let mut e = exp;
     let mut cent = 0i32;
     if e > 99 {
         cent = e / 100;
-        out.push((cent as u8) + b'0');
+        out[len] = (cent as u8) + b'0';
+        len += 1;
         e -= cent * 100;
     }
     if e > 9 {
         let dec = e / 10;
-        out.push((dec as u8) + b'0');
+        out[len] = (dec as u8) + b'0';
+        len += 1;
         e -= dec * 10;
     } else if cent != 0 {
-        out.push(b'0');
+        out[len] = b'0';
+        len += 1;
     }
-    out.push(((e % 10) as u8) + b'0');
+    out[len] = ((e % 10) as u8) + b'0';
+    len + 1
 }
 
-fn fpconv_dtoa_into(d: f64, out: &mut Vec<u8>) {
+fn fpconv_dtoa_to_slice(d: f64, out: &mut [u8; 32]) -> usize {
     let neg = d.to_bits() & FPCONV_SIGNMASK != 0;
     let mut digits = [0u8; 24];
     let mut k = 0i32;
     let ndigits = fpconv_grisu2(d, &mut digits, &mut k);
+    let mut len = 0usize;
     if neg {
-        out.push(b'-');
+        out[0] = b'-';
+        len = 1;
     }
-    fpconv_emit_digits_into(&digits, ndigits, k, neg, out);
+    fpconv_emit_digits_to_slice(&digits, ndigits, k, neg, out, len)
+}
+
+fn fpconv_dtoa_into(d: f64, out: &mut Vec<u8>) {
+    let mut buf = [0u8; 32];
+    let n = fpconv_dtoa_to_slice(d, &mut buf);
+    out.extend_from_slice(&buf[..n]);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
