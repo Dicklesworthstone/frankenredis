@@ -7324,6 +7324,7 @@ fn zset_cmp(score_a: f64, member_a: &[u8], score_b: f64, member_b: &[u8]) -> std
 pub struct PackedZSet {
     buf: Vec<u8>,
     len: usize,
+    max_member_len: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7340,6 +7341,7 @@ impl PackedZSet {
         Self {
             buf: Vec::new(),
             len: 0,
+            max_member_len: 0,
         }
     }
 
@@ -7356,6 +7358,31 @@ impl PackedZSet {
     #[must_use]
     pub fn byte_len(&self) -> usize {
         self.buf.len()
+    }
+
+    /// Sound upper bound on the byte length of any member currently in the packed zset.
+    #[inline]
+    #[must_use]
+    pub fn max_member_len_upper_bound(&self) -> usize {
+        self.max_member_len
+    }
+
+    /// Whether any member currently in the packed zset has byte length strictly greater than `limit`.
+    #[inline]
+    #[must_use]
+    pub fn has_member_longer_than(&self, limit: usize) -> bool {
+        if self.max_member_len <= limit {
+            return false;
+        }
+        let mut pos = 0;
+        while pos < self.buf.len() {
+            let (mlen, m_start) = read_varint(&self.buf, pos);
+            if mlen > limit {
+                return true;
+            }
+            pos = m_start + mlen + 8;
+        }
+        false
     }
 
     /// Build a packed zset from already de-duplicated `(member, score)` pairs.
@@ -7384,12 +7411,14 @@ impl PackedZSet {
         let mut zset = Self {
             buf: Vec::with_capacity(cap),
             len: 0,
+            max_member_len: 0,
         };
         for (member, score) in pairs {
             write_varint(&mut zset.buf, member.len());
             zset.buf.extend_from_slice(&member);
             zset.buf.extend_from_slice(&canon_zero(score).to_le_bytes());
             zset.len += 1;
+            zset.max_member_len = zset.max_member_len.max(member.len());
         }
         zset
     }
@@ -7409,8 +7438,15 @@ impl PackedZSet {
 
     #[must_use]
     pub fn from_unique_pairs_borrowed(mut pairs: Vec<(&[u8], f64)>) -> Self {
-        pairs.sort_unstable_by(|(am, ascore), (bm, bscore)| zset_cmp(*ascore, am, *bscore, bm));
-        Self::from_sorted_unique_pairs_borrowed(pairs)
+        Self::from_unique_slice_borrowed(&mut pairs)
+    }
+
+    #[must_use]
+    pub fn from_unique_slice_borrowed(pairs: &mut [(&[u8], f64)]) -> Self {
+        if !Self::borrowed_pairs_are_sorted(pairs) {
+            pairs.sort_unstable_by(|(am, ascore), (bm, bscore)| zset_cmp(*ascore, am, *bscore, bm));
+        }
+        Self::from_sorted_unique_slice_borrowed(pairs)
     }
 
     /// Build directly from pairs already known to be in Redis `(score, member)`
@@ -7418,6 +7454,11 @@ impl PackedZSet {
     /// calling this constructor avoids a second `O(n log n)` sort during RESTORE.
     #[must_use]
     pub(crate) fn from_sorted_unique_pairs_borrowed(pairs: Vec<(&[u8], f64)>) -> Self {
+        Self::from_sorted_unique_slice_borrowed(&pairs)
+    }
+
+    #[must_use]
+    pub(crate) fn from_sorted_unique_slice_borrowed(pairs: &[(&[u8], f64)]) -> Self {
         let cap = pairs
             .iter()
             .map(|(member, _)| member.len().saturating_add(10))
@@ -7425,12 +7466,14 @@ impl PackedZSet {
         let mut zset = Self {
             buf: Vec::with_capacity(cap),
             len: 0,
+            max_member_len: 0,
         };
-        for (member, score) in pairs {
+        for &(member, score) in pairs {
             write_varint(&mut zset.buf, member.len());
             zset.buf.extend_from_slice(member);
             zset.buf.extend_from_slice(&canon_zero(score).to_le_bytes());
             zset.len += 1;
+            zset.max_member_len = zset.max_member_len.max(member.len());
         }
         zset
     }
@@ -7448,12 +7491,18 @@ impl PackedZSet {
 
     #[must_use]
     pub fn from_single(member: Vec<u8>, score: f64) -> Self {
+        Self::from_single_slice(&member, score)
+    }
+
+    #[must_use]
+    pub fn from_single_slice(member: &[u8], score: f64) -> Self {
         let mut zset = Self {
             buf: Vec::with_capacity(member.len().saturating_add(10)),
             len: 1,
+            max_member_len: member.len(),
         };
         write_varint(&mut zset.buf, member.len());
-        zset.buf.extend_from_slice(&member);
+        zset.buf.extend_from_slice(member);
         zset.buf.extend_from_slice(&canon_zero(score).to_le_bytes());
         zset
     }
@@ -7537,20 +7586,54 @@ impl PackedZSet {
 
     pub fn insert_result(&mut self, member: &[u8], score: f64) -> PackedZSetInsertResult {
         let score = canon_zero(score);
-        let result = if let Some((rs, re, old_score)) = self.locate(member) {
+        if let Some((rs, re, old_score)) = self.locate(member) {
             if old_score.total_cmp(&score).is_eq() {
                 return PackedZSetInsertResult::Unchanged;
             }
-            self.buf.drain(rs..re);
-            self.len -= 1;
-            PackedZSetInsertResult::Updated
-        } else {
-            PackedZSetInsertResult::Added
-        };
+            let target_off = self.insert_offset(member, score);
+            if target_off == rs || target_off == re {
+                self.buf[re - 8..re].copy_from_slice(&score.to_le_bytes());
+                return PackedZSetInsertResult::Updated;
+            }
+            let rec_len = re - rs;
+            let (vbuf, vlen) = encode_varint_array(member.len());
+            debug_assert_eq!(rec_len, vlen + member.len() + 8);
+            if target_off < rs {
+                self.buf.copy_within(target_off..rs, target_off + rec_len);
+                self.buf[target_off..target_off + vlen].copy_from_slice(&vbuf[..vlen]);
+                self.buf[target_off + vlen..target_off + vlen + member.len()]
+                    .copy_from_slice(member);
+                self.buf[target_off + rec_len - 8..target_off + rec_len]
+                    .copy_from_slice(&score.to_le_bytes());
+            } else {
+                let new_start = target_off - rec_len;
+                self.buf.copy_within(re..target_off, rs);
+                self.buf[new_start..new_start + vlen].copy_from_slice(&vbuf[..vlen]);
+                self.buf[new_start + vlen..new_start + vlen + member.len()].copy_from_slice(member);
+                self.buf[target_off - 8..target_off].copy_from_slice(&score.to_le_bytes());
+            }
+            return PackedZSetInsertResult::Updated;
+        }
         let off = self.insert_offset(member, score);
-        self.buf.splice(off..off, Self::encode(member, score));
+        let (vbuf, vlen) = encode_varint_array(member.len());
+        let rec_len = vlen + member.len() + 8;
+        let old_len = self.buf.len();
+        if off == old_len {
+            self.buf.reserve(rec_len);
+            self.buf.extend_from_slice(&vbuf[..vlen]);
+            self.buf.extend_from_slice(member);
+            self.buf.extend_from_slice(&score.to_le_bytes());
+        } else {
+            self.buf.resize(old_len + rec_len, 0);
+            self.buf.copy_within(off..old_len, off + rec_len);
+            self.buf[off..off + vlen].copy_from_slice(&vbuf[..vlen]);
+            self.buf[off + vlen..off + vlen + member.len()].copy_from_slice(member);
+            self.buf[off + vlen + member.len()..off + rec_len]
+                .copy_from_slice(&score.to_le_bytes());
+        }
         self.len += 1;
-        result
+        self.max_member_len = self.max_member_len.max(member.len());
+        PackedZSetInsertResult::Added
     }
 
     /// ZREM a member; returns true if it was present.
@@ -7558,6 +7641,9 @@ impl PackedZSet {
         if let Some((rs, re, _)) = self.locate(member) {
             self.buf.drain(rs..re);
             self.len -= 1;
+            if self.len == 0 {
+                self.max_member_len = 0;
+            }
             true
         } else {
             false
@@ -7588,6 +7674,9 @@ impl PackedZSet {
         }
         self.buf.drain(start_off..pos);
         self.len -= remove;
+        if self.len == 0 {
+            self.max_member_len = 0;
+        }
         remove
     }
 
@@ -7606,6 +7695,9 @@ impl PackedZSet {
         }
         self.buf.drain(0..pos);
         self.len -= n;
+        if self.len == 0 {
+            self.max_member_len = 0;
+        }
         out
     }
 
@@ -7631,6 +7723,9 @@ impl PackedZSet {
         }
         self.buf.truncate(start_off);
         self.len -= n;
+        if self.len == 0 {
+            self.max_member_len = 0;
+        }
         out.reverse();
         out
     }
@@ -7947,6 +8042,9 @@ impl PackedZSet {
         let out = (m.to_vec(), score);
         self.buf.drain(0..end);
         self.len -= 1;
+        if self.len == 0 {
+            self.max_member_len = 0;
+        }
         Some(out)
     }
 
@@ -7983,6 +8081,9 @@ impl PackedZSet {
         let out = (m.to_vec(), score);
         self.buf.truncate(last_start);
         self.len -= 1;
+        if self.len == 0 {
+            self.max_member_len = 0;
+        }
         Some(out)
     }
 }

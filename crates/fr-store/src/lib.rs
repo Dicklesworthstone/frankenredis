@@ -1439,6 +1439,7 @@ enum FullZSetOrder {
 }
 
 impl FullZSetOrder {
+    #[cfg(test)]
     fn with_capacity(cap: usize) -> Self {
         if cap <= SORTED_SET_COMPACT_FULL_MAX_ENTRIES {
             Self::Compact(Vec::with_capacity(cap))
@@ -1666,6 +1667,7 @@ impl DoubleEndedIterator for FullZSetOrderRange<'_> {
 }
 
 impl FullSortedSet {
+    #[cfg(test)]
     fn with_capacity(cap: usize) -> Self {
         Self {
             dict: IndexMap::with_capacity_and_hasher(
@@ -1710,15 +1712,68 @@ impl FullSortedSet {
         }
     }
 
+    fn from_unique_borrowed_pairs(pairs: &[(&[u8], f64)]) -> Self {
+        let mut dict = IndexMap::with_capacity_and_hasher(
+            pairs.len(),
+            foldhash::quality::RandomState::default(),
+        );
+        let mut score_members: Vec<ScoreMember> = Vec::with_capacity(pairs.len());
+        for &(member, score) in pairs {
+            let score = canonicalize_zero_score(score);
+            let member: SharedZSetMember = SharedZSetMember::from(member);
+            score_members.push(ScoreMember::actual(score, Arc::clone(&member)));
+            dict.insert(member, score);
+        }
+        let ordered = FullZSetOrder::from_score_members(score_members);
+        Self {
+            dict,
+            ordered,
+            rank_tree: None,
+            deep_index_reads: 0,
+        }
+    }
+
+    fn from_sorted_unique_borrowed_pairs<'a>(
+        pairs: impl ExactSizeIterator<Item = (&'a [u8], f64)>,
+    ) -> Self {
+        let len = pairs.len();
+        let mut dict =
+            IndexMap::with_capacity_and_hasher(len, foldhash::quality::RandomState::default());
+        let mut score_members: Vec<ScoreMember> = Vec::with_capacity(len);
+        for (member, score) in pairs {
+            let score = canonicalize_zero_score(score);
+            let member: SharedZSetMember = SharedZSetMember::from(member);
+            score_members.push(ScoreMember::actual(score, Arc::clone(&member)));
+            dict.insert(member, score);
+        }
+        let ordered = if score_members.len() <= SORTED_SET_COMPACT_FULL_MAX_ENTRIES {
+            FullZSetOrder::Compact(score_members)
+        } else {
+            FullZSetOrder::from_score_members(score_members)
+        };
+        Self {
+            dict,
+            ordered,
+            rank_tree: None,
+            deep_index_reads: 0,
+        }
+    }
+
     fn len(&self) -> usize {
         self.dict.len()
     }
 
+    #[cfg(test)]
     fn insert(&mut self, member: Vec<u8>, score: f64) -> bool {
         matches!(self.insert_result(member, score), ZSetInsertResult::Added)
     }
 
+    #[cfg(test)]
     fn insert_result(&mut self, member: Vec<u8>, score: f64) -> ZSetInsertResult {
+        self.insert_slice_result(&member, score)
+    }
+
+    fn insert_slice_result(&mut self, member: &[u8], score: f64) -> ZSetInsertResult {
         let score = canonicalize_zero_score(score);
         // (frankenredis-ug50u) Existing-member score update: bump the score in the
         // dict IN PLACE via `get_mut` rather than `dict.insert(member.clone())`,
@@ -1728,7 +1783,7 @@ impl FullSortedSet {
         // alloc+free per command. The dict probe is unchanged (one `get_mut` vs the
         // old one `insert`); behaviour is byte-identical — the slot only changes
         // when the score differs, exactly as the old equal-score early return.
-        let existing = match self.dict.get_full_mut(member.as_slice()) {
+        let existing = match self.dict.get_full_mut(member) {
             Some((_idx, existing_member, slot)) => {
                 let old_score = *slot;
                 if old_score.total_cmp(&score).is_eq() {
@@ -1758,7 +1813,7 @@ impl FullSortedSet {
             }
             return ZSetInsertResult::Updated;
         }
-        let member: SharedZSetMember = member.into();
+        let member: SharedZSetMember = SharedZSetMember::from(member);
         self.dict.insert(Arc::clone(&member), score);
         let new_sm = ScoreMember::actual(score, member);
         if let Some(tree) = &mut self.rank_tree {
@@ -2096,11 +2151,20 @@ impl SortedSet {
             return;
         };
         let packed = std::mem::take(packed);
-        let mut full = FullSortedSet::with_capacity(packed.len());
-        for (member, score) in packed.iter() {
-            full.insert(member.to_vec(), score);
-        }
+        let full = FullSortedSet::from_sorted_unique_borrowed_pairs(packed.iter());
         self.set_inner(SortedSetInner::Full(full));
+    }
+
+    fn has_member_longer_than(&self, limit: usize) -> bool {
+        if let SortedSetRepr::Pending(p) = &self.repr
+            && p.decoded.get().is_none()
+        {
+            return p.max_member_len > limit;
+        }
+        match self.inner() {
+            SortedSetInner::Packed(p) => p.has_member_longer_than(limit),
+            SortedSetInner::Full(f) => f.dict.keys().any(|k| k.len() > limit),
+        }
     }
 
     fn maybe_promote_for_insert(
@@ -2112,12 +2176,11 @@ impl SortedSet {
         let SortedSetInner::Packed(p) = self.inner() else {
             return;
         };
-        let contains_member = p.contains(member);
-        let packed_exceeds_current_limits = p.len() > max_listpack_entries
-            || p.iter()
-                .any(|(existing_member, _)| existing_member.len() > max_listpack_value);
-        let insert_would_exceed_limits = !contains_member
-            && (p.len() >= max_listpack_entries || member.len() > max_listpack_value);
+        let packed_exceeds_current_limits =
+            p.len() > max_listpack_entries || p.has_member_longer_than(max_listpack_value);
+        let insert_would_exceed_limits = (p.len() >= max_listpack_entries
+            || member.len() > max_listpack_value)
+            && !p.contains(member);
         if packed_exceeds_current_limits || insert_would_exceed_limits {
             self.promote();
         }
@@ -2139,10 +2202,7 @@ impl SortedSet {
         max_listpack_entries: usize,
         max_listpack_value: usize,
     ) -> bool {
-        matches!(
-            self.insert_with_limits_result(member, score, max_listpack_entries, max_listpack_value),
-            ZSetInsertResult::Added
-        )
+        self.insert_slice_with_limits(&member, score, max_listpack_entries, max_listpack_value)
     }
 
     fn insert_with_limits_result(
@@ -2152,11 +2212,44 @@ impl SortedSet {
         max_listpack_entries: usize,
         max_listpack_value: usize,
     ) -> ZSetInsertResult {
+        self.insert_slice_with_limits_result(
+            &member,
+            score,
+            max_listpack_entries,
+            max_listpack_value,
+        )
+    }
+
+    fn insert_slice_with_limits(
+        &mut self,
+        member: &[u8],
+        score: f64,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> bool {
+        matches!(
+            self.insert_slice_with_limits_result(
+                member,
+                score,
+                max_listpack_entries,
+                max_listpack_value,
+            ),
+            ZSetInsertResult::Added
+        )
+    }
+
+    fn insert_slice_with_limits_result(
+        &mut self,
+        member: &[u8],
+        score: f64,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> ZSetInsertResult {
         let score = canonicalize_zero_score(score);
-        self.maybe_promote_for_insert(&member, max_listpack_entries, max_listpack_value);
+        self.maybe_promote_for_insert(member, max_listpack_entries, max_listpack_value);
         match self.inner_mut() {
-            SortedSetInner::Packed(p) => p.insert_result(&member, score).into(),
-            SortedSetInner::Full(f) => f.insert_result(member, score),
+            SortedSetInner::Packed(p) => p.insert_result(member, score).into(),
+            SortedSetInner::Full(f) => f.insert_slice_result(member, score),
         }
     }
 
@@ -2166,16 +2259,51 @@ impl SortedSet {
         max_listpack_entries: usize,
         max_listpack_value: usize,
     ) -> Self {
+        Self::from_single_slice_with_limits(
+            &member,
+            score,
+            max_listpack_entries,
+            max_listpack_value,
+        )
+    }
+
+    fn from_single_slice_with_limits(
+        member: &[u8],
+        score: f64,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> Self {
         if max_listpack_entries >= 1 && member.len() <= max_listpack_value {
             Self {
-                repr: SortedSetRepr::Ready(SortedSetInner::Packed(PackedZSet::from_single(
+                repr: SortedSetRepr::Ready(SortedSetInner::Packed(PackedZSet::from_single_slice(
                     member, score,
                 ))),
             }
         } else {
-            Self::from_inner(SortedSetInner::Full(FullSortedSet::from_unique_pairs(
-                vec![(member, score)],
-            )))
+            Self::from_inner(SortedSetInner::Full(
+                FullSortedSet::from_unique_borrowed_pairs(&[(member, score)]),
+            ))
+        }
+    }
+
+    fn from_unique_borrowed_slice_with_shape(
+        pairs: &mut [(&[u8], f64)],
+        max_member_len: usize,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> Self {
+        if pairs.len() <= max_listpack_entries && max_member_len <= max_listpack_value {
+            Self {
+                repr: SortedSetRepr::Ready(SortedSetInner::Packed(
+                    PackedZSet::from_unique_slice_borrowed(pairs),
+                )),
+            }
+        } else {
+            Self {
+                repr: SortedSetRepr::Ready(SortedSetInner::Full(
+                    FullSortedSet::from_unique_borrowed_pairs(pairs),
+                )),
+            }
         }
     }
 
@@ -2226,34 +2354,17 @@ impl SortedSet {
     }
 
     fn from_unique_borrowed_pairs_with_shape(
-        pairs: Vec<(&[u8], f64)>,
+        mut pairs: Vec<(&[u8], f64)>,
         max_member_len: usize,
         max_listpack_entries: usize,
         max_listpack_value: usize,
     ) -> Self {
-        if pairs.len() <= max_listpack_entries && max_member_len <= max_listpack_value {
-            let packed = if PackedZSet::borrowed_pairs_are_sorted(&pairs) {
-                // RDB_TYPE_ZSET_LISTPACK is normally written in this order by
-                // Redis. Retain the defensive fallback below for legal foreign
-                // payloads: RESTORE accepts them but must normalize their order.
-                PackedZSet::from_sorted_unique_pairs_borrowed(pairs)
-            } else {
-                PackedZSet::from_unique_pairs_borrowed(pairs)
-            };
-            Self {
-                repr: SortedSetRepr::Ready(SortedSetInner::Packed(packed)),
-            }
-        } else {
-            let owned_pairs = pairs
-                .into_iter()
-                .map(|(member, score)| (member.to_vec(), score))
-                .collect();
-            Self {
-                repr: SortedSetRepr::Ready(SortedSetInner::Full(FullSortedSet::from_unique_pairs(
-                    owned_pairs,
-                ))),
-            }
-        }
+        Self::from_unique_borrowed_slice_with_shape(
+            &mut pairs,
+            max_member_len,
+            max_listpack_entries,
+            max_listpack_value,
+        )
     }
 
     #[cfg(test)]
@@ -9934,7 +10045,7 @@ impl Store {
             return;
         };
         let needs_skiplist =
-            zs.len() > max_listpack_entries || zs.keys().any(|k| k.len() > max_listpack_value);
+            zs.len() > max_listpack_entries || zs.has_member_longer_than(max_listpack_value);
         if needs_skiplist {
             entry.set_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING, true);
         }
@@ -25702,7 +25813,7 @@ impl Store {
             let mut first_added = false;
             let mut first_error = None;
             for (index, score) in scores.iter().copied().enumerate() {
-                match self.zadd_plain_owned(key, vec![(score, member.to_vec())], now_ms) {
+                match self.zadd_plain_borrowed(key, &[(score, member)], now_ms) {
                     Ok(added) if index == 0 => first_added = added != 0,
                     Ok(_) => {}
                     Err(err) if first_error.is_none() => first_error = Some(err),
@@ -25738,7 +25849,7 @@ impl Store {
                 }
                 previous_score = Some(score);
             }
-            zset.insert_with_limits_result(member.to_vec(), final_score, max_entries, max_value);
+            zset.insert_slice_with_limits_result(member, final_score, max_entries, max_value);
             if mutations != 0 {
                 entry.touch_lru(now_ms);
                 entry.modification_count = entry.modification_count.wrapping_add(mutations);
@@ -25758,8 +25869,8 @@ impl Store {
                 }
                 previous_score = score;
             }
-            let zset = SortedSet::from_single_with_limits(
-                member.to_vec(),
+            let zset = SortedSet::from_single_slice_with_limits(
+                member,
                 final_score,
                 max_entries,
                 max_value,
@@ -26017,6 +26128,428 @@ impl Store {
         Ok(added)
     }
 
+    /// Borrowed-slice fast path for flagless `ZADD key score member [score member ...]`.
+    /// Eliminates per-member `Vec<u8>` allocations (`PackedZSet` and `FullSortedSet`
+    /// both copy from `&[u8]` directly).
+    pub fn zadd_plain_borrowed(
+        &mut self,
+        key: &[u8],
+        members: &[(f64, &[u8])],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+
+        let (added, changed, touched) = if let Some(entry) = self.entries.get_mut(key) {
+            let Value::SortedSet(zs) = &mut entry.value else {
+                return Err(StoreError::WrongType);
+            };
+            let mut added = 0_usize;
+            let mut changed = 0_usize;
+            for &(score, member) in members {
+                let result = zs.insert_slice_with_limits_result(
+                    member,
+                    score,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                added += result.added_count();
+                changed += result.changed_count();
+            }
+            let touched = added > 0 || changed > 0;
+            if touched {
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                Self::refresh_zset_encoding_flag_after_insert(
+                    entry,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+            }
+            (added, changed, touched)
+        } else {
+            let Some(&(first_score, first_member)) = members.first() else {
+                return Ok(0);
+            };
+            if members.len() == 1 {
+                let zs = SortedSet::from_single_slice_with_limits(
+                    first_member,
+                    canonicalize_zero_score(first_score),
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                Self::refresh_zset_encoding_flag_from_max_len(
+                    &mut entry,
+                    first_member.len(),
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                self.internal_entries_insert(key, entry);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add(1);
+                return Ok(1);
+            }
+            if members.len() <= 16 {
+                let mut unique_buf = [(&[][..], 0.0_f64); 16];
+                let mut unique_len = 0_usize;
+                let mut max_member_len = 0_usize;
+                let mut changed = 0_usize;
+                for &(score, member) in members {
+                    let score = canonicalize_zero_score(score);
+                    if let Some(slot) = unique_buf[..unique_len]
+                        .iter_mut()
+                        .find(|(m, _)| *m == member)
+                    {
+                        if !slot.1.total_cmp(&score).is_eq() {
+                            changed += 1;
+                        }
+                        slot.1 = score;
+                    } else {
+                        unique_buf[unique_len] = (member, score);
+                        unique_len += 1;
+                        max_member_len = max_member_len.max(member.len());
+                    }
+                }
+                let zs = SortedSet::from_unique_borrowed_slice_with_shape(
+                    &mut unique_buf[..unique_len],
+                    max_member_len,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                Self::refresh_zset_encoding_flag_from_max_len(
+                    &mut entry,
+                    max_member_len,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                self.internal_entries_insert(key, entry);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add((unique_len + changed) as u64);
+                return Ok(unique_len);
+            }
+            let mut added = 0_usize;
+            let mut changed = 0_usize;
+            let mut max_member_len = 0_usize;
+            let mut latest: IndexMap<&[u8], f64, foldhash::quality::RandomState> =
+                IndexMap::with_capacity_and_hasher(
+                    members.len(),
+                    foldhash::quality::RandomState::default(),
+                );
+            for &(score, member) in members {
+                let score = canonicalize_zero_score(score);
+                match latest.insert(member, score) {
+                    Some(old_score) => {
+                        if !old_score.total_cmp(&score).is_eq() {
+                            changed += 1;
+                        }
+                    }
+                    None => {
+                        added += 1;
+                        max_member_len = max_member_len.max(member.len());
+                    }
+                }
+            }
+            let ordered_pairs: Vec<(&[u8], f64)> = latest.into_iter().collect();
+            let zs = SortedSet::from_unique_borrowed_pairs_with_shape(
+                ordered_pairs,
+                max_member_len,
+                zset_max_entries,
+                zset_max_value,
+            );
+            let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+            entry.touch_write(now_ms, lfu_tracking_enabled);
+            Self::refresh_zset_encoding_flag_from_max_len(
+                &mut entry,
+                max_member_len,
+                zset_max_entries,
+                zset_max_value,
+            );
+            self.internal_entries_insert(key, entry);
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            self.dirty = self.dirty.saturating_add((added + changed) as u64);
+            return Ok(added);
+        };
+        if touched {
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            self.dirty = self.dirty.saturating_add((added + changed) as u64);
+        }
+        Ok(added)
+    }
+
+    fn zadd_apply_options_to_sorted_set<'a>(
+        zs: &mut SortedSet,
+        members: impl IntoIterator<Item = (f64, &'a [u8])>,
+        opts: &ZaddOptions,
+        zset_max_entries: usize,
+        zset_max_value: usize,
+    ) -> (usize, usize) {
+        let mut added = 0_usize;
+        let mut changed = 0_usize;
+        if !opts.nx && !opts.xx && !opts.gt && !opts.lt {
+            for (score, member) in members {
+                let result = zs.insert_slice_with_limits_result(
+                    member,
+                    score,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                added += result.added_count();
+                changed += result.changed_count();
+            }
+            return (added, changed);
+        }
+        for (score, member) in members {
+            match zs.get_score(member) {
+                Some(old_score) => {
+                    if opts.nx {
+                        continue;
+                    }
+                    let should_update = if opts.gt {
+                        score > old_score
+                    } else if opts.lt {
+                        score < old_score
+                    } else {
+                        true
+                    };
+                    if should_update {
+                        let old_canonical = canonicalize_zero_score(old_score);
+                        let new_canonical = canonicalize_zero_score(score);
+                        let score_changed = !old_canonical.total_cmp(&new_canonical).is_eq();
+                        zs.insert_slice_with_limits(
+                            member,
+                            score,
+                            zset_max_entries,
+                            zset_max_value,
+                        );
+                        if score_changed {
+                            changed += 1;
+                        }
+                    }
+                }
+                None => {
+                    if opts.xx {
+                        continue;
+                    }
+                    zs.insert_slice_with_limits(member, score, zset_max_entries, zset_max_value);
+                    added += 1;
+                }
+            }
+        }
+        (added, changed)
+    }
+
+    /// Borrowed-slice twin of [`Self::zadd_with_options`].
+    pub fn zadd_with_options_borrowed(
+        &mut self,
+        key: &[u8],
+        members: &[(f64, &[u8])],
+        opts: ZaddOptions,
+        now_ms: u64,
+    ) -> Result<(usize, usize), StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+
+        if let Some(entry) = self.entries.get_mut(key) {
+            let Value::SortedSet(zs) = &mut entry.value else {
+                return Err(StoreError::WrongType);
+            };
+            let (added, changed) = Self::zadd_apply_options_to_sorted_set(
+                zs,
+                members.iter().copied(),
+                &opts,
+                zset_max_entries,
+                zset_max_value,
+            );
+            let is_empty = zs.is_empty();
+            let touched = added > 0 || changed > 0;
+            if touched {
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                Self::refresh_zset_encoding_flag_after_insert(
+                    entry,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add((added + changed) as u64);
+            }
+            if is_empty {
+                self.internal_entries_remove(key);
+            }
+            return Ok(if opts.ch {
+                (added + changed, changed)
+            } else {
+                (added, changed)
+            });
+        }
+
+        if opts.xx || members.is_empty() {
+            return Ok((0, 0));
+        }
+
+        if members.len() == 1 {
+            let (score, member) = members[0];
+            let zs = SortedSet::from_single_slice_with_limits(
+                member,
+                canonicalize_zero_score(score),
+                zset_max_entries,
+                zset_max_value,
+            );
+            let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+            entry.touch_write(now_ms, lfu_tracking_enabled);
+            Self::refresh_zset_encoding_flag_from_max_len(
+                &mut entry,
+                member.len(),
+                zset_max_entries,
+                zset_max_value,
+            );
+            self.internal_entries_insert(key, entry);
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+            self.dirty = self.dirty.saturating_add(1);
+            return Ok((1, 0));
+        }
+
+        let permissive = !opts.nx && !opts.gt && !opts.lt;
+        if members.len() <= 16 {
+            let mut unique_buf = [(&[][..], 0.0_f64); 16];
+            let mut unique_len = 0_usize;
+            let mut max_member_len = 0_usize;
+            let mut changed = 0_usize;
+            let mut intra_dup = false;
+            for &(score, member) in members {
+                let score = canonicalize_zero_score(score);
+                if let Some(slot) = unique_buf[..unique_len]
+                    .iter_mut()
+                    .find(|(m, _)| *m == member)
+                {
+                    intra_dup = true;
+                    if !slot.1.total_cmp(&score).is_eq() {
+                        changed += 1;
+                    }
+                    slot.1 = score;
+                } else {
+                    unique_buf[unique_len] = (member, score);
+                    unique_len += 1;
+                    max_member_len = max_member_len.max(member.len());
+                }
+            }
+            if permissive || !intra_dup {
+                let zs = SortedSet::from_unique_borrowed_slice_with_shape(
+                    &mut unique_buf[..unique_len],
+                    max_member_len,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                Self::refresh_zset_encoding_flag_from_max_len(
+                    &mut entry,
+                    max_member_len,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                self.internal_entries_insert(key, entry);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add((unique_len + changed) as u64);
+                return Ok(if opts.ch {
+                    (unique_len + changed, changed)
+                } else {
+                    (unique_len, changed)
+                });
+            }
+        } else {
+            let mut latest: IndexMap<&[u8], f64, foldhash::quality::RandomState> =
+                IndexMap::with_capacity_and_hasher(
+                    members.len(),
+                    foldhash::quality::RandomState::default(),
+                );
+            let mut added = 0_usize;
+            let mut changed = 0_usize;
+            let mut max_member_len = 0_usize;
+            let mut intra_dup = false;
+            for &(score, member) in members {
+                let score = canonicalize_zero_score(score);
+                match latest.insert(member, score) {
+                    Some(old_score) => {
+                        intra_dup = true;
+                        if !old_score.total_cmp(&score).is_eq() {
+                            changed += 1;
+                        }
+                    }
+                    None => {
+                        added += 1;
+                        max_member_len = max_member_len.max(member.len());
+                    }
+                }
+            }
+            if permissive || !intra_dup {
+                let ordered_pairs: Vec<(&[u8], f64)> = latest.into_iter().collect();
+                let zs = SortedSet::from_unique_borrowed_pairs_with_shape(
+                    ordered_pairs,
+                    max_member_len,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                Self::refresh_zset_encoding_flag_from_max_len(
+                    &mut entry,
+                    max_member_len,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                self.internal_entries_insert(key, entry);
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add((added + changed) as u64);
+                return Ok(if opts.ch {
+                    (added + changed, changed)
+                } else {
+                    (added, changed)
+                });
+            }
+        }
+
+        let mut zs = SortedSet::new();
+        let (added, changed) = Self::zadd_apply_options_to_sorted_set(
+            &mut zs,
+            members.iter().copied(),
+            &opts,
+            zset_max_entries,
+            zset_max_value,
+        );
+        if !zs.is_empty() {
+            let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
+            if added > 0 || changed > 0 {
+                entry.touch_write(now_ms, lfu_tracking_enabled);
+                Self::refresh_zset_encoding_flag_after_insert(
+                    &mut entry,
+                    zset_max_entries,
+                    zset_max_value,
+                );
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                self.dirty = self.dirty.saturating_add((added + changed) as u64);
+            }
+            self.internal_entries_insert(key, entry);
+        }
+        Ok(if opts.ch {
+            (added + changed, changed)
+        } else {
+            (added, changed)
+        })
+    }
+
     /// ZADD with NX/XX/GT/LT/CH options.
     /// Returns (count, changed) where:
     /// - Without CH: count = number of new elements added
@@ -26029,160 +26562,23 @@ impl Store {
         opts: ZaddOptions,
         now_ms: u64,
     ) -> Result<(usize, usize), StoreError> {
-        // (CrimsonHawk) Skip the always-2-lookup drop_if_expired when no key has a TTL
-        // (the contains_key/get_mut below re-probe entries). Byte-identical; see sadd.
-        if self.expires_count != 0 {
-            self.drop_if_expired(key, now_ms);
-        }
-
-        // ZADD XX on a missing key should not create an empty sorted set
-        if opts.xx && !self.entries.contains_key(key) {
-            return Ok((0, 0));
-        }
-
-        let zset_max_entries = self.zset_max_listpack_entries;
-        let zset_max_value = self.zset_max_listpack_value;
-        let lfu_tracking_enabled = self.lfu_tracking_enabled();
-        // (frankenredis-zaddchbulk) On a FRESH key with default/CH semantics
-        // (no NX/GT/LT; XX already returned above), every member is added and
-        // an intra-batch repeat is last-wins with a CH/changed bump — exactly
-        // what the flagless bulk `zadd` does. The per-member option loop below
-        // instead builds the zset one insert at a time, which is O(n^2) in the
-        // PackedZSet sorted-Vec phase. Route to the one-shot bulk build (sort
-        // once) and report the same (added, changed). Byte-identical final set.
-        if !self.entries.contains_key(key) {
-            // (frankenredis-zaddflagbulk) default/CH: intra-batch repeats are
-            // last-wins (safe to bulk). NX/GT/LT repeat semantics are
-            // order-dependent, so for those only bulk when there is no
-            // intra-batch duplicate member; otherwise fall through to the
-            // per-member loop. A fresh key means every DISTINCT member is just
-            // added regardless of flag (no existing score to gate on).
-            let permissive = !opts.nx && !opts.gt && !opts.lt;
-            let mut latest: HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
-                HashMap::with_capacity_and_hasher(
-                    members.len(),
-                    foldhash::quality::RandomState::default(),
-                );
-            let mut added = 0_usize;
-            let mut changed = 0_usize;
-            let mut intra_dup = false;
-            for (score, member) in &members {
-                let score = canonicalize_zero_score(*score);
-                match latest.insert(member.clone(), score) {
-                    Some(old_score) => {
-                        intra_dup = true;
-                        if !old_score.total_cmp(&score).is_eq() {
-                            changed += 1;
-                        }
-                    }
-                    None => added += 1,
-                }
+        if members.len() <= 16 {
+            let mut stack_members = [(0.0_f64, &[][..]); 16];
+            for (idx, (score, member)) in members.iter().enumerate() {
+                stack_members[idx] = (*score, member.as_slice());
             }
-            if permissive || !intra_dup {
-                if added == 0 {
-                    return Ok((0, 0));
-                }
-                let zs = SortedSet::from_unique_pairs_with_limits(
-                    latest.into_iter().collect(),
-                    zset_max_entries,
-                    zset_max_value,
-                );
-                let mut entry = Entry::new(Value::SortedSet(Box::new(zs)), now_ms);
-                entry.touch_write(now_ms, lfu_tracking_enabled);
-                Self::refresh_zset_encoding_flag(&mut entry, zset_max_entries, zset_max_value);
-                self.internal_entries_insert(key, entry);
-                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-                self.dirty = self.dirty.saturating_add((added + changed) as u64);
-                if opts.ch {
-                    return Ok((added + changed, changed));
-                }
-                return Ok((added, changed));
-            }
+            return self.zadd_with_options_borrowed(
+                key,
+                &stack_members[..members.len()],
+                opts,
+                now_ms,
+            );
         }
-        let (added, changed, is_empty, touched) = {
-            let entry =
-                self.internal_entry(key, || Value::SortedSet(Box::new(SortedSet::new())), now_ms);
-            let Value::SortedSet(zs) = &mut entry.value else {
-                return Err(StoreError::WrongType);
-            };
-            let mut added = 0_usize;
-            let mut changed = 0_usize;
-
-            // (frankenredis-zadddedup) Upstream t_zset.c::zaddGenericCommand
-            // processes each (score, member) pair SEQUENTIALLY against the
-            // current set state, so a member that repeats within one ZADD is
-            // evaluated against the score an earlier pair just set. The prior
-            // dedup-keep-last shortcut corrupted both the final score (e.g.
-            // `ZADD k GT 20 a 10 a` must end at 20, not 10; `ZADD k NX 1 a 2 a`
-            // must keep 1, not 2) and the CH/added counts (each successive
-            // change counts). Iterate the pairs verbatim.
-            // (frankenredis-ug50u) `members` is owned, so each member-Vec is MOVED
-            // into the store instead of `member.clone()`-d. The runtime ZADD fast
-            // path and both fr-command callers already build a throwaway
-            // `Vec<(f64, Vec<u8>)>`, so the prior borrowed signature forced a second
-            // full member allocation per pair purely to hand an owned Vec to
-            // `insert_with_limits`. Moving eliminates that clone; behaviour is
-            // unchanged (a skipped NX/XX/GT/LT pair simply drops its owned member).
-            for (score, member) in members {
-                match zs.get_score(&member) {
-                    Some(old_score) => {
-                        // Existing member
-                        if opts.nx {
-                            continue; // NX: don't update existing
-                        }
-                        let should_update = if opts.gt {
-                            score > old_score
-                        } else if opts.lt {
-                            score < old_score
-                        } else {
-                            true
-                        };
-                        if should_update {
-                            let old_canonical = canonicalize_zero_score(old_score);
-                            let new_canonical = canonicalize_zero_score(score);
-                            let score_changed = !old_canonical.total_cmp(&new_canonical).is_eq();
-                            zs.insert_with_limits(member, score, zset_max_entries, zset_max_value);
-                            if score_changed {
-                                changed += 1;
-                            }
-                        }
-                    }
-                    None => {
-                        // New member
-                        if opts.xx {
-                            continue; // XX: don't add new
-                        }
-                        zs.insert_with_limits(member, score, zset_max_entries, zset_max_value);
-                        added += 1;
-                    }
-                }
-            }
-            let is_empty = zs.is_empty();
-            let touched = added > 0 || changed > 0;
-            if touched {
-                entry.touch_write(now_ms, lfu_tracking_enabled);
-                // (frankenredis-yp503) Lock skiplist encoding once a
-                // zset crosses zset-max-listpack-{entries,value}.
-                Self::refresh_zset_encoding_flag_after_insert(
-                    entry,
-                    zset_max_entries,
-                    zset_max_value,
-                );
-            }
-            (added, changed, is_empty, touched)
-        };
-        if touched {
-            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
-            self.dirty = self.dirty.saturating_add((added + changed) as u64);
-        }
-        if is_empty {
-            self.internal_entries_remove(key);
-        }
-        if opts.ch {
-            Ok((added + changed, changed))
-        } else {
-            Ok((added, changed))
-        }
+        let borrowed: Vec<(f64, &[u8])> = members
+            .iter()
+            .map(|(score, member)| (*score, member.as_slice()))
+            .collect();
+        self.zadd_with_options_borrowed(key, &borrowed, opts, now_ms)
     }
 
     pub fn zrem(&mut self, key: &[u8], members: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
@@ -26374,34 +26770,182 @@ impl Store {
         weights: &[f64],
         aggregate: &[u8],
     ) -> Vec<(Vec<u8>, f64)> {
-        let inputs: Vec<Option<ZSetAlgebraInput<'_>>> = keys
-            .iter()
-            .map(|key| {
-                self.entries
-                    .get(key)
-                    .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
-            })
-            .collect();
-        let Some(Some(first)) = inputs.first().copied() else {
-            return Vec::new();
+        self.zinter_members_argv_order_no_stats_with_slices(keys, weights, aggregate, |pairs| {
+            pairs
+                .iter()
+                .map(|&(member, score)| (member.to_vec(), score))
+                .collect()
+        })
+    }
+
+    /// Zero-allocation callback twin of [`Self::zinter_members_argv_order_no_stats`] that yields
+    /// borrowed `(&[u8], f64)` pairs already sorted in ascending `(score, member)` order.
+    pub fn zinter_members_argv_order_no_stats_with_slices<R>(
+        &self,
+        keys: &[&[u8]],
+        weights: &[f64],
+        aggregate: &[u8],
+        f: impl FnOnce(&[(&[u8], f64)]) -> R,
+    ) -> R {
+        if keys.is_empty() {
+            return f(&[]);
+        }
+        let mut stack_inputs: [Option<ZSetAlgebraInput<'_>>; 8] = [None; 8];
+        let mut heap_inputs: Vec<ZSetAlgebraInput<'_>> = Vec::new();
+        let mut min_idx = 0_usize;
+        let mut min_len = usize::MAX;
+        for (idx, &key) in keys.iter().enumerate() {
+            let Some(inp) = self
+                .entries
+                .get(key)
+                .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
+            else {
+                return f(&[]);
+            };
+            let len = inp.len();
+            if len == 0 {
+                return f(&[]);
+            }
+            if len < min_len {
+                min_len = len;
+                min_idx = idx;
+            }
+            if idx < stack_inputs.len() {
+                stack_inputs[idx] = Some(inp);
+            } else {
+                if heap_inputs.is_empty() {
+                    heap_inputs.reserve(keys.len());
+                    for prev in stack_inputs.iter().flatten() {
+                        heap_inputs.push(*prev);
+                    }
+                }
+                heap_inputs.push(inp);
+            }
+        }
+        let num_inputs = keys.len();
+        let get_input = |idx: usize| -> ZSetAlgebraInput<'_> {
+            if heap_inputs.is_empty() {
+                stack_inputs[idx].expect("validated input")
+            } else {
+                heap_inputs[idx]
+            }
         };
         let w0 = weights.first().copied().unwrap_or(1.0);
-        let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
-        first.for_each(|member, score| {
-            let mut combined = normalize_weighted_score(score, w0);
-            for (i, input) in inputs[1..].iter().enumerate() {
-                let Some(input) = input else {
-                    return;
+        let combine_survivor = |member: &[u8], min_score: f64| -> Option<f64> {
+            if num_inputs == 1 {
+                return Some(normalize_weighted_score(min_score, w0));
+            }
+            if num_inputs == 2 {
+                let (s0, s1) = if min_idx == 0 {
+                    (min_score, get_input(1).score(member)?)
+                } else {
+                    (get_input(0).score(member)?, min_score)
                 };
-                let Some(other) = input.score(member) else {
-                    return;
-                };
+                let w1 = weights.get(1).copied().unwrap_or(1.0);
+                return Some(aggregate_scores(
+                    normalize_weighted_score(s0, w0),
+                    s1 * w1,
+                    aggregate,
+                ));
+            }
+            let mut stack_scores = [0.0_f64; 8];
+            let mut heap_scores: Vec<f64> = if num_inputs > stack_scores.len() {
+                vec![0.0; num_inputs]
+            } else {
+                Vec::new()
+            };
+            let scores = if heap_scores.is_empty() {
+                &mut stack_scores[..num_inputs]
+            } else {
+                &mut heap_scores[..]
+            };
+            scores[min_idx] = min_score;
+            for (i, slot) in scores.iter_mut().enumerate() {
+                if i == min_idx {
+                    continue;
+                }
+                *slot = get_input(i).score(member)?;
+            }
+            let mut combined = normalize_weighted_score(scores[0], w0);
+            for (i, &other) in scores[1..].iter().enumerate() {
                 let weight = weights.get(i + 1).copied().unwrap_or(1.0);
                 combined = aggregate_scores(combined, other * weight, aggregate);
             }
-            result.push((member.to_vec(), combined));
-        });
-        result
+            Some(combined)
+        };
+        let zset_pair_le = |a: &(&[u8], f64), b: &(&[u8], f64)| -> bool {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(b.0))
+                .is_le()
+        };
+        let sort_borrowed_pairs = |slice: &mut [(&[u8], f64)]| {
+            if slice.len() > 1 && !slice.windows(2).all(|w| zset_pair_le(&w[0], &w[1])) {
+                slice.sort_unstable_by(|a, b| {
+                    a.1.partial_cmp(&b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.0.cmp(b.0))
+                });
+            }
+        };
+
+        match get_input(min_idx) {
+            ZSetAlgebraInput::SortedSet(zs) => {
+                let mut stack_out: [(&[u8], f64); 32] = [(&[], 0.0); 32];
+                let mut heap_out: Vec<(&[u8], f64)> = Vec::new();
+                let mut out_len = 0_usize;
+                for (member, min_score) in zs.iter_asc() {
+                    let Some(combined) = combine_survivor(member, min_score) else {
+                        continue;
+                    };
+                    if out_len < stack_out.len() {
+                        stack_out[out_len] = (member, combined);
+                    } else {
+                        if heap_out.is_empty() {
+                            heap_out.reserve(min_len.max(64));
+                            heap_out.extend_from_slice(&stack_out);
+                        }
+                        heap_out.push((member, combined));
+                    }
+                    out_len += 1;
+                }
+                if heap_out.is_empty() {
+                    let slice = &mut stack_out[..out_len];
+                    sort_borrowed_pairs(slice);
+                    f(slice)
+                } else {
+                    sort_borrowed_pairs(&mut heap_out);
+                    f(&heap_out)
+                }
+            }
+            ZSetAlgebraInput::Set(s) => {
+                let mut owned_survivors: Vec<(Cow<'_, [u8]>, f64)> = Vec::new();
+                for member in s.iter() {
+                    let Some(combined) = combine_survivor(member.as_ref(), 1.0) else {
+                        continue;
+                    };
+                    owned_survivors.push((member, combined));
+                }
+                owned_survivors.sort_unstable_by(|a, b| {
+                    a.1.partial_cmp(&b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.0.as_ref().cmp(b.0.as_ref()))
+                });
+                let mut stack_out: [(&[u8], f64); 32] = [(&[], 0.0); 32];
+                if owned_survivors.len() <= stack_out.len() {
+                    for (idx, (m, score)) in owned_survivors.iter().enumerate() {
+                        stack_out[idx] = (m.as_ref(), *score);
+                    }
+                    f(&stack_out[..owned_survivors.len()])
+                } else {
+                    let borrowed: Vec<(&[u8], f64)> = owned_survivors
+                        .iter()
+                        .map(|(m, score)| (m.as_ref(), *score))
+                        .collect();
+                    f(&borrowed)
+                }
+            }
+        }
     }
 
     /// (CrimsonHawk) ZDIFF (non-store) data core: iterate the FIRST source by
@@ -26421,30 +26965,116 @@ impl Store {
     /// `ensure_zset_or_set_source`; the caller re-sorts, so first-source
     /// visitation order is invisible.
     pub fn zdiff_members_no_stats(&self, keys: &[&[u8]]) -> Vec<(Vec<u8>, f64)> {
-        let inputs: Vec<Option<ZSetAlgebraInput<'_>>> = keys
-            .iter()
-            .map(|key| {
-                self.entries
-                    .get(key)
-                    .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
-            })
-            .collect();
-        let Some(Some(first)) = inputs.first().copied() else {
-            return Vec::new();
+        self.zdiff_members_no_stats_with_slices(keys, |pairs| {
+            pairs
+                .iter()
+                .map(|&(member, score)| (member.to_vec(), score))
+                .collect()
+        })
+    }
+
+    /// Zero-allocation callback twin of [`Self::zdiff_members_no_stats`] that yields
+    /// borrowed `(&[u8], f64)` pairs already sorted in ascending `(score, member)` order.
+    pub fn zdiff_members_no_stats_with_slices<R>(
+        &self,
+        keys: &[&[u8]],
+        f: impl FnOnce(&[(&[u8], f64)]) -> R,
+    ) -> R {
+        let Some(&first_key) = keys.first() else {
+            return f(&[]);
         };
-        let others = &inputs[1..];
-        let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
-        first.for_each(|member, score| {
-            for other in others.iter() {
-                if let Some(other) = other
-                    && other.score(member).is_some()
-                {
-                    return;
+        let Some(first) = self
+            .entries
+            .get(first_key)
+            .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
+        else {
+            return f(&[]);
+        };
+        if first.len() == 0 {
+            return f(&[]);
+        }
+        let mut stack_others: [ZSetAlgebraInput<'_>; 8] = [first; 8];
+        let mut heap_others: Vec<ZSetAlgebraInput<'_>> = Vec::new();
+        let mut others_len = 0_usize;
+        for &key in &keys[1..] {
+            if let Some(inp) = self
+                .entries
+                .get(key)
+                .and_then(|entry| ZSetAlgebraInput::from_value(&entry.value))
+                && inp.len() != 0
+            {
+                if others_len < stack_others.len() {
+                    stack_others[others_len] = inp;
+                } else {
+                    if heap_others.is_empty() {
+                        heap_others.reserve(keys.len().saturating_sub(1));
+                        heap_others.extend_from_slice(&stack_others);
+                    }
+                    heap_others.push(inp);
+                }
+                others_len += 1;
+            }
+        }
+        let active_others: &[ZSetAlgebraInput<'_>] = if heap_others.is_empty() {
+            &stack_others[..others_len]
+        } else {
+            &heap_others
+        };
+        match first {
+            ZSetAlgebraInput::SortedSet(zs) => {
+                let mut stack_out: [(&[u8], f64); 32] = [(&[], 0.0); 32];
+                let mut heap_out: Vec<(&[u8], f64)> = Vec::new();
+                let mut out_len = 0_usize;
+                'member_loop: for (member, score) in zs.iter_asc() {
+                    for other in active_others {
+                        if other.score(member).is_some() {
+                            continue 'member_loop;
+                        }
+                    }
+                    if out_len < stack_out.len() {
+                        stack_out[out_len] = (member, score);
+                    } else {
+                        if heap_out.is_empty() {
+                            heap_out.reserve(zs.len().max(64));
+                            heap_out.extend_from_slice(&stack_out);
+                        }
+                        heap_out.push((member, score));
+                    }
+                    out_len += 1;
+                }
+                if heap_out.is_empty() {
+                    f(&stack_out[..out_len])
+                } else {
+                    f(&heap_out)
                 }
             }
-            result.push((member.to_vec(), score));
-        });
-        result
+            ZSetAlgebraInput::Set(s) => {
+                let mut owned_survivors: Vec<(Cow<'_, [u8]>, f64)> = Vec::new();
+                'set_loop: for member in s.iter() {
+                    let member_bytes = member.as_ref();
+                    for other in active_others {
+                        if other.score(member_bytes).is_some() {
+                            continue 'set_loop;
+                        }
+                    }
+                    owned_survivors.push((member, 1.0));
+                }
+                owned_survivors.sort_unstable_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+                let mut stack_out: [(&[u8], f64); 32] = [(&[], 0.0); 32];
+                if owned_survivors.len() <= stack_out.len() {
+                    for (idx, (m, score)) in owned_survivors.iter().enumerate() {
+                        stack_out[idx] = (m.as_ref(), *score);
+                    }
+                    f(&stack_out[..owned_survivors.len()])
+                } else {
+                    let borrowed: Vec<(&[u8], f64)> = owned_survivors
+                        .iter()
+                        .map(|(m, score)| (m.as_ref(), *score))
+                        .collect();
+                    f(&borrowed)
+                }
+            }
+        }
     }
 
     fn zintercard_cache_hit(&self, keys: &[&[u8]], limit: u64) -> Option<u64> {
@@ -28539,7 +29169,18 @@ impl Store {
         delta: f64,
         now_ms: u64,
     ) -> Result<f64, StoreError> {
-        self.zincrby_with_options(key, member, delta, ZaddOptions::default(), now_ms)
+        self.zincrby_slice(key, &member, delta, now_ms)
+    }
+
+    /// Borrowed-slice twin of [`Self::zincrby`].
+    pub fn zincrby_slice(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        delta: f64,
+        now_ms: u64,
+    ) -> Result<f64, StoreError> {
+        self.zincrby_with_options_borrowed(key, member, delta, ZaddOptions::default(), now_ms)
             .map(|opt| opt.unwrap_or(0.0)) // ZINCRBY without options always succeeds
     }
 
@@ -28549,6 +29190,18 @@ impl Store {
         &mut self,
         key: &[u8],
         member: Vec<u8>,
+        delta: f64,
+        opts: ZaddOptions,
+        now_ms: u64,
+    ) -> Result<Option<f64>, StoreError> {
+        self.zincrby_with_options_impl::<true>(key, &member, delta, opts, now_ms)
+    }
+
+    /// Borrowed-slice twin of [`Self::zincrby_with_options`].
+    pub fn zincrby_with_options_borrowed(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
         delta: f64,
         opts: ZaddOptions,
         now_ms: u64,
@@ -28569,7 +29222,7 @@ impl Store {
         opts: ZaddOptions,
         now_ms: u64,
     ) -> Result<Option<f64>, StoreError> {
-        self.zincrby_with_options_impl::<false>(key, member, delta, opts, now_ms)
+        self.zincrby_with_options_impl::<false>(key, &member, delta, opts, now_ms)
     }
 
     /// Shared score-mutation core for [`Self::zincrby_with_options`]: applies ZADD-INCR / ZINCRBY
@@ -28581,7 +29234,7 @@ impl Store {
     #[allow(clippy::too_many_arguments)]
     fn zincrby_apply_entry(
         entry: &mut Entry,
-        member: Vec<u8>,
+        member: &[u8],
         delta: f64,
         opts: &ZaddOptions,
         now_ms: u64,
@@ -28592,7 +29245,7 @@ impl Store {
         let Value::SortedSet(zs) = &mut entry.value else {
             return (Err(StoreError::WrongType), false, false);
         };
-        let old_score = zs.get_score(&member);
+        let old_score = zs.get_score(member);
         let res = if (opts.nx && old_score.is_some()) || (opts.xx && old_score.is_none()) {
             Ok(None)
         } else {
@@ -28612,11 +29265,16 @@ impl Store {
                 if (opts.gt && new_score <= old) || (opts.lt && new_score >= old) {
                     Ok(None)
                 } else {
-                    zs.insert_with_limits(member, new_score, zset_max_entries, zset_max_value);
+                    zs.insert_slice_with_limits(
+                        member,
+                        new_score,
+                        zset_max_entries,
+                        zset_max_value,
+                    );
                     Ok(Some(new_score))
                 }
             } else {
-                zs.insert_with_limits(member, new_score, zset_max_entries, zset_max_value);
+                zs.insert_slice_with_limits(member, new_score, zset_max_entries, zset_max_value);
                 Ok(Some(new_score))
             }
         };
@@ -28634,7 +29292,7 @@ impl Store {
     fn zincrby_with_options_impl<const GETMUT_FIRST: bool>(
         &mut self,
         key: &[u8],
-        member: Vec<u8>,
+        member: &[u8],
         delta: f64,
         opts: ZaddOptions,
         now_ms: u64,

@@ -10621,12 +10621,17 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_zincrby_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_zincrby_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if let Some(response) = runtime
+                        .execute_plain_zincrby_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.start,
+                            packet.end,
+                            ts,
+                            default_write_allowed,
+                        )
+                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -11756,8 +11761,17 @@ fn process_buffered_frames(
                     b"GEOADD",
                 ) {
                     // GEOADD key lon lat member: key=key, a=lon, b=lat, c=member.
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
                     if let Some(response) = runtime
-                        .execute_plain_geoadd_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
+                        .execute_plain_geoadd_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.a,
+                            packet.b,
+                            packet.c,
+                            ts,
+                            default_write_allowed,
+                        )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13695,14 +13709,22 @@ fn process_buffered_frames(
                     b"ZINTER",
                 ) {
                     // 3-key: key=numkeys, a/b/c = k1/k2/k3.
-                    if let Some(response) = runtime.execute_plain_zinter_borrowed(
-                        packet.key,
-                        &[packet.a, packet.b, packet.c],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if runtime
+                        .execute_plain_zinter_borrowed_into(
+                            packet.key,
+                            &[packet.a, packet.b, packet.c],
+                            ts,
+                            default_read_allowed,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -13721,12 +13743,22 @@ fn process_buffered_frames(
                     b"ZINTER",
                 ) {
                     // packet.key holds the numkeys bulk; a/b are the two keys.
-                    if let Some(response) =
-                        runtime.execute_plain_zinter_borrowed(packet.key, &[packet.a, packet.b], ts)
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if runtime
+                        .execute_plain_zinter_borrowed_into(
+                            packet.key,
+                            &[packet.a, packet.b],
+                            ts,
+                            default_read_allowed,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -13745,12 +13777,23 @@ fn process_buffered_frames(
                     b"ZDIFF",
                 ) {
                     // packet.key holds the numkeys bulk; a/b are the two keys.
-                    if let Some(response) =
-                        runtime.execute_plain_zdiff2_borrowed(packet.key, packet.a, packet.b, ts)
+                    let default_read_allowed =
+                        Some(*plain_get_read_gate_cache.get_or_insert_with(|| {
+                            runtime.plain_borrowed_default_key_read_gate(ts)
+                        }));
+                    if runtime
+                        .execute_plain_zdiff2_borrowed_into(
+                            packet.key,
+                            packet.a,
+                            packet.b,
+                            ts,
+                            default_read_allowed,
+                            &mut conn.write_buf,
+                        )
+                        .is_some()
                     {
-                        Ok(BorrowedMultibulkAction::FastReply {
+                        Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -21700,18 +21743,28 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zinter2 => {
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // packet.key holds the numkeys bulk; a/b are the two source keys.
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
                 b"*4\r\n$6\r\n",
                 b"ZINTER",
-            ) && let Some(response) =
-                runtime.execute_plain_zinter_borrowed(packet.key, &[packet.a, packet.b], ts)
+            ) && runtime
+                .execute_plain_zinter_borrowed_into(
+                    packet.key,
+                    &[packet.a, packet.b],
+                    ts,
+                    default_read_allowed,
+                    out,
+                )
+                .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -21725,18 +21778,29 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zdiff2 => {
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // packet.key holds the numkeys bulk; a/b are the two source keys.
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
                 b"*4\r\n$5\r\n",
                 b"ZDIFF",
-            ) && let Some(response) =
-                runtime.execute_plain_zdiff2_borrowed(packet.key, packet.a, packet.b, ts)
+            ) && runtime
+                .execute_plain_zdiff2_borrowed_into(
+                    packet.key,
+                    packet.a,
+                    packet.b,
+                    ts,
+                    default_read_allowed,
+                    out,
+                )
+                .is_some()
             {
-                Ok(BorrowedMultibulkAction::FastReply {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
-                    response,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -23073,9 +23137,16 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zincrby => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_zincrby_packet(unparsed, &parser_config)
-                && let Some(response) =
-                    runtime.execute_plain_zincrby_borrowed(packet.key, packet.start, packet.end, ts)
+                && let Some(response) = runtime
+                    .execute_plain_zincrby_borrowed_with_default_write_gate(
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                        default_write_allowed,
+                    )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -23849,13 +23920,21 @@ fn try_dispatch_floor_classified_action(
         // (key=key, a=lon, b=lat, c=member). Declines to the generic dispatcher,
         // as every floor arm does.
         BorrowedDispatchFloorClass::GeoaddOne => {
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
             if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
                 unparsed,
                 &parser_config,
                 b"*5\r\n$6\r\n",
                 b"GEOADD",
-            ) && let Some(response) =
-                runtime.execute_plain_geoadd_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
+            ) && let Some(response) = runtime
+                .execute_plain_geoadd_borrowed_with_default_write_gate(
+                    packet.key,
+                    packet.a,
+                    packet.b,
+                    packet.c,
+                    ts,
+                    default_write_allowed,
+                )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,

@@ -10915,7 +10915,7 @@ impl Runtime {
         match self
             .server
             .store
-            .zadd_plain_owned(key, vec![(score, member.to_vec())], now_ms)
+            .zadd_plain_borrowed(key, &[(score, member)], now_ms)
         {
             Ok(added) => encode_nonnegative_integer_reply(added as u64, out),
             Err(err) => CommandError::Store(err).to_resp().encode_into(out),
@@ -14328,11 +14328,23 @@ impl Runtime {
         }
         // Parse every score BEFORE any state change; bail to the generic path
         // (which produces the exact error reply) on the first invalid score.
-        let mut members: Vec<(f64, Vec<u8>)> = Vec::with_capacity(pairs.len() / 2);
-        for pair in pairs.as_chunks::<2>().0 {
-            let score = fr_command::parse_score_f64_arg(pair[0]).ok()?;
-            members.push((score, pair[1].to_vec()));
-        }
+        let pair_chunks = pairs.as_chunks::<2>().0;
+        let mut stack_members: [(f64, &[u8]); 16] = [(0.0, &[]); 16];
+        let mut heap_members: Vec<(f64, &[u8])> = Vec::new();
+        let members_slice: &[(f64, &[u8])] = if pair_chunks.len() <= stack_members.len() {
+            for (idx, pair) in pair_chunks.iter().enumerate() {
+                let score = fr_command::parse_score_f64_arg(pair[0]).ok()?;
+                stack_members[idx] = (score, pair[1]);
+            }
+            &stack_members[..pair_chunks.len()]
+        } else {
+            heap_members.reserve(pair_chunks.len());
+            for pair in pair_chunks {
+                let score = fr_command::parse_score_f64_arg(pair[0]).ok()?;
+                heap_members.push((score, pair[1]));
+            }
+            &heap_members
+        };
         if !default_write_allowed {
             return None;
         }
@@ -14352,7 +14364,11 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply = match self.server.store.zadd_plain_owned(key, members, now_ms) {
+        let reply = match self
+            .server
+            .store
+            .zadd_plain_borrowed(key, members_slice, now_ms)
+        {
             Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
             Err(err) => CommandError::Store(err).to_resp(),
         };
@@ -14462,6 +14478,25 @@ impl Runtime {
     /// shapes never reach here (the parser only matches the 5-element form).
     /// Records cmdstat as `geoadd`; the keyspace "zadd" event / ZADD propagation
     /// are gated off (default-write-gate defers when notify/repl/AOF/etc active).
+    pub fn execute_plain_geoadd_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        lon: &[u8],
+        lat: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_geoadd_borrowed_inner(
+            key,
+            lon,
+            lat,
+            member,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
     pub fn execute_plain_geoadd_borrowed(
         &mut self,
         key: &[u8],
@@ -14469,6 +14504,26 @@ impl Runtime {
         lat: &[u8],
         member: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_geoadd_borrowed_inner(
+            key,
+            lon,
+            lat,
+            member,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    fn execute_plain_geoadd_borrowed_inner(
+        &mut self,
+        key: &[u8],
+        lon: &[u8],
+        lat: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"GEOADD".len()
@@ -14485,7 +14540,7 @@ impl Runtime {
         let latitude = fr_command::parse_f64_arg(lat).ok()?;
         let bits = fr_command::geo_encode_wgs84(longitude, latitude)?;
         let score = bits as f64;
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -14504,15 +14559,14 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply =
-            match self
-                .server
-                .store
-                .zadd_plain_owned(key, vec![(score, member.to_vec())], now_ms)
-            {
-                Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
-                Err(err) => CommandError::Store(err).to_resp(),
-            };
+        let reply = match self
+            .server
+            .store
+            .zadd_plain_borrowed(key, &[(score, member)], now_ms)
+        {
+            Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
@@ -15351,12 +15405,47 @@ impl Runtime {
     /// NaN-result error wording. The same `store.zincrby` is called, so the
     /// emptied-key/LFU/keyspace-hit accounting is unchanged. Returns None (fall
     /// back) on any disabling state. (frankenredis-zincrfast)
+    pub fn execute_plain_zincrby_borrowed_with_default_write_gate(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.execute_plain_zincrby_borrowed_inner(
+            key,
+            delta_arg,
+            member,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
     pub fn execute_plain_zincrby_borrowed(
         &mut self,
         key: &[u8],
         delta_arg: &[u8],
         member: &[u8],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_zincrby_borrowed_inner(
+            key,
+            delta_arg,
+            member,
+            now_ms,
+            default_write_allowed,
+        )
+    }
+
+    fn execute_plain_zincrby_borrowed_inner(
+        &mut self,
+        key: &[u8],
+        delta_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"ZINCRBY".len()
@@ -15367,7 +15456,7 @@ impl Runtime {
             return None;
         }
         let delta = fr_command::parse_score_f64_arg(delta_arg).ok()?;
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -15387,11 +15476,7 @@ impl Runtime {
 
         let resp3 = self.session.resp_protocol_version == 3;
         let start = self.chained_command_start();
-        let reply = match self
-            .server
-            .store
-            .zincrby(key, member.to_vec(), delta, now_ms)
-        {
+        let reply = match self.server.store.zincrby_slice(key, member, delta, now_ms) {
             Ok(score) => {
                 if resp3 {
                     RespFrame::double_from_f64(score)
@@ -15598,11 +15683,7 @@ impl Runtime {
 
         let resp3 = self.session.resp_protocol_version == 3;
         let start = self.chained_command_start();
-        let reply = match self
-            .server
-            .store
-            .zincrby(key, member.to_vec(), delta, now_ms)
-        {
+        let reply = match self.server.store.zincrby_slice(key, member, delta, now_ms) {
             Ok(score) => {
                 if resp3 {
                     RespFrame::double_from_f64(score)
@@ -15841,9 +15922,9 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply = match self.server.store.zadd_with_options(
+        let reply = match self.server.store.zadd_with_options_borrowed(
             key,
-            vec![(score, member.to_vec())],
+            &[(score, member)],
             opts,
             now_ms,
         ) {
@@ -16095,9 +16176,9 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply = match self.server.store.zadd_with_options(
+        let reply = match self.server.store.zadd_with_options_borrowed(
             key,
-            vec![(score, member.to_vec())],
+            &[(score, member)],
             opts,
             now_ms,
         ) {
@@ -16316,11 +16397,23 @@ impl Runtime {
         }
         // Parse every score BEFORE any state change; bail to the generic path on
         // the first invalid score (it produces the exact error reply).
-        let mut members: Vec<(f64, Vec<u8>)> = Vec::with_capacity(pairs.len() / 2);
-        for pair in pairs.as_chunks::<2>().0 {
-            let score = fr_command::parse_score_f64_arg(pair[0]).ok()?;
-            members.push((score, pair[1].to_vec()));
-        }
+        let pair_chunks = pairs.as_chunks::<2>().0;
+        let mut stack_members: [(f64, &[u8]); 16] = [(0.0, &[]); 16];
+        let mut heap_members: Vec<(f64, &[u8])> = Vec::new();
+        let members_slice: &[(f64, &[u8])] = if pair_chunks.len() <= stack_members.len() {
+            for (idx, pair) in pair_chunks.iter().enumerate() {
+                let score = fr_command::parse_score_f64_arg(pair[0]).ok()?;
+                stack_members[idx] = (score, pair[1]);
+            }
+            &stack_members[..pair_chunks.len()]
+        } else {
+            heap_members.reserve(pair_chunks.len());
+            for pair in pair_chunks {
+                let score = fr_command::parse_score_f64_arg(pair[0]).ok()?;
+                heap_members.push((score, pair[1]));
+            }
+            &heap_members
+        };
         if !default_write_allowed {
             return None;
         }
@@ -16342,14 +16435,15 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let reply = match self
-            .server
-            .store
-            .zadd_with_options(key, members, opts, now_ms)
-        {
-            Ok((count, _changed)) => RespFrame::Integer(count as i64),
-            Err(err) => CommandError::Store(err).to_resp(),
-        };
+        let reply =
+            match self
+                .server
+                .store
+                .zadd_with_options_borrowed(key, members_slice, opts, now_ms)
+            {
+                Ok((count, _changed)) => RespFrame::Integer(count as i64),
+                Err(err) => CommandError::Store(err).to_resp(),
+            };
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
@@ -28638,24 +28732,51 @@ impl Runtime {
                 return CommandError::Store(err).to_resp();
             }
         }
-        // (CrimsonHawk) Resolve k2's view ONCE and probe it directly instead of
-        // re-running `entries.get(k2)` (a full keyspace lookup) on every member of
-        // k1 via `zget_score_or_set_member_no_stats` — the same per-probe re-lookup
-        // that dominated ZINTER. Byte-exact: keeps k1's members absent from k2 with
-        // k1's score, and the result is re-sorted below. Wrong-type was already
-        // rejected by `ensure_zset_or_set_source` above.
-        let mut result = self.server.store.zdiff_members_no_stats(&keys);
-        result.sort_unstable_by(|a, b| {
-            a.1.partial_cmp(&b.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        RespFrame::Array(Some(
-            result
-                .into_iter()
-                .map(|(m, _)| RespFrame::BulkString(Some(m)))
-                .collect(),
-        ))
+        self.server
+            .store
+            .zdiff_members_no_stats_with_slices(&keys, |result| {
+                RespFrame::Array(Some(
+                    result
+                        .iter()
+                        .map(|&(m, _)| RespFrame::BulkString(Some(m.to_vec())))
+                        .collect(),
+                ))
+            })
+    }
+
+    fn execute_plain_zdiff2_core_into(
+        &mut self,
+        k1: &[u8],
+        k2: &[u8],
+        now_ms: u64,
+        suppress_reply: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<String> {
+        let keys = [k1, k2];
+        fr_command::record_source_key_lookups(&mut self.server.store, &keys, now_ms);
+        for &k in &keys {
+            if let Err(err) = self.server.store.ensure_zset_or_set_source(k, now_ms) {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    reply.encode_into(out);
+                }
+                return match reply {
+                    RespFrame::Error(msg) => Some(msg),
+                    _ => None,
+                };
+            }
+        }
+        self.server
+            .store
+            .zdiff_members_no_stats_with_slices(&keys, |result| {
+                if !suppress_reply {
+                    fr_protocol::encode_aggregate_header(result.len(), false, out);
+                    for &(m, _) in result {
+                        encode_bulk_string_slice(Some(m), false, out);
+                    }
+                }
+            });
+        None
     }
 
     /// (frankenredis-zdiff2fast) Borrowed READ fast path for the common 2-key form
@@ -28714,6 +28835,63 @@ impl Runtime {
         Some(reply)
     }
 
+    pub fn execute_plain_zdiff2_borrowed_into(
+        &mut self,
+        numkeys_arg: &[u8],
+        k1: &[u8],
+        k2: &[u8],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"ZDIFF".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || k1.len() > self.policy.gate.max_bulk_len
+            || k2.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(2) {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
+            return None;
+        }
+        let packet_id = self.plain_read_borrowed_preamble(
+            "zdiff",
+            b"ZDIFF".len() + numkeys_arg.len() + k1.len() + k2.len(),
+            now_ms,
+        );
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let error_msg = self.execute_plain_zdiff2_core_into(k1, k2, now_ms, suppress_reply, out);
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_msg.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zdiff",
+            "ZDIFF",
+            || {
+                vec![
+                    b"ZDIFF".to_vec(),
+                    numkeys_arg.to_vec(),
+                    k1.to_vec(),
+                    k2.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_msg(error_msg);
+        Some(())
+    }
+
     // (frankenredis-zinter2fast) Intersection core for `ZINTER 2 k1 k2` (default
     // WEIGHTS=[1,1], AGGREGATE=SUM, no WITHSCORES). Byte-for-byte mirror of
     // fr-command::zinter for that form, including the inlined
@@ -28727,35 +28905,49 @@ impl Runtime {
                 return CommandError::Store(err).to_resp();
             }
         }
-        // (CrimsonHawk) Resolve every source view ONCE and probe them directly,
-        // instead of re-looking-up each key in the keyspace on every member probe.
-        // The prior loop called `zget_score_or_set_member_no_stats(k, member)` per
-        // (member, key) pair — each call re-did `entries.get(k)` (the dominant
-        // ~43% profiled cost on a 2000×2000 intersection: 2000 redundant keyspace
-        // hashmap lookups for the second key), and it materialized every member of
-        // keys[0] via `zget_members_with_scores_no_stats` only to discard the
-        // non-survivors. `zinter_members_argv_order_no_stats` builds the borrowed
-        // ZSetAlgebraInput views once, iterates the first by reference, and clones
-        // only survivors. Byte-exact for this no-option ZINTER: implicit weights=1.0
-        // + AGGREGATE SUM, and the store-level `normalize_weighted_score`/
-        // `aggregate_scores` are the same nan0(a)/nan0(a+b) this loop inlined;
-        // wrong-type was already rejected by `ensure_zset_or_set_source` above and
-        // the result is re-sorted below, so first-key visitation order is invisible.
-        let mut result = self
-            .server
+        self.server
             .store
-            .zinter_members_argv_order_no_stats(keys, &[], b"SUM");
-        result.sort_unstable_by(|a, b| {
-            a.1.partial_cmp(&b.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        RespFrame::Array(Some(
-            result
-                .into_iter()
-                .map(|(m, _)| RespFrame::BulkString(Some(m)))
-                .collect(),
-        ))
+            .zinter_members_argv_order_no_stats_with_slices(keys, &[], b"SUM", |result| {
+                RespFrame::Array(Some(
+                    result
+                        .iter()
+                        .map(|&(m, _)| RespFrame::BulkString(Some(m.to_vec())))
+                        .collect(),
+                ))
+            })
+    }
+
+    fn execute_plain_zinter_core_into(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+        suppress_reply: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<String> {
+        fr_command::record_source_key_lookups(&mut self.server.store, keys, now_ms);
+        for &k in keys {
+            if let Err(err) = self.server.store.ensure_zset_or_set_source(k, now_ms) {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    reply.encode_into(out);
+                }
+                return match reply {
+                    RespFrame::Error(msg) => Some(msg),
+                    _ => None,
+                };
+            }
+        }
+        self.server
+            .store
+            .zinter_members_argv_order_no_stats_with_slices(keys, &[], b"SUM", |result| {
+                if !suppress_reply {
+                    fr_protocol::encode_aggregate_header(result.len(), false, out);
+                    for &(m, _) in result {
+                        encode_bulk_string_slice(Some(m), false, out);
+                    }
+                }
+            });
+        None
     }
 
     /// (frankenredis-zinter2fast) Borrowed READ fast path for the no-option
@@ -28816,6 +29008,58 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    pub fn execute_plain_zinter_borrowed_into(
+        &mut self,
+        numkeys_arg: &[u8],
+        keys: &[&[u8]],
+        now_ms: u64,
+        default_read_allowed: Option<bool>,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < keys.len() + 2
+            || self.policy.gate.max_bulk_len < b"ZINTER".len()
+            || numkeys_arg.len() > self.policy.gate.max_bulk_len
+            || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if fr_command::parse_i64_arg(numkeys_arg).ok() != Some(keys.len() as i64) {
+            return None;
+        }
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
+            return None;
+        }
+        let argv_len_sum =
+            b"ZINTER".len() + numkeys_arg.len() + keys.iter().map(|k| k.len()).sum::<usize>();
+        let packet_id = self.plain_read_borrowed_preamble("zinter", argv_len_sum, now_ms);
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let error_msg = self.execute_plain_zinter_core_into(keys, now_ms, suppress_reply, out);
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = error_msg.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "zinter",
+            "ZINTER",
+            || {
+                let mut argv = Vec::with_capacity(keys.len() + 2);
+                argv.push(b"ZINTER".to_vec());
+                argv.push(numkeys_arg.to_vec());
+                argv.extend(keys.iter().map(|k| k.to_vec()));
+                argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_msg(error_msg);
+        Some(())
     }
 
     // (frankenredis-scan0fast) Borrowed READ fast path for the cursor-0, no-option
@@ -88784,5 +89028,156 @@ sentinel announce-port 26380
                 .is_none()
         );
         assert!(declined.is_empty());
+    }
+
+    #[test]
+    fn zset_borrowed_fastpaths_match_generic_execution() {
+        let mut rt_fast = Runtime::default_strict();
+        let mut rt_gen = Runtime::default_strict();
+
+        // 1. Multi-pair ZADD (<= 16 pairs stack path + duplicate member within batch)
+        assert_eq!(
+            rt_fast.execute_plain_zadd_borrowed_with_default_write_gate(
+                b"z1",
+                &[b"1.5", b"a", b"2.5", b"b", b"3.5", b"a", b"0.5", b"c"],
+                10,
+                true,
+            ),
+            Some(rt_gen.execute_frame(
+                command(&[
+                    b"ZADD", b"z1", b"1.5", b"a", b"2.5", b"b", b"3.5", b"a", b"0.5", b"c"
+                ]),
+                10,
+            ))
+        );
+
+        // 2. Same-rank score update and rank-changing score update via ZADD + flags
+        for (flag, score, member) in [
+            (&b"XX"[..], &b"3.6"[..], &b"a"[..]),
+            (&b"GT"[..], &b"10.0"[..], &b"c"[..]),
+            (&b"LT"[..], &b"0.1"[..], &b"b"[..]),
+            (&b"NX"[..], &b"5.0"[..], &b"d"[..]),
+            (&b"CH"[..], &b"5.5"[..], &b"d"[..]),
+        ] {
+            assert_eq!(
+                rt_fast.execute_plain_zadd_flag_borrowed_with_default_write_gate(
+                    b"z1", flag, score, member, 11, true,
+                ),
+                Some(rt_gen.execute_frame(command(&[b"ZADD", b"z1", flag, score, member]), 11,))
+            );
+        }
+
+        // 3. ZINCRBY and GEOADD
+        assert_eq!(
+            rt_fast.execute_plain_zincrby_borrowed_with_default_write_gate(
+                b"z1", b"2.25", b"a", 12, true,
+            ),
+            Some(rt_gen.execute_frame(command(&[b"ZINCRBY", b"z1", b"2.25", b"a"]), 12))
+        );
+        assert_eq!(
+            rt_fast.execute_plain_geoadd_borrowed_with_default_write_gate(
+                b"geo1",
+                b"13.361389",
+                b"38.115556",
+                b"Palermo",
+                12,
+                true,
+            ),
+            Some(rt_gen.execute_frame(
+                command(&[b"GEOADD", b"geo1", b"13.361389", b"38.115556", b"Palermo"]),
+                12,
+            ))
+        );
+
+        // 4. Populate second zset z2 (with > 16 pairs to exercise heap fallback)
+        let mut raw_pairs: Vec<Vec<u8>> = Vec::new();
+        for i in 0..20u32 {
+            raw_pairs.push(format!("{i}").into_bytes());
+            raw_pairs.push(format!("m{i}").into_bytes());
+        }
+        raw_pairs.push(b"4.0".to_vec());
+        raw_pairs.push(b"a".to_vec());
+        raw_pairs.push(b"1.0".to_vec());
+        raw_pairs.push(b"c".to_vec());
+        let pair_refs: Vec<&[u8]> = raw_pairs.iter().map(Vec::as_slice).collect();
+        let mut gen_cmd: Vec<&[u8]> = vec![b"ZADD", b"z2"];
+        gen_cmd.extend_from_slice(&pair_refs);
+        assert_eq!(
+            rt_fast
+                .execute_plain_zadd_borrowed_with_default_write_gate(b"z2", &pair_refs, 13, true,),
+            Some(rt_gen.execute_frame(command(&gen_cmd), 13))
+        );
+
+        // 5. ZDIFF 2 and ZINTER 2 / 3 via _into vs generic execute_frame
+        rt_fast.execute_frame(command(&[b"SADD", b"s_set", b"a", b"m1", b"only_s"]), 14);
+        rt_gen.execute_frame(command(&[b"SADD", b"s_set", b"a", b"m1", b"only_s"]), 14);
+        rt_fast.execute_frame(command(&[b"SET", b"str_key", b"val"]), 14);
+        rt_gen.execute_frame(command(&[b"SET", b"str_key", b"val"]), 14);
+
+        for (k1, k2) in [
+            (&b"z1"[..], &b"z2"[..]),
+            (&b"z2"[..], &b"z1"[..]),
+            (&b"z1"[..], &b"s_set"[..]),
+            (&b"s_set"[..], &b"z1"[..]),
+            (&b"missing1"[..], &b"z1"[..]),
+            (&b"z1"[..], &b"missing2"[..]),
+            (&b"z1"[..], &b"str_key"[..]),
+        ] {
+            let mut got_diff = Vec::new();
+            assert!(
+                rt_fast
+                    .execute_plain_zdiff2_borrowed_into(
+                        b"2",
+                        k1,
+                        k2,
+                        15,
+                        Some(true),
+                        &mut got_diff,
+                    )
+                    .is_some()
+            );
+            let mut want_diff = Vec::new();
+            rt_gen
+                .execute_frame(command(&[b"ZDIFF", b"2", k1, k2]), 15)
+                .encode_into(&mut want_diff);
+            assert_eq!(got_diff, want_diff, "ZDIFF 2 {k1:?} {k2:?}");
+
+            let mut got_inter = Vec::new();
+            assert!(
+                rt_fast
+                    .execute_plain_zinter_borrowed_into(
+                        b"2",
+                        &[k1, k2],
+                        15,
+                        Some(true),
+                        &mut got_inter,
+                    )
+                    .is_some()
+            );
+            let mut want_inter = Vec::new();
+            rt_gen
+                .execute_frame(command(&[b"ZINTER", b"2", k1, k2]), 15)
+                .encode_into(&mut want_inter);
+            assert_eq!(got_inter, want_inter, "ZINTER 2 {k1:?} {k2:?}");
+        }
+
+        // 3-key ZINTER
+        let mut got_inter3 = Vec::new();
+        assert!(
+            rt_fast
+                .execute_plain_zinter_borrowed_into(
+                    b"3",
+                    &[b"z2", b"z1", b"s_set"],
+                    16,
+                    Some(true),
+                    &mut got_inter3,
+                )
+                .is_some()
+        );
+        let mut want_inter3 = Vec::new();
+        rt_gen
+            .execute_frame(command(&[b"ZINTER", b"3", b"z2", b"z1", b"s_set"]), 16)
+            .encode_into(&mut want_inter3);
+        assert_eq!(got_inter3, want_inter3);
     }
 }

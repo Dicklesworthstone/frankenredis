@@ -7168,9 +7168,8 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
 
     if incr {
         let score_delta = parse_score_f64_arg(&argv[i])?;
-        let member = argv[i + 1].clone();
         let result = store
-            .zincrby_with_options(&argv[1], member, score_delta, opts, now_ms)
+            .zincrby_with_options_borrowed(&argv[1], &argv[i + 1], score_delta, opts, now_ms)
             .map_err(|e| match e {
                 // (br-frankenredis-zinaN)
                 StoreError::IncrFloatNaN => {
@@ -7193,15 +7192,40 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             None => Ok(RespFrame::BulkString(None)),
         }
     } else {
-        let mut pairs = Vec::with_capacity(remaining / 2);
-        while i + 1 < argv.len() {
-            let score = parse_score_f64_arg(&argv[i])?;
-            pairs.push((score, argv[i + 1].clone()));
-            i += 2;
+        let pair_count = remaining / 2;
+        if pair_count <= 16 {
+            let mut stack_pairs = [(0.0_f64, &[][..]); 16];
+            let mut idx = 0_usize;
+            while i + 1 < argv.len() {
+                let score = parse_score_f64_arg(&argv[i])?;
+                stack_pairs[idx] = (score, argv[i + 1].as_slice());
+                idx += 1;
+                i += 2;
+            }
+            let count = if !nx && !xx && !gt && !lt && !ch {
+                store.zadd_plain_borrowed(&argv[1], &stack_pairs[..idx], now_ms)?
+            } else {
+                store
+                    .zadd_with_options_borrowed(&argv[1], &stack_pairs[..idx], opts, now_ms)?
+                    .0
+            };
+            Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
+        } else {
+            let mut pairs = Vec::with_capacity(pair_count);
+            while i + 1 < argv.len() {
+                let score = parse_score_f64_arg(&argv[i])?;
+                pairs.push((score, argv[i + 1].as_slice()));
+                i += 2;
+            }
+            let count = if !nx && !xx && !gt && !lt && !ch {
+                store.zadd_plain_borrowed(&argv[1], &pairs, now_ms)?
+            } else {
+                store
+                    .zadd_with_options_borrowed(&argv[1], &pairs, opts, now_ms)?
+                    .0
+            };
+            Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
         }
-
-        let (count, _changed) = store.zadd_with_options(&argv[1], pairs, opts, now_ms)?;
-        Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
     }
 }
 
@@ -7552,6 +7576,41 @@ fn zrange_emit_with_resp(
     }
 }
 
+fn zrange_emit_slices_with_resp(
+    pairs: &[(&[u8], f64)],
+    withscores: bool,
+    resp_protocol_version: i64,
+) -> Result<RespFrame, CommandError> {
+    if !withscores {
+        let frames = pairs
+            .iter()
+            .map(|&(m, _)| RespFrame::BulkString(Some(m.to_vec())))
+            .collect();
+        return Ok(RespFrame::Array(Some(frames)));
+    }
+    if resp_protocol_version == 3 {
+        let frames = pairs
+            .iter()
+            .map(|&(member, score)| {
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(member.to_vec())),
+                    RespFrame::double_from_f64(score),
+                ]))
+            })
+            .collect();
+        Ok(RespFrame::Array(Some(frames)))
+    } else {
+        let mut frames = Vec::with_capacity(pairs.len() * 2);
+        for &(member, score) in pairs {
+            frames.push(RespFrame::BulkString(Some(member.to_vec())));
+            frames.push(RespFrame::BulkString(Some(
+                redis_score_to_string(score).into_bytes(),
+            )));
+        }
+        Ok(RespFrame::Array(Some(frames)))
+    }
+}
+
 fn zrevrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 4 || argv.len() > 5 {
         return Err(CommandError::WrongArity("ZREVRANGE"));
@@ -7671,7 +7730,7 @@ fn zincrby(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let delta = parse_score_f64_arg(&argv[2])?;
     let new_score = store
-        .zincrby(&argv[1], argv[3].clone(), delta, now_ms)
+        .zincrby_slice(&argv[1], &argv[3], delta, now_ms)
         .map_err(|e| {
             // Upstream t_zset.c uses 'resulting score is not a number
             // (NaN)' for any zset increment that yields NaN, distinct
@@ -7845,40 +7904,64 @@ fn geoadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::SyntaxError);
     }
 
-    let mut pairs = Vec::with_capacity(remaining / 3);
-    let mut idx = long_idx;
-    while idx + 2 < argv.len() {
-        let longitude = match parse_geo_f64(&argv[idx]) {
-            Ok(value) => value,
-            Err(reply) => return Ok(reply),
-        };
-        let latitude = match parse_geo_f64(&argv[idx + 1]) {
-            Ok(value) => value,
-            Err(reply) => return Ok(reply),
-        };
-        if !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&longitude)
-            || !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&latitude)
-        {
-            return Ok(geo_invalid_pair_error(longitude, latitude));
+    let pair_count = remaining / 3;
+    let opts = fr_store::ZaddOptions {
+        xx,
+        nx,
+        ch,
+        ..Default::default()
+    };
+    let (total_changed, _only_updated) = if pair_count <= 16 {
+        let mut stack_pairs = [(0.0_f64, &[][..]); 16];
+        let mut p_idx = 0_usize;
+        let mut idx = long_idx;
+        while idx + 2 < argv.len() {
+            let longitude = match parse_geo_f64(&argv[idx]) {
+                Ok(value) => value,
+                Err(reply) => return Ok(reply),
+            };
+            let latitude = match parse_geo_f64(&argv[idx + 1]) {
+                Ok(value) => value,
+                Err(reply) => return Ok(reply),
+            };
+            if !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&longitude)
+                || !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&latitude)
+            {
+                return Ok(geo_invalid_pair_error(longitude, latitude));
+            }
+            let Some(bits) = geo_encode_wgs84(longitude, latitude) else {
+                return Ok(geo_invalid_pair_error(longitude, latitude));
+            };
+            stack_pairs[p_idx] = (bits as f64, argv[idx + 2].as_slice());
+            p_idx += 1;
+            idx += 3;
         }
-        let Some(bits) = geo_encode_wgs84(longitude, latitude) else {
-            return Ok(geo_invalid_pair_error(longitude, latitude));
-        };
-        pairs.push((bits as f64, argv[idx + 2].clone()));
-        idx += 3;
-    }
-
-    let (total_changed, _only_updated) = store.zadd_with_options(
-        &argv[1],
-        pairs,
-        fr_store::ZaddOptions {
-            xx,
-            nx,
-            ch,
-            ..Default::default()
-        },
-        now_ms,
-    )?;
+        store.zadd_with_options_borrowed(&argv[1], &stack_pairs[..p_idx], opts, now_ms)?
+    } else {
+        let mut pairs = Vec::with_capacity(pair_count);
+        let mut idx = long_idx;
+        while idx + 2 < argv.len() {
+            let longitude = match parse_geo_f64(&argv[idx]) {
+                Ok(value) => value,
+                Err(reply) => return Ok(reply),
+            };
+            let latitude = match parse_geo_f64(&argv[idx + 1]) {
+                Ok(value) => value,
+                Err(reply) => return Ok(reply),
+            };
+            if !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&longitude)
+                || !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&latitude)
+            {
+                return Ok(geo_invalid_pair_error(longitude, latitude));
+            }
+            let Some(bits) = geo_encode_wgs84(longitude, latitude) else {
+                return Ok(geo_invalid_pair_error(longitude, latitude));
+            };
+            pairs.push((bits as f64, argv[idx + 2].as_slice()));
+            idx += 3;
+        }
+        store.zadd_with_options_borrowed(&argv[1], &pairs, opts, now_ms)?
+    };
 
     Ok(RespFrame::Integer(total_changed as i64))
 }
@@ -27222,20 +27305,10 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     // the keyspace on each member probe; wrong-type was rejected by
     // ensure_zset_or_set_source above. Byte-identical: keeps keys[0]'s members
     // absent from all others with keys[0]'s score, re-sorted below.
-    let mut result = store.zdiff_members_no_stats(&keys);
-    // (gauntlet B3) zset reply order: score asc, ties by member byte-lex.
-    result.sort_unstable_by(|a, b| {
-        a.1.partial_cmp(&b.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.cmp(&b.0))
-    });
-    // (gauntlet B5) WITHSCORES emits RESP3 Double + nested pairs under HELLO 3,
-    // flat bulk-string array under RESP2 — same shape as ZRANGE WITHSCORES.
-    zrange_emit_with_resp(
-        result,
-        withscores,
-        store.dispatch_client_ctx.resp_protocol_version,
-    )
+    let resp_protocol_version = store.dispatch_client_ctx.resp_protocol_version;
+    store.zdiff_members_no_stats_with_slices(&keys, |result| {
+        zrange_emit_slices_with_resp(result, withscores, resp_protocol_version)
+    })
 }
 
 fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -27317,19 +27390,10 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     // helpers (`aggregate_scores`/`normalize_weighted_score` mirror the `*_for_cmd`
     // variants), and the result is re-sorted below so first-key visitation order
     // does not matter.
-    let mut result = store.zinter_members_argv_order_no_stats(&keys, &weights, &aggregate);
-    // (gauntlet B3) zset reply order: score asc, ties by member byte-lex.
-    result.sort_unstable_by(|a, b| {
-        a.1.partial_cmp(&b.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.cmp(&b.0))
-    });
-    // (gauntlet B5) WITHSCORES: RESP3 Double + nested pairs under HELLO 3.
-    zrange_emit_with_resp(
-        result,
-        withscores,
-        store.dispatch_client_ctx.resp_protocol_version,
-    )
+    let resp_protocol_version = store.dispatch_client_ctx.resp_protocol_version;
+    store.zinter_members_argv_order_no_stats_with_slices(&keys, &weights, &aggregate, |result| {
+        zrange_emit_slices_with_resp(result, withscores, resp_protocol_version)
+    })
 }
 
 fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
